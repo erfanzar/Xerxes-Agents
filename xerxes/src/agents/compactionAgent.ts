@@ -10,6 +10,7 @@ import {
   stripCompactionAnalysis,
   type ContextMessage,
 } from '../context/index.js'
+import { COMPACTION_ARCHIVE_NOTE } from '../context/compressor.js'
 import { SmartTokenCounter } from '../context/tokenCounter.js'
 import { classifyError, ErrorKind } from '../runtime/errorClassifier.js'
 
@@ -297,16 +298,20 @@ function carriedSummaryOf(message: ContextMessage): string | undefined {
   return carried || undefined
 }
 
+/** Drop the reference prefix and the archive note; both are re-added once by the writer. */
 function stripSummaryPrefixes(text: string): string {
   let rest = text.trimStart()
-  while (rest.startsWith(COMPACTION_SUMMARY_PREFIX)) rest = rest.slice(COMPACTION_SUMMARY_PREFIX.length).trimStart()
-  return rest
+  for (;;) {
+    if (rest.startsWith(COMPACTION_SUMMARY_PREFIX)) rest = rest.slice(COMPACTION_SUMMARY_PREFIX.length).trimStart()
+    else if (rest.startsWith(COMPACTION_ARCHIVE_NOTE)) rest = rest.slice(COMPACTION_ARCHIVE_NOTE.length).trimStart()
+    else return rest
+  }
 }
 
 /** The placeholder message rewritten as one consolidated summary. */
 function consolidateSummary(message: ContextMessage, summary: string): ContextMessage {
   if (typeof message.content !== 'string' || !message.content.includes(COMPACTION_PROMPT_PLACEHOLDER)) return message
-  return { ...message, content: `${COMPACTION_SUMMARY_PREFIX}\n\n${summary.trim()}` }
+  return { ...message, content: `${COMPACTION_SUMMARY_PREFIX}\n\n${stripSummaryPrefixes(summary)}` }
 }
 
 function replaceSummaryPlaceholder(message: ContextMessage, summary: string): ContextMessage {

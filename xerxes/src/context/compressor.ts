@@ -252,7 +252,16 @@ function unchanged(messages: ContextMessage[], tokens: number): CompressionResul
   }
 }
 
+/**
+ * Added once after the reference prefix by `compactMessagesIfNeeded`, only
+ * when the replaced history was archived; iterative passes strip it so it is
+ * never repeated. The summary is lossy, the archive is not, and the model
+ * only searches what it knows exists.
+ */
+export const COMPACTION_ARCHIVE_NOTE = 'Earlier turns are archived verbatim. If an exact value, path, error or decision is missing here, recover it with session_search.'
+
 function wrapSummary(prior: string | undefined, summary: string): string {
-  const body = prior ? `${prior.trim()}\n\n---\n\n${summary.trim()}` : summary.trim()
+  const priorBody = prior?.replace(COMPACTION_ARCHIVE_NOTE, '').trim()
+  const body = priorBody ? `${priorBody}\n\n---\n\n${summary.trim()}` : summary.trim()
   return `${COMPACTION_REFERENCE_PREFIX}\n\n${body}`
 }

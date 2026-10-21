@@ -14,7 +14,36 @@ const identity = (message: Message): string => {
 
 /** A read archive, ready to stitch the live window onto. */
 export interface ArchivedHistory {
+  /** Every archived message, oldest first, as the archive's own windows stitch together. */
+  readonly messages: readonly Message[]
   stitch(current: readonly Message[]): Message[]
+}
+
+/**
+ * The archive followed by whatever of the live window it does not already
+ * hold, for search rather than display. `stitch` applies undo semantics meant
+ * for a reopened chat and can drop archived turns a live window lacks;
+ * search needs every message that ever existed. A tool result shortened in
+ * the live window keeps its full archived copy. `inContext[i]` is true when
+ * message `i` is in the live window exactly as shown.
+ */
+export function searchableHistory(
+  archived: readonly Message[],
+  live: readonly Message[],
+): { readonly messages: Message[]; readonly inContext: boolean[] } {
+  const liveContent = new Map<string, string>()
+  for (const message of live) liveContent.set(identity(message), JSON.stringify(message.content ?? null))
+  const seen = new Set<string>()
+  const messages: Message[] = []
+  const inContext: boolean[] = []
+  for (const message of [...archived, ...live]) {
+    const key = identity(message)
+    if (seen.has(key)) continue
+    seen.add(key)
+    messages.push(message)
+    inContext.push(liveContent.get(key) === JSON.stringify(message.content ?? null))
+  }
+  return { messages, inContext }
 }
 
 /** A stitched history with each message's identity, kept in step so no record rehashes it. */
@@ -160,6 +189,7 @@ export class ArchiveHistory {
     }
     const { history, retained } = cached
     return {
+      messages: history.messages,
       stitch(current) {
         const view: Stitched = { messages: [...history.messages], keys: [...history.keys] }
         stitchWindow(view, current, true, retained)

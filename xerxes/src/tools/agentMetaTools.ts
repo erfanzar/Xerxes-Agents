@@ -104,6 +104,8 @@ export async function mixtureOfAgents(
 
 export interface SessionSearchRequest {
   readonly agentId?: string
+  /** The session whose turn made the call; a port may refuse to search any other. */
+  readonly callerSessionId?: string
   readonly limit: number
   readonly query: string
   readonly sessionId?: string
@@ -332,7 +334,7 @@ export const MIXTURE_OF_AGENTS_DEFINITION: ToolDefinition = toolDefinition(
 
 export const SESSION_SEARCH_DEFINITION: ToolDefinition = toolDefinition(
   'session_search',
-  'Search prior session transcripts through a host-provided session-search port.',
+  'Search this session\'s full history, including older turns that compaction summarized out of your context (they are archived verbatim). Use it to recover exact values, paths, errors or decisions the summary lost. Matches words case-insensitively; defaults to the current session.',
   {
     query: { type: 'string' },
     limit: { type: 'integer', minimum: 1, default: 5 },
@@ -407,7 +409,7 @@ export async function mixtureOfAgentsTool(inputs: JsonObject, options: AgentMeta
 
 export async function sessionSearchTool(
   inputs: JsonObject,
-  _context: ToolExecutionContext,
+  context: ToolExecutionContext,
   options: AgentMetaToolsOptions = {},
 ): Promise<JsonObject> {
   const port = options.sessionSearch ?? getSessionSearchPort()
@@ -417,12 +419,19 @@ export async function sessionSearchTool(
   const limit = positiveLimit(optionalInteger(inputs, 'limit', 5))
   const agentId = optionalString(inputs, 'agent_id')
   const sessionId = optionalString(inputs, 'session_id')
+  const callerSessionId = typeof context?.sessionId === 'string' && context.sessionId ? context.sessionId : undefined
   return port.search({
     query: requiredString(inputs, 'query'),
     limit,
     ...(agentId === undefined ? {} : { agentId }),
     ...(sessionId === undefined ? {} : { sessionId }),
+    ...(callerSessionId === undefined ? {} : { callerSessionId }),
   })
+}
+
+/** Register only `session_search`, backed by an explicit host port (no second skill_manage). */
+export function registerSessionSearchTool(registry: ToolRegistry, port: SessionSearchPort, agentId = 'default'): void {
+  registry.replace(SESSION_SEARCH_DEFINITION, (inputs, context) => sessionSearchTool(inputs, context, { sessionSearch: port }), agentId)
 }
 
 export async function skillsListTool(inputs: JsonObject, options: AgentMetaToolsOptions = {}): Promise<JsonObject> {

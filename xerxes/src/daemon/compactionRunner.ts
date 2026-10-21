@@ -12,7 +12,13 @@ import {
   type CompactionCompletionPort,
 } from "../agents/compactionAgent.js";
 import { DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS } from "../context/compactionProvisioner.js";
-import { isCompactionSummaryMessage, type ContextMessage } from "../context/compressor.js";
+import {
+  COMPACTION_ARCHIVE_NOTE,
+  COMPACTION_REFERENCE_PREFIX,
+  isCompactionSummaryMessage,
+  type ContextMessage,
+} from "../context/compressor.js";
+import { shedToolResults } from "../context/toolResultPruner.js";
 import { estimateContextTokens } from "../context/windowUsage.js";
 import {
   closeLlmClient,
@@ -53,6 +59,34 @@ export const COMPACTION_SUMMARY_BUDGETS = [
   Math.floor(DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS / 2),
   Math.floor(DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS / 4),
 ] as const;
+
+/** Largest summary any compaction asks for, whatever the window. */
+export const MAX_COMPACTION_SUMMARY_TOKENS = 32_768;
+/** Mid-turn rescues run with the window already full; their summary stays smaller. */
+export const MIN_OVERFLOW_SUMMARY_TOKENS = 2_048;
+export const MAX_OVERFLOW_SUMMARY_TOKENS = 8_192;
+
+/**
+ * Summary budgets that grow with the prompt budget instead of being the same
+ * for a 128K and a 1M window: 2% of the budget before a turn (8K floor, 32K
+ * ceiling), 0.8% mid-turn (2K floor, 8K ceiling). A known output ceiling
+ * caps every attempt, since a summary larger than the model may write is cut
+ * off. Fallback attempts halve, then quarter, as before.
+ */
+export function compactionSummaryBudgets(
+  promptBudget: number | undefined,
+  options: { readonly maxOutputTokens?: number; readonly midTurn?: boolean } = {},
+): readonly number[] {
+  const midTurn = options.midTurn === true;
+  const floor = midTurn ? MIN_OVERFLOW_SUMMARY_TOKENS : DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS;
+  const ceiling = midTurn ? MAX_OVERFLOW_SUMMARY_TOKENS : MAX_COMPACTION_SUMMARY_TOKENS;
+  const known = promptBudget !== undefined && Number.isFinite(promptBudget) && promptBudget > 0;
+  let first = known ? Math.min(ceiling, Math.max(floor, Math.floor(promptBudget * (midTurn ? 0.008 : 0.02)))) : floor;
+  const output = options.maxOutputTokens;
+  if (output !== undefined && Number.isFinite(output) && output > 0) first = Math.min(first, Math.max(512, Math.floor(output * 0.9)));
+  if (midTurn) return [first];
+  return [first, Math.max(512, Math.floor(first / 2)), Math.max(512, Math.floor(first / 4))];
+}
 
 export function normalizeCompactionThreshold(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
@@ -307,6 +341,10 @@ export interface CompactionStamp {
   readonly archive_error?: string;
   readonly archive_path?: string;
   readonly compacted_at: string;
+  /** Present when the model summary failed and older tool outputs were shed instead. */
+  readonly fallback?: "shed-tool-results";
+  /** Why the model summary failed, when the fallback ran. */
+  readonly summary_error?: string;
   readonly messages_summarized: number;
   readonly reason: string;
   readonly tokens_after: number;
@@ -327,6 +365,14 @@ export interface CompactMessagesRequest {
   /** Origin recorded in the archive and the stamp: `compact`, `auto`, `subagent`. */
   readonly reason: string;
   readonly summaryBudgets?: readonly number[];
+  /**
+   * When every summary attempt fails, shed the oldest tool outputs (the
+   * newest stay verbatim) down to half of `maxContextTokens` instead of
+   * failing. Requires `archivePath` and `maxContextTokens`: the original is
+   * archived first, so nothing is lost and `session_search` can read it back.
+   * Automatic paths set this; an explicit `/compact` reports the failure.
+   */
+  readonly deterministicFallback?: boolean;
   /** Leave the transcript alone below this many tokens; omit to always attempt. */
   readonly thresholdTokens?: number;
 }
@@ -395,7 +441,19 @@ export async function compactMessagesIfNeeded(
     if (isUnchanged(original, compacted)) {
       return { compacted: false, reason: "unchanged" };
     }
-    const tokensAfter = estimateContextTokens(compacted, { model: request.model });
+    let tokensAfter = estimateContextTokens(compacted, { model: request.model });
+    // Point the model at the archive, but only when there is one, and never
+    // at the cost of a compaction that no longer shrinks the transcript.
+    if (request.archivePath !== undefined) {
+      const noted = withArchiveNote(compacted);
+      if (noted !== compacted) {
+        const notedTokens = estimateContextTokens(noted, { model: request.model });
+        if (notedTokens < tokensBefore) {
+          compacted = noted;
+          tokensAfter = notedTokens;
+        }
+      }
+    }
     const archive = await archivePreCompaction(request.archivePath, {
       archived_at: new Date().toISOString(),
       messages: original.map(message => {
@@ -429,7 +487,73 @@ export async function compactMessagesIfNeeded(
       },
     };
   }
-  return { compacted: false, reason: "failed", error: errorMessage(lastError) };
+  const summaryError = errorMessage(lastError);
+  const fallback = await shedFallback(request, original, tokensBefore, summaryError);
+  return fallback ?? { compacted: false, reason: "failed", error: summaryError };
+}
+
+/** The summary message with the archive note after its prefix; the same array when nothing changes. */
+function withArchiveNote(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+  let changed = false;
+  const noted = messages.map(message => {
+    if (!isCompactionSummaryMessage(message) || typeof message.content !== "string") return message;
+    if (message.content.includes(COMPACTION_ARCHIVE_NOTE) || !message.content.startsWith(COMPACTION_REFERENCE_PREFIX)) return message;
+    changed = true;
+    return { ...message, content: `${COMPACTION_REFERENCE_PREFIX}\n${COMPACTION_ARCHIVE_NOTE}${message.content.slice(COMPACTION_REFERENCE_PREFIX.length)}` };
+  });
+  return changed ? noted : messages;
+}
+
+/** Newest tool results the deterministic fallback never sheds. */
+const FALLBACK_KEEP_RECENT_TOOL_RESULTS = 8;
+
+async function shedFallback(
+  request: CompactMessagesRequest,
+  original: readonly ContextMessage[],
+  tokensBefore: number,
+  summaryError: string,
+): Promise<CompactionOutcome | undefined> {
+  if (!request.deterministicFallback || request.archivePath === undefined || request.maxContextTokens === undefined) {
+    return undefined;
+  }
+  const count = (messages: readonly ContextMessage[]) => estimateContextTokens(messages, { model: request.model });
+  const shed = shedToolResults(original, {
+    budgetTokens: Math.floor(request.maxContextTokens / 2),
+    keepRecent: FALLBACK_KEEP_RECENT_TOOL_RESULTS,
+    count,
+  });
+  if (shed.shedCount === 0) return undefined;
+  const tokensAfter = count(shed.messages);
+  if (tokensAfter >= tokensBefore) return undefined;
+  const archive = await archivePreCompaction(request.archivePath, {
+    archived_at: new Date().toISOString(),
+    messages: original.map(message => {
+      const outcome = getTurnOutcome(message);
+      return outcome ? { ...message, turn_outcome: outcome } : message;
+    }),
+    model: request.model,
+    reason: `${request.reason}:shed-fallback`,
+    // No summary: every message is retained, only older outputs are emptied.
+    retained_messages: shed.messages.length,
+    tokens_after: tokensAfter,
+    tokens_before: tokensBefore,
+  });
+  if (archive.error !== undefined) return { compacted: false, reason: "failed", error: archive.error };
+  return {
+    compacted: true,
+    messages: shed.messages,
+    originalCount: original.length,
+    stamp: {
+      ...(archive.path === undefined ? {} : { archive_path: archive.path }),
+      compacted_at: new Date().toISOString(),
+      fallback: "shed-tool-results",
+      messages_summarized: 0,
+      reason: request.reason,
+      summary_error: summaryError,
+      tokens_after: tokensAfter,
+      tokens_before: tokensBefore,
+    },
+  };
 }
 
 /**

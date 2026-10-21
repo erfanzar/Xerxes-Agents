@@ -400,9 +400,23 @@ export function messageContentToText(content: unknown): string {
   return content === undefined || content === null ? '' : String(content)
 }
 
+/**
+ * Preview ceilings for summary input. 400 characters per result cut test
+ * reports, diffs and stack traces before the summarizer saw what failed or
+ * changed. Failures get the most room: they are what the next turn acts on.
+ * The full outputs stay in the pre-compaction archive (`session_search`).
+ */
+export const SUMMARY_MAX_ARGUMENT_CHARS = 200
+export const SUMMARY_MAX_OBSERVATION_CHARS = 1_200
+export const SUMMARY_MAX_ERROR_CHARS = 4_000
+
 /** Render model-readable summary input through the shared, explicitly clipped trajectory grammar. */
 export function renderMessagesForSummary(messages: readonly ContextMessage[]): string {
-  return renderTrajectory(messages, { maxArgumentChars: 200, maxObservationChars: 400 })
+  return renderTrajectory(messages, {
+    maxArgumentChars: SUMMARY_MAX_ARGUMENT_CHARS,
+    maxObservationChars: SUMMARY_MAX_OBSERVATION_CHARS,
+    maxErrorChars: SUMMARY_MAX_ERROR_CHARS,
+  })
 }
 
 export interface CompactionPromptOptions {

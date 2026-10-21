@@ -252,6 +252,7 @@ import {
   lazyCompactionCompletionPort,
   compactionThresholdTokens,
   DEFAULT_AUTO_COMPACT_THRESHOLD,
+  compactionSummaryBudgets,
   normalizeCompactionThreshold,
   precompactArchivePathFor,
 } from "./compactionRunner.js";
@@ -7852,6 +7853,13 @@ export class DaemonServer {
       // The summary call above can take tens of seconds while this method
       // holds only the session-operation queue for THIS key. A concurrent
       // session.open / resume of the same persisted id under another key
+        summaryBudgets: compactionSummaryBudgets(this.promptBudget(model, session) || undefined, {
+          ...(this.maxOutputTokens(model, session) === undefined ? {} : { maxOutputTokens: this.maxOutputTokens(model, session)! }),
+        }),
+        // Automatic passes shed old tool outputs (archived first) when the
+        // summary fails, instead of pausing the session. An explicit /compact
+        // reports the failure so the person sees it.
+        deterministicFallback: reason === "auto-compact",
       // folds and evicts this exact object — the fold's only guard is
       // activeTurnId, and compaction is not a turn. If that happened, the
       // swap below would mutate an orphan that flushSessions no longer sees:
@@ -7907,6 +7915,13 @@ export class DaemonServer {
           // discovered after the fact.
           this.emitSlash(
             notify,
+        if (outcome.stamp.fallback === "shed-tool-results") {
+          this.emitSlash(
+            notify,
+            `The compaction summary failed (${outcome.stamp.summary_error ?? "unknown error"}), so older tool outputs were shortened instead. The full history is archived and searchable with session_search.`,
+            "warning",
+          );
+        }
             "Note: no pre-compaction archive was available, so the replaced history cannot be recovered if the summary went wrong.",
             "warning",
           );

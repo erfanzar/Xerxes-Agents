@@ -27,6 +27,8 @@ export interface TrajectoryRenderOptions {
   readonly maxObservationChars?: number
   /** Tool argument preview ceiling; defaults to 200 UTF-16 characters. */
   readonly maxArgumentChars?: number
+  /** Failed-result preview ceiling; defaults to maxObservationChars. Errors carry the detail a summary must keep. */
+  readonly maxErrorChars?: number
 }
 
 /**
@@ -107,7 +109,9 @@ export function renderTrajectory(
       }
       case 'observation':
       case 'error': {
-        const preview = previewText(step.text, options.maxObservationChars ?? 2_000, 'observation')
+        const observationChars = options.maxObservationChars ?? 2_000
+        const limit = step.type === 'error' ? options.maxErrorChars ?? observationChars : observationChars
+        const preview = previewText(step.text, limit, 'observation')
         return `[${step.type === 'error' ? 'ERROR' : 'OBSERVATION'}]${renderCallId(step.callId)} ${preview.text}${preview.note}`
       }
     }

@@ -604,6 +604,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',
     'HandoffTool', 'AskUserQuestionTool', 'SetInteractionModeTool', 'get_goal',
     'create_goal', 'update_goal', 'SkillTool', 'TodoWriteTool', 'ToolSearchTool', 'create_project_setup',
+    'session_search', 'NotebookEditTool',
   ]
   const definitions: AgentDefinition[] = [
     {

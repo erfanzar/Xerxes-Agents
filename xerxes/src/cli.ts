@@ -74,7 +74,7 @@ import {
   ToolRegistry,
   type ToolExecutionContext,
 } from "./executors/toolRegistry.js";
-import { compactMessagesIfNeeded, precompactArchivePath } from "./daemon/compactionRunner.js";
+import { compactMessagesIfNeeded, compactionSummaryBudgets, precompactArchivePath } from "./daemon/compactionRunner.js";
 import { recordCompaction } from "./context/compactionHistory.js";
 import { FILE_READS_METADATA_KEY, fileStateTracker } from "./tools/fileState.js";
 import { AuditEmitter } from "./audit/emitter.js";
@@ -112,7 +112,9 @@ import { registerLessonTools } from './tools/lessonTools.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
 import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
-import { SkillBundleStore } from './tools/agentMetaTools.js';
+import { SkillBundleStore, registerSessionSearchTool } from './tools/agentMetaTools.js';
+import { archiveSessionSearchPort } from './daemon/archiveSearch.js';
+import { registerClaudeNotebookTools } from './tools/claudeTools/notebook.js';
 import type { TurnReflectionInput } from './daemon/turnRunner.js';
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
@@ -278,7 +280,10 @@ function renderHelp(writer: CliWriter): void {
   );
 }
 
-/** Summary budget for a mid-turn overflow rescue: small, because the window is already full. */
+/**
+ * Mid-turn overflow rescue summary when the window is unknown. With a known
+ * window, `compactionSummaryBudgets(..., { midTurn: true })` scales it.
+ */
 const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 
 const { agent: cliAgentReference, rest: agentlessArguments } = extractAgentOption(
@@ -1962,7 +1967,7 @@ function daemonRuntime(
     const mcpTools = resources.mcpManager ? registerMcpTools(tools, resources.mcpManager) : [];
     registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
     if (host.schedules) registerScheduleTools(tools, host.schedules);
-    registerCoreTools(tools, {
+    const corePaths = registerCoreTools(tools, {
       ...(host.modelInventory ? { modelInventory: host.modelInventory } : {}),
       workspaceRoot,
       activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
@@ -1995,6 +2000,8 @@ function daemonRuntime(
       },
       memoryTools: { resolveContext: memoryToolContext.resolve },
     });
+    // Same workspace-safe path resolver as the core file tools.
+    registerClaudeNotebookTools(tools, corePaths);
     if (host.declarativeForge) {
       registerCreatorForgeTool(tools, host.declarativeForge);
     }
@@ -2053,6 +2060,14 @@ function daemonRuntime(
         return { id, name: String(row.name ?? ""), ok: successfulGoalEvidence(row, id), summary: result.length > 500 ? `${result.slice(0, 500)}… [${result.length} chars]` : result };
       },
     });
+    // Compaction archives replaced history verbatim; this lets the model read
+    // it back instead of relying on the summary alone. Own session only.
+    registerSessionSearchTool(tools, archiveSessionSearchPort({
+      liveMessages: (sessionId) => runtime?.listSessions().find(session => session.id === sessionId)?.messages,
+      archivePath: (sessionId) => {
+        try { return precompactArchivePath(transcriptStore.pathFor(sessionId)); } catch { return undefined; }
+      },
+    }));
     registerInteractionModeTool(tools, {
       async setMode({ context, mode }) {
         const activeRuntime = runtime;
@@ -2346,14 +2361,21 @@ function daemonRuntime(
         const priced = messages as unknown as Readonly<Record<string, unknown>>[];
         const before = estimateContextTokens(priced, { model });
         const contextWindow = localClient ? undefined : resolvedProfileContextLimit(profile ?? profileStore.active(), model);
+        const overflowOutput = localClient ? undefined : resolvedProfileMaxOutputTokens(profile ?? profileStore.active(), model);
+        const [overflowSummaryTokens = OVERFLOW_SUMMARY_MAX_TOKENS] = compactionSummaryBudgets(contextWindow, {
+          midTurn: true,
+          ...(overflowOutput === undefined ? {} : { maxOutputTokens: overflowOutput }),
+        });
         const outcome = await compactMessagesIfNeeded({
           model,
           completion: compactionCompletionPort(compactionLlm, model, undefined, signal, localClient ? undefined : profile?.provider),
-          summaryBudgets: [OVERFLOW_SUMMARY_MAX_TOKENS],
+          summaryBudgets: [overflowSummaryTokens],
           messages: priced,
           reason: "mid-turn-auto-compact",
+          // A failed summary sheds old tool outputs (archived first) rather than ending the turn.
+          deterministicFallback: true,
           // In compaction's units: the plain estimate, before the calibration the turn's meter applies.
-          ...(contextWindow ? { maxContextTokens: Math.max(4096, Math.floor((contextWindow - OVERFLOW_SUMMARY_MAX_TOKENS) / (active ? contextCalibrationRatio(active.metadata, model) : 1))) } : {}),
+          ...(contextWindow ? { maxContextTokens: Math.max(4096, Math.floor((contextWindow - overflowSummaryTokens) / (active ? contextCalibrationRatio(active.metadata, model) : 1))) } : {}),
           ...(active ? { archivePath: precompactArchivePath(transcriptStore.pathFor(active.id)) } : {}),
         });
         // `ContextMessage` is deliberately `Record<string, unknown>` so

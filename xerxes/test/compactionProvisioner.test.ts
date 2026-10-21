@@ -272,14 +272,31 @@ test('summary rendering and strategy selection are stable and model-backed smart
 test('tool previews keep emoji whole at both compaction truncation boundaries', () => {
   const history = [
     { role: 'assistant', content: '', tool_calls: [{ id: 'unicode', function: { name: 'exec_command', arguments: 'a'.repeat(199) + '😀tail' } }] },
-    { role: 'tool', tool_call_id: 'unicode', content: 'b'.repeat(399) + '🚀tail' },
+    { role: 'tool', tool_call_id: 'unicode', content: 'b'.repeat(1_199) + '🚀tail' },
   ]
   const before = JSON.stringify(history)
   const prompt = renderMessagesForSummary(history)
   expect(prompt.isWellFormed()).toBe(true)
   expect(prompt).toContain('a'.repeat(199))
   expect(prompt).toContain('[argument preview clipped by the renderer: showing 199 of 205 chars; original arguments unchanged]')
-  expect(prompt).toContain('b'.repeat(399))
-  expect(prompt).toContain('[preview clipped by the renderer: showing 399 of 405 chars;')
+  expect(prompt).toContain('b'.repeat(1_199))
+  expect(prompt).toContain('[preview clipped by the renderer: showing 1199 of 1205 chars;')
   expect(JSON.stringify(history)).toBe(before)
+})
+
+test('the summarizer sees failures in far more detail than ordinary results', () => {
+  const trace = 'E'.repeat(3_500)
+  const listing = 'L'.repeat(3_500)
+  const prompt = renderMessagesForSummary([
+    { role: 'assistant', content: '', tool_calls: [
+      { id: 'fail', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"bun"}' } },
+      { id: 'ok', type: 'function', function: { name: 'ListDir', arguments: '{}' } },
+    ] },
+    { role: 'tool', tool_call_id: 'fail', content: trace, is_error: true },
+    { role: 'tool', tool_call_id: 'ok', content: listing },
+  ])
+  // The whole 3,500-character failure survives; the listing is clipped at 1,200.
+  expect(prompt).toContain(trace)
+  expect(prompt).not.toContain(listing)
+  expect(prompt).toContain('[preview clipped by the renderer: showing 1200 of 3500 chars;')
 })
