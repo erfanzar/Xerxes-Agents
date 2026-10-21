@@ -7,6 +7,14 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { ValidationError } from '../core/errors.js'
 import { foldGoalChanges, readGoalChanges } from '../runtime/goalDomain.js'
 import { readGoalWake } from '../runtime/goalWake.js'
+import {
+  joinMetadataSidecar,
+  METADATA_SIDECAR_FIELD,
+  MetadataSidecarStore,
+  recordWithSidecar,
+  sidecarPathFor,
+  splitMetadata,
+} from './metadataSidecar.js'
 import { inspectTranscriptEventLog, type TranscriptEventInspection } from './transcriptEventInspection.js'
 import {
   RESUME_REPLAY_SENTINEL,
@@ -174,6 +182,9 @@ export function normalizeDaemonTranscript(raw: unknown, options: TranscriptLoadO
     'total_output_tokens',
     'usage_complete', 'metadata',
     'thinking_content', 'tool_executions',
+    // Resolved by the store before normalization; never round-tripped as an
+    // unknown field, or a later save would carry stale references.
+    METADATA_SIDECAR_FIELD,
   ])
   const extra = Object.fromEntries(Object.entries(raw).filter(([key]) => !knownKeys.has(key)))
   const cwd = normalizeProjectDirectory(
@@ -331,6 +342,7 @@ function validateGoalMetadata(metadata: Readonly<Record<string, unknown>>): bool
 export class DaemonTranscriptStore {
   private readonly currentProjectDirectory: string
   private readonly directory: string
+  private readonly sidecars = new MetadataSidecarStore()
   private readonly lockStaleMs: number
   private readonly lockWaitMs: number
   private readonly workspaceRoot: string | undefined
@@ -541,10 +553,22 @@ export class DaemonTranscriptStore {
       const coveredOffset = coversEventLog
         ? await this.eventLogSize(transcript.sessionId)
         : inheritedOffset
+      const path = this.pathFor(transcript.sessionId)
+      const sidecarPath = sidecarPathFor(path)
+      // Growing metadata (agents, goal history, workflow runs) is stored once
+      // per element in the sidecar. Its new elements must be durable before a
+      // transcript that names them exists, so they are appended first.
+      const split = splitMetadata(transcript.metadata)
+      await this.sidecars.append(sidecarPath, split.entries)
       await atomicJsonWrite(
-        this.pathFor(transcript.sessionId),
-        daemonTranscriptRecord({ ...transcript, generation, eventLogOffset: coveredOffset, messages }),
+        path,
+        recordWithSidecar(daemonTranscriptRecord({ ...transcript, generation, eventLogOffset: coveredOffset, messages }), split),
       )
+      // Superseded versions (an agent's earlier progress) are reclaimed only
+      // once the transcript naming the live set is on disk.
+      await this.sidecars.compact(sidecarPath, new Set(split.entries.keys())).catch((error: unknown) => {
+        console.warn(`Could not compact the metadata of session ${transcript.sessionId}: ${errorText(error)}`)
+      })
       // The snapshot above covers only events the caller actually loaded into
       // `messages`. Events appended concurrently or after that load remain
       // beyond its inherited byte watermark and replay on the next resume.
@@ -609,6 +633,7 @@ export class DaemonTranscriptStore {
       // session too (one whose first turn never saved), so removing it counts.
       const hadJournal = await this.hasEventLog(sessionId)
       await rm(this.journalPathFor(sessionId), { force: true })
+      await this.sidecars.remove(sidecarPathFor(path))
       try {
         await rm(path)
         return true
@@ -638,14 +663,29 @@ export class DaemonTranscriptStore {
    * vanished. With no snapshot, the journal alone is the record.
    */
   private async readReplayedRecord(sessionId: string): Promise<unknown> {
+    const sidecarPath = sidecarPathFor(this.pathFor(sessionId))
     let raw: unknown
     let orphaned = false
-    try {
-      raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
-    } catch (error) {
-      if (!isMissing(error) || !(await this.hasEventLog(sessionId))) return undefined
-      raw = { session_id: sessionId, messages: [] }
-      orphaned = true
+    // Reads take no lock. A writer can compact the sidecar between our read
+    // of an older transcript and our read of the sidecar, so a transcript
+    // whose records are missing is read once more: the second read sees the
+    // transcript that matches the compacted sidecar.
+    for (let attempt = 0; ; attempt += 1) {
+      orphaned = false
+      try {
+        raw = JSON.parse(await readFile(this.pathFor(sessionId), 'utf8')) as unknown
+      } catch (error) {
+        if (!isMissing(error) || !(await this.hasEventLog(sessionId))) return undefined
+        raw = { session_id: sessionId, messages: [] }
+        orphaned = true
+      }
+      if (!isRecord(raw)) break
+      const missing = await joinMetadataSidecar(raw, sidecarPath, this.sidecars)
+      if (missing === 0) break
+      if (attempt >= 1) {
+        console.warn(`Session ${sessionId} references ${missing} metadata record(s) missing from ${sidecarPath}`)
+        break
+      }
     }
     // Replay before normalization so journalled messages go through the same
     // resume repair as persisted ones: a crash between two tool calls leaves

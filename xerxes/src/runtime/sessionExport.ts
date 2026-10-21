@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
 import { displayTitle } from '../daemon/titleGenerator.js'
+import { joinMetadataSidecar, sidecarPathFor } from '../session/metadataSidecar.js'
 
 export const EXPORT_SCHEMA = 'xerxes.session.export.v1'
 export const DEFAULT_EXPORT_FORMAT = 'json'
@@ -288,6 +289,9 @@ async function readSavedSession(
     if (!isRecord(parsed) || !recordHasHistory(parsed)) {
       return undefined
     }
+    // Agent records and goal history live in the metadata sidecar; an export
+    // must carry them whole, exactly as the session holds them in memory.
+    await joinMetadataSidecar(parsed, sidecarPathFor(path))
     const projectRaw = recordProjectDirectoryText(parsed)
     const projectDirectory = projectRaw ? await resolvedPath(projectRaw, pathResolver) : undefined
     return {

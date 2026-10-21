@@ -7,16 +7,13 @@ import type { ModelCallBinding } from '../llms/callBudget.js'
 export const SUBAGENT_SNAPSHOT_METADATA_KEY = 'xerxes_subagent_snapshots_v1'
 export const SUBAGENT_DELIVERY_METADATA_KEY = 'xerxes_subagent_deliveries_v1'
 
-const MAX_ARCHIVED_TEXT_CHARS = 16_000
 /**
- * A workflow can run thousands of agents, and every one of them is rewritten
- * into the session file on each save. Each keeps its full text (up to the
- * per-agent cap, so the inspector can show it) while the grouped agents'
- * text stays under a session-wide budget; past it, the oldest are cut to a
- * short excerpt and marked as trimmed.
+ * Each agent keeps its full text up to this cap, so the inspector can show it.
+ * There is no session-wide budget: every agent a session ran stays whole. The
+ * transcript store keeps this manifest in an append-only sidecar, written per
+ * changed row, so its size no longer slows down saves (metadataSidecar.ts).
  */
-const MAX_ARCHIVED_GROUPED_TEXT_CHARS = 2_000
-const MAX_ARCHIVED_GROUPED_TEXT_BUDGET = 1_000_000
+const MAX_ARCHIVED_TEXT_CHARS = 16_000
 const MAX_ARCHIVED_FILES = 1_000
 const MAX_ARCHIVED_DELIVERIES = 2_000
 
@@ -56,7 +53,7 @@ export function replacePersistedSubagentSnapshots(
   metadata: Record<string, unknown>,
   snapshots: readonly SpawnedAgentSnapshot[],
 ): void {
-  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget(snapshots.map(archivedSnapshotWire))
+  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = snapshots.map(archivedSnapshotWire)
 }
 
 /**
@@ -77,7 +74,9 @@ export function mergePersistedSubagentSnapshots(
     if (id && !removedIds.has(id)) byId.set(id, value)
   }
   for (const snapshot of snapshots) byId.set(snapshot.id, archivedSnapshotWire(snapshot))
-  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = withinGroupedTextBudget([...byId.values()])
+  // Every row stays whole. The sidecar stores rows by content hash, so an
+  // unchanged row is already on disk and a save writes only agents that moved.
+  metadata[SUBAGENT_SNAPSHOT_METADATA_KEY] = [...byId.values()]
 }
 
 export function persistedSubagentSnapshotValues(
@@ -116,8 +115,10 @@ function archivedSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, un
     ...(snapshot.providerRoute === undefined ? {} : { provider_route: snapshot.providerRoute }),
     ...(snapshot.providerProfile ? { provider_profile: snapshot.providerProfile } : {}),
     ...(snapshot.reasoningEffort ? { reasoning_effort: snapshot.reasoningEffort } : {}),
-    rules: snapshot.rules ?? [],
-    toolsets: snapshot.toolsets ?? [],
+    // Copied: the session store freezes saved rows (metadataSidecar.ts), and
+    // these arrays belong to the live subagent manager.
+    rules: [...(snapshot.rules ?? [])],
+    toolsets: [...(snapshot.toolsets ?? [])],
     ...(snapshot.apiCalls === undefined ? {} : { api_calls: snapshot.apiCalls }),
     ...(snapshot.toolCalls === undefined ? {} : { tool_count: snapshot.toolCalls }),
     ...(snapshot.cacheReadTokens === undefined ? {} : { cache_read_tokens: snapshot.cacheReadTokens }),
@@ -153,34 +154,4 @@ function archivedModelCallBinding(binding: ModelCallBinding): Record<string, unk
 function boundedText(value: string | undefined, limit: number): string | undefined {
   if (!value) return undefined
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
-}
-
-/**
- * Keep grouped agents' saved text under the session-wide budget. The newest
- * agents keep their text whole; once the budget is spent, older ones are cut
- * to a short excerpt and flagged, so the inspector can say the rest is gone.
- */
-function withinGroupedTextBudget(rows: readonly Readonly<Record<string, unknown>>[]): Record<string, unknown>[] {
-  const size = (row: Readonly<Record<string, unknown>>) =>
-    (typeof row.last_input === 'string' ? row.last_input.length : 0) + (typeof row.last_output === 'string' ? row.last_output.length : 0)
-  const newestFirst = rows
-    .filter(row => typeof row.group === 'object' && row.group !== null)
-    .sort((left, right) => String(right.updated_at ?? '').localeCompare(String(left.updated_at ?? '')))
-  const trimmed = new Set<Readonly<Record<string, unknown>>>()
-  let spent = 0
-  for (const row of newestFirst) {
-    if (spent + size(row) <= MAX_ARCHIVED_GROUPED_TEXT_BUDGET) spent += size(row)
-    else { trimmed.add(row); spent += Math.min(size(row), MAX_ARCHIVED_GROUPED_TEXT_CHARS * 2) }
-  }
-  return rows.map(row => {
-    if (!trimmed.has(row)) return { ...row }
-    const input = typeof row.last_input === 'string' ? row.last_input : undefined
-    const output = typeof row.last_output === 'string' ? row.last_output : undefined
-    return {
-      ...row,
-      last_input: boundedText(input, MAX_ARCHIVED_GROUPED_TEXT_CHARS) ?? null,
-      last_output: boundedText(output, MAX_ARCHIVED_GROUPED_TEXT_CHARS) ?? null,
-      ...(output !== undefined && output.length > MAX_ARCHIVED_GROUPED_TEXT_CHARS ? { last_output_truncated: true } : {}),
-    }
-  })
 }

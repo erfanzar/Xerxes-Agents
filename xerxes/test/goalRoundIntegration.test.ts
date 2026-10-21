@@ -23,6 +23,7 @@ import { DaemonServer } from "../src/daemon/server.js";
 import { GoalTokenLedger } from '../src/runtime/goalTokenLedger.js';
 import { chargeModelCall } from '../src/llms/callBudget.js';
 import { readGoalWake, queueGoalWake, claimGoalWake } from '../src/runtime/goalWake.js';
+import { joinMetadataSidecar, sidecarPathFor } from '../src/session/metadataSidecar.js';
 import {
   completeGoal,
   createGoal,
@@ -38,6 +39,17 @@ import type {
   TurnRunControls,
   TurnRunner,
 } from "../src/daemon/runtime.js";
+
+/**
+ * What is durably persisted for a session: the transcript joined with its
+ * metadata sidecar, which holds goal history. Reading only `<id>.json` would
+ * miss it.
+ */
+async function persistedRecord(path: string): Promise<Record<string, any>> {
+  const record = await Bun.file(path).json() as Record<string, any>;
+  expect(await joinMetadataSidecar(record, sidecarPathFor(path))).toBe(0);
+  return record;
+}
 
 interface TurnRecord {
   readonly text: string;
@@ -142,7 +154,7 @@ for (const previousState of ['queued', 'running'] as const) test(`a ${previousSt
   let persistedClaim = false
   const runner: TurnRunner = { async *run(session, _text, _signal, controls) {
     rounds.push(controls!.goalRound!)
-    const saved = await Bun.file(join(sessionDirectory, `${session.id}.json`)).json()
+    const saved = await persistedRecord(join(sessionDirectory, `${session.id}.json`))
     const recorded = readGoalWake(saved.metadata, session.id)!
     persistedClaim = recorded.state === 'running' && recorded.round === controls?.goalRound
       && getGoal(saved.metadata, session.id)?.roundsStarted === controls?.goalRound
@@ -249,7 +261,7 @@ test('milestone commands persist before acknowledgement and survive session relo
     client.send({ jsonrpc: '2.0', id: 2, method: 'session.goal', params: { input: 'milestone Verify cancellation under load' } })
     expect(JSON.stringify(await client.next(frame => frame.id === 2))).toContain('Verify cancellation under load')
     const path = join(directory, 'sessions', `${session.id}.json`)
-    expect(await Bun.file(path).text()).toContain('Verify cancellation under load')
+    expect(JSON.stringify(await persistedRecord(path))).toContain('Verify cancellation under load')
     client.send({ jsonrpc: '2.0', id: 3, method: 'goal.inspect', params: {} })
     expect(JSON.stringify(await client.next(frame => frame.id === 3))).toContain('currentMilestone')
     const restoredRuntime = new InMemoryDaemonRuntime(undefined, { sessionDirectory: join(directory, 'sessions'), currentProjectDirectory: directory })
@@ -259,7 +271,7 @@ test('milestone commands persist before acknowledgement and survive session relo
     client.send({ jsonrpc: '2.0', id: 4, method: 'session.goal', params: { input: 'milestone clear' } })
     await client.next(frame => frame.id === 4)
     expect(getGoal(session.metadata, session.id)?.currentMilestone).toBeUndefined()
-    const stored = await Bun.file(path).json()
+    const stored = await persistedRecord(path)
     expect(getGoal(stored.metadata, session.id)?.currentMilestone).toBeUndefined()
     expect(runner.turns).toHaveLength(0)
   })
@@ -285,7 +297,7 @@ test('human criterion decisions bind to the viewed session and revision and pers
     const accepted = getGoal(session.metadata, session.id)!
     expect(accepted.criteria?.[0]?.evidence).toMatchObject({ kind: 'user-decision', summary: params.summary })
     expect(accepted.phase).toBe('active')
-    const stored = await Bun.file(join(directory, 'sessions', `${session.id}.json`)).text()
+    const stored = JSON.stringify(await persistedRecord(join(directory, 'sessions', `${session.id}.json`)))
     expect(stored).toContain('user-decision')
     expect(stored).toContain(params.summary)
     client.send({ jsonrpc: '2.0', id: 5, method: 'goal.decision', params: { ...params, summary: 'stale decision' } })
@@ -400,7 +412,7 @@ test("a goal created mid-turn cancels live work at its wall-time deadline and pe
     expect(calls).toBe(1)
     expect(getGoal(session.metadata, session.id)).toMatchObject({ phase: 'blocked', blockedReason: { code: 'time-limit' } })
     await runtime.flushSessions()
-    const stored = await Bun.file(join(directory, 'sessions', `${session.id}.json`)).text()
+    const stored = JSON.stringify(await persistedRecord(join(directory, 'sessions', `${session.id}.json`)))
     expect(stored).toContain('time-limit')
   })
 })

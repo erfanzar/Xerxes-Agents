@@ -49,24 +49,21 @@ describe('saved subagent output', () => {
     expect(row.last_output_truncated).toBe(true)
   })
 
-  test('past the session budget the oldest workflow agents are trimmed, the newest kept whole', () => {
+  test('every workflow agent keeps its whole result, however many a session ran', () => {
     const metadata: Record<string, unknown> = {}
-    // 100 agents × 15,000 characters is past the 1,000,000 budget.
+    // 100 agents × 15,000 characters: the old 1,000,000 budget cut the oldest to 2,000.
     const agents = Array.from({ length: 100 }, (_, index) => agent(index, `${index}:`.padEnd(15_000, 'z')))
     replacePersistedSubagentSnapshots(metadata, agents)
     const rows = saved(metadata)
-    const newest = rows.find(row => row.id === 'agent-99')!
-    const oldest = rows.find(row => row.id === 'agent-0')!
-    expect(String(newest.last_output).length).toBe(15_000)
-    expect(newest).not.toHaveProperty('last_output_truncated')
-    expect(String(oldest.last_output).length).toBe(2_000)
-    expect(oldest.last_output_truncated).toBe(true)
-    const total = rows.reduce((sum, row) => sum + String(row.last_output ?? '').length, 0)
-    expect(total).toBeLessThanOrEqual(1_000_000 + 100 * 2_000)
-    // Merging later progress keeps the manifest inside the same budget.
+    expect(rows).toHaveLength(100)
+    for (const row of rows) {
+      expect(String(row.last_output).length).toBe(15_000)
+      expect(row).not.toHaveProperty('last_output_truncated')
+    }
+    // Merging later progress keeps every earlier agent whole.
     mergePersistedSubagentSnapshots(metadata, [agent(100, '100:'.padEnd(15_000, 'z'))])
     const merged = saved(metadata)
-    expect(String(merged.find(row => row.id === 'agent-100')!.last_output).length).toBe(15_000)
     expect(merged).toHaveLength(101)
+    expect(String(merged.find(row => row.id === 'agent-0')!.last_output).length).toBe(15_000)
   })
 })
