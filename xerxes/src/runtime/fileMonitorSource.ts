@@ -1,12 +1,17 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { watch, type FSWatcher } from 'node:fs'
-import { lstat, realpath, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { constants, watch, type FSWatcher } from 'node:fs'
+import { lstat, open, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 const MAX_PATH_CHARS = 4_096
 const DEBOUNCE_MS = 50
+// Content checks read at most 128 KiB per observation: all of a small file,
+// or the first and last 64 KiB of a larger one. Unsampled interior-only edits
+// in large files still require a metadata change. Never emit content itself.
+const CONTENT_SAMPLE_BYTES = 64 * 1024
 
 export interface FileMonitorChange {
   readonly text: string
@@ -175,19 +180,41 @@ async function readValidatedState(workspace: string, lexical: string): Promise<F
   try {
     const canonical = await realpath(lexical)
     assertInside(workspace, canonical, 'Monitored path resolves outside the workspace')
-    return readState(canonical)
+    return readState(workspace, canonical)
   } catch (error) {
     if (isMissing(error)) return undefined
     throw error
   }
 }
 
-async function readState(path: string): Promise<FileState | undefined> {
+async function readState(workspace: string, path: string): Promise<FileState | undefined> {
   try {
-    const info = await stat(path)
-    if (!info.isFile()) return undefined
-    const mtime = typeof info.mtimeMs === 'number' ? info.mtimeMs : 0
-    return { signature: `${info.dev}:${info.ino}:${info.size}:${mtime}`, size: info.size, mtimeMs: mtime }
+    // A swap to a symlink or FIFO must not make fingerprinting follow an
+    // unchecked target or hang the watcher. Read only this regular file.
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    try {
+      assertInside(workspace, await realpath(path), 'Monitored path resolves outside the workspace')
+      const info = await file.stat()
+      if (!info.isFile()) return undefined
+      const hash = createHash('sha256')
+      const buffer = Buffer.allocUnsafe(CONTENT_SAMPLE_BYTES)
+      const sample = async (position: number, length: number): Promise<void> => {
+        let offset = 0
+        while (offset < length) {
+          const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, length - offset), position + offset)
+          if (bytesRead === 0) break
+          hash.update(buffer.subarray(0, bytesRead))
+          offset += bytesRead
+        }
+      }
+      if (info.size <= 2 * CONTENT_SAMPLE_BYTES) await sample(0, info.size)
+      else {
+        await sample(0, CONTENT_SAMPLE_BYTES)
+        await sample(info.size - CONTENT_SAMPLE_BYTES, CONTENT_SAMPLE_BYTES)
+      }
+      const mtime = typeof info.mtimeMs === 'number' ? info.mtimeMs : 0
+      return { signature: `${info.dev}:${info.ino}:${info.size}:${mtime}:${hash.digest('hex')}`, size: info.size, mtimeMs: mtime }
+    } finally { await file.close() }
   } catch (error) {
     if (isMissing(error)) return undefined
     throw error

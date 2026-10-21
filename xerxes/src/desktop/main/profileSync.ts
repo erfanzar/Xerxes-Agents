@@ -7,9 +7,9 @@
  * rules are testable headlessly; main.ts runs it after each SSH connect.
  */
 
-import { watch } from 'node:fs'
+import { statSync, watch } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { basename, dirname } from 'node:path'
+import { dirname } from 'node:path'
 
 export type ProfileImportCall = (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>
 
@@ -84,17 +84,34 @@ export async function copyProfilesToRemote(call: ProfileImportCall, profilesFile
  * Call `changed` shortly after this Mac's profiles file is written, so a
  * provider added or a key changed here reaches a connected SSH host without
  * reconnecting. The folder is watched, not the file: saves replace the file
- * by rename, which ends a watch on the old one. Returns the stop function.
+ * by rename, which ends a watch on the old one. Bun on Linux can coalesce an
+ * atomic save into an event naming only its temporary source, not the target.
+ * Treat directory events as hints and compare the target's version after the
+ * debounce, so unrelated writes do not sync profiles. Returns the stop function.
  */
 export function watchProfiles(profilesFile: string, changed: () => void, debounceMs = 500): () => void {
-  const name = basename(profilesFile)
+  const version = (): string | undefined => {
+    const stat = statSync(profilesFile, { bigint: true, throwIfNoEntry: false })
+    return stat ? [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':') : undefined
+  }
+  let previous: string | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let watcher: ReturnType<typeof watch> | undefined
   try {
-    watcher = watch(dirname(profilesFile), (_event, file) => {
-      if (file !== null && file !== name) return
+    previous = version()
+    watcher = watch(dirname(profilesFile), () => {
       clearTimeout(timer)
-      timer = setTimeout(changed, debounceMs)
+      timer = setTimeout(() => {
+        try {
+          const current = version()
+          if (current === previous) return
+          previous = current
+        } catch (error) {
+          console.warn(`Cannot inspect ${profilesFile} for profile changes: ${error instanceof Error ? error.message : String(error)}`)
+          return
+        }
+        changed()
+      }, debounceMs)
     })
     watcher.on('error', error => console.warn(`Stopped watching ${profilesFile}: ${error instanceof Error ? error.message : String(error)}`))
   } catch (error) {

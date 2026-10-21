@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, symlink, unlink, writeFile, rm, rename } from 'node:fs/promises'
+import { utimesSync, writeFileSync } from 'node:fs'
+import { mkdir, mkdtemp, symlink, unlink, writeFile, rm, rename, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { nativeFileMonitorSource } from '../src/runtime/fileMonitorSource.js'
@@ -100,6 +101,66 @@ test('file monitor allows A to B to A transitions', async () => {
     await writeFile(f.file, 'b'); const first = await nextEvent(events)
     await writeFile(f.file, 'a'); const second = await nextEvent(events)
     expect(first.identity).not.toBe(second.identity)
+  } finally { monitor.close(); await f.close() }
+})
+
+test('file monitor detects same-size content changes with an identical metadata signature', async () => {
+  const f = await fixture()
+  const events: { text: string; identity: string }[] = []
+  const timestamp = new Date('2024-01-01T00:00:00Z')
+  utimesSync(f.file, timestamp, timestamp)
+  const initial = await stat(f.file)
+  const signature = (info: Awaited<ReturnType<typeof stat>>) => `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`
+  const monitor = await nativeFileMonitorSource.open(f.root, f.file, event => events.push(event), error => { throw error })
+  try {
+    // Both synchronous operations finish before a watcher or poll can run.
+    // Freeze every field in the production metadata signature, not a lucky
+    // same-tick write. The content must be what makes these states differ.
+    const replace = (text: string) => {
+      writeFileSync(f.file, text)
+      utimesSync(f.file, timestamp, timestamp)
+    }
+    replace('b')
+    expect(signature(await stat(f.file))).toBe(signature(initial))
+    const first = await nextEvent(events)
+    replace('a')
+    expect(signature(await stat(f.file))).toBe(signature(initial))
+    const second = await nextEvent(events)
+    expect(first.identity).not.toBe(second.identity)
+    expect(JSON.parse(first.text)).toMatchObject({ event: 'changed', path: 'watched.txt' })
+    // A notification must not disclose file contents.
+    expect(JSON.parse(second.text)).toEqual({ event: 'changed', path: 'watched.txt', size: 1, mtime_ms: initial.mtimeMs })
+    await Bun.sleep(400)
+    expect(events).toEqual([])
+  } finally { monitor.close(); await f.close() }
+})
+
+test('large-file content checks sample the head and tail, not an unbounded interior', async () => {
+  const f = await fixture()
+  const events: { text: string; identity: string }[] = []
+  const content = Buffer.alloc(256 * 1024)
+  const timestamp = new Date('2024-01-01T00:00:00Z')
+  const replace = () => {
+    writeFileSync(f.file, content)
+    utimesSync(f.file, timestamp, timestamp)
+  }
+  replace()
+  const monitor = await nativeFileMonitorSource.open(f.root, f.file, event => events.push(event), error => { throw error })
+  try {
+    // Document the bounded rule: an interior-only edit with unchanged metadata
+    // is outside the sample. Such an edit needs a metadata change to notify.
+    content[128 * 1024] = 1
+    replace()
+    await Bun.sleep(600)
+    expect(events).toEqual([])
+    content[0] = 1
+    replace()
+    const head = await nextEvent(events)
+    content[content.length - 1] = 1
+    replace()
+    const tail = await nextEvent(events)
+    expect(head.identity).not.toBe(tail.identity)
+    expect(JSON.parse(tail.text)).toMatchObject({ event: 'changed', size: content.length })
   } finally { monitor.close(); await f.close() }
 })
 

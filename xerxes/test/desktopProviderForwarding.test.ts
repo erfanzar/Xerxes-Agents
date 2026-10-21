@@ -200,7 +200,13 @@ test('a new SSH conversation follows this computer\'s sign-in provider with no r
     const ended=await f.forwarding.current() as {bound:boolean;live:boolean;requests:number;inFlight:number}
     expect(ended).toMatchObject({bound:true,live:false,inFlight:0})
     expect(ended.requests).toBeGreaterThanOrEqual(1)
-    expect(await f.forwarding.follow()).toEqual({status:'bound'})
+    // The title's save can enter the session-operation queue after turn() saw
+    // it idle. A renewal may be refused while that save runs; follow() retries
+    // by itself. Assert that access returns, not that its first pass wins a race.
+    const renewed=await f.forwarding.follow()
+    if(renewed.status!=='bound')expect(renewed).toMatchObject({status:'failed',reason:'The conversation changed or is working. Review setup when it is idle.'})
+    await until(()=>f.forwarding.activityFor(bound.sessionKey).live)
+    expect((await f.forwarding.inspect()).source).toBe('local')
     await f.turn()
     expect(f.fallback()).toBe(0)
     // A keyed active profile is copied to the host instead.
@@ -208,6 +214,40 @@ test('a new SSH conversation follows this computer\'s sign-in provider with no r
     expect((await f.forwarding.follow()).status).toBe('skipped')
   }finally{await f.close()}
 },20000)
+
+test('automatic renewal waits out a busy session operation without another follow call',async()=>{
+  let busy=false, bound=false, grants=0, binds=0
+  const profile={name:'signin',model:'gpt-4o',supported:true,credential_source:'local provider authentication or environment',output_limit_mode:'request-bound'}
+  const forwarding=new DesktopProviderForwarding(async(method)=>{
+    if(method==='provider.relay.inventory')return {ok:true,profiles:[profile]}
+    if(method==='provider.relay.authorize')return {ok:true,grant:{id:String(++grants).repeat(32)}}
+    return {ok:true}
+  },async(method,params)=>{
+    if(method==='provider.remote.bind'){
+      expect(busy).toBe(false)
+      binds++
+      bound=true
+      return {ok:true,binding:{workspace:'/project',profile:params.profile,model:params.model,binding:String(binds).repeat(32)}}
+    }
+    return {ok:true,provider_binding_session_guard_supported:true,provider_binding_busy:busy,provider_binding_lost:false,
+      session:{key:'task',cwd:'/project',status:'idle',turn_count:0,...(bound?{local_provider_label:'Local provider: signin'}:{})}}
+  },'host','/project',async()=>'signin')
+  try{
+    expect(await forwarding.follow()).toEqual({status:'bound'})
+    await forwarding.disconnect()
+    busy=true
+    expect(await forwarding.follow()).toEqual({status:'failed',reason:'The conversation changed or is working. Review setup when it is idle.'})
+    expect(forwarding.activityFor('task').live).toBe(false)
+    expect(grants).toBe(1)
+    expect(binds).toBe(1)
+    busy=false
+    // The production retry timer, not this test, performs the next follow.
+    await until(()=>forwarding.activityFor('task').live)
+    expect(grants).toBe(2)
+    expect(binds).toBe(2)
+    expect((await forwarding.inspect()).source).toBe('local')
+  }finally{await forwarding.disconnect()}
+})
 
 test('a conversation already run on the host\'s providers is not taken over',async()=>{
   const f=await fixture(async()=>'local-signin')

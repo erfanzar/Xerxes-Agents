@@ -13,9 +13,23 @@ test('real SSH preserves aliases and identity references while clearing all conf
     await Bun.write(user, 'Host audit\n HostName example.invalid\n User audit-user\n IdentityFile /local/key-reference\n SendEnv PRIVATE_* LANG\n SetEnv PRIVATE_TOKEN=sentinel-credential\nHost unrelated\n User other\n')
     await Bun.write(system, 'SendEnv LC_*\nSetEnv SYSTEM_TOKEN=another-sentinel\nServerAliveInterval 42\nControlMaster auto\nControlPath /tmp/user-master\nPermitLocalCommand yes\nLocalCommand echo should-not-run\nLocalForward 12345 localhost:23456\nRemoteForward 23456 localhost:34567\nDynamicForward 34567\n')
     const config = await writeSshConnectionConfig(directory, [user, system])
-    const child = Bun.spawn(['ssh', '-G', '-F', config, 'audit'], { stdout: 'pipe', stderr: 'pipe' })
-    const output = await new Response(child.stdout).text()
-    expect(await child.exited).toBe(0)
+    // Test OpenSSH's config semantics, not native allocator instrumentation
+    // inherited from a developer's shell. On Ubuntu, preloading libtcmalloc
+    // corrupts OpenSSH 8.9's Include parsing even for immutable shell-written
+    // files. Change only this child's environment, never the running process.
+    const env = { ...process.env }
+    delete env.LD_PRELOAD
+    let output = ''
+    const before = await Bun.file(config).text()
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const child = Bun.spawn(['ssh', '-G', '-F', config, 'audit'], { env, stdout: 'pipe', stderr: 'pipe' })
+      const [text, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 })
+      expect(text).toMatch(/^hostname example.invalid$/m)
+      expect(text).toMatch(/^user audit-user$/m)
+      output = text
+    }
+    expect(await Bun.file(config).text()).toBe(before)
     expect(output).toMatch(/^hostname example.invalid$/m)
     expect(output).toMatch(/^user audit-user$/m)
     expect(output).toMatch(/^identityfile \/local\/key-reference$/m)

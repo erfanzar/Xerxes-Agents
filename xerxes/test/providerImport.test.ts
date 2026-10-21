@@ -203,6 +203,43 @@ test('a provider saved on the Mac (written by rename) triggers one sync; other f
       for (let i = 0; i < 50 && calls === 0; i++) await Bun.sleep(20)
       await Bun.sleep(150)
       expect(calls).toBe(1)
+      // A later save must still work after the first inode was replaced. Use
+      // the production writer too: its temporary filename includes a UUID.
+      new ProfileStore(file).save({ name: 'another', provider: 'openai', baseUrl: 'https://example.test/v1', apiKey: 'another-key', model: 'm' })
+      for (let i = 0; i < 50 && calls < 2; i++) await Bun.sleep(20)
+      await Bun.sleep(150)
+      expect(calls).toBe(2)
+    } finally { stop() }
+  })
+})
+
+test('profile watching detects creation and in-place writes, ignores unrelated renames, and stops pending syncs', async () => {
+  await inTemporaryHome(async root => {
+    const file = join(root, 'profiles.json')
+    let calls = 0
+    const stop = watchProfiles(file, () => { calls++ }, 50)
+    const waitFor = async (count: number) => {
+      for (let i = 0; i < 50 && calls < count; i++) await Bun.sleep(20)
+      await Bun.sleep(100)
+      expect(calls).toBe(count)
+    }
+    try {
+      await writeFile(join(root, 'unrelated.tmp'), '{}')
+      await rename(join(root, 'unrelated.tmp'), join(root, 'other.json'))
+      await Bun.sleep(150)
+      expect(calls).toBe(0)
+      // Editors need not use ProfileStore's temporary filename convention.
+      await writeFile(join(root, 'editor-save'), JSON.stringify(mac))
+      await rename(join(root, 'editor-save'), file)
+      await waitFor(1)
+      await writeFile(file, JSON.stringify({ ...mac, active: 'zai' }))
+      await waitFor(2)
+      await writeFile(file, JSON.stringify(mac))
+      // Allow fs.watch to queue the debounce callback, then cancel it.
+      await Bun.sleep(10)
+      stop()
+      await Bun.sleep(150)
+      expect(calls).toBe(2)
     } finally { stop() }
   })
 })
