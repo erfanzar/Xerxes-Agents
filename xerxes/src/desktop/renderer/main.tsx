@@ -4,6 +4,7 @@
 import { createRoot } from 'react-dom/client'
 
 import { restoreAppearance } from './appearance.js'
+import { followAppearanceChanges } from './appearanceSync.js'
 import { applyBackdrop, loadBackdrop } from './backdrop.js'
 import { restoreDisplayPrefs } from './displayPrefs.js'
 import { ErrorBoundary } from './ErrorBoundary.js'
@@ -22,6 +23,8 @@ const applyTheme = (): void => {
 }
 applyBackdrop(loadBackdrop())
 restoreDisplayPrefs()
+// A look chosen in any other workspace or SSH view applies here too.
+followAppearanceChanges()
 // Pause every animation while the window is not focused (see atelier.css):
 // a turn can run for an hour behind another app, redrawing spinners nobody sees.
 const setFocused = (focused: boolean): void => {

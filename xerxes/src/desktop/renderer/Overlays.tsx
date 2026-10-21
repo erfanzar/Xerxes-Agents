@@ -129,7 +129,7 @@ function useThemeChoice(): [string, (next: string) => void] {
       document.documentElement.setAttribute('data-theme', next)
     }
     applyBackdrop(loadBackdrop())
-    saveAppearance()
+    saveAppearance({ theme: next === 'dark' || next === 'light' ? next : 'system' })
     setChoice(next)
   }
   return [choice, set]
@@ -427,7 +427,8 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
   const { notifications, loginItem, toggleNotifications, toggleLoginItem } = useNativeSwitches()
   const applyFont = (size: string): void => {
     if (typeof document !== 'undefined') document.documentElement.setAttribute('data-font', size)
-    saveAppearance()
+    const font = FONT_SIZES.find(value => value === size)
+    if (font) saveAppearance({ font })
     setFontSize(size)
   }
   return (
