@@ -123,13 +123,16 @@ export class ApprovalStore {
    * must never authorize a different one, or a single `Always allow` on a command-running tool
    * would hand every future argv the user's blessing.
    */
-  check(toolName: string, sessionId: string, argsHash = ''): boolean | undefined {
+  check(toolName: string, sessionId: string, argsHash = '', options: { readonly skipAlways?: boolean } = {}): boolean | undefined {
     const tool = requiredText(toolName, 'toolName')
     const session = optionalText(sessionId)
     const hash = optionalText(argsHash)
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]
       if (!record || record.toolName !== tool) continue
+      // A shared (multi-participant) session never inherits machine-wide remembered decisions:
+      // `skipAlways` ignores durable grants AND denials so the people present are asked instead.
+      if (options.skipAlways === true && record.scope === ApprovalScope.ALWAYS) continue
       // A stored empty hash marks a record written before approvals were scoped to arguments —
       // including everything daemon/productionInteractions.ts persisted then — so it stays a
       // tool-wide grant instead of silently revoking approvals users already gave.

@@ -32,11 +32,11 @@ import {
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import { getGoal } from '../runtime/goalDomain.js'
-import type { ChatMessage, MessageContent, HarnessOrigin } from '../types/messages.js'
+import { withoutXerxesAnnotations, type ChatMessage, type MessageContent, type HarnessOrigin, type XerxesActor } from '../types/messages.js'
 import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
-import { steerContent, steerText, type SteerInput } from './steer.js'
+import { steerMessage, steerText, type SteerInput } from './steer.js'
 export type { SteerInput } from './steer.js'
 import type {
   AgentState,
@@ -286,6 +286,8 @@ export interface TurnRequest {
   readonly userDisplayText?: string
   /** Author of a prompt the human did not type; clients hide these. */
   readonly userOrigin?: HarnessOrigin
+  /** Verified Hub author of this prompt (provider-omitted). Only the daemon sets it, from a verified context. */
+  readonly userActor?: XerxesActor
 }
 
 export interface TurnDependencies {
@@ -306,7 +308,7 @@ export interface TurnDependencies {
   /** Supplies passive sub-agent status lines at safe provider/tool boundaries. */
   readonly drainAgentEvents?: () => readonly string[]
   /** Supplies steering (text, optionally with images) at safe provider/tool boundaries for daemon turns. */
-  readonly drainSteer?: () => readonly SteerInput[]
+  readonly drainSteer?: (boundary?: 'start' | 'final') => readonly SteerInput[]
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
@@ -443,6 +445,7 @@ export async function* runTurn(
     content: request.userMessage,
     ...(request.userDisplayText === undefined ? {} : { displayText: request.userDisplayText }),
     ...(request.userOrigin === undefined ? {} : { origin: request.userOrigin }),
+    ...(request.userActor === undefined ? {} : { xerxes_actor: request.userActor }),
   })
   state.metadata.model = request.model
   state.turnCount += 1
@@ -552,8 +555,8 @@ export async function* runTurn(
         try { turnTools = dependencies.refreshTools(turnTools) } catch { /* keep the previous list */ }
       }
       for (const steer of dependencies.drainSteer?.() ?? []) {
-        const content = steerContent('[steer from user]', steer)
-        if (content) state.messages.push({ role: 'user', content })
+        const message = steerMessage('[steer from user]', steer)
+        if (message) state.messages.push(message)
       }
       const observedForRound = observedPromptTokens
       observedPromptTokens = undefined
@@ -1078,10 +1081,10 @@ export async function* runTurn(
           if (toolTurn + 1 >= turnLimit) turnLimit += 1
           continue
         }
-        for (const steer of dependencies.drainSteer?.() ?? []) {
-          const content = steerContent('[steer from user saved for next turn]', steer)
-          if (!content) continue
-          state.messages.push({ role: 'user', content })
+        for (const steer of dependencies.drainSteer?.('final') ?? []) {
+          const message = steerMessage('[steer from user saved for next turn]', steer)
+          if (!message) continue
+          state.messages.push(message)
           yield {
             type: 'text',
             text: renderIntervention({ kind: 'steer-note', content: steerText(steer).trim() || 'image' }),
@@ -1672,9 +1675,10 @@ function completionRequest(
     : ceiling
   return {
     model: request.model,
+    // Transcript annotations (xerxes_actor / xerxes_interaction) never reach a provider.
     messages: request.systemPromptRequestOnly && request.systemPrompt
-      ? [{ role: 'system' as const, content: request.systemPrompt }, ...messages]
-      : [...messages],
+      ? [{ role: 'system' as const, content: request.systemPrompt }, ...withoutXerxesAnnotations(messages)]
+      : [...withoutXerxesAnnotations(messages)],
     ...(tools?.length ? { tools } : {}),
     ...(maxTokens !== undefined
       ? { maxTokens }

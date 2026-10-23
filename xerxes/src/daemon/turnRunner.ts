@@ -76,7 +76,8 @@ import {
   type ToolPolicy,
 } from '../streaming/permissions.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
-import { isHarnessOrigin, messageText, type HarnessOrigin } from '../types/messages.js'
+import { COLLAB_KEY } from './collaboration.js'
+import { isHarnessOrigin, isXerxesActor, messageText, type HarnessOrigin, type XerxesInteractionRecord } from '../types/messages.js'
 import { imageUrlContentParts } from './images.js'
 import type { RawMessage, TranscriptMessageJournalAppend } from '../session/daemonTranscript.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -285,17 +286,17 @@ export class SessionPromptSnapshots {
   readonly compaction = new Map<string, boolean>()
   /** Per session: the delegated-agent model list as first rendered (kept stable for the prompt cache). */
   readonly delegationModels = new Map<string, string>()
-
   /** Per session: the learning policy as first rendered (a live reflection change must not rewrite the prompt). */
   readonly learningPolicy = new Map<string, string>()
+
   drop(sessionId: string): void {
     this.memorySnapshots.delete(sessionId)
     this.deliveredGoalStatus.delete(sessionId)
     this.promptDay.delete(sessionId)
     this.compaction.delete(sessionId)
     this.delegationModels.delete(sessionId)
-    for (const key of this.bootstrapPrompts.keys()) {
     this.learningPolicy.delete(sessionId)
+    for (const key of this.bootstrapPrompts.keys()) {
       if (key.startsWith(sessionId + '\u0000')) this.bootstrapPrompts.delete(key)
     }
   }
@@ -541,7 +542,6 @@ export class AgentTurnRunner implements TurnRunner {
     const compacts = this.snapshots.compaction.get(session.id)
       ?? (Boolean(contextLimit && contextLimit > 0) && (this.options.autoCompactThreshold?.() ?? 0.8) > 0)
     this.snapshots.compaction.set(session.id, compacts)
-    const systemSegments = assembleContextLayers({
     // When to recall, record and search. Goals are used because their policy says
     // when; the learning tools had only per-tool notes and were never called.
     const learningPolicy = this.snapshots.learningPolicy.get(session.id) ?? learningPolicyPrompt({
@@ -549,8 +549,9 @@ export class AgentTurnRunner implements TurnRunner {
       reflection: this.options.reflectionMode?.() ?? 'all',
     })
     this.snapshots.learningPolicy.set(session.id, learningPolicy)
-      addendum: systemPromptAddendum(session),
+    const systemSegments = assembleContextLayers({
       learningPolicy,
+      addendum: systemPromptAddendum(session),
       ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
       agentPrompt: promptAgent?.systemPrompt ?? '',
       bootstrap: bootstrapPrompt,
@@ -723,6 +724,7 @@ export class AgentTurnRunner implements TurnRunner {
         userMessage,
         ...(providerText === displayText ? {} : { userDisplayText: displayText }),
         ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
+        ...(controls.actor ? { userActor: controls.actor } : {}),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
         permissionMode,
@@ -1738,6 +1740,9 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   // wakes, so restoring a superseded one self-heals.)
   const preservedTitle = session.metadata.title
   const preservedGoalWake = session.metadata.goal_wake
+  // Shared-session state (participants, queued steers, decision records) can be created mid-turn
+  // by a Hub request; the turn-start snapshot must not erase it.
+  const preservedCollaboration = session.metadata[COLLAB_KEY]
   // A forced update restart writes this marker while the turn it then aborts
   // is still unwinding; restoring the turn-start snapshot over it would make
   // the next process leave the armed goal stopped.
@@ -1755,6 +1760,7 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
   if (providerProfile !== undefined) session.metadata.provider_profile = providerProfile
   if (preservedTitle !== undefined) session.metadata.title = preservedTitle
   if (preservedGoalWake !== undefined) session.metadata.goal_wake = preservedGoalWake
+  if (preservedCollaboration !== undefined) session.metadata[COLLAB_KEY] = preservedCollaboration
   if (preservedRearm !== undefined) session.metadata[GOAL_REARM_AFTER_RESTART_KEY] = preservedRearm
   else delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY]
   if (hadTitleDerived) session.metadata.title_derived = preservedTitleDerived
@@ -1772,7 +1778,7 @@ function synchronizeSessionState(session: DaemonSession, state: AgentState): voi
 /** Who wrote this turn's prompt when it was not the human. */
 function harnessOrigin(controls: TurnRunControls): HarnessOrigin | undefined {
   if (controls.goalRound !== undefined) return 'goal'
-  return controls.origin === 'monitor' || controls.origin === 'schedule' ? controls.origin : undefined
+  return controls.origin === 'monitor' || controls.origin === 'schedule' || controls.origin === 'agent' ? controls.origin : undefined
 }
 
 function recordLatestUserDisplayText(state: AgentState, providerText: string, displayText: string, origin?: HarnessOrigin): void {
@@ -1814,6 +1820,7 @@ function providerMessagesFromTranscript(message: DaemonSession['messages'][numbe
       content,
       ...(typeof message.text === 'string' ? { displayText: message.text } : {}),
       ...(isHarnessOrigin(message.origin) ? { origin: message.origin } : {}),
+      ...(isXerxesActor(message.xerxes_actor) ? { xerxes_actor: message.xerxes_actor } : {}),
       // Dropping it saved the summary back as a long message the user never typed.
       ...(message[COMPACTION_SUMMARY_MARKER] === true ? { [COMPACTION_SUMMARY_MARKER]: true as const } : {}),
     }]
@@ -1825,6 +1832,7 @@ function providerMessagesFromTranscript(message: DaemonSession['messages'][numbe
       tool_call_id: message.tool_call_id,
       ...(typeof message.name === 'string' ? { name: message.name } : {}),
       ...(message.is_error === true ? { is_error: true } : {}),
+      ...(Array.isArray(message.xerxes_interaction) ? { xerxes_interaction: message.xerxes_interaction as readonly XerxesInteractionRecord[] } : {}),
       // Where a tool was loaded: providers with native deferred tools render
       // the result by it, and dropping it re-rendered that result next turn.
       ...(Array.isArray(message.added_tool_names) && message.added_tool_names.every(name => typeof name === 'string')

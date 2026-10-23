@@ -4,6 +4,8 @@
 import type { WorkspaceResources } from './workspaceResources.js';
 import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
+import { TransportEventJournal, type TransportEventJournalOptions } from './transportEventJournal.js';
+import { EventSubscriptions } from './eventSubscriptions.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
@@ -39,6 +41,7 @@ import { existsSync } from "node:fs";
 import { describeDaemonExit, lastDaemonExit, recordDaemonExit, type DaemonExitRecord } from "./exitLog.js";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir, totalmem } from "node:os";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -265,6 +268,47 @@ import {
 } from "./images.js";
 import { DaemonInteractionBoard } from "./interactions.js";
 import {
+  COLLAB_KEY,
+  PENDING_INTERACTION_REVISION,
+  RESOLVED_INTERACTION_REVISION,
+  InteractionResolutions,
+  SteerQueueFullError,
+  actorFromContext,
+  addPendingDecision,
+  alreadyResolvedFailure,
+  authorSummary,
+  collabState,
+  enqueueSteer,
+  hasQueuedSteers,
+  interactionRecord,
+  isSharedSession,
+  lookupSubmission,
+  peekCollabState,
+  queuedSteers,
+  recordParticipant,
+  recordSubmission,
+  redactEventPage,
+  redactPendingFrames,
+  resolutionEventFields,
+  settleSteers,
+  steerInputOf,
+  steerStatusPayload,
+  submissionDigest,
+  type InteractionResolution,
+  type SteerEntry,
+} from "./collaboration.js";
+import {
+  HubAuthError,
+  HubIdentityVerifier,
+  enrollHub,
+  hubAuthorizationFailure,
+  listHubEnrollments,
+  revokeHub,
+  hubMethodPolicy,
+  type VerifiedHubContext,
+} from "../security/hubIdentityVerifier.js";
+import { steerLabel, type SteerInput } from "../streaming/steer.js";
+import {
   queueSessionNotification,
   takeSessionNotifications,
 } from "./sessionNotifications.js";
@@ -298,6 +342,7 @@ import { resolveProjectDirectory, xerxesHome } from "./paths.js";
 import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
+import { HubModelService } from './hubModels.js';
 import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities, localProviderSelections, type LocalProviderSelection } from './remoteProviderBindings.js';
 import { boundedLocalCapabilities, localReasoningLevels, localReasoningNote } from './localReasoningCapabilities.js';
@@ -438,6 +483,28 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   "forge.list",
   "provider_models",
   "provider.relay.next",
+  // Provider round-trips for the Hub's supervisor: a slow completion must not
+  // hold the queue, and the concurrency cap only works if they run in parallel.
+  "hub.models.catalog",
+  "hub.models.options",
+  "hub.model.complete",
+]);
+
+/**
+ * Hub-authenticated methods whose signed `session_id` is checked against the
+ * interaction they answer (inside the handler) rather than the connection's
+ * active session, and methods that name no session at all.
+ */
+const HUB_SESSIONLESS_METHODS: ReadonlySet<string> = new Set([
+  "permission_response",
+  "question_response",
+  "runtime.status",
+  "session.active_list",
+  "session.list",
+  "learning.list",
+  "hub.models.catalog",
+  "hub.models.options",
+  "hub.model.complete",
 ]);
 
 /**
@@ -869,6 +936,12 @@ export interface DaemonServerOptions {
   readonly crashHandlers?: boolean;
   /** Shared approval/question state passed to the native agent turn runner. */
   readonly interactions?: DaemonInteractionBoard;
+  /** Where pinned Hub public keys live (default `<daemon state>/hub-enrollments.json`, mode 0600). */
+  readonly hubEnrollmentPath?: string;
+  /** Test seam for `hub.model.complete`; production builds the client from the stored provider profile. */
+  readonly hubModelClientFactory?: (model: string, profile: ProviderProfile) => LlmClient;
+  /** Test seam: wall-clock limit of one `hub.model.complete` (default 120 s). */
+  readonly hubModelTimeoutMs?: number;
   /** Legacy declarative text-template store retained for persisted packages. */
   readonly declarativeForge?: DeclarativeToolForge;
   /** DSH-style live agent-preset roster used by session selection and authoring RPCs. */
@@ -922,6 +995,8 @@ export interface DaemonServerOptions {
   /** Snapshots retained per workspace when the store is pruned on start. */
   readonly snapshotRetention?: number;
   readonly socketPath: string;
+  /** Defaults beside the daemon pid file (or under <xerxes home>/daemon/state/<socket digest> without one), in transport-events. */
+  readonly eventJournal?: TransportEventJournalOptions;
   /** Max bytes in one inbound NDJSON frame before the Unix client is dropped. */
   readonly maxSocketFrameBytes?: number;
   /** Max parsed requests waiting for serial dispatch on one Unix connection. */
@@ -981,6 +1056,9 @@ const MODEL_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /** Waits before retrying a goal round lost to a transient provider failure. */
 /** A marker older than this is stale (the update never came back) and is dropped, not honoured. */
 const GOAL_REARM_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+/** Session marker a forced restart leaves on a turn it interrupted, so the next process continues it. */
+const TURN_RESUME_AFTER_RESTART_KEY = 'turn_resume_after_restart';
+const TURN_RESUME_PROMPT = '[The Xerxes runtime restarted (an update) while you were working on this task, and your previous turn was cut off. Its last step may be incomplete, and any subagents or background commands it started were stopped. Check the transcript above and the workspace state, then continue the task from where it stopped. Do not redo work that already finished.]';
 /** The app re-asks for a queued update every few seconds while visible. */
 const GOAL_DRAIN_LAPSE_MS = 2 * 60 * 1000;
 const GOAL_TRANSIENT_RETRY_DELAYS_MS = [60_000, 180_000, 600_000] as const;
@@ -1009,6 +1087,8 @@ export class DaemonServer {
   private readonly sessionOwnedClients = new WeakSet<DaemonTransportConnection>();
   private readonly sessionTurnOwners = new WeakSet<DaemonTransportConnection>();
   private readonly sessionObservers = new Set<DaemonTransportConnection>();
+  private readonly eventJournal: TransportEventJournal;
+  private readonly eventSubscriptions: EventSubscriptions;
   private stoppingGoalWakes = false;
   /**
    * A queued runtime update draining armed goals: no new goal round starts,
@@ -1133,6 +1213,8 @@ export class DaemonServer {
   private readonly ptySessions: PtySessionManager | undefined;
   /** Live output subscriptions per client: terminal id → unsubscribe. */
   private readonly terminalWatches = new Map<DaemonTransportConnection, Map<string, () => void>>();
+  /** Registry observations are shared across its callbacks; persist each before watcher fan-out. */
+  private readonly terminalEventObservations = new WeakSet<object>();
   /** Plan-usage answers per credential, shared by every client for a minute. */
   private readonly usageCache = new UsageReportCache();
   private readonly reactionMailbox: ReactionMailbox | undefined;
@@ -1149,6 +1231,19 @@ export class DaemonServer {
    * daemon-lifetime set. Entries for an evicted session are dropped with it.
    */
   private readonly acceptedSubmissionIds = new Set<string>();
+  /** Pins the Hub keys this daemon trusts for `hub_auth` (explicit enrollment only). */
+  private readonly hubVerifier: HubIdentityVerifier;
+  /** Model access for the Hub's XERXES supervisor (`hub.models.*`, `hub.model.complete`). */
+  private readonly hubModels: HubModelService;
+  /** Who won each recently answered permission/question, for first-answer-wins arbitration. */
+  private readonly interactionResolutions = new InteractionResolutions();
+  /** In-memory images of queued steers; durable entries persist their text only. */
+  private readonly queuedSteerImages = new Map<string, readonly TurnImage[]>();
+  /** Event subscriptions created by a principal that may not see approval/question details. */
+  private readonly redactedSubscriptions = new Map<DaemonTransportConnection, Set<string>>();
+  private readonly steerContinuations = new Map<string, Promise<void>>();
+  /** The verified Hub identity of the request being dispatched; never derived from params. */
+  private readonly hubContexts = new AsyncLocalStorage<VerifiedHubContext>();
   /** Session-scoped signals bounding background work to the session's life. */
   private readonly sessionLifetimeSignals = new Map<string, AbortController>();
   /** One cold read of the transcript directory, shared by concurrent searches. */
@@ -1192,6 +1287,20 @@ export class DaemonServer {
     this.workspaceRelease = options.workspaceRelease;
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
+    // Never fall back to the socket's own folder: a socket may live inside a
+    // project directory, and journal segments there leak into path completion
+    // and the user's tree. Key the fallback by socket path so daemons sharing
+    // one Xerxes home keep separate streams.
+    const daemonStateDirectory = options.pidPath
+      ? dirname(options.pidPath)
+      : isNamedPipePath(options.socketPath)
+        ? join(xerxesHome(), 'daemon')
+        : join(xerxesHome(), 'daemon', 'state', createHash('sha256').update(resolve(options.socketPath), 'utf8').digest('hex').slice(0, 16));
+    this.eventJournal = new TransportEventJournal(options.eventJournal ?? {
+      directory: join(daemonStateDirectory, 'transport-events'),
+    });
+    this.hubVerifier = new HubIdentityVerifier({ path: options.hubEnrollmentPath ?? join(daemonStateDirectory, 'hub-enrollments.json') });
+    this.eventSubscriptions = new EventSubscriptions(this.eventJournal);
     this.projectDirectory = options.projectDirectory
       ? resolveProjectDirectory(options.projectDirectory)
       : undefined;
@@ -1224,6 +1333,9 @@ export class DaemonServer {
     this.agentDefinitionLoader =
       options.agentDefinitionLoader ?? ((cwd) => listAgentDefinitions({ cwd }));
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
+    // Remembered ALWAYS approvals never authorize calls in a session shared with another participant.
+    this.interactions.setSharedSessionProbe(sessionId =>
+      isSharedSession(this.runtime.listSessions().find(session => session.id === sessionId)?.metadata));
     this.declarativeForge = options.declarativeForge ?? new DeclarativeToolForge();
     this.default_agentPresetRoster = options.agentPresetRoster ?? new AgentPresetRoster({
       ...(this.projectDirectory ? { projectDirectory: this.projectDirectory } : {}),
@@ -1276,6 +1388,15 @@ export class DaemonServer {
     );
     this.profileStore = options.profileStore ?? new ProfileStore();
     this.providerRelays = new DaemonProviderRelays(this.profileStore, options.relayClientFactory);
+    this.hubModels = new HubModelService({
+      profiles: this.profileStore,
+      fetchModels: name => this.fetchModels({ profile_name: name }),
+      reasoningLevels: (model, profile, signal) => this.reasoningLevels(model, profile, signal),
+      createClient: (model, profile) => createCompactionClient(model, profile, this.runtime.status()),
+    }, {
+      ...(options.hubModelClientFactory ? { clientFactory: options.hubModelClientFactory } : {}),
+      ...(options.hubModelTimeoutMs === undefined ? {} : { timeoutMs: options.hubModelTimeoutMs }),
+    });
     this.remoteProviderBindings = options.remoteProviderBindings;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
@@ -1398,6 +1519,7 @@ export class DaemonServer {
     if (!isNamedPipePath(this.socketPath)) {
       await mkdir(dirname(this.socketPath), { recursive: true });
     }
+    await this.eventJournal.start();
     await this.unlinkSocketPath();
     this.server = createServer((socket) => this.attach(socket));
     try {
@@ -1742,6 +1864,7 @@ export class DaemonServer {
       await cleanup(() => this.monitorWebhookServer?.stop());
       await cleanup(() => channelWebhook?.stop());
       await cleanup(() => this.channelManager?.stopAll());
+      await cleanup(() => this.eventJournal.flush());
       for (const connection of this.connections) {
         connection.socket.destroy();
       }
@@ -1770,8 +1893,14 @@ export class DaemonServer {
     this.unsubscribeRunHistory?.();
     // Pooled Codex WebSocket sessions outlive individual turns; drop them so
     // the daemon exits without waiting on an idle-timeout close.
-    await closeCodexWebSocketSessions();
-    await this.runtime.shutdown?.();
+    try {
+      await closeCodexWebSocketSessions();
+      await this.runtime.shutdown?.();
+    } finally {
+      this.hubModels.abortAll();
+      this.eventSubscriptions.close();
+      await this.eventJournal.close();
+    }
   }
 
   private attach(socket: Socket): void {
@@ -1946,10 +2075,20 @@ export class DaemonServer {
 
   /** Broadcast a global event to every local and remote daemon client. */
   broadcast(type: string, payload: JsonRpcPayload): void {
-    for (const connection of this.connections) {
-      this.emit(connection, type, payload);
-    }
-    this.websocketGateway?.broadcast(type, payload);
+    this.broadcastEvent(type, payload);
+  }
+
+  /** Journal exactly once before either transport fans an event out. */
+  private broadcastEvent(type: string, payload: JsonRpcPayload, accepts: (connection: DaemonTransportConnection) => boolean = () => true,
+    observers?: readonly DaemonTransportConnection[], projectDirectory?: string): void {
+    const audience = [...new Set([...this.connections, ...(observers ?? [])])].filter(accepts).map(connection => {
+      this.recordEventInteraction(connection, type, payload);
+      return { connection, payload: this.normalizedEventPayload(connection, type, payload) };
+    });
+    this.publishEvent(type, payload, undefined, () => {
+      for (const target of audience) this.deliverEvent(target.connection, type, target.payload);
+      if (!observers) this.websocketGateway?.broadcast(type, payload, accepts);
+    }, projectDirectory);
   }
 
   private runCancelLabel(run: RunRecord): string | null {
@@ -1972,10 +2111,7 @@ export class DaemonServer {
       body: runNoticeBody(run),
       payload: { run_id: run.id, revision: run.revision, session_id: run.ownerSessionId },
     };
-    for (const connection of this.connections) {
-      if (accepts(connection)) this.emit(connection, "notification", payload);
-    }
-    this.websocketGateway?.broadcast("notification", payload, accepts);
+    this.broadcastEvent('notification', payload, accepts);
   }
 
   private async runMonitorReaction(claim: ReactionClaim, signal: AbortSignal): Promise<ReactionUsage> {
@@ -2025,8 +2161,7 @@ export class DaemonServer {
         if (reason && reason !== "completed" && reason !== "objective_verified") failure = `Monitor reaction stopped before completion: ${reason}`;
       }
       const accepts = (connection: DaemonTransportConnection): boolean => this.runtime.sessionStatus(connection.activeSessionKey)?.id === claim.owner;
-      for (const connection of this.connections) if (accepts(connection)) this.emit(connection, event.type, event.payload);
-      this.websocketGateway?.broadcast(event.type, event.payload, accepts);
+      this.broadcastEvent(event.type, event.payload, accepts);
     }, undefined, { origin: "monitor", signal, displayText: "Monitor reaction · " + claim.fromSequence + "–" + claim.throughSequence }, true);
     });
     budget.close();
@@ -2059,8 +2194,7 @@ export class DaemonServer {
       severity: "info", title: monitor.trigger === "completion" ? "Command finished" : monitor.source?.kind === 'file' ? 'File changed' : "Monitor match", body: `${monitor.source?.kind === 'websocket' ? 'WebSocket' : monitor.source?.kind === 'webhook' ? 'Webhook' : monitor.source?.kind === 'file' ? 'File' : 'Terminal'} watch: ${event.text.slice(0, 2000)}\n/runs inspect ${monitor.id}`,
       payload: { run_id: monitor.id, sequence: event.sequence, session_id: monitor.owner },
     };
-    for (const connection of this.connections) if (accepts(connection)) this.emit(connection, "notification", payload);
-    this.websocketGateway?.broadcast("notification", payload, accepts);
+    this.broadcastEvent('notification', payload, accepts);
   }
 
   private recoverMonitorReactions(session: DaemonSession): void {
@@ -2133,9 +2267,30 @@ export class DaemonServer {
       const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
       const resources = await this.workspaceResources?.(cwd);
       if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
-      const result = resources
-        ? await this.workspaceContext.run(resources, () => this.dispatch(connection, request))
-        : await this.dispatch(connection, request);
+      // Event subscriptions belong to a physical lane, never to its restorable turn lease.
+      const dispatchConnection = request.method.startsWith('events.') ? responseConnection : connection;
+      // A request carrying hub_auth is verified and authorized BEFORE anything runs; a failure
+      // is a JSON-RPC error and never degrades to an anonymous local human.
+      let dispatchRequest = request;
+      let hub: VerifiedHubContext | undefined;
+      if (Object.hasOwn(request.params, 'hub_auth')) {
+        hub = this.authorizeHubRequest(connection, request, session, cwd);
+        const { hub_auth: _envelope, ...bareParams } = request.params;
+        dispatchRequest = { ...request, params: bareParams };
+        this.noteHubParticipant(hub, request, session, connection);
+      }
+      const dispatchOnce = (): Promise<JsonRpcPayload> => hub
+        ? this.hubContexts.run(hub, () => this.dispatch(dispatchConnection, dispatchRequest))
+        : this.dispatch(dispatchConnection, dispatchRequest);
+      let result = resources
+        ? await this.workspaceContext.run(resources, dispatchOnce)
+        : await dispatchOnce();
+      // A principal that may not answer interactions sees that something waits, never its arguments.
+      if (hub && !hub.scopes.includes('permission.respond') && Array.isArray(result.pending_interactions)) {
+        result = { ...result, pending_interactions: redactPendingFrames(result.pending_interactions as { type: string; payload: JsonRpcPayload }[]) };
+      }
+      // Preserve the legacy event-before-reply order, but only after the durable append finishes.
+      await this.eventJournal.flush();
       // Journaling ends in the same synchronous step as the reply: ending it
       // any earlier lets newer live frames overtake the reply, and the client
       // would then replay the older journal on top of them.
@@ -2144,7 +2299,46 @@ export class DaemonServer {
         : undefined;
       responseConnection.send(jsonRpcSuccess(request.id, reconnectEvents ? { ...result, reconnect_events: reconnectEvents } : result));
     } catch (error) {
-      responseConnection.send(jsonRpcFailure(request.id, -32000, errorMessage(error)));
+      responseConnection.send(jsonRpcFailure(request.id, error instanceof HubAuthError ? -32001 : -32000, errorMessage(error)));
+    }
+  }
+
+  /** Verify the signed envelope, then the method's scope. Throws HubAuthError; never returns an unverified identity. */
+  private authorizeHubRequest(
+    connection: DaemonTransportConnection,
+    request: JsonRpcRequest,
+    session: DaemonSession | undefined,
+    cwd: string,
+  ): VerifiedHubContext {
+    const { method, params } = request;
+    // Permission and question answers are bound to their interaction's session in the handler.
+    const bindsSession = !HUB_SESSIONLESS_METHODS.has(method) && !method.startsWith('events.');
+    const key = sessionKey(connection, params);
+    const verified = this.hubVerifier.verify(params.hub_auth, {
+      method,
+      params,
+      projectDir: cwd,
+      ...(bindsSession ? { sessionKey: key, ...(session ? { sessionId: session.id } : {}) } : {}),
+    });
+    if (!verified.ok) throw new HubAuthError(verified.reason, `hub_auth rejected (${verified.reason}): ${verified.message}`);
+    const refusal = hubAuthorizationFailure(verified.context, method, params);
+    if (refusal) throw new HubAuthError('forbidden', `hub_auth refused: ${refusal}`);
+    return verified.context;
+  }
+
+  /** A session-changing hub action makes its principal a participant; a second participant shares the session. */
+  private noteHubParticipant(
+    hub: VerifiedHubContext,
+    request: JsonRpcRequest,
+    session: DaemonSession | undefined,
+    connection: DaemonTransportConnection,
+  ): void {
+    const policy = hubMethodPolicy(request.method, request.params);
+    if (policy.kind !== 'scope' || policy.scope === 'session.read' || !session) return;
+    if (HUB_SESSIONLESS_METHODS.has(request.method)) return;
+    const became = recordParticipant(session.metadata, hub, sessionHasHistory(session) && !peekCollabState(session.metadata));
+    if (became) {
+      this.emit(connection, 'notification', { level: 'info', message: 'This session is now shared with another participant.', session_id: session.id });
     }
   }
 
@@ -2202,15 +2396,28 @@ export class DaemonServer {
         ].slice(0, 12);
         return { ok: false, busy: true, force_supported: true, blockers, ...(armed.length && !otherWork ? { waiting_for_goal_round: true } : {}) };
       }
+      // A forced restart also stops ordinary turns a person started. Without a
+      // marker the fresh process loads them idle and they silently stop; only
+      // armed goals used to come back. Mark each so it continues on its own.
+      const interrupted = force
+        ? sessions.filter(session => !armed.includes(session) && !goalSessions.has(session.sessionKey)
+          && Boolean(session.activeTurnId || this.turnOwners.has(session.sessionKey) || session.status !== 'idle'))
+        : [];
+      for (const session of interrupted) {
+        session.metadata[TURN_RESUME_AFTER_RESTART_KEY] = { at: Date.now(), origin: stringValue(session.metadata.turn_origin) || 'human' };
+      }
       if (armed.length) {
         for (const session of armed) {
           const goal = getGoal(session.metadata, session.id)!;
           session.metadata[GOAL_REARM_AFTER_RESTART_KEY] = { goal_id: goal.id, revision: goal.revision, at: Date.now() };
         }
+      }
+      if (armed.length || interrupted.length) {
         await this.runtime.flushSessions();
         if (this.goalRearmFile) {
           await mkdir(dirname(this.goalRearmFile), { recursive: true });
-          await writeFile(this.goalRearmFile, `${JSON.stringify({ version: 1, sessions: armed.map(session => ({ id: session.id, cwd: session.cwd })) })}\n`, 'utf8');
+          const listed = [...armed, ...interrupted].map(session => ({ id: session.id, cwd: session.cwd }));
+          await writeFile(this.goalRearmFile, `${JSON.stringify({ version: 1, sessions: listed })}\n`, 'utf8');
         }
       }
       if (this.goalDrainTimer) { clearTimeout(this.goalDrainTimer); this.goalDrainTimer = undefined; }
@@ -2226,7 +2433,10 @@ export class DaemonServer {
           this.desktopRestartPending = false;
           this.stoppingGoalWakes = false;
           if (this.cronSchedulerStarted) this.cronScheduler.start();
-          for (const session of this.runtime.listSessions()) delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+          for (const session of this.runtime.listSessions()) {
+            delete session.metadata[GOAL_REARM_AFTER_RESTART_KEY];
+            delete session.metadata[TURN_RESUME_AFTER_RESTART_KEY];
+          }
           if (this.goalRearmFile) void rm(this.goalRearmFile, { force: true }).catch(removeError => console.error('Could not remove the goal re-arm list:', errorMessage(removeError)));
           void this.rearmHeldGoals();
           this.broadcast('notification', { level: 'error', message: `Runtime restart failed: ${errorMessage(error)}` });
@@ -2273,6 +2483,7 @@ export class DaemonServer {
       connection.activeSessionKey = key;
       this.recoverMonitorReactions(session);
       await this.rearmGoalAfterRestart(key, connection);
+      await this.resumeTurnAfterRestart(key, connection);
       // Drain notices that settled while no client was attached (background
       // tasks above). At-most-once: the attaching client receives them here,
       // never again.
@@ -2788,7 +2999,7 @@ export class DaemonServer {
       const workspace = session?.cwd ?? this.projectDirectory ?? process.cwd();
       return method === "learning.list"
         ? listLearning(workspace, this.learning)
-        : reviewLearning(params, workspace, this.learning, session);
+        : reviewLearning(params, workspace, this.learning, session, { principalKind: this.hubContexts.getStore()?.principal_kind ?? 'user' });
     }
     if (method === "context.inspect") {
       const active = this.runtime.listSessions().find(session => session.sessionKey === connection.activeSessionKey);
@@ -2849,6 +3060,41 @@ export class DaemonServer {
         return { ok: false, error: errorMessage(error) };
       }
     }
+    if (method === 'events.subscribe') {
+      await this.eventJournal.flush();
+      // A principal that may not answer interactions sees that a card is pending, never its arguments.
+      const hub = this.hubContexts.getStore();
+      const redact = hub !== undefined && !hub.scopes.includes('permission.respond');
+      const subscribed = this.eventSubscriptions.subscribe(connection, params, (type, payload) =>
+        connection.send(daemonEvent(type, redact ? redactEventPage(payload) : payload)));
+      if (redact && typeof subscribed.subscription_id === 'string') {
+        const ids = this.redactedSubscriptions.get(connection) ?? new Set<string>();
+        ids.add(subscribed.subscription_id);
+        this.redactedSubscriptions.set(connection, ids);
+      }
+      return subscribed;
+    }
+    if (method === 'events.read') {
+      const page = this.eventSubscriptions.read(connection, params);
+      const hub = this.hubContexts.getStore();
+      const redact = hub !== undefined && (!hub.scopes.includes('permission.respond')
+        || this.redactedSubscriptions.get(connection)?.has(String(params.subscription_id)) === true);
+      return redact ? redactEventPage(page) : page;
+    }
+    if (method === 'events.unsubscribe') {
+      this.redactedSubscriptions.get(connection)?.delete(String(params.subscription_id));
+      return this.eventSubscriptions.unsubscribe(connection, params);
+    }
+    if (method === 'hub.enroll' || method === 'hub.revoke' || method === 'hub.list') {
+      // Trust in a Hub is established only from a local non-hub connection, never by a hub_auth request.
+      if (this.hubContexts.getStore()) return { ok: false, error: 'hub enrollment is not available to hub principals' };
+      return this.hubEnrollment(method, params);
+    }
+    // Reached by a local client or by a hub request already checked for the
+    // supervisor.model scope in authorizeHubRequest.
+    if (method === 'hub.models.catalog') return this.hubModels.catalog();
+    if (method === 'hub.models.options') return this.hubModels.options(params);
+    if (method === 'hub.model.complete') return this.hubModels.complete(connection, params);
     if (method === "runtime.status") {
       return this.runtimeStatusPayload();
     }
@@ -3178,6 +3424,18 @@ export class DaemonServer {
           ? params.display_text.trim()
           : "") || text;
       const submissionId = optionalString(params.submission_id)?.trim();
+      const ifBusy = params.if_busy;
+      if (ifBusy !== undefined && ifBusy !== "refuse" && ifBusy !== "steer") {
+        return { ok: false, error: "if_busy must be refuse or steer" };
+      }
+      const hubForSubmit = this.hubContexts.getStore();
+      if (hubForSubmit || ifBusy !== undefined) {
+        // Collaborative admission: only hub-authenticated or explicitly opted-in callers reach it.
+        return this.collaborativeSubmit({
+          connection, key, text, displayText, images, submissionId,
+          ifBusy: ifBusy ?? "refuse", ...(hubForSubmit ? { hub: hubForSubmit } : {}),
+        });
+      }
       const submissionKey = submissionId ? `${key}\u0000${submissionId}` : undefined;
       if (submissionKey && this.acceptedSubmissionIds.has(submissionKey)) {
         return { ok: true, duplicate: true };
@@ -3299,7 +3557,10 @@ export class DaemonServer {
       return { ok: true, task_id: taskId, session_key: backgroundKey };
     }
     if (method === "turn.cancel" || method === "cancel") {
-      return { ok: this.cancelTrackedTurn(sessionKey(connection, params)) };
+      const cancelKey = sessionKey(connection, params);
+      // An explicit cancel drops the steers still waiting; they are not replayed as a new turn.
+      const droppedSteers = this.cancelQueuedSteers(cancelKey, "turn-cancelled");
+      return { ok: this.cancelTrackedTurn(cancelKey), ...(droppedSteers ? { cancelled_steers: droppedSteers } : {}) };
     }
     if (method === "cancel_all") {
       return { ok: true, cancelled: this.runtime.cancelAllTurns() };
@@ -3398,6 +3659,22 @@ export class DaemonServer {
       const processed = session && content.trim()
         ? await processAtMentions(content, session.cwd)
         : { enhancedMessage: content, mentionedFiles: [] };
+      const hubSteer = this.hubContexts.getStore();
+      if (hubSteer) {
+        const outcome = await this.hubSteer({
+          connection, key, session, text: processed.enhancedMessage, images, hub: hubSteer,
+          submissionId: optionalString(params.submission_id)?.trim(),
+        });
+        if (outcome.ok === true && outcome.duplicate !== true) {
+          this.emit(connection, "steer_input", {
+            content,
+            ...(images.length ? { image_count: images.length } : {}),
+            ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
+            ...(processed.mentionedFiles.length ? { mentioned_files: processed.mentionedFiles } : {}),
+          });
+        }
+        return outcome;
+      }
       const ok = this.runtime.steerTurn(key, processed.enhancedMessage, images);
       if (ok) {
         this.emit(connection, "steer_input", {
@@ -4373,12 +4650,11 @@ export class DaemonServer {
       console.error('Learning change counts unavailable:', result.error);
       return;
     }
-    for (const connection of new Set([...this.connections, ...this.sessionObservers])) {
+    const accepts = (connection: DaemonTransportConnection): boolean => {
       const active = this.runtime.sessionStatus(connection.activeSessionKey);
-      if (active && resolve(active.cwd) === resolve(workspace)) {
-        this.emit(connection, 'learning_changed', { workspace: active.cwd, counts: result.counts });
-      }
-    }
+      return Boolean(active && resolve(active.cwd) === resolve(workspace));
+    };
+    this.broadcastEvent('learning_changed', { workspace, counts: result.counts }, accepts, [...this.sessionObservers], workspace);
   }
 
   /** Invoked by the runner only after runtime terminal emission. Never awaited by a turn. */
@@ -4425,13 +4701,10 @@ export class DaemonServer {
       if (signal.aborted) return;
       const summary = `${record.proposal.kind} ${record.proposal.target}`;
       const message = `Reflection proposal ${record.id}: ${summary}. Nothing was changed. Review it with /xerxes.`;
-      for (const connection of new Set([...this.connections, ...this.sessionObservers])) {
-        if (this.runtime.sessionStatus(connection.activeSessionKey)?.id === session.id) {
-          this.emit(connection, 'notification', { level: 'info', category: 'reflection', type: 'proposal', message, session_id: session.id,
-            reflection: { id: record.id, kind: record.proposal.kind, target: record.proposal.target,
-              rationale: record.proposal.rationale.split('\n')[0] ?? '', evidence_count: record.proposal.evidence.length } });
-        }
-      }
+      this.broadcastEvent('notification', { level: 'info', category: 'reflection', type: 'proposal', message, session_id: session.id,
+        reflection: { id: record.id, kind: record.proposal.kind, target: record.proposal.target,
+          rationale: record.proposal.rationale.split('\n')[0] ?? '', evidence_count: record.proposal.evidence.length } },
+        connection => this.runtime.sessionStatus(connection.activeSessionKey)?.id === session.id, [...this.sessionObservers], session.cwd);
       return { id: record.id, summary };
     } finally { await closeLlmClient(client); }
   }
@@ -4713,11 +4986,12 @@ export class DaemonServer {
   private notifySessionStateChanged(sessionId: string): void {
     const target = sessionId.trim();
     if (!target) return;
-    for (const connection of this.connections) {
-      const session = this.runtime.sessionStatus(connection.activeSessionKey);
-      if (!session || session.id !== target) continue;
-      this.emitStatus(connection, session);
-    }
+    const session = this.runtime.listSessions().find(session => session.id === target);
+    if (!session) return;
+    const observers = [...this.connections].filter(connection => this.runtime.sessionStatus(connection.activeSessionKey)?.id === target);
+    this.emitStatus({ activeSessionKey: session.sessionKey, send: frame => {
+      for (const observer of observers) observer.send(frame);
+    } }, session);
   }
 
   /**
@@ -7090,7 +7364,13 @@ export class DaemonServer {
       if (!inspected) return { ok: false, error: "Unknown terminal" };
       if (inspected.running) {
         const stop = registry.subscribe(owner, id, (event) => {
-          this.emit(connection, "terminal_output", { terminal_id: id, data: event.text, closed: event.closed, exit_code: event.exitCode });
+          if (!this.terminalEventObservations.has(event)) {
+            this.terminalEventObservations.add(event);
+            const audience = [...this.terminalWatches].filter(([, watches]) => watches.has(id)).map(([observer]) => observer);
+            this.emit({ activeSessionKey: connection.activeSessionKey, send: frame => {
+              for (const observer of audience) observer.send(frame);
+            } }, 'terminal_output', { terminal_id: id, data: event.text, closed: event.closed, exit_code: event.exitCode });
+          }
           if (event.closed) { watches.get(id)?.(); watches.delete(id); }
         });
         watches.set(id, stop);
@@ -8855,8 +9135,12 @@ export class DaemonServer {
       model: session.model,
     });
     Object.assign(branch, snapshot);
+    // Messages keep their provider-omitted authorship; the fork starts with no participants,
+    // queued steers or submission ledger of its own.
+    const { [COLLAB_KEY]: _sharedState, ...forkMetadata } = snapshot.metadata;
+    void _sharedState;
     branch.metadata = {
-      ...snapshot.metadata,
+      ...forkMetadata,
       forked_from: session.id,
       parent_session_id: session.id,
       ...(throughTurn === undefined ? {} : { branch_through_retained_turn: throughTurn, branch_message_count: messageCount }),
@@ -9549,8 +9833,7 @@ export class DaemonServer {
       emit(event);
       if (job.targetSessionId) {
         const accepts = (connection: DaemonTransportConnection) => this.runtime.sessionStatus(connection.activeSessionKey)?.id === job.targetSessionId;
-        for (const connection of this.connections) if (accepts(connection)) this.emit(connection, event.type, event.payload);
-        this.websocketGateway?.broadcast(event.type, event.payload, accepts);
+        this.broadcastEvent(event.type, event.payload, accepts);
       }
     }, undefined, { origin: "schedule", ...(signal ? { signal } : {}) }, Boolean(job.targetSessionId)));
     signal?.throwIfAborted();
@@ -9913,16 +10196,314 @@ export class DaemonServer {
     if (owner && !this.canAnswerInteraction(owner, connection)) {
       return { ok: false, error: "approval owned by another connection" };
     }
+    const hub = this.hubContexts.getStore();
+    const info = this.interactions.pendingPermissionInfo(requestId);
+    if (hub && info) {
+      const mismatch = this.interactionSessionMismatch(hub, info.sessionId);
+      if (mismatch) return mismatch;
+      this.noteInteractionParticipant(hub, info.sessionId);
+    }
+    const supplied = params.interaction_revision;
+    if (supplied !== undefined && (typeof supplied !== "number" || !Number.isInteger(supplied))) {
+      return { ok: false, error: "interaction_revision must be an integer" };
+    }
+    if (!info) {
+      // Already answered (or never existed). Only collaborative callers learn who won.
+      const winner = this.interactionResolutions.get(requestId);
+      if (winner && (hub || supplied !== undefined)) return alreadyResolvedFailure(winner);
+      return { ok: false };
+    }
+    if (supplied !== undefined && supplied !== PENDING_INTERACTION_REVISION) {
+      return { ok: false, code: "interaction-revision-mismatch", error: "interaction-revision-mismatch" };
+    }
     const response = optionalString(params.response) ?? "reject";
+    // respondPermission removes the wait before resolving it: the first answer wins atomically.
     const ok = this.interactions.respondPermission(requestId, response);
     if (ok) {
       this.approvalOwners.delete(requestId);
+      const resolution = this.recordResolution(requestId, "permission", permissionDecisionName(response), hub, info.sessionId, info.toolCallId, info.toolName);
       this.emit(this.interactionAudience(owner, connection), "approval_response", {
         request_id: requestId,
         response,
+        ...(hub ? resolutionEventFields(resolution) : {}),
       });
     }
     return { ok };
+  }
+
+  /** Answering a card makes the answerer a participant; a participant other than the owner shares the session. */
+  private noteInteractionParticipant(hub: VerifiedHubContext, sessionId: string): void {
+    const session = this.runtime.listSessions().find(row => row.id === sessionId);
+    if (session) recordParticipant(session.metadata, hub, sessionHasHistory(session) && !peekCollabState(session.metadata));
+  }
+
+  /** Bind a hub answer to the session its signed envelope names. */
+  private interactionSessionMismatch(hub: VerifiedHubContext, sessionId: string): JsonRpcPayload | undefined {
+    if (hub.session_id === sessionId) return undefined;
+    return { ok: false, code: "session_mismatch", error: "the hub_auth envelope was not signed for this interaction's session" };
+  }
+
+  /** Remember who won an interaction and queue the transcript decision record for a verified hub actor. */
+  private recordResolution(
+    interactionId: string,
+    kind: "permission" | "question",
+    decision: string,
+    hub: VerifiedHubContext | undefined,
+    sessionId: string,
+    toolCallId: string,
+    toolName?: string,
+  ): InteractionResolution {
+    const actor = hub ? actorFromContext(hub, kind, { interaction_id: interactionId }) : undefined;
+    const resolution: InteractionResolution = {
+      interaction_id: interactionId,
+      kind,
+      decision,
+      decided_by: hub?.display_name ?? "local",
+      ...(actor ? { actor } : {}),
+      interaction_revision: RESOLVED_INTERACTION_REVISION,
+      recorded_at: new Date().toISOString(),
+    };
+    this.interactionResolutions.record(resolution);
+    const session = this.runtime.listSessions().find(row => row.id === sessionId);
+    if (actor && session && toolCallId) {
+      addPendingDecision(collabState(session.metadata), {
+        tool_call_id: toolCallId,
+        record: interactionRecord({ ...resolution, actor }, { tool_call_id: toolCallId, ...(toolName ? { tool_name: toolName } : {}) }),
+      });
+    }
+    return resolution;
+  }
+
+  private sessionBusy(key: string, session: DaemonSession | undefined): boolean {
+    return this.turnOwners.has(key) || Boolean(session?.activeTurnId) || this.steerContinuations.has(key);
+  }
+
+  /** Publish steer lifecycle through the single journal choke point. */
+  private publishSteerStatus(session: DaemonSession, entries: readonly SteerEntry[]): void {
+    const turnId = session.activeTurnId || undefined;
+    for (const entry of entries) {
+      this.broadcastEvent("steer_status", steerStatusPayload(session.id, entry, turnId),
+        connection => this.runtime.sessionStatus(connection.activeSessionKey)?.id === session.id, undefined, session.cwd);
+    }
+  }
+
+  /** Durable FIFO entry for a steer behind a busy turn. The order is assigned here, never by the client. */
+  private async queueDurableSteer(input: {
+    readonly session: DaemonSession;
+    readonly text: string;
+    readonly images: readonly TurnImage[];
+    readonly hub: VerifiedHubContext | undefined;
+    readonly submissionId: string | undefined;
+    readonly digest: string;
+  }): Promise<JsonRpcPayload> {
+    const { session, hub, submissionId } = input;
+    const state = collabState(session.metadata);
+    const actor = hub ? actorFromContext(hub, "steer", submissionId ? { submission_id: submissionId } : {}) : undefined;
+    let entry: SteerEntry;
+    try {
+      entry = enqueueSteer(state, {
+        text: input.text,
+        image_count: input.images.length,
+        display_name: hub?.display_name ?? "user",
+        principal_id: hub?.principal_id ?? "local",
+        ...(actor ? { actor } : {}),
+        ...(submissionId ? { submission_id: submissionId } : {}),
+      });
+    } catch (error) {
+      if (error instanceof SteerQueueFullError) return { ok: false, code: "steer-queue-full", error: "steer-queue-full" };
+      throw error;
+    }
+    if (input.images.length) this.queuedSteerImages.set(entry.steer_id, input.images);
+    const outcome: JsonRpcPayload = {
+      ok: true,
+      ...(submissionId ? { submission_id: submissionId } : {}),
+      disposition: "queued_steer",
+      queue_sequence: entry.queue_sequence,
+      steer_id: entry.steer_id,
+      ...(session.activeTurnId ? { turn_id: session.activeTurnId } : {}),
+    };
+    if (submissionId) recordSubmission(state, hub?.principal_id ?? "local", submissionId, input.digest, outcome);
+    this.publishSteerStatus(session, [entry]);
+    // Persist before acknowledging: a queued steer must survive a daemon restart.
+    await this.runtime.flushSessions();
+    return outcome;
+  }
+
+  /** `turn.submit` for hub principals and for callers that opt in with `if_busy`. */
+  private async collaborativeSubmit(input: {
+    readonly connection: DaemonTransportConnection;
+    readonly key: string;
+    readonly text: string;
+    readonly displayText: string;
+    readonly images: readonly TurnImage[];
+    readonly submissionId: string | undefined;
+    readonly ifBusy: "refuse" | "steer";
+    readonly hub?: VerifiedHubContext;
+  }): Promise<JsonRpcPayload> {
+    const { connection, key, text, images, submissionId, ifBusy, hub } = input;
+    const session = this.runtime.sessionStatus(key);
+    if (!session) return { ok: false, error: "no active session" };
+    const state = collabState(session.metadata);
+    const principalId = hub?.principal_id ?? "local";
+    const digest = submissionDigest(text, input.displayText, ifBusy, images);
+    if (submissionId) {
+      const found = lookupSubmission(state, principalId, submissionId, digest);
+      if (found.kind === "duplicate") return { ...found.outcome, duplicate: true };
+      if (found.kind === "conflict") return { ok: false, code: "submission-conflict", error: "submission-conflict" };
+    }
+    // Everything from this busy check to the launch below is synchronous: two simultaneous
+    // submitters cannot both start a turn.
+    if (this.sessionBusy(key, session)) {
+      if (ifBusy !== "steer") return { ok: false, code: "turn-active", error: "a turn is already active for this session" };
+      return this.queueDurableSteer({ session, text, images, hub, submissionId, digest });
+    }
+    const actor = hub ? actorFromContext(hub, "submit", submissionId ? { submission_id: submissionId } : {}) : undefined;
+    const outcome: JsonRpcPayload = { ok: true, ...(submissionId ? { submission_id: submissionId } : {}), disposition: "started" };
+    if (submissionId) recordSubmission(state, principalId, submissionId, digest, outcome);
+    const origin = hub?.principal_kind === "agent" ? "agent" as const : undefined;
+    void this.submitTrackedTurn(
+      key,
+      text,
+      (event) => this.emit(connection, event.type, event.payload),
+      connection,
+      {
+        displayText: input.displayText,
+        ...(images.length ? { images } : {}),
+        announceSuppressedTurn: true,
+        ...(origin ? { origin } : {}),
+        ...(actor ? { actor } : {}),
+      },
+    ).catch((error) => {
+      const neverBegan = (error as Error & { turnNeverBegan?: boolean } | undefined)?.turnNeverBegan;
+      if (submissionId && neverBegan !== false) {
+        state.submissions = state.submissions.filter(record => !(record.principal_id === principalId && record.submission_id === submissionId));
+      }
+      this.emit(connection, "notification", { level: "error", message: errorMessage(error) });
+    });
+    return outcome;
+  }
+
+  /** `turn.steer` from a verified hub principal: a durable attributed queue entry when busy, an attributed message when idle. */
+  private async hubSteer(input: {
+    readonly connection: DaemonTransportConnection;
+    readonly key: string;
+    readonly session: DaemonSession | undefined;
+    readonly text: string;
+    readonly images: readonly TurnImage[];
+    readonly hub: VerifiedHubContext;
+    readonly submissionId: string | undefined;
+  }): Promise<JsonRpcPayload> {
+    const { key, session, text, images, hub, submissionId } = input;
+    if (!session || (!text.trim() && !images.length)) return { ok: false, error: "No session or steering text to apply" };
+    const state = collabState(session.metadata);
+    const digest = submissionDigest(text, "", "steer", images);
+    if (submissionId) {
+      const found = lookupSubmission(state, hub.principal_id, submissionId, digest);
+      if (found.kind === "duplicate") return { ...found.outcome, duplicate: true };
+      if (found.kind === "conflict") return { ok: false, code: "submission-conflict", error: "submission-conflict" };
+    }
+    if (this.sessionBusy(key, session)) return this.queueDurableSteer({ session, text, images, hub, submissionId, digest });
+    const actor = actorFromContext(hub, "steer", submissionId ? { submission_id: submissionId } : {});
+    // An idle steer is recorded for the next turn and never starts work.
+    const ok = this.runtime.steerTurn(key, text, images, { display_name: hub.display_name, actor });
+    if (!ok) return { ok: false, error: "No session or steering text to apply" };
+    const outcome: JsonRpcPayload = { ok: true, ...(submissionId ? { submission_id: submissionId } : {}), disposition: "appended" };
+    if (submissionId) recordSubmission(state, hub.principal_id, submissionId, digest, outcome);
+    return outcome;
+  }
+
+  /** Hand the model every queued steer at a provider/tool boundary; each entry is applied exactly once. */
+  private pullQueuedSteers(key: string): readonly SteerInput[] {
+    const session = this.runtime.sessionStatus(key);
+    const state = session ? peekCollabState(session.metadata) : undefined;
+    if (!session || !state) return [];
+    const entries = queuedSteers(state);
+    if (!entries.length) return [];
+    settleSteers(state, new Set(entries.map(entry => entry.steer_id)), "applied");
+    this.publishSteerStatus(session, entries);
+    return entries.map(entry => {
+      const images = this.queuedSteerImages.get(entry.steer_id);
+      this.queuedSteerImages.delete(entry.steer_id);
+      return steerInputOf(entry, images);
+    });
+  }
+
+  /** An explicit cancel marks waiting steers cancelled; they never become a new turn. */
+  private cancelQueuedSteers(key: string, reason: string): number {
+    const session = this.runtime.sessionStatus(key);
+    const state = session ? peekCollabState(session.metadata) : undefined;
+    if (!session || !state) return 0;
+    const changed = settleSteers(state, undefined, "cancelled", reason);
+    for (const entry of changed) this.queuedSteerImages.delete(entry.steer_id);
+    if (changed.length) {
+      this.publishSteerStatus(session, changed);
+      void this.runtime.flushSessions().catch(error => console.error(`Could not save cancelled steers: ${errorMessage(error)}`));
+    }
+    return changed.length;
+  }
+
+  /** Run ONE serialized continuation for steers that were still waiting when the turn settled. */
+  private scheduleSteerContinuation(key: string, emit: (event: DaemonEvent) => void, owner: DaemonTransportConnection | undefined): void {
+    const session = this.runtime.sessionStatus(key);
+    if (!session || !hasQueuedSteers(session.metadata) || session.cancelRequested) return;
+    if (this.stoppingGoalWakes || this.desktopRestartPending || this.steerContinuations.has(key)) return;
+    const run = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() => this.withSessionOperation(key, async () => {
+      const live = this.runtime.sessionStatus(key);
+      if (!live || live.id !== session.id || live.cancelRequested || live.activeTurnId || this.turnOwners.has(key)) return;
+      const state = peekCollabState(live.metadata);
+      const entries = state ? queuedSteers(state) : [];
+      const first = entries[0];
+      if (!state || !first) return;
+      // ONE continuation carries every waiting steer, in queue order.
+      settleSteers(state, new Set(entries.map(entry => entry.steer_id)), "applied");
+      this.publishSteerStatus(live, entries);
+      const images = entries.flatMap(entry => this.queuedSteerImages.get(entry.steer_id) ?? []);
+      for (const entry of entries) this.queuedSteerImages.delete(entry.steer_id);
+      // Any agent-authored steer keeps the whole continuation non-human.
+      const agent = entries.some(entry => entry.actor?.principal_kind === "agent");
+      await this.submitTrackedTurn(key,
+        entries.map(entry => `[steer from ${steerLabel(entry.display_name)}]\n${entry.text}`).join("\n\n"), emit, owner, {
+        displayText: entries.map(entry => `${steerLabel(entry.display_name)}: ${entry.text}`).join("\n"),
+        ...(images.length ? { images } : {}),
+        ...(agent ? { origin: "agent" as const } : {}),
+        ...(first.actor ? { actor: { ...first.actor, action_kind: "continuation" as const } } : {}),
+      }, true);
+    }, "background")).catch(error => {
+      emit({ type: "notification", payload: { level: "error", message: `Steer continuation stopped: ${errorMessage(error)}`, session_id: session.id } });
+    });
+    this.steerContinuations.set(key, run);
+    this.inFlightTurns.add(run);
+    void run.finally(() => {
+      this.steerContinuations.delete(key);
+      this.inFlightTurns.delete(run);
+      // Steers queued while the continuation ran get the next (again single) continuation.
+      this.scheduleSteerContinuation(key, emit, owner);
+    });
+  }
+
+  /** Local-only trust management for hub public keys. */
+  private hubEnrollment(method: string, params: JsonRpcPayload): JsonRpcPayload {
+    try {
+      if (method === "hub.list") return { ok: true, hubs: this.hubVerifier.list().map(record => ({ ...record, all_projects: record.project_dirs.includes('/') })) };
+      const hubId = optionalString(params.hub_id)?.trim();
+      if (!hubId) return { ok: false, error: "hub_id is required" };
+      if (method === "hub.revoke") return { ok: true, revoked: this.hubVerifier.revoke(hubId) };
+      const pem = optionalString(params.public_key_pem);
+      if (!pem) return { ok: false, error: "public_key_pem is required" };
+      const stringList = (value: unknown): string[] | undefined => Array.isArray(value) && value.every(item => typeof item === "string") ? value as string[] : undefined;
+      if (params.all_projects !== undefined && typeof params.all_projects !== "boolean") return { ok: false, error: "all_projects must be a boolean" };
+      // A whole machine: '/' covers every absolute project path (projectEnrolled), merged with any pinned dirs.
+      const projects = params.all_projects === true
+        ? [...new Set([...(stringList(params.project_dirs) ?? []), "/"])]
+        : stringList(params.project_dirs) ?? (this.projectDirectory && params.workspace_ids === undefined ? [this.projectDirectory] : []);
+      const workspaces = stringList(params.workspace_ids) ?? [];
+      const record = this.hubVerifier.enroll({
+        hub_id: hubId, public_key_pem: pem, project_dirs: projects, workspace_ids: workspaces, replace: params.replace === true,
+      });
+      return { ok: true, hub: { ...record, all_projects: record.project_dirs.includes('/') } };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
   }
 
   /**
@@ -9949,6 +10530,24 @@ export class DaemonServer {
       return { ok: false, error: "question owned by another connection" };
     }
     const answers = stringRecord(params.answers);
+    const hub = this.hubContexts.getStore();
+    const questionInfo = this.interactions.pendingQuestionInfo(requestId);
+    if (hub && questionInfo) {
+      const mismatch = this.interactionSessionMismatch(hub, questionInfo.sessionId);
+      if (mismatch) return mismatch;
+      this.noteInteractionParticipant(hub, questionInfo.sessionId);
+    }
+    const suppliedRevision = params.interaction_revision;
+    if (suppliedRevision !== undefined && (typeof suppliedRevision !== "number" || !Number.isInteger(suppliedRevision))) {
+      return { ok: false, error: "interaction_revision must be an integer" };
+    }
+    if (!questionInfo && !this.providerFlows.has(connection) && (hub || suppliedRevision !== undefined)) {
+      const winner = this.interactionResolutions.get(requestId);
+      if (winner) return alreadyResolvedFailure(winner);
+    }
+    if (questionInfo && suppliedRevision !== undefined && suppliedRevision !== PENDING_INTERACTION_REVISION) {
+      return { ok: false, code: "interaction-revision-mismatch", error: "interaction-revision-mismatch" };
+    }
     const providerFlow = this.providerFlows.get(connection);
     if (providerFlow?.activeRequestId === requestId) {
       const transition = await providerFlow.answer(requestId, answers);
@@ -9969,7 +10568,12 @@ export class DaemonServer {
     const ok = this.interactions.respondQuestion(requestId, answers);
     if (ok) {
       this.questionOwners.delete(requestId);
-      this.emit(this.interactionAudience(owner, connection), "question_response", { id: requestId, answers });
+      // The decision record never copies a free-text answer into the transcript metadata.
+      const resolution = this.recordResolution(requestId, "question", "answered", hub, questionInfo?.sessionId ?? "", questionInfo?.toolCallId ?? "");
+      this.emit(this.interactionAudience(owner, connection), "question_response", {
+        id: requestId, answers,
+        ...(hub ? resolutionEventFields(resolution) : {}),
+      });
     }
     return { ok };
   }
@@ -10411,6 +11015,7 @@ export class DaemonServer {
     if (params.session_owned_turns === true) this.sessionOwnedClients.add(connection);
     await this.recoverGoalWakeAfterRestart(key);
     await this.rearmGoalAfterRestart(key, connection);
+    await this.resumeTurnAfterRestart(key, connection);
     await this.refreshSkills(session);
     const skills = this.skillRegistry
       .all()
@@ -10452,6 +11057,10 @@ export class DaemonServer {
       version: XERXES_VERSION,
       daemon_version: XERXES_VERSION,
       connection_lease_supported: true,
+      principal_auth_v1_supported: true,
+      hub_models_v1_supported: true,
+      collaboration_v1_supported: true,
+      attributed_steer_supported: true,
       session_owned_turns_supported: true,
       provider_relay_control_supported: true,
       remote_provider_binding_supported: Boolean(this.remoteProviderBindings),
@@ -10670,6 +11279,13 @@ export class DaemonServer {
       // is independent: an unconfigured daemon must still be probeable by TUI
       // startup and provider setup flows.
       runtime_ready: status.ok === true,
+      runtime_id: this.eventJournal.runtimeId,
+      instance_id: this.eventJournal.instanceId,
+      event_stream_supported: this.eventJournal.available,
+      principal_auth_v1_supported: true,
+      hub_models_v1_supported: true,
+      collaboration_v1_supported: true,
+      attributed_steer_supported: true,
       ok: true,
       pid: typeof status.pid === "number" ? status.pid : process.pid,
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
@@ -10702,35 +11318,54 @@ export class DaemonServer {
     );
   }
 
-  private emit(
-    connection: DaemonTransportConnection,
-    type: string,
-    payload: JsonRpcPayload,
-  ): void {
+  /** The only public-event persistence choke point; private provider requests never call it. */
+  private publishEvent(type: string, payload: JsonRpcPayload, connection: DaemonTransportConnection | undefined,
+    deliver: () => void, projectDirectory?: string): void {
+    // Provider editors can answer a generic `value` question with a raw API key.
+    // Do not depend on key-name/pattern redaction to recognize arbitrary credentials.
+    if (connection && type === 'question_response' && this.providerFlows.has(connection)) {
+      this.eventJournal.deliverPrivate(deliver);
+      return;
+    }
+    const nested = isRecord(payload.payload) ? payload.payload : undefined;
+    const id = optionalString(payload.session_id) ?? optionalString(nested?.session_id);
+    const session = id ? this.runtime.listSessions().find(session => session.id === id)
+      : connection ? this.runtime.sessionStatus(connection.activeSessionKey) : undefined;
+    const journalPayload = type === 'question_response' && Object.hasOwn(payload, 'answers')
+      ? { ...payload, answers: '[redacted]' } : payload;
+    this.eventJournal.append({ type, payload: journalPayload,
+      project_dir: projectDirectory ?? session?.cwd ?? this.projectDirectory ?? process.cwd(),
+      ...(id || session?.id ? { session_id: id ?? session!.id } : {}),
+    }, deliver);
+  }
+
+  private normalizedEventPayload(connection: DaemonTransportConnection, type: string, payload: JsonRpcPayload): JsonRpcPayload {
+    if (type !== 'status_update') return payload;
+    const session = this.runtime.sessionStatus(connection.activeSessionKey);
+    const model = optionalString(payload.model) || session?.model || '';
+    if (!model) return payload;
+    const normalized = { ...payload };
+    delete normalized.max_context;
+    return { ...normalized, max_context: this.contextLimit(model, session),
+      ...(session ? { reasoning_effort: this.sessionReasoningEffort(session) } : {}) };
+  }
+
+  private emit(connection: DaemonTransportConnection, type: string, payload: JsonRpcPayload): void {
+    this.recordEventInteraction(connection, type, payload);
+    const normalized = this.normalizedEventPayload(connection, type, payload);
+    this.publishEvent(type, normalized, connection, () => this.deliverEvent(connection, type, normalized));
+  }
+
+  private recordEventInteraction(connection: DaemonTransportConnection, type: string, payload: JsonRpcPayload): void {
     this.recordInteractionOwner(connection, type, payload);
     if (type === 'approval_response' || type === 'question_response') {
       const requestId = optionalString(payload.request_id) ?? optionalString(payload.id);
       if (requestId) this.pendingInteractionFrames.delete(requestId);
     }
-    if (type === "status_update") {
-      const session = this.runtime.sessionStatus(connection.activeSessionKey);
-      const model = optionalString(payload.model) || session?.model || "";
-      if (model) {
-        const normalized = { ...payload };
-        delete normalized.max_context;
-        const contextLimit = this.contextLimit(model, session);
-        connection.send(
-          daemonEvent(type, {
-            ...normalized,
-            // Zero is the explicit unknown sentinel and clears any previous
-            // profile/model window held by a connected client.
-            max_context: contextLimit,
-            ...(session ? { reasoning_effort: this.sessionReasoningEffort(session) } : {}),
-          }),
-        );
-        return;
-      }
-    }
+  }
+
+  /** Transport-only delivery, reached only after publishEvent has completed its append. */
+  private deliverEvent(connection: DaemonTransportConnection, type: string, payload: JsonRpcPayload): void {
     connection.send(daemonEvent(type, payload));
   }
 
@@ -10919,6 +11554,38 @@ export class DaemonServer {
   }
 
   /**
+   * The fresh process after a forced restart: a turn the old one cut off
+   * continues on its own, once (the marker is consumed first). It runs as a
+   * non-human continuation, so it cannot create goals or schedules on the
+   * person's authority; it only finishes the work already asked for.
+   */
+  private async resumeTurnAfterRestart(sessionKey: string, connection: DaemonTransportConnection | undefined): Promise<void> {
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session || !Object.hasOwn(session.metadata, TURN_RESUME_AFTER_RESTART_KEY)) return;
+    const marker = session.metadata[TURN_RESUME_AFTER_RESTART_KEY];
+    delete session.metadata[TURN_RESUME_AFTER_RESTART_KEY];
+    await this.runtime.flushSessions();
+    const record = isRecord(marker) ? marker : {};
+    const fresh = typeof record.at === 'number' && Date.now() - record.at < GOAL_REARM_MAX_AGE_MS;
+    if (!fresh || session.activeTurnId || this.turnOwners.has(sessionKey) || session.cancelRequested) return;
+    const emit = connection
+      ? (event: DaemonEvent) => this.emit(connection, event.type, event.payload)
+      : this.sessionViewerEmitter(session.id);
+    emit({ type: 'notification', payload: { level: 'info', message: 'The runtime restarted mid-turn; continuing this task.', session_id: session.id } });
+    const run = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() => this.withSessionOperation(sessionKey, async () => {
+      const live = this.runtime.sessionStatus(sessionKey);
+      if (!live || live.id !== session.id || live.activeTurnId || live.cancelRequested || this.turnOwners.has(sessionKey)) return;
+      await this.submitTrackedTurn(sessionKey, TURN_RESUME_PROMPT, emit, undefined, {
+        displayText: 'Continue after the runtime restart', origin: 'agent',
+      }, true);
+    }, 'background')).catch(error => {
+      emit({ type: 'notification', payload: { level: 'error', message: `Could not continue the interrupted turn: ${errorMessage(error)}`, session_id: session.id } });
+    });
+    this.inFlightTurns.add(run);
+    void run.finally(() => this.inFlightTurns.delete(run));
+  }
+
+  /**
    * A goal round whose owner vanished across a restart has an unknown outcome
    * and blocks the goal for review, unless the update restart the person
    * forced is what stopped it: its re-arm marker says so, and the goal goes on.
@@ -10940,8 +11607,7 @@ export class DaemonServer {
   private sessionViewerEmitter(sessionId: string): (event: DaemonEvent) => void {
     const accepts = (connection: DaemonTransportConnection): boolean => this.runtime.sessionStatus(connection.activeSessionKey)?.id === sessionId;
     return event => {
-      for (const connection of this.connections) if (accepts(connection)) this.emit(connection, event.type, event.payload);
-      this.websocketGateway?.broadcast(event.type, event.payload, accepts);
+      this.broadcastEvent(event.type, event.payload, accepts);
     };
   }
 
@@ -10975,6 +11641,7 @@ export class DaemonServer {
               ?? (await this.runtime.openSession(id, undefined, { cwd, preserveProject: true, resume: true })).sessionKey;
             await this.recoverGoalWakeAfterRestart(key);
             await this.rearmGoalAfterRestart(key, undefined);
+            await this.resumeTurnAfterRestart(key, undefined);
           };
           await (resources ? this.workspaceContext.run(resources, resume) : resume());
         } catch (error) {
@@ -10999,7 +11666,14 @@ export class DaemonServer {
     let retry = false;
     // Let turn ownership and terminal events settle before enqueuing another
     // operation. A human request received at this boundary gets first place.
-    const dispatch = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() =>
+    // The request that kicked this wake replies (and hands its socket queue to
+    // the next queued request) only after the event journal's durable append,
+    // which can take longer than one timer tick. Wait for that same append
+    // first, so a human request queued behind it is still admitted before the
+    // wake. This wait only orders work; journal failures are reported where the
+    // journal records them.
+    const dispatch = this.eventJournal.flush().catch(() => undefined)
+      .then(() => new Promise<void>(resolve => setTimeout(resolve, 0))).then(() =>
       this.withSessionOperation(sessionKey, async () => {
         if (this.stoppingGoalWakes) {
           if (this.goalDrainTimer && !this.desktopRestartPending) this.heldGoalKicks.set(sessionKey, { emit, owner });
@@ -11234,7 +11908,10 @@ export class DaemonServer {
           }
         }
       };
-      await this.runtime.submitTurn(sessionKey, text, forward, options);
+      await this.runtime.submitTurn(sessionKey, text, forward, {
+        ...options,
+        pullQueuedSteers: () => this.pullQueuedSteers(sessionKey),
+      });
       if (options.goalRound !== undefined && round_.error === undefined && round_.productive) {
         this.goalTransientFailures.delete(sessionKey);
       }
@@ -11309,6 +11986,8 @@ export class DaemonServer {
       // A turn that ends or is cancelled without an answer must not leak its
       // approval/question ownership entries into later requests.
       this.releaseTurnInteractions(interactionIds);
+      // Steers that arrived too late for any provider/tool boundary run in ONE serialized continuation.
+      this.scheduleSteerContinuation(sessionKey, emit, owner);
       if (!options.origin || options.origin === 'human') this.kickGoalWake(sessionKey, emit, owner);
       // The runtime persists the session as the turn ends, so this is the
       // incremental feed: the index tracks the transcript that was just saved.
@@ -11450,6 +12129,10 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
+    this.eventSubscriptions.disconnect(connection);
+    // A completion nobody can receive any more must stop spending tokens.
+    this.hubModels.abortConnection(connection);
+    this.hubModels.abortConnection(this.connectionLeases.owner(connection));
     const watches = this.terminalWatches.get(connection);
     if (watches) { for (const stop of watches.values()) stop(); this.terminalWatches.delete(connection); }
     this.remoteProviderBindings?.disconnect(this.connectionLeases.owner(connection));
@@ -11556,6 +12239,15 @@ export class DaemonServer {
       void this.workspaceResources?.(root).catch(() => undefined);
     }
   }
+}
+
+/** Stable decision name recorded for a permission answer. */
+function permissionDecisionName(response: string): string {
+  const value = response.trim().toLowerCase();
+  if (value === "always") return "approve_always";
+  if (value === "approve_for_session") return "approve_for_session";
+  if (value === "approve" || value === "allow") return "approve";
+  return "reject";
 }
 
 function sessionHasHistory(session: DaemonSession): boolean {
@@ -12582,7 +13274,7 @@ function messageText(message: DaemonSession["messages"][number]): string {  if (
   }
   const content = message.content;
   if (typeof content === "string") {
-    return (message.role === 'user' ? content.replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\]\r?\n/, '') : content).trim();
+    return (message.role === 'user' ? content.replace(/^\[(?:mid-turn steer from user|steer from [^\]\r\n]+?(?: saved for next turn)?)\]\r?\n/, '') : content).trim();
   }
   if (Array.isArray(content)) {
     const joined = content
@@ -12597,7 +13289,7 @@ function messageText(message: DaemonSession["messages"][number]): string {  if (
       .filter(Boolean)
       .join("\n");
     // A steer that carried images is stored as parts with the same framing.
-    return (message.role === 'user' ? joined.replace(/^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\](?:\r?\n|$)/, '') : joined).trim();
+    return (message.role === 'user' ? joined.replace(/^\[(?:mid-turn steer from user|steer from [^\]\r\n]+?(?: saved for next turn)?)\](?:\r?\n|$)/, '') : joined).trim();
   }
   return isRecord(content)
     ? stringValue(content.text) || stringValue(content.content)

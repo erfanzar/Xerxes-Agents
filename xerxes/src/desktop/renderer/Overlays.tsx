@@ -14,10 +14,11 @@
 import { createPortal } from 'react-dom'
 import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
-import { saveAppearance, DEFAULT_FONT_SIZE, FONT_SIZES, FONT_LABELS } from './appearance.js'
+import { saveAppearance, loadAppearance, DEFAULT_FONT_SIZE, DEFAULT_STYLE, FONT_SIZES, FONT_LABELS, STYLES, STYLE_LABELS, type StyleChoice } from './appearance.js'
+import { chooseStyle } from './appearanceSync.js'
 import { applySessionDensity, applyTerminalFont, applyUiScale, loadSessionDensity, loadTerminalFont, loadUiScale, parseTerminalFont, SESSION_DENSITIES, UI_SCALES, type SessionDensity } from './displayPrefs.js'
 import { loadPalette, PALETTES, paletteVariant, savePalette, type Palette } from './palettes.js'
-import { applyBackdrop, backdropFromImage, BACKDROP_PRESETS, BUNDLED_BACKGROUNDS, DEFAULT_BLUR, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY, loadBackdrop, saveBackdrop, transparencySupported, type Backdrop } from './backdrop.js'
+import { applyBackdrop, backdropFromImage, BACKDROP_PRESETS, BUNDLED_BACKGROUNDS, DEFAULT_BLUR, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY, loadBackdrop, neoBackdropNote, saveBackdrop, transparencySupported, type Backdrop } from './backdrop.js'
 import { desktopError } from './desktopRpc.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
@@ -30,6 +31,7 @@ import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { Icon, type IconName } from './Icon.js'
 import { isVscodeHost } from './host.js'
+import { HubPhoneCard } from './HubPhonePanel.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
 
@@ -43,6 +45,7 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'mcp', label: 'MCP Servers' },
   { id: 'terminals', label: 'Terminals' },
   { id: 'lsp', label: 'Language servers' },
+  { id: 'hub', label: 'Hub & phone' },
 ]
 
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -97,6 +100,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
           {snap.settingsTab === 'mcp' && <McpCard snap={snap} />}
           {snap.settingsTab === 'terminals' && <TerminalsCard snap={snap} />}
           {snap.settingsTab === 'lsp' && <LspCard snap={snap} />}
+          {snap.settingsTab === 'hub' && <HubPhoneCard />}
         </div>
       </div>
     </div>
@@ -117,7 +121,10 @@ function useThemeChoice(): [string, (next: string) => void] {
     // Picking light or dark by hand takes precedence over a background's
     // derived mode. With a palette the background stays: the mode only picks
     // the palette's variant.
-    if (document.documentElement.hasAttribute('data-backdrop') && !loadPalette()) { applyBackdrop({ kind: 'none' }); saveBackdrop({ kind: 'none' }) }
+    // Under Neo a background lends only its colours (data-backdrop-colors); a
+    // hand-picked mode overrides it exactly as it does in Classic.
+    const root = document.documentElement
+    if ((root.hasAttribute('data-backdrop') || root.hasAttribute('data-backdrop-colors')) && !loadPalette()) { applyBackdrop({ kind: 'none' }); saveBackdrop({ kind: 'none' }) }
     if (next === 'system') {
       document.documentElement.removeAttribute('data-user-theme')
       document.documentElement.setAttribute(
@@ -246,7 +253,21 @@ function BackdropCard({ label, description, paint, on, onPick }: { label: string
  * image, or the see-through window, and the surfaces, accent and light/dark
  * are derived from it.
  */
+/** Whether the page is in the Neo style, following a switch made anywhere (Settings, ⌘K, another window). */
+function useNeoStyle(): boolean {
+  const read = (): boolean => typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'neo'
+  const [neo, setNeo] = useState(read)
+  useEffect(() => {
+    if (typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(() => setNeo(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-style'] })
+    return () => observer.disconnect()
+  }, [])
+  return neo
+}
+
 function BackdropField(): ReactElement {
+  const neo = useNeoStyle()
   const [current, setCurrent] = useState<Backdrop>(() => typeof document === 'undefined' ? { kind: 'none' } : loadBackdrop())
   const [error, setError] = useState('')
   const [custom, setCustom] = useState(() => current.kind === 'gradient' ? { from: current.from, to: current.to } : { from: '#1b2a6b', to: '#6b1b5a' })
@@ -272,16 +293,19 @@ function BackdropField(): ReactElement {
   return (
     <div className="field backdrop-field">
       <label id="backdrop-label">Background</label>
+      {/* Neo never shows a picture: say so before a choice, and again for the
+          one just made, so picking an image there is not a silent no-op. */}
+      {neo && <p className="backdrop-note backdrop-note--neo" role="status" aria-live="polite">{neoBackdropNote(current.kind)}</p>}
       {/* Cards like the colour themes: each shows a small window over the
           picture, so you see how the panels will sit on it. */}
       <div className="palette-grid backdrop-grid" role="radiogroup" aria-labelledby="backdrop-label">
-        <BackdropCard label="None" description="Solid Xerxes surfaces" paint={undefined} on={current.kind === 'none'} onPick={() => choose({ kind: 'none' })} />
-        {transparencySupported() && <BackdropCard label="Transparent" description="Your desktop, blurred through the window" paint="transparent" on={current.kind === 'transparent'} onPick={() => choose({ kind: 'transparent' })} />}
+        <BackdropCard label="None" description={neo ? 'Neo\'s own colours' : 'Solid Xerxes surfaces'} paint={undefined} on={current.kind === 'none'} onPick={() => choose({ kind: 'none' })} />
+        {transparencySupported() && <BackdropCard label="Transparent" description={neo ? 'No effect in Neo' : 'Your desktop, blurred through the window'} paint="transparent" on={current.kind === 'transparent'} onPick={() => choose({ kind: 'transparent' })} />}
         {BUNDLED_BACKGROUNDS.map(art => (
-          <BackdropCard key={art.name} label={art.name} description="Artwork" paint={`center / cover no-repeat url("${art.backdrop.src}")`} on={current.kind === 'image' && current.src === art.backdrop.src} onPick={() => choose(art.backdrop)} />
+          <BackdropCard key={art.name} label={art.name} description={neo ? 'Artwork · colours only in Neo' : 'Artwork'} paint={`center / cover no-repeat url("${art.backdrop.src}")`} on={current.kind === 'image' && current.src === art.backdrop.src} onPick={() => choose(art.backdrop)} />
         ))}
         {BACKDROP_PRESETS.map(preset => (
-          <BackdropCard key={preset.name} label={preset.name} description="Gradient" paint={swatch(preset.backdrop)} on={same(preset.backdrop)} onPick={() => choose(preset.backdrop)} />
+          <BackdropCard key={preset.name} label={preset.name} description={neo ? 'Gradient · colours only in Neo' : 'Gradient'} paint={swatch(preset.backdrop)} on={same(preset.backdrop)} onPick={() => choose(preset.backdrop)} />
         ))}
         {/* Your own picture; once chosen it shows here as its own card. */}
         {current.kind === 'image' && current.src.startsWith('data:') && <BackdropCard label="Your image" description="Uploaded picture" paint={`center / cover no-repeat url("${current.src}")`} on onPick={() => undefined} />}
@@ -298,7 +322,8 @@ function BackdropField(): ReactElement {
         <input type="color" aria-label="Gradient end" value={custom.to} onChange={event => setCustom(value => ({ ...value, to: event.target.value }))} />
         <button className="btn" onClick={() => choose({ kind: 'gradient', from: custom.from, to: custom.to, angle: 150 })}>Apply</button>
       </div>
-      {current.kind !== 'none' && <div className="backdrop-levels">
+      {/* Opacity and blur shape how the picture shows through; Neo shows none. */}
+      {!neo && current.kind !== 'none' && <div className="backdrop-levels">
         <label htmlFor="backdrop-chat">Conversation</label>
         <input id="backdrop-chat" type="range" min={0} max={100} value={current.chat ?? DEFAULT_CHAT_OPACITY} aria-valuetext={`${current.chat ?? DEFAULT_CHAT_OPACITY}% solid`}
           onChange={event => tune({ chat: Number(event.target.value) })} />
@@ -324,10 +349,38 @@ function BackdropField(): ReactElement {
           <output htmlFor="backdrop-blur">{current.blur ?? DEFAULT_BLUR}%</output>
         </>}
       </div>}
-      {current.kind !== 'none' && <p className="backdrop-note">{current.kind === 'transparent'
+      {!neo && current.kind !== 'none' && <p className="backdrop-note">{current.kind === 'transparent'
         ? 'How solid each surface is over your desktop — 0% leaves only the system blur. Light or dark follows the Theme setting.'
         : 'How solid each surface is, and how blurred the picture under them is — 0% on all three shows the background exactly as it is. Light or dark and the accent follow the background.'}</p>}
       {error && <p className="backdrop-note backdrop-note--error" role="alert">{error}</p>}
+    </div>
+  )
+}
+
+const STYLE_NOTES: Record<StyleChoice, string> = {
+  classic: 'The standard Xerxes design',
+  neo: 'Terminal console: one mono font, square corners, flat surfaces',
+}
+
+/**
+ * Classic or Neo. Applies at once in every open window; Theme, Colour theme
+ * and text size work in both. Neo is flat and solid, so a background lends it
+ * only its colours (the picture returns with Classic).
+ */
+function StyleField(): ReactElement {
+  const [style, setStyle] = useState<StyleChoice>(() => typeof document === 'undefined' ? DEFAULT_STYLE : loadAppearance().style)
+  const pick = (next: StyleChoice): void => { chooseStyle(next); setStyle(next) }
+  return (
+    <div className="field style-field">
+      <label id="style-label">Style</label>
+      <div className="seg" role="radiogroup" aria-labelledby="style-label">
+        {STYLES.map(value => (
+          <button key={value} role="radio" aria-checked={style === value} title={STYLE_NOTES[value]} className={style === value ? 'is-on' : ''} onClick={() => pick(value)}>{STYLE_LABELS[value]}</button>
+        ))}
+      </div>
+      <p className="field__note">{style === 'neo'
+        ? 'Colour themes work in Neo. A background is never shown in Neo: only its colours are used.'
+        : STYLE_NOTES.classic + '. Neo is also in the command palette (⌘K).'}</p>
     </div>
   )
 }
@@ -348,6 +401,7 @@ function PalettePreview({ palette, mode }: { palette: Palette | undefined; mode:
  * background's, when none is chosen.
  */
 function PaletteField(): ReactElement {
+  const neo = useNeoStyle()
   const [current, setCurrent] = useState(() => typeof document === 'undefined' ? undefined : loadPalette()?.name)
   const mode: 'light' | 'dark' = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
   const choose = (name: string | undefined): void => {
@@ -362,7 +416,9 @@ function PaletteField(): ReactElement {
   return (
     <div className="field palette-field">
       <label id="palette-label">Colour theme</label>
-      <p className="field__note">With a background, the theme tints the glass over it; Light / Dark picks the theme's variant.</p>
+      <p className="field__note">{neo
+        ? 'In Neo the theme\'s colours replace Neo\'s own (and a background\'s); Light / Dark picks the theme\'s variant. Xerxes keeps Neo\'s purple.'
+        : 'With a background, the theme tints the glass over it; Light / Dark picks the theme\'s variant.'}</p>
       <div className="palette-grid" role="radiogroup" aria-labelledby="palette-label">
         {options.map(option => (
           <button key={option.label} role="radio" aria-checked={current === option.name} className={`palette-card${current === option.name ? ' is-on' : ''}`} onClick={() => choose(option.name)}>
@@ -436,6 +492,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <h2 className="modal__title">General</h2>
       <p className="modal__sub">Applies immediately; nothing here is per-task.</p>
 
+      <StyleField />
       <BackdropField />
       <div className="field">
         <label>Theme</label>
@@ -1698,6 +1755,10 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         run: () => setNeedle('/goal '),
       },
       { id: 'compact', label: '/compact — compact this task now', run: () => void store.submit('/compact') },
+      (() => {
+        const next: StyleChoice = typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'neo' ? 'classic' : 'neo'
+        return { id: 'style', icon: 'half', label: `Switch to ${STYLE_LABELS[next]} style`, run: () => chooseStyle(next) } satisfies PaletteAction
+      })(),
       { id: 'settings', icon: 'settings', label: 'Settings…', run: () => store.openSettings() },
       { id: 'models-settings', icon: 'spark', label: 'Models & Providers settings…', run: () => store.openSettings('models') },
       { id: 'permissions', icon: 'shield', label: 'Permissions settings…', run: () => store.openSettings('permissions') },

@@ -1,0 +1,20 @@
+version: 1
+agent:
+  name: xerxes-supervisor
+  system_prompt_path: ./supervisor.md
+  when_to_use: |
+    The XERXES supervisor. It runs only inside the Hub with its own twelve-tool registry (task reads, confirmed task actions, thread notices). Do not select it for ordinary tasks.
+  tools:
+    - workspace_list
+    - tasks_list
+    - task_digest
+    - task_tail
+    - task_search
+    - task_start
+    - task_steer
+    - task_stop
+    - agent_message
+    - goal_set
+    - model_set
+    - notify_user
+  subagents: {}

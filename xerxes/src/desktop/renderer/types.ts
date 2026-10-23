@@ -12,6 +12,7 @@
 // ── Bridge (preload ↔ main ↔ renderer) ──────────────────────────────────
 import type { WorkspaceContext } from '../main/contextNavigation.js'
 import type { ReflectionNotice } from './learning.js'
+import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -30,6 +31,10 @@ export interface XerxesBridge {
   getResumeSession?(): Promise<string | null>
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
+  /** Hub cockpit: link this Mac, pair a phone, sign in to the Hub (see hubShared.ts). */
+  hubCockpit?(action: string, params?: Record<string, unknown>): Promise<unknown>
+  onHubSocket?(handler: (event: HubSocketEvent) => void): () => void
+  onHubProgress?(handler: (progress: CockpitProgress) => void): () => void
   /** The app's own update flow in the main process (see appUpdateController.ts). */
   appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
   onAppUpdate?(handler: (state: unknown) => void): () => void
@@ -449,7 +454,7 @@ export interface SessionSearchStats {
 
 // ── Settings ────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'general' | 'models' | 'intelligence' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp'
+export type SettingsTab = 'general' | 'models' | 'intelligence' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp' | 'hub'
 
 /** One MCP server's redacted status, straight from the daemon wire. */
 export interface McpServerStatus {

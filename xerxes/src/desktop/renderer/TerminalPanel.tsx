@@ -222,7 +222,7 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
       const font = terminalFont(element)
       if (xterm.options.fontFamily !== font) { xterm.options.fontFamily = font; fitter.fit() }
     })
-    themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-palette', 'data-terminal-font'] })
+    themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-palette', 'data-style', 'data-terminal-font'] })
 
     return () => {
       alive = false

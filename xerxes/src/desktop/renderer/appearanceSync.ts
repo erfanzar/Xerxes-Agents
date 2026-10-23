@@ -1,9 +1,20 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { APPEARANCE_KEY, applyAppearance, loadAppearance } from './appearance.js'
+import { APPEARANCE_KEY, applyAppearance, applyStyle, loadAppearance, saveAppearance, type StyleChoice } from './appearance.js'
 import { applyBackdrop, BACKDROP_KEY, loadBackdrop } from './backdrop.js'
 import { PALETTE_KEY } from './palettes.js'
+
+/**
+ * Switch Classic ⇄ Neo in place: remember it for every view, stamp the page,
+ * then repaint the background (Neo takes only its colours, solid; Classic shows
+ * the picture again). No reload, no other setting touched.
+ */
+export function chooseStyle(style: StyleChoice, root: HTMLElement = document.documentElement): void {
+  saveAppearance({ style })
+  applyStyle(style, root)
+  applyBackdrop(loadBackdrop(), root)
+}
 
 /** Storage keys that together decide how every page looks. */
 export const SHARED_APPEARANCE_KEYS: ReadonlySet<string> = new Set([APPEARANCE_KEY, BACKDROP_KEY, PALETTE_KEY])

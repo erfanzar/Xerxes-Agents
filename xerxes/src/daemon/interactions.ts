@@ -27,6 +27,7 @@ interface PendingPermission {
   readonly resolve: (decision: PermissionDecision) => void
   readonly sessionId: string
   readonly signal: AbortSignal | undefined
+  readonly toolCallId: string
   readonly toolName: string
 }
 
@@ -39,6 +40,7 @@ interface PendingQuestion {
   readonly resolve: (answer: string) => void
   readonly sessionId: string
   readonly signal: AbortSignal | undefined
+  readonly toolCallId: string
 }
 
 interface SessionBinding {
@@ -67,6 +69,32 @@ export class DaemonInteractionBoard {
   private readonly onApprovalStoreError: (error: unknown) => void
   private readonly permissions = new Map<string, PendingPermission>()
   private readonly questions = new Map<string, PendingQuestion>()
+  private sharedProbe: ((sessionId: string) => boolean) | undefined
+
+  /**
+   * Tells the board which sessions have had a hub participant other than their
+   * owner. In such a session remembered ALWAYS approvals never authorize a call,
+   * and an "always" answer is only remembered for that session.
+   */
+  setSharedSessionProbe(probe: ((sessionId: string) => boolean) | undefined): void {
+    this.sharedProbe = probe
+  }
+
+  private isShared(sessionId: string): boolean {
+    return this.sharedProbe?.(sessionId) === true
+  }
+
+  /** Identity of a pending approval, for attribution records. Never exposes arguments. */
+  pendingPermissionInfo(requestId: string): { readonly sessionId: string; readonly toolName: string; readonly toolCallId: string } | undefined {
+    const pending = this.permissions.get(requestId)
+    return pending ? { sessionId: pending.sessionId, toolName: pending.toolName, toolCallId: pending.toolCallId } : undefined
+  }
+
+  /** Identity of a pending question, for attribution records. Never exposes the question text. */
+  pendingQuestionInfo(requestId: string): { readonly sessionId: string; readonly toolCallId: string } | undefined {
+    const pending = this.questions.get(requestId)
+    return pending ? { sessionId: pending.sessionId, toolCallId: pending.toolCallId } : undefined
+  }
 
   constructor(options: DaemonInteractionBoardOptions = {}) {
     this.approvalStore = options.approvalStore
@@ -118,6 +146,7 @@ export class DaemonInteractionBoard {
         resolve,
         sessionId,
         signal,
+        toolCallId: request.toolCallId ?? '',
       })
       signal?.addEventListener('abort', abort, { once: true })
       if (signal?.aborted) {
@@ -164,7 +193,10 @@ export class DaemonInteractionBoard {
     if (!pending) {
       return false
     }
-    const resolution = permissionResolution(response)
+    const shared = this.isShared(pending.sessionId)
+    const parsed = permissionResolution(response)
+    // In a shared session "always" cannot mint a durable, machine-wide grant for later participants.
+    const resolution = shared && parsed.scope === ApprovalScope.ALWAYS ? { ...parsed, scope: ApprovalScope.SESSION } : parsed
     this.permissions.delete(requestId)
     pending.signal?.removeEventListener('abort', pending.abort)
     if (resolution.decision === 'approve_for_session') {
@@ -236,8 +268,9 @@ export class DaemonInteractionBoard {
     const argsHash = approvalArgumentsHash(request.toolCall.function.arguments)
     let remembered: boolean | undefined
     let storeFailed = false
+    const shared = this.isShared(sessionId)
     try {
-      remembered = this.approvalStore?.check(toolName, sessionId, argsHash)
+      remembered = this.approvalStore?.check(toolName, sessionId, argsHash, shared ? { skipAlways: true } : {})
     } catch (error) {
       // A corrupt or unreadable approvals file used to throw straight through the permission
       // path and surface as a tool failure; an unanswerable store means ask the user instead.
@@ -249,7 +282,7 @@ export class DaemonInteractionBoard {
     }
     // A store we could not read may hold a denial, so its failure also voids the in-session
     // shortcut rather than letting a live grant stand in for the record we never saw.
-    if (!storeFailed && this.hasSessionGrant(sessionId, toolName, argsHash)) {
+    if (!storeFailed && this.hasSessionGrant(sessionId, toolName, argsHash, shared)) {
       return Promise.resolve('approve')
     }
     if (signal?.aborted) {
@@ -264,6 +297,7 @@ export class DaemonInteractionBoard {
         resolve,
         sessionId,
         signal,
+        toolCallId: request.toolCall.id,
         toolName,
       })
       signal?.addEventListener('abort', abort, { once: true })
@@ -273,13 +307,13 @@ export class DaemonInteractionBoard {
     })
   }
 
-  private hasSessionGrant(sessionId: string, toolName: string, argsHash: string): boolean {
+  private hasSessionGrant(sessionId: string, toolName: string, argsHash: string, shared = false): boolean {
     const granted = this.approvedTools.get(sessionId)
     if (!granted) {
       return false
     }
     return granted.has(sessionGrantKey(ApprovalScope.SESSION, toolName, argsHash))
-      || granted.has(sessionGrantKey(ApprovalScope.ALWAYS, toolName, argsHash))
+      || (!shared && granted.has(sessionGrantKey(ApprovalScope.ALWAYS, toolName, argsHash)))
   }
 
   private finishPermission(requestId: string, decision: PermissionDecision): void {

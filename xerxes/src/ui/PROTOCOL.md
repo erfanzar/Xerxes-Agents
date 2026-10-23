@@ -2311,3 +2311,296 @@ that attaches mid-turn — after the app was closed and reopened during a long
 goal round — shows everything the turn has already done. Nothing is persisted
 differently; the runner's live state is read, and the stored transcript is
 unchanged until the turn completes.
+
+### Durable transport events (optional v35 capability)
+
+`runtime.status` adds `runtime_id` (stable for the daemon state root),
+`instance_id` (new for each daemon process), and `event_stream_supported`.
+Call the following methods only after observing `event_stream_supported: true`.
+It becomes `false` on a journal failure; legacy operation continues. None of
+these methods attaches a session, registers an interaction owner, or grants
+permission/question response authority. A subscription is scoped to the issuing
+connection (and is removed on disconnect), not to a session or reconnect lease.
+Existing clients receive exactly the existing public event envelopes, with no
+identity fields added to their payloads; only subscribers receive the new wrappers.
+
+```ts
+// Requests (normal JSON-RPC calls)
+events.subscribe {
+  project_dirs: string[],          // 1–200 absolute, canonicalized project paths
+  session_ids?: string[],          // optional additional session filter, up to 200
+  detail: "summary" | "conversation",
+  after_cursor?: string,
+  max_batch_bytes?: number         // default 262144; 1024–1048576
+}
+// Result
+{ ok: true, subscription_id: string, stream_id: string, watermark: string,
+  oldest_cursor: string, reset_required: boolean }
+
+events.read {
+  subscription_id: string, after_cursor?: string,
+  limit?: number,                  // default/max 500, minimum 1
+  max_bytes?: number               // default 262144; 1024–1048576;
+                                  // never exceeds subscription max_batch_bytes
+}
+// Result
+{ ok: true, events: WireTransportEvent[], next_cursor: string, has_more: boolean,
+  watermark: string, reset_required: boolean }
+
+events.unsubscribe { subscription_id: string }
+// Result
+{ ok: true }
+```
+
+Events use the unchanged `{jsonrpc:"2.0", method:"event", params:{type,payload}}`
+envelope. The additional event types are:
+
+```ts
+// type: "event_batch"
+{ subscription_id: string, events: WireTransportEvent[], through_cursor: string }
+// type: "event_gap"
+{ subscription_id: string, requested_cursor?: string, oldest_cursor: string,
+  watermark: string,
+  reason: "retention" | "stream_replaced" | "journal_unavailable" }
+
+interface TransportEvent {
+  event_id: string;
+  sequence: number;
+  cursor: string;
+  runtime_id: string;
+  instance_id: string;
+  project_dir: string;
+  session_id?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  occurred_at: string;             // ISO-8601 daemon timestamp
+}
+// Only when metadata itself cannot fit the requested page budget:
+interface CompactTransportEvent {
+  event_id: string; sequence: number; cursor: string;
+  runtime_id: string; instance_id: string; type: string;
+  payload: {truncated:true, original_bytes:number, type:string};
+  truncated: true; original_bytes: number;
+}
+type WireTransportEvent = TransportEvent | CompactTransportEvent;
+```
+
+Cursors are opaque to callers. Currently they encode `<stream_id>:<sequence>`;
+sequence zero is the stream's initial position. A cursor is an **exclusive**
+position: reading after it returns strictly newer events. `oldest_cursor` is the
+exclusive position immediately before the earliest retained record (or the
+watermark of an empty stream). Comparing cursors from different streams is invalid.
+Identity is assigned once before observer/transport fan-out. Clients deduplicate
+by `(runtime_id, stream_id, sequence)` / `event_id`, not arrival order across lanes.
+
+The subscription is installed and its watermark captured in one synchronous
+step before the RPC replies. With `after_cursor`, it automatically backfills
+through that captured watermark and then delivers live commits in order, with
+no duplicate at the boundary. Without `after_cursor`, it starts at the captured
+watermark (live only). Start listening before issuing subscribe. `events.read`
+is an explicit replay page, not an acknowledgement: applications using it alongside
+automatic delivery must deduplicate. Its omitted cursor starts at the subscription's
+last delivered position. A filtered page may be empty while advancing the cursor.
+Summary detail excludes text/thinking deltas, including wrapped cron/subagent deltas;
+conversation detail retains them. Project and session filters are intersections.
+
+Batches and pages account for UTF-8 bytes, including framing overhead, with a
+256 KiB target and 1 MiB hard ceiling. A single oversized event keeps its identity
+and metadata but replaces `payload` with
+`{truncated:true, original_bytes:number, type:string}`. If metadata itself cannot
+fit, a `CompactTransportEvent` omits project/session/time metadata and bounds its
+type name to 32 characters; cursor and identity still progress. The normal transcript/
+artifact APIs remain the source for full oversized content. A per-subscription
+1 MiB live backlog cap prevents a stalled subscriber blocking ingestion. Overflow
+abandons that backlog, pauses automatic delivery, and emits `event_gap` with reason
+`retention` (a live delivery gap; the disk records may still be retained).
+An explicit successful `events.read` recovers that subscription after its returned
+page, backfills any remaining records, and resumes live delivery. Physical transport
+output queues remain independently bounded and can disconnect a slow client.
+
+An expired or invalid supplied cursor gives `reset_required:true` and an `event_gap`. A cursor
+from another stream (or an invalid/future position) uses `stream_replaced`; an
+expired disk window uses `retention`. Refresh projections/snapshots before choosing
+a new valid cursor. A journal failure uses `journal_unavailable`, pauses all live
+subscriptions, and stops advertising resumability. No missing history is invented.
+
+The append-only JSONL journal lives under `<daemon state root>/transport-events/`
+(normally `<XERXES_HOME>/daemon/`, beside the daemon pid/socket; an embedding host
+may supply `eventJournal.directory`). `identity.json` preserves stream/runtime ids
+and the sequence high watermark across ordinary restarts; startup also recovers
+complete records from segment tails. An incomplete final append is abandoned, and
+new processes always open a new segment. Directory/file modes are 0700/0600.
+Defaults: 64 MiB total segments, 7 days, 1 MiB segments, 4 MiB pending ingestion.
+The embedding options `maxBytes`, `maxAgeMs`, `segmentBytes`, `maxPendingBytes`
+configure these quotas. Time-expired records are immediately unreadable; expired
+segments are removed on startup, writes, and periodic maintenance (at most 60 s).
+Rotation only removes journal-owned segments; it preserves the high watermark.
+
+Writes batch within an event-loop tick, asynchronously append with Bun, and finish
+before either legacy fan-out or resumable delivery. Default `fsync:"none"` means
+OS write completion, not a power-loss guarantee; `fsync:"batch"` additionally
+syncs every written segment and identity file before delivery. It is not a promise
+of directory-entry durability during sudden power loss. Storage errors are logged,
+not swallowed, and legacy delivery continues without a false replay guarantee.
+Private `provider.remote.request` frames, relay credentials, and provider-editor
+answer events (which can carry unlabelled keys) are never journaled. Public records
+use credential-field and known-token-pattern redaction without changing legacy
+payloads. Non-provider question-response records retain the id but redact all answers,
+since arbitrary free-form replies may themselves contain credentials. Journal data is private state, not a substitute for Hub authentication or
+project/session access checks.
+
+### Hub identity, shared sessions and attributed steering (additive v35)
+
+A Xerxes Hub forwards actions from several authenticated people (and the XERXES
+supervisor agent) to one daemon. Everything below is additive and capability-gated;
+a request without `hub_auth` behaves exactly as before. `initialize` and
+`runtime.status` advertise `principal_auth_v1_supported`,
+`collaboration_v1_supported` and `attributed_steer_supported` (all `true`). A Hub
+must not send collaborative mutations to a daemon that lacks them.
+
+**Enrollment (explicit trust).** A daemon trusts a Hub only after its Ed25519 public
+key is pinned in `<daemon state>/hub-enrollments.json` (mode 0600):
+`{ version: 1, hubs: [{ hub_id, public_key_pem, fingerprint, workspace_ids, project_dirs, enrolled_at }] }`.
+Enrollment happens only from a local, non-hub connection (these methods are refused
+for a request that carries `hub_auth`) or through the CLI-usable functions
+`enrollHub` / `revokeHub` / `listHubEnrollments` in `security/hubIdentityVerifier.ts`.
+A changed key for an existing `hub_id` is refused unless `replace: true`; a corrupt
+file is never overwritten.
+
+| Method        | Params                                                                  | Result                    | Notes |
+| ------------- | ----------------------------------------------------------------------- | ------------------------- | ----- |
+| `hub.enroll`  | `{ hub_id, public_key_pem, project_dirs?, workspace_ids?, all_projects?, replace? }` | `{ ok, hub }` or `{ ok:false, error }` | Pins a Hub key. `project_dirs` defaults to the daemon project. `all_projects: true` pins the whole machine (stored as `project_dirs: ["/"]`, merged with any other dirs given); a non-boolean value is refused. Local only. `hub` carries `all_projects: boolean`. |
+| `hub.list`    | `{}`                                                                    | `{ ok, hubs }`            | Pinned keys and fingerprints (compare with the Hub's pairing QR). Each row adds `all_projects: true` when `/` is pinned. |
+| `hub.revoke`  | `{ hub_id }`                                                            | `{ ok, revoked }`         | Removes a pin. |
+
+**Supervisor model access (`hub_models_v1`).** `runtime.status` and `initialize`
+advertise `hub_models_v1_supported: true`. Three session-less methods let the Hub's
+XERXES supervisor use this machine's provider profiles without ever holding a
+credential. Each is callable by a local unsigned client, or by a hub-signed request
+whose claims carry the scope `supervisor.model` (an agent principal may hold it; it is
+inside the agent ceiling). They never return an API key, token or base URL, and error
+messages are scrubbed of both.
+
+| Method               | Params | Result | Notes |
+| -------------------- | ------ | ------ | ----- |
+| `hub.models.catalog` | `{}` | `{ ok:true, hostname, profiles:[{ name, label, provider, default_model, signs_in }] }` | One row per stored provider profile. |
+| `hub.models.options` | `{ profile, model? }` | `{ ok:true, profile, provider, models:[{ id, label? }], models_note?, model, efforts:[{ effort, description? }], default_effort: string \| null }` | `models` comes from the daemon's model discovery; when listing fails it falls back to the configured model (plus models cached on the profile) and sets `models_note`. `model` is the requested model or the profile's. `efforts` are the selectable reasoning levels, resolved as `reasoning_levels` does. Unknown profile: `{ ok:false, code:"unknown_profile", error }`. |
+| `hub.model.complete` | `{ profile, model, effort?, system, messages, tools, max_tokens? }` | `{ ok:true, text, tool_calls:[{ id, name, arguments }], usage:{ input_tokens, output_tokens } }` | One non-streaming completion through the profile's provider client. `messages` are chat messages (`system`/`user`/`assistant` with optional `tool_calls`/`tool` with `tool_call_id`), `tools` are `{ type:"function", function:{ name, description, parameters } }`; `arguments` in the result is a JSON string. Bounds: request JSON at most 1 MiB, `max_tokens` 1–8192 (default 2048), at most 2 concurrent completions, 120 s timeout; the completion is aborted when the connection closes. Failures: `{ ok:false, code, error }` with `code` one of `unknown_profile`, `invalid_request` (oversize, bad shape, unsupported `effort`, a model the profile cannot serve), `busy`, `provider_failed`, `timeout`. `effort` maps onto the same thinking request fields the turn loop uses (`off` sends none). |
+
+**`hub_auth` envelope.** `params.hub_auth` is the signed envelope of
+`security/hubAuthEnvelope.ts`. The daemon verifies, in order: structure and signature
+against the pinned key, time window (lifetime at most 5 minutes), method, `params_hash`,
+enrollment for the project and workspace id, that the signed `session_id` matches the
+targeted session, and nonce replay (bounded LRU). On failure the request is answered
+with JSON-RPC error code `-32001` and a message `hub_auth rejected (<reason>): ...`
+(reasons: `malformed`, `bad_signature`, `expired`, `not_yet_valid`, `wrong_method`,
+`params_mismatch`, `unknown_hub`, `hub_not_enrolled_for_project`,
+`hub_not_enrolled_for_workspace`, `replayed_nonce`, `session_mismatch`,
+`lifetime_too_long`, `enrollment_unavailable`). It never degrades to an anonymous
+human. `permission_response` and `question_response` bind the signed `session_id` to
+the interaction's own session instead of the connection's.
+
+**Scopes per method.** A verified request must hold the scope its method needs, else
+the error `hub_auth refused: ...` (code `-32001`):
+`turn.submit`/`prompt` → `session.submit`; `turn.steer`/`steer`/`subagent.steer` →
+`session.steer`; `turn.cancel`/`cancel`/`subagent.interrupt` → `session.cancel`;
+`permission_response` → `permission.respond`; `question_response` → `question.respond`;
+`set_model` → `session.configure`; `session.goal` mutations → `goal.write` (a bare
+`/goal` or `milestone` read needs `session.read`); reads (`session.open`,
+`session.history`, `session.active_list`, `session.list`, `goal.inspect`,
+`learning.list`, `runtime.status`, `subagent.inspect`, `events.*`) → `session.read`;
+`hub.models.catalog`/`hub.models.options`/`hub.model.complete` → `supervisor.model`.
+Everything else (slash and shell routes, permission-mode changes, plugin/provider
+management, `goal.decision`, `learning.review`, enrollment) is refused for every hub
+principal. A principal of kind `agent` can never use a human-only route
+(`permission_response`, `question_response`, `learning.review`) and its claimed scopes
+are clamped to the agent ceiling.
+
+**Authorship.** The daemon records authorship only from the verified context, never
+from params. A `VerifiedHubContext` is
+`{ hub_id, workspace_id, principal_kind, principal_id, user_id?, device_id?, display_name, requested_by?, confirmed_by?, scopes, human_action_id?, request_id, session_id? }`.
+User messages and steers it produces carry the provider-omitted transcript field
+
+```ts
+xerxes_actor: {
+  principal_kind: "user" | "agent", principal_id: string,
+  user_id?: string, device_id?: string, display_name: string,
+  action_id: string,               // human_action_id when signed, else request_id
+  submission_id?: string, interaction_id?: string,
+  action_kind: "submit" | "steer" | "continuation" | "permission" | "question",
+  recorded_at: string,             // ISO-8601
+  requested_by?: string, confirmed_by?: string   // agent principals: attribution only
+}
+```
+
+and the tool message that a permission/question decision unblocked carries
+`xerxes_interaction: [{ interaction_id, kind, decision, decided_by: xerxes_actor, revision, recorded_at, tool_name?, tool_call_id? }]`.
+Free-text question answers are never copied into the record. Both fields are
+**stripped from every provider request** (`withoutXerxesAnnotations`) and survive save,
+reload, compaction archive, fork and export. Turns submitted by an `agent` principal
+use `origin: "agent"` (`TurnOrigin` and `HarnessOrigin` gain `agent`): `goal_turn_human`
+is `false`, so the human-only guards (goal, lesson, reflection, `learning.review`,
+monitor/process/schedule tools) refuse it. `turn_begin` additively carries
+`author: { display_name, principal_kind, principal_id, user_id? }` for hub turns.
+
+**Admission.** `turn.submit` takes optional `if_busy: "refuse" | "steer"` (default
+`refuse`, today's behavior, answering `{ ok:false, code:"turn-active" }`). Hub and
+`if_busy` callers receive additive result fields:
+
+```ts
+{ ok: true, submission_id?, disposition: "started" }                       // idle
+{ ok: true, submission_id?, disposition: "queued_steer",
+  queue_sequence: number, steer_id: string, turn_id?: string }             // busy + if_busy:"steer"
+{ ok: true, ..., duplicate: true }          // repeat of a recorded submission: the recorded outcome
+{ ok: false, code: "submission-conflict", error: "submission-conflict" }   // same id, different content
+{ ok: false, code: "steer-queue-full", error: "steer-queue-full" }
+```
+
+Idempotency is namespaced by session + principal + `submission_id` and stored in
+`session.metadata.xerxes_collaboration` (saved with the session). `turn.steer` from a hub
+principal takes the same optional `submission_id` and returns `disposition:"queued_steer"`
+when a turn is busy, or `"appended"` when idle (an idle steer never starts work).
+
+**Durable steer queue.** Queued steers are a FIFO whose order (`queue_sequence`) the
+daemon assigns, persisted in `session.metadata.xerxes_collaboration` so they survive a
+daemon restart (images are not persisted; a recovered steer keeps its text). They are
+applied at the next provider/tool boundary and rendered to the model as
+`[steer from <display_name>]` (legacy unattributed steers keep `[steer from user]`).
+If the turn settles first, ONE serialized continuation runs with the waiting steers
+(non-human if any author is an agent). An explicit `turn.cancel` marks the remaining
+queued steers `cancelled` instead of restarting work, and adds
+`cancelled_steers: number` to its result.
+
+**Event `steer_status`** (journaled through the normal choke point and broadcast to
+the session's observers):
+`{ session_id, steer_id, submission_id?, status: "queued" | "applied" | "cancelled", queue_sequence, author: { display_name, principal_kind, principal_id, user_id? }, turn_id?, reason? }`.
+
+**Interaction arbitration.** `permission_response` and `question_response` accept
+optional `interaction_revision` (an integer; a pending card is revision `1`, a resolved
+one `2`). The first answer wins atomically. A later answer from a hub principal (or a
+caller that sent `interaction_revision`) gets
+
+```ts
+{ ok: false, code: "interaction-already-resolved", error: "interaction-already-resolved",
+  resolution: { interaction_id, kind, decided_by: string, decision, interaction_revision,
+                recorded_at, actor?: { display_name, principal_kind, principal_id, user_id? } } }
+```
+
+and a stale `interaction_revision` gets `code:"interaction-revision-mismatch"`. Legacy
+callers keep the plain `{ ok:false }`. For hub answers, `approval_response` and
+`question_response` additively carry `decision`, `resolved_by`, `decided_by` and
+`interaction_revision`, so every observer sees who decided what.
+
+**Viewer redaction.** A principal without `permission.respond` receives pending
+`approval_request` / `question_request` frames (in `events.subscribe` / `events.read`
+pages, `event_batch` and `pending_interactions`) in a redacted form,
+`{ id, request_id?, tool_call_id?, session_id?, redacted: true, interaction_revision: 1 }`
+(questions add `questions: []`): they can see something is pending but never the command,
+inputs or question text.
+
+**Shared sessions.** The first hub participant of a session is its owner (or the local
+human when the session already had a conversation); any other participant marks the
+session `shared`, permanently. In a shared session the remembered `ALWAYS` approvals of
+`security/approvals.ts` never authorize a call (neither grants nor denials) and an
+"always" answer is remembered only for that session; once/session grants made inside the
+session are still honored.

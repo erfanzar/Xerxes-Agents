@@ -6,10 +6,10 @@
   "description": "Bun-native TypeScript runtime for Xerxes.",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "bun run build:runtime && bun run build:ui",
+    "build": "bun run build:runtime && bun run build:ui && bun run build:mobile",
     "build:runtime": "bun build ./src/cli.ts --target=bun --minify --outdir ./dist && bun ./scripts/copyBundledSkills.ts && bun ./scripts/writeBuildId.ts",
     "build:ui": "bun ./scripts/buildTui.ts && bun ./scripts/verifyTuiBuild.ts",
-    "check": "bun run check:image-catalog && bun run check:runtime && bun run check:ui && bun run check:desktop && bun run check:vscode",
+    "check": "bun run check:image-catalog && bun run check:runtime && bun run check:ui && bun run check:desktop && bun run check:vscode && bun run check:mobile",
     "check:image-catalog": "bun ./scripts/generateImageModels.ts --check",
     "check:runtime": "bunx tsc --noEmit -p tsconfig.json",
     "check:ui": "bunx --bun --no-install tsc --noEmit -p tsconfig.ui.json",
@@ -30,7 +30,7 @@
     "start": "bun ./src/cli.ts",
     "start:ui": "bun run build:ui && bun ./dist/ui/entry.js",
     "swarm": "bun ./scripts/swarmIntegration.ts",
-    "test": "bun run test:runtime && bun run test:ui",
+    "test": "bun run test:runtime && bun run test:ui && bun run test:mobile",
     "test:runtime": "bun test ./test",
     "test:ui": "bunx --bun --no-install vitest run --config vitest.ui.config.ts",
     "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts",
@@ -40,7 +40,10 @@
     "publish:vscode": "bun scripts/publishVscode.ts",
     "desktop": "bun run build:desktop && bun scripts/runDesktop.ts",
     "check:desktop": "bunx --bun --no-install tsc --noEmit -p tsconfig.desktop.json",
-    "check:vscode": "bunx --bun --no-install tsc --noEmit -p tsconfig.vscode.json"
+    "check:vscode": "bunx --bun --no-install tsc --noEmit -p tsconfig.vscode.json",
+    "check:mobile": "bunx --bun --no-install tsc --noEmit -p tsconfig.mobile.json",
+    "build:mobile": "bun scripts/buildMobile.ts",
+    "test:mobile": "bunx --bun --no-install vitest run --config vitest.mobile.config.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "3.1048.0",

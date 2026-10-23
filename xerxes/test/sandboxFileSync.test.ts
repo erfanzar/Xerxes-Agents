@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,27 +18,38 @@ import {
 import type { FileSyncCopyRequest, FileSyncPorts, FileSyncStatRequest } from '../src/security/index.js'
 
 test('credential files stay inside caller-supplied roots and environment selection is explicit', () => {
-  const registry = new CredentialFileRegistry({
-    allowedRoots: ['/host/credentials', '/home/agent/.config'],
-    baseDirectory: '/host/credentials',
-    homeDirectory: '/home/agent',
-  })
+  // Private temp roots, never /home/...: on macOS /home is an autofs mount, and the
+  // registry's ancestor lstat there can block the whole test process for minutes.
+  const sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'xerxes-credential-roots-')))
+  const credentials = join(sandbox, 'host', 'credentials')
+  const home = join(sandbox, 'home', 'agent')
+  try {
+    const registry = new CredentialFileRegistry({
+      allowedRoots: [credentials, join(home, '.config')],
+      baseDirectory: credentials,
+      homeDirectory: home,
+    })
 
-  expect(registry.register('aws/credentials')).toBe('/host/credentials/aws/credentials')
-  expect(registry.register('~/.config/service/token')).toBe('/home/agent/.config/service/token')
-  expect(registry.allowedPaths()).toEqual([
-    '/home/agent/.config/service/token',
-    '/host/credentials/aws/credentials',
-  ])
-  expect(registry.isAllowed('/host/credentials/aws/credentials')).toBeTrue()
-  expect(registry.isAllowed('../outside')).toBeFalse()
-  expect(registry.unregister('aws/credentials')).toBeTrue()
-  expect(registry.isAllowed('aws/credentials')).toBeFalse()
-  expect(() => registry.register('/etc/shadow')).toThrow(CredentialPathError)
-  expect(() => new CredentialFileRegistry({
-    allowedRoots: ['/host/credentials'],
-    baseDirectory: '/host/credentials',
-  }).register('~/secret')).toThrow(CredentialPathError)
+    expect(registry.register('aws/credentials')).toBe(join(credentials, 'aws', 'credentials'))
+    expect(registry.register('~/.config/service/token')).toBe(join(home, '.config', 'service', 'token'))
+    expect(registry.allowedPaths()).toEqual([
+      join(credentials, 'aws', 'credentials'),
+      join(home, '.config', 'service', 'token'),
+    ].sort())
+    expect(registry.isAllowed(join(credentials, 'aws', 'credentials'))).toBeTrue()
+    expect(registry.isAllowed('../outside')).toBeFalse()
+    expect(registry.unregister('aws/credentials')).toBeTrue()
+    expect(registry.isAllowed('aws/credentials')).toBeFalse()
+    expect(() => registry.register('/etc/shadow')).toThrow(CredentialPathError)
+    expect(() => new CredentialFileRegistry({
+      allowedRoots: [credentials],
+      baseDirectory: credentials,
+    }).register('~/secret')).toThrow(CredentialPathError)
+    registry.clear()
+    expect(registry.allowedPaths()).toEqual([])
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true })
+  }
 
   const inheritedEnvironment = Object.create({ INHERITED_TOKEN: 'must-not-leak' }) as Record<string, string>
   inheritedEnvironment.EXPLICIT_TOKEN = 'visible'
@@ -47,9 +59,6 @@ test('credential files stay inside caller-supplied roots and environment selecti
   )
   expect(selected).toEqual({ EXPLICIT_TOKEN: 'visible' })
   expect(Object.isFrozen(selected)).toBeTrue()
-
-  registry.clear()
-  expect(registry.allowedPaths()).toEqual([])
 })
 
 test('credential registry rejects symlink escapes from an allowed root', async () => {

@@ -256,14 +256,48 @@ export function parseBackdrop(value: unknown): Backdrop {
 
 const PAINTED = new Set<string>()
 
-/** Paint the background and every token it drives; `none` restores the stock theme. */
+/** The colour tokens Neo takes from a background: surfaces and accent, never glass, blur or the picture. */
+const NEO_COLOUR_TOKENS = [
+  '--x-backdrop', '--x-sunken', '--x-screen', '--x-chrome', '--x-card', '--x-selected', '--x-chip',
+  '--mac-toolbar', '--glass-navigation', '--x-seam', '--x-popover',
+  '--x-accent', '--x-focus', '--x-working', '--x-accent-soft', '--x-on-accent', '--x-inverse',
+] as const
+
+/** What the Background setting does under Neo, for the background now chosen (shown in Settings). */
+export function neoBackdropNote(kind: Backdrop['kind']): string {
+  if (kind === 'image') return 'Neo style: the picture is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see the image.'
+  if (kind === 'gradient') return 'Neo style: the gradient is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see it.'
+  if (kind === 'transparent') return 'Neo style: Neo has no see-through window, so Transparent has no effect. Pick an image or gradient to use its colours, or switch Style to Classic.'
+  return 'Neo style: Neo never shows a background. Pick an image or gradient and only its colours (accent, surface tint, light or dark) are used.'
+}
+
+export function neoColourTokens(tokens: Readonly<Record<string, string>>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const name of NEO_COLOUR_TOKENS) if (tokens[name] !== undefined) out[name] = tokens[name]
+  // Overlays and dialogs are solid in Neo: the popover colour, not translucent glass.
+  const popover = tokens['--x-popover']
+  if (popover) { out['--glass-overlay'] = popover; out['--x-dialog'] = popover }
+  return out
+}
+
+/**
+ * Paint the background and every token it drives; `none` restores the stock theme.
+ *
+ * The Neo style is flat and solid by design: it never shows a picture, glass
+ * or blur. Under Neo a gradient or image lends only its COLOURS (surfaces,
+ * accent, light or dark), painted solid; a transparent window lends nothing.
+ * A colour theme applies in Neo as in Classic. The stored background is never
+ * changed, so Classic shows the picture again.
+ */
 export function applyBackdrop(backdrop: Backdrop, root: HTMLElement = document.documentElement, palette: Palette | undefined = loadPalette()): void {
+  const neo = root.getAttribute('data-style') === 'neo'
   for (const name of PAINTED) root.style.removeProperty(name)
   PAINTED.clear()
   root.style.removeProperty('--x-backdrop-paint')
+  root.removeAttribute('data-backdrop-colors')
   // macOS's blur behind the window is only turned off for clear transparent
   // glass; every other background keeps the native material (the page covers it).
-  if (typeof window !== 'undefined') window.xerxes?.setWindowBlur?.(!(backdrop.kind === 'transparent' && backdrop.systemBlur === false))
+  if (typeof window !== 'undefined') window.xerxes?.setWindowBlur?.(!(!neo && backdrop.kind === 'transparent' && backdrop.systemBlur === false))
   const paint = (tokens: Readonly<Record<string, string>>) => {
     for (const [name, value] of Object.entries(tokens)) {
       root.style.setProperty(name, value)
@@ -276,6 +310,22 @@ export function applyBackdrop(backdrop: Backdrop, root: HTMLElement = document.d
   const variant = palette ? paletteVariant(palette, wanted) : undefined
   if (palette) root.setAttribute('data-palette', palette.name)
   else root.removeAttribute('data-palette')
+  if (neo) {
+    root.removeAttribute('data-backdrop')
+    trackBackdropImage(undefined)
+    // Fully solid and unblurred: only the background's colours survive.
+    const derived = backdrop.kind === 'gradient' || backdrop.kind === 'image'
+      ? deriveTheme({ ...backdrop, chat: 100, panels: 100, blur: 0 })
+      : undefined
+    root.setAttribute('data-theme', variant?.mode ?? derived?.mode ?? wanted)
+    if (derived) {
+      root.setAttribute('data-backdrop-colors', backdrop.kind)
+      paint(neoColourTokens(derived.tokens))
+    }
+    // A colour theme sits over the background's colours, as in Classic.
+    if (variant) paint(paletteTokens(variant.colors))
+    return
+  }
   if (backdrop.kind === 'none') {
     root.removeAttribute('data-backdrop')
     trackBackdropImage(undefined)

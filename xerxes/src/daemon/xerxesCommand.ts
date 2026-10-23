@@ -56,7 +56,9 @@ export async function listLearning(workspace: string, services?: LearningService
 }
 
 /** RPC and typed slash review are human boundaries; model tools retain their own authority gates. */
-export async function reviewLearning(params: Readonly<Record<string, unknown>>, workspace: string, services?: LearningServices, session?: DaemonSession): Promise<JsonRpcPayload> {
+export async function reviewLearning(params: Readonly<Record<string, unknown>>, workspace: string, services?: LearningServices, session?: DaemonSession, caller: { readonly principalKind: 'user' | 'agent' } = { principalKind: 'user' }): Promise<JsonRpcPayload> {
+  // An agent principal (the XERXES supervisor) can never review what Xerxes learned, whoever asked it to.
+  if (caller.principalKind === 'agent') return refusal('Learning review is a human-only action; agent principals cannot approve, reject or roll back.')
   if (!services) return refusal(UNAVAILABLE)
   const { target, id, action, reason } = params
   if (target !== 'proposal' && target !== 'lesson') return refusal('target must be proposal or lesson.')

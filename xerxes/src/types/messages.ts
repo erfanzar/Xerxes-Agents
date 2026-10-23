@@ -26,11 +26,71 @@ export interface SystemMessage {
   readonly content: MessageContent
 }
 
-/** Who wrote a user-role message that the human did not type. */
-export type HarnessOrigin = 'goal' | 'monitor' | 'schedule' | 'harness'
+/** Who wrote a user-role message that the human did not type. `agent` is a Hub agent principal (the XERXES supervisor). */
+export type HarnessOrigin = 'goal' | 'monitor' | 'schedule' | 'harness' | 'agent'
 
 export function isHarnessOrigin(value: unknown): value is HarnessOrigin {
-  return value === 'goal' || value === 'monitor' || value === 'schedule' || value === 'harness'
+  return value === 'goal' || value === 'monitor' || value === 'schedule' || value === 'harness' || value === 'agent'
+}
+
+export type XerxesActionKind = 'submit' | 'steer' | 'continuation'
+
+/**
+ * Provider-omitted authorship of a user message. Written only from a verified
+ * Hub identity context (never from request parameters) and never sent to a model.
+ */
+export interface XerxesActor {
+  readonly principal_kind: 'user' | 'agent'
+  readonly principal_id: string
+  readonly user_id?: string
+  readonly device_id?: string
+  readonly display_name: string
+  readonly action_id: string
+  readonly submission_id?: string
+  readonly interaction_id?: string
+  readonly action_kind: XerxesActionKind | 'permission' | 'question'
+  readonly recorded_at: string
+  /** Agent principals only: the humans who asked and confirmed. Attribution, never authority. */
+  readonly requested_by?: string
+  readonly confirmed_by?: string
+}
+
+export function isXerxesActor(value: unknown): value is XerxesActor {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return (record.principal_kind === 'user' || record.principal_kind === 'agent')
+    && typeof record.principal_id === 'string' && typeof record.display_name === 'string'
+    && typeof record.action_id === 'string' && typeof record.action_kind === 'string'
+    && typeof record.recorded_at === 'string'
+}
+
+/**
+ * Provider-omitted record of who decided one permission or question, stored on the
+ * tool message the decision unblocked. Free-text answers are never copied here.
+ */
+export interface XerxesInteractionRecord {
+  readonly interaction_id: string
+  readonly kind: 'permission' | 'question'
+  readonly decision: string
+  readonly decided_by: XerxesActor
+  readonly revision: number
+  readonly recorded_at: string
+  readonly tool_name?: string
+  readonly tool_call_id?: string
+}
+
+/** Transcript-annotation fields that must never reach a provider request. */
+export const PROVIDER_OMITTED_MESSAGE_FIELDS = ['xerxes_actor', 'xerxes_interaction'] as const
+
+/** The same array (and message objects) when nothing needs stripping, so legacy requests stay byte-identical. */
+export function withoutXerxesAnnotations<T extends object>(messages: readonly T[]): readonly T[] {
+  if (!messages.some(message => PROVIDER_OMITTED_MESSAGE_FIELDS.some(field => field in message))) return messages
+  return messages.map(message => {
+    if (!PROVIDER_OMITTED_MESSAGE_FIELDS.some(field => field in message)) return message
+    const copy = { ...message } as Record<string, unknown>
+    for (const field of PROVIDER_OMITTED_MESSAGE_FIELDS) delete copy[field]
+    return copy as unknown as T
+  })
 }
 
 export interface UserMessage {
@@ -50,6 +110,9 @@ export interface UserMessage {
    * rebuild of a stored message must carry it through.
    */
   readonly xerxes_compaction_summary?: true
+  /** Provider-omitted verified author (Hub attribution). Absent for legacy and local-human messages. */
+  readonly xerxes_actor?: XerxesActor
+  readonly xerxes_interaction?: readonly XerxesInteractionRecord[]
 }
 
 export interface AssistantMessage {
@@ -72,6 +135,8 @@ export interface ToolMessage {
   readonly name?: string
   readonly is_error?: boolean
   readonly tool_call_id: string
+  /** Provider-omitted record of the human decision that unblocked this call. */
+  readonly xerxes_interaction?: readonly XerxesInteractionRecord[]
 }
 
 export type ChatMessage = AssistantMessage | SystemMessage | ToolMessage | UserMessage

@@ -8,6 +8,11 @@
  * API with the same validation. Everything crossing is validated and cloned.
  */
 
+import {
+  COCKPIT_CHANNEL_PREFIX, COCKPIT_PROGRESS_EVENT, COCKPIT_SOCKET_EVENT, asCockpitProgress, asHubSocketEvent, isCockpitAction,
+  type CockpitProgress, type HubSocketEvent,
+} from './hubShared.js'
+
 /** How the bridge reaches its host: request/response by channel, and pushed events. */
 export interface BridgeTransport {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -119,6 +124,41 @@ export function createBridge(transport: BridgeTransport) {
     )
       return Promise.reject(new Error('Unknown remote action'))
     return transport.invoke('desktop:remote', action, cleanParams(params))
+  },
+  /**
+   * The Hub cockpit (Settings → Hub & phone, and the XERXES tab's sign-in). The
+   * action is checked here and again in main; results carry no credential.
+   */
+  hubCockpit(action: unknown, params: unknown = {}): Promise<unknown> {
+    if (!isCockpitAction(action)) return Promise.reject(new TypeError('Unknown Hub action'))
+    let clean: Record<string, unknown>
+    try {
+      clean = cleanParams(params)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    // One channel per action: hub.cockpit.status, hub.cockpit.link, hub.cockpit.pair, ...
+    return transport.invoke(COCKPIT_CHANNEL_PREFIX + action, clean)
+  },
+  /** Frames and state changes of the Hub socket that main bridges for this page. */
+  onHubSocket(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (value: unknown): void => {
+      const event = asHubSocketEvent(value)
+      if (event === undefined) return
+      try { (handler as (event: HubSocketEvent) => void)(event) } catch { /* a renderer fault must not break the bridge */ }
+    }
+    return transport.on(COCKPIT_SOCKET_EVENT, listener)
+  },
+  /** One line of progress while `Link this Mac` runs. */
+  onHubProgress(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (value: unknown): void => {
+      const progress = asCockpitProgress(value)
+      if (progress === undefined) return
+      try { (handler as (progress: CockpitProgress) => void)(progress) } catch { /* a renderer fault must not break the bridge */ }
+    }
+    return transport.on(COCKPIT_PROGRESS_EVENT, listener)
   },
   call<T = Record<string, unknown>>(method: unknown, params?: unknown): Promise<T> {
     if (typeof method !== 'string' || !METHOD.test(method)) {

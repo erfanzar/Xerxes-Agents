@@ -20,18 +20,26 @@ test('changing the text size in one view never puts back the theme another view 
     saveAppearance({ theme: 'light' })
     // A second view, still showing dark, changes only the font.
     saveAppearance({ font: '15' })
-    expect(loadAppearance()).toEqual({ theme: 'light', font: '15' })
+    // Never chose a style: Neo, the default.
+    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'neo' })
     saveAppearance({ theme: 'system' })
-    expect(loadAppearance()).toEqual({ theme: 'system', font: '15' })
+    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'neo' })
+    // The style is its own field: switching it keeps theme and font.
+    saveAppearance({ style: 'classic' })
+    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'classic' })
   })
 })
 
 test('applying a stored choice sets the page attributes, and system hands the theme back', () => {
   const attributes = new Map<string, string>()
   const root = { setAttribute: (k: string, v: string) => { attributes.set(k, v) }, removeAttribute: (k: string) => { attributes.delete(k) } }
-  applyAppearance({ theme: 'dark', font: '13' }, root)
+  applyAppearance({ theme: 'dark', font: '13', style: 'classic' }, root)
+  // Classic stamps no data-style, so every Classic rule sees the page it always did.
   expect(Object.fromEntries(attributes)).toEqual({ 'data-font': '13', 'data-user-theme': 'dark', 'data-theme': 'dark' })
-  applyAppearance({ theme: 'system', font: '11' }, root)
+  applyAppearance({ theme: 'dark', font: '13', style: 'neo' }, root)
+  expect(attributes.get('data-style')).toBe('neo')
+  applyAppearance({ theme: 'system', font: '11', style: 'classic' }, root)
+  expect(attributes.has('data-style')).toBe(false)
   expect(attributes.has('data-user-theme')).toBe(false)
   expect(attributes.get('data-font')).toBe('11')
 })

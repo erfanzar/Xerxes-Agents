@@ -35,6 +35,7 @@ import { isVscodeHost } from './host.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
+import { SupervisorPage } from './SupervisorPage.js'
 import { parseGoal } from './goalText.js'
 import { AppUpdatePrompt } from './AppUpdatePrompt.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
@@ -182,7 +183,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // list is a drawer over the conversation: picking a task closes it.
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
   const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
-  const [page, setPage] = useState<'agents' | 'extensions' | 'artifacts' | null>(null)
+  const [page, setPage] = useState<'agents' | 'xerxes' | 'extensions' | 'artifacts' | null>(null)
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
   // Git sits in the rail like the others; only its expanded diff view takes the window.
@@ -201,7 +202,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
-    else if (next === 'agents' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
+    else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null); store.closeLearning() }
     else setPanel(next)
   }
@@ -657,7 +658,12 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 
 // ── Sidebar ─────────────────────────────────────────────────────────────
 
-function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
+/** Tasks, Agents and XERXES: the three sidebar destinations. */
+export function SidebarViews({ page, open }: { page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null; open: (panel: DesktopPanel) => void }): ReactElement {
+  return <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button><button aria-pressed={page === 'xerxes'} className={page === 'xerxes' ? 'is-selected' : ''} onClick={() => open('xerxes')}>XERXES</button></div>
+}
+
+function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
   const [filter, setFilter] = useState('')
@@ -711,7 +717,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions'
         <div className="sidebar-wordmark" aria-label="Xerxes">XERXES</div>
         {/* `page !== 'agents'` lit Sessions while Skills & tools or
             Artifacts was open, so two destinations claimed to be current. */}
-        <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button></div>
+        <SidebarViews page={page} open={open} />
         <button
           className="newchat"
           disabled={!online}
@@ -845,7 +851,7 @@ function SessionCell({
 
 
 
-function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 'artifacts' | null }): ReactElement {
+function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
   const changes = snap.changes
@@ -872,7 +878,8 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'extensions' | 
         {!chrome.inspectorOpen && <WorkspaceTools snap={snap} inspectorOpen={false} />}
       </header>
 
-      {page && <DesktopPage panel={page} snap={snap} />}
+      {page === 'xerxes' && <SupervisorPage />}
+      {page && page !== 'xerxes' && <DesktopPage panel={page} snap={snap} />}
       <div className="conversation-surface" hidden={page !== null}>
       {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
       {snap.tab === 'activity' && <Stream snap={snap} />}

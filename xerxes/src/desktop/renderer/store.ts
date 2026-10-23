@@ -902,7 +902,8 @@ export class Store {
   private lastUser = ''
   private preparingSubmissions = new Map<string, object>()
   private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
-  private pendingSteers = new Map<string, { session: string; text: string; shown: boolean; echoed: boolean }>()
+  /** `images` are the data URLs shown with the message, whichever path shows it first. */
+  private pendingSteers = new Map<string, { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean }>()
   private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
@@ -1318,13 +1319,17 @@ export class Store {
     if (!cleaned && !images.length) return false
     const sessionKey = this.sessionKey
     const steerId = crypto.randomUUID()
-    const pending = { session: sessionKey, text: cleaned, shown: false, echoed: false }
+    // The daemon's steer_input echo can land before this call returns, and the
+    // echo carries only an image count. Keep the pictures with the pending
+    // steer so whichever path shows the message shows them too.
+    const shownImages = images.map(image => `data:${image.mediaType};base64,${image.data}`)
+    const pending = { session: sessionKey, text: cleaned, images: shownImages, shown: false, echoed: false }
     this.pendingSteers.set(steerId, pending)
     try {
       const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId, ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
-          if (!pending.shown) { this.builder.pushUser(cleaned, false, images.map(image => `data:${image.mediaType};base64,${image.data}`)); pending.shown = true }
+          if (!pending.shown) { this.builder.pushUser(cleaned, false, shownImages); pending.shown = true }
           if (this.frame.turnActive) {
             this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
             this.patch({ queue: this.queue })
@@ -4031,7 +4036,7 @@ export class Store {
         const pending = id ? this.pendingSteers.get(id) : [...this.pendingSteers.values()].find(item => item.session === this.sessionKey && item.text === content && !item.echoed)
         if (pending) pending.echoed = true
         if (!pending?.shown) {
-          this.builder.pushUser(content)
+          this.builder.pushUser(content, false, pending?.images ?? [])
           if (pending) pending.shown = true
           this.notify()
         }

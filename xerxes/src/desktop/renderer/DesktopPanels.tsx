@@ -47,6 +47,7 @@ import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
 export type DesktopPanel =
   | 'artifacts'
   | 'agents'
+  | 'xerxes'
   | 'extensions'
   | 'schedules'
   | 'activity'
@@ -122,6 +123,7 @@ function Empty({ children }: { children: ReactNode }) {
 
 /** Durable destinations share the shell and never replace the composer. */
 export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 'artifacts'; snap: Snapshot }): ReactElement {
+  // 'xerxes' is rendered by SupervisorPage in App.tsx, not here.
   const close = useDesktopNavigation()
   return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "")} aria-label={panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}>
     {/* A full-page destination had no way out of itself: no close button,
@@ -209,6 +211,7 @@ export function DesktopSheet({
   const names = {
     artifacts: 'Artifacts',
     agents: 'Specialists',
+    xerxes: 'XERXES',
     extensions: 'Skills & tools',
     schedules: 'Scheduled jobs',
     activity: 'Activity',

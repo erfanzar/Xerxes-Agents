@@ -155,10 +155,32 @@ export function encodeMediaBase64(value: Uint8Array): string {
   return Buffer.from(value).toString('base64')
 }
 
+/** At most this many `;name=value` parameters are accepted on a media type. */
+const MAX_MEDIA_TYPE_PARAMETERS = 4
+const MEDIA_TYPE_PARAMETER = /^[a-z0-9_.-]+=(?:[a-z0-9_.+-]+(?:,[a-z0-9_.+-]+)*|"[a-z0-9_.+, -]*")$/
+
+/**
+ * Validate a media type and return its bare `type/subtype`.
+ *
+ * Browsers report parameterized types such as `audio/webm;codecs=opus`. The
+ * parameters are checked against a strict token grammar (so nothing that could
+ * smuggle a header or a second type survives) and then dropped: providers key
+ * on the file name and bare type, and the returned value is safe to place in a
+ * multipart part header.
+ */
 export function requiredMediaType(value: string, prefix: 'audio/' | 'image/', field: string): string {
-  const normalized = value.trim().toLowerCase()
+  const [head = '', ...parameters] = value.split(';')
+  const normalized = head.trim().toLowerCase()
   if (!normalized.startsWith(prefix) || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(normalized)) {
     throw new ValidationError(field, `must be a valid ${prefix} media type`, value)
+  }
+  if (parameters.length > MAX_MEDIA_TYPE_PARAMETERS) {
+    throw new ValidationError(field, 'has too many media type parameters', value)
+  }
+  for (const parameter of parameters) {
+    if (!MEDIA_TYPE_PARAMETER.test(parameter.trim().toLowerCase())) {
+      throw new ValidationError(field, `has an invalid media type parameter; expected name=value`, value)
+    }
   }
   return normalized
 }

@@ -246,6 +246,7 @@ const HELP_GROUPS: readonly {
       ["xerxes capability register|unregister|list|diff --id <id>", "manage capability manifests"],
       ["xerxes telemetry record|list|benchmark|inject", "record events, benchmark, or inject failures"],
       ["xerxes status [--directory <dir>]", "show subsystem health snapshot"],
+      ["xerxes hub [run|start|stop|restart|status|workspaces]", "manage the independent workspace Hub"],
       ["xerxes channels list", "show supported channel gateways"],
       ["xerxes sandbox status", "report local sandbox availability"],
     ],
@@ -443,6 +444,9 @@ if (argument === "--help" || argument === "-h") {
 } else if (argument === "--version" || argument === "-v" || argument === "-V") {
   console.log(version);
   process.exit(0);
+} else if (argument === "hub") {
+  const { runHubCli } = await import("./hub/cli.js");
+  process.exit(await runHubCli(argumentsAfterCommand));
 } else if (argument === "skill") {
   process.exit(await runBundledSkillCli(argumentsAfterCommand));
 } else if (argument === "auth") {
@@ -2096,13 +2100,13 @@ function daemonRuntime(
     addMcpToolsToBuiltinAgents(agentDefinitions, mcpTools);
     addLspToolToBuiltinAgents(agentDefinitions, lspManager);
     if (host.modelInventory) addModelInventoryToBuiltinAgents(agentDefinitions);
+    // session_search and the lesson tools are registered above for every
+    // session; without this no built-in agent could see them.
+    addLearningToolsToBuiltinAgents(agentDefinitions, MODEL_FACING_LEARNING_TOOLS);
     // Installed plugin tools (plugin_*) reach the shipped full-access agents;
     // the main-session profiles may also manage plugins, with approval.
     addPluginToolsToBuiltinAgents(agentDefinitions, { manage: host.managedPlugins !== undefined });
     const llm = nativeConnection ? createLlmClient(connection.model, {
-    // session_search and the lesson tools are registered above for every
-    // session; without this no built-in agent could see them.
-    addLearningToolsToBuiltinAgents(agentDefinitions, MODEL_FACING_LEARNING_TOOLS);
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),

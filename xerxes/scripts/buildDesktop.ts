@@ -103,7 +103,7 @@ async function buildDesktop(): Promise<void> {
     'utf8',
   )
   await writeFile(join(rendererOutput, 'theme.css'), themeStylesheet(), 'utf8')
-  for (const asset of ['index.html', 'app.css', 'atelier.css']) {
+  for (const asset of ['index.html', 'app.css', 'atelier.css', 'neo.css']) {
     await cp(join(packageDirectory, 'src', 'desktop', 'renderer', asset), join(rendererOutput, asset))
   }
   // Bundled background artwork (Settings → General → Background); CSP img-src 'self' covers it.

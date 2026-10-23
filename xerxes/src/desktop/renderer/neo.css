@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Xerxes Desktop: the Neo style (Settings ▸ General ▸ Style).
+
+   A terminal-console visual language modelled on px0.ai: one monospace
+   face for everything, square corners, 1px hairlines instead of shadows,
+   near-black (or paper) surfaces and ONE purple accent. Semantic colours
+   (done / failed / needs input) stay, so state still reads at a glance.
+
+   Rules for this sheet, enforced by test/desktopNeoStyle.test.ts:
+   - every selector starts with `:root[data-style='neo']` and carries
+     `:not(#neo)`. Classic stamps no data-style, so nothing here ever
+     reaches it; the id-level `:not(#neo)` lets Neo outrank the Classic
+     and Claude-layout rules without touching atelier.css or app.css.
+   - keyframes are prefixed `neo-` so they never replace a Classic one.
+
+   Colour themes apply in Neo (their tokens are painted inline over these).
+   A background never shows here: backdrop.ts paints only its colours, solid
+   and unblurred, and Classic shows the picture again. The accent washes and
+   lines below derive from --x-accent so they follow either.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tokens: dark (default and explicit) ──────────────────────────────
+   Every text token clears WCAG AA 4.5:1 on screen, card, chrome and
+   selected; the test measures them. Re-run it before changing a hex. */
+:root[data-style='neo']:not(#neo){
+  color-scheme:dark;
+  --x-backdrop:#06070b;--x-screen:#08090d;--x-chrome:#06070b;--x-card:#0d0e16;
+  --x-selected:#151726;--x-chip:#11131d;--x-sunken:#0a0b11;
+  --x-popover:#0d0e16;--x-dialog:#0b0c12;
+  --x-hairline:#c0caf517;--x-divider:#c0caf50e;--x-separator:#c0caf533;--x-seam:#c0caf517;
+  --x-title:#e4e8f7;--x-prose:#d2d7ec;--x-strong:#ffffff;--x-secondary:#9ba3c4;
+  --x-meta:#7a82a6;--x-caption:#7a82a6;--x-numeric:#9ba3c4;
+  --x-accent:#a78bfa;--x-accent-soft:#a78bfa14;--x-focus:#a78bfa;
+  --x-working:#a78bfa;--x-activity:#7aa2f7;--x-structure:#7dcfff;--x-fleet-blue:#7aa2f7;
+  --x-on-accent:#06070b;--x-inverse:#06070b;
+  --x-done:#9ece6a;--x-bridge:#9ece6a;
+  --x-failed:#f7768e;--x-danger:#f7768e;--x-failed-text:#f7a0b0;--x-failed-bg:#f7768e14;--x-failed-border:#f7768e40;
+  --x-needs:#ff9e64;--x-needs-text:#ffb38a;--x-needs-bg:#ff9e6414;--x-needs-border:#ff9e6440;
+  --x-diff-add:#9ece6a14;--x-diff-del:#f7768e14;
+  --x-user-bubble:color-mix(in srgb,var(--x-accent) 5%,transparent);
+  --x-menubar:#06070b;--x-menubar-edge:#c0caf517;--x-menubar-fg:#9ba3c4;--x-menubar-strong:#e4e8f7;--x-menubar-meta:#7a82a6;
+  /* Flat: no glass, no lit edges, no blur. */
+  --x-lit:transparent;--x-elev:none;
+  --mac-control:#c0caf50a;--mac-toolbar:#06070b;
+  --glass-navigation:#06070b;--glass-overlay:#0d0e16;--glass-edge:#c0caf533;--glass-highlight:transparent;
+  --glass-blur:none;--glass-control:none;--glass-shadow:none;
+  --mac-shadow:0 0 0 1px #c0caf517,0 60px 140px -60px #000000f2;
+  --grad:none;--accent-soft:#c0caf50a;
+  --neo-accent-line:color-mix(in srgb,var(--x-accent) 32%,transparent);--neo-grid:#c0caf509;
+  --neo-wash:color-mix(in srgb,var(--x-accent) 5%,transparent);
+  --neo-float:0 0 0 1px #c0caf517,0 60px 140px -60px #000000f2;
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  --sans:var(--mono);--prose:var(--mono);
+  --r-sm:0px;--r-md:0px;--r-lg:0px;
+}
+
+/* ── Tokens: light ("paper") ─────────────────────────────────────────── */
+:root[data-style='neo'][data-theme='light']:not(#neo){
+  color-scheme:light;
+  --x-backdrop:#f4f5f8;--x-screen:#fafbfc;--x-chrome:#f4f5f8;--x-card:#ffffff;
+  --x-selected:#e9ebf1;--x-chip:#eceef3;--x-sunken:#f0f1f5;
+  --x-popover:#ffffff;--x-dialog:#ffffff;
+  --x-hairline:#0b0d141a;--x-divider:#0b0d140f;--x-separator:#0b0d1438;--x-seam:#0b0d141a;
+  --x-title:#0b0d14;--x-prose:#22262f;--x-strong:#000000;--x-secondary:#454c5e;
+  --x-meta:#5f6779;--x-caption:#5f6779;--x-numeric:#454c5e;
+  --x-accent:#6d28d9;--x-accent-soft:#6d28d914;--x-focus:#6d28d9;
+  --x-working:#6d28d9;--x-activity:#0550ae;--x-structure:#0550ae;--x-fleet-blue:#0969da;
+  --x-on-accent:#ffffff;--x-inverse:#ffffff;
+  --x-done:#116329;--x-bridge:#116329;
+  --x-failed:#c21f2b;--x-danger:#c21f2b;--x-failed-text:#a40e26;--x-failed-bg:#cf222e0d;--x-failed-border:#cf222e33;
+  --x-needs:#953800;--x-needs-text:#7a2e00;--x-needs-bg:#9538000d;--x-needs-border:#95380033;
+  --x-diff-add:#1163291a;--x-diff-del:#cf222e12;
+  --x-menubar:#f4f5f8;--x-menubar-edge:#0b0d141a;--x-menubar-fg:#454c5e;--x-menubar-strong:#0b0d14;--x-menubar-meta:#5f6779;
+  --mac-control:#0b0d1408;--mac-toolbar:#f4f5f8;
+  --glass-navigation:#f4f5f8;--glass-overlay:#ffffff;--glass-edge:#0b0d1438;
+  --mac-shadow:0 0 0 1px #0b0d141a,0 50px 100px -50px #0b0d1459;
+  --accent-soft:#0b0d1408;
+  --neo-grid:#0b0d140b;
+  --neo-float:0 0 0 1px #0b0d141a,0 50px 100px -50px #0b0d1459;
+}
+
+/* ── Type: one mono face, everywhere ─────────────────────────────────
+   Sizes stay on --ui-* so Settings ▸ Interface text size still scales. */
+:root[data-style='neo']:not(#neo) body{font-family:var(--mono);font-feature-settings:"zero" 1;font-variant-ligatures:none}
+:root[data-style='neo']:not(#neo) :is(button,input,textarea,select){font-family:var(--mono)}
+:root[data-style='neo']:not(#neo) .atelier{
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  --sans:var(--mono);--prose:var(--mono);
+  --t-caption:500 calc(var(--ui-small) + .5px)/1.45 var(--mono);
+  --t-body:400 calc(var(--ui-font) + 1px)/1.55 var(--mono);
+  --t-title:700 calc(var(--ui-font) + 1px)/1.4 var(--mono);
+  --t-hero:700 calc(var(--ui-large) + 4px)/1.2 var(--mono);
+  --t-num:500 var(--ui-font)/1.4 var(--mono);
+  --t-prose:400 calc(var(--ui-font) + 2px)/1.65 var(--mono);
+  --card-radius:0px;
+  font-feature-settings:"zero" 1;font-variant-ligatures:none;
+}
+:root[data-style='neo']:not(#neo) .atelier :is(.msg,.agent-msg){font:400 calc(var(--ui-font) + 2px)/1.7 var(--mono)}
+:root[data-style='neo']:not(#neo) ::selection{background:color-mix(in srgb,var(--x-accent) 28%,transparent)}
+
+/* ── Geometry: square corners, hairlines, no shadows ─────────────────
+   Pseudo-elements are left alone: the round dots drawn with ::before
+   (execution spine, workspace status) keep their shape. */
+:root[data-style='neo']:not(#neo) .atelier *,
+:root[data-style='neo']:not(#neo) .runtime-popover{border-radius:0}
+/* Indicators that are round by meaning, not by decoration. */
+:root[data-style='neo']:not(#neo) .atelier :is(.agent-orb,.agent-orb canvas,.dot,.sess__dot,.railstatus__dot,.railrow__dot,.command-activity__dot,.offline__dot,.runtime-status__dot,.relaybadge__dot,.approval__dot,.wgroup__mark,.resumerow__dot,.welcome__sep,.usage-plan__dot,.studio-spinner,.acard__spin,.todo__icon,.railtodos__mark){border-radius:50%}
+:root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.palette-card,.composer-dock,.seg button,.btn,.chipbtn,.cchip,.provcard,.pcard,.appupdate__card,.activity-group){box-shadow:none}
+:root[data-style='neo']:not(#neo) ::-webkit-scrollbar-thumb{border-radius:0;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 14%,transparent)}
+:root[data-style='neo']:not(#neo) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:1px solid var(--x-accent);outline-offset:1px;border-radius:0}
+
+/* ── Surfaces ─────────────────────────────────────────────────────────
+   Flat panes separated by one hairline, as px0 lays out its IDE. */
+:root[data-style='neo']:not(#neo) .atelier .side{background:var(--x-chrome);backdrop-filter:none;border-right:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .top{background:var(--x-chrome);backdrop-filter:none;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .app__body,
+:root[data-style='neo']:not(#neo) .atelier .chat{background:var(--x-screen)}
+:root[data-style='neo']:not(#neo) .atelier .chat__head{border-bottom:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .desktop-rail{margin:0;border:0;border-left:1px solid var(--x-hairline);background:var(--x-chrome);overflow:hidden}
+:root[data-style='neo']:not(#neo) .panel-divider:hover,
+:root[data-style='neo']:not(#neo) .panel-divider:focus-visible{background:var(--x-accent)}
+
+/* ── Overlays: solid, square, one long soft drop ──────────────────── */
+:root[data-style='neo']:not(#neo) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop,.studio-sheet),
+:root[data-style='neo']:not(#neo) .runtime-popover{background:var(--x-popover);border:1px solid var(--x-separator);box-shadow:var(--neo-float);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-style='neo']:not(#neo) .atelier .modal__side{background:var(--x-chrome);border-right:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .modal__side :is(button[aria-pressed='true'],button.is-selected){background:var(--neo-wash);color:var(--x-accent);box-shadow:inset 2px 0 0 var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .modal__title{font-weight:800;letter-spacing:-.03em}
+
+/* ── Labels: small uppercase mono tags with wide tracking ─────────── */
+:root[data-style='neo']:not(#neo) .atelier :is(.field>label,.studio-label,.wgroup__cap,.railcard__title,.modal__side .cap,.composer-task-summary__label,.composer-queue__heading){font:600 var(--ui-small)/1.4 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--x-meta)}
+:root[data-style='neo']:not(#neo) .atelier .railcard__meta{font:var(--t-num);color:var(--x-numeric)}
+:root[data-style='neo']:not(#neo) .atelier kbd{border:1px solid var(--x-separator);background:var(--x-chip);color:var(--x-secondary);font-family:var(--mono)}
+
+/* ── Navigation: purple marks the current thing ────────────────────── */
+:root[data-style='neo']:not(#neo) .atelier .sess.is-current{background:var(--x-selected);box-shadow:inset 2px 0 0 var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .sess:hover:not(.is-current){background:var(--mac-control)}
+:root[data-style='neo']:not(#neo) .atelier .studio-nav.is-selected{background:var(--neo-wash);color:var(--x-accent);box-shadow:inset 2px 0 0 var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .tab.is-on{color:var(--x-title);border-bottom-color:transparent;box-shadow:inset 0 -1px 0 var(--x-accent)}
+
+/* ── Cards ─────────────────────────────────────────────────────────── */
+:root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.activity-group){background:var(--x-card);border:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .palette-card{background:var(--x-card);border:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier .palette-card:hover{border-color:var(--x-separator)}
+:root[data-style='neo']:not(#neo) .atelier .palette-card.is-on{border-color:var(--x-accent);box-shadow:inset 0 0 0 1px var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier :is(pre,.md pre){background:var(--x-sunken);border:1px solid var(--x-hairline)}
+
+/* ── Controls ──────────────────────────────────────────────────────── */
+:root[data-style='neo']:not(#neo) .atelier .btn{border:1px solid var(--x-separator);background:transparent;color:var(--x-title);font-weight:600}
+:root[data-style='neo']:not(#neo) .atelier .btn:hover:not(:disabled){border-color:var(--x-accent);color:var(--x-accent);background:var(--neo-wash)}
+:root[data-style='neo']:not(#neo) .atelier :is(.btn--solid,.studio-primary,.approval .btn--solid){background:var(--x-accent);color:var(--x-on-accent);border-color:var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){filter:brightness(1.08);color:var(--x-on-accent);background:var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .seg{background:transparent;border:1px solid var(--x-hairline);padding:2px}
+:root[data-style='neo']:not(#neo) .atelier .seg button.is-on{background:var(--neo-wash);color:var(--x-accent);box-shadow:inset 0 0 0 1px var(--neo-accent-line)}
+:root[data-style='neo']:not(#neo) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){background:var(--x-screen);border:1px solid var(--x-hairline);font-family:var(--mono)}
+:root[data-style='neo']:not(#neo) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']):focus{border-color:var(--x-accent);outline:none}
+:root[data-style='neo']:not(#neo) .atelier .switch{background:var(--x-selected);box-shadow:inset 0 0 0 1px var(--x-separator)}
+:root[data-style='neo']:not(#neo) .atelier .switch.is-on{background:var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .switch::after{border-radius:0;box-shadow:none}
+:root[data-style='neo']:not(#neo) .atelier .cchip:hover{background:var(--mac-control);color:var(--x-title)}
+:root[data-style='neo']:not(#neo) .atelier .cchip.is-on{color:var(--x-accent)}
+
+/* ── Conversation ─────────────────────────────────────────────────── */
+/* The activity group is a bordered card here, so its header and body need
+   inset padding or the text sits on the border. */
+:root[data-style='neo']:not(#neo) .atelier .activity-group>summary{padding:7px 12px}
+:root[data-style='neo']:not(#neo) .atelier .activity-group__body{margin:0;padding:6px 12px 10px;border:0;border-top:1px solid var(--x-hairline);border-radius:0;background:transparent}
+/* The user's turn is a quoted block with a purple rule, not a bubble. */
+:root[data-style='neo']:not(#neo) .atelier .msg--user{background:var(--x-user-bubble);border:0;box-shadow:inset 2px 0 0 var(--x-accent);padding:8px 14px}
+
+/* The composer reads as a prompt line: `❯` then the input. */
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap{background:var(--x-screen)}
+:root[data-style='neo']:not(#neo) .atelier .composer-dock{background:var(--x-card);border:1px solid var(--x-separator);transition:border-color 150ms ease,box-shadow 150ms ease}
+:root[data-style='neo']:not(#neo) .atelier .composer-dock:focus-within{border-color:var(--neo-accent-line);box-shadow:inset 2px 0 0 var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .composer__images{order:-1}
+:root[data-style='neo']:not(#neo) .atelier .composer::before{content:'❯';flex:none;align-self:flex-start;padding:5px 0;font:700 14px/1.45 var(--mono);color:var(--x-accent)}
+:root[data-style='neo']:not(#neo) .atelier .composer{padding:10px 10px 10px 14px;gap:10px}
+:root[data-style='neo']:not(#neo) .atelier .composer__input{font:400 14px/1.45 var(--mono);padding:5px 4px}
+/* The dock's border and accent edge already show focus; the generic Neo focus
+   ring drew a second box hard against the typed text. */
+:root[data-style='neo']:not(#neo) .atelier .composer__input:focus-visible{outline:none}
+:root[data-style='neo']:not(#neo) .atelier .composer__send{background:var(--x-accent);color:var(--x-on-accent)}
+:root[data-style='neo']:not(#neo) .atelier .composer__send:disabled{background:var(--x-selected);color:var(--x-meta);opacity:1}
+:root[data-style='neo']:not(#neo) .atelier .composer__send--stop{background:transparent;color:var(--x-title);box-shadow:inset 0 0 0 1px var(--x-separator)}
+
+/* ── Welcome: a heavy, tight mono wordmark on a faint grid, with a cursor ── */
+:root[data-style='neo']:not(#neo) .atelier .welcome{
+  background-image:linear-gradient(var(--neo-grid) 1px,transparent 1px),linear-gradient(90deg,var(--neo-grid) 1px,transparent 1px);
+  background-size:32px 32px;background-position:center center;
+}
+:root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark,
+:root[data-style='neo']:not(#neo) .atelier .sidebar-wordmark{font-family:var(--mono);font-weight:800;letter-spacing:-.06em;line-height:.94}
+:root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark::after{content:'_';color:var(--x-accent);animation:neo-blink 1.1s steps(1) infinite}
+@media (prefers-reduced-motion:reduce){
+  :root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark::after{animation:none}
+}
+@keyframes neo-blink{0%,100%{opacity:1}50%{opacity:0}}

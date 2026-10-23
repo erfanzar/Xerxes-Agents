@@ -953,7 +953,7 @@ export function journalContinuation(
  * after the journal recorded it: the turn outcome, the typed text of a
  * rewritten prompt, its harness origin, a subagent checkpoint flag.
  */
-const PRESENTATION_FIELDS = ['turn_outcome', 'text', 'displayText', 'origin', 'checkpoint_partial'] as const
+const PRESENTATION_FIELDS = ['turn_outcome', 'text', 'displayText', 'origin', 'checkpoint_partial', 'xerxes_actor', 'xerxes_interaction'] as const
 
 function withoutPresentation(message: RawMessage): RawMessage {
   const stripped = { ...message }

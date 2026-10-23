@@ -92,6 +92,7 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
     'researcher',
     'reviewer',
     'tester',
+    'xerxes-supervisor',
   ])
   expect(BUILTIN_AGENTS.get('coder')?.systemPrompt).toContain('coding specialist focused on software engineering implementation')
   expect(definitions.get('default')?.tools).toEqual(expect.arrayContaining([
@@ -694,6 +695,7 @@ test('bundled specs survive strict validation and every documented field still r
     'researcher',
     'reviewer',
     'tester',
+    'xerxes-supervisor',
   ])
   for (const definition of bundled.values()) {
     expect(AGENT_SPEC_ISOLATION_MODES as readonly string[]).toContain(definition.isolation)

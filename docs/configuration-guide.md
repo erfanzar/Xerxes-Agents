@@ -1,5 +1,140 @@
 # Configuration guide
 
+## Hub
+
+The Hub is a separate, opt-in Bun process. Running or stopping it does not start, stop,
+or cancel workspace daemons. Run `xerxes hub` (or `xerxes hub run`) in the foreground;
+use the following commands for a detached instance:
+
+```sh
+xerxes hub start
+xerxes hub status
+xerxes hub status --json
+xerxes hub restart
+xerxes hub stop
+```
+
+`start` reports success only after the Hub control socket answers a verified status
+request. Status distinguishes the process, control/HTTP listeners and workspace health.
+`run` also starts the HTTP/WebSocket server for phones, bound to loopback by default
+(`XERXES_HUB_HOST`, `XERXES_HUB_PORT`; wildcard and public addresses are refused, a
+tailnet address needs TLS). Expose it with Tailscale Serve or Cloudflare Tunnel and list
+the phone's exact origin in `XERXES_HUB_PUBLIC_ORIGINS`. Startup failures include the
+detached log path and a bounded log tail. `stop` first uses the control socket; a SIGTERM fallback requires a freshly
+verified Hub identity, never just a recorded PID. Shutdown closes admission, executes
+registered resource-cleanup hooks in order, then removes its own PID record/socket.
+It never sends a daemon `shutdown` command.
+
+State is stored in `<XERXES_HOME>/hub`, defaulting to `~/.xerxes/hub`, honoring the
+same `XERXES_HOME` setting as the runtime. The state and `logs/` directories have mode
+0700; the control socket, PID record, detached log files and registry have mode 0600.
+Files include `control.sock`, `hub.pid.json`, `workspaces.json`, `hub.sqlite` (event
+store, command journal, supervisor actions), `identity.sqlite`, and the private
+`hub-key.pem`, `identity-pepper` and `vapid-key.pem`. Each detached start writes
+a separate `logs/hub-<timestamp>-<id>.log`; no service manager is installed or changed.
+
+The quickest path is two commands. On the Hub machine (Tailscale installed and signed in):
+
+```sh
+xerxes hub setup [--name "Erfan"] [--port 8737] [--no-service] [--no-pair]
+```
+
+It reads the machine's tailnet name, turns on `tailscale serve` (printing the one approval
+link Tailscale requires and waiting for it), saves the HTTPS origin to
+`<XERXES_HOME>/hub/settings.json`, creates the owner, installs the Hub as a per-user
+background service (systemd user unit on Linux, launchd agent on macOS) and prints a phone
+pairing link and QR. Running it again keeps the owner and refreshes the rest. Environment
+variables still override the saved settings.
+
+`setup` also writes a launcher `~/.xerxes/bin/xerxes` (mode 0755) that other machines use
+over ssh (`hub link`, `hub remote`).
+
+On each machine whose chats should appear (for example a Mac behind a home router):
+
+```sh
+xerxes hub link user@hub-host [--machine Mac] [--json] \
+  [--remote-xerxes '~/.bun/bin/bun ~/xerxes/dist/cli.js'] [--no-service]
+```
+
+The machine dials out over SSH (key login, no password, no connection sharing) and forwards
+its daemon socket to `~/.xerxes/tunnels/<machine>-daemon.sock` on the Hub host. A
+background service keeps the tunnel up and reconnects. The Hub gets ONE machine entry for
+that socket (re-running replaces it, and any older per-project entries on the same socket);
+its projects are discovered from the daemon's chats and appear on their own. `link` also
+pins the Hub key on this machine's daemon for every project, so nothing else needs
+enrolling. `--project` is no longer needed and is ignored. A running Hub applies registry
+changes within a few seconds, without a restart.
+
+`xerxes hub remote user@hub-host info --json` (or any other hub command) runs on the Hub
+host over ssh; `xerxes hub machines list --json` lists machines and their projects.
+
+Register local folders or remote folders explicitly:
+
+```sh
+xerxes hub workspaces list
+xerxes hub workspaces list --json
+xerxes hub workspaces add-local /absolute/project --label "Local project"
+xerxes hub workspaces add-local /absolute/project --socket /path/to/daemon.sock --label "Desktop daemon"
+xerxes hub workspaces add-ssh build-server /srv/project --socket /home/me/.xerxes/daemon/global-<id>.sock --label "Build server"
+xerxes hub workspaces remove <workspace-id>
+xerxes hub workspaces import-machines
+xerxes hub workspaces enroll <workspace-id> [--replace]
+```
+
+A workspace added with `add-local`, or with `add-ssh` plus `--socket`, connects when the
+Hub starts. `add-local --socket` points at a daemon that does not use the per-project
+socket, such as the desktop's global daemon or a socket forwarded over SSH. An SSH
+workspace needs the absolute path of the daemon socket on the remote host
+(`--socket`); without it the workspace stays "needs operator" and does not auto-connect.
+A daemon that does not advertise `principal_auth_v1_supported` (Xerxes 0.7.1 and
+earlier) cannot verify signed Hub commands, so the Hub treats it as view only: reads
+work, and every send, steer, approval or setting change is refused before it is written. `enroll` pins the Hub's
+Ed25519 signing key on a local workspace's daemon (through its local `hub.enroll` RPC)
+and prints the key fingerprint. A daemon refuses every signed Hub command until the Hub
+is enrolled for that project.
+
+### Owner, phones and other people
+
+```sh
+xerxes hub owner init --name "Erfan"     # once, on the Hub machine
+xerxes hub pair --label "My phone"       # one-time link, QR and comparison code (2 minutes)
+xerxes hub pair confirm <pairing-id> <code>
+xerxes hub devices list | devices revoke <device-id>
+xerxes hub invite create --workspace <id> [--session <id>] --role viewer|steer|operator
+xerxes hub audit verify
+```
+
+Pairing requires `XERXES_HUB_PUBLIC_ORIGINS`. Phones get httpOnly cookies, never SSH or
+provider credentials. Web push needs `XERXES_HUB_VAPID_SUBJECT` (`mailto:` or `https:`).
+
+### XERXES supervisor and voice
+
+The Hub owner chooses XERXES's model in the apps (machine, provider profile, model,
+thinking effort). The choice is stored in `hub.sqlite` and takes effect at once; every
+model call runs on the chosen machine's own daemon, so provider keys never reach the Hub.
+Until a model is chosen, `supervisor.message.submit` answers `unconfigured`.
+`XERXES_HUB_SUPERVISOR_PROFILE` and `XERXES_HUB_SUPERVISOR_MODEL` remain only as a
+fallback while nothing is stored. The supervisor can read and propose actions,
+and a person confirms each change; it can never approve permissions or reviews.
+
+Voice is off unless `XERXES_HUB_VOICE_ENABLED=true` and the supervisor is configured.
+Providers come from `XERXES_HUB_VOICE_STT_*`, `_TTS_*` and `_REALTIME_*`, with keys in
+`XERXES_VOICE_<STT|TTS|REALTIME>_API_KEY`. Audio is never stored. When voice is not
+available, the voice path is not served and the phone hides its talk button.
+
+SSH entries store an SSH-config alias (or a validated `user@host[:port]` target),
+never key material or passwords. Authentication stays in the host's SSH configuration.
+Adding or importing entries does not establish a connection: automatic connection,
+remote bootstrap and remote updates default to **false** and require deliberate host
+configuration/consent. Import reads `<XERXES_HOME>/machines.json` without changing it;
+repeated imports skip already-registered SSH target/project pairs.
+
+The version-1 registry uses stable IDs, creation/update timestamps and revision-checked,
+locked atomic writes. Concurrent stale writers must reload before retrying. A corrupt
+registry produces a typed error and is **preserved**, never replaced with an empty file;
+repair the original file manually before another mutation. Unknown commands fail with
+usage and a nonzero exit status. `xerxes hub --help` lists the full command surface.
+
 ## Xerxes learning controls
 
 The integration is Bun-native and adopts ideas, not upstream runners or published benchmark claims.
@@ -13,7 +148,7 @@ runtime:
 
 `reflection` accepts **`all`** (default: reflect when a goal transitions to complete/blocked, and after any successful turn with at least 25 tool calls or 20 minutes), **`goals`** (only goal transitions), or **`off`** (no automatic reflection). `XERXES_REFLECTION=goals|all|off` overrides configuration at startup. The live `runtime.reload` settings path also accepts `reflection`; `runtime.status` and `/config` show it. The additive v35 `learning.list` and `learning.review` RPCs share the slash review implementation; workspace-scoped `learning_changed` events refresh clients after stored proposals, reviews and lesson-tool mutations.
 
-Reflection uses the owning session's auxiliary provider path, with a 90-second request timeout and a 4096-token output ceiling. It starts only after persistence and `turn_end`, never delays the terminal event, and is cancelled with the turn/session/daemon lifetime. Errors are logged without failing the turn. Aborted/errored turns and subagent sessions are excluded. Ordinary turns do not incur this extra call under the default policy. A terminal goal is reflected on its transition, not on every later chat turn.
+Reflection uses the owning session's auxiliary provider path, with a 90-second request timeout and a 4096-token output ceiling. It starts only after persistence and `turn_end`, never delays the terminal event, and is cancelled with the turn/session/daemon lifetime. Errors are logged without failing the turn. Aborted/errored turns and subagent sessions are excluded. Short ordinary turns never incur this extra call; under the default policy only a long turn (25 tool calls or 20 minutes) or a goal transition does. Set `goals` to limit it to goal transitions. A terminal goal is reflected on its transition, not on every later chat turn.
 
 ### Shared review and lesson stores
 

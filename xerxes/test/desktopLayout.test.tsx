@@ -41,9 +41,10 @@ test('long goals and eight agents retain all content without zero-turn noise', (
 
 test('appearance preferences validate stored choices independently of session state', async () => {
   const { parseAppearance } = await import('../src/desktop/renderer/appearance.js')
-  expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13' })
-  // Unreadable choices fall back to a fresh install's defaults (XS text).
-  expect(parseAppearance({ theme: 'invalid', font: 90 })).toEqual({ theme: 'system', font: '11' })
+  expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13', style: 'neo' })
+  expect(parseAppearance({ theme: 'light', font: '13', style: 'classic' })).toEqual({ theme: 'light', font: '13', style: 'classic' })
+  // Unreadable choices fall back to a fresh install's defaults (XS text, Neo).
+  expect(parseAppearance({ theme: 'invalid', font: 90, style: 'retro' })).toEqual({ theme: 'system', font: '11', style: 'neo' })
 })
 
 test('background history is collapsed while active and unknown states remain visible', () => {

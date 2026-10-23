@@ -34,7 +34,9 @@ import {
 } from "../tools/fileState.js";
 import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
-import { steerContent, steerText, type SteerInput } from "../streaming/steer.js";
+import { steerMessage, steerText, type SteerAuthor, type SteerInput } from "../streaming/steer.js";
+import type { XerxesActor } from "../types/messages.js";
+import { applyInteractionRecords, authorSummary } from "./collaboration.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
 import { displayTitle } from "./titleGenerator.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
@@ -263,15 +265,21 @@ export interface TurnRunner {
 }
 
 /** Controls that the daemon supplies around a single active turn. */
-export type TurnOrigin = 'human' | 'schedule' | 'monitor';
+export type TurnOrigin = 'human' | 'schedule' | 'monitor' | 'agent';
 
 export interface TurnRunControls {
   /** Queue non-blocking host work until persistence and the terminal event have finished. */
   readonly afterTurn?: (start: () => void) => void;
   /** Host-provided origin; background turns never inherit human authority. */
   readonly origin?: TurnOrigin;
-  /** Drain user steering (text, optionally with images) received since the last provider/tool boundary. */
-  drainSteer?(): readonly SteerInput[];
+  /** Verified Hub author of this turn's prompt; recorded provider-omitted on the user message. */
+  readonly actor?: XerxesActor;
+  /**
+   * Drain user steering (text, optionally with images) received since the last provider/tool boundary.
+   * `final` is the no-tool-calls boundary at the end of a turn: queued attributed steers are not
+   * consumed there (they run in a continuation instead).
+   */
+  drainSteer?(boundary?: 'start' | 'final'): readonly SteerInput[];
   /** Text authored by the user before hidden attachment expansion. */
   readonly displayText?: string;
   /** Validated image attachments carried into the user message as content parts. */
@@ -295,6 +303,13 @@ export interface TurnRunControls {
 
 export interface SubmitTurnOptions {
   readonly origin?: TurnOrigin;
+  /** Verified Hub author (set only by the daemon from a verified context, never from params). */
+  readonly actor?: XerxesActor;
+  /**
+   * Host-owned durable steers (attributed Hub steers). Called at each non-final provider/tool
+   * boundary; the host marks what it returns as applied, so a steer is returned at most once.
+   */
+  readonly pullQueuedSteers?: () => readonly SteerInput[];
   /** Host-owned cancellation; never serialized into the wire protocol. */
   readonly signal?: AbortSignal;
   /** Transcript text retained separately from the provider-facing prompt. */
@@ -457,7 +472,7 @@ export interface DaemonRuntime {
   /** Release host-owned resources such as native delegated-agent managers. */
   shutdown?(): Promise<void>;
   /** Images are validated attachments (see `validateTurnImages`); a steer may be images alone. */
-  steerTurn(sessionKey: string, content: string, images?: readonly TurnImage[]): boolean;
+  steerTurn(sessionKey: string, content: string, images?: readonly TurnImage[], author?: SteerAuthor): boolean;
   /**
    * True when steering text is queued and not yet folded into the transcript.
    *
@@ -1576,7 +1591,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
   }
 
-  steerTurn(sessionKey: string, content: string, images: readonly TurnImage[] = []): boolean {
+  steerTurn(sessionKey: string, content: string, images: readonly TurnImage[] = [], author?: SteerAuthor): boolean {
     const session = this.sessions.get(sessionKey);
     const cleaned = content.trim();
     if (!session || (!cleaned && !images.length)) {
@@ -1584,7 +1599,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
     // Text-only steers stay plain strings: the queue, the steer_applied echo
     // and every existing consumer keep their shape.
-    const steer: SteerInput = images.length ? { text: cleaned, images: imageUrlContentParts(images) } : cleaned;
+    const steer: SteerInput = images.length || author
+      ? { text: cleaned, images: imageUrlContentParts(images), ...(author ? { author } : {}) }
+      : cleaned;
     if (this.abortControllers.has(sessionKey)) {
       const queue = this.steerQueues.get(sessionKey) ?? [];
       if (queue.length >= MAX_ACTIVE_TURN_STEERS) {
@@ -1594,10 +1611,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       this.steerQueues.set(sessionKey, queue);
       return true;
     }
-    session.messages.push({
-      role: "user",
-      content: steerContent("[steer from user]", steer)!,
-    });
+    session.messages.push({ ...steerMessage("[steer from user]", steer)! });
     session.lastActive = Date.now();
     return true;
   }
@@ -1678,7 +1692,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     options: SubmitTurnOptions = {},
   ): Promise<void> {
     options.signal?.throwIfAborted();
-    if (options.origin !== undefined && !['human', 'schedule', 'monitor'].includes(options.origin)) throw new Error('Invalid turn origin');
+    if (options.origin !== undefined && !['human', 'schedule', 'monitor', 'agent'].includes(options.origin)) throw new Error('Invalid turn origin');
     if (options.origin && options.origin !== 'human' && options.goalRound !== undefined) throw new Error('Background turn cannot claim goal-round authority');
     if (this.abortControllers.has(sessionKey)) {
       throw new Error("A turn is already active for this session");
@@ -1812,6 +1826,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         role: "user",
         content: providerContent,
         ...(displayText === providerText && !images.length ? {} : { text: displayText }),
+        ...(options.origin === "agent" ? { origin: "agent" } : {}),
+        ...(options.actor ? { xerxes_actor: options.actor } : {}),
       });
       session.turnCount += 1;
       // The transcript is rewritten once, in this turn's `finally`. A crash
@@ -1830,6 +1846,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         // as a marker, not as something the user said.
         ...(options.goalRound !== undefined ? { origin: "goal", goal_round: options.goalRound }
           : options.origin && options.origin !== "human" ? { origin: options.origin } : {}),
+        ...(options.actor ? { author: authorSummary(options.actor) } : {}),
         ...(processed.mentionedFiles.length
           ? { mentioned_files: processed.mentionedFiles }
           : {}),
@@ -1850,8 +1867,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         {
           // Clients show a steer as queued until it is applied; this is the
           // moment it is (a goal round can run for hours before turn_end).
-          drainSteer: () => {
-            const drained = this.drainSteers(sessionKey);
+          drainSteer: (boundary) => {
+            const live = this.drainSteers(sessionKey);
+            // The final boundary ends the turn: durable attributed steers wait for the continuation.
+            const queued = boundary === "final" ? [] : options.pullQueuedSteers?.() ?? [];
+            const drained = queued.length ? [...live, ...queued] : live;
             if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: drained.map(steerText), count: drained.length } });
             return drained;
           },
@@ -1861,6 +1881,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           ...(images.length ? { images } : {}),
           ...(options.goalRound === undefined ? {} : { goalRound: options.goalRound }),
           ...(options.origin === undefined ? {} : { origin: options.origin }),
+          ...(options.actor === undefined ? {} : { actor: options.actor }),
         },
       )) {
         emitSessionEvent(event);
@@ -1894,7 +1915,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       if (runnerManagesState && outcomeReason && session.turnCount === turnCountBefore) {
         // Setup can fail before a native runner enters its stream loop. Keep
         // the submitted prompt and its outcome, never relabel the prior turn.
-        lastMessage = { role: 'user', content: providerContent, ...(displayText === providerText ? {} : { text: displayText }) };
+        lastMessage = { role: 'user', content: providerContent, ...(displayText === providerText ? {} : { text: displayText }),
+          ...(options.origin === 'agent' ? { origin: 'agent' } : {}), ...(options.actor ? { xerxes_actor: options.actor } : {}) };
         session.messages.push(lastMessage);
         if (session.turnCount === turnCountBefore) session.turnCount++;
       }
@@ -1905,10 +1927,14 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       session.status = "idle";
       session.activeTurnId = "";
       session.lastActive = Date.now();
+      // Decisions people made on this turn's permission/question cards ride on the tool
+      // messages they unblocked (provider-omitted, see collaboration.ts).
+      const withRecords = applyInteractionRecords(session.messages, session.metadata);
+      if (withRecords !== session.messages) session.messages = [...withRecords];
       const pendingSteers = this.drainSteers(sessionKey);
       for (const steer of pendingSteers) {
-        const content = steerContent("[steer from user saved for next turn]", steer);
-        if (content) session.messages.push({ role: "user", content });
+        const saved = steerMessage("[steer from user saved for next turn]", steer);
+        if (saved) session.messages.push({ ...saved });
       }
       if (pendingSteers.length) {
         emitSessionEvent({
@@ -1981,8 +2007,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         // idle path instead.
         lateSteers = this.drainSteers(sessionKey);
         for (const steer of lateSteers) {
-          const content = steerContent("[steer from user saved for next turn]", steer);
-          if (content) session.messages.push({ role: "user", content });
+          const saved = steerMessage("[steer from user saved for next turn]", steer);
+          if (saved) session.messages.push({ ...saved });
         }
       }
       releaseInteractions?.();

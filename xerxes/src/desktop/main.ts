@@ -8,7 +8,7 @@
  * those properties are the design, not configuration.
  */
 
-import { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeImage, Notification, shell, Menu, screen, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeImage, Notification, safeStorage, shell, Menu, screen, webContents, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -37,6 +37,12 @@ import {
   type RemoteTarget,
 } from './main/remote.js'
 import { notificationFor } from './main/notify.js'
+import { createCliRunner } from './main/hubCli.js'
+import { createHubCockpit } from './main/hubCockpit.js'
+import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
+import { nodeHubHttp } from './main/hubHttp.js'
+import { connectHubSocket } from './main/hubSocket.js'
+import { createHubStorage } from './main/hubStorage.js'
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -864,6 +870,31 @@ void app.whenReady().then(async () => {
   app.setAboutPanelOptions({ applicationName: APP_NAME })
   // Offers new releases from GitHub; installs only when the person says so.
   const appUpdates = startAppUpdates({ settingsDirectory: xerxesHome(), version: app.getVersion() })
+  // Hub cockpit: link this Mac, pair a phone and sign in to the XERXES tab.
+  // The CLI, the Hub cookies and the Hub socket stay in this process.
+  const hubCockpit = createHubCockpit({
+    runner: createCliRunner(process.env, homedir()),
+    http: nodeHubHttp,
+    connect: (target, handlers) => connectHubSocket(target, handlers),
+    storage: createHubStorage(xerxesHome(), {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: text => safeStorage.encryptString(text),
+      decrypt: bytes => safeStorage.decryptString(Buffer.from(bytes)),
+    }),
+    emit: (senderId, channel, payload) => {
+      const contents = webContents.fromId(senderId)
+      if (contents && !contents.isDestroyed()) contents.send(channel, payload)
+    },
+    log: message => console.warn(message),
+  })
+  registerHubCockpitIpc(ipcMain, hubCockpit, {
+    onDestroyed: (senderId, callback) => {
+      const contents = webContents.fromId(senderId)
+      if (contents) contents.once('destroyed', callback)
+      else callback()
+    },
+  })
+  app.on('will-quit', () => hubCockpit.dispose())
   // The dock/taskbar icon is the phoenix mark; on macOS the running app's
   // dock tile only changes through app.dock.
   const icon = appIcon()

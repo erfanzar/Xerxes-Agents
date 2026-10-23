@@ -1,0 +1,355 @@
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+
+import { afterEach, describe, expect, test } from 'bun:test'
+
+import { createHubIdentity } from '../src/hub/identity/index.js'
+import type { RevocationListener } from '../src/hub/identityPort.js'
+import {
+  DAY,
+  FINGERPRINT,
+  MINUTE,
+  ORIGIN,
+  SECOND,
+  authenticate,
+  cleanupAll,
+  errorCode,
+  errorOf,
+  http,
+  inviteUser,
+  makeHarness,
+  must,
+  pairDevice,
+  refresh,
+  secondInstance,
+  sessionCookie,
+  sessionOf,
+  tempPaths,
+} from './hubIdentityHarness.js'
+
+afterEach(cleanupAll)
+
+type RevocationEvent = Parameters<RevocationListener>[0]
+
+describe('refresh rotation', () => {
+  test('each refresh issues a new refresh token and a working session', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    const r1 = await refresh(h, s0.refresh)
+    expect(r1.status).toBe(200)
+    const s1 = sessionOf(r1)
+    expect(s1.refresh).not.toBe(s0.refresh)
+    expect(s1.session).not.toBe(s0.session)
+    expect(await authenticate(h, s1)).not.toBeNull()
+    const r2 = await refresh(h, s1.refresh)
+    expect(r2.status).toBe(200)
+    expect(sessionOf(r2).refresh).not.toBe(s1.refresh)
+  })
+
+  test('reusing a retired refresh token revokes the whole family', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    const s1 = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    const replay = await refresh(h, s0.refresh)
+    expect(replay.status).toBe(401)
+    expect(replay.setCookies.join('\n')).toContain('Max-Age=0')
+    expect(events.some(event => event.deviceId === s0.deviceId && event.reason === 'refresh_token_reuse')).toBe(true)
+    expect((await refresh(h, s1.refresh)).status).toBe(401)
+    expect(await authenticate(h, s1)).toBeNull()
+    expect(h.admin.listAudit().some(event => event.action === `identity.device.revoke:${s0.deviceId}`)).toBe(true)
+  })
+
+  test('grace window: a retried request within it gets the same successor, nothing is revoked', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    const first = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(3 * SECOND)
+    const retry = await refresh(h, s0.refresh)
+    expect(retry.status).toBe(200)
+    const second = sessionOf(retry)
+    expect(second.refresh).toBe(first.refresh)
+    expect(second.session).toBe(first.session)
+    expect(events).toHaveLength(0)
+    expect((await refresh(h, first.refresh)).status).toBe(200)
+  })
+
+  test('grace window: concurrent refreshes with one token agree on a single successor', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    const results = await Promise.all([refresh(h, s0.refresh), refresh(h, s0.refresh), refresh(h, s0.refresh)])
+    expect(results.every(result => result.status === 200)).toBe(true)
+    expect(new Set(results.map(result => sessionOf(result).refresh)).size).toBe(1)
+  })
+
+  test('grace window covers only the immediately previous token', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    const s1 = sessionOf(await refresh(h, s0.refresh))
+    expect((await refresh(h, s1.refresh)).status).toBe(200)
+    expect((await refresh(h, s0.refresh)).status).toBe(401)
+    expect(h.admin.listDevices({ includeRevoked: true }).find(device => device.id === s0.deviceId)?.status).toBe('revoked')
+  })
+
+  test('refresh needs an allowed Origin and a cookie', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    expect((await refresh(h, s0.refresh, { origin: 'https://evil.test' })).status).toBe(403)
+    expect((await refresh(h, s0.refresh, { origin: null })).status).toBe(403)
+    expect((await http(h, 'POST', 'session/refresh')).status).toBe(401)
+    expect((await refresh(h, 'xr1.not-a-real-token')).status).toBe(401)
+  })
+
+  test('a pending device cannot refresh into a session', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h, { confirm: true })
+    expect((await refresh(h, s0.refresh)).status).toBe(202)
+  })
+})
+
+describe('expiry', () => {
+  test('a browser session lasts five minutes; refresh mints a new one', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    h.clock.advance(5 * MINUTE + SECOND)
+    expect(await authenticate(h, s0)).toBeNull()
+    const renewed = sessionOf(await refresh(h, s0.refresh))
+    expect(await authenticate(h, renewed)).not.toBeNull()
+  })
+
+  test('7 days of inactivity expire the device', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    h.clock.advance(7 * DAY + SECOND)
+    expect((await refresh(h, s0.refresh)).status).toBe(401)
+    expect(events.some(event => event.reason === 'expired')).toBe(true)
+  })
+
+  test('a device that keeps refreshing still ends at 30 days', async () => {
+    const h = await makeHarness()
+    let current = (await pairDevice(h)).refresh
+    for (let day = 1; day <= 29; day += 1) {
+      h.clock.advance(DAY)
+      const result = await refresh(h, current)
+      expect(result.status).toBe(200)
+      current = sessionOf(result).refresh
+      const maxAge = Number(/Max-Age=(\d+)/.exec(result.setCookies.find(line => line.startsWith('__Host-xerxes_refresh=')) ?? '')?.[1])
+      expect(maxAge).toBeLessThanOrEqual(7 * 86_400)
+      expect(maxAge).toBeLessThanOrEqual((30 - day) * 86_400)
+    }
+    h.clock.advance(DAY)
+    expect((await refresh(h, current)).status).toBe(401)
+  })
+
+  test('limits can be tightened but not raised', async () => {
+    const h = await makeHarness({ limits: { inactivityMs: 1000 } })
+    const s0 = await pairDevice(h)
+    h.clock.advance(2 * SECOND)
+    expect((await refresh(h, s0.refresh)).status).toBe(401)
+    const { paths } = tempPaths()
+    await expect(createHubIdentity({ paths, signerFingerprint: FINGERPRINT, limits: { absoluteMs: 365 * DAY } })).rejects.toThrow(RangeError)
+    await expect(createHubIdentity({ paths, signerFingerprint: 'not-hex' })).rejects.toThrow(RangeError)
+  })
+})
+
+describe('authenticate', () => {
+  test('checks the exact Origin', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    expect(await authenticate(h, s, 'https://evil.test')).toBeNull()
+    expect(await authenticate(h, s, 'null')).toBeNull()
+    expect(await authenticate(h, s, `${ORIGIN}/`)).toBeNull()
+    expect(await authenticate(h, s, 'https://hub.test:444')).toBeNull()
+    expect(await authenticate(h, s, 'http://hub.test')).toBeNull()
+    expect(await authenticate(h, s, ORIGIN)).not.toBeNull()
+    expect(await authenticate(h, s, 'http://localhost:5173')).not.toBeNull()
+    expect(await authenticate(h, s, 'http://127.0.0.1:7777')).not.toBeNull()
+    expect(await authenticate(h, s, null)).not.toBeNull()
+  })
+
+  test('rejects missing, forged and refresh-token-as-session cookies', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    expect(await h.identity.authenticate({ method: 'GET', url: ORIGIN })).toBeNull()
+    expect(await h.identity.authenticate({ method: 'GET', url: ORIGIN, cookie: sessionCookie('xs1.forged') })).toBeNull()
+    expect(await h.identity.authenticate({ method: 'GET', url: ORIGIN, cookie: sessionCookie(s.refresh) })).toBeNull()
+    expect(await h.identity.authenticate({ method: 'GET', url: ORIGIN, cookie: `__Host-xerxes_session=${'x'.repeat(500)}` })).toBeNull()
+  })
+
+  test('HTTP authentication needs the CSRF header on mutating routes only', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    const noCsrf = await http(h, 'POST', 'push/unsubscribe', {}, { cookie: s.cookie })
+    expect(noCsrf.status).toBe(403)
+    expect(errorOf(noCsrf).message).toContain('csrf')
+    expect((await http(h, 'POST', 'push/unsubscribe', {}, { cookie: s.cookie, csrf: 'wrong' })).status).toBe(403)
+    expect((await http(h, 'POST', 'push/unsubscribe', {}, { cookie: s.cookie, csrf: s.csrf })).status).toBe(200)
+    const read = await http(h, 'GET', 'session', undefined, { cookie: s.cookie })
+    expect(read.status).toBe(200)
+    expect(read.json.csrf_token).toBe(s.csrf)
+    expect((read.json.user as { owner: boolean }).owner).toBe(true)
+  })
+
+  test('a CSRF token from another session does not work', async () => {
+    const h = await makeHarness()
+    const a = await pairDevice(h)
+    const b = await pairDevice(h)
+    expect((await http(h, 'POST', 'push/unsubscribe', {}, { cookie: a.cookie, csrf: b.csrf })).status).toBe(403)
+  })
+
+  test('unauthenticated protected routes are 401; foreign Origin is 403', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    expect((await http(h, 'GET', 'session')).status).toBe(401)
+    expect((await http(h, 'GET', 'devices')).status).toBe(401)
+    expect((await http(h, 'GET', 'session', undefined, { cookie: s.cookie, origin: 'https://evil.test' })).status).toBe(403)
+  })
+})
+
+describe('logout', () => {
+  test('revokes the device, clears cookies and notifies listeners', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s = await pairDevice(h)
+    const out = await http(h, 'POST', 'session/logout', undefined, { cookie: s.cookie })
+    expect(out.status).toBe(200)
+    expect(out.setCookies.every(line => line.includes('Max-Age=0'))).toBe(true)
+    expect(await authenticate(h, s)).toBeNull()
+    expect((await refresh(h, s.refresh)).status).toBe(401)
+    expect(events.some(event => event.reason === 'logout' && event.deviceId === s.deviceId)).toBe(true)
+  })
+
+  test('requires an Origin so another site cannot log a user out', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    expect((await http(h, 'POST', 'session/logout', undefined, { cookie: s.cookie, origin: null })).status).toBe(403)
+    expect(await authenticate(h, s)).not.toBeNull()
+  })
+})
+
+describe('revocation', () => {
+  test('revokeDevice fires listeners synchronously and authenticate returns null', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    const ctx = must(await authenticate(h, s))
+    const events: RevocationEvent[] = []
+    const stop = h.identity.onRevoked(event => events.push(event))
+    h.admin.revokeDevice(s.deviceId, 'lost phone')
+    expect(events.length).toBeGreaterThanOrEqual(2)
+    expect(events.some(event => event.deviceId === s.deviceId && event.browserSessionId === undefined && event.reason === 'lost phone')).toBe(true)
+    expect(events.some(event => event.browserSessionId === ctx.browserSessionId)).toBe(true)
+    expect(events.every(event => event.principalId === h.ownerId)).toBe(true)
+    expect(await authenticate(h, s)).toBeNull()
+    expect((await refresh(h, s.refresh)).status).toBe(401)
+    const count = events.length
+    stop()
+    const other = await pairDevice(h)
+    h.admin.revokeDevice(other.deviceId)
+    expect(events).toHaveLength(count)
+  })
+
+  test('revoking an unknown device is a not_found; revoking twice is quiet', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    expect(errorCode(() => h.admin.revokeDevice('dev_missing'))).toBe('not_found')
+    h.admin.revokeDevice(s.deviceId)
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    h.admin.revokeDevice(s.deviceId)
+    expect(events).toHaveLength(0)
+  })
+
+  test('revokeUser kills that user everywhere and spares others; the owner cannot be revoked', async () => {
+    const h = await makeHarness()
+    const owner = await pairDevice(h)
+    const guest = await inviteUser(h, { workspaceId: 'w1', role: 'viewer' })
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    h.admin.revokeUser(guest.userId)
+    expect(events.some(event => event.principalId === guest.userId && event.deviceId === guest.deviceId)).toBe(true)
+    expect(await authenticate(h, guest)).toBeNull()
+    expect((await refresh(h, guest.refresh)).status).toBe(401)
+    expect(await authenticate(h, owner)).not.toBeNull()
+    expect(errorCode(() => h.admin.revokeUser(h.ownerId))).toBe('conflict')
+    expect(h.admin.listUsers().find(user => user.id === guest.userId)?.revoked).toBe(true)
+  })
+
+  test('revokeAll closes every device', async () => {
+    const h = await makeHarness()
+    const a = await pairDevice(h)
+    const b = await pairDevice(h)
+    const guest = await inviteUser(h, { workspaceId: 'w1', role: 'viewer' })
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    h.admin.revokeAll()
+    for (const session of [a, b, guest]) {
+      expect(await authenticate(h, session)).toBeNull()
+      expect(events.some(event => event.deviceId === session.deviceId)).toBe(true)
+    }
+    expect(h.admin.listDevices()).toHaveLength(0)
+  })
+
+  test('a throwing listener does not stop the others and is reported', async () => {
+    const errors: unknown[] = []
+    const h = await makeHarness({ onListenerError: error => errors.push(error) })
+    const s = await pairDevice(h)
+    const seen: string[] = []
+    h.identity.onRevoked(() => {
+      throw new Error('socket already closed')
+    })
+    h.identity.onRevoked(event => seen.push(event.reason))
+    h.admin.revokeDevice(s.deviceId, 'boom')
+    expect(seen).toContain('boom')
+    expect(errors.length).toBeGreaterThan(0)
+    expect(await authenticate(h, s)).toBeNull()
+  })
+
+  test('revocations written by another process (the CLI) are announced on sync', async () => {
+    const h = await makeHarness()
+    const s = await pairDevice(h)
+    const cli = await secondInstance(h)
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    h.admin.syncRevocations()
+    expect(events).toHaveLength(0)
+    cli.admin.revokeDevice(s.deviceId, 'revoked from cli')
+    expect(await authenticate(h, s)).toBeNull()
+    h.admin.syncRevocations()
+    expect(events.some(event => event.deviceId === s.deviceId && event.reason === 'revoked from cli')).toBe(true)
+    const count = events.length
+    h.admin.syncRevocations()
+    expect(events).toHaveLength(count)
+  })
+
+  test('devices can be listed and revoked over HTTP by their owner', async () => {
+    const h = await makeHarness()
+    const a = await pairDevice(h, { label: 'Phone A' })
+    const b = await pairDevice(h, { label: 'Phone B' })
+    const list = await http(h, 'GET', 'devices', undefined, { cookie: a.cookie })
+    const devices = list.json.devices as { id: string; current: boolean; label: string }[]
+    expect(devices.map(device => device.label).sort()).toEqual(['Phone A', 'Phone B'])
+    expect(devices.find(device => device.id === a.deviceId)?.current).toBe(true)
+    const revoked = await http(h, 'POST', 'devices/revoke', { device_id: b.deviceId }, { cookie: a.cookie, csrf: a.csrf })
+    expect(revoked.status).toBe(200)
+    expect(await authenticate(h, b)).toBeNull()
+    expect(await authenticate(h, a)).not.toBeNull()
+  })
+
+  test('a guest cannot revoke or list the owner devices', async () => {
+    const h = await makeHarness()
+    const owner = await pairDevice(h)
+    const guest = await inviteUser(h, { workspaceId: 'w1', role: 'operator' })
+    const attempt = await http(h, 'POST', 'devices/revoke', { device_id: owner.deviceId }, { cookie: guest.cookie, csrf: guest.csrf })
+    expect(attempt.status).toBe(403)
+    expect(await authenticate(h, owner)).not.toBeNull()
+    const list = await http(h, 'GET', 'devices?all=1', undefined, { cookie: guest.cookie })
+    expect((list.json.devices as { user_id: string }[]).every(device => device.user_id === guest.userId)).toBe(true)
+  })
+})

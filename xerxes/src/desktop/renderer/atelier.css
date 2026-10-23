@@ -3086,3 +3086,46 @@ html,body,#root,.app.atelier{background:transparent}
 .learned-card .studio-source{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .learning-report{font-size:var(--ui-font)}
 @media(max-width:500px){.catalog-form>.studio-tabs{flex-wrap:wrap}.learning-reason{flex-basis:100%}}
+
+/* XERXES tab, Hub & phone settings and the model chooser. */
+.visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.atelier .notice{background:var(--mac-control);border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-3);margin:var(--s-2) 0;color:var(--x-secondary);font:var(--t-caption)}
+.atelier .notice.is-error{background:var(--x-failed-bg);border-color:var(--x-failed-border);color:var(--x-failed-text)}
+.atelier .action-card__error{color:var(--x-failed-text);font:var(--t-caption);margin:var(--s-2) 0}
+.supervisor{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-5);min-width:0;overflow-y:auto;flex:1 1 auto}
+.supervisor h3{font:var(--t-title);margin:0}
+.supervisor__head{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
+.supervisor__model{font:var(--t-caption);color:var(--x-title);background:var(--x-accent-soft);border-radius:999px;padding:2px 10px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.supervisor__messages,.supervisor__cards{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-3)}
+.supervisor__message{border:1px solid var(--x-divider);border-radius:var(--r-sm);padding:var(--s-3);min-width:0;overflow-wrap:anywhere}
+.supervisor__message--xerxes{background:var(--x-accent-soft)}
+.supervisor__who{font:var(--t-caption);color:var(--x-meta);margin:0 0 var(--s-1)}
+.supervisor__text{margin:0;white-space:pre-wrap;font:var(--t-body)}
+.supervisor__composer{display:flex;gap:var(--s-2);align-items:flex-end}
+.supervisor__composer textarea{flex:1;min-width:0;resize:vertical;background:var(--x-screen);border:1px solid var(--x-hairline);border-radius:6px;color:var(--x-title);padding:6px 10px;font:var(--ui-font)/1.5 var(--sans)}
+.action-card{border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-3);display:flex;flex-direction:column;gap:var(--s-2)}
+.action-card__title{font:var(--t-body);margin:0}
+.action-card__summary,.action-card__meta,.action-card__result{margin:0;font:var(--t-caption);color:var(--x-secondary)}
+.action-card__targets{margin:0;padding-left:var(--s-4);font:var(--t-caption)}
+.action-card__actions{display:flex;gap:var(--s-2)}
+.hubphone{display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
+.hubphone h3{font:var(--t-title);margin:0}
+.hubphone__form{display:flex;flex-direction:column;gap:var(--s-2)}
+.hubphone__row{display:flex;align-items:center;justify-content:space-between;gap:var(--s-3);flex-wrap:wrap}
+.hubphone__block{border-top:1px solid var(--x-divider);padding-top:var(--s-3);display:flex;flex-direction:column;gap:var(--s-2)}
+.hubphone__block p{margin:var(--s-1) 0 0}
+.hubphone__facts{display:grid;grid-template-columns:max-content 1fr;gap:var(--s-1) var(--s-3);margin:0;font:var(--t-caption)}
+.hubphone__facts dt{color:var(--x-meta)}
+.hubphone__facts dd{margin:0;overflow-wrap:anywhere}
+.hubphone__mono,.hubphone__code{font-family:var(--mono)}
+.hubphone__code{font-size:1.4em;letter-spacing:.12em;margin-left:var(--s-2)}
+.hubphone__progress{list-style:none;margin:0;padding:var(--s-2);background:var(--mac-control);border-radius:var(--r-sm);font:var(--t-caption) var(--mono);overflow-wrap:anywhere}
+.hubphone__list,.hubphone__projects{list-style:none;margin:0;padding:0}
+.hubphone__projects li{display:flex;justify-content:space-between;gap:var(--s-3);padding:3px 0;font:var(--t-caption)}
+.hubphone__machine{font:var(--t-body);margin:var(--s-2) 0 var(--s-1)}
+.hubphone__health--online{color:var(--x-working)}
+.hubphone__health--offline,.hubphone__health--stale,.hubphone__health--needs_operator{color:var(--x-failed-text)}
+.hubphone__qr{background:#fff;padding:8px;border-radius:var(--r-sm);display:block;image-rendering:pixelated}
+.hubphone__pair{display:flex;flex-direction:column;gap:var(--s-2);align-items:flex-start}
+.hubphone__pair .field{align-self:stretch}
+.modelchooser{display:flex;flex-direction:column;gap:var(--s-2);border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-4)}

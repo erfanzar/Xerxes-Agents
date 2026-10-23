@@ -621,6 +621,51 @@ test('an update restart resumes every armed goal at startup, not only the sessio
   } finally { await fresh.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('a forced restart continues a person\'s interrupted turn in the fresh process; an idle session stays idle', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-turn-resume-'))
+  const goalRearmFile = join(root, 'daemon', 'goal-rearm.json')
+  const sessionDirectory = join(root, 'sessions')
+  const before = new InMemoryDaemonRuntime({ async *run() {} }, { currentProjectDirectory: root, sessionDirectory })
+  const busy = await before.openSession('busy-turn', undefined, { cwd: root })
+  const idle = await before.openSession('idle-chat', undefined, { cwd: root })
+  // A real interrupted session has history; without it the runtime never saves the session.
+  busy.messages.push({ role: 'user', content: 'port the kernels' } as never)
+  busy.turnCount = 1
+  busy.status = 'working'
+  busy.metadata.turn_origin = 'human'
+  const old = new DaemonServer({ socketPath: join(root, 'old.sock'), runtime: before, goalRearmFile, onRestart: () => {} })
+  await old.start()
+  const client = await DaemonParityClient.connect(join(root, 'old.sock'))
+  try {
+    // Without force a working session blocks the update; nothing is marked.
+    client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.restart_if_idle', params: {} })
+    expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: false, busy: true })
+    expect(busy.metadata.turn_resume_after_restart).toBeUndefined()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'runtime.restart_if_idle', params: { force: true } })
+    expect((await client.next(frame => frame.id === 2)).result).toEqual({ ok: true })
+    expect(busy.metadata.turn_resume_after_restart).toMatchObject({ origin: 'human' })
+    expect(idle.metadata.turn_resume_after_restart).toBeUndefined()
+  } finally { client.close(); await old.stop() }
+
+  resetGoalActivations()
+  const prompts: { session: string; text: string }[] = []
+  const runner: TurnRunner = { async *run(session, text) { prompts.push({ session: session.id, text }) } }
+  const after = new InMemoryDaemonRuntime(runner, { currentProjectDirectory: root, sessionDirectory })
+  const fresh = new DaemonServer({ socketPath: join(root, 'new.sock'), runtime: after, goalRearmFile })
+  await fresh.start()
+  try {
+    for (let tries = 0; tries < 100 && prompts.length < 1; tries++) await Bun.sleep(20)
+    await Bun.sleep(100)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.session).toBe(busy.id)
+    expect(prompts[0]!.text).toContain('runtime restarted')
+    const resumed = after.listSessions().find(session => session.id === busy.id)!
+    // Consumed once: a second process start would not continue it again.
+    expect(resumed.metadata.turn_resume_after_restart).toBeUndefined()
+    expect(await Bun.file(goalRearmFile).exists()).toBe(false)
+  } finally { await fresh.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
 test('a goal resumed after an update restart can ask a leased window, and a window opened later still sees the wait', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-goal-ownerless-'))
   const goalRearmFile = join(root, 'daemon', 'goal-rearm.json')

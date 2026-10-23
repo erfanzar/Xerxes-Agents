@@ -841,6 +841,19 @@ describe('Store workspace folds', () => {
     expect(users.map(block => block.text)).toEqual(['start', 'continue', 'continue'])
   })
 
+  test('a steer whose echo arrives before its reply still shows the attached screenshot', async () => {
+    bridge.push('turn_begin', { user_input: 'start' })
+    bridge.respondWith((method, params) => {
+      // The daemon emits steer_input (text plus image_count only) before it answers.
+      if (method === 'turn.steer') bridge.push('steer_input', { content: params.content, client_steer_id: params.client_steer_id, image_count: 1 })
+      return { ok: true }
+    })
+    await store.steer('look at this', [{ id: 'shot', mediaType: 'image/png', data: 'AAAA', name: 'shot.png' }])
+    const users = store.getSnapshot().blocks.filter(block => block.kind === 'user')
+    expect(users.filter(block => block.text === 'look at this')).toHaveLength(1)
+    expect(users.at(-1)).toMatchObject({ text: 'look at this', images: ['data:image/png;base64,AAAA'] })
+  })
+
   test('the session menu renames through session.title with the row key', async () => {
     store.openSessionMenu({ id: 'aa19f402', key: 'aa19f402', title: 'Old title' }, 40, 60)
     expect(store.getSnapshot().sessionMenu).toMatchObject({ id: 'aa19f402', title: 'Old title' })
