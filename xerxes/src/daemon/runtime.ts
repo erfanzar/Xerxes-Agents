@@ -47,7 +47,7 @@ import {
 } from "./subagentConversations.js";
 
 export const DAEMON_PROTOCOL_VERSION = 35;
-export const XERXES_VERSION = "0.7.1";
+export const XERXES_VERSION = "0.8.0";
 export const BUN_DAEMON_BUILD_ID =
   process.env.XERXES_DAEMON_BUILD_ID?.trim() || `bun-runtime-v${XERXES_VERSION}`;
 /** Maximum hints retained between active-turn provider/tool boundaries. */

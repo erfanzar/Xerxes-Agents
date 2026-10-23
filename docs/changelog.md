@@ -7,6 +7,19 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.0 — 2026-10-23
+
+- **Xerxes Hub.** A new always-on `xerxes hub` service lets you reach every workspace from your phone. It runs on a server or a Mac and is exposed through Tailscale Serve. Phones pair with a QR code and a comparison code and get a revocable device token. Server and provider credentials never reach the phone. Several people can join the same session: steers queue in order, the first answer to an approval wins, and every action is attributed and audited. Daemons verify each Hub command through a signed `hub_auth` envelope. A daemon that cannot verify one stays read-only.
+- **Machines connect themselves.** `xerxes hub link <user@hub-host>` forwards this machine's daemon to the Hub over SSH from a background service. Every project the machine has chats in shows up on its own, and new ones appear live. Linking again keeps the existing tunnel, and the Hub keeps whichever connection to a runtime is actually live.
+- **Phone app (PWA):** Inbox, Task, Xerxes and Usage tabs with live thinking, working and waiting states, image attachments and push notifications.
+- **XERXES supervisor.** A third desktop tab and a phone tab where an agent lists, reads, messages, steers, starts and stops tasks across every workspace. Every change it proposes waits for a person to confirm it. It can never approve anything. You choose the machine, provider profile, model and thinking effort in the app, from what your machines publish. The model call runs on that machine, so its keys stay there. Push-to-talk and live voice are opt-in, and audio is never stored.
+- **Desktop Settings → Hub & phone:** connect to a Hub, link this Mac and pair a phone with an in-app QR code. No terminal needed.
+- **Restarts no longer stop your work.** A forced runtime restart used to bring back only sessions with an armed goal. A turn you started that gets cut off by a restart now continues once on its own in the new runtime.
+- **The learning features are actually used now.** `session_search`, `lesson_record` and `lesson_recall` were registered but missing from the built-in agents' tool lists, so no model could call them. They are now visible with guidance on when to use them. A new learning-policy prompt layer says when to recall, record and search, and how lessons differ from memory.
+- Reflection now defaults to `all`: besides goal endings, it also reviews turns with at least 25 tool calls or 20 minutes. Set `runtime.reflection: goals` for the old behaviour.
+- The Workflow guidance says when to use `select()` (pick the best of several candidates against a baseline) and `expect_agents` (a run-count ledger).
+- Desktop: an optional "Neo" style.
+
 ## 0.7.1 — 2026-10-21
 
 - Long sessions remember more. The model can search its own full history with `session_search`, including turns that compaction summarized away (they are archived verbatim); the summary tells it the search exists. The summarizer now sees 1,200 characters of each tool result and 4,000 of each failure (was 400), and summary size grows with the context window (8K–32K before a turn, 2K–8K mid-turn, capped by the model's output limit).
