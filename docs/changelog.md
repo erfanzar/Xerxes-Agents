@@ -7,7 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
-## 0.8.0 — 2026-10-23
+## 0.8.1 — 2026-10-23
+
+- **Neo is the default style**, in the desktop app and now in the VS Code extension too. Its accent is purple. Classic is one click away: Settings → General → Style, or "Switch to Classic style" in ⌘K. Colour themes work in Neo. A background never shows in Neo; only its colours are used, and Settings says so.
+- **VS Code: a Xerxes: Style setting** (Neo or Classic), a "Xerxes: Switch Style" command and a Style toggle in the extension's Settings page. Every open Xerxes view follows a change at once. High-contrast themes always keep VS Code's colours.
+- **The XERXES tab is its own page.** The current task's title, status line and steer box no longer show under it. Replies render as Markdown, your messages are bubbles, and the composer is the task view's.
+- **The app no longer restarts a shared runtime by itself.** A build mismatch used to trigger an automatic restart whenever the runtime went idle, so two clients with different builds (the desktop app and the VS Code extension) kept restarting each other's runtime and dropping unsaved chats. Now the app shows the warning and restarts only when you ask.
+- A screenshot sent while a task is running now shows in the conversation; it was dropped when the runtime's acknowledgement arrived before the reply.
+- Neo spacing fixes for the activity header and the message box.
 
 - **Xerxes Hub.** A new always-on `xerxes hub` service lets you reach every workspace from your phone. It runs on a server or a Mac and is exposed through Tailscale Serve. Phones pair with a QR code and a comparison code and get a revocable device token. Server and provider credentials never reach the phone. Several people can join the same session: steers queue in order, the first answer to an approval wins, and every action is attributed and audited. Daemons verify each Hub command through a signed `hub_auth` envelope. A daemon that cannot verify one stays read-only.
 - **Machines connect themselves.** `xerxes hub link <user@hub-host>` forwards this machine's daemon to the Hub over SSH from a background service. Every project the machine has chats in shows up on its own, and new ones appear live. Linking again keeps the existing tunnel, and the Hub keeps whichever connection to a runtime is actually live.
