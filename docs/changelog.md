@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.4 — 2026-10-23
+
+- **XERXES sees your remote machines, by three routes.** A remote can link out to the Hub (`xerxes hub link`), the Hub can dial it itself over SSH (`xerxes hub machines add-route --alias …`), and the desktop app shares SSH workspaces it is connected to as a last resort (`XERXES_HUB_SHARE=off` turns that off). All routes to one runtime are one machine with stable project ids; the Hub uses the best route that answers, never a route that reaches a different runtime, and moves back when a better one returns.
+- **XERXES keeps answering when the Mac is off.** If the machine its model runs on is offline, it uses the same profile and model on another online machine and says so in the conversation.
+- **The Thinking spinner stays up until XERXES answers**, instead of disappearing as soon as the message was stored.
+- New Hub commands: `hub machines add-route`, `remove-route`, `attach`, and `hub trust`.
+
 ## 0.8.3 — 2026-10-23
 
 - **XERXES feels like a chat.** Your message shows as soon as you send it, and while XERXES works you see the task view's "Thinking…" row with a clock. Long replies are part of the conversation instead of a small scroll box. A failed send puts your text back in the box.
