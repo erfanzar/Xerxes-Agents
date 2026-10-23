@@ -44,6 +44,7 @@ function ports(overrides: Partial<PanelPorts> = {}) {
     openDiff: async path => { editor.push(`diff:${path}`); return true },
     pickFiles: async () => { editor.push('pick'); return ['src/a.ts'] },
     showSourceControl: async () => { editor.push('scm'); return true },
+    setStyle: async style => { editor.push(`style:${style}`); return true },
     ...overrides,
   }
   return { value, memory, opened, panels, notes, editor, hide: () => { shown = false } }
@@ -150,6 +151,15 @@ test('files, diffs, the file picker and Git go to VS Code through the host chann
   expect(await bridge.pickFiles()).toEqual(['src/a.ts'])
   expect(await bridge.showSourceControl()).toBe(true)
   expect(env.editor).toEqual(['open:src/a.ts:12', 'open:src/b.ts:', 'diff:src/a.ts', 'pick', 'scm'])
+})
+
+test('the Style switch saves through VS Code settings and rejects anything but neo or classic', async () => {
+  const env = ports()
+  const { bridge } = wire(post => new PanelHost(env.value, post, () => fakeDaemon().daemon))
+  expect(await bridge.setStyle('classic')).toBe(true)
+  expect(await bridge.setStyle('neo')).toBe(true)
+  await expect(bridge.setStyle('retro')).rejects.toThrow('invalid style')
+  expect(env.editor).toEqual(['style:classic', 'style:neo'])
 })
 
 test('a failure opening a file in VS Code reaches the view as an error', async () => {

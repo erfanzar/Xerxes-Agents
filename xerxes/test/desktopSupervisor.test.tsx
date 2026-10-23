@@ -104,9 +104,27 @@ test('an unconfigured XERXES shows the chooser inline, disables the composer and
   expect(html).toContain('aria-label="XERXES model"')
   expect(html).toContain('XERXES has no model yet')
   expect(html).toContain('Choose a model first')
-  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Send</)
+  expect(html).toMatch(/<button[^>]*aria-label="Send to XERXES"[^>]*disabled=""/)
   expect(html).not.toContain('XERXES_HUB_SUPERVISOR')
   expect(html).not.toContain('>Close<')
+})
+
+test('XERXES replies render as Markdown and the page uses the task composer, not raw text in boxes', () => {
+  const state = ready({
+    supervisor: {
+      phase: 'ready', busy: false, confirmations: [],
+      messages: [
+        { id: 'u1', role: 'user', text: 'hi what can u do?', at: new Date().toISOString(), source: 'text' },
+        { id: 'x1', role: 'xerxes', text: '**Look**\n- List your tasks', at: new Date().toISOString(), source: 'text' },
+      ],
+    },
+  })
+  const html = view(state)
+  expect(html).toContain('<strong>Look</strong>')
+  expect(html).not.toContain('**Look**')
+  expect(html).toContain('class="msg msg--user"')
+  expect(html).toContain('class="composer__input"')
+  expect(html).toContain('class="supervisor__stream"')
 })
 
 test('the chooser lists machine, profile, model and effort from the options, and saves only for the owner', () => {

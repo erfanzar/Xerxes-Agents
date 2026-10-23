@@ -42,7 +42,25 @@ export function activate(extension: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('xerxes.palette', () => menu('palette')),
     vscode.commands.registerCommand('xerxes.exportTranscript', () => menu('export')),
     vscode.commands.registerCommand('xerxes.sendSelection', sendSelection),
+    vscode.commands.registerCommand('xerxes.toggleStyle', () => setStyle(currentStyle() === 'neo' ? 'classic' : 'neo')),
+    // Settings UI, settings.json, the palette or another window: every open view follows.
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (!event.affectsConfiguration('xerxes.style')) return
+      const style = currentStyle()
+      for (const entry of hosts) void entry.webview.postMessage({ kind: 'push', channel: 'desktop:style', value: style } satisfies PushFrame)
+    }),
   )
+}
+
+/** Xerxes: Style. Neo unless the person chose Classic. */
+function currentStyle(): 'neo' | 'classic' {
+  return vscode.workspace.getConfiguration('xerxes').get<string>('style') === 'classic' ? 'classic' : 'neo'
+}
+
+/** Save the style in the user's settings; the configuration listener repaints every view. */
+async function setStyle(style: 'neo' | 'classic'): Promise<boolean> {
+  await vscode.workspace.getConfiguration('xerxes').update('style', style, vscode.ConfigurationTarget.Global)
+  return true
 }
 
 export function deactivate(): void {
@@ -130,6 +148,7 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
       return (picked ?? []).map(item => item.label)
     },
     async showSourceControl() { await vscode.commands.executeCommand('workbench.view.scm'); return true },
+    setStyle,
   }
   const post = (frame: ResultFrame | PushFrame): void => { void webview.postMessage(frame) }
   const host = new PanelHost(ports, post, projectDir => new DaemonRpc({ projectDir }), options)
@@ -153,8 +172,10 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
   }
   const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'renderer/')).toString()
   const source = webview.cspSource
+  // Stamped before first paint so a Neo view never flashes Classic.
+  const style = currentStyle()
   return `<!doctype html>
-<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}">
+<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}" data-style-choice="${style}"${style === 'neo' ? ' data-style="neo"' : ''}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -166,6 +187,8 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     <link rel="stylesheet" href="${asset('renderer/app.css')}" />
     <link rel="stylesheet" href="${asset('renderer/atelier.css')}" />
     <link rel="stylesheet" href="${asset('vscode.css')}" />
+    <!-- Last: the Neo style; inert unless data-style="neo". -->
+    <link rel="stylesheet" href="${asset('renderer/neo.css')}" />
     <!-- VS Code pads every webview body (0 20px); the view is edge to edge. -->
     <style>html, body { margin: 0; padding: 0; overflow: hidden; }</style>
   </head>

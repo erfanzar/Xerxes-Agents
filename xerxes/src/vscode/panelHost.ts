@@ -46,6 +46,8 @@ export interface PanelPorts {
   /** Quick-pick workspace files; workspace-relative paths. */
   pickFiles(): Promise<string[]>
   showSourceControl(): Promise<boolean>
+  /** Save the Xerxes: Style setting (VS Code user settings); every Xerxes view follows it. */
+  setStyle(style: 'classic' | 'neo'): Promise<boolean>
   /** Whether the panel is visible now (notifications only fire while it is not). */
   visible(): boolean
 }
@@ -159,6 +161,11 @@ export class PanelHost {
       case 'host:open-diff': return this.ports.openDiff(String(args[0]))
       case 'host:pick-files': return this.ports.pickFiles()
       case 'host:source-control': return this.ports.showSourceControl()
+      case 'host:set-style': {
+        const style = args[0]
+        if (style !== 'neo' && style !== 'classic') throw new Error('Unknown style: choose neo or classic.')
+        return this.ports.setStyle(style)
+      }
       default: throw new Error(`Unknown channel ${channel}`)
     }
   }

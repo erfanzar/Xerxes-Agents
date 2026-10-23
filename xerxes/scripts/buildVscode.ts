@@ -88,8 +88,24 @@ function manifest(extensionVersion: string): Record<string, unknown> {
         { command: 'xerxes.search', title: 'Search Message History', category: 'Xerxes' },
         { command: 'xerxes.palette', title: 'Command Palette', category: 'Xerxes' },
         { command: 'xerxes.exportTranscript', title: 'Export Transcript', category: 'Xerxes' },
+        { command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Classic)', category: 'Xerxes' },
         ...SHEETS.map(([name, title]) => ({ command: `xerxes.panel.${name}`, title, category: 'Xerxes' })),
       ],
+      configuration: {
+        title: 'Xerxes',
+        properties: {
+          'xerxes.style': {
+            type: 'string',
+            enum: ['neo', 'classic'],
+            enumDescriptions: [
+              'One monospace font, square corners, flat surfaces and a purple accent, in its own colours.',
+              'Follows your VS Code theme: its colours and fonts.',
+            ],
+            default: 'neo',
+            description: 'How the Xerxes view looks. High-contrast themes always keep VS Code\'s colours.',
+          },
+        },
+      },
       menus: {
         'editor/context': [{ command: 'xerxes.sendSelection', when: 'editorHasSelection', group: 'xerxes@1' }],
         // The title bar carries the everyday actions; everything else is in its overflow menu.
@@ -100,6 +116,7 @@ function manifest(extensionVersion: string): Record<string, unknown> {
           { command: 'xerxes.search', when: 'view == xerxes.chat', group: '1_task@1' },
           { command: 'xerxes.exportTranscript', when: 'view == xerxes.chat', group: '1_task@2' },
           ...SHEETS.map(([name], index) => ({ command: `xerxes.panel.${name}`, when: 'view == xerxes.chat', group: `2_panels@${index + 1}` })),
+          { command: 'xerxes.toggleStyle', when: 'view == xerxes.chat', group: '3_view@1' },
         ],
       },
       keybindings: [

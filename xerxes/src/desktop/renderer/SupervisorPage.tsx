@@ -9,6 +9,8 @@ import { HubConnection } from '../../client/hubConnection.js'
 import { createHubController, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput } from '../../client/hubController.js'
 import { createHubStore, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
+import { Icon } from './Icon.js'
+import { Markdown } from './markdown.js'
 import { ModelChooser } from './ModelChooser.js'
 import {
   HUB_CHANGED_EVENT, cockpitCall, cockpitEnsureSession, createCockpitSockets, windowCockpitApi,
@@ -117,6 +119,12 @@ export interface SupervisorViewProps {
   readonly onSaveModel: (input: SupervisorConfigInput) => Promise<boolean>
 }
 
+/**
+ * One conversation page, laid out like a task: a slim toolbar, the messages
+ * in a scrolling reading column (XERXES replies rendered as Markdown, your
+ * own as the task view's user bubble), and the task view's composer docked
+ * at the bottom.
+ */
 export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const { state, hubLabel, now, onSend, onRespond, onReopen, onOpenSettings } = props
   const supervisor = state.supervisor
@@ -125,71 +133,131 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
   const unconfigured = config.status === 'unconfigured'
-  const showChooser = props.chooserOpen || unconfigured
+  const showChooser = (props.chooserOpen || unconfigured) && supervisor.phase !== 'unsupported'
+  const ready = supervisor.phase === 'ready'
+  const conversing = supervisor.phase !== 'unsupported' && supervisor.phase !== 'error'
+  const canType = ready && !unconfigured
+  const canSend = canType && live && !supervisor.busy && text.trim() !== ''
+  const streamRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const items = supervisor.messages.length + supervisor.confirmations.length
+  // Follow the newest message, as the task conversation does.
+  useEffect(() => {
+    const element = streamRef.current
+    if (element) element.scrollTop = element.scrollHeight
+  }, [items, supervisor.busy])
+  const grow = (): void => {
+    const element = inputRef.current
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = `${Math.min(element.scrollHeight, 220)}px`
+  }
   const submit = async (): Promise<void> => {
     const message = text.trim()
     if (message === '' || supervisor.busy || !live || unconfigured) return
-    if (await onSend(message)) setText('')
+    if (await onSend(message)) {
+      setText('')
+      requestAnimationFrame(grow)
+    }
   }
   return (
-    <section className="supervisor" aria-labelledby="supervisor-title">
-      <header className="supervisor__head">
-        <h3 id="supervisor-title">XERXES</h3>
-        <span className="studio-muted">{hubLabel}</span>
+    <section className="supervisor" aria-label="XERXES">
+      <header className="supervisor__bar">
+        <span className="supervisor__hub" title={`Hub: ${hubLabel}`}><span className={`supervisor__dot${live ? ' is-live' : ''}`} aria-hidden="true" />{hubLabel}</span>
+        <span className="supervisor__flex" />
         <span className="supervisor__model" aria-label="XERXES model">{modelChipText(config)}</span>
         <button type="button" className="btn" aria-expanded={showChooser} onClick={() => props.onChooserChange(!props.chooserOpen)}>Model</button>
         <button type="button" className="btn" onClick={onOpenSettings}>Hub settings</button>
       </header>
-      {note ? <p role="status" className="notice">{note}</p> : null}
-      {showChooser && supervisor.phase !== 'unsupported' ? (
-        <ModelChooser
-          machines={state.machines}
-          config={config}
-          onOptions={props.onOptions}
-          onSave={props.onSaveModel}
-          onOpen={props.onChooserShown}
-          {...(props.chooserOpen && !unconfigured ? { onClose: () => props.onChooserChange(false) } : {})}
-        />
-      ) : null}
-      {supervisor.phase === 'unsupported' ? (
-        <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
-      ) : supervisor.phase === 'error' ? (
-        <div role="alert" className="notice is-error">
-          <p>Could not open the supervisor: {supervisor.error ?? 'unknown error'}</p>
-          <button type="button" className="btn" onClick={onReopen}>Try again</button>
+      {note || showChooser ? (
+        <div className="supervisor__panel">
+          {note ? <p role="status" className="notice">{note}</p> : null}
+          {showChooser ? (
+            <ModelChooser
+              machines={state.machines}
+              config={config}
+              onOptions={props.onOptions}
+              onSave={props.onSaveModel}
+              onOpen={props.onChooserShown}
+              {...(props.chooserOpen && !unconfigured ? { onClose: () => props.onChooserChange(false) } : {})}
+            />
+          ) : null}
         </div>
-      ) : (
-        <>
-          <p className="studio-muted">Ask XERXES about your tasks. It proposes actions and waits for a person to confirm them. It cannot approve anything for you.</p>
-          {supervisor.phase !== 'ready' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for the Hub…'}</p> : null}
-          {supervisor.phase === 'ready' && supervisor.messages.length === 0 && !unconfigured ? <p className="studio-muted">No messages yet. Try “What needs me right now?”</p> : null}
-          <ol className="supervisor__messages" aria-label="Conversation">
-            {supervisor.messages.map(message => (
-              <li key={message.id} className={`supervisor__message supervisor__message--${message.role}`}>
-                <p className="supervisor__who">
-                  {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Notice' : message.author ?? 'You'}
-                  {message.source === 'voice' ? ' · voice' : ''}
-                  <span className="studio-muted"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
-                </p>
-                <p className="supervisor__text">{message.text}</p>
-              </li>
-            ))}
-          </ol>
-          {supervisor.confirmations.length === 0 ? null : (
-            <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
-              {supervisor.confirmations.map(item => (
-                <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
-              ))}
-            </ul>
+      ) : null}
+      <div className="supervisor__stream" ref={streamRef}>
+        <div className="supervisor__col">
+          {supervisor.phase === 'unsupported' ? (
+            <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
+          ) : supervisor.phase === 'error' ? (
+            <div role="alert" className="notice is-error">
+              <p>Could not open the supervisor: {supervisor.error ?? 'unknown error'}</p>
+              <button type="button" className="btn" onClick={onReopen}>Try again</button>
+            </div>
+          ) : (
+            <>
+              {!ready ? <p className="supervisor__empty" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
+              {ready && supervisor.messages.length === 0 && !unconfigured ? (
+                <div className="supervisor__empty">
+                  <strong>Ask XERXES about your work</strong>
+                  <p>It sees every task on your Hub, proposes actions and waits for a person to confirm them. It cannot approve anything for you.</p>
+                  <p className="supervisor__try">Try “What needs me right now?”</p>
+                </div>
+              ) : null}
+              {supervisor.messages.length > 0 ? (
+                <ol className="supervisor__messages" aria-label="Conversation">
+                  {supervisor.messages.map(message => (
+                    <li key={message.id} className={`supervisor__message supervisor__message--${message.role}`}>
+                      <p className="supervisor__who">
+                        {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Notice' : message.author ?? 'You'}
+                        {message.source === 'voice' ? ' · voice' : ''}
+                        <span> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
+                      </p>
+                      {message.role === 'xerxes'
+                        ? <div className="msg msg--agent"><Markdown text={message.text} className="msg__text" /></div>
+                        : message.role === 'user'
+                          ? <div className="msg msg--user"><div className="msg__text">{message.text}</div></div>
+                          : <p className="supervisor__notice">{message.text}</p>}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+              {supervisor.confirmations.length === 0 ? null : (
+                <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
+                  {supervisor.confirmations.map(item => (
+                    <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
+                  ))}
+                </ul>
+              )}
+              {supervisor.busy ? <p className="supervisor__busy" role="status">XERXES is thinking…</p> : null}
+              {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="action-card__error">{supervisor.error}</p> : null}
+            </>
           )}
-          {supervisor.error !== undefined && supervisor.phase === 'ready' && !unconfigured ? <p role="alert" className="action-card__error">{supervisor.error}</p> : null}
-          <form className="supervisor__composer" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
-            <label className="visually-hidden" htmlFor="supervisor-input">Message to XERXES</label>
-            <textarea id="supervisor-input" rows={2} value={text} placeholder={unconfigured ? 'Choose a model first' : 'Ask XERXES…'} disabled={supervisor.phase !== 'ready' || unconfigured} onChange={event => setText(event.target.value)} />
-            <button type="submit" className="btn btn--solid" disabled={supervisor.phase !== 'ready' || !live || supervisor.busy || unconfigured || text.trim() === ''}>{supervisor.busy ? 'Sending…' : 'Send'}</button>
-          </form>
-        </>
-      )}
+        </div>
+      </div>
+      {conversing ? (
+        <form className="supervisor__dock" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
+          <div className="composer-dock">
+            <div className="composer">
+              <label className="visually-hidden" htmlFor="supervisor-input">Message to XERXES</label>
+              <textarea
+                id="supervisor-input"
+                ref={inputRef}
+                className="composer__input"
+                rows={1}
+                value={text}
+                placeholder={unconfigured ? 'Choose a model first' : 'Ask XERXES…'}
+                disabled={!canType}
+                onChange={event => { setText(event.target.value); grow() }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() }
+                }}
+              />
+              <button type="submit" className="composer__send" aria-label={supervisor.busy ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
+            </div>
+          </div>
+          <p className="supervisor__hint">XERXES proposes; nothing runs until you confirm. ⏎ send · ⇧⏎ new line</p>
+        </form>
+      ) : null}
     </section>
   )
 }
@@ -295,7 +363,7 @@ export function SupervisorPage(): ReactElement {
   switch (gate.phase) {
     case 'reading':
     case 'signing_in':
-      return <section className="supervisor"><p aria-busy="true">{gate.phase === 'reading' ? 'Reading the saved Hub…' : 'Signing in to the Hub…'}</p></section>
+      return <section className="supervisor supervisor--connect"><p aria-busy="true">{gate.phase === 'reading' ? 'Reading the saved Hub…' : 'Signing in to the Hub…'}</p></section>
     case 'no_hub':
       return <ConnectHub onOpenSettings={openSettings} />
     case 'failed':

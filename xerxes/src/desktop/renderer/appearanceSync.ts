@@ -11,6 +11,12 @@ import { PALETTE_KEY } from './palettes.js'
  * the picture again). No reload, no other setting touched.
  */
 export function chooseStyle(style: StyleChoice, root: HTMLElement = document.documentElement): void {
+  // In VS Code the choice is the Xerxes: Style setting; the extension pushes
+  // it back to every open view (vscode/ui/main.tsx applies it).
+  if (root.getAttribute('data-host') === 'vscode') {
+    if (typeof window !== 'undefined' && window.xerxes?.setStyle) void window.xerxes.setStyle(style)
+    return
+  }
   saveAppearance({ style })
   applyStyle(style, root)
   applyBackdrop(loadBackdrop(), root)

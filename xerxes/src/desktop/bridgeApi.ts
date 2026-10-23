@@ -276,6 +276,15 @@ export function createBridge(transport: BridgeTransport) {
   pickFiles(): Promise<string[]> { return transport.invoke('host:pick-files') as Promise<string[]> },
   /** VS Code: show the Source Control view. */
   showSourceControl(): Promise<boolean> { return transport.invoke('host:source-control') as Promise<boolean> },
+  /** VS Code: save the Style setting (Neo or Classic); every Xerxes view follows it. */
+  setStyle(style: unknown): Promise<boolean> {
+    if (style !== 'neo' && style !== 'classic') return Promise.reject(new TypeError('invalid style'))
+    return transport.invoke('host:set-style', style) as Promise<boolean>
+  },
+  /** VS Code: the Style setting changed (Settings, the palette, or another view). */
+  onStyle(handler: (style: 'neo' | 'classic') => void): () => void {
+    return transport.on('desktop:style', value => { if (value === 'neo' || value === 'classic') handler(value) })
+  },
 
   /** Reveal one daemon-resolved user preset directory. Main re-checks containment. */
   openPath(path: unknown): Promise<boolean> {

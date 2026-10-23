@@ -860,16 +860,19 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'ext
     dels: changes.reduce((sum, file) => sum + file.dels, 0),
   }), [changes])
   const needsInput = snap.approval !== null || snap.question !== null
+  // The XERXES tab is its own conversation with its own composer: the task's
+  // title, status line and steer box under it read as part of XERXES.
+  const supervisor = page === 'xerxes'
 
   return (
     <main className="chat">
       <header className="chat__head chat__head--minimal">
         {!chrome.sidebarVisible && <SidebarToggle />}
-        <span className="chat__title">{snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')}</span>
-        <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
+        <span className="chat__title">{supervisor ? 'XERXES' : (snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected'))}</span>
+        {!supervisor && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
-        {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity') }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
+        {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null) }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
         {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
         {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
           Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
@@ -888,7 +891,8 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'ext
       {snap.tab === 'log' && <div className="workspace workspace--log"><LogTab snap={snap} /></div>}
 
       </div>
-      <Composer snap={snap} />
+      {/* Hidden, not unmounted, so a half-typed task message survives a visit to XERXES. */}
+      <div className="chat__composer-host" hidden={supervisor}><Composer snap={snap} /></div>
     </main>
   )
 }

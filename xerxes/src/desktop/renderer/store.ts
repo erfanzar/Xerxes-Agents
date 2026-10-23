@@ -3101,7 +3101,12 @@ export class Store {
     if (this.updatingRuntime || this.openingFreshTask || this.openingSession) return
     if (this.frame.connection === 'online') {
       this.refreshSessions()
-      if (this.frame.daemonWarning && !this.frame.daemonWarning.startsWith('The app is older') && this.frame.runtimeUpdate !== 'failed') {
+      // Only a restart the person asked for is retried here (it waits for
+      // running work). A build mismatch alone never restarts the runtime:
+      // other clients (the VS Code extension, another app build) share it,
+      // and two clients with different builds used to restart each other's
+      // runtime every time it went idle, dropping unsaved chats each time.
+      if (this.frame.daemonWarning && !this.frame.daemonWarning.startsWith('The app is older') && this.frame.runtimeUpdate === 'waiting') {
         await this.restartDaemon(false)
       }
       // Events would still be flowing; a silent socket only shows when a

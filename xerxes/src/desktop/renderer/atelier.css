@@ -3092,17 +3092,38 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .notice{background:var(--mac-control);border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-3);margin:var(--s-2) 0;color:var(--x-secondary);font:var(--t-caption)}
 .atelier .notice.is-error{background:var(--x-failed-bg);border-color:var(--x-failed-border);color:var(--x-failed-text)}
 .atelier .action-card__error{color:var(--x-failed-text);font:var(--t-caption);margin:var(--s-2) 0}
-.supervisor{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-5);min-width:0;overflow-y:auto;flex:1 1 auto}
+/* XERXES is a page of its own inside .chat: toolbar, scrolling reading
+   column, docked composer. The task's composer host is hidden meanwhile. */
+.atelier .chat__composer-host{display:contents}
+.supervisor{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden}
+.supervisor--connect{gap:var(--s-3);padding:var(--s-5);overflow-y:auto;max-width:var(--conversation-width,720px);width:100%;margin:0 auto;box-sizing:border-box}
 .supervisor h3{font:var(--t-title);margin:0}
-.supervisor__head{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
-.supervisor__model{font:var(--t-caption);color:var(--x-title);background:var(--x-accent-soft);border-radius:999px;padding:2px 10px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.supervisor__messages,.supervisor__cards{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-3)}
-.supervisor__message{border:1px solid var(--x-divider);border-radius:var(--r-sm);padding:var(--s-3);min-width:0;overflow-wrap:anywhere}
-.supervisor__message--xerxes{background:var(--x-accent-soft)}
-.supervisor__who{font:var(--t-caption);color:var(--x-meta);margin:0 0 var(--s-1)}
-.supervisor__text{margin:0;white-space:pre-wrap;font:var(--t-body)}
-.supervisor__composer{display:flex;gap:var(--s-2);align-items:flex-end}
-.supervisor__composer textarea{flex:1;min-width:0;resize:vertical;background:var(--x-screen);border:1px solid var(--x-hairline);border-radius:6px;color:var(--x-title);padding:6px 10px;font:var(--ui-font)/1.5 var(--sans)}
+.supervisor__bar{flex:none;display:flex;align-items:center;gap:var(--s-2);min-height:40px;padding:6px var(--s-5);border-bottom:1px solid var(--x-hairline);box-sizing:border-box}
+.supervisor__bar .btn{min-height:26px;padding:3px 10px}
+.supervisor__flex{flex:1}
+.supervisor__hub{display:inline-flex;align-items:center;gap:7px;min-width:0;font:var(--t-caption);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.supervisor__dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--x-separator)}
+.supervisor__dot.is-live{background:var(--x-done)}
+.supervisor__model{font:var(--t-caption);color:var(--x-title);background:var(--x-accent-soft);border-radius:999px;padding:2px 10px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.supervisor__panel{flex:none;max-height:45%;overflow-y:auto;padding:var(--s-3) var(--s-5);border-bottom:1px solid var(--x-hairline)}
+.supervisor__stream{flex:1 1 auto;min-height:0;overflow-y:auto}
+.supervisor__col{display:flex;flex-direction:column;gap:var(--s-4);width:100%;max-width:var(--conversation-width,760px);margin:0 auto;padding:var(--s-5) var(--s-5) var(--s-4);box-sizing:border-box}
+.supervisor__empty{margin:12vh auto 0;max-width:460px;text-align:center;color:var(--x-meta);font:var(--t-body)}
+.supervisor__empty strong{display:block;margin-bottom:var(--s-2);font:var(--t-title);color:var(--x-title)}
+.supervisor__empty p{margin:0 0 var(--s-2)}
+.supervisor__try{color:var(--x-secondary)}
+.supervisor__messages,.supervisor__cards{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-5)}
+.supervisor__message{display:flex;flex-direction:column;gap:var(--s-1);min-width:0;overflow-wrap:anywhere}
+.supervisor__message--user{align-items:flex-end}
+.supervisor__message--user .msg--user{max-width:min(85%,640px);margin:0}
+.supervisor__message--user .msg__text{white-space:pre-wrap}
+.supervisor__message--xerxes .msg--agent{margin:0}
+.supervisor__who{font:var(--t-caption);color:var(--x-meta);margin:0}
+.supervisor__notice{margin:0;padding:var(--s-2) var(--s-3);border-left:2px solid var(--x-needs);background:var(--x-needs-bg);color:var(--x-secondary);font:var(--t-caption);white-space:pre-wrap}
+.supervisor__busy{margin:0;font:var(--t-caption);color:var(--x-meta)}
+.supervisor__dock{flex:none;padding:var(--s-2) var(--s-5) var(--s-3);background:var(--x-screen)}
+.supervisor__dock .composer-dock{margin:0 auto}
+.supervisor__hint{max-width:var(--conversation-width,760px);margin:6px auto 0;font:var(--t-caption);color:var(--x-caption);text-align:center}
 .action-card{border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-3);display:flex;flex-direction:column;gap:var(--s-2)}
 .action-card__title{font:var(--t-body);margin:0}
 .action-card__summary,.action-card__meta,.action-card__result{margin:0;font:var(--t-caption);color:var(--x-secondary)}

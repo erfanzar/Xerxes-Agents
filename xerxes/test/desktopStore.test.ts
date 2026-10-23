@@ -682,7 +682,7 @@ describe('Store workspace folds', () => {
     expect(bridge.calls.some(call => call.method === "slash" && call.params.command === "/restart")).toBe(false)
   })
 
-  test('a build mismatch automatically requests a safe idle update and stops retrying errors', async () => {
+  test('a build mismatch never restarts the shared runtime by itself, only on request', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     let attempts = 0
     bridge.respondWith(method => {
@@ -691,15 +691,20 @@ describe('Store workspace folds', () => {
       return { ok: true }
     })
     await store.openSession("aa19f402")
-    await (store as unknown as { beat(): Promise<void> }).beat()
-    expect(attempts).toBe(1)
+    const beat = () => (store as unknown as { beat(): Promise<void> }).beat()
+    await beat()
+    await beat()
+    // Another client may share this runtime: the warning shows, nothing restarts.
+    expect(attempts).toBe(0)
     expect(store.getSnapshot().daemonWarning).toBeTruthy()
-    await (store as unknown as { beat(): Promise<void> }).beat()
+    await store.restartDaemon(false)
     expect(attempts).toBe(1)
     expect(store.getSnapshot().runtimeUpdate).toBe("failed")
+    await beat()
+    expect(attempts).toBe(1)
   })
 
-  test('automatic update retries busy work then resumes the same session after idle', async () => {
+  test('a requested update waits for busy work, retries, then resumes the same session after idle', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     let updated = false
     let busy = true
@@ -715,6 +720,9 @@ describe('Store workspace folds', () => {
     await store.openSession('aa19f402')
     const beat = () => (store as unknown as { beat(): Promise<void> }).beat()
     await beat()
+    expect(bridge.calls.some(call => call.method === 'desktop.restartRuntime')).toBe(false)
+    // The person asks for the update; busy work queues it.
+    await store.restartDaemon(false)
     expect(store.getSnapshot().runtimeUpdate).toBe('waiting')
     expect(updated).toBe(false)
     busy = false

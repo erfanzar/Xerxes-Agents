@@ -63,6 +63,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
           <button className="chipbtn" aria-label="Close settings" onClick={() => store.closeSettings()}><Icon name="close" size={13} /></button>
         </header>
         <div className="modal__main">
+          <StyleField />
           <ModelsCard snap={snap} />
           <AgentIntelligenceCard snap={snap} />
           <PermissionsCard snap={snap} />
@@ -368,8 +369,30 @@ const STYLE_NOTES: Record<StyleChoice, string> = {
  * only its colours (the picture returns with Classic).
  */
 function StyleField(): ReactElement {
-  const [style, setStyle] = useState<StyleChoice>(() => typeof document === 'undefined' ? DEFAULT_STYLE : loadAppearance().style)
+  const vscode = isVscodeHost()
+  // VS Code keeps the choice in its own settings and stamps it on the page.
+  const read = (): StyleChoice => typeof document === 'undefined' ? DEFAULT_STYLE
+    : vscode ? (document.documentElement.dataset?.styleChoice === 'classic' ? 'classic' : 'neo')
+    : loadAppearance().style
+  const [style, setStyle] = useState<StyleChoice>(read)
+  useEffect(() => {
+    if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return
+    const observer = new MutationObserver(() => setStyle(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-style', 'data-style-choice'] })
+    return () => observer.disconnect()
+  }, [])
   const pick = (next: StyleChoice): void => { chooseStyle(next); setStyle(next) }
+  if (vscode) return (
+    <div className="field style-field">
+      <label id="style-label">Style</label>
+      <div className="seg" role="radiogroup" aria-labelledby="style-label">
+        {STYLES.map(value => (
+          <button key={value} role="radio" aria-checked={style === value} className={style === value ? 'is-on' : ''} onClick={() => pick(value)}>{STYLE_LABELS[value]}</button>
+        ))}
+      </div>
+      <p className="field__note">Neo uses its own colours and a monospace font; Classic follows your VS Code theme. Saved as Xerxes: Style in VS Code settings.</p>
+    </div>
+  )
   return (
     <div className="field style-field">
       <label id="style-label">Style</label>
