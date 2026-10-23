@@ -2213,7 +2213,11 @@ html,body,#root,.app.atelier{background:transparent}
 /* Goal as a rail card. */
 .atelier .railcard--goal{margin-bottom:10px}
 .atelier .railcard--goal .goalcard{display:grid;gap:10px;font:var(--t-body);color:var(--x-prose)}
-.atelier .railcard--goal .goal-expand{padding:0;margin-top:-4px;font:var(--t-caption);color:var(--x-secondary)}
+/* A text link, not a button: without the reset the browser drew its grey
+   default button (worst in VS Code, which has no other button reset). */
+.atelier .goal-expand{appearance:none;background:transparent;border:0;border-radius:0;cursor:pointer}
+.atelier .railcard--goal .goal-expand{padding:0;margin-top:-4px;font:var(--t-caption);color:var(--x-accent)}
+.atelier .railcard--goal .goal-expand:hover{text-decoration:underline}
 .atelier .railcard--goal .goal-inspection{margin:0;padding-top:10px;border-top:1px solid var(--x-hairline);font:var(--t-caption);color:var(--x-secondary)}
 .atelier .railcard--goal .goalcard__rounds{margin:0;font:var(--t-num);color:var(--x-meta)}
 .atelier .railcard--goal .goalcard__btns{margin:2px 0 0;gap:8px}

@@ -162,6 +162,23 @@ test('the Style switch saves through VS Code settings and rejects anything but n
   expect(env.editor).toEqual(['style:classic', 'style:neo'])
 })
 
+test('every Xerxes view action is an icon on the title bar, none hidden in the overflow menu', async () => {
+  const source = await Bun.file(new URL('../scripts/buildVscode.ts', import.meta.url)).text()
+  const start = source.indexOf("'view/title': [")
+  // The array closes on its own line; `([name],` inside SHEETS.map is not its end.
+  const menu = source.slice(start, source.indexOf('\n        ],', start))
+  expect(menu).not.toMatch(/group: '(?!navigation)/)
+  for (const command of ['xerxes.search', 'xerxes.exportTranscript', 'xerxes.settings']) {
+    expect(menu).toContain(`command: '${command}'`)
+    expect(source).toMatch(new RegExp(`command: '${command.replace('.', '\\.')}'[^}]*icon: '\\$\\(`))
+  }
+  // The style switch lives in the command palette and Settings only.
+  expect(menu).not.toContain("command: 'xerxes.toggleStyle'")
+  expect(source).toContain("command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Classic)'")
+  expect(source).toContain("activity: '$(pulse)'")
+  expect(source).toContain("usage: '$(graph)'")
+})
+
 test('a failure opening a file in VS Code reaches the view as an error', async () => {
   const env = ports({ openFile: async () => { throw new Error('File not found: gone.ts') } })
   const { bridge } = wire(post => new PanelHost(env.value, post, () => fakeDaemon().daemon))

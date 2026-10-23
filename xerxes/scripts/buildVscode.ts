@@ -51,6 +51,8 @@ async function version(): Promise<string> {
 
 /** The app's surfaces without a native VS Code home, opened from the view's overflow menu. Keep in step with SHEETS in src/vscode/extension.ts. */
 const SHEETS: ReadonlyArray<readonly [string, string]> = [['activity', 'Activity'], ['usage', 'Usage']]
+/** Title-bar codicons for those surfaces. */
+const SHEET_ICONS: Readonly<Record<string, string>> = { activity: '$(pulse)', usage: '$(graph)' }
 
 /** The extension manifest VS Code and the Marketplace read. */
 function manifest(extensionVersion: string): Record<string, unknown> {
@@ -85,11 +87,11 @@ function manifest(extensionVersion: string): Record<string, unknown> {
         { command: 'xerxes.history', title: 'Task History', category: 'Xerxes', icon: '$(history)' },
         { command: 'xerxes.settings', title: 'Settings', category: 'Xerxes', icon: '$(settings-gear)' },
         { command: 'xerxes.sendSelection', title: 'Send Selection to Xerxes', category: 'Xerxes' },
-        { command: 'xerxes.search', title: 'Search Message History', category: 'Xerxes' },
+        { command: 'xerxes.search', title: 'Search Message History', category: 'Xerxes', icon: '$(search)' },
         { command: 'xerxes.palette', title: 'Command Palette', category: 'Xerxes' },
-        { command: 'xerxes.exportTranscript', title: 'Export Transcript', category: 'Xerxes' },
-        { command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Classic)', category: 'Xerxes' },
-        ...SHEETS.map(([name, title]) => ({ command: `xerxes.panel.${name}`, title, category: 'Xerxes' })),
+        { command: 'xerxes.exportTranscript', title: 'Export Transcript', category: 'Xerxes', icon: '$(export)' },
+        { command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Classic)', category: 'Xerxes', icon: '$(color-mode)' },
+        ...SHEETS.map(([name, title]) => ({ command: `xerxes.panel.${name}`, title, category: 'Xerxes', icon: SHEET_ICONS[name] })),
       ],
       configuration: {
         title: 'Xerxes',
@@ -108,15 +110,16 @@ function manifest(extensionVersion: string): Record<string, unknown> {
       },
       menus: {
         'editor/context': [{ command: 'xerxes.sendSelection', when: 'editorHasSelection', group: 'xerxes@1' }],
-        // The title bar carries the everyday actions; everything else is in its overflow menu.
+        // Every action is an icon on the title bar, so people can see it exists;
+        // the overflow menu hid Search, Activity, Usage, Export and Style.
         'view/title': [
           { command: 'xerxes.newTask', when: 'view == xerxes.chat', group: 'navigation@1' },
           { command: 'xerxes.history', when: 'view == xerxes.chat', group: 'navigation@2' },
-          { command: 'xerxes.settings', when: 'view == xerxes.chat', group: 'navigation@3' },
-          { command: 'xerxes.search', when: 'view == xerxes.chat', group: '1_task@1' },
-          { command: 'xerxes.exportTranscript', when: 'view == xerxes.chat', group: '1_task@2' },
-          ...SHEETS.map(([name], index) => ({ command: `xerxes.panel.${name}`, when: 'view == xerxes.chat', group: `2_panels@${index + 1}` })),
-          { command: 'xerxes.toggleStyle', when: 'view == xerxes.chat', group: '3_view@1' },
+          { command: 'xerxes.search', when: 'view == xerxes.chat', group: 'navigation@3' },
+          ...SHEETS.map(([name], index) => ({ command: `xerxes.panel.${name}`, when: 'view == xerxes.chat', group: `navigation@${4 + index}` })),
+          { command: 'xerxes.exportTranscript', when: 'view == xerxes.chat', group: `navigation@${4 + SHEETS.length}` },
+          // Switch Style stays in the command palette and Settings, not the title bar.
+          { command: 'xerxes.settings', when: 'view == xerxes.chat', group: `navigation@${5 + SHEETS.length}` },
         ],
       },
       keybindings: [

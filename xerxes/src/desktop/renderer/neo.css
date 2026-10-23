@@ -182,6 +182,24 @@
 :root[data-style='neo']:not(#neo) .atelier .composer__send{background:var(--x-accent);color:var(--x-on-accent)}
 :root[data-style='neo']:not(#neo) .atelier .composer__send:disabled{background:var(--x-selected);color:var(--x-meta);opacity:1}
 :root[data-style='neo']:not(#neo) .atelier .composer__send--stop{background:transparent;color:var(--x-title);box-shadow:inset 0 0 0 1px var(--x-separator)}
+/* "To-dos" in uppercase tracking broke at its hyphen into "TO- / DOS". */
+:root[data-style='neo']:not(#neo) .atelier .composer-task-summary__label{white-space:nowrap}
+
+/* ── VS Code: the desktop's reading margins and composer ──────────────
+   vscode.css joins the message box and its toolbar into one bordered
+   frame and gives the transcript a 10px inset. Under Neo that frame kept
+   its own border (and turned accent on focus) around the toolbar, and the
+   text sat closer to the edge than the composer. Here the transcript and
+   the composer share one 20px inset, the box is the desktop's, and the
+   toolbar sits under it unframed. */
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .stream{scrollbar-gutter:stable;padding-left:20px;padding-right:10px}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .stream--welcome{padding-left:20px;padding-right:20px}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer-wrap{gap:8px;padding:8px 20px 12px}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer__input{min-height:30px}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer__send{width:30px;height:30px}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer__toolbar{margin-top:0;min-height:30px;padding:0 2px;border:0;background:transparent}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer__toolbar .cchip{height:26px;padding:0 8px;font:400 var(--ui-font)/1 var(--mono)}
+:root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv .composer__toolbar .cchip:hover{background:var(--mac-control);color:var(--x-title)}
 
 /* ── Welcome: a heavy, tight mono wordmark on a faint grid, with a cursor ── */
 :root[data-style='neo']:not(#neo) .atelier .welcome{

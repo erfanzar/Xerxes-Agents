@@ -46,6 +46,26 @@ test('every Neo rule is scoped to data-style="neo", so Classic is untouched', as
   for (const match of css.matchAll(/@keyframes\s+([\w-]+)/g)) expect(match[1]).toStartWith('neo-')
 })
 
+test('Neo in VS Code uses the desktop composer: an unframed toolbar and one shared side inset', async () => {
+  const css = await Bun.file(NEO).text()
+  const prefix = ":root[data-style='neo'][data-host='vscode']:not(#neo) .atelier.xv "
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${prefix}${selector}{`)
+    if (start < 0) throw new Error(`missing VS Code Neo rule for ${selector}`)
+    return css.slice(start, css.indexOf('}', start))
+  }
+  expect(rule('.composer__toolbar')).toContain('border:0')
+  expect(rule('.composer__toolbar')).toContain('background:transparent')
+  expect(rule('.stream')).toContain('padding-left:20px')
+  expect(rule('.composer-wrap')).toContain('20px')
+  expect(css).toContain(".composer-task-summary__label{white-space:nowrap}")
+})
+
+test('"Show full goal" is a plain text link, never the browser\'s default grey button', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain('.atelier .goal-expand{appearance:none;background:transparent;border:0;')
+})
+
 test('Neo loads last, in the app, the build and the layout preview', async () => {
   const [html, build, preview] = await Promise.all([
     Bun.file(new URL('../src/desktop/renderer/index.html', import.meta.url)).text(),
