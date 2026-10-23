@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.3 — 2026-10-23
+
+- **XERXES feels like a chat.** Your message shows as soon as you send it, and while XERXES works you see the task view's "Thinking…" row with a clock. Long replies are part of the conversation instead of a small scroll box. A failed send puts your text back in the box.
+- **Agents, Skills & tools, Artifacts and Scheduled jobs are full pages**, like XERXES: the header names the page, the task's message box is hidden (your draft is kept), and a slim bar has the description and a close button. Scheduled jobs used to open as a pop-up.
+
 ## 0.8.2 — 2026-10-23
 
 - **VS Code: Neo matches the desktop.** The conversation and the message box share one 20px side inset, the message box is the desktop's (with the `❯` prompt and the full-size send button), and the toolbar sits under it without its own frame.
