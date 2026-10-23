@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.5 — 2026-10-24
+
+- **An SSH host with its own Claude Code uses it.** A new SSH task used to relay every prompt through this computer's Claude Code sign-in, even when the host had its own working one. The desktop now asks the host first (`provider_list {with_readiness:true}`; only a state such as `ready` or `not_signed_in` is returned, never a token or path), runs the task on the host's sign-in when it works, and relays only when it does not, or when the host runs an older version. The composer then says "via ‹host›" instead of "via this Mac".
+- **A tool call closed with the wrong end tag still runs.** On the Claude Code transport, a call whose JSON arguments were complete but that ended with a parameter, invoke or call-block close was shown in the reply as text and never ran. Those slips are now accepted once the arguments are whole; a tag only mentioned in prose is still text.
+- The "missing Claude Code CLI" test no longer runs a real `bun add`.
+
 ## 0.8.4 — 2026-10-23
 
 - **XERXES sees your remote machines, by three routes.** A remote can link out to the Hub (`xerxes hub link`), the Hub can dial it itself over SSH (`xerxes hub machines add-route --alias …`), and the desktop app shares SSH workspaces it is connected to as a last resort (`XERXES_HUB_SHARE=off` turns that off). All routes to one runtime are one machine with stable project ids; the Hub uses the best route that answers, never a route that reaches a different runtime, and moves back when a better one returns.
