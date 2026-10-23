@@ -281,6 +281,14 @@ const PARTIAL_INVOKE_HEADER = /<(?:antml:)?invoke name="[^"\n<>]*(?:"\s*)?$/y
 const PARAMETER_HEADER = /<(?:antml:)?parameter name="[^"\n<>]{1,64}"\s*>/y
 const PARTIAL_PARAMETER_HEADER = /<(?:antml:)?parameter name="[^"\n<>]{0,64}(?:"\s*)?$/y
 const PARAMETER_CLOSE = ['</parameter>', `</${NS}parameter>`] as const
+/**
+ * Closes the model writes by mistake after a JSON-bodied call's arguments are
+ * complete: the end of a parameter or invoke (its trained form leaking in), or
+ * the call block's close with the call's own close skipped. Rejected, a whole
+ * lesson_record call was shown as text and never ran. The block close is not
+ * consumed, so it still ends the reply.
+ */
+const STRAY_CLOSES = [...PARAMETER_CLOSE, ...ORPHAN_CLOSE, CALL_BLOCK_CLOSE] as const
 /** What may follow an `<invoke>` header, or a resumed call's `</parameter>`: more of the call. */
 const INVOKE_BODY = [...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
 /** Openers that start a call. One arriving before a held tag's close shows that tag was mentioned. */
@@ -304,6 +312,8 @@ interface BodyScan {
   /** Nesting inside the JSON object: 0 before it opens and after it closes. */
   readonly depth: number
   readonly opened: boolean
+  /** Characters to skip past `index` when a stray close stood in for the expected one. */
+  readonly closeLength?: number
 }
 
 const NOT_A_CALL = -2
@@ -319,7 +329,7 @@ const NOT_A_CALL = -2
  * chunk could change the answer: a backslash whose escaped character has not
  * arrived, or a partial close.
  */
-function scanCallBody(text: string, from: number, close: string, lead: RegExp, resume?: Omit<BodyScan, 'index'>): BodyScan {
+function scanCallBody(text: string, from: number, close: string, lead: RegExp, resume?: Omit<BodyScan, 'index'>, strays: readonly string[] = []): BodyScan {
   let inString = resume?.inString ?? false
   let depth = resume?.depth ?? 0
   let opened = resume?.opened ?? false
@@ -349,6 +359,11 @@ function scanCallBody(text: string, from: number, close: string, lead: RegExp, r
       // A stray close or a second object is the model's slip inside a call,
       // not prose: rejecting it showed the whole call as text and never ran
       // it. parseArguments keeps the first object. A word still means a mention.
+      if (char === '<' && strays.length) {
+        const stray = strays.find(token => text.startsWith(token, index))
+        if (stray !== undefined) return { ...stop(index), closeLength: stray === CALL_BLOCK_CLOSE ? 0 : stray.length }
+        if (strays.some(token => index + token.length > text.length && token.startsWith(text.slice(index)))) break
+      }
       if (char === '{' || char === '[') depth = 1
       else if (!/[\s`}\],]/.test(char)) return stop(NOT_A_CALL)
       continue
@@ -605,7 +620,7 @@ export class FunctionCallExtractor {
         // The close counts only outside a JSON string: a value containing
         // "</function>" (code under test, this protocol itself) ended the call
         // there, and the truncated arguments were repaired and run.
-        const scan = scanCallBody(this.pending, bodyStart, close, bare ? BARE_LEAD : JSON_LEAD, resumed)
+        const scan = scanCallBody(this.pending, bodyStart, close, bare ? BARE_LEAD : JSON_LEAD, resumed, legacy || bare ? STRAY_CLOSES : [])
         if (scan.index === -1) {
           if (!end) return hold(scan)
           // Arguments the limit cut, or that stop mid-object, are incomplete.
@@ -615,7 +630,7 @@ export class FunctionCallExtractor {
         } else if (scan.index >= 0) {
           const call = asCall(this.pending.slice(bodyStart, scan.index))
           if (call) {
-            this.advance(scan.index + close.length)
+            this.advance(scan.index + (scan.closeLength ?? close.length))
             this.record(call)
             if (this.finished) { this.pending = ''; return visible }
             continue

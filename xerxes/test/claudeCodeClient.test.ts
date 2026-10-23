@@ -181,7 +181,8 @@ test('Claude Code errors become provider errors — a spent plan is classified a
 })
 
 test('a missing CLI explains how to install it instead of failing obscurely', async () => {
-  const client = new ClaudeCodeClient({ launch: fakeLauncher([]).launch, environment: { PATH: '/nonexistent', HOME: '/nonexistent' }, workingDirectory: '/tmp' })
+  // Automatic install off: otherwise the test runs a real `bun add` and times out on it.
+  const client = new ClaudeCodeClient({ launch: fakeLauncher([]).launch, environment: { PATH: '/nonexistent', HOME: '/nonexistent', XERXES_AUTO_INSTALL_CLAUDE_CODE: '0' }, workingDirectory: '/tmp' })
   const failure: Error = await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] })).then(() => new Error('resolved'), (error: Error) => error)
   expect(failure.message).toContain('Claude Code is not installed')
 })
@@ -584,6 +585,30 @@ test('markup mentioned in prose never swallows the rest of the reply or the call
     // A plain final answer that only mentions the tag is shown whole.
     expect(run(prose + ' Done.')).toEqual({ visible: prose + ' Done.', calls: [] })
   }
+})
+
+test('a JSON call closed with the wrong end tag still runs and is never shown as text', () => {
+  // Seen live: a whole lesson_record call ended with a parameter close instead of
+  // the function close, was shown in the reply as text, and never ran.
+  const lesson = { cue: 'dsa indexer oom', lesson: 'Lower with a layer override first.', confidence: 0.85 }
+  for (const close of ['</parameter>', '</invoke>', '\n</parameter>\n']) {
+    const reply = `Recording it.\n<function=lesson_record>${JSON.stringify(lesson)}${close}`
+    for (const size of [reply.length, 1]) {
+      const extractor = new FunctionCallExtractor()
+      let visible = ''
+      for (let i = 0; i < reply.length; i += size) visible += extractor.push(reply.slice(i, i + size))
+      visible += extractor.finish()
+      // Whitespace after the close is ordinary text, as after a correct close.
+      expect({ close, size, visible: visible.trimEnd(), calls: extractor.calls }).toEqual({ close, size, visible: 'Recording it.', calls: [{ name: 'lesson_record', arguments: lesson }] })
+    }
+  }
+  // The call block closing with the call's own close skipped: the call runs and the reply ends there.
+  const block = new FunctionCallExtractor()
+  const visible = block.push('Running.\n<tool_calls>\n<function=Bash>{"command":"ls"}\n</tool_calls>\nimagined output') + block.finish()
+  expect(block.calls).toEqual([{ name: 'Bash', arguments: { command: 'ls' } }])
+  expect(block.done).toBe(true)
+  expect(visible).not.toContain('<function=')
+  expect(visible).not.toContain('imagined output')
 })
 
 test('a call with a stray closing brace or a second object still runs, not shown as markup', () => {
