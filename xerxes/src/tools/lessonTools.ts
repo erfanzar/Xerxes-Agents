@@ -70,6 +70,18 @@ export const LESSON_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
 ]
 
+/**
+ * When and why the model should use the lesson tools. Rendered into the
+ * tool_guidance layer only while the tool is visible to the agent.
+ */
+export const LESSON_TOOL_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
+  lesson_record: 'Record a lesson when you learn something reusable about this workspace that a future session would otherwise rediscover the hard way: a non-obvious root cause you just fixed, a command or flag that works where the obvious one fails, a test or environment quirk, or a correction the user gave you. Call it right after the tool call or test that proved it, so the host can cite that call as evidence. Keep the cue a few searchable words and the lesson general and actionable. Do not record task-specific answers or anything unverified. Lessons stay pending until a person approves them; approved ones are added to future turns automatically.',
+  lesson_recall: 'Before starting non-trivial work in an area where something went wrong before (a flaky test, a build step, a tool, a deployment), call lesson_recall with a few words describing the situation. It also returns lessons still pending review, which are not injected automatically.',
+})
+
+/** Built-in agents that should see the model-facing learning tools. */
+export const MODEL_FACING_LEARNING_TOOLS = ['session_search', 'lesson_record', 'lesson_recall'] as const
+
 export function registerLessonTools(registry: ToolRegistry, options: LessonToolsOptions, agentId = 'default'): void {
   for (const definition of LESSON_TOOL_DEFINITIONS) {
     const name = definition.function.name
@@ -106,9 +118,10 @@ export function registerLessonTools(registry: ToolRegistry, options: LessonTools
           throw new Error(`Unknown lesson tool: ${name}`)
       }
     }), agentId, {
-      concurrencySafe: name === 'lesson_recall', defer: true, destructive: name === 'lesson_review', openWorld: false,
+      // Record and recall are model-facing and stay loaded; review is a human step.
+      concurrencySafe: name === 'lesson_recall', defer: name === 'lesson_review', destructive: name === 'lesson_review', openWorld: false,
       readOnly: name === 'lesson_recall', interruptBehavior: name === 'lesson_recall' ? 'cancel' : 'block',
-    })
+    }, LESSON_TOOL_GUIDANCE[name])
   }
 }
 

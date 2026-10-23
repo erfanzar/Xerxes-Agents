@@ -38,6 +38,8 @@ export interface ContextAssemblyInput {
   readonly toolGuidance: string
   /** Goal policy, when goal tools are visible (the goal's status is per-turn). */
   readonly goalPolicy?: string
+  /** When to recall, record and search: present when the learning tools are visible. */
+  readonly learningPolicy?: string
   /** Names of tools that exist but are not in this request's schemas. */
   readonly deferredCatalog?: string
   /** Interaction-mode switch hint for the current mode. */
@@ -71,6 +73,7 @@ export function assembleContextLayers(input: ContextAssemblyInput): SystemPrompt
     { name: 'agent', text: input.agentPrompt },
     { name: 'tool_guidance', text: input.toolGuidance },
     { name: 'goal_policy', text: input.goalPolicy ?? '' },
+    { name: 'learning_policy', text: input.learningPolicy ?? '' },
     { name: 'deferred_catalog', text: input.deferredCatalog ?? '' },
     { name: 'mode_hint', text: input.modeHint },
     { name: 'subagent_join', text: input.subagentJoin },

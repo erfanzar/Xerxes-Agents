@@ -8,10 +8,10 @@ Set the reflection policy in the normal daemon configuration:
 
 ```yaml
 runtime:
-  reflection: goals
+  reflection: all
 ```
 
-`reflection` accepts **`goals`** (default: reflect only when a goal transitions to complete/blocked during a successful turn), **`all`** (also reflect after at least 25 tool calls or 20 minutes), or **`off`** (no automatic reflection). `XERXES_REFLECTION=goals|all|off` overrides configuration at startup. The live `runtime.reload` settings path also accepts `reflection`; `runtime.status` and `/config` show it. The additive v35 `learning.list` and `learning.review` RPCs share the slash review implementation; workspace-scoped `learning_changed` events refresh clients after stored proposals, reviews and lesson-tool mutations.
+`reflection` accepts **`all`** (default: reflect when a goal transitions to complete/blocked, and after any successful turn with at least 25 tool calls or 20 minutes), **`goals`** (only goal transitions), or **`off`** (no automatic reflection). `XERXES_REFLECTION=goals|all|off` overrides configuration at startup. The live `runtime.reload` settings path also accepts `reflection`; `runtime.status` and `/config` show it. The additive v35 `learning.list` and `learning.review` RPCs share the slash review implementation; workspace-scoped `learning_changed` events refresh clients after stored proposals, reviews and lesson-tool mutations.
 
 Reflection uses the owning session's auxiliary provider path, with a 90-second request timeout and a 4096-token output ceiling. It starts only after persistence and `turn_end`, never delays the terminal event, and is cancelled with the turn/session/daemon lifetime. Errors are logged without failing the turn. Aborted/errored turns and subagent sessions are excluded. Ordinary turns do not incur this extra call under the default policy. A terminal goal is reflected on its transition, not on every later chat turn.
 

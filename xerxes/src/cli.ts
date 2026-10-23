@@ -108,11 +108,11 @@ import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
 import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution, successfulGoalEvidence } from './runtime/goalEvidence.js';
 import { GovernedMemoryStore } from './memory/governedMemoryStore.js';
 import { LessonStore, renderApprovedLessonsForTurn } from './memory/lessons.js';
-import { registerLessonTools } from './tools/lessonTools.js';
+import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
 import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
-import { SkillBundleStore, registerSessionSearchTool } from './tools/agentMetaTools.js';
+import { SkillBundleStore, addLearningToolsToBuiltinAgents, registerSessionSearchTool } from './tools/agentMetaTools.js';
 import { archiveSessionSearchPort } from './daemon/archiveSearch.js';
 import { registerClaudeNotebookTools } from './tools/claudeTools/notebook.js';
 import type { TurnReflectionInput } from './daemon/turnRunner.js';
@@ -1825,7 +1825,8 @@ function daemonRuntime(
   };
   const initialConnection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   const initialProfile = profileStore.active();
-  const reflection = process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection || 'goals';
+  // Default `all`: with `goals` only goal endings reflected, so ordinary long sessions never did.
+  const reflection = process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection || 'all';
   if (reflection !== 'goals' && reflection !== 'all' && reflection !== 'off') {
     throw new ConfigurationError('reflection', 'runtime.reflection / XERXES_REFLECTION must be goals, all or off');
   }
@@ -2099,6 +2100,9 @@ function daemonRuntime(
     // the main-session profiles may also manage plugins, with approval.
     addPluginToolsToBuiltinAgents(agentDefinitions, { manage: host.managedPlugins !== undefined });
     const llm = nativeConnection ? createLlmClient(connection.model, {
+    // session_search and the lesson tools are registered above for every
+    // session; without this no built-in agent could see them.
+    addLearningToolsToBuiltinAgents(agentDefinitions, MODEL_FACING_LEARNING_TOOLS);
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),

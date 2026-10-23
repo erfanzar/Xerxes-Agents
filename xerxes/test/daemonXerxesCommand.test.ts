@@ -277,8 +277,12 @@ test('background reflection stores only evidence-validated proposals and notifie
   const records = await store.list(root)
   expect(records).toHaveLength(1)
   expect(records[0]?.status).toBe('pending')
-  await new Promise<void>(resolve => setTimeout(resolve, 5))
-  const notice = notifications.find(item => String(item.message).startsWith('Reflection proposal'))
+  // The notice is emitted asynchronously; wait for it instead of a fixed 5 ms.
+  let notice = notifications.find(item => String(item.message).startsWith('Reflection proposal'))
+  for (let attempt = 0; !notice && attempt < 400; attempt++) {
+    await new Promise<void>(resolve => setTimeout(resolve, 5))
+    notice = notifications.find(item => String(item.message).startsWith('Reflection proposal'))
+  }
   expect(notice?.session_id).toBe(session.id)
   expect(notice).toMatchObject({ level: 'info', category: 'reflection', type: 'proposal', reflection: { id: result?.id, kind: 'skill_create', target: 'fixture-skill', rationale: proposal.rationale, evidence_count: 1 } })
   expect(notice?.message).toBe(`Reflection proposal ${result?.id}: skill_create fixture-skill. Nothing was changed. Review it with /xerxes.`)
@@ -292,7 +296,7 @@ test('background reflection stores only evidence-validated proposals and notifie
 test('reflection obeys live settings and shutdown cancellation even after a turn has ended', async () => {
   const started = Promise.withResolvers<AbortSignal>()
   await fixture(async ({ server, runtime, store, root, request }) => {
-    expect(runtime.status().reflection).toBe('goals')
+    expect(runtime.status().reflection).toBe('all')
     expect(await request('runtime.reload', { reflection: 'off' })).toMatchObject({ reflection: 'off' })
     const input: TurnReflectionInput = { session: runtime.sessionStatus('xerxes')!, messages: trajectory, trigger: 'goal_complete', signal: new AbortController().signal }
     expect(await server.reflectAfterTurn(input)).toBeUndefined()

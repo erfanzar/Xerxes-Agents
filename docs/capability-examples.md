@@ -83,7 +83,7 @@ Lessons start **pending**. Approve a lesson yourself after checking its evidence
 
 ### Review reflection proposals before changing anything
 
-By default, a goal transitioning to complete or blocked can request one background reflection using the session's provider. The turn ends first. Aborted/errored turns and subagent sessions do not reflect. The model must cite exact `[ACTION]`, `[OBSERVATION]` or `[ERROR]` lines from the shared trajectory, and may return no proposal. A clipped preview is not proof of failure. Configure `runtime.reflection: goals | all | off` (default `goals`); `all` also permits long-turn reflection at 25 tool calls or 20 minutes. `XERXES_REFLECTION` overrides the startup setting.
+By default, a goal transitioning to complete or blocked, or a long turn (25 tool calls or 20 minutes), can request one background reflection using the session's provider. The turn ends first. Aborted/errored turns and subagent sessions do not reflect. The model must cite exact `[ACTION]`, `[OBSERVATION]` or `[ERROR]` lines from the shared trajectory, and may return no proposal. A clipped preview is not proof of failure. Configure `runtime.reflection: all | goals | off` (default `all`); `goals` limits it to goal transitions. `XERXES_REFLECTION` overrides the startup setting.
 
 ```text
 /xerxes

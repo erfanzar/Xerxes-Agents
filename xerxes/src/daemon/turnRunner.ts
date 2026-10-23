@@ -55,6 +55,7 @@ import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../r
 import { DEFAULT_MAX_GOAL_ROUNDS, GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
 import { GOAL_REARM_AFTER_RESTART_KEY } from '../runtime/goalWake.js'
 import { DEFAULT_BLOCKED_AFTER_CONSECUTIVE_ROUNDS, goalPolicyPrompt } from '../runtime/goalTools.js'
+import { learningPolicyPrompt } from '../runtime/learningPolicy.js'
 import {
   mergeContextDeltas,
   renderContextDeltas,
@@ -285,6 +286,8 @@ export class SessionPromptSnapshots {
   /** Per session: the delegated-agent model list as first rendered (kept stable for the prompt cache). */
   readonly delegationModels = new Map<string, string>()
 
+  /** Per session: the learning policy as first rendered (a live reflection change must not rewrite the prompt). */
+  readonly learningPolicy = new Map<string, string>()
   drop(sessionId: string): void {
     this.memorySnapshots.delete(sessionId)
     this.deliveredGoalStatus.delete(sessionId)
@@ -292,6 +295,7 @@ export class SessionPromptSnapshots {
     this.compaction.delete(sessionId)
     this.delegationModels.delete(sessionId)
     for (const key of this.bootstrapPrompts.keys()) {
+    this.learningPolicy.delete(sessionId)
       if (key.startsWith(sessionId + '\u0000')) this.bootstrapPrompts.delete(key)
     }
   }
@@ -538,7 +542,15 @@ export class AgentTurnRunner implements TurnRunner {
       ?? (Boolean(contextLimit && contextLimit > 0) && (this.options.autoCompactThreshold?.() ?? 0.8) > 0)
     this.snapshots.compaction.set(session.id, compacts)
     const systemSegments = assembleContextLayers({
+    // When to recall, record and search. Goals are used because their policy says
+    // when; the learning tools had only per-tool notes and were never called.
+    const learningPolicy = this.snapshots.learningPolicy.get(session.id) ?? learningPolicyPrompt({
+      tools: new Set((tools ?? []).map(tool => tool.function.name)),
+      reflection: this.options.reflectionMode?.() ?? 'all',
+    })
+    this.snapshots.learningPolicy.set(session.id, learningPolicy)
       addendum: systemPromptAddendum(session),
+      learningPolicy,
       ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
       agentPrompt: promptAgent?.systemPrompt ?? '',
       bootstrap: bootstrapPrompt,
@@ -980,7 +992,7 @@ export class AgentTurnRunner implements TurnRunner {
           // setting or snapshot must never turn a successful task into a failure.
           void Promise.resolve().then(() => {
             if (signal.aborted) return
-            const mode = this.options.reflectionMode?.() ?? 'goals'
+            const mode = this.options.reflectionMode?.() ?? 'all'
             if (mode === 'off') return
             const goalAfter = getGoal(completedSession.metadata, completedSession.id)
             const transitioned = goalAfter && (goalAfter.id !== goalBefore?.id || goalAfter.phase !== goalBefore?.phase)

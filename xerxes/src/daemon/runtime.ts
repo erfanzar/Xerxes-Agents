@@ -1652,7 +1652,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             : [],
         ),
       ),
-      reflection: this.runtimeSettings.reflection === 'all' || this.runtimeSettings.reflection === 'off' ? this.runtimeSettings.reflection : 'goals',
+      reflection: this.runtimeSettings.reflection === 'goals' || this.runtimeSettings.reflection === 'off' ? this.runtimeSettings.reflection : 'all',
       tools: inventoryCount(inventory.tools),
       skills: inventoryCount(inventory.skills),
       ...(inventory.activeSubagents === undefined

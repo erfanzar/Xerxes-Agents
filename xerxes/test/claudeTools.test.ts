@@ -1432,6 +1432,18 @@ test('registered delegation schemas advertise only configured intelligence tiers
   expect((all.find(tool => tool.function.name === 'AgentTool')!.function.parameters.properties as Record<string, unknown>).intelligence).toMatchObject({ enum: ['smart'] })
 })
 
+test('Workflow guidance tells the model when to use select() and expect_agents', () => {
+  const manager = new SpawnedAgentManager({ runner: async () => ({ content: 'ok' }) })
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { manager })
+  const [segment] = registry.guidanceForTools(['Workflow'])
+  expect(segment?.name).toBe('Workflow')
+  // Documented in the description alone, these were never used; the guidance names the situation.
+  expect(segment?.text).toContain('Pick the best of several alternatives')
+  expect(segment?.text).toContain('select(candidates')
+  expect(segment?.text).toContain('pass expect_agents')
+})
+
 test('agent and swarm isolation is forwarded explicitly and unsupported runners reject it', async () => {
   const seen: Array<string | undefined> = []
   const refs: Array<string | undefined> = []

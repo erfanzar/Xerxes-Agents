@@ -4,6 +4,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
+import type { AgentDefinition } from '../agents/definitions.js'
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry, type ToolExecutionContext } from '../executors/toolRegistry.js'
 import { lintHarness, renderLintReport, type HarnessLintFinding } from '../extensions/harnessLint.js'
@@ -430,8 +431,24 @@ export async function sessionSearchTool(
 }
 
 /** Register only `session_search`, backed by an explicit host port (no second skill_manage). */
+export const SESSION_SEARCH_GUIDANCE = 'When the conversation starts with a compaction summary, or you need an exact value, path, error message, command or decision from earlier in this session that is no longer in your context, call session_search with a few distinctive words before guessing or asking the user to repeat it. The archive holds the replaced turns verbatim.'
+
 export function registerSessionSearchTool(registry: ToolRegistry, port: SessionSearchPort, agentId = 'default'): void {
-  registry.replace(SESSION_SEARCH_DEFINITION, (inputs, context) => sessionSearchTool(inputs, context, { sessionSearch: port }), agentId)
+  registry.replace(SESSION_SEARCH_DEFINITION, (inputs, context) => sessionSearchTool(inputs, context, { sessionSearch: port }), agentId,
+    { concurrencySafe: true, destructive: false, openWorld: false, readOnly: true }, SESSION_SEARCH_GUIDANCE)
+}
+
+/**
+ * The learning tools are registered for every session but a built-in agent
+ * only sees tools named in its catalog. They shipped without being added, so
+ * no model could call them. Widen built-in catalogs only; user agents keep
+ * their own allow lists.
+ */
+export function addLearningToolsToBuiltinAgents(definitions: Map<string, AgentDefinition>, names: readonly string[]): void {
+  for (const [name, definition] of definitions) {
+    if (definition.source !== 'built-in' || definition.tools.length === 0) continue
+    definitions.set(name, { ...definition, tools: [...new Set([...definition.tools, ...names])] })
+  }
 }
 
 export async function skillsListTool(inputs: JsonObject, options: AgentMetaToolsOptions = {}): Promise<JsonObject> {

@@ -4398,7 +4398,7 @@ export class DaemonServer {
     const services = this.learning;
     const session = input.session;
     if (!services || signal.aborted || session.metadata.session_kind === 'subagent') return;
-    const mode = this.runtime.status().reflection ?? 'goals';
+    const mode = this.runtime.status().reflection ?? 'all';
     if (mode === 'off' || (input.trigger === 'long_turn' && mode !== 'all')) return;
     const goal = getGoal(session.metadata, session.id);
     const objective = goal?.objective ?? 'Review the completed long turn for a reusable improvement.';
