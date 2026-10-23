@@ -3122,6 +3122,14 @@ html,body,#root,.app.atelier{background:transparent}
 .supervisor__message--user .msg--user{max-width:min(85%,640px);margin:0}
 .supervisor__message--user .msg__text{white-space:pre-wrap}
 .supervisor__message--xerxes .msg--agent{margin:0}
+/* A reply is part of the conversation, not a box: app.css caps every .md at
+   380px with its own scrollbar, which made long answers scroll inside. */
+.supervisor__message--xerxes .md{max-height:none;overflow:visible;padding:0}
+.supervisor__thinking{display:flex;align-items:center;gap:8px;padding:2px 0}
+/* Every page has the XERXES page's slim bar: the chat header carries the
+   name, so this row holds the description and the way back. */
+.atelier .desktop-page>header.desktop-page__bar{display:flex;align-items:center;gap:var(--s-2);min-height:40px;padding:6px var(--s-5);border-bottom:1px solid var(--x-hairline);box-sizing:border-box}
+.atelier .desktop-page>header.desktop-page__bar p{flex:1;min-width:0;margin:0;font:var(--t-caption);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .supervisor__who{font:var(--t-caption);color:var(--x-meta);margin:0}
 .supervisor__notice{margin:0;padding:var(--s-2) var(--s-3);border-left:2px solid var(--x-needs);background:var(--x-needs-bg);color:var(--x-secondary);font:var(--t-caption);white-space:pre-wrap}
 .supervisor__busy{margin:0;font:var(--t-caption);color:var(--x-meta)}

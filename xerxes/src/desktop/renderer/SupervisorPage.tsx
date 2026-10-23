@@ -9,6 +9,8 @@ import { HubConnection } from '../../client/hubConnection.js'
 import { createHubController, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput } from '../../client/hubController.js'
 import { createHubStore, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
+import { AgentOrb } from './AgentOrb.js'
+import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
 import { ModelChooser } from './ModelChooser.js'
@@ -137,7 +139,23 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const ready = supervisor.phase === 'ready'
   const conversing = supervisor.phase !== 'unsupported' && supervisor.phase !== 'error'
   const canType = ready && !unconfigured
-  const canSend = canType && live && !supervisor.busy && text.trim() !== ''
+  // What you just sent, shown at once: the Hub only returns the thread after
+  // XERXES has answered, so without this nothing moved for the whole wait.
+  const [pending, setPending] = useState<{ readonly text: string; readonly at: string } | null>(null)
+  const thinking = supervisor.busy || pending !== null
+  const canSend = canType && live && !thinking && text.trim() !== ''
+  // The task view's "Thinking… 3s" clock.
+  const [startedAt, setStartedAt] = useState<number | null>(null)
+  const [, setTick] = useState(0)
+  useEffect(() => { setStartedAt(current => (thinking ? current ?? Date.now() : null)) }, [thinking])
+  useEffect(() => {
+    if (!thinking) return
+    const timer = setInterval(() => setTick(value => value + 1), 1_000)
+    return () => clearInterval(timer)
+  }, [thinking])
+  const thinkingSeconds = startedAt === null ? 0 : Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))
+  const lastUser = [...supervisor.messages].reverse().find(message => message.role === 'user')
+  const showPending = pending !== null && !(supervisor.messages.at(-1)?.role !== 'xerxes' && lastUser?.text === pending.text)
   const streamRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const items = supervisor.messages.length + supervisor.confirmations.length
@@ -145,7 +163,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   useEffect(() => {
     const element = streamRef.current
     if (element) element.scrollTop = element.scrollHeight
-  }, [items, supervisor.busy])
+  }, [items, thinking, showPending])
   const grow = (): void => {
     const element = inputRef.current
     if (!element) return
@@ -154,11 +172,15 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   }
   const submit = async (): Promise<void> => {
     const message = text.trim()
-    if (message === '' || supervisor.busy || !live || unconfigured) return
-    if (await onSend(message)) {
-      setText('')
-      requestAnimationFrame(grow)
-    }
+    if (message === '' || thinking || !live || unconfigured) return
+    // A chat clears the box and shows the message straight away.
+    setPending({ text: message, at: new Date().toISOString() })
+    setText('')
+    requestAnimationFrame(grow)
+    const sent = await onSend(message)
+    setPending(null)
+    // A failed send gives the draft back instead of losing it.
+    if (!sent) setText(current => current || message)
   }
   return (
     <section className="supervisor" aria-label="XERXES">
@@ -196,14 +218,14 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           ) : (
             <>
               {!ready ? <p className="supervisor__empty" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
-              {ready && supervisor.messages.length === 0 && !unconfigured ? (
+              {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
                 <div className="supervisor__empty">
                   <strong>Ask XERXES about your work</strong>
                   <p>It sees every task on your Hub, proposes actions and waits for a person to confirm them. It cannot approve anything for you.</p>
                   <p className="supervisor__try">Try “What needs me right now?”</p>
                 </div>
               ) : null}
-              {supervisor.messages.length > 0 ? (
+              {supervisor.messages.length > 0 || showPending ? (
                 <ol className="supervisor__messages" aria-label="Conversation">
                   {supervisor.messages.map(message => (
                     <li key={message.id} className={`supervisor__message supervisor__message--${message.role}`}>
@@ -219,6 +241,12 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                           : <p className="supervisor__notice">{message.text}</p>}
                     </li>
                   ))}
+                  {showPending && pending ? (
+                    <li className="supervisor__message supervisor__message--user supervisor__message--pending">
+                      <p className="supervisor__who">You<span> · <time dateTime={pending.at}>just now</time></span></p>
+                      <div className="msg msg--user"><div className="msg__text">{pending.text}</div></div>
+                    </li>
+                  ) : null}
                 </ol>
               ) : null}
               {supervisor.confirmations.length === 0 ? null : (
@@ -228,7 +256,13 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                   ))}
                 </ul>
               )}
-              {supervisor.busy ? <p className="supervisor__busy" role="status">XERXES is thinking…</p> : null}
+              {thinking ? (
+                <div className="streamstatus supervisor__thinking" role="status" aria-live="polite">
+                  <AgentOrb size={20} state="working" />
+                  <span className="streamstatus__phrase">Thinking…</span>
+                  <span className="streamstatus__clock">{elapsedOf(thinkingSeconds)}</span>
+                </div>
+              ) : null}
               {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="action-card__error">{supervisor.error}</p> : null}
             </>
           )}
@@ -252,7 +286,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                   if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() }
                 }}
               />
-              <button type="submit" className="composer__send" aria-label={supervisor.busy ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
+              <button type="submit" className="composer__send" aria-label={thinking ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
             </div>
           </div>
           <p className="supervisor__hint">XERXES proposes; nothing runs until you confirm. ⏎ send · ⇧⏎ new line</p>

@@ -58,6 +58,17 @@ export type DesktopPanel =
   | 'workspace'
   | 'snapshots'
   | null
+/** Full-page destinations: each replaces the conversation, its header and its composer. */
+export type DesktopPageName = 'agents' | 'xerxes' | 'extensions' | 'artifacts' | 'schedules'
+export const PAGE_TITLES: Readonly<Record<DesktopPageName, string>> = {
+  agents: 'Agents', xerxes: 'XERXES', extensions: 'Skills & tools', artifacts: 'Artifacts', schedules: 'Scheduled jobs',
+}
+const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> = {
+  agents: 'Specialists you can bring into a conversation.',
+  extensions: 'Instructions and tools available in this workspace.',
+  artifacts: 'Files this task changed, and its exportable transcript.',
+  schedules: 'Jobs that run on their own in this workspace.',
+}
 /** Views that open in the task-context rail beside the conversation. */
 export type RailPanel = 'files' | 'review' | 'terminal' | 'activity' | 'usage'
 export const RAIL_PANELS: readonly RailPanel[] = ['files', 'review', 'terminal', 'activity', 'usage']
@@ -121,16 +132,20 @@ function Empty({ children }: { children: ReactNode }) {
   return <div className="studio-empty">{children}</div>
 }
 
-/** Durable destinations share the shell and never replace the composer. */
-export function DesktopPage({ panel, snap }: { panel: 'agents' | 'extensions' | 'artifacts'; snap: Snapshot }): ReactElement {
+/**
+ * A full-page destination, laid out like the XERXES page: the chat header
+ * names it (App.tsx), the task's composer is hidden, and this bar carries
+ * the description and the way back.
+ */
+export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, 'xerxes'>; snap: Snapshot }): ReactElement {
   // 'xerxes' is rendered by SupervisorPage in App.tsx, not here.
   const close = useDesktopNavigation()
-  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "")} aria-label={panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}>
+  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "")} aria-label={PAGE_TITLES[panel]}>
     {/* A full-page destination had no way out of itself: no close button,
         and the tab bar is hidden while it is open, so Escape was the only
         thing left to try — and Escape cancelled the running turn. */}
-    <header><div><h2>{panel === 'agents' ? 'Agents' : panel === 'artifacts' ? 'Artifacts' : 'Skills & tools'}</h2><p className="studio-muted">{panel === 'agents' ? 'Specialists you can bring into a conversation.' : panel === 'artifacts' ? 'Files this task changed, and its exportable transcript.' : 'Instructions and tools available in this workspace.'}</p></div><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
-    <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
+    <header className="desktop-page__bar"><h2 className="visually-hidden">{PAGE_TITLES[panel]}</h2><p className="studio-muted">{PAGE_NOTES[panel]}</p><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
+    <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : panel === 'schedules' ? <SchedulesPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
   </section>
 }
 

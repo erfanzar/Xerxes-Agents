@@ -109,6 +109,19 @@ test('an unconfigured XERXES shows the chooser inline, disables the composer and
   expect(html).not.toContain('>Close<')
 })
 
+test('while XERXES works the page shows the task view\'s Thinking row with a clock', () => {
+  const html = view(ready({ supervisor: { phase: 'ready', busy: true, messages: [], confirmations: [] } }))
+  expect(html).toContain('class="streamstatus supervisor__thinking"')
+  expect(html).toContain('Thinking…')
+  expect(html).toContain('class="streamstatus__clock"')
+  expect(view(ready())).not.toContain('Thinking…')
+})
+
+test('a XERXES reply is never a scroll box inside the conversation', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain('.supervisor__message--xerxes .md{max-height:none;overflow:visible;padding:0}')
+})
+
 test('XERXES replies render as Markdown and the page uses the task composer, not raw text in boxes', () => {
   const state = ready({
     supervisor: {

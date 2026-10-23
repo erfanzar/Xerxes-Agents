@@ -46,7 +46,7 @@ import { FindBar } from './FindBar.js'
 import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, useDesktopNavigation, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
@@ -183,7 +183,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // list is a drawer over the conversation: picking a task closes it.
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
   const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
-  const [page, setPage] = useState<'agents' | 'xerxes' | 'extensions' | 'artifacts' | null>(null)
+  const [page, setPage] = useState<DesktopPageName | null>(null)
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
   // Git sits in the rail like the others; only its expanded diff view takes the window.
@@ -202,7 +202,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'activity') setSelectedAgent(filePath ?? '')
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
-    else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts') { setPage(next); setPanel(null) }
+    else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null) }
     else if (next === null) { setPage(null); setPanel(null); store.closeLearning() }
     else setPanel(next)
   }
@@ -659,11 +659,11 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 // ── Sidebar ─────────────────────────────────────────────────────────────
 
 /** Tasks, Agents and XERXES: the three sidebar destinations. */
-export function SidebarViews({ page, open }: { page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null; open: (panel: DesktopPanel) => void }): ReactElement {
+export function SidebarViews({ page, open }: { page: DesktopPageName | null; open: (panel: DesktopPanel) => void }): ReactElement {
   return <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button><button aria-pressed={page === 'xerxes'} className={page === 'xerxes' ? 'is-selected' : ''} onClick={() => open('xerxes')}>XERXES</button></div>
 }
 
-function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null }): ReactElement {
+function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
   const [filter, setFilter] = useState('')
@@ -726,7 +726,7 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | '
         ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
         <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span><LearnedBadge snap={snap} /></button>
         <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
-        <button className="studio-nav" disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
+        <button className={`studio-nav${page === "schedules" ? " is-selected" : ""}`} aria-pressed={page === 'schedules'} disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
         <input
           className="side__search"
           value={filter}
@@ -851,7 +851,7 @@ function SessionCell({
 
 
 
-function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'extensions' | 'artifacts' | null }): ReactElement {
+function Chat({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
   const changes = snap.changes
@@ -860,16 +860,17 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'ext
     dels: changes.reduce((sum, file) => sum + file.dels, 0),
   }), [changes])
   const needsInput = snap.approval !== null || snap.question !== null
-  // The XERXES tab is its own conversation with its own composer: the task's
-  // title, status line and steer box under it read as part of XERXES.
-  const supervisor = page === 'xerxes'
+  // A page (XERXES, Agents, Skills & tools, Artifacts, Scheduled jobs) is
+  // its own place: the task's title, status line and steer box under it read
+  // as part of the page, so the header names the page and the composer hides.
+  const onPage = page !== null
 
   return (
     <main className="chat">
       <header className="chat__head chat__head--minimal">
         {!chrome.sidebarVisible && <SidebarToggle />}
-        <span className="chat__title">{supervisor ? 'XERXES' : (snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected'))}</span>
-        {!supervisor && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
+        <span className="chat__title">{page ? PAGE_TITLES[page] : (snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected'))}</span>
+        {!onPage && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
         {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null) }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
@@ -891,8 +892,8 @@ function Chat({ snap, page }: { snap: Snapshot; page: 'agents' | 'xerxes' | 'ext
       {snap.tab === 'log' && <div className="workspace workspace--log"><LogTab snap={snap} /></div>}
 
       </div>
-      {/* Hidden, not unmounted, so a half-typed task message survives a visit to XERXES. */}
-      <div className="chat__composer-host" hidden={supervisor}><Composer snap={snap} /></div>
+      {/* Hidden, not unmounted, so a half-typed task message survives a visit to a page. */}
+      <div className="chat__composer-host" hidden={onPage}><Composer snap={snap} /></div>
     </main>
   )
 }

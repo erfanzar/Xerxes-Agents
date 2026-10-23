@@ -1003,6 +1003,17 @@ test('unsaved Files edits survive the rail closing, switching tab or changing ch
   expect(unsavedFile('/work/drafts', './src/notes.md')).toBeUndefined()
 })
 
+test('Scheduled jobs is a full page like Agents, Skills & tools and Artifacts, never a modal sheet', () => {
+  const snap = snapshot({})
+  for (const [panel, label] of [['schedules', 'Scheduled jobs'], ['artifacts', 'Artifacts'], ['agents', 'Agents'], ['extensions', 'Skills &amp; tools']] as const) {
+    const html = renderToStaticMarkup(createElement(DesktopPage, { panel, snap }))
+    expect(html).toContain(`aria-label="${label}"`)
+    expect(html).toContain('class="desktop-page__bar"')
+    expect(html).toContain('Back to the conversation')
+    expect(html).not.toContain('aria-modal')
+  }
+})
+
 test("agents page exposes its project scope and workspace switch", () => {
   const html = renderToStaticMarkup(createElement(DesktopPage, { panel: "agents", snap: snapshot({ cwd: "/work/project-a" }) }))
   expect(html).toContain("/work/project-a")
