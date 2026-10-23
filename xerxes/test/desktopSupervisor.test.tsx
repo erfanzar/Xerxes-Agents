@@ -115,6 +115,9 @@ test('while XERXES works the page shows the task view\'s Thinking row with a clo
   expect(html).toContain('Thinking…')
   expect(html).toContain('class="streamstatus__clock"')
   expect(view(ready())).not.toContain('Thinking…')
+  // The submit request has returned but the Hub is still running the turn.
+  const working = view(ready({ supervisor: { phase: 'ready', busy: false, working: true, messages: [], confirmations: [] } }))
+  expect(working).toContain('Thinking…')
 })
 
 test('a XERXES reply is never a scroll box inside the conversation', async () => {

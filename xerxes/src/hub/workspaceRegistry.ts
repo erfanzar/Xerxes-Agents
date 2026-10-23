@@ -17,6 +17,21 @@ export type HubWorkspaceEndpoint =
       readonly remoteSocketPath?: string
     }
 
+/**
+ * Another way to reach a machine's daemon, tried after its `endpoint` in this order:
+ * `hub` (the Hub dials the host over SSH), then `mac` (a desktop app shares a remote it is connected to).
+ */
+export type HubRouteVia = 'hub' | 'mac'
+export type HubRouteEndpoint =
+  | { readonly kind: 'local'; readonly socketPath: string }
+  | { readonly kind: 'ssh'; readonly sshAlias: string; readonly remoteSocketPath: string }
+export interface HubRoute {
+  readonly via: HubRouteVia
+  readonly endpoint: HubRouteEndpoint
+}
+export const MAX_MACHINE_ROUTES = 8
+const ROUTE_ORDER: Readonly<Record<HubRouteVia, number>> = { hub: 0, mac: 1 }
+
 export interface HubWorkspaceInput {
   readonly label: string
   readonly endpoint: HubWorkspaceEndpoint
@@ -24,6 +39,8 @@ export interface HubWorkspaceInput {
   readonly projectDir: string
   readonly connection: { readonly autoConnect: boolean; readonly discover?: boolean }
   readonly consent: { readonly bootstrap: boolean; readonly update: boolean }
+  /** Fallback routes to the same daemon (machine entries only), best first. */
+  readonly routes?: readonly HubRoute[]
 }
 
 export interface HubWorkspace extends HubWorkspaceInput {
@@ -81,9 +98,47 @@ function rejectSecrets(value: unknown, depth = 0): void {
     }
   }
 }
+/** An SSH alias the Hub's tunnel accepts: a saved Host name, never a destination or an option. */
+const SSH_ALIAS = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/
+function unixSocket(value: unknown): string {
+  const path = absolute(value)
+  // ssh -L/-R take local:remote; a colon would change the forward.
+  if (path.includes(':')) return invalid()
+  return path
+}
+export function parseRoute(value: unknown): HubRoute {
+  const row = object(value, ['via', 'endpoint'])
+  if (row.via !== 'hub' && row.via !== 'mac') return invalid()
+  const raw = object(row.endpoint, ['kind', 'socketPath', 'sshAlias', 'remoteSocketPath'])
+  if (raw.kind === 'local') {
+    object(raw, ['kind', 'socketPath'])
+    return { via: row.via, endpoint: { kind: 'local', socketPath: unixSocket(raw.socketPath) } }
+  }
+  if (raw.kind === 'ssh') {
+    object(raw, ['kind', 'sshAlias', 'remoteSocketPath'])
+    if (typeof raw.sshAlias !== 'string' || !SSH_ALIAS.test(raw.sshAlias)) return invalid()
+    return { via: row.via, endpoint: { kind: 'ssh', sshAlias: raw.sshAlias, remoteSocketPath: unixSocket(raw.remoteSocketPath) } }
+  }
+  return invalid()
+}
+function routes(value: unknown): HubRoute[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > MAX_MACHINE_ROUTES) return invalid()
+  const seen = new Set<string>()
+  const parsed: HubRoute[] = []
+  for (const item of value) {
+    const route = parseRoute(item)
+    const key = JSON.stringify(route.endpoint)
+    if (seen.has(key)) continue
+    seen.add(key); parsed.push(route)
+  }
+  // Stable: routes of the same kind keep the order they were added in.
+  return parsed.map((route, index) => ({ route, index }))
+    .sort((a, b) => ROUTE_ORDER[a.route.via] - ROUTE_ORDER[b.route.via] || a.index - b.index).map(row => row.route)
+}
 function input(value: unknown): HubWorkspaceInput {
   rejectSecrets(value)
-  const row = object(value, ['label', 'endpoint', 'projectDir', 'connection', 'consent'])
+  const row = object(value, ['label', 'endpoint', 'projectDir', 'connection', 'consent', 'routes'])
   const connection = object(row.connection, ['autoConnect', 'discover'])
   const discover = connection.discover === undefined ? false : bool(connection.discover)
   const rawEndpoint = object(row.endpoint, ['kind', 'socketPath', 'sshAlias', 'remoteProjectDir', 'remoteSocketPath'])
@@ -111,10 +166,14 @@ function input(value: unknown): HubWorkspaceInput {
   if (discover && row.projectDir !== undefined) absolute(row.projectDir)
   const projectDir = discover ? '/' : absolute(row.projectDir)
   if (endpoint.kind === 'ssh' && endpoint.remoteProjectDir !== projectDir) return invalid()
+  const fallback = routes(row.routes)
+  // Routes reach one daemon; only a machine entry stands for a daemon.
+  if (fallback.length > 0 && !discover) return invalid()
   return {
     label: text(row.label, 200), endpoint, projectDir,
     connection: { autoConnect: bool(connection.autoConnect), ...(discover ? { discover: true } : {}) },
     consent: { bootstrap: bool(consent.bootstrap), update: bool(consent.update) },
+    ...(fallback.length > 0 ? { routes: fallback } : {}),
   }
 }
 function timestamp(value: unknown): string {
@@ -124,10 +183,10 @@ function timestamp(value: unknown): string {
 }
 function entry(value: unknown): HubWorkspace {
   rejectSecrets(value)
-  const row = object(value, ['id', 'label', 'endpoint', 'projectDir', 'connection', 'consent', 'createdAt', 'updatedAt'])
+  const row = object(value, ['id', 'label', 'endpoint', 'projectDir', 'connection', 'consent', 'routes', 'createdAt', 'updatedAt'])
   const id = text(row.id, 100)
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) return invalid()
-  return { ...input({ label: row.label, endpoint: row.endpoint, projectDir: row.projectDir, connection: row.connection, consent: row.consent }), id, createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt) }
+  return { ...input({ label: row.label, endpoint: row.endpoint, projectDir: row.projectDir, connection: row.connection, consent: row.consent, ...(row.routes === undefined ? {} : { routes: row.routes }) }), id, createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt) }
 }
 function revision(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) return invalid()
@@ -223,6 +282,59 @@ export class WorkspaceRegistry {
         throw error
       }
     }
+  }
+
+  /**
+   * Add a fallback route to a machine entry, idempotently by endpoint. A route that is the machine's own
+   * endpoint is ignored. Retries on a concurrent registry write. The daemon behind the route is checked by
+   * the runtime pool (same runtime identity) before it carries any traffic.
+   */
+  async addRoute(machineId: string, value: unknown): Promise<{ readonly snapshot: HubWorkspaceRegistrySnapshot; readonly added: boolean }> {
+    rejectSecrets(value)
+    const route = parseRoute(value)
+    for (let attempt = 0; ; attempt += 1) {
+      const current = await this.load()
+      let added = false
+      try {
+        const snapshot = await this.mutate(current.revision, snap => {
+          added = false
+          const machine = snap.workspaces.find(row => row.id === machineId)
+          if (!machine) throw new HubRegistryError('not_found', 'Unknown Hub machine id')
+          if (machine.connection.discover !== true) return invalid()
+          const key = JSON.stringify(route.endpoint)
+          const own = machine.endpoint.kind === 'local'
+            ? JSON.stringify({ kind: 'local', socketPath: machine.endpoint.socketPath })
+            : JSON.stringify({ kind: 'ssh', sshAlias: machine.endpoint.sshAlias, remoteSocketPath: machine.endpoint.remoteSocketPath })
+          const existing = machine.routes ?? []
+          if (key === own || existing.some(row => JSON.stringify(row.endpoint) === key)) return snap.workspaces
+          if (existing.length >= MAX_MACHINE_ROUTES) return invalid()
+          added = true
+          return snap.workspaces.map(row => row.id === machineId ? entry({ ...row, routes: [...existing, route], updatedAt: this.now() }) : row)
+        })
+        return { snapshot, added }
+      } catch (error) {
+        if (error instanceof HubRegistryConflictError && attempt < 4) continue
+        throw error
+      }
+    }
+  }
+
+  /** Drop one fallback route (by endpoint) from a machine entry. */
+  async removeRoute(machineId: string, value: unknown): Promise<HubWorkspaceRegistrySnapshot> {
+    const route = parseRoute(value)
+    const current = await this.load()
+    return this.mutate(current.revision, snap => {
+      const machine = snap.workspaces.find(row => row.id === machineId)
+      if (!machine) throw new HubRegistryError('not_found', 'Unknown Hub machine id')
+      const key = JSON.stringify(route.endpoint)
+      const kept = (machine.routes ?? []).filter(row => JSON.stringify(row.endpoint) !== key)
+      if (kept.length === (machine.routes ?? []).length) return snap.workspaces
+      return snap.workspaces.map(row => {
+        if (row.id !== machineId) return row
+        const { routes: _routes, ...rest } = row
+        return entry({ ...rest, ...(kept.length > 0 ? { routes: kept } : {}), updatedAt: this.now() })
+      })
+    })
   }
 
   async remove(id: string, expectedRevision: number): Promise<HubWorkspaceRegistrySnapshot> {

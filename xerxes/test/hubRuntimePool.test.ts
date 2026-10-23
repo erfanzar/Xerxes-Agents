@@ -192,6 +192,45 @@ test('a second endpoint to the same runtime takes over when the first one died; 
   expect((await pool.call('old', 'session.status', { session_key: 'k0' })).state).toBe('accepted')
 })
 
+test('a machine with routes comes online on a fallback route and moves back to its own endpoint when that returns', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xh-routes-'))
+  cleanup.push(() => rm(dir, { recursive: true, force: true }))
+  const primaryPath = join(dir, 'primary.sock')
+  const relay = await fakeDaemon('mac'), store = sink()
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 20, betterRouteProbeMs: 20 })
+  cleanup.push(() => pool.stop())
+  const machine: PoolWorkspace = { ...workspace('m', primaryPath), routes: [{ via: 'mac', endpoint: { kind: 'local', socketPath: relay.socketPath } }] }
+  await pool.start([machine])
+  await until(() => pool.health('m')?.state === 'online')
+  expect(pool.machines()[0]).toMatchObject({ id: 'm', route: 'mac', runtimeId: 'mac' })
+  expect((await pool.call('m', 'session.status', { session_key: 'k0' })).state).toBe('accepted')
+  // The machine's own endpoint answers again: the pool switches back without being told.
+  const direct = await fakeDaemon('mac', primaryPath)
+  await until(() => pool.machines()[0]?.route === 'primary' && pool.health('m')?.state === 'online', 4000)
+  expect(direct.live).toBeGreaterThan(0)
+  expect((await pool.call('m', 'session.status', { session_key: 'k1' })).state).toBe('accepted')
+  expect(pool.runtimeCount).toBe(1)
+})
+
+test('a fallback route that reaches a different runtime is never used', async () => {
+  const own = await fakeDaemon('tpu'), stranger = await fakeDaemon('someone-else'), store = sink()
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 20, betterRouteProbeMs: 20 })
+  cleanup.push(() => pool.stop())
+  const machine: PoolWorkspace = { ...workspace('m', own.socketPath), routes: [{ via: 'hub', endpoint: { kind: 'local', socketPath: stranger.socketPath } }] }
+  await pool.start([machine])
+  await until(() => pool.health('m')?.state === 'online')
+  own.close()
+  await until(() => pool.health('m')?.state !== 'online')
+  // Give the lane time to try the stranger's socket and refuse it.
+  await until(() => stranger.requests.some(frame => frame.method === 'runtime.status'), 3000)
+  await Bun.sleep(300)
+  expect(pool.health('m')?.state).not.toBe('online')
+  expect(pool.machines()[0]?.runtimeId).toBe('tpu')
+  expect((await pool.call('m', 'session.status', { session_key: 'k0' })).state).toBe('rejected')
+  // Nothing that reached the stranger ever subscribed to its journal or wrote to it.
+  expect(stranger.requests.some(frame => frame.method === 'events.subscribe' || frame.method === 'session.active_list')).toBe(false)
+})
+
 test('a daemon that advertises principal_auth_v1 accepts mutations', async () => {
   const daemon = await fakeDaemon(), store = sink()
   const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry })

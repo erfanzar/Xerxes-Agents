@@ -6,7 +6,7 @@ import { basename } from 'node:path'
 
 import { HubDaemonClient, DaemonRpcError, DaemonTransportError } from './daemonClient.js'
 import type { DaemonCallOptions, DaemonHandshake, HubDaemonClientOptions } from './daemonClient.js'
-import { isPrivateProviderType, parseUpstreamEvent } from './ports.js'
+import { HubOperatorError, isPrivateProviderType, parseUpstreamEvent } from './ports.js'
 import type { HubEventSink, HubTunnel } from './ports.js'
 import { HUB_LIMITS, isRecord } from './protocol.js'
 import type { WorkspaceHealth } from './protocol.js'
@@ -14,10 +14,22 @@ import { emptyProjection, markProjectionInterrupted, markProjectionStale, reduce
 import type { WorkspaceProjection } from './projections.js'
 import { openSshTunnel } from './sshTunnel.js'
 
+export type PoolEndpoint = { readonly kind: 'local'; readonly socketPath: string } | { readonly kind: 'ssh'; readonly sshAlias: string; readonly remoteSocketPath?: string }
+/** One way to reach a daemon. `primary` is the entry's own endpoint; the others are fallbacks. */
+export interface PoolRoute {
+  readonly via: 'primary' | 'hub' | 'mac'
+  readonly endpoint: PoolEndpoint
+}
 export interface PoolWorkspace {
   readonly id: string
   readonly label: string
-  readonly endpoint: { readonly kind: 'local'; readonly socketPath: string } | { readonly kind: 'ssh'; readonly sshAlias: string; readonly remoteSocketPath?: string }
+  readonly endpoint: PoolEndpoint
+  /**
+   * Fallback routes to the same daemon (machine entries only), best first. With routes, every
+   * (re)connect tries the endpoint and then each route in order; a route that reaches a different
+   * runtime than the one already verified is never used.
+   */
+  readonly routes?: readonly PoolRoute[]
   readonly projectDir: string
   readonly autoConnect: boolean
   readonly bootstrapConsent?: boolean
@@ -63,6 +75,10 @@ export interface PoolMachine {
   readonly modelsSupported: boolean
   /** Routable workspaces on this machine (never the discover entry itself). */
   readonly workspaceIds: readonly string[]
+  /** The route in use, when the machine has fallback routes. */
+  readonly route?: PoolRoute['via']
+  /** The daemon's verified runtime identity, once known. */
+  readonly runtimeId?: string
 }
 export interface PoolDerivedWorkspace {
   readonly id: string
@@ -119,6 +135,8 @@ export interface HubRuntimePoolOptions {
   readonly onProjection?: (workspaceId: string, projection: WorkspaceProjection) => void
   readonly onGap?: (notice: PoolGapNotice) => void
   readonly onInterrupted?: (notice: PoolInterruptedNotice) => void
+  /** How often a machine on a fallback route checks whether a better route is back (default 30 s). */
+  readonly betterRouteProbeMs?: number
 }
 interface SessionLane {
   readonly client: HubDaemonClient
@@ -153,6 +171,42 @@ interface Lane {
   tunnel: HubTunnel | undefined
   generation: number
   queuedEventBytes: number
+  /** The entry this lane's client was opened for; its routes are the ones tried. */
+  readonly entry: PoolWorkspace
+  /** Index into `routesOf(entry)` of the route this lane last picked. */
+  routeIndex: number
+  /** The picked route reached a verified, online daemon. Until then the next pick starts after it. */
+  routeConfirmed: boolean
+  /** Route index -> time until which it is skipped (it reached a different runtime). */
+  readonly badRoutes: Map<number, number>
+  /** Earliest time to check whether a better route than the current one is back. */
+  betterProbeAt: number
+}
+
+/** The entry's own endpoint first, then its fallback routes. */
+export function routesOf(workspace: PoolWorkspace): readonly PoolRoute[] {
+  return [{ via: 'primary', endpoint: workspace.endpoint }, ...(workspace.routes ?? [])]
+}
+const BETTER_ROUTE_PROBE_MS = 30_000
+const BAD_ROUTE_MS = 5 * 60_000
+
+/** Resolves when something accepts a connection on the Unix socket; a stale tunnel socket refuses. */
+export async function probeSocket(path: string, timeoutMs = 1500): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const done = (error?: Error): void => {
+      if (settled) return
+      settled = true; clearTimeout(timer)
+      if (error) reject(error); else resolve()
+    }
+    const timer = setTimeout(() => done(new Error('the socket did not answer')), timeoutMs)
+    void Bun.connect<undefined>({ unix: path, socket: {
+      open(socket) { socket.end(); done() },
+      data() {},
+      error(_socket, error) { done(error) },
+      connectError(_socket, error) { done(error) },
+    } }).catch((error: unknown) => done(error instanceof Error ? error : new Error(String(error))))
+  })
 }
 
 /** One metadata/event lane per VERIFIED runtime; endpoint equality alone never merges distinct runtimes. */
@@ -241,29 +295,22 @@ export class HubRuntimePool {
     }
     const abort = new AbortController()
     let lane: Lane
+    const routed = (workspace.routes?.length ?? 0) > 0
     const client = new HubDaemonClient({ ...this.options.clientOptions, projectDir: workspace.projectDir,
-      ...(workspace.endpoint.kind === 'local' ? { socketPath: workspace.endpoint.socketPath } : {
+      ...(workspace.endpoint.kind === 'local' && !routed ? { socketPath: workspace.endpoint.socketPath } : {
         resolveSocketPath: async () => {
+          if (routed) return this.pickRoute(lane, workspace, abort.signal)
           await lane.tunnel?.close(); lane.tunnel = undefined
-          const open = this.options.openTunnel ?? ((entry, signal, onFailure) => {
-            if (entry.endpoint.kind !== 'ssh') throw new Error('SSH endpoint required')
-            return openSshTunnel({ sshAlias: entry.endpoint.sshAlias,
-              ...(entry.endpoint.remoteSocketPath === undefined ? {} : { remoteSocketPath: entry.endpoint.remoteSocketPath }),
-              bootstrapConsent: entry.bootstrapConsent === true, signal, onFailure })
-          })
-          lane.tunnel = await open(workspace, abort.signal, error => {
-            if (!lane.active) return
-            for (const control of lane.controls.values()) control.client.interrupt(error)
-            client.interrupt(error)
-          })
+          lane.tunnel = await this.openTunnelFor(lane, workspace, abort.signal)
           lane.socketPath = lane.tunnel.socketPath
           return lane.tunnel.socketPath
         },
       }) })
-    lane = { client, controls: new Map(), socketPath: workspace.endpoint.kind === 'local' ? workspace.endpoint.socketPath : undefined,
+    lane = { client, controls: new Map(), socketPath: workspace.endpoint.kind === 'local' && !routed ? workspace.endpoint.socketPath : undefined,
       workspaces: new Map([[workspace.id, workspace]]), abort, endpointKeys: new Set([endpointKey]), active: true,
       everOnline: false, runtimeId: `unverified:${workspace.id}`, verified: false, signedCommands: false, modelsSupported: false, health: undefined, subscribedKey: undefined, instanceId: undefined, subscriptionId: undefined, streamId: undefined,
-      degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0 }
+      degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0,
+      entry: workspace, routeIndex: 0, routeConfirmed: true, badRoutes: new Map(), betterProbeAt: 0 }
     this.lanes.add(lane); this.endpoints.set(endpointKey, lane); this.owners.set(workspace.id, lane)
     client.onState((state, error) => {
       if (!lane.active || this.stopped) return
@@ -365,6 +412,73 @@ export class HubRuntimePool {
     this.lanes.clear(); this.runtimes.clear(); this.endpoints.clear(); this.owners.clear()
     for (const id of this.workspaces.keys()) { this.setHealth(id, { state: 'offline', degraded: false }); this.publish(id, markProjectionStale(this.projections.get(id)!)) }
   }
+  /** Open the SSH tunnel for one endpoint; a later transport failure interrupts the lane. */
+  private openTunnelFor(lane: Lane, entry: PoolWorkspace, signal: AbortSignal): Promise<HubTunnel> {
+    const open = this.options.openTunnel ?? ((target, abort, onFailure) => {
+      if (target.endpoint.kind !== 'ssh') throw new Error('SSH endpoint required')
+      return openSshTunnel({ sshAlias: target.endpoint.sshAlias,
+        ...(target.endpoint.remoteSocketPath === undefined ? {} : { remoteSocketPath: target.endpoint.remoteSocketPath }),
+        bootstrapConsent: target.bootstrapConsent === true, signal: abort, onFailure })
+    })
+    const routed = (lane.entry.routes?.length ?? 0) > 0
+    return open(entry, signal, error => {
+      if (!lane.active) return
+      // With other routes left, an operator condition on one route is not a reason to stop trying.
+      const reported = routed && error instanceof HubOperatorError ? new Error(error.message) : error
+      for (const control of lane.controls.values()) control.client.interrupt(reported)
+      lane.client.interrupt(reported)
+    })
+  }
+
+  /**
+   * The socket of the first route that answers, best first. After a pick that never came online the
+   * search starts at the next route, so one broken daemon behind a live socket cannot pin the lane.
+   * Never throws an operator error: the client keeps retrying while any route might come back.
+   */
+  private async pickRoute(lane: Lane, workspace: PoolWorkspace, signal: AbortSignal): Promise<string> {
+    const all = routesOf(workspace)
+    await lane.tunnel?.close(); lane.tunnel = undefined; lane.socketPath = undefined
+    const now = Date.now()
+    const start = lane.routeConfirmed ? 0 : (lane.routeIndex + 1) % all.length
+    const problems: string[] = []
+    for (let step = 0; step < all.length; step++) {
+      const index = (start + step) % all.length
+      const route = all[index]!
+      if ((lane.badRoutes.get(index) ?? 0) > now) { problems.push(`${route.via}: reaches another runtime`); continue }
+      signal.throwIfAborted()
+      try {
+        let socketPath: string
+        if (route.endpoint.kind === 'local') {
+          await probeSocket(route.endpoint.socketPath)
+          socketPath = route.endpoint.socketPath
+        } else {
+          lane.tunnel = await this.openTunnelFor(lane, { ...workspace, endpoint: route.endpoint }, signal)
+          socketPath = lane.tunnel.socketPath
+        }
+        lane.routeIndex = index; lane.routeConfirmed = false; lane.socketPath = socketPath
+        return socketPath
+      } catch (error) {
+        if (signal.aborted) throw error
+        problems.push(`${route.via}: ${error instanceof Error ? error.message.slice(0, 160) : String(error)}`)
+      }
+    }
+    lane.routeConfirmed = true
+    throw new Error(`No route to ${workspace.label} answered (${problems.join('; ')})`)
+  }
+
+  /** On a fallback route: whether a better local route answers again (checked at most every 30 s). */
+  private async betterRouteBack(lane: Lane): Promise<boolean> {
+    if (lane.routeIndex === 0 || (lane.entry.routes?.length ?? 0) === 0 || Date.now() < lane.betterProbeAt) return false
+    lane.betterProbeAt = Date.now() + (this.options.betterRouteProbeMs ?? BETTER_ROUTE_PROBE_MS)
+    const all = routesOf(lane.entry)
+    for (let index = 0; index < lane.routeIndex; index++) {
+      const route = all[index]!
+      if (route.endpoint.kind !== 'local' || (lane.badRoutes.get(index) ?? 0) > Date.now()) continue
+      try { await probeSocket(route.endpoint.socketPath); return true } catch { /* still down */ }
+    }
+    return false
+  }
+
   private enqueue(lane: Lane, operation: () => Promise<void>): void {
     lane.tail = lane.tail.then(async () => { if (lane.active && !this.stopped) await operation() }).catch((error: unknown) => {
       if (lane.active && !this.stopped) lane.client.interrupt(error instanceof Error ? error : new Error(String(error)))
@@ -372,6 +486,12 @@ export class HubRuntimePool {
   }
   private async handshake(lane: Lane, handshake: DaemonHandshake): Promise<void> {
     const runtimeId = typeof handshake.status.runtime_id === 'string' && handshake.status.runtime_id ? handshake.status.runtime_id : undefined
+    // A fallback route must reach the daemon this machine already is. Anything else (a reused tunnel
+    // socket, a different host behind an alias) is skipped for a while; the next route is tried.
+    if (runtimeId && lane.verified && runtimeId !== lane.runtimeId && lane.routeIndex > 0 && (lane.entry.routes?.length ?? 0) > 0) {
+      lane.badRoutes.set(lane.routeIndex, Date.now() + BAD_ROUTE_MS)
+      throw new Error(`The ${routesOf(lane.entry)[lane.routeIndex]?.via ?? 'fallback'} route to ${lane.entry.label} reaches a different Xerxes runtime; it is skipped`)
+    }
     if (runtimeId) {
       const existing = this.runtimes.get(runtimeId)
       if (existing && existing !== lane && existing.client.online) {
@@ -432,7 +552,7 @@ export class HubRuntimePool {
         await this.backfill(lane, typeof after === 'string' ? after : undefined)
       }
     }
-    lane.everOnline = true; this.setLaneHealth(lane, 'online')
+    lane.everOnline = true; lane.routeConfirmed = true; this.setLaneHealth(lane, 'online')
     this.schedulePoll(lane)
   }
   private async backfill(lane: Lane, after: string | undefined): Promise<void> {
@@ -464,6 +584,8 @@ export class HubRuntimePool {
     lane.poll = setTimeout(() => {
       lane.poll = undefined
       this.enqueue(lane, async () => {
+        // Back on the best route as soon as it answers: reconnecting re-picks from the top.
+        if (await this.betterRouteBack(lane)) { lane.client.interrupt(new Error('A better route is back; switching to it')); return }
         await this.summaries(lane)
         // A project found by this poll joins the event subscription.
         if (!lane.degraded && this.subscriptionDirs(lane).join('\0') !== lane.subscribedKey) await this.configure(lane)
@@ -551,10 +673,12 @@ export class HubRuntimePool {
       if (members.length === 0) continue
       const entries = members.filter(row => row.discover === true)
       const head = [...(entries.length > 0 ? entries : members)].sort((a, b) => a.id.localeCompare(b.id))[0]!
+      const route = (lane.entry.routes?.length ?? 0) > 0 ? routesOf(lane.entry)[lane.routeIndex]?.via : undefined
       rows.push({
         id: head.id, label: head.label, health: this.health(head.id)?.state ?? 'offline',
         readOnly: !lane.signedCommands, modelsSupported: lane.modelsSupported,
         workspaceIds: members.filter(row => row.discover !== true).map(row => row.id).sort(),
+        ...(route === undefined ? {} : { route }), ...(lane.verified ? { runtimeId: lane.runtimeId } : {}),
       })
     }
     // A machine that has not connected (yet) is still a machine.

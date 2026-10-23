@@ -110,4 +110,39 @@ describe('Hub workspace registry', () => {
     expect(await readFile(paths.machinesPath, 'utf8')).toBe(source)
     await expect(registry.importMachines(0, paths.machinesPath)).rejects.toBeInstanceOf(HubRegistryConflictError)
   })
+
+  test('machine routes: idempotent by endpoint, sorted hub before mac, only on machine entries, validated', async () => {
+    const { registry } = await fixture()
+    const { id } = await registry.upsertMachine({ label: 'TPU', socketPath: '/home/xerxes/.xerxes/tunnels/tpu-daemon.sock' })
+    const mac = { via: 'mac', endpoint: { kind: 'local', socketPath: '/home/xerxes/.xerxes/tunnels/mac-relay-tpu.sock' } }
+    const hub = { via: 'hub', endpoint: { kind: 'ssh', sshAlias: 'tpu', remoteSocketPath: '/home/erfan/.xerxes/daemon/global.sock' } }
+    expect((await registry.addRoute(id, mac)).added).toBe(true)
+    expect((await registry.addRoute(id, hub)).added).toBe(true)
+    // Same endpoint again, or the machine's own endpoint: nothing changes.
+    const again = await registry.addRoute(id, mac)
+    expect(again.added).toBe(false)
+    expect((await registry.addRoute(id, { via: 'mac', endpoint: { kind: 'local', socketPath: '/home/xerxes/.xerxes/tunnels/tpu-daemon.sock' } })).added).toBe(false)
+    const machine = (await registry.load()).workspaces.find(row => row.id === id)!
+    expect(machine.routes?.map(route => route.via)).toEqual(['hub', 'mac'])
+    // Survives a reload exactly.
+    expect((await new WorkspaceRegistry(registry.path).load()).workspaces.find(row => row.id === id)?.routes).toEqual(machine.routes)
+    for (const bad of [
+      { via: 'mac', endpoint: { kind: 'local', socketPath: 'relative.sock' } },
+      { via: 'mac', endpoint: { kind: 'local', socketPath: '/tmp/a:b.sock' } },
+      { via: 'hub', endpoint: { kind: 'ssh', sshAlias: '-oProxyCommand=x', remoteSocketPath: '/r.sock' } },
+      { via: 'hub', endpoint: { kind: 'ssh', sshAlias: 'user@host', remoteSocketPath: '/r.sock' } },
+      { via: 'phone', endpoint: { kind: 'local', socketPath: '/r.sock' } },
+      { ...mac, extra: true },
+    ]) await expect(registry.addRoute(id, bad)).rejects.toBeInstanceOf(HubRegistryError)
+    // A per-project entry never carries routes.
+    const project = await registry.add(local, (await registry.load()).revision)
+    const projectId = project.workspaces.find(row => row.label === 'Local')!.id
+    await expect(registry.addRoute(projectId, mac)).rejects.toBeInstanceOf(HubRegistryError)
+    await expect(registry.add({ ...local, routes: [mac] }, (await registry.load()).revision)).rejects.toBeInstanceOf(HubRegistryError)
+    // Removal drops just that route; removing the last one leaves no routes field.
+    await registry.removeRoute(id, hub)
+    expect((await registry.load()).workspaces.find(row => row.id === id)?.routes?.map(route => route.via)).toEqual(['mac'])
+    await registry.removeRoute(id, mac)
+    expect((await registry.load()).workspaces.find(row => row.id === id)?.routes).toBeUndefined()
+  })
 })

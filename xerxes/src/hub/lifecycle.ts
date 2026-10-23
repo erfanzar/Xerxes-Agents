@@ -17,6 +17,10 @@ export interface HubWorkspaceHealth {
   readonly machine_id?: string
   readonly project_dir?: string
   readonly label?: string
+  /** The verified runtime identity of the daemon behind this workspace, once known. */
+  readonly runtime_id?: string
+  /** The route the machine is reached through when it has fallback routes. */
+  readonly route?: string
 }
 export interface HubStatus {
   readonly service: 'xerxes-hub'

@@ -82,6 +82,33 @@ describe('hub CLI --json', () => {
     expect((await cli(['machines', 'add-local', 'NoSocket', '--json'], home)).code).toBe(1)
   })
 
+  test('machines add-route / remove-route keep fallback routes on one machine, idempotently, one JSON object each', async () => {
+    const home = await tempDir('xh-cli-')
+    const added = oneObject((await cli(['machines', 'add-local', 'TPU', '--socket', '/tmp/tpu-tunnel.sock', '--json'], home)).out)
+    const id = String(added.machine_id)
+    const hub = ['--alias', 'tpu', '--remote-socket', '/home/erfan/.xerxes/daemon/global.sock']
+    const first = oneObject((await cli(['machines', 'add-route', id, ...hub, '--json'], home)).out)
+    expect(first).toMatchObject({ machine_id: id, added: true, routes: [{ via: 'hub', endpoint: { kind: 'ssh', sshAlias: 'tpu', remoteSocketPath: '/home/erfan/.xerxes/daemon/global.sock' } }] })
+    expect(oneObject((await cli(['machines', 'add-route', id, ...hub, '--json'], home)).out)).toMatchObject({ added: false })
+    const relayed = oneObject((await cli(['machines', 'add-route', id, '--via', 'mac', '--socket', '/tmp/mac-relay.sock', '--json'], home)).out)
+    expect((relayed.routes as Array<{ via: string }>).map(route => route.via)).toEqual(['hub', 'mac'])
+    // Unsafe aliases and a route on an unknown machine are refused.
+    expect((await cli(['machines', 'add-route', id, '--alias', '-oProxyCommand=x', '--remote-socket', '/r.sock', '--json'], home)).code).toBe(1)
+    expect((await cli(['machines', 'add-route', 'nope', ...hub, '--json'], home)).code).toBe(1)
+    expect((await cli(['machines', 'add-route', id, '--alias', 'tpu', '--json'], home)).code).toBe(1)
+    const removed = oneObject((await cli(['machines', 'remove-route', id, ...hub, '--json'], home)).out)
+    expect((removed.routes as Array<{ via: string }>).map(route => route.via)).toEqual(['mac'])
+  })
+
+  test('trust needs a target and a socket that a daemon listens on', async () => {
+    const home = await tempDir('xh-cli-')
+    expect((await cli(['trust', 'xerxes@hub'], home)).code).toBe(1)
+    const missing = await cli(['trust', 'xerxes@hub', '--socket', join(home, 'none.sock'), '--json'], home)
+    expect(missing.code).toBe(1)
+    expect(missing.out).toEqual([])
+    expect(missing.err.join('\n')).toContain('No Xerxes daemon is listening')
+  })
+
   test('pair --json carries the pairing, comparison code and QR; owner-less Hubs say so on stderr', async () => {
     const home = await tempDir('xh-cli-')
     const env = { XERXES_HUB_PUBLIC_ORIGINS: 'https://hub.test' }

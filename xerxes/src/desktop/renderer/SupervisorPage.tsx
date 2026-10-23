@@ -142,7 +142,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   // What you just sent, shown at once: the Hub only returns the thread after
   // XERXES has answered, so without this nothing moved for the whole wait.
   const [pending, setPending] = useState<{ readonly text: string; readonly at: string } | null>(null)
-  const thinking = supervisor.busy || pending !== null
+  const thinking = supervisor.busy || supervisor.working === true || pending !== null
   const canSend = canType && live && !thinking && text.trim() !== ''
   // The task view's "Thinking… 3s" clock.
   const [startedAt, setStartedAt] = useState<number | null>(null)

@@ -231,6 +231,28 @@ export async function runHubLink(options: HubLinkOptions, deps: HubLinkDeps): Pr
   return { machineId, remoteSocket, enrolled: true, ...(servicePath === undefined ? {} : { servicePath }) }
 }
 
+/**
+ * `hub trust <ssh-target> --socket <path>`: pin the Hub's signing key on the daemon behind a local
+ * socket (this machine's own, or a forward to a remote daemon a desktop app holds). Only step 4 of
+ * `hub link`: no tunnel and no machine entry.
+ */
+export async function runHubTrust(input: { readonly target: string; readonly socketPath: string; readonly remoteXerxes?: string }, deps: Pick<HubLinkDeps, 'ssh' | 'run' | 'socketExists' | 'enrollLocal'>): Promise<{ readonly hubId: string; readonly enrolled: true }> {
+  const target = validateSshTarget(input.target)
+  checkSocketPath(input.socketPath, 'The daemon socket')
+  if (!deps.socketExists(input.socketPath)) throw new HubLinkError(`No Xerxes daemon is listening at ${input.socketPath}.`)
+  const info = await remoteJson(deps as HubLinkDeps, target, ['info', '--json'], input.remoteXerxes, 'Reading the Hub key')
+  const hubId = info.hub_id, publicKeyPem = info.public_key_pem
+  if (typeof hubId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(hubId) || typeof publicKeyPem !== 'string' || !publicKeyPem.includes('-----BEGIN PUBLIC KEY-----')) {
+    throw new HubLinkError(`The Hub on ${target} returned no usable signing key. Update Xerxes on the Hub host.`)
+  }
+  try {
+    await deps.enrollLocal({ socketPath: input.socketPath, hubId, publicKeyPem })
+  } catch (error) {
+    throw new HubLinkError(`The daemon refused the Hub key: ${error instanceof Error ? error.message : String(error)}. Update Xerxes there if it is older than the Hub features.`)
+  }
+  return { hubId, enrolled: true }
+}
+
 export interface LinkTunnelDeps {
   readonly run: CommandRunner
   /** Run a process attached to this one; resolves with its exit code. */

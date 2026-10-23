@@ -345,7 +345,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     try {
       const result = await connection.request('supervisor.thread.open', {})
       supervisorThread = str(result.thread_id)
-      store.dispatch({ type: 'supervisor', patch: { phase: 'ready', ...(supervisorThread ? { threadId: supervisorThread } : {}) } })
+      store.dispatch({ type: 'supervisor', patch: { phase: 'ready', working: result.busy === true, ...(supervisorThread ? { threadId: supervisorThread } : {}) } })
       store.dispatch({ type: 'supervisorMessages', messages: arr(result.messages).flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] }) })
       store.dispatch({ type: 'supervisorConfirmations', confirmations: arr(result.confirmations).flatMap(raw => { const c = parseConfirmation(raw); return c ? [c] : [] }) })
       // thread.open reports the model status too; the full answer (who may edit, which model) comes from config.get.
@@ -369,7 +369,10 @@ export function createHubController(options: HubControllerOptions): HubControlle
       const messages = arr(result.messages).flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
       store.dispatch({ type: 'supervisorMessages', messages: messages.length > 0 ? messages : [{ id: messageId, role: 'user', text, at: iso(), source }] })
       store.dispatch({ type: 'supervisorConfirmations', confirmations: arr(result.confirmations).flatMap(raw => { const c = parseConfirmation(raw); return c ? [c] : [] }) })
-      store.dispatch({ type: 'supervisor', patch: { busy: false } })
+      // A stored message always starts a turn on the Hub; show it as working
+      // until the Hub says idle or the reply lands, so there is no gap
+      // between this answer and the Hub's own `activity: working` event.
+      store.dispatch({ type: 'supervisor', patch: { busy: false, working: true } })
       return true
     } catch (error) {
       if (error instanceof HubRequestError && (error.code as string) === 'unconfigured') {
@@ -503,6 +506,10 @@ export function createHubController(options: HubControllerOptions): HubControlle
       } else if (type === 'supervisor.thread_event') {
         const messages = [payload.message, ...arr(payload.messages)].flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
         if (messages.length > 0) store.dispatch({ type: 'supervisorMessages', messages })
+        // The Hub reports when a turn starts and ends; a XERXES reply also ends it.
+        if (payload.activity === 'working') store.dispatch({ type: 'supervisor', patch: { working: true } })
+        // "XERXES stopped: …" is the Hub's notice for a failed turn; an older Hub sends no `idle`.
+        else if (payload.activity === 'idle' || messages.some(message => message.role === 'xerxes' || (message.role === 'system' && message.text.startsWith('XERXES stopped')))) store.dispatch({ type: 'supervisor', patch: { working: false } })
         const confirmation = parseConfirmation(payload.confirmation)
         if (confirmation) store.dispatch({ type: 'supervisorConfirmations', confirmations: [confirmation] })
       } else if ((type as string) === 'supervisor.config_changed') {

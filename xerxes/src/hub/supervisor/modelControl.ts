@@ -29,6 +29,7 @@ import type { SupervisorModelPort, SupervisorModelRequest, SupervisorModelRespon
 export const UNCONFIGURED_MESSAGE = "Choose XERXES's model in XERXES settings"
 const MAX_REQUEST_BYTES = 1024 * 1024
 const MAX_LIST = 500
+const FAILOVER_SKIP_CODES = new Set(['unknown_profile', 'not_found', 'invalid_request', 'unsupported', 'unavailable'])
 
 export type SupervisorConfigStatus = 'configured' | 'unconfigured' | 'machine_offline' | 'invalid'
 
@@ -102,6 +103,8 @@ export interface SupervisorModelControlOptions {
   readonly fallback?: SupervisorModelPort
   /** Pushes an event to every connected person; the builder runs once per recipient. */
   readonly broadcast?: (build: (context: AuthenticatedContext) => Readonly<Record<string, unknown>>) => void
+  /** Announces a serving-machine change; `to` is undefined on return to the configured machine. */
+  readonly onFailover?: (change: { readonly from: string; readonly to: string | undefined }) => void
   readonly clock?: () => number
   readonly onError?: (error: unknown, context: string) => void
 }
@@ -109,6 +112,7 @@ export interface SupervisorModelControlOptions {
 export interface SupervisorConfigDescription {
   readonly status: SupervisorConfigStatus
   readonly config?: { readonly machineId: string; readonly machineLabel: string; readonly profile: string; readonly model: string; readonly effort: string | null }
+  readonly fallback?: { readonly machineId: string; readonly label: string }
   readonly message?: string
 }
 
@@ -173,6 +177,7 @@ export class SupervisorModelControl {
   private readonly store: SupervisorModelStore
   private readonly clock: () => number
   private current: StoredSupervisorModel | undefined
+  private failover: { readonly machineId: string; readonly label: string } | undefined
 
   constructor(private readonly options: SupervisorModelControlOptions) {
     this.clock = options.clock ?? Date.now
@@ -207,10 +212,20 @@ export class SupervisorModelControl {
         ? { status: 'unconfigured', message: UNCONFIGURED_MESSAGE }
         : { status: 'configured', message: 'XERXES runs on the model named in this Hub\'s environment (XERXES_HUB_SUPERVISOR_*). Choose one in XERXES settings to replace it.' }
     }
-    const machine = this.options.machines.machines().find(row => row.id === stored.machineId)
+    const machines = this.options.machines.machines()
+    const machine = machines.find(row => row.id === stored.machineId)
     const config = { machineId: stored.machineId, machineLabel: machine?.label ?? stored.machineId, profile: stored.profile, model: stored.model, effort: stored.effort }
-    if (machine === undefined) return { status: 'invalid', config, message: 'The machine XERXES was set to run on is no longer linked to this Hub. Choose another.' }
-    if (machine.health !== 'online') return { status: 'machine_offline', config, message: `${machine.label} is offline; XERXES cannot answer until it is back.` }
+    if (machine === undefined || machine.health !== 'online') {
+      const fallback = this.failover
+      if (fallback !== undefined && machines.some(row => row.id === fallback.machineId && row.health === 'online')) {
+        return { status: 'configured', config, fallback, message: `${config.machineLabel} is offline; XERXES is answering on ${fallback.label} with the same model.` }
+      }
+      if (machines.some(row => row.id !== stored.machineId && row.health === 'online' && row.modelsSupported)) {
+        return { status: 'machine_offline', config, message: `${config.machineLabel} is offline; XERXES will try the same model on another online machine.` }
+      }
+      if (machine === undefined) return { status: 'invalid', config, message: 'The machine XERXES was set to run on is no longer linked to this Hub. Choose another.' }
+      return { status: 'machine_offline', config, message: `${machine.label} is offline; XERXES cannot answer until it is back.` }
+    }
     if (!machine.modelsSupported) return { status: 'invalid', config, message: `${machine.label} runs a Xerxes version that cannot run XERXES's model calls. Update Xerxes there or choose another machine.` }
     return { status: 'configured', config }
   }
@@ -227,6 +242,7 @@ export class SupervisorModelControl {
         },
       }),
       can_edit: canEdit,
+      ...(description.fallback === undefined ? {} : { fallback: { machine_id: description.fallback.machineId, machine_label: description.fallback.label } }),
       ...(description.message === undefined ? {} : { message: description.message }),
     }
   }
@@ -256,6 +272,7 @@ export class SupervisorModelControl {
   }
 
   private async complete(request: SupervisorModelRequest): Promise<SupervisorModelResponse> {
+    request.signal?.throwIfAborted()
     const stored = this.current
     if (stored === undefined) {
       if (this.options.fallback !== undefined) return this.options.fallback.complete(request)
@@ -266,9 +283,45 @@ export class SupervisorModelControl {
       system: request.system, messages: request.messages, tools: request.tools, max_tokens: request.maxTokens,
     }
     if (Buffer.byteLength(JSON.stringify(params)) > MAX_REQUEST_BYTES) throw new Error('the request to the model is too large')
-    const outcome = await this.call(stored.machineId, 'hub.model.complete', params, undefined, request.signal)
-    if (outcome.state !== 'accepted') throw new Error(refusalMessage(outcome))
-    return parseCompletion(outcome.result)
+    const machines = this.options.machines.machines()
+    const machine = machines.find(row => row.id === stored.machineId)
+    const configuredLabel = machine?.label ?? stored.machineId
+    if (machine?.health === 'online' && machine.modelsSupported) {
+      const outcome = await this.call(stored.machineId, 'hub.model.complete', params, undefined, request.signal)
+      request.signal?.throwIfAborted()
+      if (outcome.state === 'accepted') {
+        const response = parseCompletion(outcome.result)
+        if (this.current === stored) this.setFailover(configuredLabel, undefined)
+        return response
+      }
+      if (outcome.error.code !== 'unavailable') throw new Error(refusalMessage(outcome))
+    }
+    const preferred = this.failover?.machineId
+    const candidates = machines.filter(row => row.id !== stored.machineId && row.health === 'online' && row.modelsSupported)
+      .sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred) || a.label.localeCompare(b.label))
+    for (const candidate of candidates) {
+      request.signal?.throwIfAborted()
+      const outcome = await this.call(candidate.id, 'hub.model.complete', params, undefined, request.signal)
+      request.signal?.throwIfAborted()
+      if (outcome.state === 'accepted') {
+        const response = parseCompletion(outcome.result)
+        if (this.current === stored) this.setFailover(configuredLabel, { machineId: candidate.id, label: candidate.label })
+        return response
+      }
+      if (!FAILOVER_SKIP_CODES.has(outcome.error.code)) throw new Error(refusalMessage(outcome))
+    }
+    throw new Error(`${configuredLabel} is offline and no other online machine offers ${stored.profile}/${stored.model}.`)
+  }
+
+  private setFailover(from: string, next: { readonly machineId: string; readonly label: string } | undefined): void {
+    if (this.failover?.machineId === next?.machineId && this.failover?.label === next?.label) return
+    this.failover = next
+    this.options.broadcast?.(recipient => this.view(isOwner(recipient)))
+    try {
+      this.options.onFailover?.({ from, to: next?.label })
+    } catch (error) {
+      this.options.onError?.(error, 'supervisor model failover')
+    }
   }
 
   private async fetchOptions(machineId: string, profile: string | undefined, model: string | undefined, requestedBy: string): Promise<Options> {

@@ -78,7 +78,14 @@ export interface SupervisorState {
   readonly threadId?: string
   readonly messages: readonly SupervisorMessage[]
   readonly confirmations: readonly SupervisorConfirmation[]
+  /** The submit request is in flight. */
   readonly busy: boolean
+  /**
+   * XERXES is running a turn on the Hub. The submit request returns as soon
+   * as the message is stored; the reply arrives later as a thread event, so
+   * `busy` alone ended the spinner before XERXES had started.
+   */
+  readonly working?: boolean
   readonly error?: string
 }
 

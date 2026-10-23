@@ -43,6 +43,7 @@ import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
 import { nodeHubHttp } from './main/hubHttp.js'
 import { connectHubSocket } from './main/hubSocket.js'
 import { createHubStorage } from './main/hubStorage.js'
+import { createNodeShareDeps, shareRemoteWorkspace, type HubShareDeps, type HubShareHandle } from './main/hubShare.js'
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -129,6 +130,9 @@ function maybeNotify(window: BrowserWindow, type: string, payload: Record<string
 // window's daemon target, persisted across launches.
 
 const workspaceFile = (): string => join(xerxesHome(), 'desktop.json')
+// Shares connected SSH workspaces with the linked Hub as a last-resort route. Created on first use.
+let hubShareDeps: HubShareDeps | null = null
+const hubShareDepsOf = (): HubShareDeps => (hubShareDeps ??= createNodeShareDeps({ home: xerxesHome(), cli: createCliRunner(process.env, homedir()) }))
 
 function loadWorkspace(): string | null {
   // Legacy fallback for installations without a saved window layout.
@@ -329,6 +333,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   let remoteMachine: RemoteTarget | null = null
   let remoteAttempt: AbortController | null = null
   let remoteError = ''
+  // The connected SSH workspace, relayed to the Hub while this window holds it.
+  let hubShare: HubShareHandle | null = null
+  const stopHubShare = () => { void hubShare?.close(); hubShare = null }
+  const startHubShare = (label: string, socketPath: string) => {
+    stopHubShare()
+    hubShare = shareRemoteWorkspace(hubShareDepsOf(), { label, localSocket: socketPath })
+  }
   let providerForwarding: DesktopProviderForwarding | null = null
   let localProviderDaemon: DaemonRpc | null = null
   // Copies this Mac's keyed profiles to the connected SSH host; null when local.
@@ -446,6 +457,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     remoteAttempt = null
     closeProviderForwarding()
     void remote?.close()
+    stopHubShare()
     remote = null
     remoteMachine = null
     remoteError = ''
@@ -599,6 +611,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           const previous = next
           next = replacement
           if (remote === previous) remote = replacement
+          // The forward socket moved: relay the new one.
+          if (remote === replacement && remoteMachine) startHubShare(remoteMachine.alias, replacement.socketPath)
           remoteError = ''
           await previous.close()
           return replacement.socketPath
@@ -659,6 +673,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       stopProfileWatch = watchProfiles(profilesFile, () => syncProfiles?.())
       remote = next
       remoteMachine = machine
+      startHubShare(machine.alias, next.socketPath)
       selectedWorkspace = next.projectDir
       scheduleWindowSave()
       if (activeSurfaces.get(window.id) === id) window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
@@ -820,6 +835,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     remoteAttempt?.abort()
     voiceRequest?.abort()
     void remote?.close()
+    stopHubShare()
     cleanupWindows.delete(cleanup)
   }
   cleanupWindows.add(cleanup)

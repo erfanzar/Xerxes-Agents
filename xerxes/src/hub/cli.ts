@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { realSleep, spawnCommand } from './commandRunner.js'
 import { resolveTailscaleCli, runHubSetup } from './hubSetup.js'
-import { runHubLink, runHubRemote, runLinkTunnel, slug } from './hubLink.js'
+import { runHubLink, runHubRemote, runHubTrust, runLinkTunnel, slug } from './hubLink.js'
 import { version as packageVersion } from '../../package.json' with { type: 'json' }
 import { loadHubSettings, settingsEnvironment } from './settings.js'
 
@@ -41,10 +41,21 @@ export const HUB_HELP = `Usage: xerxes hub [command]
                                    machine's daemon for every project. Safe to run again.
   remote <user@hub-host> [--remote-xerxes <cmd>] <hub-args...>
                                    Run "xerxes hub <hub-args...>" on the Hub host over ssh
+  trust <user@hub-host> --socket <daemon-socket> [--json]
+                                   Pin the Hub's signing key on the daemon behind that socket
   info [--json]                    Hub id, key fingerprint, public key and public origin
   machines list [--json]           Machines and the projects the Hub found on them
   machines add-local <label> --socket <path> [--json]
                                    Register one machine (its projects are discovered)
+  machines add-route <id> --alias <ssh-alias> --remote-socket <path> [--json]
+                                   Let the Hub dial this machine itself over SSH when its own
+                                   link is down (the alias lives in the Hub host's ~/.ssh/config)
+  machines add-route <id> --via mac --socket <path> [--json]
+                                   A socket a desktop app relays to this machine (last resort)
+  machines remove-route <id> (--alias <a> --remote-socket <p> | --socket <path>) [--json]
+  machines attach --socket <path> --label <label> [--json]
+                                   A desktop app shares a daemon: it joins the machine with the same
+                                   runtime as a relayed route, or becomes a machine of its own
   machines remove <id> [--json]
   run                              Run in the foreground (default)
   start                            Start detached; wait for control readiness
@@ -284,6 +295,17 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
       }
       return 0
     }
+    if (command === 'trust') {
+      const parsed = parseFlags(rest, new Set(['socket', 'remote-xerxes']))
+      const socket = parsed.values.get('socket')?.at(-1)
+      if (parsed.positional.length !== 1 || !socket) throw new Error('usage: xerxes hub trust &lt;user@hub-host> --socket <daemon-socket> [--json]')
+      const remoteXerxes = parsed.values.get('remote-xerxes')?.at(-1)
+      const result = await runHubTrust({ target: parsed.positional[0]!, socketPath: resolve(socket), ...(remoteXerxes === undefined ? {} : { remoteXerxes }) }, {
+        ssh: Bun.which('ssh') ?? '/usr/bin/ssh', run: spawnCommand, socketExists: existsSync, enrollLocal: enrollOnLocalDaemon,
+      })
+      out(parsed.flags.has('json') ? JSON.stringify({ hub_id: result.hubId, enrolled: true }) : `Hub ${result.hubId} is trusted by the daemon at ${resolve(socket)}.`)
+      return 0
+    }
     if (command === 'remote') {
       // `hub remote <target> [--remote-xerxes <cmd>] <hub-args...>`: everything after the target is the remote hub command.
       const args = [...rest]
@@ -318,9 +340,59 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
     }
     if (command === 'machines') {
       const [action = 'list', ...parameters] = rest
-      const parsed = parseFlags(parameters, new Set(['socket']))
+      const parsed = parseFlags(parameters, new Set(['socket', 'via', 'alias', 'remote-socket', 'label']))
       const json = parsed.flags.has('json')
       const registry = new WorkspaceRegistry(paths.workspacesPath)
+      const one = (name: string): string | undefined => parsed.values.get(name)?.at(-1)
+      const routeOf = (): Record<string, unknown> => {
+        const alias = one('alias'), remoteSocket = one('remote-socket'), socket = one('socket')
+        if (alias !== undefined) {
+          if (remoteSocket === undefined) throw new Error('--alias needs --remote-socket <absolute path of the daemon socket on that host>')
+          return { via: one('via') ?? 'hub', endpoint: { kind: 'ssh', sshAlias: alias, remoteSocketPath: remoteSocket } }
+        }
+        if (socket === undefined) throw new Error('Give --alias <ssh-alias> --remote-socket <path>, or --socket <path>')
+        return { via: one('via') ?? 'mac', endpoint: { kind: 'local', socketPath: resolve(socket) } }
+      }
+      if (action === 'add-route' && parsed.positional.length === 1) {
+        const saved = await registry.addRoute(parsed.positional[0]!, routeOf())
+        const machine = saved.snapshot.workspaces.find(row => row.id === parsed.positional[0])
+        out(json ? JSON.stringify({ machine_id: parsed.positional[0], added: saved.added, routes: machine?.routes ?? [] })
+          : saved.added ? 'Route added. The Hub uses it when the machine\'s own link is down.' : 'That route is already known.')
+        return 0
+      }
+      if (action === 'remove-route' && parsed.positional.length === 1) {
+        const saved = await registry.removeRoute(parsed.positional[0]!, routeOf())
+        const machine = saved.workspaces.find(row => row.id === parsed.positional[0])
+        out(json ? JSON.stringify({ machine_id: parsed.positional[0], routes: machine?.routes ?? [] }) : 'Route removed.')
+        return 0
+      }
+      if (action === 'attach' && parsed.positional.length === 0) {
+        const socket = one('socket'), label = one('label')
+        if (!socket || !label) throw new Error('usage: xerxes hub machines attach --socket <path> --label <label> [--json]')
+        const socketPath = resolve(socket)
+        // Which daemon answers there: its runtime identity decides which machine this is.
+        const client = new HubDaemonClient({ socketPath, projectDir: '/', retryBaseMs: 60_000, requestTimeoutMs: 10_000, connectTimeoutMs: 5000 })
+        let runtimeId: string | undefined
+        try {
+          const handshake = await client.connect()
+          runtimeId = typeof handshake.status.runtime_id === 'string' && handshake.status.runtime_id ? handshake.status.runtime_id : undefined
+        } finally { client.close() }
+        if (runtimeId === undefined) throw new Error('The daemon behind that socket reports no runtime identity. Update Xerxes there.')
+        const status = await getHubStatus(lifecycle).catch(() => null)
+        const snapshot = await registry.load()
+        const machineIds = new Set(snapshot.workspaces.filter(row => row.connection.discover === true).map(row => row.id))
+        const match = (status?.workspaces ?? []).find(row => row.runtime_id === runtimeId && row.machine_id !== undefined && machineIds.has(row.machine_id))
+        if (match?.machine_id !== undefined) {
+          const saved = await registry.addRoute(match.machine_id, { via: 'mac', endpoint: { kind: 'local', socketPath } })
+          const result = { machine_id: match.machine_id, runtime_id: runtimeId, attached: 'route', added: saved.added }
+          out(json ? JSON.stringify(result) : `Shared as a relayed route of machine ${match.machine_id}.`)
+          return 0
+        }
+        const saved = await registry.upsertMachine({ label, socketPath })
+        const result = { machine_id: saved.id, runtime_id: runtimeId, attached: 'machine', added: saved.created }
+        out(json ? JSON.stringify(result) : `Shared as machine ${saved.id}; its projects appear on their own.`)
+        return 0
+      }
       if (action === 'list' && parsed.positional.length === 0) {
         const snapshot = await registry.load()
         const status = await getHubStatus(lifecycle).catch(() => null)

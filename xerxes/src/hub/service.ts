@@ -24,6 +24,7 @@ import {
   type HubSupervisor, type PushLike, type SupervisorModelPort, type SupervisorQuotas,
 } from './supervisor/index.js'
 import { SupervisorModelControl } from './supervisor/modelControl.js'
+import { messageToWire } from './supervisor/threads.js'
 import { WorkspaceRegistry, type HubWorkspace } from './workspaceRegistry.js'
 import { allowedModes, type VoiceRuntimeConfig } from './voice/config.js'
 import { createHubVoiceRoute, type HubVoiceRoute } from './voice/route.js'
@@ -158,6 +159,9 @@ export function toPoolWorkspace(workspace: HubWorkspace): PoolWorkspace {
     id: workspace.id, label: workspace.label, endpoint, projectDir: workspace.projectDir,
     autoConnect: workspace.connection.autoConnect, bootstrapConsent: workspace.consent.bootstrap, updateConsent: workspace.consent.update,
     ...(workspace.connection.discover === true ? { discover: true } : {}),
+    ...(workspace.routes === undefined || workspace.routes.length === 0 ? {} : {
+      routes: workspace.routes.map(route => ({ via: route.via, endpoint: route.endpoint })),
+    }),
   }
 }
 
@@ -274,11 +278,18 @@ export function createHubService(options: HubServiceOptions): HubService {
     get supervisor() { return supervisor },
 
     workspaceHealth() {
+      const machines = new Map((pool?.machines() ?? []).map(machine => [machine.id, machine]))
       return [
+        // Per-project entries keep their original `{ id, health }` shape; only machine rows carry identity.
         ...[...known.values()].filter(row => !row.machine).map(row => ({ id: row.id, health: pool?.health(row.id)?.state ?? 'offline' })),
-        ...(pool?.derivedWorkspaces() ?? []).map(row => ({
-          id: row.id, health: pool?.health(row.id)?.state ?? 'offline', machine_id: row.machineId, project_dir: row.projectDir, label: row.label,
-        })),
+        ...(pool?.derivedWorkspaces() ?? []).map(row => {
+          const machine = machines.get(row.machineId)
+          return {
+            id: row.id, health: pool?.health(row.id)?.state ?? 'offline', machine_id: row.machineId, project_dir: row.projectDir, label: row.label,
+            ...(machine?.runtimeId === undefined ? {} : { runtime_id: machine.runtimeId }),
+            ...(machine?.route === undefined ? {} : { route: machine.route }),
+          }
+        }),
       ]
     },
 
@@ -348,6 +359,16 @@ export function createHubService(options: HubServiceOptions): HubService {
             audit: record => identity.audit(record),
             ...(supervisorConfig?.kind === 'configured' ? { fallback: supervisorConfig.model } : {}),
             broadcast: build => { hubServerRef?.sendEventToAll('supervisor.config_changed', build) },
+            // Say it in the conversation, not only in settings: a different machine is answering.
+            onFailover: change => {
+              const running = supervisor
+              if (running === undefined) return
+              const text = change.to === undefined
+                ? `${change.from} is back; XERXES answers there again.`
+                : `${change.from} is offline; XERXES is answering on ${change.to} with the same model.`
+              const { message } = running.threads.append({ threadId: 'shared', role: 'system', text })
+              running.threads.emit('shared', 'supervisor.thread_event', { message: messageToWire(message) })
+            },
             ...(options.server?.clock === undefined ? {} : { clock: options.server.clock }),
             onError: report,
           })

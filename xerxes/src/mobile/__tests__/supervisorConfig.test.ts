@@ -121,6 +121,27 @@ describe('supervisor config controller', () => {
     expect(fake.requests).toEqual([])
   })
 
+  it('XERXES stays "working" from the Hub\'s activity event until it says idle or the reply lands', () => {
+    const fake = fakeConnection()
+    const store = createHubStore()
+    createHubController({ connection: fake.connection, store }).start()
+    expect(store.getSnapshot().supervisor.working).toBeFalsy()
+    fake.notice('supervisor.thread_event', { activity: 'working' })
+    expect(store.getSnapshot().supervisor.working).toBe(true)
+    // A person's own message echoed back does not end the turn.
+    fake.notice('supervisor.thread_event', { message: { id: 'u1', role: 'user', text: 'hi', at: new Date().toISOString() } })
+    expect(store.getSnapshot().supervisor.working).toBe(true)
+    fake.notice('supervisor.thread_event', { message: { id: 'x1', role: 'xerxes', text: 'hello', at: new Date().toISOString() } })
+    expect(store.getSnapshot().supervisor.working).toBe(false)
+    fake.notice('supervisor.thread_event', { activity: 'working' })
+    fake.notice('supervisor.thread_event', { activity: 'idle' })
+    expect(store.getSnapshot().supervisor.working).toBe(false)
+    // A failed turn from a Hub that sends no `idle` still ends the spinner.
+    fake.notice('supervisor.thread_event', { activity: 'working' })
+    fake.notice('supervisor.thread_event', { message: { id: 's1', role: 'system', text: 'XERXES stopped: provider failed', at: new Date().toISOString() } })
+    expect(store.getSnapshot().supervisor.working).toBe(false)
+  })
+
   it('asks the Hub again when a config_changed payload is unreadable', () => {
     const fake = fakeConnection()
     const store = createHubStore()
