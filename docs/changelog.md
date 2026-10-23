@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.2 — 2026-10-23
+
+- **VS Code: Neo matches the desktop.** The conversation and the message box share one 20px side inset, the message box is the desktop's (with the `❯` prompt and the full-size send button), and the toolbar sits under it without its own frame.
+- **VS Code: every action is on the title bar.** Search, Activity, Usage and Export Transcript are icons next to New Task, History and Settings instead of hidden in the ⋯ menu. Switch Style stays in the command palette and Settings.
+- "Show full goal" is a plain text link; it showed as the browser's default grey button.
+- The To-dos label no longer wraps at its hyphen in Neo.
+
 ## 0.8.1 — 2026-10-23
 
 - **Neo is the default style**, in the desktop app and now in the VS Code extension too. Its accent is purple. Classic is one click away: Settings → General → Style, or "Switch to Classic style" in ⌘K. Colour themes work in Neo. A background never shows in Neo; only its colours are used, and Settings says so.
