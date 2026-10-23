@@ -19,6 +19,18 @@ test('only a conversation bound to this computer produces a badge', () => {
   expect(providerRelayView({ ok: true, bound: true, requests: -1, inFlight: 'x', profile: '' })).toEqual({ bound: true, live: false, requests: 0, inFlight: 0 })
 })
 
+test('a task on the host\'s own sign-in names the host, never "via this Mac"', () => {
+  const view = providerRelayView({ ok: true, bound: false, destination: 'tpu-host', onHost: { profile: 'claude-code', model: 'claude-code/opus' } })!
+  expect(view.onHost).toEqual({ profile: 'claude-code', model: 'claude-code/opus' })
+  const markup = renderToStaticMarkup(createElement(RelayBadge, { relay: view }))
+  expect(markup).toContain('data-state="host"')
+  expect(markup).toContain('via tpu-host')
+  expect(markup).not.toContain('via this Mac')
+  expect(relaySummary(view)).toContain('run on tpu-host with its own claude-code (claude-code/opus) sign-in, not through this computer')
+  // An incomplete host route is not a badge.
+  expect(providerRelayView({ ok: true, bound: false, onHost: { profile: 'claude-code' } })).toBeNull()
+})
+
 test('the badge says where prompts run, pulses while one is in flight, and warns when access ended', () => {
   const live = providerRelayView(activity)!
   const summary = relaySummary(live, 1_791_000_000_000)

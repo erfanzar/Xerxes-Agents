@@ -109,6 +109,7 @@ import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution, successfulG
 import { GovernedMemoryStore } from './memory/governedMemoryStore.js';
 import { LessonStore, renderApprovedLessonsForTurn } from './memory/lessons.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
+import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
 import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
@@ -1203,6 +1204,7 @@ async function runDaemonOwned(
     memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
+    providerReadiness: createSignInReadinessProbe(),
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
     autoSnapshotTurns: true,

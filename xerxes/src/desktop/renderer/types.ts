@@ -369,6 +369,8 @@ export interface ProviderRow {
   readonly baseUrl: string
   /** The credential is a sign-in on each machine (ChatGPT/Codex, Claude Code), not a copyable key. */
   readonly signsIn: boolean
+  /** An SSH host reported its own copy of this sign-in working; it then runs there, not through this computer. */
+  readonly ready?: boolean
 }
 
 /**

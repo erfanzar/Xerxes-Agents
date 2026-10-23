@@ -16,6 +16,10 @@ import type { ProviderRelayView } from './store.js'
 
 export function relaySummary(relay: ProviderRelayView, now = Date.now()): string {
   const route = relay.profile ? `${relay.profile}${relay.model ? ` (${relay.model})` : ''}` : 'its provider'
+  if (relay.onHost) {
+    return [`Prompts for this task run on ${relay.destination ?? 'the SSH host'} with its own ${route} sign-in, not through this computer.`,
+      'Click to inspect or change.'].join('\n')
+  }
   const lines = [relay.live
     ? `Prompts for this task run on this computer through ${route}, not on ${relay.destination ?? 'the SSH host'}.`
     : relay.reconnecting
@@ -32,6 +36,14 @@ export function relaySummary(relay: ProviderRelayView, now = Date.now()): string
 
 export function RelayBadge({ relay }: { relay: ProviderRelayView }): ReactElement {
   const open = useDesktopNavigation()
+  if (relay.onHost) {
+    return (
+      <button className="cchip composer__text relaybadge" data-state="host" title={relaySummary(relay)} aria-label={relaySummary(relay)} onClick={() => open('workspace')}>
+        <Icon name="cloud" size={14} />
+        <span>{`via ${relay.destination ?? 'the host'}`}</span>
+      </button>
+    )
+  }
   const state = !relay.live ? relay.reconnecting ? 'reconnecting' : 'ended' : relay.inFlight > 0 ? 'busy' : 'live'
   return (
     <button

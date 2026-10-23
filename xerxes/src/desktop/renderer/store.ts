@@ -196,14 +196,17 @@ export interface ProviderRelayView {
   /** Not live, and this window is binding it again (retrying until it is). */
   readonly reconnecting?: boolean
   readonly lastFailure?: string
+  /** Not relayed: the host runs this task on its own sign-in (`bound` is false). */
+  readonly onHost?: { readonly profile: string; readonly model: string }
 }
 
 /**
  * A profile whose login lives on each machine (the host reports `signs_in`).
  * In an SSH window it runs on this computer, through the relay, not on the host.
  */
-export function runsOnThisComputer(frame: { readonly storageScope?: string }, row: { readonly signsIn: boolean } | undefined): boolean {
-  return Boolean(frame.storageScope?.startsWith('ssh:') && row?.signsIn)
+export function runsOnThisComputer(frame: { readonly storageScope?: string }, row: { readonly signsIn: boolean; readonly ready?: boolean } | undefined): boolean {
+  // A host whose own sign-in works runs it itself.
+  return Boolean(frame.storageScope?.startsWith('ssh:') && row?.signsIn && row.ready !== true)
 }
 
 /**
@@ -227,8 +230,13 @@ export function providerRowState(frame: Pick<Snapshot, 'storageScope' | 'provide
 export function providerRelayView(value: unknown): ProviderRelayView | null {
   if (!value || typeof value !== 'object') return null
   const row = value as Record<string, unknown>
-  if (row.ok !== true || row.bound !== true) return null
   const text = (field: unknown) => typeof field === 'string' && field ? field : undefined
+  const host = row.onHost && typeof row.onHost === 'object' ? row.onHost as Record<string, unknown> : undefined
+  if (row.ok === true && row.bound !== true && host && text(host.profile) && text(host.model)) {
+    return { bound: false, live: true, requests: 0, inFlight: 0, profile: text(host.profile)!, model: text(host.model)!,
+      onHost: { profile: text(host.profile)!, model: text(host.model)! }, ...(text(row.destination) ? { destination: text(row.destination)! } : {}) }
+  }
+  if (row.ok !== true || row.bound !== true) return null
   const count = (field: unknown) => typeof field === 'number' && Number.isFinite(field) && field >= 0 ? field : undefined
   const view: Record<string, unknown> = { bound: true, live: row.live === true, requests: count(row.requests) ?? 0, inFlight: count(row.inFlight) ?? 0 }
   for (const [key, field] of [['destination', text(row.destination)], ['profile', text(row.profile)], ['model', text(row.model)], ['lastError', text(row.lastError)], ['lastFailure', text(row.lastFailure)]] as const) if (field) view[key] = field
@@ -2940,7 +2948,8 @@ export class Store {
     // that same false empty state for its whole duration.
     this.patch({ providerError: '', providersLoading: true })
     const providers = this.bridge
-      .call('provider_list', {})
+      // In an SSH window, ask whether the host's own sign-ins work: those run there.
+      .call('provider_list', this.frame.storageScope?.startsWith('ssh:') ? { with_readiness: true } : {})
       .then(result => {
         if (result.ok === false) throw new Error(str(result.error) || 'Could not load provider profiles')
         const rows = Array.isArray(result.profiles) ? (result.profiles as unknown[]) : []
@@ -2954,6 +2963,7 @@ export class Store {
               label: str(row.label) || name,
               provider: str(row.provider),
               signsIn: row.signs_in === true,
+              ...(row.ready === true ? { ready: true as boolean } : {}),
               model: str(row.model),
               active: row.active === true,
               baseUrl: str(row.base_url),

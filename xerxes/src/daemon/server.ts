@@ -343,6 +343,7 @@ import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
 import { HubModelService } from './hubModels.js';
+import type { SignInReadiness, SignInReadinessProbe } from './providerReadiness.js';
 import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities, localProviderSelections, type LocalProviderSelection } from './remoteProviderBindings.js';
 import { boundedLocalCapabilities, localReasoningLevels, localReasoningNote } from './localReasoningCapabilities.js';
@@ -828,6 +829,8 @@ export interface DaemonServerOptions {
   readonly remoteProviderBindings?: RemoteProviderBindings;
   /** Local provider client factory for explicitly consented relay grants. */
   readonly relayClientFactory?: RelayClientFactory;
+  /** Whether this machine's own per-machine sign-ins work (`provider_list {with_readiness:true}`). */
+  readonly providerReadiness?: SignInReadinessProbe;
   readonly workspaceResources?: (cwd: string) => Promise<WorkspaceResources>;
   /**
    * Drop one workspace's cached resources (per-project skill registry, MCP
@@ -1171,6 +1174,7 @@ export class DaemonServer {
   private readonly profileStore: ProfileStore;
   private readonly providerRelays: DaemonProviderRelays;
   private readonly remoteProviderBindings: RemoteProviderBindings | undefined;
+  private readonly providerReadiness: SignInReadinessProbe | undefined;
   private readonly agentSettingsStore: AgentSettingsStore;
   private readonly agentSettingsDefaults: unknown;
   private readonly questionOwners = new Map<
@@ -1398,6 +1402,7 @@ export class DaemonServer {
       ...(options.hubModelTimeoutMs === undefined ? {} : { timeoutMs: options.hubModelTimeoutMs }),
     });
     this.remoteProviderBindings = options.remoteProviderBindings;
+    this.providerReadiness = options.providerReadiness;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
     // What providers reported earlier (saved on each profile) is known to the
@@ -3834,9 +3839,21 @@ export class DaemonServer {
       if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
         return {ok:true,local_setup:true,profiles:localProviderSelections(session.metadata).map(route => ({name:route.profile,provider:'local relay',model:route.model,active:route.profile === (session.metadata.local_provider_profile ?? localProviderSelections(session.metadata)[0]?.profile)}))};
       }
+      const rows = this.profileStore.list().map(profilePayload);
+      // Asked for by an SSH window deciding whether this host's own sign-in can run
+      // a task instead of relaying it through the desktop. Only a state leaves here.
+      const probe = this.providerReadiness;
+      if (params.with_readiness !== true || !probe) return { ok: true, profiles: rows };
+      const readiness = await Promise.all(rows.map(row => row.signs_in === true
+        ? probe(String(row.provider)).catch((): SignInReadiness => ({ state: 'unknown' }))
+        : Promise.resolve(undefined)));
       return {
         ok: true,
-        profiles: this.profileStore.list().map(profilePayload),
+        readiness_supported: true,
+        profiles: rows.map((row, index) => {
+          const fact = readiness[index];
+          return fact ? { ...row, ready: fact.state === 'ready', ready_state: fact.state, ...(fact.reason ? { ready_reason: fact.reason } : {}) } : row;
+        }),
       };
     }
     if (method.startsWith('provider.remote.')) {

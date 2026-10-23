@@ -61,6 +61,8 @@ export class DesktopProviderForwarding {
   private readonly activity = new Map<string, ActivityState>()
   /** The profile each conversation was put on; survives transport loss so renewal keeps it. */
   private readonly chosen = new Map<string, string>()
+  /** Conversations put on the host's own sign-in (its copy of this computer's profile). */
+  private readonly hostOwn = new Map<string, { profile: string; model: string }>()
   private changed: (() => void) | undefined
   /** `preferred` names this computer's active profile; without it nothing is followed automatically. */
   constructor(private readonly local: Rpc, private readonly remote: Rpc,
@@ -210,6 +212,11 @@ export class DesktopProviderForwarding {
       // turn is retrying meanwhile. Any other change waits for it to finish.
       const restore = followsHere && review.running
       if (review.running && !restore) return { status: 'skipped', reason: 'the conversation is working' }
+      // The host's own working sign-in wins: relaying a host that has its own
+      // Claude Code through this computer was the bug. Anything unclear relays.
+      if (!followsHere && await this.useHostSignIn(review.sessionKey, primary)) {
+        return { status: 'skipped', reason: `the host has its own ${primary.name} sign-in` }
+      }
       await this.bindPrimary(review, primary, restore)
       return { status: 'bound' }
     } catch (error) {
@@ -234,7 +241,31 @@ export class DesktopProviderForwarding {
     return { ok: true }
   }
 
+  /**
+   * Put a fresh conversation on the host's own copy of `primary` when the host
+   * reports that sign-in working. False (relay as before) on an older host, a
+   * host without it, or any failure: never a silent half-switch.
+   */
+  private async useHostSignIn(sessionKey: string, primary: ShareableLocalProfile): Promise<boolean> {
+    let listed: Record<string, unknown>
+    try { listed = await this.remote('provider_list', { with_readiness: true }) } catch { return false }
+    if (listed.ok !== true || listed.readiness_supported !== true || !Array.isArray(listed.profiles)) return false
+    const row = listed.profiles.map(record).find(value => value.name === primary.name && value.signs_in === true && value.ready === true)
+    if (!row) return false
+    const model = primary.model || (typeof row.model === 'string' ? row.model : '')
+    if (!model) return false
+    try {
+      const set = await this.remote('set_model', { model, provider_profile: primary.name, session_key: sessionKey })
+      if (set.ok !== true) return false
+    } catch { return false }
+    this.hostOwn.set(sessionKey, { profile: primary.name, model })
+    while (this.hostOwn.size > MAX_ACTIVITY) this.hostOwn.delete(this.hostOwn.keys().next().value!)
+    this.changed?.()
+    return true
+  }
+
   private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile, restore = false): Promise<void> {
+    this.hostOwn.delete(review.sessionKey)
     const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
     await this.authorize({ consent: true, restore, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
       minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
@@ -304,6 +335,8 @@ export class DesktopProviderForwarding {
     const bound = typeof session.local_provider_label === 'string' && session.local_provider_label !== ''
     const activity = this.activityFor(session.key)
     const route = savedRoute(session)
+    const host = this.hostOwn.get(session.key)
+    if (!bound && host) return { ok: true, bound: false, sessionKey: session.key, destination: this.destination, onHost: host }
     return { ok: true, bound, sessionKey: session.key, destination: this.destination, ...activity,
       ...(!activity.profile && route ? { profile: route.profile, model: route.model } : {}),
       // Not live but bound: this window is restoring it and retries until it is back.
