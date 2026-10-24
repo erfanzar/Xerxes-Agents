@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.8 — 2026-10-24
+
+- **XERXES Autopilot.** The Hub owner can turn Autopilot on per workspace from the desktop XERXES tab or the phone, with an optional standing instruction and expiry. XERXES then wakes on its own when a task asks a question, waits for a person, fails, gets blocked or finishes its goal, and checks in every 15 minutes on workspaces with a running task (`XERXES_HUB_AUTOPILOT_CHECKIN_MS`, 0 turns it off).
+- **It answers questions and acts without Confirm.** Autopilot answers a task's questions with the recommended option, or as the standing instruction says, and asks the owner when a question is open-ended. It steers, stops and messages tasks without a Confirm tap, attributed to XERXES on behalf of the owner. Every action and answer posts a thread notice and pushes the owner; anything it will not decide pings the owner at once.
+- **Permission approvals stay with people.** XERXES can never approve a command or edit: the Hub grants, the command router and the daemon each refuse it. Answering questions uses a new scope, `question.delegated`, that only Autopilot can hold; it cannot be stored as a grant, and agents with it still see permission requests redacted.
+- **Bounded on purpose.** Wake turns run in a private Autopilot thread only the owner can open. A wake turn cannot start a task or change a goal or model on its own: those come to the owner as Confirm cards. Autopilot is limited to 12 wake-ups and 30 actions per workspace per hour, turns itself off when it expires or the enabler is no longer the owner, and tells the owner when it does.
+
 ## 0.8.7 — 2026-10-24
 
 - **The Learned panel says where its count is.** The Skills & tools badge adds pending proposals and pending lessons together, but the panel gave no hint which sub-tab held them: with one pending proposal and the Lessons sub-tab open, it showed "No pending lessons" next to a badge of 1. Each sub-tab now shows its own pending count, and the panel opens on the one that has something waiting.
