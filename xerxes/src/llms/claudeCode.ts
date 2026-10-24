@@ -36,7 +36,7 @@ import type { JsonObject, JsonValue, ToolCall, ToolDefinition } from '../types/t
 import { isJsonObject } from '../types/toolCalls.js'
 import type { CompletionRequest, LlmClient, LlmDelta, TokenUsage } from './client.js'
 import { claudeCodeCatalog } from './claudeCodeCatalog.js'
-import { CLAUDE_CODE_TOOL_SERVER, declareClaudeCodeTools, type ClaudeCodeToolDeclaration } from './claudeCodeToolServer.js'
+import { CLAUDE_CODE_TOOL_PREFIX, CLAUDE_CODE_TOOL_SERVER, declareClaudeCodeTools, type ClaudeCodeToolDeclaration } from './claudeCodeToolServer.js'
 import { credentialFingerprint } from './credentialFingerprint.js'
 import { reportedModelCapability, reportModelCapability } from './modelsDev.js'
 
@@ -411,6 +411,19 @@ function parseArguments(body: string): JsonObject | undefined {
   } catch { /* Repair below: trailing-comma or unclosed JSON is common. */ }
   const repaired: unknown = parseStreamingJson(trimmed)
   return isJsonObject(repaired) ? repaired : undefined
+}
+
+/**
+ * The request's own name for a call written as text. The prompt tells the
+ * model its tools are `mcp__xerxes__<name>`, and it writes that name in text
+ * calls too; the registry knows only `<name>`, so every such call failed with
+ * "was not configured for this turn". Native calls were already mapped.
+ * The prefix is removed only when what remains is a tool of this request.
+ */
+export function requestToolName(name: string, tools: readonly ToolDefinition[]): string {
+  if (!name.startsWith(CLAUDE_CODE_TOOL_PREFIX)) return name
+  const bare = name.slice(CLAUDE_CODE_TOOL_PREFIX.length)
+  return tools.some(tool => tool.function.name === bare) ? bare : name
 }
 
 /** Tool name → the JSON type each argument's schema declares, for `<parameter>` values (always text). */
@@ -1208,7 +1221,7 @@ export class ClaudeCodeClient implements LlmClient {
       const toolCalls: ToolCall[] = [...nativeCalls, ...extractor.calls.map((call, index) => ({
         id: `call_cc_${Date.now().toString(36)}_${index}`,
         type: 'function' as const,
-        function: { name: call.name, arguments: call.arguments },
+        function: { name: requestToolName(call.name, request.tools ?? []), arguments: call.arguments },
       }))]
       usage ??= streamed
       if (usage) yield { usage }

@@ -18,6 +18,7 @@ import {
   claudeCodeThinkingOff,
   claudeCodeTranscript,
   FunctionCallExtractor,
+  requestToolName,
   withTranscriptCacheMark,
   toolParameterTypes,
   MAX_NATIVE_CALL_RETRIES,
@@ -585,6 +586,17 @@ test('markup mentioned in prose never swallows the rest of the reply or the call
     // A plain final answer that only mentions the tag is shown whole.
     expect(run(prose + ' Done.')).toEqual({ visible: prose + ' Done.', calls: [] })
   }
+})
+
+test('a text call named with the mcp__xerxes__ prefix runs the request\'s own tool', () => {
+  // Seen live: every FileEditTool call written as text failed with
+  // "mcp__xerxes__FileEditTool was not configured for this turn".
+  const tools = [{ type: 'function' as const, function: { name: 'FileEditTool', description: 'edit', parameters: { type: 'object', properties: {} } } }]
+  expect(requestToolName('mcp__xerxes__FileEditTool', tools)).toBe('FileEditTool')
+  expect(requestToolName('FileEditTool', tools)).toBe('FileEditTool')
+  // Only a tool this request offers loses the prefix; anything else is left for the registry to refuse.
+  expect(requestToolName('mcp__xerxes__Unknown', tools)).toBe('mcp__xerxes__Unknown')
+  expect(requestToolName('mcp__other__FileEditTool', tools)).toBe('mcp__other__FileEditTool')
 })
 
 test('a JSON call closed with the wrong end tag still runs and is never shown as text', () => {
