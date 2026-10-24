@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.7 — 2026-10-24
+
+- **The Learned panel says where its count is.** The Skills & tools badge adds pending proposals and pending lessons together, but the panel gave no hint which sub-tab held them: with one pending proposal and the Lessons sub-tab open, it showed "No pending lessons" next to a badge of 1. Each sub-tab now shows its own pending count, and the panel opens on the one that has something waiting.
+
 ## 0.8.6 — 2026-10-24
 
 - **Tool calls written as text with the `mcp__xerxes__` prefix run again.** On the Claude Code transport the prompt names Xerxes' tools `mcp__xerxes__<name>`, and a call the model wrote as text kept that prefix, so the registry refused it ("was not configured for this turn") and every such edit failed. The prefix is now removed when the remaining name is a tool the request offers; native calls were already mapped.
