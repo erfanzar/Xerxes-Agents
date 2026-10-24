@@ -72,9 +72,20 @@ export function LearnedLessons({ snap, actions }: ReviewProps): ReactElement {
 }
 
 export function LearnedPanel({ snap, actions = store }: { snap: Snapshot; actions?: Actions }): ReactElement {
-  const [tab, setTab] = useState<'proposals' | 'lessons'>('proposals')
+  // The header badge sums both kinds; each sub-tab says its own share, and the
+  // panel opens on the one that has something waiting (until the person picks).
+  const pendingProposals = snap.learningCounts?.pending_proposals ?? 0
+  const pendingLessons = snap.learningCounts?.pending_lessons ?? 0
+  const [tab, setTab] = useState<'proposals' | 'lessons'>(() => !pendingProposals && pendingLessons ? 'lessons' : 'proposals')
   const root = useRef<HTMLDivElement>(null)
   const focusedRequest = useRef('')
+  const picked = useRef(false)
+  const choose = (next: 'proposals' | 'lessons') => { picked.current = true; setTab(next) }
+  useEffect(() => {
+    if (picked.current) return
+    if (tab === 'proposals' && !pendingProposals && pendingLessons) setTab('lessons')
+    if (tab === 'lessons' && !pendingLessons && pendingProposals) setTab('proposals')
+  }, [pendingProposals, pendingLessons, tab])
   useEffect(() => { void actions.refreshLearning() }, [snap.cwd, snap.sessionKey, snap.learningOpenRevision, actions])
   useEffect(() => { if (snap.learningProposalId) setTab('proposals') }, [snap.learningOpenRevision])
   useEffect(() => {
@@ -90,8 +101,8 @@ export function LearnedPanel({ snap, actions = store }: { snap: Snapshot; action
   return <div ref={root} className="learned-panel">
     <p className="studio-muted">What Xerxes learned from its work. Proposals and lessons stay pending; nothing changes without your approval.</p>
     <div className="studio-tabs" role="group" aria-label="Learned views">
-      <button className={tab === 'proposals' ? 'is-selected' : ''} aria-pressed={tab === 'proposals'} onClick={() => setTab('proposals')}>Proposals</button>
-      <button className={tab === 'lessons' ? 'is-selected' : ''} aria-pressed={tab === 'lessons'} onClick={() => setTab('lessons')}>Lessons</button>
+      <button className={tab === 'proposals' ? 'is-selected' : ''} aria-pressed={tab === 'proposals'} onClick={() => choose('proposals')}>Proposals{pendingProposals ? <span className="learned-badge" aria-label={`${pendingProposals} pending proposals`}>{pendingProposals}</span> : null}</button>
+      <button className={tab === 'lessons' ? 'is-selected' : ''} aria-pressed={tab === 'lessons'} onClick={() => choose('lessons')}>Lessons{pendingLessons ? <span className="learned-badge" aria-label={`${pendingLessons} pending lessons`}>{pendingLessons}</span> : null}</button>
       <button disabled={snap.learningLoading || snap.learningReviewBusy || snap.connection !== 'online'} onClick={() => void actions.refreshLearning()}>Refresh</button>
     </div>
     {snap.learningLoading && <p className="studio-progress" role="status">Loading learned items…</p>}

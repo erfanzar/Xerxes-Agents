@@ -242,6 +242,19 @@ test('malformed and cross-workspace items fail closed; invalid notifications nev
   expect(builder.all().some(block => block.kind === 'reflection')).toBe(false)
 })
 
+test('each sub-tab shows its own pending count, and the panel opens on the one with something waiting', async () => {
+  const { store } = await setup()
+  const base = { ...store.getSnapshot(), learning: { ...readLearningList(list()), lessons: [] } }
+  // Seen live: the header said 1, the person opened Lessons, saw nothing pending and nothing said why.
+  const proposalsOnly = renderToStaticMarkup(createElement(LearnedPanel, { snap: { ...base, learningCounts: { pending_proposals: 1, pending_lessons: 0 } }, actions: store }))
+  expect(proposalsOnly).toContain('aria-label="1 pending proposals"')
+  expect(proposalsOnly).not.toContain('pending lessons"')
+  expect(proposalsOnly).toContain('aria-label="Reflection proposals"')
+  const lessonsOnly = renderToStaticMarkup(createElement(LearnedPanel, { snap: { ...base, learning: { ...readLearningList(list()), proposals: [] }, learningCounts: { pending_proposals: 0, pending_lessons: 2 } }, actions: store }))
+  expect(lessonsOnly).toContain('aria-label="2 pending lessons"')
+  expect(lessonsOnly).toContain('aria-label="Lessons"')
+})
+
 test('empty views explain evidence and human approval instead of implying automatic changes', async () => {
   const { store } = await setup()
   const snap = { ...store.getSnapshot(), learning: { ...readLearningList(list()), proposals: [], lessons: [] } }
