@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.6 — 2026-10-24
+
+- **Tool calls written as text with the `mcp__xerxes__` prefix run again.** On the Claude Code transport the prompt names Xerxes' tools `mcp__xerxes__<name>`, and a call the model wrote as text kept that prefix, so the registry refused it ("was not configured for this turn") and every such edit failed. The prefix is now removed when the remaining name is a tool the request offers; native calls were already mapped.
+
 ## 0.8.5 — 2026-10-24
 
 - **An SSH host with its own Claude Code uses it.** A new SSH task used to relay every prompt through this computer's Claude Code sign-in, even when the host had its own working one. The desktop now asks the host first (`provider_list {with_readiness:true}`; only a state such as `ready` or `not_signed_in` is returned, never a token or path), runs the task on the host's sign-in when it works, and relays only when it does not, or when the host runs an older version. The composer then says "via ‹host›" instead of "via this Mac".
