@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { HubCommandResult, HubMethod } from '../hub/protocol.js'
+import { AUTOPILOT_THREAD_PREFIX, autopilotThreadId } from './autopilot.js'
 import { newCommandId } from './bridge.js'
 import { HubRequestError, type HubConnection, type SubscriptionHandle } from './hubConnection.js'
 import {
-  parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
-  parseSupervisorOptions, parseWorkspaces, snapshotSessions,
+  parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
+  parseSupervisorOptions, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
 import { canMutate, type DecisionKind, type HubStore } from './hubStore.js'
 import type { WorkspaceView } from './hubTypes.js'
@@ -54,7 +55,29 @@ export interface HubController {
   supervisorConfigOptions(input: SupervisorOptionsInput): Promise<void>
   /** Resolves true only when the Hub saved the choice. A refusal is left in `supervisorConfig.saveError`. */
   supervisorConfigSet(input: SupervisorConfigInput): Promise<boolean>
+  /** Loads `supervisor.autopilot.get` into `state.autopilot`. */
+  loadAutopilot(): Promise<void>
+  /** Resolves true only when the Hub saved the row. A refusal is left in `autopilot.saveError`. */
+  setAutopilot(input: AutopilotInput): Promise<boolean>
+  /**
+   * Opens the owner's private `autopilot-<selfUserId>` thread. Does nothing for
+   * anyone but the Hub owner, and never asks again after the Hub said not_found.
+   */
+  autopilotThreadOpen(): Promise<void>
+  /** Confirm or cancel a card held in the Autopilot thread. */
+  autopilotThreadRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void>
 }
+
+export interface AutopilotInput {
+  readonly workspaceId: string
+  readonly enabled: boolean
+  /** Omitted: keep the saved instruction. At most 2000 characters. */
+  readonly instruction?: string
+  /** Omitted: keep the saved expiry. null: no expiry. Otherwise an ISO time in the future. */
+  readonly expiresAt?: string | null
+}
+
+export const AUTOPILOT_INSTRUCTION_LIMIT = 2000
 
 export interface SupervisorOptionsInput {
   readonly machineId: string
@@ -355,6 +378,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
         if (known.status !== 'invalid') store.dispatch({ type: 'supervisorConfig', patch: { status: known.status } })
       }
       void supervisorConfigGet()
+      void loadAutopilot()
     } catch (error) {
       if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
       else store.dispatch({ type: 'supervisor', patch: { phase: 'error', error: failureMessage(error) } })
@@ -459,13 +483,120 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
-  async function supervisorRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> {
-    store.dispatch({ type: 'supervisorConfirmation', id: confirmationId, patch: { state: 'confirming' } })
-    const params = { confirmation_id: confirmationId, decision, response_id: newCommandId(), ...(supervisorThread ? { thread_id: supervisorThread } : {}) }
+  // ── autopilot ──────────────────────────────────────────────────────
+
+  async function loadAutopilot(): Promise<void> {
+    store.dispatch({ type: 'autopilot', patch: { phase: 'loading' } })
+    try {
+      const view = parseAutopilotView(await call('supervisor.autopilot.get'))
+      if (view === undefined) store.dispatch({ type: 'autopilot', patch: { phase: 'error', error: 'The Hub sent an Autopilot answer this app cannot read.' } })
+      else {
+        store.dispatch({ type: 'autopilotView', view })
+        void maybeOpenAutopilotThread()
+      }
+    } catch (error) {
+      if (error instanceof HubRequestError && (error.code === 'unsupported' || error.code === 'invalid_request')) {
+        // This Hub predates Autopilot: the control stays hidden.
+        store.dispatch({ type: 'autopilot', patch: { phase: 'ready', unsupported: true } })
+      } else store.dispatch({ type: 'autopilot', patch: { phase: 'error', error: failureMessage(error) } })
+    }
+  }
+
+  async function setAutopilot(input: AutopilotInput): Promise<boolean> {
+    if (input.instruction !== undefined && input.instruction.length > AUTOPILOT_INSTRUCTION_LIMIT) {
+      store.dispatch({ type: 'autopilot', patch: { savingId: undefined, saveError: `The instruction can be at most ${AUTOPILOT_INSTRUCTION_LIMIT} characters.` } })
+      return false
+    }
+    store.dispatch({ type: 'autopilot', patch: { savingId: input.workspaceId } })
+    try {
+      const result = await call('supervisor.autopilot.set', {
+        workspace_id: input.workspaceId,
+        enabled: input.enabled,
+        ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+        ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
+      })
+      const row = parseAutopilotRow(result.workspace)
+      if (row === undefined) {
+        // Never show a guess: read back what the Hub holds.
+        store.dispatch({ type: 'autopilot', patch: { savingId: undefined, saveError: 'The Hub sent an answer this app cannot read. Checking what it saved…' } })
+        void loadAutopilot()
+        return false
+      }
+      store.dispatch({ type: 'autopilotRow', row })
+      store.dispatch({ type: 'autopilot', patch: { savingId: undefined } })
+      void maybeOpenAutopilotThread()
+      return true
+    } catch (error) {
+      if (error instanceof HubRequestError && error.uncertain) {
+        // Never send it again: read back what the Hub holds now.
+        store.dispatch({ type: 'autopilot', patch: { savingId: undefined, saveError: UNKNOWN_OUTCOME } })
+        void loadAutopilot()
+        return false
+      }
+      store.dispatch({ type: 'autopilot', patch: { savingId: undefined, saveError: failureMessage(error) } })
+      return false
+    }
+  }
+
+  // ── the owner's Autopilot thread ───────────────────────────────────
+
+  const isAutopilotThread = (threadId: unknown): boolean => {
+    const self = store.getSnapshot().selfUserId
+    return typeof threadId === 'string' && self !== undefined && threadId === autopilotThreadId(self)
+  }
+
+  /** Opens the thread when the owner has an active workspace. Anyone else never asks. */
+  async function maybeOpenAutopilotThread(): Promise<void> {
+    const snapshot = store.getSnapshot()
+    if (!snapshot.autopilot.canEdit || snapshot.selfUserId === undefined) return
+    if (!snapshot.autopilot.rows.some(row => row.active)) return
+    await autopilotThreadOpen()
+  }
+
+  async function autopilotThreadOpen(): Promise<void> {
+    const snapshot = store.getSnapshot()
+    const self = snapshot.selfUserId
+    const phase = snapshot.autopilotThread.phase
+    // Only the Hub owner has this thread. `hidden` is the Hub's answer; asking again would loop.
+    if (!snapshot.autopilot.canEdit || self === undefined) return
+    if (phase === 'loading' || phase === 'ready' || phase === 'hidden') return
+    const threadId = autopilotThreadId(self)
+    store.dispatch({ type: 'autopilotThread', patch: { phase: 'loading', threadId } })
+    try {
+      const result = await connection.request('supervisor.thread.open', { thread_id: threadId })
+      store.dispatch({ type: 'autopilotThread', patch: { phase: 'ready', threadId: str(result.thread_id) ?? threadId, working: result.busy === true } })
+      store.dispatch({ type: 'autopilotThreadMessages', messages: arr(result.messages).flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] }) })
+      store.dispatch({ type: 'autopilotThreadConfirmations', confirmations: arr(result.confirmations).flatMap(raw => { const c = parseConfirmation(raw); return c ? [c] : [] }) })
+    } catch (error) {
+      if (error instanceof HubRequestError && (error.code === 'not_found' || error.code === 'forbidden' || error.code === 'unsupported' || error.code === 'invalid_request')) {
+        store.dispatch({ type: 'autopilotThread', patch: { phase: 'hidden' } })
+      } else store.dispatch({ type: 'autopilotThread', patch: { phase: 'error', error: failureMessage(error) } })
+    }
+  }
+
+  const autopilotThreadRespond = (confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> =>
+    respondToCard(
+      store.getSnapshot().selfUserId === undefined ? undefined : autopilotThreadId(store.getSnapshot().selfUserId!),
+      (id, patch) => store.dispatch({ type: 'autopilotThreadConfirmation', id, patch }),
+      confirmationId,
+      decision,
+    )
+
+  const supervisorRespond = (confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> =>
+    respondToCard(supervisorThread, (id, patch) => store.dispatch({ type: 'supervisorConfirmation', id, patch }), confirmationId, decision)
+
+  async function respondToCard(
+    threadId: string | undefined,
+    patchCard: (id: string, patch: Partial<SupervisorConfirmation>) => void,
+    confirmationId: string,
+    decision: 'confirm' | 'cancel',
+  ): Promise<void> {
+    patchCard(confirmationId, { state: 'confirming' })
+    const params = { confirmation_id: confirmationId, decision, response_id: newCommandId(), ...(threadId ? { thread_id: threadId } : {}) }
     try {
       const result = await connection.request('supervisor.confirmation.respond', params)
       const updated = parseConfirmation(result.confirmation ?? { id: confirmationId, state: decision === 'confirm' ? 'confirmed' : 'cancelled' })
-      store.dispatch({ type: 'supervisorConfirmation', id: confirmationId, patch: updated ? { state: updated.state, ...(updated.message ? { message: updated.message } : {}) } : { state: decision === 'confirm' ? 'confirmed' : 'cancelled' } })
+      patchCard(confirmationId, updated ? { state: updated.state, ...(updated.message ? { message: updated.message } : {}) } : { state: decision === 'confirm' ? 'confirmed' : 'cancelled' })
     } catch (error) {
       if (error instanceof HubRequestError && error.uncertain) {
         // Ask what happened; never send the confirmation again.
@@ -473,14 +604,14 @@ export function createHubController(options: HubControllerOptions): HubControlle
           const status = await connection.request('supervisor.action.status', { confirmation_id: confirmationId })
           const known = parseConfirmation({ id: confirmationId, ...rec(status.confirmation ?? status) })
           if (known && known.state !== 'confirming' && known.state !== 'pending') {
-            store.dispatch({ type: 'supervisorConfirmation', id: confirmationId, patch: { state: known.state } })
+            patchCard(confirmationId, { state: known.state })
             return
           }
         } catch { /* fall through to the honest unknown */ }
-        store.dispatch({ type: 'supervisorConfirmation', id: confirmationId, patch: { state: 'failed', message: UNKNOWN_OUTCOME } })
+        patchCard(confirmationId, { state: 'failed', message: UNKNOWN_OUTCOME })
         return
       }
-      store.dispatch({ type: 'supervisorConfirmation', id: confirmationId, patch: { state: error instanceof HubRequestError && error.code === 'conflict' ? 'expired' : 'failed', message: failureMessage(error) } })
+      patchCard(confirmationId, { state: error instanceof HubRequestError && error.code === 'conflict' ? 'expired' : 'failed', message: failureMessage(error) })
     }
   }
 
@@ -496,6 +627,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
       if (store.getSnapshot().usage.phase !== 'idle') void loadUsage()
       void machinesList()
       if (store.getSnapshot().supervisorConfig.phase !== 'idle') void supervisorConfigGet()
+      if (store.getSnapshot().autopilot.phase !== 'idle' && !store.getSnapshot().autopilot.unsupported) void loadAutopilot()
       const current = selected()
       if (current && !sessionSub) startSelected(current.workspaceId, current.sessionId)
     }))
@@ -503,6 +635,18 @@ export function createHubController(options: HubControllerOptions): HubControlle
       if (type === 'hub.presence') {
         const presence = parsePresence(payload)
         if (presence) store.dispatch({ type: 'presence', workspaceId: presence.workspaceId, ...(presence.sessionId ? { sessionId: presence.sessionId } : {}), entries: presence.entries })
+      } else if ((type === 'supervisor.thread_event' || type === 'supervisor.confirmation') && isAutopilotThread(payload.thread_id)) {
+        // The owner's private Autopilot thread: its own state, never the shared thread's.
+        const messages = [payload.message, ...arr(payload.messages)].flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
+        if (messages.length > 0) store.dispatch({ type: 'autopilotThreadMessages', messages })
+        if (payload.activity === 'working') store.dispatch({ type: 'autopilotThread', patch: { working: true } })
+        else if (payload.activity === 'idle' || messages.some(message => message.role === 'xerxes')) store.dispatch({ type: 'autopilotThread', patch: { working: false } })
+        const confirmation = parseConfirmation(type === 'supervisor.confirmation' ? payload.confirmation ?? payload : payload.confirmation)
+        if (confirmation) store.dispatch({ type: 'autopilotThreadConfirmations', confirmations: [confirmation] })
+      } else if ((type === 'supervisor.thread_event' || type === 'supervisor.confirmation')
+        && typeof payload.thread_id === 'string' && payload.thread_id.startsWith(AUTOPILOT_THREAD_PREFIX)) {
+        // Another owner's Autopilot thread, or ours before `selfUserId` is known. Never mix it into
+        // the shared thread: opening the Autopilot thread fetches its full state anyway.
       } else if (type === 'supervisor.thread_event') {
         const messages = [payload.message, ...arr(payload.messages)].flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
         if (messages.length > 0) store.dispatch({ type: 'supervisorMessages', messages })
@@ -516,6 +660,13 @@ export function createHubController(options: HubControllerOptions): HubControlle
         // Same shape as config.get. An unreadable payload is a reason to ask again, not to guess.
         if (parseSupervisorConfig(payload).status === 'invalid' && payload.status !== 'invalid') void supervisorConfigGet()
         else store.dispatch({ type: 'supervisorConfigView', view: parseSupervisorConfig(payload) })
+      } else if ((type as string) === 'supervisor.autopilot_changed') {
+        // One row. An unreadable row is a reason to ask again, not to guess.
+        const row = parseAutopilotRow(payload.workspace)
+        if (row) {
+          store.dispatch({ type: 'autopilotRow', row })
+          void maybeOpenAutopilotThread()
+        } else void loadAutopilot()
       } else if (type === 'supervisor.confirmation') {
         const confirmation = parseConfirmation(payload.confirmation ?? payload)
         if (confirmation) store.dispatch({ type: 'supervisorConfirmations', confirmations: [confirmation] })
@@ -538,6 +689,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     imagesSupported,
     start, dispose, refreshInbox, openSession, closeSession, loadOlder, submit, steer, stopTurn, decide, answerQuestion,
     setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond,
-    machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet,
+    machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet, loadAutopilot, setAutopilot,
+    autopilotThreadOpen, autopilotThreadRespond,
   }
 }

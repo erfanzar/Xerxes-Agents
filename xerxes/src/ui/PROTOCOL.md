@@ -2513,8 +2513,20 @@ the error `hub_auth refused: ...` (code `-32001`):
 Everything else (slash and shell routes, permission-mode changes, plugin/provider
 management, `goal.decision`, `learning.review`, enrollment) is refused for every hub
 principal. A principal of kind `agent` can never use a human-only route
-(`permission_response`, `question_response`, `learning.review`) and its claimed scopes
-are clamped to the agent ceiling.
+(`permission_response`, `learning.review`) and its claimed scopes are clamped to the
+agent ceiling. The one exception is XERXES Autopilot: an agent may call
+`question_response` only when its claims carry `question.delegated` (a non-human-only
+scope the Hub signs on a Hub owner's behalf, only for its XERXES supervisor and only
+from a per-dispatch grant; it can never be stored in a Hub grant); without it the route is human-only for
+agents. Humans still need `question.respond`. There is no delegated counterpart for
+`permission_response`: an agent is refused whatever it claims.
+
+**Redaction for Autopilot.** A hub user without `permission.respond` sees approval and
+question cards redacted. An agent holding `question.delegated` sees `question_request`
+frames in full (in `pending_interactions`, `events.subscribe` batches and `events.read`
+pages) while `approval_request` frames stay redacted; any other agent sees both redacted.
+`events.read` applies the narrower of the reader's visibility and the visibility the
+subscription was created with.
 
 **Authorship.** The daemon records authorship only from the verified context, never
 from params. A `VerifiedHubContext` is

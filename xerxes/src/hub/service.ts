@@ -83,6 +83,10 @@ export interface HubServiceOptions {
   readonly voice?: VoiceRuntimeConfig
   /** Minimal-text push to a user (identity.admin.sendPush). Absent: no push is attempted. */
   readonly sendPush?: PushLike
+  /** Live Hub-owner check (identity.admin.ownerUserId). XERXES Autopilot stays active only while its enabler is the owner. */
+  readonly isHubOwner?: (userId: string) => boolean
+  /** XERXES Autopilot timings; `checkInMs` comes from XERXES_HUB_AUTOPILOT_CHECKIN_MS (0 disables). */
+  readonly autopilot?: { readonly checkInMs?: number; readonly cooldownMs?: number; readonly maxWakesPerHour?: number }
   /** How often the workspace registry is re-read so added/removed workspaces apply live. 0 disables. Default 3000 ms. */
   readonly registryPollMs?: number
   readonly onError?: (error: unknown, context: string) => void
@@ -340,6 +344,7 @@ export function createHubService(options: HubServiceOptions): HubService {
         if (identity !== undefined) {
           router = new HubCommandRouter({
             databasePath: options.paths.databasePath, backend, identity: overlay.wrapIdentity(identity), signer: options.signer,
+            overlayGrants: () => overlay.current(),
             ...(options.server?.clock === undefined ? {} : { clock: options.server.clock }),
             onError: report,
           })
@@ -395,6 +400,13 @@ export function createHubService(options: HubServiceOptions): HubService {
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.persona === undefined ? {} : { persona: supervisorConfig.persona }),
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.modelSetSessionOnly === undefined ? {} : { modelSetSessionOnly: supervisorConfig.modelSetSessionOnly }),
             ...(options.sendPush === undefined ? {} : { sendPush: options.sendPush }),
+            ...(options.isHubOwner === undefined ? {} : { isHubOwner: options.isHubOwner }),
+            ...(options.autopilot === undefined ? {} : { autopilot: options.autopilot }),
+            // Only people who can see the workspace learn about its Autopilot row.
+            broadcastAutopilot: (workspaceId, payload) => {
+              hubServerRef?.sendEventToAll('supervisor.autopilot_changed', recipient =>
+                canSeeWorkspace(recipient.principal, identity.grantsFor(recipient.principal.id), workspaceId, Date.now()) ? payload : undefined)
+            },
             ...(options.server?.clock === undefined ? {} : { clock: options.server.clock }),
             onError: report,
           })

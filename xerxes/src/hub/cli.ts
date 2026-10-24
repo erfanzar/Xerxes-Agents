@@ -9,7 +9,7 @@ import { createHubIdentity } from './identity/index.js'
 import { runHubIdentityCli } from './identity/cli.js'
 import { createHubService, type HubService } from './service.js'
 import { loadOrCreateHubSigner } from './signer.js'
-import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, createLlmModelPort } from './supervisor/index.js'
+import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort } from './supervisor/index.js'
 import { createVoiceRuntimeConfig } from './voice/providerFactory.js'
 import type { VoiceRuntimeConfig } from './voice/config.js'
 import type { HubServiceSupervisorConfig } from './service.js'
@@ -470,6 +470,13 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
         } catch (error) {
           err(`Hub voice is off: ${error instanceof Error ? error.message : String(error)}`)
         }
+        // A bad Autopilot check-in value is reported and the default (15 minutes) applies.
+        let autopilotCheckIn: number | undefined
+        try {
+          autopilotCheckIn = autopilotCheckInFromEnvironment(environment)
+        } catch (error) {
+          err(`Hub Autopilot check-in uses the default: ${error instanceof Error ? error.message : String(error)}`)
+        }
         try {
           service = createHubService({
             paths, signer, identity, lifecycle: handle,
@@ -477,6 +484,8 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
             supervisor: supervisorConfigFromEnvironment(environment),
             ...(voice === undefined ? {} : { voice }),
             sendPush: (userId, message) => identity.admin.sendPush(userId, message),
+            isHubOwner: userId => identity.admin.ownerUserId() === userId,
+            ...(autopilotCheckIn === undefined ? {} : { autopilot: { checkInMs: autopilotCheckIn } }),
             onError: (error, context) => err(`Hub ${context} failed: ${error instanceof Error ? error.message : String(error)}`),
           })
         } catch (error) {

@@ -6,10 +6,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { ConnectionStatus } from '../../client/bridge.js'
 import { relativeTime } from '../../client/format.js'
 import { HubConnection } from '../../client/hubConnection.js'
-import { createHubController, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput } from '../../client/hubController.js'
-import { createHubStore, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
+import { AUTOPILOT_COMPOSER_HINT, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
+import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput } from '../../client/hubController.js'
+import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
 import { AgentOrb } from './AgentOrb.js'
+import { AutopilotPanel } from './AutopilotPanel.js'
+import { AutopilotThreadView } from './AutopilotThreadView.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
@@ -119,6 +122,15 @@ export interface SupervisorViewProps {
   readonly onChooserShown: () => void
   readonly onOptions: (input: SupervisorOptionsInput) => void
   readonly onSaveModel: (input: SupervisorConfigInput) => Promise<boolean>
+  /** Autopilot panel open state. Absent: the panel is closed and cannot be opened. */
+  readonly autopilotOpen?: boolean
+  readonly onAutopilotChange?: (open: boolean) => void
+  readonly onSaveAutopilot?: (input: AutopilotInput) => Promise<boolean>
+  readonly onRetryAutopilot?: () => void
+  /** The owner's private Autopilot thread view. Absent: the view cannot be opened. */
+  readonly autopilotThreadOpen?: boolean
+  readonly onAutopilotThreadChange?: (open: boolean) => void
+  readonly onRespondAutopilot?: (confirmationId: string, decision: 'confirm' | 'cancel') => void
 }
 
 /**
@@ -131,6 +143,13 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const { state, hubLabel, now, onSend, onRespond, onReopen, onOpenSettings } = props
   const supervisor = state.supervisor
   const config = state.supervisorConfig
+  const autopilot = state.autopilot
+  const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const autopilotAvailable = props.onAutopilotChange !== undefined && !autopilot.unsupported
+  const showAutopilot = autopilotAvailable && props.autopilotOpen === true && supervisor.phase !== 'unsupported'
+  const threadAvailable = props.onAutopilotThreadChange !== undefined && autopilotThreadAvailable(state)
+  const showThread = threadAvailable && props.autopilotThreadOpen === true && supervisor.phase !== 'unsupported'
+  const threadPending = autopilotPendingCount(state)
   const live = state.connection.state === 'live'
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
@@ -187,13 +206,30 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
       <header className="supervisor__bar">
         <span className="supervisor__hub" title={`Hub: ${hubLabel}`}><span className={`supervisor__dot${live ? ' is-live' : ''}`} aria-hidden="true" />{hubLabel}</span>
         <span className="supervisor__flex" />
+        {autopilotChip === undefined ? null : <span className="supervisor__autopilot" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
         <span className="supervisor__model" aria-label="XERXES model">{modelChipText(config)}</span>
+        {threadAvailable ? (
+          <button type="button" className="btn" aria-pressed={showThread} onClick={() => props.onAutopilotThreadChange?.(!props.autopilotThreadOpen)}>
+            {showThread ? 'Back to chat' : 'Autopilot thread'}
+            {threadPending > 0 ? <span className="supervisor__badge" aria-label={pendingBadgeLabel(threadPending)}>{threadPending}</span> : null}
+          </button>
+        ) : null}
+        {autopilotAvailable ? <button type="button" className="btn" aria-expanded={showAutopilot} onClick={() => props.onAutopilotChange?.(!props.autopilotOpen)}>Autopilot</button> : null}
         <button type="button" className="btn" aria-expanded={showChooser} onClick={() => props.onChooserChange(!props.chooserOpen)}>Model</button>
         <button type="button" className="btn" onClick={onOpenSettings}>Hub settings</button>
       </header>
-      {note || showChooser ? (
+      {note || showChooser || showAutopilot ? (
         <div className="supervisor__panel">
           {note ? <p role="status" className="notice">{note}</p> : null}
+          {showAutopilot ? (
+            <AutopilotPanel
+              autopilot={autopilot}
+              live={live}
+              onSave={props.onSaveAutopilot ?? (async () => false)}
+              onRetry={props.onRetryAutopilot ?? (() => undefined)}
+              onClose={() => props.onAutopilotChange?.(false)}
+            />
+          ) : null}
           {showChooser ? (
             <ModelChooser
               machines={state.machines}
@@ -208,7 +244,9 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
       ) : null}
       <div className="supervisor__stream" ref={streamRef}>
         <div className="supervisor__col">
-          {supervisor.phase === 'unsupported' ? (
+          {showThread ? (
+            <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
+          ) : supervisor.phase === 'unsupported' ? (
             <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
           ) : supervisor.phase === 'error' ? (
             <div role="alert" className="notice is-error">
@@ -268,7 +306,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           )}
         </div>
       </div>
-      {conversing ? (
+      {conversing && !showThread ? (
         <form className="supervisor__dock" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
           <div className="composer-dock">
             <div className="composer">
@@ -289,7 +327,12 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               <button type="submit" className="composer__send" aria-label={thinking ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
             </div>
           </div>
-          <p className="supervisor__hint">XERXES proposes; nothing runs until you confirm. ⏎ send · ⇧⏎ new line</p>
+          <p className="supervisor__hint">
+            {autopilotChip === undefined
+              ? 'XERXES proposes; nothing runs until you confirm.'
+              : `XERXES proposes; most actions wait for your Confirm. ${AUTOPILOT_COMPOSER_HINT}`}
+            {' '}⏎ send · ⇧⏎ new line
+          </p>
         </form>
       ) : null}
     </section>
@@ -321,6 +364,8 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
   const state = useSyncExternalStore(session.store.subscribe, session.store.getSnapshot, session.store.getSnapshot)
   const now = useNow()
   const [chooserOpen, setChooserOpen] = useState(false)
+  const [autopilotOpen, setAutopilotOpen] = useState(false)
+  const [autopilotThreadOpen, setAutopilotThreadOpen] = useState(false)
   useEffect(() => {
     session.controller.start()
     return () => {
@@ -345,6 +390,13 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
       onChooserShown={() => { void session.controller.machinesList(); void session.controller.supervisorConfigGet() }}
       onOptions={input => { void session.controller.supervisorConfigOptions(input) }}
       onSaveModel={input => session.controller.supervisorConfigSet(input)}
+      autopilotOpen={autopilotOpen}
+      onAutopilotChange={open => { setAutopilotOpen(open); if (open) void session.controller.loadAutopilot() }}
+      onSaveAutopilot={input => session.controller.setAutopilot(input)}
+      onRetryAutopilot={() => { void session.controller.loadAutopilot() }}
+      autopilotThreadOpen={autopilotThreadOpen}
+      onAutopilotThreadChange={open => { setAutopilotThreadOpen(open); if (open) void session.controller.autopilotThreadOpen() }}
+      onRespondAutopilot={(id, decision) => { void session.controller.autopilotThreadRespond(id, decision) }}
     />
   )
 }

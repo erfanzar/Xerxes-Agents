@@ -317,6 +317,13 @@ export function hubAuthorizationFailure(
 ): string | undefined {
   const policy = hubMethodPolicy(method, params)
   if (policy.kind === 'refused') return policy.reason
+  // XERXES Autopilot: an agent may answer a QUESTION only with the delegated scope
+  // (granted on a Hub owner's behalf). There is no such exception for permission_response.
+  if (context.principal_kind === 'agent' && method === 'question_response') {
+    return context.scopes.includes('question.delegated')
+      ? undefined
+      : `${method} is a human-only route for agent principals unless Autopilot delegated question.delegated`
+  }
   if (context.principal_kind === 'agent' && HUMAN_ONLY_SCOPES.has(policy.scope)) {
     return `${method} is a human-only route; agent principals can never use it`
   }

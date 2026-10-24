@@ -10,7 +10,7 @@ import { join } from 'node:path'
 
 import {
   applyInteractionRecords, addPendingDecision, collabState, interactionRecord, isSharedSession, peekCollabState,
-  recordParticipant, redactInteractionPayload,
+  interactionVisibility, recordParticipant, redactInteractionPayload, redactPendingFrames,
 } from '../src/daemon/collaboration.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession, type TurnRunControls, type TurnRunner } from '../src/daemon/runtime.js'
@@ -414,6 +414,75 @@ test('first answer wins: a later answer gets interaction-already-resolved with t
     expect(await r.client.call('permission_response', wrongSession)).toMatchObject({ ok: false, code: 'session_mismatch' })
     expect(await r.hub(BOB, 'permission_response', { request_id: 'approval-2', response: 'reject' })).toEqual({ ok: true })
   } finally { viewerClient.socket.destroy(); await r.stop() }
+})
+
+/** Asks one question through the board, then raises one approval. */
+class QuestionThenApprovalRunner implements TurnRunner {
+  constructor(private readonly board: DaemonInteractionBoard) {}
+  async *run(session: DaemonSession, _text: string, signal: AbortSignal): AsyncGenerator<DaemonEvent> {
+    const answer = await this.board.ask(session.id, { question: 'Which build?', options: ['nightly', 'release (Recommended)'], allowFreeform: false }, signal)
+    yield { type: 'text_part', payload: { text: `answer:${answer}` } }
+    const request: PermissionRequest = {
+      requestId: 'approval-q', description: 'rm -rf secret-dir', inputs: { path: 'secret' },
+      toolCall: { id: 'tool-q', type: 'function', function: { name: 'WriteFile', arguments: { path: 'a' } } },
+    }
+    yield { type: 'approval_request', payload: { id: request.requestId, request_id: request.requestId, tool_call_id: 'tool-q', description: request.description, inputs: request.inputs } }
+    const decision = await this.board.permissionBroker(session.id).request(request, signal)
+    yield { type: 'text_part', payload: { text: `approval:${decision}` } }
+  }
+}
+
+test('Autopilot: an agent with question.delegated sees and answers questions, but permission frames stay redacted and permission_response stays human-only', async () => {
+  const board = new DaemonInteractionBoard()
+  const r = await rig(new QuestionThenApprovalRunner(board), { board })
+  const agentClient = await Client.open(join(r.root, 'daemon.sock'))
+  const AUTOPILOT: Who = { ...SUPERVISOR, scopes: [...SUPERVISOR.scopes, 'question.delegated'] }
+  try {
+    const sub = await agentClient.call('events.subscribe', r.sign(AUTOPILOT, 'events.subscribe', { project_dirs: [r.root], detail: 'conversation' }))
+    await r.hub(ALICE, 'turn.submit', { text: 'build it' })
+    const asked = await r.client.event('question_request')
+    const questionId = String(asked.params!.payload.id)
+    // The delegated agent reads the question in full.
+    const page = await agentClient.call('events.read', r.sign(AUTOPILOT, 'events.read', { subscription_id: sub.subscription_id, after_cursor: sub.watermark }))
+    const question = (page.events as { type: string; payload: JsonRpcPayload }[]).find(event => event.type === 'question_request')!
+    expect(question.payload.redacted).toBeUndefined()
+    expect(JSON.stringify(question.payload)).toContain('Which build?')
+    // Without question.delegated an agent cannot answer.
+    await expect(r.hub(SUPERVISOR, 'question_response', { request_id: questionId, answers: { answer: 'nightly' } })).rejects.toThrow('human-only')
+    expect(await r.hub(AUTOPILOT, 'question_response', { request_id: questionId, answers: { answer: 'nightly' } })).toEqual({ ok: true })
+    await r.client.event('text_part', payload => payload.text === 'answer:nightly')
+    await r.client.event('approval_request', payload => payload.request_id === 'approval-q')
+    // The permission request stays redacted for the agent, whatever it holds.
+    const later = await agentClient.call('events.read', r.sign(AUTOPILOT, 'events.read', { subscription_id: sub.subscription_id, after_cursor: sub.watermark }))
+    const card = (later.events as { type: string; payload: JsonRpcPayload }[]).find(event => event.type === 'approval_request')!
+    expect(card.payload).toMatchObject({ redacted: true })
+    expect(JSON.stringify(later)).not.toContain('rm -rf secret-dir')
+    for (const extra of [[], ['permission.respond'], ['permission.respond', 'question.respond', 'approvals.manage']]) {
+      await expect(r.hub({ ...AUTOPILOT, scopes: [...AUTOPILOT.scopes, ...extra] }, 'permission_response', { request_id: 'approval-q', response: 'approve' })).rejects.toThrow('human-only')
+    }
+    expect(board.pendingPermissionIds()).toEqual(['approval-q'])
+    // A person still answers it.
+    expect(await r.hub(BOB, 'permission_response', { request_id: 'approval-q', response: 'approve' })).toEqual({ ok: true })
+    await r.client.event('text_part', payload => payload.text === 'approval:approve')
+  } finally { agentClient.socket.destroy(); await r.stop() }
+})
+
+test('interaction visibility: agents with question.delegated see questions only; humans need permission.respond for everything', () => {
+  const frames: { type: string; payload: JsonRpcPayload }[] = [
+    { type: 'approval_request', payload: { id: 'a', description: 'rm -rf', inputs: { x: 1 } } },
+    { type: 'question_request', payload: { id: 'q', questions: [{ question: 'which?' }] } },
+  ]
+  const agent = (scopes: string[]) => interactionVisibility({ principal_kind: 'agent', scopes })
+  expect(agent(['question.delegated'])).toBe('questions')
+  expect(agent(['question.delegated', 'permission.respond'])).toBe('questions')
+  expect(agent(['permission.respond'])).toBe('none')
+  expect(interactionVisibility({ principal_kind: 'user', scopes: ['permission.respond'] })).toBe('full')
+  expect(interactionVisibility({ principal_kind: 'user', scopes: ['question.delegated'] })).toBe('none')
+  const shown = redactPendingFrames(frames, 'questions')
+  expect(shown[0]!.payload).toMatchObject({ redacted: true })
+  expect(JSON.stringify(shown[0])).not.toContain('rm -rf')
+  expect(shown[1]!.payload).toEqual(frames[1]!.payload)
+  expect(redactPendingFrames(frames).every(frame => frame.payload.redacted === true)).toBe(true)
 })
 
 test('remembered ALWAYS approvals never authorize calls in a session shared with another participant', async () => {

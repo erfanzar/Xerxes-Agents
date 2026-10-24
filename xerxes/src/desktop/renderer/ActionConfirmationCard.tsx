@@ -3,6 +3,7 @@
 
 import type { ReactElement } from 'react'
 
+import { autoCardNote } from '../../client/autopilot.js'
 import type { ConfirmationState, SupervisorConfirmation } from '../../client/hubParsers.js'
 
 /**
@@ -31,6 +32,19 @@ export interface ActionConfirmationCardProps {
 export function ActionConfirmationCard({ item, canAct, onRespond }: ActionConfirmationCardProps): ReactElement {
   const settled = SETTLED[item.state]
   const titleId = `action-card-${item.id}`
+  if (item.auto === true) {
+    // Autopilot ran this without a Confirm tap: it is a record, never a question.
+    return (
+      <article className="action-card action-card--auto" aria-labelledby={titleId} data-state={item.state} data-auto="true">
+        <h3 id={titleId} className="action-card__title">XERXES did: {item.tool}</h3>
+        <p className="action-card__summary">{item.summary}</p>
+        {item.targets.length === 0 ? null : <ul className="action-card__targets" aria-label="Affects">{item.targets.map(target => <li key={target}>{target}</li>)}</ul>}
+        {item.state === 'failed'
+          ? <p role="alert" className="action-card__error">{item.message ?? 'Autopilot tried this and it did not go through.'}</p>
+          : <p role="status" className="action-card__result">{autoCardNote(item.confirmedBy)}</p>}
+      </article>
+    )
+  }
   return (
     <article className="action-card" aria-labelledby={titleId} data-state={item.state}>
       <h3 id={titleId} className="action-card__title">XERXES proposes: {item.tool}</h3>

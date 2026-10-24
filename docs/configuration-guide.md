@@ -117,6 +117,24 @@ Until a model is chosen, `supervisor.message.submit` answers `unconfigured`.
 fallback while nothing is stored. The supervisor can read and propose actions,
 and a person confirms each change; it can never approve permissions or reviews.
 
+**Autopilot.** The Hub owner can turn on Autopilot per workspace in the apps
+(`supervisor.autopilot.set`), with an optional standing instruction and an expiry of at
+most 30 days. While it is on, XERXES wakes on task events (a waiting question, a failed
+or blocked task, a blocked or finished goal) and on a periodic check-in. Wake-ups run in
+the owner's own Autopilot thread, which nobody else can open. In a wake-up it may steer,
+stop or message a task's agents and answer pending questions without a Confirm tap;
+starting a task, setting a goal or changing a model still needs the owner's Confirm.
+The owner's own messages run immediately only while nobody else is talking in the
+conversation. At most 30 autonomous actions run per workspace per hour; past that they
+become Confirm cards. Every autonomous action is posted in the shared thread (to people
+who can read that task) and pushed to the owner. It never answers a permission request:
+those are pushed to the owner. Autopilot acts with the owner's account scopes, not a
+device's. It turns itself off when it expires or its enabler is no longer the Hub owner,
+and says so. Leaving the expiry out of a change keeps the current one.
+`XERXES_HUB_AUTOPILOT_CHECKIN_MS` sets the check-in period (default 900000, 15 minutes;
+`0` disables it; otherwise at least 60000). An invalid value is reported and the default
+applies.
+
 Voice is off unless `XERXES_HUB_VOICE_ENABLED=true` and the supervisor is configured.
 Providers come from `XERXES_HUB_VOICE_STT_*`, `_TTS_*` and `_REALTIME_*`, with keys in
 `XERXES_VOICE_<STT|TTS|REALTIME>_API_KEY`. Audio is never stored. When voice is not

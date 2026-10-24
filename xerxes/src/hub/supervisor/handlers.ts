@@ -132,5 +132,7 @@ export function createUnsupportedSupervisorHandlers(reason: string): SupervisorH
     'supervisor.message.submit': refuse,
     'supervisor.confirmation.respond': refuse,
     'supervisor.action.status': refuse,
+    'supervisor.autopilot.get': refuse,
+    'supervisor.autopilot.set': refuse,
   }
 }

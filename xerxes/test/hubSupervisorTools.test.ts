@@ -84,6 +84,21 @@ describe('supervisor read tools', () => {
     expect(world.backendCalls[0]!.params).toMatchObject({ session_id: 's1', query: 'mine', limit: 5 })
   })
 
+  test('task_search strips argument-like fields from hits at any depth before they reach the model', async () => {
+    const world = makeWorld()
+    world.backendBehavior.run = () => ({
+      state: 'accepted',
+      result: { ok: true, hits: [{
+        session_id: 's1', text: 'ran a tool', arguments: '{"cmd":"rm -rf secret"}', input: { path: 'secret' }, inputs: { a: 1 },
+        tool_input: { x: 1 }, params: { y: 2 }, nested: [{ tool: 'Bash', arguments: { cmd: 'leak' }, note: 'kept' }],
+      }] },
+    })
+    const found = await run(world, 'task_search', { workspace_id: 'w1', task_id: 's1', query: 'tool' })
+    expect(found.hits).toEqual([{ session_id: 's1', text: 'ran a tool', nested: [{ tool: 'Bash', note: 'kept' }] }])
+    expect(JSON.stringify(found)).not.toContain('secret')
+    expect(JSON.stringify(found)).not.toContain('leak')
+  })
+
   test('an unavailable workspace surfaces as a tool error, not an invented result', async () => {
     const world = makeWorld()
     world.backendBehavior.run = () => ({ state: 'rejected', error: { code: 'unavailable', message: 'Workspace is not online' } })

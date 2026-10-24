@@ -7,6 +7,7 @@ import { resolveSessionKey, type CommandBackend } from '../commandRouter.js'
 import { isRecord, utf8ByteLength } from '../protocol.js'
 import type { HubWorkspaceView } from '../server.js'
 import { ACTION_TOOLS, SupervisorDenied, isActionTool, type ActionService } from './actions.js'
+import { displayOption, type PendingInteractions } from './autopilot.js'
 import type { DigestService } from './digests.js'
 import {
   SUPERVISOR_TOOLS, assertSupervisorToolCeiling, validateSupervisorArguments, type SupervisorToolSpec,
@@ -16,7 +17,7 @@ import {
 } from './threads.js'
 
 /**
- * The supervisor's DEDICATED tool registry: exactly the twelve tools in
+ * The supervisor's DEDICATED tool registry: exactly the fourteen tools in
  * `schemas.ts` and nothing else. It never contains workspace plugins, MCP,
  * shell or filesystem tools, Workflow, review or ordinary goal tools.
  *
@@ -37,6 +38,10 @@ export interface SupervisorTurnState {
   readonly reader: ScopeReader
   /** Set when a tool was refused for lack of authority. The runner stops the turn on it. */
   denial: string | undefined
+  /** Present when the Hub started this turn by itself (XERXES Autopilot). */
+  readonly trigger?: 'autopilot'
+  /** Whether a user message by anyone but the requester is in this turn's context. Absent counts as true. */
+  readonly othersInContext?: boolean
 }
 
 function isTurnState(value: unknown): value is SupervisorTurnState {
@@ -48,6 +53,25 @@ export interface SupervisorPushPort {
   (userId: string, message: { readonly title: string; readonly body: string; readonly url: string }): Promise<unknown>
 }
 
+/** XERXES Autopilot hooks for the `task.pending` and `question.answer` tools. Absent: both refuse. */
+export interface SupervisorAutopilotPort {
+  /** What the task waits on, from the Hub journal. Permission details are never included. */
+  pending(workspaceId: string, sessionId: string): PendingInteractions | undefined
+  /** Answer a waiting question on the owner's behalf; throws SupervisorDenied when Autopilot is not active. */
+  answer(input: {
+    readonly threadId: string
+    readonly workspaceId: string
+    readonly sessionId: string
+    readonly requestId: string
+    readonly answers: Readonly<Record<string, string>>
+    readonly requester: UserPrincipal
+    /** The thread's shared read scope (the same check createIntent applies). */
+    readonly reader: ScopeReader
+    readonly trigger: boolean
+    readonly othersInContext: boolean
+  }): Promise<Record<string, unknown>>
+}
+
 export interface SupervisorToolDeps {
   readonly workspaces: Pick<HubWorkspaceView, 'list' | 'projection' | 'health'>
   readonly backend: Pick<CommandBackend, 'call'>
@@ -55,6 +79,7 @@ export interface SupervisorToolDeps {
   readonly actions: Pick<ActionService, 'createIntent'>
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get' | 'recipients' | 'participants'>
   readonly push?: SupervisorPushPort
+  readonly autopilot?: SupervisorAutopilotPort
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -102,6 +127,21 @@ export function renderTail(history: unknown, maxBytes: number): { readonly lines
   }
   const kept = lines.slice(lines.length - keep)
   return { lines: kept, truncated: kept.length < lines.length }
+}
+
+const ARGUMENT_FIELDS: ReadonlySet<string> = new Set(['arguments', 'input', 'inputs', 'tool_input', 'params'])
+
+/** A copy of a search hit without argument-like fields, at any depth (bounded). */
+export function stripArgumentFields(value: unknown, depth = 0): unknown {
+  if (depth > 8) return undefined
+  if (Array.isArray(value)) return value.map(item => stripArgumentFields(item, depth + 1))
+  if (!isRecord(value)) return value
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (ARGUMENT_FIELDS.has(key)) continue
+    out[key] = stripArgumentFields(item, depth + 1)
+  }
+  return out
 }
 
 const CURSOR_PREFIX = 'o1.'
@@ -203,13 +243,77 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       for (const hit of hits) {
         // Defence in depth: the daemon scopes the search, and anything from another session is dropped.
         if (isRecord(hit) && typeof hit.session_id === 'string' && hit.session_id !== taskId) continue
-        const text = JSON.stringify(hit)
+        // Tool or permission arguments never reach the model, even through search.
+        const safe = stripArgumentFields(hit)
+        const text = JSON.stringify(safe)
         const size = utf8ByteLength(text) + 1
         if (kept.length >= limit || bytes + size > SEARCH_MAX_BYTES) { truncated = true; break }
-        kept.push(hit)
+        kept.push(safe)
         bytes += size
       }
       return { hits: kept, truncated }
+    },
+
+    'task.pending': (args, turn) => {
+      const workspaceId = str(args, 'workspace_id')!
+      const taskId = str(args, 'task_id')!
+      readable(turn, workspaceId, taskId)
+      const count = deps.workspaces.projection(workspaceId)?.sessions[taskId]?.pending_interaction_count ?? 0
+      const found = deps.autopilot?.pending(workspaceId, taskId)
+      if (found === undefined) {
+        return { questions: [], permission_requests_waiting: 0, waiting_total: count, note: 'Waiting items cannot be read on this Hub.' }
+      }
+      return {
+        questions: found.questions.map(question => ({
+          request_id: question.request_id,
+          questions: question.questions.map(item => ({
+            id: item.id,
+            question: item.question,
+            // Shown clipped; answer_question accepts the full text or exactly this shown form.
+            options: item.options.map(displayOption),
+            // The task marks its suggestion with "(Recommended)"; otherwise there is none.
+            recommended: ((option: string | undefined) => (option === undefined ? null : displayOption(option)))(
+              item.options.find(option => /\brecommended\b/i.test(option))),
+            free_form_allowed: item.allow_free_form,
+          })),
+        })),
+        // Count only: a permission's command and arguments never reach the supervisor.
+        permission_requests_waiting: found.permissionIds.length,
+        ...(found.permissionIds.length > 0 ? { permission_note: 'A permission request is waiting. Only a person can answer it; tell the owner.' } : {}),
+        waiting_total: count,
+        ...(found.complete ? {} : { note: 'The journal window is partial; this list may miss older items.' }),
+      }
+    },
+
+    'question.answer': async (args, turn) => {
+      const workspaceId = str(args, 'workspace_id')!
+      const taskId = str(args, 'task_id')!
+      readable(turn, workspaceId, taskId)
+      const raw = isRecord(args.answers) ? args.answers : {}
+      const entries = Object.entries(raw)
+      if (entries.length === 0 || entries.length > 10) throw new Error('answers must map 1 to 10 question ids to answer text')
+      const answers: Record<string, string> = {}
+      for (const [key, value] of entries) {
+        if (key === '' || key.length > 200 || typeof value !== 'string' || value.trim() === '' || [...value].length > 2000) {
+          throw new Error('each answer must be non-empty text of at most 2000 characters under a question id')
+        }
+        answers[key] = value
+      }
+      if (deps.autopilot === undefined) {
+        throw new SupervisorDenied('Autopilot is not available on this Hub, so XERXES cannot answer questions. Tell the owner.')
+      }
+      try {
+        return await deps.autopilot.answer({
+          threadId: turn.threadId, workspaceId, sessionId: taskId, requestId: str(args, 'request_id')!, answers, requester: turn.requester,
+          reader: turn.reader, trigger: turn.trigger === 'autopilot', othersInContext: turn.othersInContext ?? true,
+        })
+      } catch (error) {
+        if (error instanceof SupervisorDenied) {
+          turn.denial = error.message
+          return { ok: false, denied: true, message: error.message }
+        }
+        throw error
+      }
     },
 
     'notify.user': async (args, turn) => {
@@ -250,7 +354,25 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
   const mutation = (spec: SupervisorToolSpec): ((args: JsonObject, turn: SupervisorTurnState) => Promise<unknown>) => async (args, turn) => {
     if (!isActionTool(spec.name)) throw new Error(`${spec.name} is not an action tool`)
     try {
-      const action = await deps.actions.createIntent({ threadId: turn.threadId, tool: spec.name, args, requester: turn.requester, reader: turn.reader })
+      const action = await deps.actions.createIntent({
+        threadId: turn.threadId, tool: spec.name, args, requester: turn.requester, reader: turn.reader,
+        turn: { ...(turn.trigger === undefined ? {} : { trigger: turn.trigger }), othersInContext: turn.othersInContext ?? true },
+      })
+      if (action.auto) {
+        // XERXES Autopilot ran it at once for the owner: report what really happened.
+        const state = action.state === 'accepted' || action.state === 'rejected' ? action.state : 'unknown'
+        return {
+          state,
+          action_id: action.id,
+          summary: action.summary,
+          ...(action.confirmedByName === undefined ? {} : { on_behalf_of: action.confirmedByName }),
+          ...(action.outcome === undefined ? {} : { outcome: action.outcome }),
+          ...(action.errorMessage === undefined ? {} : { message: action.errorMessage }),
+          note: state === 'accepted' ? 'Done by Autopilot. The owner was told.'
+            : state === 'rejected' ? 'Not done. The owner was told. Do not retry blindly.'
+            : 'The outcome is unknown. Do not retry it; the owner was told.',
+        }
+      }
       return {
         state: 'pending_confirmation',
         action_id: action.id,

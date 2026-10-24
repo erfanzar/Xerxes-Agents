@@ -873,11 +873,14 @@ export class HubServer {
    * Push one event to every connected person (not agents). The payload is built per
    * recipient, so it can differ by what that person may do. Returns how many sockets got it.
    */
-  sendEventToAll(type: HubEventType, build: (context: AuthenticatedContext) => Readonly<Record<string, unknown>>): number {
+  sendEventToAll(type: HubEventType, build: (context: AuthenticatedContext) => Readonly<Record<string, unknown>> | undefined): number {
     let sent = 0
     for (const conn of this.conns) {
       if (conn.closed || conn.context.principal.kind !== 'user') continue
-      if (this.sendFrame(conn, hubEvent(type, build(conn.context)))) sent += 1
+      // A builder that returns undefined skips that person (they may not see this event).
+      const payload = build(conn.context)
+      if (payload === undefined) continue
+      if (this.sendFrame(conn, hubEvent(type, payload))) sent += 1
     }
     return sent
   }

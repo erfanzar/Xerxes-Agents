@@ -37,6 +37,17 @@ export type MessageSource = 'text' | 'voice'
 
 export const SHARED_THREAD_ID = 'shared'
 export const MAX_MESSAGE_CHARS = 4000
+/** XERXES Autopilot's owner-only thread: wake turns run here, never in the shared thread. */
+export const AUTOPILOT_THREAD_PREFIX = 'autopilot-'
+
+export function autopilotThreadId(ownerId: string): string {
+  return `${AUTOPILOT_THREAD_PREFIX}${ownerId}`
+}
+
+/** Ids that name a supervisor conversation, never a task. */
+export function isSupervisorThreadId(id: string): boolean {
+  return id === SHARED_THREAD_ID || id.startsWith('private-') || id.startsWith(AUTOPILOT_THREAD_PREFIX)
+}
 
 /** What the agent could do on behalf of a human: the human's effective scopes inside the agent ceiling. */
 export function delegatedScopes(principal: UserPrincipal, grants: readonly HubGrant[], target: AccessTarget, now: number): ReadonlySet<HubScope> {
@@ -219,10 +230,27 @@ export class SupervisorThreads {
     return row ? toThread(row) : undefined
   }
 
+  /**
+   * The Hub owner's XERXES Autopilot thread, created on first use. It is a private
+   * thread of that owner: anyone else gets `not_found`. Wake turns run here, so no
+   * other participant's message can ever be in an Autopilot turn's context.
+   */
+  autopilotFor(ownerId: string): ThreadRecord {
+    const id = autopilotThreadId(ownerId)
+    this.db.query('INSERT OR IGNORE INTO hub_supervisor_threads (id, kind, owner_id, title, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, 'private', ownerId, 'Autopilot', this.clock())
+    const thread = this.get(id)!
+    if (thread.kind !== 'private' || thread.ownerId !== ownerId) throw new Error('the Autopilot thread id is taken by another thread')
+    return thread
+  }
+
   /** The person's private thread, created on first use. `fresh` starts another one. */
   privateFor(principal: UserPrincipal, fresh = false): ThreadRecord {
     if (!fresh) {
-      const row = this.db.query<ThreadRow, [string]>("SELECT * FROM hub_supervisor_threads WHERE kind = 'private' AND owner_id = ? ORDER BY created_at DESC LIMIT 1").get(principal.id)
+      // The owner's Autopilot thread is private too, but it is never their ordinary private thread.
+      const row = this.db.query<ThreadRow, [string, string]>(
+        "SELECT * FROM hub_supervisor_threads WHERE kind = 'private' AND owner_id = ? AND id NOT LIKE ? ORDER BY created_at DESC LIMIT 1",
+      ).get(principal.id, `${AUTOPILOT_THREAD_PREFIX}%`)
       if (row) return toThread(row)
     }
     const id = `private-${randomUUID()}`

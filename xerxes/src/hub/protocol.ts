@@ -55,6 +55,8 @@ export const HUB_METHODS = [
   'supervisor.config.get',
   'supervisor.config.options',
   'supervisor.config.set',
+  'supervisor.autopilot.get',
+  'supervisor.autopilot.set',
 ] as const
 export type HubMethod = (typeof HUB_METHODS)[number]
 
@@ -65,6 +67,8 @@ export const HUB_COMMAND_ACTIONS = [
   'turn.cancel',
   'permission.respond',
   'question.respond',
+  /** XERXES Autopilot only: answer a pending question on the Hub owner's behalf (scope question.delegated). */
+  'question.answer',
   'goal.set',
   'model.set',
   'subagent.message',
@@ -81,6 +85,7 @@ export const HUB_EVENT_TYPES = [
   'supervisor.thread_event',
   'supervisor.confirmation',
   'supervisor.config_changed',
+  'supervisor.autopilot_changed',
 ] as const
 export type HubEventType = (typeof HUB_EVENT_TYPES)[number]
 

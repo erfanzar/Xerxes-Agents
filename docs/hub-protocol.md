@@ -66,11 +66,19 @@ mid-call). `unknown` is resolved with `hub.command.status`, never by replaying.
 | viewer | `session.read`, `usage.read`, `presence.read` |
 | steer | viewer + `session.steer` |
 | operator | steer + `session.submit`, `session.cancel`, `session.configure`, `goal.write`, `permission.respond`, `question.respond` |
-| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model` |
+| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model`, `question.delegated` |
 
 `supervisor.model` lets a principal run one model completion on a daemon's own
 provider profiles (`hub.model.complete`). An agent principal may hold it; the Hub
 signs the supervisor's calls with exactly this one scope.
+
+`question.delegated` (XERXES Autopilot) lets an agent answer a task's pending
+QUESTION on the Hub owner's behalf through the `hub.command` action
+`question.answer` (daemon method `question_response`, same arguments as
+`question.respond`). It is in the agent ceiling and is not human-only.
+`question.answer` is refused for user principals (people use `question.respond`).
+There is no delegated permission route: `permission.respond` stays human-only at
+the Hub router, the daemon verifier and the supervisor tool ceiling.
 
 Effective scopes = matching allow grants − matching deny grants, ∩ the device
 ceiling. A hub owner starts from every scope. Session-scoped grants apply only
@@ -81,11 +89,14 @@ capped at `AGENT_SCOPE_CEILING` and can never hold a human-only scope
 
 ## Supervisor tools
 
-The XERXES supervisor sees twelve tools, with underscore provider names
+The XERXES supervisor sees fourteen tools, with underscore provider names
 (`tasks_list`) and dotted canonical names (`tasks.list`): `workspace.list`,
-`tasks.list`, `task.digest`, `task.tail`, `task.search` (reads);
-`task.start`, `task.steer`, `task.stop`, `agent.message`, `goal.set`,
-`model.set` (need a human to confirm); `notify.user` (thread audience only).
+`tasks.list`, `task.digest`, `task.tail`, `task.search`, `task.pending`
+(provider name `pending_interactions`: questions with text and options,
+permissions only as a count) (reads); `task.start`, `task.steer`, `task.stop`,
+`agent.message`, `goal.set`, `model.set` (need a human to confirm, except under
+Autopilot); `question.answer` (provider name `answer_question`, Autopilot only);
+`notify.user` (thread audience only).
 Approval, review, permission-mode, shell, Workflow and generic RPC tools are
 refused by `assertSupervisorToolCeiling`.
 
@@ -138,6 +149,75 @@ broadcasts event `supervisor.config_changed` (the `config.get` shape, with
 `user` with `hubOwner`. With no stored choice (and no environment fallback)
 `supervisor.thread.open` works and reports `config_status:"unconfigured"`, and
 `supervisor.message.submit` is refused with code `unconfigured`.
+
+## XERXES Autopilot
+
+Per workspace, the Hub owner can let XERXES act for them. Rows live in
+`hub_supervisor_autopilot` (supervisor database).
+
+| Method | Params | Result |
+|---|---|---|
+| `supervisor.autopilot.get` | none | `{can_edit, workspaces:[row]}` for every workspace the caller can see (unconfigured ones as `enabled:false, instruction:'', nulls`) |
+| `supervisor.autopilot.set` (owner) | `{workspace_id, enabled, instruction? (≤2000 chars), expires_at? (ISO, future, ≤30 days, or null)}` | `{workspace: row}` |
+
+Row: `{workspace_id, label, enabled, instruction, expires_at, enabled_by:{id,name}|null,
+updated_at, active}`; `active` = enabled, not expired, and the enabler is still the
+Hub owner. In `set`, an omitted `expires_at` keeps the stored expiry and only an
+explicit `null` clears it; `enabled:true` with a kept expiry that has already
+passed is refused (`invalid_request`, choose a new expiry). `set` refuses agents and non-owners (`forbidden`, audited), unknown keys
+and bad values (`invalid_request`), unknown workspaces (`not_found`), and an
+unavailable audit log (`unavailable`). Event `supervisor.autopilot_changed
+{workspace: row}` goes to everyone who can see the workspace after every set, and
+after the 30-second sweep turns off an expired row or one whose enabler is no
+longer the owner.
+
+While a workspace's Autopilot is active:
+- **Wake-ups.** A newly opened attention item (failed or blocked task, blocked goal,
+  waiting question), a live `question_request`, a `status_update` whose
+  `goal_phase` moves into `complete`, and a periodic check-in (for a working task,
+  and for every `needs_you` task with an unanswered question) post `Autopilot: woke
+  for <reason> in “<task title>”.` to `shared` (readers of that task and the owner
+  only) and start a turn in the owner's dedicated thread `autopilot-<ownerId>`. That
+  thread is private to the owner (anyone else gets `not_found`) and is refused as a
+  task id, so no other participant's message is ever in a wake turn's context. The
+  wake text is Hub-authored; task content inside it is fenced as untrusted. Wakes
+  are deduplicated per (workspace, task, reason) for 10 minutes (question wakes per
+  request id) and bounded to 12 per workspace per hour; nothing is recorded unless
+  the wake notice posts. Wakes only happen while the model status is `configured`.
+- **Actions.** Whether a proposal runs without a Confirm tap is decided before the
+  card is stored (`auto` is persisted at insert, and an automatic card is never
+  announced as pending). It runs automatically when (a) it comes from a wake turn
+  in the owner's Autopilot thread and is `task.steer`, `task.stop` or
+  `agent.message` (a wake turn's `task.start`, `goal.set` and `model.set` become
+  Confirm cards with an `Autopilot needs you: confirm …` notice and push), or (b)
+  the enabling owner's own message started the turn and no other person's message
+  is in that turn's context window. Everything else, and anything past the cap of
+  30 autonomous actions per workspace per hour (one notice), is a normal Confirm
+  card. An automatic run uses the normal confirm path (single-winner state change,
+  fail-closed audit, stale checks, never retrying `unknown`) with the owner as
+  confirmer. The card carries `auto: true` and `confirmed_by` = the owner's name;
+  the tool returns the real outcome. `Autopilot did: <summary> (on behalf of
+  <owner>)` or `Autopilot needs you: ...` goes to readers of the target and the
+  owner, and the owner gets a push.
+- **Questions.** `answer_question` runs only under the same conditions (a wake turn,
+  or an owner-only conversation), applies the thread's shared scope check (everyone
+  the thread speaks for must hold `question.delegated` on the task), checks the
+  request is a waiting question (never a permission) and that the answer matches an
+  option by its full text (or the clipped form shown), counts against the action
+  cap, then dispatches `question.answer` with the owner's delegated scopes, posts
+  `Autopilot answered “<title>”: <answer>` and pushes the owner. The router accepts
+  `question.answer` only from the supervisor principal with scopes from the
+  per-dispatch grant overlay; `question.delegated` can never be stored in a grant.
+- **Authority.** Autopilot acts with the enabling owner's account scopes (explicit
+  deny grants apply) inside the agent ceiling. It is not bound to any device, so a
+  per-device scope ceiling does not apply.
+- **Turning off.** The 30-second sweep disables an expired row or one whose enabler
+  is no longer the owner, broadcasts the change, posts `Autopilot needs you:
+  Autopilot is off in <label> because …` to people who can see the workspace, and
+  pushes the enabler. Closing the supervisor cancels queued and running turns.
+- **Permissions.** A waiting permission request posts `Autopilot needs you:
+  “<title>” is asking for permission. Only a person can answer it.` and pushes the
+  owner. XERXES never decides it.
 
 ## Identity and pairing
 

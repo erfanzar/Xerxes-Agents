@@ -6,7 +6,7 @@ import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
 import { foldSummaryEvent, presenceChips, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
 import {
-  taskKey, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
+  taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type SessionTail } from './sessionFold.js'
@@ -138,6 +138,76 @@ export interface SupervisorConfigState {
   readonly saveError?: string
 }
 
+/**
+ * Autopilot per workspace (`supervisor.autopilot.get`). `canEdit` is false
+ * until the Hub says the person is the owner; `rows` is empty until it answers.
+ */
+export interface AutopilotState {
+  readonly phase: LoadPhase
+  readonly canEdit: boolean
+  readonly rows: readonly AutopilotRow[]
+  readonly error?: string
+  /** A save is in flight for this workspace id. */
+  readonly savingId?: string
+  readonly saveError?: string
+  /** True once this Hub answered `unsupported`: the control is hidden. */
+  readonly unsupported: boolean
+}
+
+/** `savingId: undefined` explicitly ends a save; an absent key leaves it alone. */
+export interface AutopilotPatch {
+  readonly phase?: LoadPhase
+  readonly error?: string
+  readonly savingId?: string | undefined
+  readonly saveError?: string
+  readonly unsupported?: boolean
+}
+
+export function initialAutopilot(): AutopilotState {
+  return { phase: 'idle', canEdit: false, rows: [], unsupported: false }
+}
+
+export type AutopilotThreadPhase = 'idle' | 'loading' | 'ready' | 'hidden' | 'error'
+
+/**
+ * The owner's private Autopilot thread (`autopilot-<ownerUserId>`). Its
+ * messages and cards are kept apart from the shared thread: events are routed
+ * by `thread_id`. `hidden` means the Hub said the thread is not ours (or not
+ * offered); it is never asked for again on this connection.
+ */
+export interface AutopilotThreadState {
+  readonly phase: AutopilotThreadPhase
+  readonly threadId?: string
+  readonly messages: readonly SupervisorMessage[]
+  readonly confirmations: readonly SupervisorConfirmation[]
+  readonly working?: boolean
+  readonly error?: string
+}
+
+export function initialAutopilotThread(): AutopilotThreadState {
+  return { phase: 'idle', messages: [], confirmations: [] }
+}
+
+/** Cards in the Autopilot thread that wait for the owner's Confirm. */
+export function autopilotPendingCount(state: Pick<HubState, 'autopilotThread'>): number {
+  return state.autopilotThread.confirmations.filter(card => card.state === 'pending' && card.auto !== true).length
+}
+
+/**
+ * Whether the Autopilot thread view is offered: only the Hub owner (`can_edit`),
+ * only while a workspace is active (or cards still wait for a Confirm), and
+ * never after the Hub refused to open it.
+ */
+export function autopilotThreadAvailable(state: Pick<HubState, 'autopilot' | 'autopilotThread' | 'selfUserId'>): boolean {
+  if (!state.autopilot.canEdit || state.selfUserId === undefined || state.autopilotThread.phase === 'hidden') return false
+  return state.autopilot.rows.some(row => row.active) || autopilotPendingCount(state) > 0
+}
+
+/** Rows that are on right now (the Hub's verdict). */
+export function activeAutopilotRows(state: Pick<HubState, 'autopilot'>): readonly AutopilotRow[] {
+  return state.autopilot.rows.filter(row => row.active)
+}
+
 export interface HubState {
   readonly connection: ConnectionStatus
   readonly selfUserId?: string
@@ -152,6 +222,8 @@ export interface HubState {
   readonly supervisor: SupervisorState
   readonly machines: MachinesState
   readonly supervisorConfig: SupervisorConfigState
+  readonly autopilot: AutopilotState
+  readonly autopilotThread: AutopilotThreadState
 }
 
 export function initialSupervisorConfig(): SupervisorConfigState {
@@ -172,6 +244,8 @@ export function initialHubState(): HubState {
     supervisor: { phase: 'idle', messages: [], confirmations: [], busy: false },
     machines: { phase: 'idle', list: [] },
     supervisorConfig: initialSupervisorConfig(),
+    autopilot: initialAutopilot(),
+    autopilotThread: initialAutopilotThread(),
   }
 }
 
@@ -210,6 +284,17 @@ export type HubAction =
   /** Everything but the Hub's answer: loading, errors, saving. */
   | { readonly type: 'supervisorConfig'; readonly patch: Partial<Pick<SupervisorConfigState, 'phase' | 'error' | 'saving' | 'saveError' | 'status'>> }
   | { readonly type: 'supervisorConfigOptions'; readonly state: SupervisorOptionsState }
+  /** A fresh `supervisor.autopilot.get` answer replaces every row. */
+  | { readonly type: 'autopilotView'; readonly view: AutopilotView }
+  /** One row from `supervisor.autopilot.set` or a `supervisor.autopilot_changed` event. */
+  | { readonly type: 'autopilotRow'; readonly row: AutopilotRow }
+  /** Loading, errors, saving and unsupported. */
+  | { readonly type: 'autopilot'; readonly patch: AutopilotPatch }
+  /** Phase, id, working flag and errors of the owner's Autopilot thread. */
+  | { readonly type: 'autopilotThread'; readonly patch: Partial<AutopilotThreadState> }
+  | { readonly type: 'autopilotThreadMessages'; readonly messages: readonly SupervisorMessage[] }
+  | { readonly type: 'autopilotThreadConfirmations'; readonly confirmations: readonly SupervisorConfirmation[] }
+  | { readonly type: 'autopilotThreadConfirmation'; readonly id: string; readonly patch: Partial<SupervisorConfirmation> }
 
 export function presenceKey(workspaceId: string, sessionId?: string): string {
   return `${workspaceId}\u001f${sessionId ?? ''}`
@@ -424,6 +509,54 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
       return { ...state, supervisorConfig: next }
     }
     case 'supervisorConfigOptions': return { ...state, supervisorConfig: { ...state.supervisorConfig, options: action.state } }
+    case 'autopilotView': {
+      const { error: _error, saveError: _saveError, savingId: _savingId, ...rest } = state.autopilot
+      return { ...state, autopilot: { ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.workspaces, unsupported: false } }
+    }
+    case 'autopilotRow': {
+      const rows = state.autopilot.rows
+      const index = rows.findIndex(row => row.workspaceId === action.row.workspaceId)
+      const next = index === -1 ? [...rows, action.row] : rows.map((row, i) => (i === index ? action.row : row))
+      return { ...state, autopilot: { ...state.autopilot, rows: next } }
+    }
+    case 'autopilotThread': {
+      const next: AutopilotThreadState = { ...state.autopilotThread, ...action.patch }
+      // A fresh phase without an error clears the old one.
+      if (action.patch.phase !== undefined && action.patch.error === undefined) delete (next as { error?: string }).error
+      return { ...state, autopilotThread: next }
+    }
+    case 'autopilotThreadMessages': {
+      const known = new Set(state.autopilotThread.messages.map(m => m.id))
+      const added = action.messages.filter(m => !known.has(m.id))
+      if (added.length === 0) return state
+      return { ...state, autopilotThread: { ...state.autopilotThread, messages: bounded([...state.autopilotThread.messages, ...added], SUPERVISOR_MESSAGE_LIMIT) } }
+    }
+    case 'autopilotThreadConfirmations': {
+      const byId = new Map(state.autopilotThread.confirmations.map(c => [c.id, c]))
+      for (const c of action.confirmations) byId.set(c.id, c)
+      return { ...state, autopilotThread: { ...state.autopilotThread, confirmations: bounded([...byId.values()], 50) } }
+    }
+    case 'autopilotThreadConfirmation': {
+      return {
+        ...state,
+        autopilotThread: { ...state.autopilotThread, confirmations: state.autopilotThread.confirmations.map(c => (c.id === action.id ? { ...c, ...action.patch } : c)) },
+      }
+    }
+    case 'autopilot': {
+      const { savingId: patchSaving, ...patch } = action.patch
+      const next: AutopilotState = { ...state.autopilot, ...patch }
+      const mutable = next as { error?: string; saveError?: string; savingId?: string }
+      // A fresh phase without an error clears the old one; a new save clears the old save error.
+      if (patch.phase !== undefined && patch.error === undefined) delete mutable.error
+      if ('savingId' in action.patch) {
+        if (patchSaving === undefined) delete mutable.savingId
+        else {
+          mutable.savingId = patchSaving
+          if (patch.saveError === undefined) delete mutable.saveError
+        }
+      }
+      return { ...state, autopilot: next }
+    }
   }
 }
 

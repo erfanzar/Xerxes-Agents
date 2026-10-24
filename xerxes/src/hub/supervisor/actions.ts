@@ -14,7 +14,7 @@ import {
   SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID, SupervisorAudit, supervisorActor, supervisorRequestHash,
 } from './audit.js'
 import {
-  delegatedScopes, messageToWire, type ScopeReader, type SupervisorEventType, type SupervisorThreads, type UserPrincipal,
+  SHARED_THREAD_ID, delegatedScopes, isSupervisorThreadId, messageToWire, type ScopeReader, type SupervisorEventType, type SupervisorThreads, type UserPrincipal,
 } from './threads.js'
 
 /**
@@ -93,7 +93,34 @@ export interface ActionRecord {
   readonly createdAt: number
   readonly expiresAt: number
   readonly updatedAt: number
+  /** Run by XERXES Autopilot without a Confirm tap; `confirmedBy` is the enabling Hub owner. */
+  readonly auto: boolean
 }
+
+/**
+ * The Hub owner Autopilot acts for, when Autopilot is active for a workspace.
+ * `wake` is true for a turn the Hub started by itself (an Autopilot wake-up):
+ * such a turn may only steer, stop or message without a Confirm tap.
+ */
+export interface AutopilotGrant {
+  readonly owner: UserPrincipal
+  readonly wake: boolean
+}
+
+/** What the turn that proposes an action looked like. */
+export interface ActionTurnInfo {
+  /** Set when the Hub started the turn (an Autopilot wake-up). */
+  readonly trigger?: 'autopilot'
+  /** Whether a user message by anyone but the requester was in the turn's context. Unknown counts as true. */
+  readonly othersInContext?: boolean
+}
+
+/** The only actions an Autopilot wake-up runs without a Confirm tap. */
+export const WAKE_AUTO_TOOLS: ReadonlySet<ActionTool> = new Set<ActionTool>(['task.steer', 'task.stop', 'agent.message'])
+
+export type AutopilotBudgetTake =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly notify: boolean; readonly limit: number }
 
 /** What the actions need to know about the world, supplied by projections in production and fakes in tests. */
 export interface ActionTargets {
@@ -150,6 +177,23 @@ export interface ActionServiceOptions {
   readonly steerCooldownMs?: number
   /** `model.set` is offered only when the runtime guarantees the change is session-only. */
   readonly modelSetSessionOnly?: boolean
+  /**
+   * XERXES Autopilot: the owner an action proposed by `requester` in this workspace runs for,
+   * without a Confirm tap. Undefined: confirm as usual.
+   */
+  readonly autopilot?: (input: {
+    readonly workspaceId: string; readonly threadId: string; readonly requester: UserPrincipal
+    readonly trigger: boolean; readonly othersInContext: boolean
+  }) => AutopilotGrant | undefined
+  /** Per-workspace cap on autonomous actions. Past it, actions become cards. */
+  readonly autopilotBudget?: { take(workspaceId: string): AutopilotBudgetTake }
+  /**
+   * Posts an Autopilot notice to the shared thread, limited to people who can read the
+   * target (and the owner). Absent: the notice goes to the action's own thread.
+   */
+  readonly autopilotNotice?: (input: { readonly workspaceId: string; readonly sessionId?: string; readonly ownerId: string; readonly text: string }) => void
+  /** Minimal-text push to the owner about an autonomous action. Best effort. */
+  readonly push?: (userId: string, message: { readonly title: string; readonly body: string; readonly url: string }) => Promise<unknown>
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -158,6 +202,7 @@ interface ActionRow {
   summary: string; targets: string; instance_id: string | null; target_revision: string | null; requested_by: string
   requested_by_name: string; idempotency_key: string; state: string; confirmed_by: string | null; confirmed_by_name: string | null
   outcome: string | null; error_code: string | null; error_message: string | null; created_at: number; expires_at: number; updated_at: number
+  auto: number
 }
 
 const STATES: ReadonlySet<string> = new Set(['pending', 'confirming', 'accepted', 'rejected', 'unknown', 'cancelled', 'expired'])
@@ -192,6 +237,7 @@ function toRecord(row: ActionRow): ActionRecord {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     updatedAt: row.updated_at,
+    auto: row.auto === 1,
   }
 }
 
@@ -211,6 +257,7 @@ export function actionToWire(action: ActionRecord): Record<string, unknown> {
     targets: [...action.targets],
     requested_by: action.requestedByName,
     ...(action.confirmedByName === undefined ? {} : { confirmed_by: action.confirmedByName }),
+    ...(action.auto ? { auto: true } : {}),
     expires_at: new Date(action.expiresAt).toISOString(),
     state,
     ...(message === undefined ? {} : { message }),
@@ -256,6 +303,11 @@ export class ActionService {
       );
       CREATE INDEX IF NOT EXISTS hub_supervisor_actions_thread ON hub_supervisor_actions(thread_id, created_at);
     `)
+    // Databases created before Autopilot have no `auto` column; add it once.
+    const columns = this.db.query<{ name: string }, []>('PRAGMA table_info(hub_supervisor_actions)').all()
+    if (!columns.some(column => column.name === 'auto')) {
+      this.db.exec('ALTER TABLE hub_supervisor_actions ADD COLUMN auto INTEGER NOT NULL DEFAULT 0')
+    }
     // A dispatch that was in flight when the Hub stopped has an unknowable outcome. Never replay it.
     this.db.query(`UPDATE hub_supervisor_actions SET state = 'unknown', error_code = 'unavailable',
       error_message = 'The Hub restarted before the outcome was recorded.', updated_at = ? WHERE state = 'confirming'`).run(this.clock())
@@ -291,12 +343,12 @@ export class ActionService {
   // ── transitions ────────────────────────────────────────────────────
 
   /** Atomic compare-and-set. Exactly one caller wins a given transition. */
-  private transition(id: string, from: readonly ActionState[], to: ActionState, patch: { confirmedBy?: string; confirmedByName?: string; responseId?: string } = {}): boolean {
+  private transition(id: string, from: readonly ActionState[], to: ActionState, patch: { confirmedBy?: string; confirmedByName?: string; responseId?: string; auto?: boolean } = {}): boolean {
     const placeholders = from.map(() => '?').join(',')
     const result = this.db.query(
       `UPDATE hub_supervisor_actions SET state = ?, confirmed_by = COALESCE(?, confirmed_by), confirmed_by_name = COALESCE(?, confirmed_by_name),
-       response_id = COALESCE(?, response_id), updated_at = ? WHERE id = ? AND state IN (${placeholders})`,
-    ).run(to, patch.confirmedBy ?? null, patch.confirmedByName ?? null, patch.responseId ?? null, this.clock(), id, ...from)
+       response_id = COALESCE(?, response_id), auto = MAX(auto, ?), updated_at = ? WHERE id = ? AND state IN (${placeholders})`,
+    ).run(to, patch.confirmedBy ?? null, patch.confirmedByName ?? null, patch.responseId ?? null, patch.auto === true ? 1 : 0, this.clock(), id, ...from)
     return result.changes === 1
   }
 
@@ -356,6 +408,7 @@ export class ActionService {
     readonly args: JsonObject
     readonly requester: UserPrincipal
     readonly reader: ScopeReader
+    readonly turn?: ActionTurnInfo
   }): Promise<ActionRecord> {
     const { tool, args, requester, reader } = input
     const { targets } = this.options
@@ -372,7 +425,7 @@ export class ActionService {
       const value = stringArg(args, key)
       if (value !== undefined && SELF_NAMES.has(value.toLowerCase())) throw new Error('refused: the supervisor cannot target or start a supervisor')
     }
-    if (sessionId !== undefined && (sessionId === 'shared' || sessionId.startsWith('private-'))) throw new Error('refused: that is a supervisor thread, not a task')
+    if (sessionId !== undefined && isSupervisorThreadId(sessionId)) throw new Error('refused: that is a supervisor thread, not a task')
     if (sessionId !== undefined && targets.revision(workspaceId, sessionId) === undefined) throw new Error(`no such task ${JSON.stringify(sessionId)} in this workspace`)
     if (sessionId === undefined && tool !== 'task.start') throw new Error('task_id is required')
 
@@ -428,7 +481,27 @@ export class ActionService {
       createdAt: now,
       expiresAt: now + (this.options.expiryMs ?? DEFAULT_ACTION_EXPIRY_MS),
       updatedAt: now,
+      auto: false,
     }
+    // XERXES Autopilot: decide before anything is stored whether this runs without a Confirm tap.
+    const grant = this.options.autopilot?.({
+      workspaceId, threadId: input.threadId, requester,
+      trigger: input.turn?.trigger === 'autopilot', othersInContext: input.turn?.othersInContext ?? true,
+    })
+    const ownerGrants = grant === undefined ? [] : this.options.identity.grantsFor(grant.owner.id)
+    let held: { readonly text: string; readonly push: string } | undefined
+    let eligible = false
+    if (grant !== undefined) {
+      const owner = grant.owner
+      if (grant.wake && !WAKE_AUTO_TOOLS.has(tool)) {
+        held = { text: `Autopilot needs you: confirm ${record.summary}`, push: 'Autopilot needs you to confirm an action.' }
+      } else if (!hasScope(owner, ownerGrants, accessTarget, scope, now)) {
+        held = { text: `Autopilot needs you: ${owner.displayName} cannot ${tool} here, so this waits for a person to confirm: ${record.summary}`, push: 'Autopilot needs you.' }
+      } else {
+        eligible = true
+      }
+    }
+
     // Fail closed: no audit record, no card.
     try {
       await this.audit.record(this.auditEntry(record, 'intent', 'allowed', 'n/a'))
@@ -436,14 +509,59 @@ export class ActionService {
       this.options.onError?.(error, 'supervisor audit intent')
       throw new Error('the audit log is unavailable; no action was proposed')
     }
+    let auto = false
+    if (eligible && grant !== undefined) {
+      const budget = this.options.autopilotBudget?.take(workspaceId) ?? { ok: true }
+      if (budget.ok) auto = true
+      else if (budget.notify) {
+        held = {
+          text: `Autopilot needs you: it reached its limit of ${budget.limit} autonomous actions this hour in ${label}, so actions wait for a person to confirm: ${record.summary}`,
+          push: 'Autopilot needs you.',
+        }
+      }
+    }
+    // `auto` is stored with the card, and an automatic card is never announced as pending:
+    // nobody sees Confirm/Cancel on it, and the compare-and-set below still has a single winner.
     this.db.query(`INSERT INTO hub_supervisor_actions (id, thread_id, tool, workspace_id, session_id, args, args_hash, summary, targets,
-      instance_id, target_revision, requested_by, requested_by_name, idempotency_key, state, created_at, expires_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(
+      instance_id, target_revision, requested_by, requested_by_name, idempotency_key, state, created_at, expires_at, updated_at, auto)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`).run(
       record.id, record.threadId, tool, workspaceId, sessionId ?? null, argsJson, argsHash, record.summary, JSON.stringify(record.targets),
       record.instanceId ?? null, record.targetRevision ?? null, requester.id, requester.displayName, record.idempotencyKey, now, record.expiresAt, now,
+      auto ? 1 : 0,
     )
+    if (auto && grant !== undefined) return await this.confirmAndDispatch(record.id, grant.owner, ownerGrants, undefined, true)
     this.announce(record)
+    if (held !== undefined && grant !== undefined) {
+      this.autopilotNote(record, grant.owner.id, held.text)
+      await this.pushOwner(grant.owner.id, held.push)
+    }
     return record
+  }
+
+  /** An Autopilot notice: in the action's own thread unless it is the shared one, and to the shared thread for readers of the target. */
+  private autopilotNote(action: ActionRecord, ownerId: string, text: string): void {
+    const { threads } = this.options
+    const hook = this.options.autopilotNotice
+    if (action.threadId !== SHARED_THREAD_ID || hook === undefined) {
+      const { message } = threads.append({ threadId: action.threadId, role: 'system', text, causalMessageId: action.id })
+      threads.emit(action.threadId, 'supervisor.thread_event', { message: messageToWire(message) })
+    }
+    if (hook === undefined) return
+    try {
+      hook({ workspaceId: action.workspaceId, ...(action.sessionId === undefined ? {} : { sessionId: action.sessionId }), ownerId, text })
+    } catch (error) {
+      this.options.onError?.(error, 'autopilot notice')
+    }
+  }
+
+  private async pushOwner(ownerId: string, body: string): Promise<void> {
+    if (this.options.push === undefined) return
+    try {
+      // Lock-screen text stays minimal: no task title, no arguments.
+      await this.options.push(ownerId, { title: 'XERXES', body, url: '/xerxes' })
+    } catch (error) {
+      this.options.onError?.(error, 'autopilot action push')
+    }
   }
 
   // ── respond ────────────────────────────────────────────────────────
@@ -491,8 +609,17 @@ export class ActionService {
       return cancelled
     }
 
+    return this.confirmAndDispatch(id, human, grants, responseId, false)
+  }
+
+  /**
+   * The single confirm path shared by a person's Confirm tap and XERXES Autopilot:
+   * single-winner compare-and-set, fail-closed audit, stale checks at execution,
+   * dispatch under the confirmer's delegated scopes, settle. Never retries `unknown`.
+   */
+  private async confirmAndDispatch(id: string, human: UserPrincipal, grants: readonly HubGrant[], responseId: string | undefined, auto: boolean): Promise<ActionRecord> {
     // Only one confirmer wins this compare-and-set; everyone else sees the winner's state.
-    if (!this.transition(id, ['pending'], 'confirming', { confirmedBy: human.id, confirmedByName: human.displayName, ...(responseId === undefined ? {} : { responseId }) })) {
+    if (!this.transition(id, ['pending'], 'confirming', { confirmedBy: human.id, confirmedByName: human.displayName, ...(responseId === undefined ? {} : { responseId }), auto })) {
       const lost = this.load(id)
       if (lost.state === 'expired') throw new HubProtocolError('conflict', 'This confirmation expired. Ask XERXES again if you still want it.')
       return lost
@@ -540,6 +667,16 @@ export class ActionService {
   private async settle(action: ActionRecord, human: UserPrincipal): Promise<ActionRecord> {
     const outcome = action.state === 'accepted' ? 'accepted' : action.state === 'rejected' ? 'rejected' : 'unknown'
     await this.audit.recordBestEffort(this.auditEntry(action, 'outcome', 'allowed', outcome, human.id))
+    if (action.auto) {
+      const notice = action.state === 'accepted' ? `Autopilot did: ${action.summary} (on behalf of ${human.displayName})`
+        : action.state === 'rejected' ? `Autopilot needs you: this was not done: ${action.summary} ${action.errorMessage ?? ''}`.trim()
+        : `Autopilot needs you: the outcome is unknown: ${action.summary} Check the task; XERXES will not retry it.`
+      this.announce(action)
+      // Only readers of the target see what Autopilot did.
+      this.autopilotNote(action, human.id, notice)
+      await this.pushOwner(human.id, action.state === 'accepted' ? 'Autopilot acted for you. Open XERXES to see what it did.' : 'Autopilot needs you.')
+      return action
+    }
     const notice = action.state === 'accepted' ? `Done: ${action.summary} (confirmed by ${human.displayName}).`
       : action.state === 'rejected' ? `Not done: ${action.summary} ${action.errorMessage ?? ''}`.trim()
       : `Outcome unknown: ${action.summary} Check the task before trying again; XERXES will not retry it.`

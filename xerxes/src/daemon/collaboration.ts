@@ -430,19 +430,41 @@ export function redactInteractionPayload(type: string, payload: JsonRpcPayload):
   return payload
 }
 
+/**
+ * What a verified hub principal may see of pending interactions:
+ * - `full`: holds `permission.respond` (a human who can answer anything);
+ * - `questions`: an agent holding `question.delegated` (XERXES Autopilot) sees
+ *   question text and options, but permission requests stay redacted;
+ * - `none`: everyone else sees only that something waits.
+ */
+export type InteractionVisibility = 'full' | 'questions' | 'none'
+
+export function interactionVisibility(context: { readonly principal_kind: 'user' | 'agent'; readonly scopes: readonly string[] }): InteractionVisibility {
+  // An agent never sees permission arguments, whatever its claims say.
+  if (context.principal_kind === 'agent') return context.scopes.includes('question.delegated') ? 'questions' : 'none'
+  return context.scopes.includes('permission.respond') ? 'full' : 'none'
+}
+
+function shouldRedact(type: string, visibility: InteractionVisibility): boolean {
+  if (visibility === 'full') return false
+  if (visibility === 'questions' && type === 'question_request') return false
+  return true
+}
+
 /** Redact approval/question requests inside a journal page or `event_batch` payload; other events are untouched. */
-export function redactEventPage(page: JsonRpcPayload): JsonRpcPayload {
+export function redactEventPage(page: JsonRpcPayload, visibility: InteractionVisibility = 'none'): JsonRpcPayload {
   const events = page.events
   if (!Array.isArray(events)) return page
   let changed = false
   const mapped = events.map(event => {
     if (!isRecord(event) || (event.type !== 'approval_request' && event.type !== 'question_request') || !isRecord(event.payload)) return event
+    if (!shouldRedact(event.type, visibility)) return event
     changed = true
     return { ...event, payload: redactInteractionPayload(event.type, event.payload) }
   })
   return changed ? { ...page, events: mapped } : page
 }
 
-export function redactPendingFrames<T extends { readonly type: string; readonly payload: JsonRpcPayload }>(frames: readonly T[]): T[] {
-  return frames.map(frame => ({ ...frame, payload: redactInteractionPayload(frame.type, frame.payload) }))
+export function redactPendingFrames<T extends { readonly type: string; readonly payload: JsonRpcPayload }>(frames: readonly T[], visibility: InteractionVisibility = 'none'): T[] {
+  return frames.map(frame => (shouldRedact(frame.type, visibility) ? { ...frame, payload: redactInteractionPayload(frame.type, frame.payload) } : frame))
 }

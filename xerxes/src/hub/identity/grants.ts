@@ -38,7 +38,13 @@ export function grantScopeSet(grant: HubGrant): Set<HubScope> {
 
 /** Agent principals can never be *granted* a human-only scope, whatever the record says. */
 export function assertGrantAllowed(kind: UserRow['kind'], grant: HubGrant): void {
-  if (kind !== 'agent' || grant.effect === 'deny') return
+  if (grant.effect === 'deny') return
+  // question.delegated exists only inside one XERXES Autopilot dispatch (the supervisor's grant
+  // overlay). It can never be stored as an explicit scope, for anyone; a Hub owner holds it through ownership.
+  if ((grant.scopes ?? []).includes('question.delegated') || (kind === 'agent' && grantScopeSet(grant).has('question.delegated'))) {
+    throw new HubIdentityError('forbidden', 'question.delegated is only delegated by XERXES Autopilot and cannot be stored in a grant')
+  }
+  if (kind !== 'agent') return
   for (const scope of grantScopeSet(grant)) {
     if (HUMAN_ONLY_SCOPES.has(scope)) {
       throw new HubIdentityError('forbidden', `agent principals cannot be granted the human-only scope ${scope}`)

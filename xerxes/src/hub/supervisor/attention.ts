@@ -63,6 +63,8 @@ export interface AttentionQueueOptions {
   readonly onError?: (error: unknown, context: string) => void
   /** Resolved items are kept this long for display. Default 1 hour. */
   readonly retainResolvedMs?: number
+  /** A status event moved a goal from another phase into `complete` (XERXES Autopilot wakes on it). */
+  readonly onGoalComplete?: (workspaceId: string, sessionId: string) => void
 }
 
 const SEVERITY: Readonly<Record<AttentionKind, AttentionSeverity>> = {
@@ -97,6 +99,8 @@ export function attentionToWire(item: AttentionItem): Record<string, unknown> {
 export class AttentionQueue {
   private readonly items = new Map<string, AttentionItem>()
   private readonly blockedGoals = new Set<string>()
+  /** Last goal phase seen per task (insertion-ordered, bounded). */
+  private readonly goalPhases = new Map<string, string>()
   private readonly clock: () => number
   private sequence = 0
   private timer: ReturnType<typeof setInterval> | undefined
@@ -129,6 +133,18 @@ export class AttentionQueue {
       const key = AttentionQueue.key('goal_blocked', event.workspace_id, event.session_id)
       if (phase === 'blocked') this.blockedGoals.add(key)
       else this.blockedGoals.delete(key)
+      // A finished goal is a transition: a phase seen before that was not `complete`. Repeated
+      // `complete` updates, or the first one seen after a Hub start, do not count.
+      const previous = this.goalPhases.get(key)
+      this.goalPhases.delete(key)
+      this.goalPhases.set(key, phase)
+      if (this.goalPhases.size > 5000) {
+        const oldest = this.goalPhases.keys().next().value
+        if (oldest !== undefined) this.goalPhases.delete(oldest)
+      }
+      if (phase === 'complete' && previous !== undefined && previous !== 'complete') {
+        try { this.options.onGoalComplete?.(event.workspace_id, event.session_id) } catch (error) { this.options.onError?.(error, 'goal complete') }
+      }
     }
   }
 

@@ -124,6 +124,12 @@ export function createModelDigestSummarizer(model: SupervisorModelPort, promptVe
   }
 }
 
+/** A turn the Hub started by itself (XERXES Autopilot), not a person's message. */
+export interface SupervisorTurnTrigger {
+  readonly kind: 'autopilot'
+  readonly text: string
+}
+
 export type SupervisorStop = 'completed' | 'tool_cap' | 'denied' | 'quota' | 'timeout' | 'cancelled' | 'model_error' | 'gone'
 
 export interface SupervisorTurnResult {
@@ -173,6 +179,7 @@ export class SupervisorRunner {
   private readonly tails = new Map<string, Promise<unknown>>()
   private readonly active = new Map<string, AbortController>()
   private usage = { windowStart: 0, tokens: 0, costUsd: 0, calls: 0 }
+  private closed = false
 
   constructor(private readonly options: SupervisorRunnerOptions) {
     this.clock = options.clock ?? Date.now
@@ -201,6 +208,12 @@ export class SupervisorRunner {
     return this.tails.has(threadId)
   }
 
+  /** Stop for good: queued turns never start and every running turn is cancelled. */
+  shutdown(): void {
+    this.closed = true
+    for (const controller of this.active.values()) controller.abort(new Error('cancelled'))
+  }
+
   /** Cancel the turn running on this thread. Background agents are not touched. */
   cancel(threadId: string): boolean {
     const controller = this.active.get(threadId)
@@ -209,10 +222,17 @@ export class SupervisorRunner {
     return true
   }
 
-  /** Queue one turn behind any turn already running on the thread. Never rejects. */
-  enqueue(input: { readonly threadId: string; readonly requester: UserPrincipal }): Promise<SupervisorTurnResult> {
+  /**
+   * Queue one turn behind any turn already running on the thread. Never rejects.
+   * `trigger` marks a Hub-started XERXES Autopilot turn: its Hub-authored text is
+   * the last message of the turn, and the requester is the enabling owner.
+   */
+  enqueue(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger }): Promise<SupervisorTurnResult> {
     const previous = this.tails.get(input.threadId) ?? Promise.resolve()
-    const next = previous.then(() => this.run(input), () => this.run(input))
+    const start = (): Promise<SupervisorTurnResult> => (this.closed
+      ? Promise.resolve({ stop: 'cancelled', toolCalls: 0, modelCalls: 0 })
+      : this.run(input))
+    const next = previous.then(start, start)
     const tail = next.then(() => undefined, () => undefined)
     this.tails.set(input.threadId, tail)
     void tail.then(() => { if (this.tails.get(input.threadId) === tail) this.tails.delete(input.threadId) })
@@ -250,7 +270,7 @@ export class SupervisorRunner {
     return { stop, ...counts, ...(detail === undefined ? {} : { detail }) }
   }
 
-  private async run(input: { readonly threadId: string; readonly requester: UserPrincipal }): Promise<SupervisorTurnResult> {
+  private async run(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger }): Promise<SupervisorTurnResult> {
     const { threads, registry, model } = this.options
     const { threadId, requester } = input
     const counts = { toolCalls: 0, modelCalls: 0 }
@@ -262,9 +282,16 @@ export class SupervisorRunner {
     const timer = setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs)
     threads.setWorking(threadId, true)
     try {
-      const state: SupervisorTurnState = { threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined }
       const stored = threads.messagesFor(threadId, requester.id, CONTEXT_MESSAGES)
+      const state: SupervisorTurnState = {
+        threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined,
+        ...(input.trigger === undefined ? {} : { trigger: input.trigger.kind }),
+        // Autopilot runs the requester's own actions only when nobody else spoke in this context window.
+        othersInContext: stored.some(message => message.role === 'user' && message.authorId !== requester.id),
+      }
       const messages: ChatMessage[] = stored.map(toChat)
+      // Hub-authored wake text; anything copied from a task inside it is already fenced.
+      if (input.trigger !== undefined) messages.push({ role: 'user', content: input.trigger.text })
       // The person's message this turn answers; voice uses it to match a reply to its submission.
       const inReplyTo = stored.filter(message => message.role === 'user').at(-1)?.id
       const tools = registry.definitions()
@@ -284,6 +311,8 @@ export class SupervisorRunner {
           this.options.onError?.(error, 'supervisor model')
           return this.finishWith(threadId, requester, 'model_error', counts, `it could not reach its model (${clip(error instanceof Error ? error.message : String(error), 160)})`)
         }
+        // A model that ignored the abort (or a shutdown during the call) must not act on its answer.
+        if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
         this.usage.calls += 1
         if (response.usage !== undefined) {
           const tokens = Math.max(0, response.usage.inputTokens) + Math.max(0, response.usage.outputTokens)
@@ -326,7 +355,8 @@ export class SupervisorRunner {
     } finally {
       clearTimeout(timer)
       this.active.delete(threadId)
-      threads.setWorking(threadId, false)
+      // After shutdown the database may already be closed; there is nobody left to tell.
+      if (!this.closed) threads.setWorking(threadId, false)
     }
   }
 

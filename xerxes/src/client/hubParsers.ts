@@ -4,7 +4,7 @@
 import { isRecord, type HubEvent, type WorkspaceHealth } from '../hub/protocol.js'
 import { asActor } from './hubConnection.js'
 import type {
-  EffortOption, MachineView, ModelChoice, ModelOption, PresenceChip, ProfileOption, SupervisorChoice, SupervisorConfigStatus, SupervisorConfigView,
+  AutopilotPerson, AutopilotRow, AutopilotView, EffortOption, MachineView, ModelChoice, ModelOption, PresenceChip, ProfileOption, SupervisorChoice, SupervisorConfigStatus, SupervisorConfigView,
   SupervisorOptions, TaskSummary, WorkspaceView,
 } from './hubTypes.js'
 import { arr, clip, isoOr, num, rec, str } from './parse.js'
@@ -271,6 +271,10 @@ export interface SupervisorConfirmation {
   readonly expiresAt?: string
   readonly state: ConfirmationState
   readonly message?: string
+  /** Created by Autopilot: it runs without a Confirm tap, so the card has no buttons. */
+  readonly auto?: boolean
+  /** The person Autopilot acted for (`confirmed_by` on the wire). */
+  readonly confirmedBy?: string
 }
 
 export function parseSupervisorMessage(raw: unknown): SupervisorMessage | undefined {
@@ -293,8 +297,11 @@ export function parseConfirmation(raw: unknown): SupervisorConfirmation | undefi
   const requestedBy = str(c.requested_by) ?? str(rec(c.actor).requested_by)
   const expiresAt = str(c.expires_at)
   const message = str(c.message)
+  const confirmedBy = str(c.confirmed_by) ?? str(rec(c.actor).confirmed_by)
   return {
     id,
+    ...(c.auto === true ? { auto: true } : {}),
+    ...(confirmedBy ? { confirmedBy } : {}),
     tool: str(c.tool) ?? str(c.action) ?? 'action',
     summary: str(c.summary) ?? str(c.description) ?? 'XERXES proposes an action.',
     targets: arr(c.targets).flatMap(t => (typeof t === 'string' ? [t] : str(rec(t).label) ? [str(rec(t).label)!] : [])),
@@ -303,6 +310,65 @@ export function parseConfirmation(raw: unknown): SupervisorConfirmation | undefi
     ...(expiresAt ? { expiresAt } : {}),
     ...(message ? { message } : {}),
   }
+}
+
+// ── autopilot ─────────────────────────────────────────────────────────
+
+/** An ISO timestamp string that parses, or null for an explicit JSON null. Anything else is malformed (undefined). */
+function isoOrNull(value: unknown): string | null | undefined {
+  if (value === null) return null
+  return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value)) ? value : undefined
+}
+
+function parseAutopilotPerson(value: unknown): AutopilotPerson | null | undefined {
+  if (value === null) return null
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined
+  const person = rec(value)
+  const id = str(person.id)
+  const name = str(person.name)
+  return id && name ? { id, name } : undefined
+}
+
+/**
+ * One row of `supervisor.autopilot.get`, `supervisor.autopilot.set` or the
+ * `supervisor.autopilot_changed` event. Strict: a row with a missing or wrongly
+ * typed field is rejected whole, because a guessed `active` could show
+ * Autopilot as on when the Hub has it off.
+ */
+export function parseAutopilotRow(raw: unknown): AutopilotRow | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const r = rec(raw)
+  const workspaceId = str(r.workspace_id)
+  if (!workspaceId || typeof r.label !== 'string') return undefined
+  if (typeof r.enabled !== 'boolean' || typeof r.active !== 'boolean' || typeof r.instruction !== 'string') return undefined
+  const expiresAt = isoOrNull(r.expires_at)
+  const updatedAt = isoOrNull(r.updated_at)
+  const enabledBy = parseAutopilotPerson(r.enabled_by)
+  if (expiresAt === undefined || updatedAt === undefined || enabledBy === undefined) return undefined
+  return {
+    workspaceId,
+    label: r.label === '' ? workspaceId : r.label,
+    enabled: r.enabled,
+    instruction: r.instruction,
+    expiresAt,
+    enabledBy,
+    updatedAt,
+    active: r.active,
+  }
+}
+
+/** `supervisor.autopilot.get`. Any malformed row or a missing `can_edit` rejects the whole answer; a repeated workspace is malformed. */
+export function parseAutopilotView(raw: unknown): AutopilotView | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const r = rec(raw)
+  if (typeof r.can_edit !== 'boolean' || !Array.isArray(r.workspaces)) return undefined
+  const rows: AutopilotRow[] = []
+  for (const item of r.workspaces) {
+    const row = parseAutopilotRow(item)
+    if (!row || rows.some(known => known.workspaceId === row.workspaceId)) return undefined
+    rows.push(row)
+  }
+  return { canEdit: r.can_edit, workspaces: rows }
 }
 
 // ── machines and the supervisor's model ───────────────────────────────

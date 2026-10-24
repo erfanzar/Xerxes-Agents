@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto'
 import { Database } from 'bun:sqlite'
 
 import { canonicalJson, paramsHash, type HubAuthClaims } from '../security/hubAuthEnvelope.js'
-import { HUMAN_ONLY_SCOPES, hasScope, type HubScope } from '../security/principal.js'
+import { HUMAN_ONLY_SCOPES, hasScope, type HubGrant, type HubScope } from '../security/principal.js'
+import { SUPERVISOR_PRINCIPAL_ID } from './supervisor/audit.js'
 import type { DaemonCallOptions } from './daemonClient.js'
 import type { AuthenticatedContext, HubIdentityPort } from './identityPort.js'
 import {
@@ -50,6 +51,11 @@ export interface HubCommandRouterOptions {
   readonly onError?: (error: unknown, context: string) => void
   /** Records older than this are pruned at open. Default 14 days. */
   readonly retentionMs?: number
+  /**
+   * The supervisor's per-dispatch overlay grants (SupervisorGrantOverlay.current). `question.answer`
+   * is accepted only when these grants carry its scope. Absent: `question.answer` is always refused.
+   */
+  readonly overlayGrants?: () => readonly HubGrant[]
 }
 
 export const HUB_AUTH_LIFETIME_MS = 60_000
@@ -177,6 +183,18 @@ export const COMMAND_SPECS: Readonly<Record<HubCommandAction, CommandSpec>> = Ob
   },
   'question.respond': {
     scope: 'question.respond', method: 'question_response', needsSession: true, interaction: true,
+    build: args => {
+      shape(args, ['request_id', 'answers'], ['request_id', 'answers'])
+      return { request_id: readId(args.request_id, 'args.request_id'), answers: answers(args.answers) }
+    },
+  },
+  /**
+   * XERXES Autopilot: the same daemon route and arguments as `question.respond`,
+   * under the non-human-only scope `question.delegated`. There is deliberately no
+   * delegated counterpart of `permission.respond`.
+   */
+  'question.answer': {
+    scope: 'question.delegated', method: 'question_response', needsSession: true, interaction: true,
     build: args => {
       shape(args, ['request_id', 'answers'], ['request_id', 'answers'])
       return { request_id: readId(args.request_id, 'args.request_id'), answers: answers(args.answers) }
@@ -373,7 +391,15 @@ export class HubCommandRouter {
     // Structural rule first: an agent principal can never answer a human interaction,
     // whatever its grants say. hasScope enforces the same rule; this makes it explicit here.
     const humanOnly = HUMAN_ONLY_SCOPES.has(spec.scope)
-    if ((context.principal.kind === 'agent' && humanOnly) || !hasScope(context.principal, grants, target, spec.scope, this.clock())) {
+    // `question.answer` is the XERXES Autopilot route only: the supervisor principal, with scopes
+    // that come solely from the per-dispatch overlay (never a stored grant). People use `question.respond`.
+    const autopilotRoute = request.action === 'question.answer'
+    const autopilotAllowed = !autopilotRoute || (
+      context.principal.kind === 'agent' && context.principal.id === SUPERVISOR_PRINCIPAL_ID
+      && this.options.overlayGrants !== undefined
+      && hasScope(context.principal, this.options.overlayGrants(), target, spec.scope, this.clock()))
+    if ((context.principal.kind === 'agent' && humanOnly) || !autopilotAllowed
+      || !hasScope(context.principal, grants, target, spec.scope, this.clock())) {
       await this.auditBestEffort(context, request, hash, 'denied', 'rejected')
       throw new HubProtocolError('forbidden', `not permitted: ${request.action} requires ${spec.scope}`)
     }

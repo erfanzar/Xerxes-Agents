@@ -105,6 +105,37 @@ export interface SupervisorOptions {
   readonly defaultEffort: string | null
 }
 
+/** Who turned Autopilot on. */
+export interface AutopilotPerson {
+  readonly id: string
+  readonly name: string
+}
+
+/**
+ * One workspace's Autopilot setting (`supervisor.autopilot.get` row). `active`
+ * is the Hub's verdict: enabled, not expired, and the person who enabled it is
+ * still the Hub owner. Apps show `active`, never infer it from `enabled`.
+ */
+export interface AutopilotRow {
+  readonly workspaceId: string
+  readonly label: string
+  readonly enabled: boolean
+  /** The owner's standing instruction; empty when none. */
+  readonly instruction: string
+  /** ISO time Autopilot stops by itself, or null for no expiry. */
+  readonly expiresAt: string | null
+  readonly enabledBy: AutopilotPerson | null
+  readonly updatedAt: string | null
+  readonly active: boolean
+}
+
+/** The shape of `supervisor.autopilot.get`. */
+export interface AutopilotView {
+  /** Whether this person may change Autopilot (the Hub owner only). */
+  readonly canEdit: boolean
+  readonly workspaces: readonly AutopilotRow[]
+}
+
 export function taskKey(workspaceId: string, sessionId: string): string {
   return `${workspaceId}\u001f${sessionId}`
 }

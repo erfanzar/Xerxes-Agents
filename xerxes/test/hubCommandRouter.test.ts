@@ -10,7 +10,9 @@ import { COMMAND_SPECS, HUB_AUTH_LIFETIME_MS, HubCommandRouter, commandDaemonMet
 import { HUB_COMMAND_ACTIONS, type HubCommandAction } from '../src/hub/protocol.js'
 import { HUB_DAEMON_METHODS } from '../src/hub/runtimePool.js'
 import { verifyHubAuth } from '../src/security/hubAuthEnvelope.js'
-import { HUMAN_ONLY_SCOPES, type HubScope } from '../src/security/principal.js'
+import { SupervisorGrantOverlay } from '../src/hub/supervisor/actions.js'
+import { SUPERVISOR_PRINCIPAL_ID } from '../src/hub/supervisor/audit.js'
+import { HUMAN_ONLY_SCOPES, type HubGrant, type HubScope } from '../src/security/principal.js'
 import {
   FakeBackend, FakeIdentity, agentPrincipal, disposeAll, registerCleanup, standardUsers, tempDir, testSigner, workspaceGrant,
 } from './hubHarness.js'
@@ -32,6 +34,20 @@ async function setup(extra: Partial<HubCommandRouterOptions> = {}) {
   return { dir, identity, backend, signer, time, errors, databasePath, router, options, mutations }
 }
 
+/** A router wired like the Hub's: the supervisor's grants come only from the per-dispatch overlay. */
+function autopilotRouter(t: Awaited<ReturnType<typeof setup>>) {
+  const overlay = new SupervisorGrantOverlay()
+  if (!t.identity.users.has(SUPERVISOR_PRINCIPAL_ID)) t.identity.add(agentPrincipal(SUPERVISOR_PRINCIPAL_ID), [])
+  const router = new HubCommandRouter({
+    ...t.options, databasePath: join(t.dir, 'hub-overlay.sqlite'),
+    identity: overlay.wrapIdentity(t.identity), overlayGrants: () => overlay.current(),
+  })
+  registerCleanup(() => router.close())
+  return { router, overlay }
+}
+const delegated = (scopes: HubScope[] = ['question.delegated', 'session.read']): HubGrant[] =>
+  [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource: { type: 'session', workspaceId: 'w1', sessionId: 's1' }, effect: 'allow', scopes }]
+
 const submit = (id = 'c1', text = 'hello') => ({ workspace_id: 'w1', session_id: 's1', command_id: id, action: 'turn.submit', args: { text } })
 
 const EXPECTED: Record<HubCommandAction, readonly [HubScope, string]> = {
@@ -41,6 +57,7 @@ const EXPECTED: Record<HubCommandAction, readonly [HubScope, string]> = {
   'turn.cancel': ['session.cancel', 'turn.cancel'],
   'permission.respond': ['permission.respond', 'permission_response'],
   'question.respond': ['question.respond', 'question_response'],
+  'question.answer': ['question.delegated', 'question_response'],
   'goal.set': ['goal.write', 'session.goal'],
   'model.set': ['session.configure', 'set_model'],
   'subagent.message': ['session.steer', 'subagent.steer'],
@@ -52,6 +69,7 @@ const VALID_ARGS: Record<HubCommandAction, Record<string, unknown>> = {
   'turn.cancel': {},
   'permission.respond': { request_id: 'p1', response: 'approve' },
   'question.respond': { request_id: 'q1', answers: { a: 'b' } },
+  'question.answer': { request_id: 'q1', answers: { a: 'b' } },
   'goal.set': { input: 'ship it' },
   'model.set': { model: 'm1' },
   'subagent.message': { task: 't1', message: 'hi' },
@@ -64,13 +82,17 @@ describe('Hub command router', () => {
   test('maps every action to one scope and exactly one allowlisted daemon method', async () => {
     expect(Object.keys(COMMAND_SPECS).sort()).toEqual([...HUB_COMMAND_ACTIONS].sort())
     const t = await setup()
+    const { router, overlay } = autopilotRouter(t)
     for (const action of HUB_COMMAND_ACTIONS) {
       const [scope, method] = EXPECTED[action]
       expect(commandScope(action)).toBe(scope)
       expect(commandDaemonMethod(action)).toBe(method)
       expect((HUB_DAEMON_METHODS as readonly string[]).includes(method)).toBe(true)
       t.backend.calls.length = 0
-      const result = await t.router.execute(t.identity.context('alice'), command(action, `map-${action}`))
+      // question.answer is the Autopilot route: the supervisor principal, scopes only from the overlay.
+      const result = action === 'question.answer'
+        ? await overlay.run(delegated(), () => router.execute(t.identity.context(SUPERVISOR_PRINCIPAL_ID), command(action, `map-${action}`)))
+        : await router.execute(t.identity.context('alice'), command(action, `map-${action}`))
       expect(result.state).toBe('accepted')
       expect(t.mutations().map(call => call.method)).toEqual([method])
     }
@@ -125,6 +147,33 @@ describe('Hub command router', () => {
     expect((await t.router.execute(t.identity.context('robot'), submit('ok'))).state).toBe('accepted')
     // A human operator can answer.
     expect((await t.router.execute(t.identity.context('alice'), command('permission.respond', 'human'))).state).toBe('accepted')
+  })
+
+  test('Autopilot: question.answer only for the supervisor with overlay grants, never a permission, whatever it is granted', async () => {
+    const t = await setup()
+    const { router, overlay } = autopilotRouter(t)
+    const supervisor = t.identity.context(SUPERVISOR_PRINCIPAL_ID)
+    // Another agent with a stored question.delegated grant is refused: the scope must come from the overlay.
+    t.identity.add(agentPrincipal('auto'), [{ principalId: 'auto', resource: { type: 'hub' }, effect: 'allow', scopes: ['question.delegated', 'session.read'] }])
+    await expect(router.execute(t.identity.context('auto'), command('question.answer', 'auto-qa'))).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(overlay.run(delegated(), () => router.execute(t.identity.context('auto'), command('question.answer', 'auto-qa2')))).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(router.execute(t.identity.context('robot'), command('question.answer', 'robot-qa'))).rejects.toMatchObject({ code: 'forbidden' })
+    // The supervisor outside an overlay dispatch has nothing.
+    await expect(router.execute(supervisor, command('question.answer', 'sup-bare'))).rejects.toMatchObject({ code: 'forbidden' })
+    // A router without overlayGrants refuses the route outright, even inside a dispatch.
+    await expect(overlay.run(delegated(), () => t.router.execute(supervisor, command('question.answer', 'no-overlay')))).rejects.toMatchObject({ code: 'forbidden' })
+    // Even with every scope in the overlay, the supervisor can never answer a permission or use question.respond.
+    const everything = delegated(['question.delegated', 'permission.respond', 'question.respond', 'session.read'])
+    for (const action of ['permission.respond', 'question.respond'] as const) {
+      await expect(overlay.run(everything, () => router.execute(supervisor, command(action, `sup-${action}`)))).rejects.toMatchObject({ code: 'forbidden' })
+    }
+    // A person (even the owner, who holds question.delegated) answers through question.respond instead.
+    await expect(router.execute(t.identity.context('owner'), command('question.answer', 'owner-qa'))).rejects.toMatchObject({ code: 'forbidden' })
+    expect(t.mutations()).toEqual([])
+    expect(HUMAN_ONLY_SCOPES.has('question.delegated')).toBe(false)
+    expect((await overlay.run(delegated(), () => router.execute(supervisor, command('question.answer', 'sup-qa')))).state).toBe('accepted')
+    expect(t.mutations().map(call => call.method)).toEqual(['question_response'])
+    expect(t.mutations()[0]!.params).toMatchObject({ request_id: 'q1', answers: { a: 'b' } })
   })
 
   test('replays the recorded outcome for the same command id and content, durably', async () => {

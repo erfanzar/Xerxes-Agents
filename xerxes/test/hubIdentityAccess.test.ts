@@ -199,6 +199,23 @@ describe('grants', () => {
     expect(hasScope(principal, h.admin.listGrants(agent), { workspaceId: 'w1' }, 'session.steer')).toBe(true)
   })
 
+  test('question.delegated can never be stored in a grant, for agents or people; it only comes from the Autopilot overlay', async () => {
+    const h = await makeHarness()
+    const agent = addAgent(h)
+    const guest = await inviteUser(h, { workspaceId: 'w1', role: 'viewer' })
+    for (const principalId of [agent, guest.userId]) {
+      for (const resource of [{ type: 'hub' } as const, { type: 'workspace', workspaceId: 'w1' } as const]) {
+        expect(errorCode(() => h.admin.updateGrants({ principalId, mode: 'add', grants: [{ principalId, effect: 'allow', resource, scopes: ['question.delegated'] }] }))).toBe('forbidden')
+        expect(errorCode(() => h.admin.updateGrants({ principalId, mode: 'add', grants: [{ principalId, effect: 'allow', resource, role: 'steer', scopes: ['session.read', 'question.delegated'] }] }))).toBe('forbidden')
+      }
+    }
+    expect(h.admin.listGrants(agent)).toEqual([])
+    expect(h.admin.listGrants(guest.userId).flatMap(grant => grant.scopes ?? [])).not.toContain('question.delegated')
+    // A deny of it is fine (denials never add authority).
+    h.admin.updateGrants({ principalId: agent, grants: [{ principalId: agent, effect: 'deny', resource: { type: 'hub' }, scopes: ['question.delegated'] }] })
+    expect(h.admin.listGrants(agent)).toHaveLength(1)
+  })
+
   test('agent principals have no devices and cannot be paired or authenticated', async () => {
     const h = await makeHarness()
     const agent = addAgent(h)

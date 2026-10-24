@@ -287,6 +287,8 @@ import {
   queuedSteers,
   recordParticipant,
   recordSubmission,
+  interactionVisibility,
+  type InteractionVisibility,
   redactEventPage,
   redactPendingFrames,
   resolutionEventFields,
@@ -1244,7 +1246,7 @@ export class DaemonServer {
   /** In-memory images of queued steers; durable entries persist their text only. */
   private readonly queuedSteerImages = new Map<string, readonly TurnImage[]>();
   /** Event subscriptions created by a principal that may not see approval/question details. */
-  private readonly redactedSubscriptions = new Map<DaemonTransportConnection, Set<string>>();
+  private readonly redactedSubscriptions = new Map<DaemonTransportConnection, Map<string, InteractionVisibility>>();
   private readonly steerContinuations = new Map<string, Promise<void>>();
   /** The verified Hub identity of the request being dispatched; never derived from params. */
   private readonly hubContexts = new AsyncLocalStorage<VerifiedHubContext>();
@@ -2291,8 +2293,9 @@ export class DaemonServer {
         ? await this.workspaceContext.run(resources, dispatchOnce)
         : await dispatchOnce();
       // A principal that may not answer interactions sees that something waits, never its arguments.
-      if (hub && !hub.scopes.includes('permission.respond') && Array.isArray(result.pending_interactions)) {
-        result = { ...result, pending_interactions: redactPendingFrames(result.pending_interactions as { type: string; payload: JsonRpcPayload }[]) };
+      // An Autopilot agent (question.delegated) sees questions; permission requests stay redacted for it.
+      if (hub && interactionVisibility(hub) !== 'full' && Array.isArray(result.pending_interactions)) {
+        result = { ...result, pending_interactions: redactPendingFrames(result.pending_interactions as { type: string; payload: JsonRpcPayload }[], interactionVisibility(hub)) };
       }
       // Preserve the legacy event-before-reply order, but only after the durable append finishes.
       await this.eventJournal.flush();
@@ -3069,12 +3072,12 @@ export class DaemonServer {
       await this.eventJournal.flush();
       // A principal that may not answer interactions sees that a card is pending, never its arguments.
       const hub = this.hubContexts.getStore();
-      const redact = hub !== undefined && !hub.scopes.includes('permission.respond');
+      const visibility = hub === undefined ? 'full' : interactionVisibility(hub);
       const subscribed = this.eventSubscriptions.subscribe(connection, params, (type, payload) =>
-        connection.send(daemonEvent(type, redact ? redactEventPage(payload) : payload)));
-      if (redact && typeof subscribed.subscription_id === 'string') {
-        const ids = this.redactedSubscriptions.get(connection) ?? new Set<string>();
-        ids.add(subscribed.subscription_id);
+        connection.send(daemonEvent(type, visibility !== 'full' ? redactEventPage(payload, visibility) : payload)));
+      if (visibility !== 'full' && typeof subscribed.subscription_id === 'string') {
+        const ids = this.redactedSubscriptions.get(connection) ?? new Map<string, InteractionVisibility>();
+        ids.set(subscribed.subscription_id, visibility);
         this.redactedSubscriptions.set(connection, ids);
       }
       return subscribed;
@@ -3082,9 +3085,13 @@ export class DaemonServer {
     if (method === 'events.read') {
       const page = this.eventSubscriptions.read(connection, params);
       const hub = this.hubContexts.getStore();
-      const redact = hub !== undefined && (!hub.scopes.includes('permission.respond')
-        || this.redactedSubscriptions.get(connection)?.has(String(params.subscription_id)) === true);
-      return redact ? redactEventPage(page) : page;
+      if (hub === undefined) return page;
+      // The narrower of the reader's visibility and the visibility the subscription was created with.
+      const own = interactionVisibility(hub);
+      const recorded = this.redactedSubscriptions.get(connection)?.get(String(params.subscription_id));
+      const rank: Record<InteractionVisibility, number> = { none: 0, questions: 1, full: 2 };
+      const visibility = recorded !== undefined && rank[recorded] < rank[own] ? recorded : own;
+      return visibility !== 'full' ? redactEventPage(page, visibility) : page;
     }
     if (method === 'events.unsubscribe') {
       this.redactedSubscriptions.get(connection)?.delete(String(params.subscription_id));

@@ -29,6 +29,12 @@ export const HUB_SCOPES = [
   'devices.manage',
   /** Run one model completion on a daemon's local provider profile (the Hub's XERXES supervisor). */
   'supervisor.model',
+  /**
+   * Answer a task's pending QUESTION on a Hub owner's behalf (XERXES Autopilot).
+   * Not human-only: it exists so an agent can hold it. It never covers a
+   * permission request; `permission.respond` stays human-only everywhere.
+   */
+  'question.delegated',
 ] as const
 export type HubScope = (typeof HUB_SCOPES)[number]
 
@@ -55,7 +61,7 @@ const OPERATOR: readonly HubScope[] = [
   'permission.respond',
   'question.respond',
 ]
-const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model']
+const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model', 'question.delegated']
 
 export const ROLE_SCOPES: Readonly<Record<HubRole, ReadonlySet<HubScope>>> = Object.freeze({
   viewer: new Set(VIEWER),
@@ -74,6 +80,7 @@ export const AGENT_SCOPE_CEILING: ReadonlySet<HubScope> = new Set<HubScope>([
   'session.configure',
   'goal.write',
   'supervisor.model',
+  'question.delegated',
 ])
 
 export type HubPrincipal =

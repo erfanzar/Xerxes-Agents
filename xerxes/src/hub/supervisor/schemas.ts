@@ -20,9 +20,11 @@ import type { JsonObject, JsonSchema } from '../../types/toolCalls.js'
  * - `read`: access-controlled read inside the thread's observation scope.
  * - `confirm`: creates an action intent; a human must tap Confirm before it runs.
  * - `audience`: delivery restricted to authorized thread participants.
+ * - `autopilot`: runs only while the Hub owner has XERXES Autopilot on for the
+ *   workspace, on the owner's behalf (answering a pending QUESTION; never a permission).
  */
 
-export type SupervisorGate = 'read' | 'confirm' | 'audience'
+export type SupervisorGate = 'read' | 'confirm' | 'audience' | 'autopilot'
 
 export interface SupervisorToolSpec {
   readonly name: SupervisorToolName
@@ -46,6 +48,8 @@ export const SUPERVISOR_TOOL_NAMES = [
   'task.digest',
   'task.tail',
   'task.search',
+  'task.pending',
+  'question.answer',
   'task.start',
   'task.steer',
   'task.stop',
@@ -113,6 +117,28 @@ const SPECS: readonly SupervisorToolSpec[] = [
         limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
       },
       ['workspace_id', 'task_id', 'query'],
+    ),
+  },
+  {
+    name: 'task.pending',
+    providerName: 'pending_interactions',
+    gate: 'read',
+    description: 'List what one task is waiting on: its questions (text and options, the recommended option marked) and how many permission requests wait. Permission details are never shown; only a person can answer a permission.',
+    parameters: object({ workspace_id: WORKSPACE_ID, task_id: TASK_ID }, ['workspace_id', 'task_id']),
+  },
+  {
+    name: 'question.answer',
+    providerName: 'answer_question',
+    gate: 'autopilot',
+    description: "Answer a task's waiting QUESTION on the Hub owner's behalf. Works only while Autopilot is on for the workspace. Never answers a permission request. answers maps each question id from pending_interactions to the chosen answer text.",
+    parameters: object(
+      {
+        workspace_id: WORKSPACE_ID,
+        task_id: TASK_ID,
+        request_id: { ...ID, description: 'request_id of the waiting question from pending_interactions.' },
+        answers: { type: 'object', description: 'Question id -> answer text (usually one of its options).' },
+      },
+      ['workspace_id', 'task_id', 'request_id', 'answers'],
     ),
   },
   {

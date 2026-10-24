@@ -3,10 +3,13 @@
 
 import { useEffect, useState, type ReactElement } from 'react'
 
+import { AUTOPILOT_COMPOSER_HINT, AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { relativeTime } from '../../client/format.js'
 import type { ConfirmationState, SupervisorConfirmation } from '../../client/hubParsers.js'
+import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
 import { useHubState, useNow, useServices } from '../context.js'
 import { supervisorHeading } from '../viewModel.js'
+import { AutopilotSheet } from './AutopilotSheet.js'
 import { ModelChooser, ModelSheet } from './ModelChooser.js'
 import { TalkButton } from './TalkButton.js'
 import { VoiceStatus } from './VoiceStatus.js'
@@ -24,6 +27,19 @@ const SETTLED: Readonly<Record<ConfirmationState, string | undefined>> = {
 
 function ConfirmationCard({ item, canAct, onRespond }: { item: SupervisorConfirmation; canAct: boolean; onRespond: (decision: 'confirm' | 'cancel') => void }): ReactElement {
   const settled = SETTLED[item.state]
+  if (item.auto === true) {
+    // Autopilot ran this without a Confirm tap: it is a record, never a question.
+    return (
+      <li className="card" data-auto="true">
+        <h3 className="card-title">XERXES did: {item.tool}</h3>
+        <p>{item.summary}</p>
+        {item.targets.length === 0 ? null : <ul className="notes">{item.targets.map(target => <li key={target}>{target}</li>)}</ul>}
+        {item.state === 'failed'
+          ? <p role="alert" className="field-error">{item.message ?? 'Autopilot tried this and it did not go through.'}</p>
+          : <p role="status" className="block-meta">{autoCardNote(item.confirmedBy)}</p>}
+      </li>
+    )
+  }
   return (
     <li className="card card-attention">
       <h3 className="card-title">XERXES proposes: {item.tool}</h3>
@@ -43,6 +59,42 @@ function ConfirmationCard({ item, canAct, onRespond }: { item: SupervisorConfirm
   )
 }
 
+/** The owner's private Autopilot thread: wake-ups, replies, cards waiting for Confirm, and what XERXES did alone. */
+export function AutopilotThreadBody(): ReactElement {
+  const state = useHubState()
+  const now = useNow()
+  const { controller } = useServices()
+  const thread = state.autopilotThread
+  const live = state.connection.state === 'live'
+  return (
+    <div aria-label="Autopilot thread" role="region">
+      <p className="summary">{AUTOPILOT_THREAD_NOTE}</p>
+      {thread.phase === 'loading' || thread.phase === 'idle' ? <p role="status" aria-busy="true">Opening the Autopilot thread…</p> : null}
+      {thread.phase === 'error' ? <p role="alert" className="field-error">Could not open the Autopilot thread: {thread.error ?? 'unknown error'}</p> : null}
+      {thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0 ? <p className="empty">Nothing yet.</p> : null}
+      <ol className="blocks" aria-label="Autopilot conversation">
+        {thread.messages.map(message => (
+          <li key={message.id} className={`block block-${message.role === 'user' ? 'user' : 'assistant'}`}>
+            <p className="block-who">
+              {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Autopilot' : message.author ?? 'You'}
+              <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
+            </p>
+            <p className="block-text">{message.text}</p>
+          </li>
+        ))}
+      </ol>
+      {thread.confirmations.length === 0 ? null : (
+        <ul className="pending" aria-label="Autopilot actions">
+          {thread.confirmations.map(item => (
+            <ConfirmationCard key={item.id} item={item} canAct={live} onRespond={decision => { void controller.autopilotThreadRespond(item.id, decision) }} />
+          ))}
+        </ul>
+      )}
+      {thread.working === true ? <p role="status" aria-live="polite">Autopilot is working…</p> : null}
+    </div>
+  )
+}
+
 export function XerxesTab(): ReactElement {
   const state = useHubState()
   const now = useNow()
@@ -51,6 +103,12 @@ export function XerxesTab(): ReactElement {
   const config = state.supervisorConfig
   const unconfigured = config.status === 'unconfigured'
   const [sheet, setSheet] = useState(false)
+  const [autopilotSheet, setAutopilotSheet] = useState(false)
+  const [threadView, setThreadView] = useState(false)
+  const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const threadAvailable = autopilotThreadAvailable(state)
+  const showThread = threadAvailable && threadView
+  const threadPending = autopilotPendingCount(state)
   const [text, setText] = useState(() => drafts.get('supervisor'))
   const [fromVoice, setFromVoice] = useState(false)
 
@@ -93,8 +151,24 @@ export function XerxesTab(): ReactElement {
         <>
           <div className="config-row">
             <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setSheet(true)}>{config.canEdit ? 'Model' : 'Model (view)'}</button>
+            {state.autopilot.unsupported ? null : (
+              <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setAutopilotSheet(true)}>{state.autopilot.canEdit || state.autopilot.phase !== 'ready' ? 'Autopilot' : 'Autopilot (view)'}</button>
+            )}
+            {autopilotChip === undefined ? null : <span className="chip" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
+            {threadAvailable ? (
+              <button
+                type="button"
+                className="btn"
+                aria-pressed={showThread}
+                onClick={() => { const next = !threadView; setThreadView(next); if (next) void controller.autopilotThreadOpen() }}
+              >
+                {showThread ? 'Back to chat' : 'Autopilot thread'}
+                {threadPending > 0 ? <span className="chip" aria-label={pendingBadgeLabel(threadPending)}> {threadPending}</span> : null}
+              </button>
+            ) : null}
           </div>
           {sheet ? <ModelSheet onClose={() => setSheet(false)} /> : null}
+          {autopilotSheet ? <AutopilotSheet onClose={() => setAutopilotSheet(false)} /> : null}
           {unconfigured ? (
             <div className="empty-state" role="status">
               <h2>Choose XERXES's model</h2>
@@ -102,7 +176,9 @@ export function XerxesTab(): ReactElement {
               <ModelChooser />
             </div>
           ) : null}
-          <p className="summary">Ask XERXES about your tasks. It can look across workspaces, and it proposes actions that wait for your confirmation. It cannot approve anything for you.</p>
+          <p className="summary">Ask XERXES about your tasks. It can look across workspaces, and it proposes actions that wait for your confirmation. It cannot approve anything for you.{autopilotChip === undefined ? '' : ` ${AUTOPILOT_COMPOSER_HINT}`}</p>
+          {showThread ? <AutopilotThreadBody /> : null}
+          {showThread ? null : <>
           {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
           {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? <p className="empty">No messages yet. Try “What needs me right now?”</p> : null}
           <ol className="blocks" aria-label="Conversation">
@@ -136,6 +212,7 @@ export function XerxesTab(): ReactElement {
               <button type="submit" className="btn btn-primary" disabled={supervisor.phase !== 'ready' || !live || supervisor.busy || text.trim() === ''}>{supervisor.busy ? 'Sending…' : 'Send'}</button>
             </div>
           </form>
+          </>}
         </>
       )}
     </section>

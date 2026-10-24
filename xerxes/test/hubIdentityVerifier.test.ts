@@ -177,6 +177,12 @@ test('method scopes are enforced and an agent principal can never use a human-on
     expect(hubAuthorizationFailure(agent, method, {})).toContain('human-only')
   }
   expect(hubAuthorizationFailure(agent, 'slash', { command: '!rm -rf /' })).toContain('not accepted')
+  // Autopilot: question.delegated lets an agent answer a question, never a permission.
+  const autopilot = context({ principal_kind: 'agent', scopes: ['session.read', 'question.delegated', 'permission.respond'] })
+  expect(hubAuthorizationFailure(autopilot, 'question_response', {})).toBeUndefined()
+  expect(hubAuthorizationFailure(autopilot, 'permission_response', {})).toContain('human-only')
+  // A human still needs question.respond; question.delegated alone is not enough for a person.
+  expect(hubAuthorizationFailure(context({ scopes: ['question.delegated'] }), 'question_response', {})).toContain('question.respond')
   expect(hubAuthorizationFailure(agent, 'turn.submit', {})).toBeUndefined()
 })
 
