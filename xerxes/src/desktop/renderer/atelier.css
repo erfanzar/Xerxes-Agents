@@ -351,6 +351,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .atelier .switch{border-radius:20px}
 .atelier .switch.is-on{background:var(--x-accent)}
 .atelier .menu,.atelier .modelpop{padding:5px}
+.session-menu-confirm{margin:6px 8px 4px;color:var(--x-secondary);font:var(--ui-font)/1.5 var(--sans);overflow-wrap:anywhere}
 .session-menu-error{margin:6px 5px 4px;color:var(--x-failed-text);font:var(--ui-font)/1.5 var(--sans);overflow-wrap:anywhere}
 .atelier .menu--renaming{width:320px;max-width:calc(100vw - 16px)}
 .menu__rename>.menu__item{flex:none;width:auto}

@@ -547,8 +547,20 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
 
 // ── Session context menu (mockup 08) ────────────────────────────────────
 
-/** execCommand copy — the renderer has no clipboard capability on file:// and none is exposed. */
+/**
+ * Copy to the clipboard: the async Clipboard API first (Electron and VS Code
+ * webviews), then the execCommand fallback where that API is missing or refused.
+ */
 function copyText(text: string): void {
+  const clipboard = typeof navigator === 'object' ? navigator.clipboard : undefined
+  if (clipboard && typeof clipboard.writeText === 'function') {
+    clipboard.writeText(text).catch(() => copyTextFallback(text))
+    return
+  }
+  copyTextFallback(text)
+}
+
+function copyTextFallback(text: string): void {
   const ta = document.createElement('textarea')
   ta.value = text
   ta.setAttribute('readonly', '')
@@ -568,6 +580,9 @@ function copyText(text: string): void {
  */
 function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement | null {
   const [renaming, setRenaming] = useState(menu?.renaming ?? false)
+  // Delete asks in the menu itself: VS Code webviews block modal browser
+  // dialogs (a confirm prompt returns false without showing anything).
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [draft, setDraft] = useState(menu?.title ?? '')
   const menuRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
@@ -642,12 +657,21 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
               <Icon name="download" size={13} /> Export as Markdown
             </button>
             <div className="menu__sep" />
-            <button role="menuitem" className="menu__item menu__item--danger" disabled={menu.pending} onClick={() => {
-              // Permanent: the saved transcript is removed, not archived.
-              if (window.confirm(`Delete “${menu.title || 'this chat'}”? Its saved history is removed permanently.`)) void store.deleteSession(menu.id)
-            }}>
-              <Icon name="trash" size={13} /> {menu.pending ? 'Deleting…' : 'Delete…'}
-            </button>
+            {confirmingDelete || menu.pending ? (
+              <>
+                <p className="session-menu-confirm" role="alert">Delete “{menu.title || 'this chat'}”? Its saved history is removed permanently.</p>
+                <button role="menuitem" className="menu__item menu__item--danger" disabled={menu.pending} onClick={() => { void store.deleteSession(menu.id) }}>
+                  <Icon name="trash" size={13} /> {menu.pending ? 'Deleting…' : 'Delete permanently'}
+                </button>
+                <button role="menuitem" className="menu__item" disabled={menu.pending} onClick={() => setConfirmingDelete(false)}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button role="menuitem" className="menu__item menu__item--danger" onClick={() => setConfirmingDelete(true)}>
+                <Icon name="trash" size={13} /> Delete…
+              </button>
+            )}
           </>
         )}
         {menu.error && <p className="session-menu-error" role="alert">{menu.error}</p>}

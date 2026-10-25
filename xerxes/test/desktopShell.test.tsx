@@ -674,6 +674,39 @@ test('the session context menu offers open, rename, copy id and delete', () => {
   expect(html).not.toContain('Move to worktree')
 })
 
+test('the session context menu sits above its own dismiss scrim, so its items receive clicks', async () => {
+  // The menu renders after a clear .backdrop that closes it on click. When the
+  // menu's z-index was below the scrim's, every click on Copy ID or Delete hit
+  // the scrim and only closed the menu.
+  const css = await read('renderer/app.css')
+  const zIndex = (selector: string): number => {
+    const block = css.match(new RegExp(`^${selector.replace('.', '\\.')} \\{([^}]*)\\}`, 'm'))?.[1] ?? ''
+    const value = block.match(/z-index:\s*(\d+)/)?.[1]
+    if (value === undefined) throw new Error(`no z-index for ${selector}`)
+    return Number(value)
+  }
+  expect(zIndex('.menu')).toBeGreaterThan(zIndex('.backdrop--clear'))
+  expect(zIndex('.menu')).toBeGreaterThan(zIndex('.backdrop'))
+  const html = render(snapshot({ sessionMenu: { id: 'aa19f402', key: 'aa19f402', title: 'Ship loop', x: 40, y: 60 } }))
+  expect(html.indexOf('backdrop--clear')).toBeGreaterThanOrEqual(0)
+  expect(html.indexOf('backdrop--clear')).toBeLessThan(html.indexOf('aria-label="Session actions"'))
+})
+
+test('session delete confirms inside the menu, not with window.confirm (blocked in VS Code webviews)', async () => {
+  const app = await read('renderer/App.tsx')
+  const menu = app.slice(app.indexOf('function SessionMenu('), app.indexOf('// ── Statusline'))
+  expect(menu.length).toBeGreaterThan(0)
+  expect(menu).not.toContain('window.confirm')
+  expect(menu).toContain('Delete permanently')
+  // Copy ID prefers the async Clipboard API and keeps the execCommand fallback.
+  expect(app).toContain('navigator.clipboard')
+  expect(app).toContain("document.execCommand('copy')")
+  // A pending delete renders the confirm step with its progress label.
+  const pending = render(snapshot({ sessionMenu: { id: 'aa19f402', key: 'aa19f402', title: 'Ship loop', x: 40, y: 60, pending: true } }))
+  expect(pending).toContain('Deleting…')
+  expect(pending).toContain('removed permanently')
+})
+
 test('the session context menu rename mode renders an inline field', () => {
   const html = render(
     snapshot({ sessionMenu: { id: 'aa19f402', key: 'aa19f402', title: 'Ship loop', x: 40, y: 60 } }),
