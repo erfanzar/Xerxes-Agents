@@ -117,6 +117,19 @@ test('restart now forces a busy runtime and reports blockers when it is not forc
   expect(older.calls).toContain('exited:42')
 })
 
+test('a runtime newer than this client is left running, never downgraded', async () => {
+  // Fixed, release-independent versions: 3.4.10 is newer than 3.4.9 (numeric, not string, order).
+  const newer = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'other', daemon_version: '3.4.10' } })
+  expect(await prepareManagedRuntime(newer.create, 'new', newer.wait, {}, { version: '3.4.9' })).toEqual({ busy: false, newerRuntime: true })
+  expect(newer.calls).toEqual(['start:false', 'runtime.status', 'close'])
+  // Same or older releases (or a runtime that reports none) are still replaced.
+  for (const daemonVersion of ['3.4.9', '3.4.8', '2.99.99', undefined]) {
+    const f = scriptedFixture({ 'runtime.status': { pid: 42, daemon_build_id: 'old', ...(daemonVersion ? { daemon_version: daemonVersion } : {}) }, 'runtime.restart_if_idle': { ok: true } })
+    expect(await prepareManagedRuntime(f.create, 'new', f.wait, {}, { version: '3.4.9' })).toEqual({ busy: false })
+    expect(f.calls).toContain('exited:42')
+  }
+})
+
 test('a runtime another client is already restarting is waited for, not reported as a failure', async () => {
   const restarting = { ok: false, error: 'Runtime is restarting. Reconnect to continue.' }
   // Reached during shutdown: even runtime.status is refused, so the pid file identifies it.

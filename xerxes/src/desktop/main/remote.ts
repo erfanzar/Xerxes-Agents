@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { remoteBootstrapScript } from '../../ui/lib/remoteBootstrap.js'
+import { XERXES_VERSION } from '../../core/version.js'
 import { remoteResumeProgram } from './remoteResume.js'
 import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
 
@@ -30,7 +31,7 @@ export function remoteTarget(value: unknown): RemoteTarget {
     throw new Error('Invalid SSH alias, target, or absolute project folder')
   return { alias: row.alias, target: row.target, workspacePath: row.workspacePath }
 }
-export function remoteAddress(output: string): { socketPath: string; projectDir: string; expectedBuildId?: string; busy?: boolean; blockers?: string[]; waitingForGoalRound?: boolean } {
+export function remoteAddress(output: string): { socketPath: string; projectDir: string; expectedBuildId?: string; busy?: boolean; blockers?: string[]; waitingForGoalRound?: boolean; newerRuntime?: boolean } {
   const line = output.split('\n').find((value) => value.startsWith('XERXES_REMOTE_READY '))
   if (!line) throw new Error('Remote setup did not return a daemon address')
   const value: unknown = JSON.parse(line.slice('XERXES_REMOTE_READY '.length))
@@ -55,6 +56,7 @@ export function remoteAddress(output: string): { socketPath: string; projectDir:
     ...(row.busy === true ? { busy: true } : {}),
     ...(row.busy === true && blockers.length ? { blockers } : {}),
     ...(row.busy === true && row.waitingForGoalRound === true ? { waitingForGoalRound: true } : {}),
+    ...(row.newerRuntime === true ? { newerRuntime: true } : {}),
   }
 }
 export function runCaptured(
@@ -151,7 +153,7 @@ export async function openRemote(
         '-T',
         '--',
         destination,
-        'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon')),
+        'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { version: XERXES_VERSION })),
       ],
       signal,
       300000,
@@ -230,7 +232,7 @@ export async function openRemote(
       reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress),
       async update(force = false) {
         const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', destination,
-          'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force }))], updateController.signal, 300000))
+          'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force, version: XERXES_VERSION }))], updateController.signal, 300000))
         if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
         reconnectAddress = updated
         connection.expectedBuildId = updated.expectedBuildId

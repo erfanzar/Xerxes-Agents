@@ -24,11 +24,19 @@ export interface ManagedRuntimeOutcome {
   /** What the busy runtime is waiting for, as the daemon reported it. */
   blockers?: string[]
   waitingForGoalRound?: boolean
+  /** The host runs a newer release than this client; it was left running untouched. */
+  newerRuntime?: boolean
 }
 
 export interface ManagedRuntimeOptions {
   /** The person confirmed "restart now": running work stops instead of being waited out. */
   force?: boolean
+  /**
+   * The release this client installs. A running runtime that reports a newer
+   * release is left running: replacing it would downgrade the host, and two
+   * clients of different releases would restart it back and forth.
+   */
+  version?: string
 }
 
 /** Upgrade through the daemon's atomic idle guard, never by killing a process. */
@@ -50,6 +58,16 @@ export async function prepareManagedRuntime(
     await client.start()
     const status = await client.request<Record<string, unknown>>('runtime.status', {})
     if (status.daemon_build_id === expectedBuildId) return { busy: false }
+    // Self-contained (inlined into the remote script): numeric x.y.z compare.
+    const releaseParts = (value: unknown): number[] | undefined => {
+      const match = typeof value === 'string' ? /^v?(\d+)\.(\d+)\.(\d+)/.exec(value.trim()) : null
+      return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined
+    }
+    const running = releaseParts(status.daemon_version), own = releaseParts(options.version)
+    if (running && own) {
+      const order = running[0]! - own[0]! || running[1]! - own[1]! || running[2]! - own[2]!
+      if (order > 0) return { busy: false, newerRuntime: true }
+    }
     let pid = Number.isSafeInteger(status.pid) && Number(status.pid) > 0 ? Number(status.pid) : undefined
     if (pid === undefined && legacy?.pidFallback) pid = await legacy.pidFallback()
     if (pid === undefined) throw new Error('Remote runtime identity is unavailable; left it running.')

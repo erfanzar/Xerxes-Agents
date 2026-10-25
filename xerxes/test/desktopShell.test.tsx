@@ -133,6 +133,16 @@ test('the shell renders the right state in every connectivity mode', () => {
   }
 })
 
+test('a runtime newer than the app offers an app update, not a restart that cannot work', async () => {
+  const app = await read('renderer/App.tsx')
+  const panel = app.slice(app.indexOf("snap.daemonWarning?.startsWith('The app is older')"), app.indexOf("{!snap.daemonWarning && snap.connection !== 'online'"))
+  expect(panel.length).toBeGreaterThan(0)
+  expect(panel).toContain("store.appUpdateAction('check')")
+  expect(panel).toContain('Update the app')
+  // The restart button stays only in the branch for a runtime older than the app.
+  expect(panel.slice(0, panel.indexOf(': snap.daemonWarning &&'))).not.toContain('restartDaemon')
+})
+
 test('a stale daemon handshake renders the actionable restart warning', () => {
   const html = render(snapshot({ daemonWarning: 'Daemon is older than the app — restart it.' }))
   expect(html).toContain('Workspace runtime: Runtime update available')

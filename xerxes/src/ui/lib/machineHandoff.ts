@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import { withTerminalSuspended } from './terminalRuntime.opentui.js'
 import { remoteBootstrapScript } from './remoteBootstrap.js'
+import { XERXES_VERSION } from '../../core/version.js'
 import { sshFailure } from '../../security/sshDiagnostics.js'
 import { writeSshConnectionConfig } from '../../security/sshConnectionConfig.js'
 import { startSshSocketTunnel } from './sshSocketTunnel.js'
@@ -68,7 +69,7 @@ function remoteFailureHint(error: Error): string {
 
 export function remoteMachineCommand(machine: RemoteMachine): string {
   const validated = parseRemoteMachine(machine)
-  return `exec sh -c ${quoteShell(remoteBootstrapScript(validated.workspacePath, 'daemon'))}`
+  return `exec sh -c ${quoteShell(remoteBootstrapScript(validated.workspacePath, 'daemon', { version: XERXES_VERSION }))}`
 }
 
 /** Start the remote daemon, forward its private socket, and run a LOCAL TUI. */

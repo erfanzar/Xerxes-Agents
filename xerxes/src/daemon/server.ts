@@ -11314,6 +11314,9 @@ export class DaemonServer {
       pid: typeof status.pid === "number" ? status.pid : process.pid,
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
+      // Lets a client that installs remote runtimes see a newer release and
+      // leave it running instead of replacing it with its own older one.
+      daemon_version: XERXES_VERSION,
       channels: Array.isArray(status.channels) ? status.channels : [],
       channels_available: status.channels_available === true,
       channels_configured: status.channels_configured === true,

@@ -109,6 +109,43 @@ if [ "$1" = run ]; then mkdir -p xerxes/dist/ui; touch xerxes/dist/cli.js xerxes
 it('passes a confirmed restart-now to the remote runtime preparation', () => {
   expect(remoteBootstrapScript('/work', 'daemon', { force: true })).toContain('{ force: true }')
   expect(remoteBootstrapScript('/work', 'daemon')).toContain('{ force: false }')
+  expect(remoteBootstrapScript('/work', 'daemon', { version: '0.8.11' })).toContain('{ force: false, version: "0.8.11" }')
+  // Anything that is not a plain x.y.z release never reaches the shell.
+  const hostile = remoteBootstrapScript('/work', 'daemon', { version: "1.0.0'; touch /tmp/pwned" })
+  expect(hostile).not.toContain('pwned')
+  expect(hostile).toContain('{ force: false }')
+})
+
+it("installs the client's own release tag, and main only when that tag does not exist", async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-pinned-'))
+  const bin = join(root, 'bin'), home = join(root, 'home'), project = join(root, 'project')
+  await Promise.all([mkdir(bin), mkdir(home), mkdir(project)])
+  const tagged = 'd'.repeat(40), peeled = 'e'.repeat(40), main = 'f'.repeat(40)
+  const executable = async (name: string, content: string) => { const file = join(bin, name); await Bun.write(file, '#!/bin/sh\nset -eu\n' + content); await chmod(file, 0o755) }
+  // An annotated tag lists both the tag object and the commit it points at ("^{}").
+  await executable('git', `if [ "$1" = ls-remote ]; then
+  case "$3" in
+    refs/tags/v0.8.11) printf '${tagged}\\trefs/tags/v0.8.11\\n${peeled}\\trefs/tags/v0.8.11^{}\\n' ;;
+    refs/tags/*) ;;
+    refs/heads/main) printf '${main}\\trefs/heads/main\\n' ;;
+  esac
+fi
+`)
+  await executable('bun', `if [ "$1" = -e ]; then case "$2" in *renameSync*) exec "$REAL_BUN" "$@" ;; esac; fi
+if [ "$1" = run ]; then mkdir -p xerxes/dist/ui; touch xerxes/dist/cli.js xerxes/dist/ui/entry.js; fi
+`)
+  const run = async (version?: string) => {
+    const child = Bun.spawn(['sh', '-c', remoteBootstrapScript(project, 'tui', version === undefined ? {} : { version })], { env: { ...process.env, HOME: home, PATH: bin + ':/usr/bin:/bin', REAL_BUN: process.execPath }, stdout: 'pipe', stderr: 'pipe' })
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0)
+  }
+  const runtime = join(home, '.xerxes/remote-runtime')
+  try {
+    await run('0.8.11')
+    expect(await Bun.file(join(runtime, peeled, '.ready')).exists()).toBe(true)
+    expect(await Bun.file(join(runtime, main, '.ready')).exists()).toBe(false)
+    await run('0.0.1')
+    expect(await Bun.file(join(runtime, main, '.ready')).exists()).toBe(true)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 // Exercise the actual OS lock and shell bootstrap, including crash boundaries.

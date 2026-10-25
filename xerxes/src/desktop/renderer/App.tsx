@@ -340,7 +340,11 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
           <button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button>
           <button className="runtime-popover__danger" disabled={busy} onClick={() => void store.restartRuntimeNow()}>Restart now</button>
         </div>
-      </> : snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
+      </> : snap.daemonWarning?.startsWith('The app is older')
+        // The runtime is newer than this app: restarting it cannot help (the
+        // app would refuse, or reinstall the same newer runtime). Update the app.
+        ? <><p>{isVscodeHost() ? 'Update the Xerxes extension, then reload the window. Your tasks keep running meanwhile.' : 'Update this app to match the runtime. Your tasks keep running meanwhile.'}</p>{!isVscodeHost() && <div className="runtime-popover__actions"><button disabled={snap.appUpdate?.phase === 'checking' || snap.appUpdate?.phase === 'downloading'} onClick={() => { setExpanded(false); void store.appUpdateAction('check') }}>Update the app</button></div>}</>
+        : snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
       {!snap.daemonWarning && snap.connection !== 'online' && <button onClick={() => { setExpanded(false); navigate('workspace') }}>Open workspace settings</button>}
     </div>, document.body)}
   </>

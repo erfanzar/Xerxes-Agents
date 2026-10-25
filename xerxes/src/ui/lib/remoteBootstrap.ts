@@ -4,9 +4,17 @@
 import { prepareManagedRuntime } from './managedRuntime.js'
 import { remoteBunInstallScript } from './remoteBun.js'
 
-/** Executed by SSH on the selected host. Installs only in a dedicated user-owned directory. */
-export function remoteBootstrapScript(workspacePath: string, mode: 'tui' | 'daemon' = 'tui', options: { force?: boolean } = {}): string {
+/**
+ * Executed by SSH on the selected host. Installs only in a dedicated user-owned directory.
+ *
+ * `version` is the calling client's own release. The host then installs the
+ * matching `v<version>` tag, so an app never puts a runtime newer than itself on
+ * a host (which it could then neither use fully nor restart). Without a version,
+ * or when that tag does not exist (a development build), it installs `main`.
+ */
+export function remoteBootstrapScript(workspacePath: string, mode: 'tui' | 'daemon' = 'tui', options: { force?: boolean; version?: string } = {}): string {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+  const version = options.version !== undefined && /^\d+\.\d+\.\d+$/.test(options.version) ? options.version : ''
   const prepare = `
 const { dirname, resolve } = await import('node:path');
 const { pathToFileURL } = await import('node:url');
@@ -40,10 +48,11 @@ const result = await prepareManagedRuntime(
       } catch { return undefined; }
     },
   },
-  { force: ${options.force === true ? 'true' : 'false'} },
+  { force: ${options.force === true ? 'true' : 'false'}${version === '' ? '' : `, version: ${JSON.stringify(version)}`} },
 );
 console.log('XERXES_REMOTE_READY ' + JSON.stringify({ projectDir, socketPath: daemonPaths(projectDir).socketPath, expectedBuildId: expectedDaemonBuildId, busy: result.busy,
-  ...(result.blockers ? { blockers: result.blockers } : {}), ...(result.waitingForGoalRound ? { waitingForGoalRound: true } : {}) }));
+  ...(result.blockers ? { blockers: result.blockers } : {}), ...(result.waitingForGoalRound ? { waitingForGoalRound: true } : {}),
+  ...(result.newerRuntime ? { newerRuntime: true } : {}) }));
 process.exit(0);
 `
   // An older bootstrap may publish concurrently during the one-time lock migration.
@@ -128,7 +137,18 @@ fail() { printf '\\nXerxes remote setup failed: %s\\n' "$*" >&2; printf '%s\\n' 
 printf 'Xerxes · checking remote installation…\\n'
 command -v git >/dev/null 2>&1 || fail 'Install Git on this host, then reconnect.'
 export GIT_TERMINAL_PROMPT=0
-revision=$(git ls-remote "$repo" refs/heads/main 2>/dev/null) || fail 'Cannot check GitHub for updates. Check network access and reconnect.'
+pinned=${quote(version === '' ? '' : `v${version}`)}
+revision=''
+if [ -n "$pinned" ]; then
+  # The client's own release. An annotated tag lists its commit as "<tag>^{}".
+  refs=$(git ls-remote "$repo" "refs/tags/$pinned" "refs/tags/$pinned^{}" 2>/dev/null) || fail 'Cannot check GitHub for updates. Check network access and reconnect.'
+  peeled=$(printf '%s\\n' "$refs" | awk 'index($2, "^{}") { print $1; exit }')
+  plain=$(printf '%s\\n' "$refs" | awk 'NF { print $1; exit }')
+  revision=\${peeled:-$plain}
+fi
+if [ -z "$revision" ]; then
+  revision=$(git ls-remote "$repo" refs/heads/main 2>/dev/null) || fail 'Cannot check GitHub for updates. Check network access and reconnect.'
+fi
 revision=\${revision%%[[:space:]]*}
 case "$revision" in ''|*[!0-9a-f]*) fail 'GitHub returned an invalid revision.' ;; esac
 [ \${#revision} -eq 40 ] || fail 'GitHub returned an invalid revision length.'
