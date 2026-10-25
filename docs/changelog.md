@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.10 — 2026-10-25
+
+- **The chat right-click menu works again.** Copy ID, Delete and the other items in a chat's right-click menu sat underneath the menu's own invisible dismiss layer, so every click only closed the menu. The menu now sits above it, in the desktop app and the VS Code extension.
+- **Delete asks inside the menu.** Deleting a chat now confirms in the menu itself ("Delete permanently" / Cancel) instead of a browser dialog, which VS Code webviews block silently. Copy ID uses the system clipboard API, with the old copy method as a fallback.
+- **Release package restored.** 0.8.9 shipped without its `.tgz` because a test used a fixed date that passed on release day; that test now uses a far-future date.
+
 ## 0.8.9 — 2026-10-25
 
 - **XERXES Watch.** The Hub owner can watch individual tasks from the desktop XERXES tab or the phone. A watcher on the Hub follows every step of a watched task without using a model: edits, tool calls and failures, test runs and failing test names, errors, running agents and context use. Live cards show it as it happens.
