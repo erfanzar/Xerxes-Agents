@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.11 — 2026-10-25
+
+- **Remote runtimes match the app that installs them.** Setting up or updating a runtime on an SSH host used to install whatever was newest on GitHub `main`, so an app could put a runtime newer than itself on a host, and then could neither use it fully nor restart it. The app and the terminal UI now install their own release tag (`v<version>`); only a build with no matching tag (a development build) still uses `main`.
+- **A newer runtime is never downgraded.** `runtime.status` now reports `daemon_version`. A client that finds a host already running a newer release leaves it running instead of replacing it with its own older one, so two clients of different releases cannot restart a host back and forth.
+- **The runtime panel offers the action that works.** When the runtime is newer than the app, the panel now offers "Update the app" (in VS Code: update the extension and reload) instead of a "Restart workspace runtime" button that could never succeed.
+
 ## 0.8.10 — 2026-10-25
 
 - **The chat right-click menu works again.** Copy ID, Delete and the other items in a chat's right-click menu sat underneath the menu's own invisible dismiss layer, so every click only closed the menu. The menu now sits above it, in the desktop app and the VS Code extension.
