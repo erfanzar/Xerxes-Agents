@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.9 — 2026-10-25
+
+- **XERXES Watch.** The Hub owner can watch individual tasks from the desktop XERXES tab or the phone. A watcher on the Hub follows every step of a watched task without using a model: edits, tool calls and failures, test runs and failing test names, errors, running agents and context use. Live cards show it as it happens.
+- **XERXES wakes only when a run looks wrong.** A repeating call, a stall, the same test failing three times, a burst of errors, nearly full context or a blocked goal wakes XERXES with everything that happened since its last look. An optional review every 5 to 60 minutes also judges whether the task drifted. Wakes are bounded per task, per problem and Hub-wide, and XERXES has a default token window when none is configured (`XERXES_HUB_WATCH_STALL_MS` sets the stall threshold).
+- **Wake-ups stay narrow.** XERXES sees tool names and argument names, never argument values. A wake-up acts without Confirm only on the task it woke for, and only when the same owner's Autopilot is on for that workspace; anything else becomes a Confirm card. Phone notifications carry no task names.
+- **macOS permissions check in the desktop app.** At start the app reads Accessibility, Screen Recording and Microphone without prompting, and offers to open the right System Settings page when computer use is missing one. Settings → macOS permissions lists each permission with Open Settings, Request where macOS allows it, Re-check and Relaunch. Computer-use errors now name the app that runs Xerxes instead of "the terminal app".
+
 ## 0.8.8 — 2026-10-24
 
 - **XERXES Autopilot.** The Hub owner can turn Autopilot on per workspace from the desktop XERXES tab or the phone, with an optional standing instruction and expiry. XERXES then wakes on its own when a task asks a question, waits for a person, fails, gets blocked or finishes its goal, and checks in every 15 minutes on workspaces with a running task (`XERXES_HUB_AUTOPILOT_CHECKIN_MS`, 0 turns it off).
