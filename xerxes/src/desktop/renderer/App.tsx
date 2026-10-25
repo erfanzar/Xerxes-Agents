@@ -38,6 +38,7 @@ import { AgentsCard } from './AgentsCard.js'
 import { SupervisorPage } from './SupervisorPage.js'
 import { parseGoal } from './goalText.js'
 import { AppUpdatePrompt } from './AppUpdatePrompt.js'
+import { MacPermissionsNotice } from './MacPermissionsPanel.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
 // drawer (DesktopPanels) can import it without a cycle through App.
 export { SessionDiagnostics } from './SessionDiagnostics.js'
@@ -243,6 +244,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       <Announcer snap={snap} />
       <SettingsModal snap={snap} />
       <AppUpdatePrompt update={snap.appUpdate} />
+      <MacPermissionsNotice />
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
           focus effect) must never share a fiber with a closed render. */}

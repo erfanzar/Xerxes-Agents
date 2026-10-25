@@ -52,6 +52,8 @@ test('computer_use doctor check reports platform fit, missing tools, and permiss
   const ready = checkComputerUse({ platform: 'darwin', fileExists: () => true })
   expect(ready.severity).toBe('ok')
   expect(ready.message).toContain('Accessibility')
+  expect(ready.message).toContain('Xerxes Agents, VS Code, or your terminal app')
+  expect(ready.message).toContain('Privacy & Security')
 })
 
 test('Bun doctor warns for absent optional setup', () => {

@@ -12,6 +12,10 @@ import {
   COCKPIT_CHANNEL_PREFIX, COCKPIT_PROGRESS_EVENT, COCKPIT_SOCKET_EVENT, asCockpitProgress, asHubSocketEvent, isCockpitAction,
   type CockpitProgress, type HubSocketEvent,
 } from './hubShared.js'
+import {
+  MAC_PERMISSIONS_CHANNEL_PREFIX, MAC_PERMISSIONS_STATE_EVENT, asMacPermissionsState, isMacPermissionAction,
+  type MacPermissionsState,
+} from './macPermissionsShared.js'
 
 /** How the bridge reaches its host: request/response by channel, and pushed events. */
 export interface BridgeTransport {
@@ -139,6 +143,30 @@ export function createBridge(transport: BridgeTransport) {
     }
     // One channel per action: hub.cockpit.status, hub.cockpit.link, hub.cockpit.pair, ...
     return transport.invoke(COCKPIT_CHANNEL_PREFIX + action, clean)
+  },
+  /**
+   * macOS privacy permissions (Settings → macOS permissions and the startup
+   * notice). Only a permission id crosses; main owns every System Settings URL.
+   */
+  macPermissions(action: unknown, params: unknown = {}): Promise<unknown> {
+    if (!isMacPermissionAction(action)) return Promise.reject(new TypeError('Unknown permissions action'))
+    let clean: Record<string, unknown>
+    try {
+      clean = cleanParams(params)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    return transport.invoke(MAC_PERMISSIONS_CHANNEL_PREFIX + action, clean)
+  },
+  /** The permissions state after a change (focus re-check, another window's action). */
+  onMacPermissions(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (value: unknown): void => {
+      const state = asMacPermissionsState(value)
+      if (state === undefined) return
+      try { (handler as (state: MacPermissionsState) => void)(state) } catch { /* a renderer fault must not break the bridge */ }
+    }
+    return transport.on(MAC_PERMISSIONS_STATE_EVENT, listener)
   },
   /** Frames and state changes of the Hub socket that main bridges for this page. */
   onHubSocket(handler: unknown): () => void {

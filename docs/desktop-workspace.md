@@ -59,6 +59,14 @@ bun run --cwd xerxes desktop
 
 The model is optional; `whisper-1` is the default. Recording is limited to two minutes and 8 MiB. Stop recording to transcribe, or cancel to discard it. Audio goes to the configured endpoint only after recording stops. Chat-provider credentials are not silently reused.
 
+## macOS permissions
+
+Computer use needs **Accessibility** to post clicks and keystrokes and **Screen Recording** to take screenshots. macOS gives these permissions to the app that runs Xerxes. When the desktop app starts the runtime, that app is **Xerxes Agents** (a source launch shows up as **Electron**). When the VS Code extension started the shared runtime, VS Code needs the permissions. When you start Xerxes from a terminal, that terminal app needs them.
+
+At start the app reads these permissions silently; it never makes macOS prompt you. If Accessibility or Screen Recording is off, a notice offers **Open settings**, which goes straight to the matching System Settings › Privacy & Security pane. The notice also offers **Relaunch now**, because macOS applies a new Screen Recording grant only after a relaunch, plus **Not now** and **Don't remind me**. The opt-out is stored in `~/.xerxes/desktop-permissions.json`. The app checks again when its window regains focus, at most once every five seconds, so coming back from System Settings updates the notice.
+
+**Settings › macOS permissions** has one row each for Accessibility, Screen Recording, Automation, App Management, Microphone (dictation) and Full Disk Access. Each row shows the status and what the permission is for, with **Open Settings** and a **Re-check** button. **Request** shows macOS's own prompt and is offered only where an app can ask: Accessibility, and Screen Recording or Microphone before you have first answered. macOS has no side-effect-free way to read Automation, App Management or Full Disk Access, so those rows say *Cannot be checked* and explain why. Xerxes does not probe them by controlling other apps or reading protected files. The app relaunches only when you click a relaunch button; relaunching does not restart the runtime.
+
 ## Verification scope
 
 Automated desktop tests cover transport, session replay, RPC errors, specialist data, diff indexing, remote address validation, subprocess cancellation/timeouts, and transcription input validation. The local walkthrough uses an isolated real daemon. Live provider generation, remote-host setup, and microphone transcription also depend on external configuration and must be exercised in that configured environment.

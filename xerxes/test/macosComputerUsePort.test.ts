@@ -248,6 +248,10 @@ test('backend failures surface permission hints, and capture failure raises unav
   const click = await port.click({ button: 'left', captureAfter: false, clickCount: 1, x: 1, y: 1 })
   expect(click.ok).toBe(false)
   expect(click.message).toContain('Privacy & Security')
+  // The grant belongs to the app that runs Xerxes, not always a terminal.
+  expect(click.message).toContain('Xerxes Agents for the desktop app')
+  expect(click.message).toContain('VS Code')
+  expect(click.message).toContain('relaunch that app')
 
   await expect(port.capture({ mode: 'vision' })).rejects.toBeInstanceOf(ComputerUseUnavailableError)
 })

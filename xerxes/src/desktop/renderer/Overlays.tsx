@@ -32,6 +32,7 @@ import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { Icon, type IconName } from './Icon.js'
 import { isVscodeHost } from './host.js'
 import { HubPhoneCard } from './HubPhonePanel.js'
+import { MacPermissionsCard } from './MacPermissionsPanel.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'terminals', label: 'Terminals' },
   { id: 'lsp', label: 'Language servers' },
   { id: 'hub', label: 'Hub & phone' },
+  { id: 'macos', label: 'macOS permissions' },
 ]
 
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -102,6 +104,7 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
           {snap.settingsTab === 'terminals' && <TerminalsCard snap={snap} />}
           {snap.settingsTab === 'lsp' && <LspCard snap={snap} />}
           {snap.settingsTab === 'hub' && <HubPhoneCard />}
+          {snap.settingsTab === 'macos' && <MacPermissionsCard />}
         </div>
       </div>
     </div>

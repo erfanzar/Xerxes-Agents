@@ -13,6 +13,7 @@
 import type { WorkspaceContext } from '../main/contextNavigation.js'
 import type { ReflectionNotice } from './learning.js'
 import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
+import type { MacPermissionAction, MacPermissionsState } from '../macPermissionsShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -39,6 +40,9 @@ export interface XerxesBridge {
   appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
   onAppUpdate?(handler: (state: unknown) => void): () => void
   onProviderRelay?(handler: () => void): () => void
+  /** macOS privacy permissions in the main process (see main/macPermissions.ts); desktop app only. */
+  macPermissions?(action: MacPermissionAction, params?: Record<string, unknown>): Promise<unknown>
+  onMacPermissions?(handler: (state: MacPermissionsState) => void): () => void
   /** VS Code host only. */
   openInEditor?(path: string, line?: number): Promise<boolean>
   openDiff?(path: string): Promise<boolean>
@@ -458,7 +462,7 @@ export interface SessionSearchStats {
 
 // ── Settings ────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'general' | 'models' | 'intelligence' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp' | 'hub'
+export type SettingsTab = 'general' | 'models' | 'intelligence' | 'agents' | 'permissions' | 'mcp' | 'channels' | 'terminals' | 'lsp' | 'hub' | 'macos'
 
 /** One MCP server's redacted status, straight from the daemon wire. */
 export interface McpServerStatus {

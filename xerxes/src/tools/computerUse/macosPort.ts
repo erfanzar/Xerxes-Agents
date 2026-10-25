@@ -76,7 +76,7 @@ const PERMISSION_PROBLEM = /assistive|accessibility|screen recording|not permitt
 // Appended to any error that looks permission-related: the only fix is a
 // user grant in System Settings, so the hint names the exact pane.
 const PERMISSION_HINT =
-  'macOS blocked the action. Grant Screen Recording and Accessibility to the terminal app in System Settings > Privacy & Security, then retry.'
+  'macOS blocked the action. Grant Screen Recording and Accessibility to the app that runs Xerxes (Xerxes Agents for the desktop app, VS Code for the extension, or your terminal app) in System Settings > Privacy & Security, then relaunch that app and retry.'
 
 /** Result of one spawned system command. */
 export interface MacOSCommandResult {

@@ -146,7 +146,7 @@ export function checkComputerUse(options: DoctorOptions = {}): Diagnosis {
   return diagnosis(
     'computer-use',
     'ok',
-    'computer_use macOS backend available by default; grant Screen Recording and Accessibility to the terminal app',
+    'computer_use macOS backend available by default; grant Screen Recording and Accessibility to the app that runs Xerxes (Xerxes Agents, VS Code, or your terminal app) in System Settings > Privacy & Security',
   )
 }
 

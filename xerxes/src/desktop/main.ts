@@ -44,6 +44,9 @@ import { nodeHubHttp } from './main/hubHttp.js'
 import { connectHubSocket } from './main/hubSocket.js'
 import { createHubStorage } from './main/hubStorage.js'
 import { createNodeShareDeps, shareRemoteWorkspace, type HubShareDeps, type HubShareHandle } from './main/hubShare.js'
+import { createMacPermissions, registerMacPermissionsIpc } from './main/macPermissions.js'
+import { electronMacPermissionsPort } from './main/macPermissionsPort.js'
+import { MAC_PERMISSIONS_STATE_EVENT } from './macPermissionsShared.js'
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -911,6 +914,20 @@ void app.whenReady().then(async () => {
     },
   })
   app.on('will-quit', () => hubCockpit.dispose())
+  // macOS privacy permissions for computer use and dictation. Read silently at
+  // start (no prompt), again when a window regains focus (throttled, so coming
+  // back from System Settings updates the notice), and pushed to every page.
+  const macPermissions = createMacPermissions(electronMacPermissionsPort({ settingsDirectory: xerxesHome(), appName: APP_NAME }))
+  registerMacPermissionsIpc(ipcMain, macPermissions)
+  macPermissions.onChange(state => {
+    for (const contents of webContents.getAllWebContents()) {
+      if (!contents.isDestroyed()) contents.send(MAC_PERMISSIONS_STATE_EVENT, state)
+    }
+  })
+  if (process.platform === 'darwin') {
+    macPermissions.check()
+    app.on('browser-window-focus', () => { macPermissions.recheckOnFocus() })
+  }
   // The dock/taskbar icon is the phoenix mark; on macOS the running app's
   // dock tile only changes through app.dock.
   const icon = appIcon()
