@@ -5,7 +5,7 @@ import { isRecord, type HubEvent, type WorkspaceHealth } from '../hub/protocol.j
 import { asActor } from './hubConnection.js'
 import type {
   AutopilotPerson, AutopilotRow, AutopilotView, EffortOption, MachineView, ModelChoice, ModelOption, PresenceChip, ProfileOption, SupervisorChoice, SupervisorConfigStatus, SupervisorConfigView,
-  SupervisorOptions, TaskSummary, WorkspaceView,
+  SupervisorOptions, TaskSummary, WatchAnomaly, WatchAnomalyKind, WatchRow, WatchStats, WatchTests, WatchView, WorkspaceView,
 } from './hubTypes.js'
 import { arr, clip, isoOr, num, rec, str } from './parse.js'
 import { toolSummary, userInputOf, type Block, type FoldInput } from './sessionFold.js'
@@ -369,6 +369,160 @@ export function parseAutopilotView(raw: unknown): AutopilotView | undefined {
     rows.push(row)
   }
   return { canEdit: r.can_edit, workspaces: rows }
+}
+
+// ── watch ─────────────────────────────────────────────────────────────
+
+const WATCH_ANOMALY_KINDS: ReadonlySet<string> = new Set<WatchAnomalyKind>(['loop', 'stall', 'test_fail_repeat', 'error_burst', 'context_high', 'goal_blocked'])
+
+/** A finite, non-negative number, or undefined. Counts are never negative. */
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** A count, or null for an explicit JSON null. Anything else is malformed (undefined). */
+function countOrNull(value: unknown): number | null | undefined {
+  return value === null ? null : count(value)
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseWatchTests(raw: unknown): WatchTests | undefined {
+  if (!isObject(raw)) return undefined
+  const runs = count(raw.runs)
+  const passed = count(raw.passed)
+  const failed = count(raw.failed)
+  if (runs === undefined || passed === undefined || failed === undefined) return undefined
+  if (raw.last !== null && raw.last !== 'pass' && raw.last !== 'fail') return undefined
+  if (!Array.isArray(raw.last_failing) || !raw.last_failing.every((name): name is string => typeof name === 'string')) return undefined
+  return { runs, passed, failed, last: raw.last, lastFailing: raw.last_failing }
+}
+
+function parseWatchAnomaly(raw: unknown): WatchAnomaly | undefined {
+  if (!isObject(raw)) return undefined
+  const kind = raw.kind
+  if (typeof kind !== 'string' || !WATCH_ANOMALY_KINDS.has(kind)) return undefined
+  const since = isoOrNull(raw.since)
+  if (typeof since !== 'string' || typeof raw.detail !== 'string') return undefined
+  return { kind: kind as WatchAnomalyKind, since, detail: raw.detail }
+}
+
+function parseWatchStats(raw: unknown): WatchStats | undefined {
+  if (!isObject(raw)) return undefined
+  const since = isoOrNull(raw.since)
+  const lastActivityAt = isoOrNull(raw.last_activity_at)
+  if (typeof since !== 'string' || lastActivityAt === undefined) return undefined
+  if (typeof raw.status !== 'string' || typeof raw.summary_line !== 'string') return undefined
+  const turns = count(raw.turns)
+  const toolCalls = count(raw.tool_calls)
+  const toolFailures = count(raw.tool_failures)
+  const errors = count(raw.errors)
+  const edits = count(raw.edits)
+  const filesTouched = count(raw.files_touched)
+  if (turns === undefined || toolCalls === undefined || toolFailures === undefined || errors === undefined || edits === undefined || filesTouched === undefined) return undefined
+  const tests = parseWatchTests(raw.tests)
+  if (tests === undefined) return undefined
+  let repeatedCall: WatchStats['repeatedCall'] = null
+  if (raw.repeated_call !== null) {
+    if (!isObject(raw.repeated_call)) return undefined
+    const repeats = count(raw.repeated_call.count)
+    if (typeof raw.repeated_call.name !== 'string' || repeats === undefined) return undefined
+    repeatedCall = { name: raw.repeated_call.name, count: repeats }
+  }
+  const contextTokens = countOrNull(raw.context_tokens)
+  const maxContext = countOrNull(raw.max_context)
+  const totalTokens = countOrNull(raw.total_tokens)
+  if (contextTokens === undefined || maxContext === undefined || totalTokens === undefined) return undefined
+  if (!isObject(raw.agents)) return undefined
+  const running = count(raw.agents.running)
+  const total = count(raw.agents.total)
+  if (running === undefined || total === undefined) return undefined
+  if (!Array.isArray(raw.anomalies)) return undefined
+  const anomalies: WatchAnomaly[] = []
+  for (const item of raw.anomalies) {
+    const anomaly = parseWatchAnomaly(item)
+    if (!anomaly) return undefined
+    anomalies.push(anomaly)
+  }
+  if (!isObject(raw.reviews)) return undefined
+  const wakesThisHour = count(raw.reviews.wakes_this_hour)
+  const lastWakeAt = isoOrNull(raw.reviews.last_wake_at)
+  if (wakesThisHour === undefined || lastWakeAt === undefined) return undefined
+  return {
+    since,
+    lastActivityAt,
+    status: raw.status,
+    turns,
+    toolCalls,
+    toolFailures,
+    errors,
+    edits,
+    filesTouched,
+    tests,
+    repeatedCall,
+    contextTokens,
+    maxContext,
+    totalTokens,
+    agents: { running, total },
+    anomalies,
+    reviews: { wakesThisHour, lastWakeAt },
+    summaryLine: raw.summary_line,
+  }
+}
+
+/**
+ * One row of `supervisor.watch.list`, `supervisor.watch.set` or the
+ * `supervisor.watch_update` event. Strict: a row with a missing or wrongly
+ * typed field, an unknown anomaly kind or a date that does not parse is
+ * rejected whole, because a guessed `active` or a dropped anomaly would show a
+ * run as healthy or watched when the Hub says otherwise. `stats` may be null.
+ */
+export function parseWatchRow(raw: unknown): WatchRow | undefined {
+  if (!isObject(raw)) return undefined
+  const workspaceId = str(raw.workspace_id)
+  const taskId = str(raw.task_id)
+  if (!workspaceId || !taskId || typeof raw.title !== 'string' || typeof raw.workspace_label !== 'string') return undefined
+  if (typeof raw.enabled !== 'boolean' || typeof raw.active !== 'boolean') return undefined
+  const interval = raw.review_interval_minutes
+  if (interval !== null && !(typeof interval === 'number' && Number.isInteger(interval) && interval > 0)) return undefined
+  const expiresAt = isoOrNull(raw.expires_at)
+  const updatedAt = isoOrNull(raw.updated_at)
+  const enabledBy = parseAutopilotPerson(raw.enabled_by)
+  if (expiresAt === undefined || updatedAt === undefined || enabledBy === undefined) return undefined
+  let stats: WatchStats | null = null
+  if (raw.stats !== null) {
+    const parsed = parseWatchStats(raw.stats)
+    if (!parsed) return undefined
+    stats = parsed
+  }
+  return {
+    workspaceId,
+    taskId,
+    title: raw.title === '' ? taskId : raw.title,
+    workspaceLabel: raw.workspace_label === '' ? workspaceId : raw.workspace_label,
+    enabled: raw.enabled,
+    active: raw.active,
+    reviewIntervalMinutes: interval,
+    expiresAt,
+    enabledBy,
+    updatedAt,
+    stats,
+  }
+}
+
+/** `supervisor.watch.list`. Any malformed row or a missing `can_edit` rejects the whole answer; a repeated task is malformed. */
+export function parseWatchView(raw: unknown): WatchView | undefined {
+  if (!isObject(raw)) return undefined
+  if (typeof raw.can_edit !== 'boolean' || !Array.isArray(raw.watches)) return undefined
+  const rows: WatchRow[] = []
+  for (const item of raw.watches) {
+    const row = parseWatchRow(item)
+    if (!row || rows.some(known => known.workspaceId === row.workspaceId && known.taskId === row.taskId)) return undefined
+    rows.push(row)
+  }
+  return { canEdit: raw.can_edit, watches: rows }
 }
 
 // ── machines and the supervisor's model ───────────────────────────────

@@ -124,11 +124,21 @@ export function createModelDigestSummarizer(model: SupervisorModelPort, promptVe
   }
 }
 
-/** A turn the Hub started by itself (XERXES Autopilot), not a person's message. */
+/**
+ * A turn the Hub started by itself, not a person's message: an XERXES Autopilot
+ * wake-up (`autopilot`) or a Watch wake-up (`watch`). Both are Hub triggers for
+ * the action rules; a `watch` turn only auto-runs where Autopilot is active.
+ */
 export interface SupervisorTurnTrigger {
-  readonly kind: 'autopilot'
-  readonly text: string
+  readonly kind: 'autopilot' | 'watch'
+  /** Hub-authored wake text. A function is called only when the turn actually starts. */
+  readonly text: string | (() => string)
+  /** The one task this wake is about. Only actions on it may run without a Confirm tap. */
+  readonly target?: { readonly workspaceId: string; readonly sessionId: string }
 }
+
+/** Default spend bound applied when the Hub wires the supervisor: tokens per 24-hour window. */
+export const DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW = 2_000_000
 
 export type SupervisorStop = 'completed' | 'tool_cap' | 'denied' | 'quota' | 'timeout' | 'cancelled' | 'model_error' | 'gone'
 
@@ -168,7 +178,10 @@ function clip(text: string, max: number): string {
 }
 
 function toChat(message: ThreadMessage): ChatMessage {
-  if (message.role === 'xerxes') return { role: 'assistant', content: message.text }
+  // A reply written in a Hub wake turn may quote task text: it comes back fenced.
+  if (message.role === 'xerxes') {
+    return { role: 'assistant', content: message.origin === 'wake' ? fenceUntrusted('earlier_wake_reply', message.text) : message.text }
+  }
   if (message.role === 'system') return { role: 'user', content: fenceUntrusted('thread_notice', message.text) }
   return { role: 'user', content: `${message.authorName ?? 'Someone'}${message.source === 'voice' ? ' (spoken)' : ''}: ${message.text}` }
 }
@@ -286,12 +299,24 @@ export class SupervisorRunner {
       const state: SupervisorTurnState = {
         threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined,
         ...(input.trigger === undefined ? {} : { trigger: input.trigger.kind }),
-        // Autopilot runs the requester's own actions only when nobody else spoke in this context window.
-        othersInContext: stored.some(message => message.role === 'user' && message.authorId !== requester.id),
+        ...(input.trigger?.target === undefined ? {} : { target: input.trigger.target }),
+        // Autopilot runs the requester's own actions only when nobody else spoke in this context window,
+        // and no reply from a wake turn (which may quote task text) is in it either.
+        othersInContext: stored.some(message => (message.role === 'user' && message.authorId !== requester.id)
+          || (message.role === 'xerxes' && message.origin === 'wake')),
       }
       const messages: ChatMessage[] = stored.map(toChat)
       // Hub-authored wake text; anything copied from a task inside it is already fenced.
-      if (input.trigger !== undefined) messages.push({ role: 'user', content: input.trigger.text })
+      if (input.trigger !== undefined) {
+        let text: string
+        try {
+          text = typeof input.trigger.text === 'function' ? input.trigger.text() : input.trigger.text
+        } catch (error) {
+          this.options.onError?.(error, 'supervisor wake text')
+          return this.finishWith(threadId, requester, 'model_error', counts, 'the Hub could not build the wake-up message')
+        }
+        messages.push({ role: 'user', content: text })
+      }
       // The person's message this turn answers; voice uses it to match a reply to its submission.
       const inReplyTo = stored.filter(message => message.role === 'user').at(-1)?.id
       const tools = registry.definitions()
@@ -323,7 +348,9 @@ export class SupervisorRunner {
 
         if (response.toolCalls.length === 0) {
           const text = clip(response.text.trim(), MAX_MESSAGE_CHARS)
-          const { message } = threads.append({ threadId, role: 'xerxes', text: text === '' ? 'I have nothing to add.' : text })
+          const { message } = threads.append({
+            threadId, role: 'xerxes', text: text === '' ? 'I have nothing to add.' : text, ...(input.trigger === undefined ? {} : { origin: 'wake' as const }),
+          })
           threads.emit(threadId, 'supervisor.thread_event', { message: messageToWire(message) })
           threads.publishReply(threadId, { id: message.id, text: message.text, ...(inReplyTo === undefined ? {} : { inReplyTo }) })
           return { stop: 'completed', ...counts, reply: message }

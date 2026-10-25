@@ -23,6 +23,7 @@ export function stubController(overrides: Partial<HubController> = {}): HubContr
     supervisorOpen: noop, supervisorSend: async () => true, supervisorRespond: noop,
     machinesList: noop, supervisorConfigGet: noop, supervisorConfigOptions: noop, supervisorConfigSet: async () => true,
     loadAutopilot: noop, setAutopilot: async () => true, autopilotThreadOpen: noop, autopilotThreadRespond: noop,
+    loadWatches: noop, setWatch: async () => true,
     ...overrides,
   }
 }

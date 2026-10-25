@@ -79,6 +79,8 @@ export interface ThreadMessage {
   readonly causalMessageId?: string
   /** When present, only these principals can read the message. */
   readonly audience?: readonly string[]
+  /** `wake`: an XERXES reply written in a Hub-started (Autopilot or Watch) turn. It may quote task text. */
+  readonly origin?: 'wake'
 }
 
 export interface ThreadParticipant {
@@ -115,7 +117,7 @@ interface ParticipantRow { thread_id: string; principal_id: string; display_name
 interface MessageRow {
   seq: number; id: string; thread_id: string; role: string; text: string; author_id: string | null; author_name: string | null
   device_id: string | null; source: string; client_message_id: string | null; causal_message_id: string | null
-  audience: string | null; created_at: number
+  audience: string | null; created_at: number; origin?: string | null
 }
 
 function toThread(row: ThreadRow): ThreadRecord {
@@ -143,6 +145,7 @@ function toMessage(row: MessageRow): ThreadMessage {
     ...(row.client_message_id === null ? {} : { clientMessageId: row.client_message_id }),
     ...(row.causal_message_id === null ? {} : { causalMessageId: row.causal_message_id }),
     ...(row.audience === null ? {} : { audience: JSON.parse(row.audience) as string[] }),
+    ...(row.origin === 'wake' ? { origin: 'wake' as const } : {}),
   }
 }
 
@@ -200,6 +203,9 @@ export class SupervisorThreads {
         ON hub_supervisor_messages(thread_id, author_id, client_message_id) WHERE client_message_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS hub_supervisor_messages_thread ON hub_supervisor_messages(thread_id, seq);
     `)
+    // Databases created before Watch have no `origin` column; add it once.
+    const columns = this.db.query<{ name: string }, []>('PRAGMA table_info(hub_supervisor_messages)').all()
+    if (!columns.some(column => column.name === 'origin')) this.db.exec('ALTER TABLE hub_supervisor_messages ADD COLUMN origin TEXT')
     this.offRevoked = options.identity.onRevoked?.(event => {
       // A revoked person stops narrowing (and receiving) the shared thread. A single revoked device does not remove the person.
       if (event.deviceId === undefined && event.browserSessionId === undefined) this.removePrincipal(event.principalId)
@@ -240,7 +246,8 @@ export class SupervisorThreads {
     this.db.query('INSERT OR IGNORE INTO hub_supervisor_threads (id, kind, owner_id, title, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(id, 'private', ownerId, 'Autopilot', this.clock())
     const thread = this.get(id)!
-    if (thread.kind !== 'private' || thread.ownerId !== ownerId) throw new Error('the Autopilot thread id is taken by another thread')
+    // Never reveal what holds the id: answer as for any thread the caller cannot open.
+    if (thread.kind !== 'private' || thread.ownerId !== ownerId) throw new HubProtocolError('not_found', 'no such thread')
     return thread
   }
 
@@ -356,6 +363,7 @@ export class SupervisorThreads {
     readonly clientMessageId?: string
     readonly causalMessageId?: string
     readonly audience?: readonly string[]
+    readonly origin?: 'wake'
   }): { readonly message: ThreadMessage; readonly duplicate: boolean } {
     const authorId = input.author?.id
     if (input.clientMessageId !== undefined && authorId !== undefined) {
@@ -369,11 +377,11 @@ export class SupervisorThreads {
       && this.db.query<{ n: number }, [string]>('SELECT COUNT(*) AS n FROM hub_supervisor_messages WHERE id = ?').get(input.clientMessageId)?.n === 0
     const id = claimed ? input.clientMessageId! : randomUUID()
     this.db.query(`INSERT INTO hub_supervisor_messages
-      (id, thread_id, role, text, author_id, author_name, device_id, source, client_message_id, causal_message_id, audience, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, thread_id, role, text, author_id, author_name, device_id, source, client_message_id, causal_message_id, audience, created_at, origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, input.threadId, input.role, input.text, authorId ?? null, input.author?.name ?? null, input.author?.deviceId ?? null,
       input.source ?? 'text', input.clientMessageId ?? null, input.causalMessageId ?? null,
-      input.audience === undefined ? null : JSON.stringify(input.audience), this.clock(),
+      input.audience === undefined ? null : JSON.stringify(input.audience), this.clock(), input.origin ?? null,
     )
     const row = this.db.query<MessageRow, [string]>('SELECT * FROM hub_supervisor_messages WHERE id = ?').get(id)!
     return { message: toMessage(row), duplicate: false }

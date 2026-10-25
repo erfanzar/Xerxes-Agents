@@ -10,7 +10,7 @@ import { HubEventStore, type HubEventStoreOptions, type UpstreamEvent as StoredU
 import {
   resolveHubExposure, type HubExposure, type HubExposureConfig, type HubTunnelHandle, type HubTunnelRequest,
 } from './exposure.js'
-import { canSeeWorkspace, grantedSessionIds, type HubGrant } from '../security/principal.js'
+import { canSeeWorkspace, grantedSessionIds, hasScope, type HubGrant } from '../security/principal.js'
 import type { AuthenticatedContext, HubIdentityPort } from './identityPort.js'
 import type { HubHandle, HubWorkspaceHealth } from './lifecycle.js'
 import type { HubPaths } from './paths.js'
@@ -20,7 +20,7 @@ import { HubServer, type HubServerOptions } from './server.js'
 import type { HubSigner } from './signer.js'
 import { SubscriptionManager, type SubscriptionManagerOptions } from './subscriptions.js'
 import {
-  SUPERVISOR_SETUP_HINT, SupervisorGrantOverlay, createHubSupervisor, createUnsupportedSupervisorHandlers,
+  SUPERVISOR_SETUP_HINT, SupervisorGrantOverlay, createHubSupervisor, createUnsupportedSupervisorHandlers, withDefaultSpendBound,
   type HubSupervisor, type PushLike, type SupervisorModelPort, type SupervisorQuotas,
 } from './supervisor/index.js'
 import { SupervisorModelControl } from './supervisor/modelControl.js'
@@ -87,6 +87,11 @@ export interface HubServiceOptions {
   readonly isHubOwner?: (userId: string) => boolean
   /** XERXES Autopilot timings; `checkInMs` comes from XERXES_HUB_AUTOPILOT_CHECKIN_MS (0 disables). */
   readonly autopilot?: { readonly checkInMs?: number; readonly cooldownMs?: number; readonly maxWakesPerHour?: number }
+  /** XERXES Watch timings; `stallMs` comes from XERXES_HUB_WATCH_STALL_MS (at least 60000). */
+  readonly watch?: {
+    readonly stallMs?: number; readonly maxAnomalyWakesPerHour?: number; readonly maxReviewWakesPerHour?: number; readonly updateIntervalMs?: number
+    readonly maxHubWakesPerHour?: number; readonly anomalyCooldownMs?: number
+  }
   /** How often the workspace registry is re-read so added/removed workspaces apply live. 0 disables. Default 3000 ms. */
   readonly registryPollMs?: number
   readonly onError?: (error: unknown, context: string) => void
@@ -390,13 +395,14 @@ export function createHubService(options: HubServiceOptions): HubService {
             },
             backend,
             events: {
-              read: (after, filter, limit, maxBytes) => (store as HubEventStore).read(after, filter, limit, maxBytes),
+              read: (after, filter, limit, maxBytes, through) => (store as HubEventStore).read(after, filter, limit, maxBytes, through),
               watermark: () => (store as HubEventStore).watermark(),
               onEvents: observer => (store as HubEventStore).onEvents(observer),
             },
             model: control.port,
             configStatus: () => control.describe(),
-            ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.quotas === undefined ? {} : { quotas: supervisorConfig.quotas }),
+            // A default token bound per 24 h window applies unless the operator configured one.
+            quotas: withDefaultSpendBound(supervisorConfig?.kind === 'configured' ? supervisorConfig.quotas : undefined),
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.persona === undefined ? {} : { persona: supervisorConfig.persona }),
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.modelSetSessionOnly === undefined ? {} : { modelSetSessionOnly: supervisorConfig.modelSetSessionOnly }),
             ...(options.sendPush === undefined ? {} : { sendPush: options.sendPush }),
@@ -407,6 +413,13 @@ export function createHubService(options: HubServiceOptions): HubService {
               hubServerRef?.sendEventToAll('supervisor.autopilot_changed', recipient =>
                 canSeeWorkspace(recipient.principal, identity.grantsFor(recipient.principal.id), workspaceId, Date.now()) ? payload : undefined)
             },
+            // Only people who can read the watched task get its live card.
+            broadcastWatch: (workspaceId, taskId, payload) => {
+              hubServerRef?.sendEventToAll('supervisor.watch_update', recipient =>
+                hasScope(recipient.principal, identity.grantsFor(recipient.principal.id), { workspaceId, sessionId: taskId }, 'session.read', Date.now())
+                  ? payload : undefined)
+            },
+            ...(options.watch === undefined ? {} : { watch: options.watch }),
             ...(options.server?.clock === undefined ? {} : { clock: options.server.clock }),
             onError: report,
           })

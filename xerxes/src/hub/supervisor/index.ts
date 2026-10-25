@@ -22,8 +22,11 @@ import {
 } from './autopilot.js'
 import { DigestService, type DigestEventSource } from './digests.js'
 import { createSupervisorHandlers, type SupervisorHandlers } from './handlers.js'
-import { SupervisorRunner, createModelDigestSummarizer, type SupervisorModelPort, type SupervisorQuotas } from './runner.js'
+import {
+  DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW, SupervisorRunner, createModelDigestSummarizer, type SupervisorModelPort, type SupervisorQuotas,
+} from './runner.js'
 import { createSupervisorToolRegistry } from './tools.js'
+import { WatchService, type WatchEvent } from './watch.js'
 import {
   SupervisorThreads, autopilotThreadId, delegatedScopes, messageToWire,
   type MessageSource, type ScopeReader, type SupervisorEventSink, type ThreadMessage, type UserPrincipal,
@@ -40,7 +43,14 @@ export { SupervisorGrantOverlay } from './actions.js'
 export { createUnsupportedSupervisorHandlers } from './handlers.js'
 export { createLlmModelPort, createModelDigestSummarizer } from './runner.js'
 export { AUTOPILOT_ENV, autopilotCheckInFromEnvironment } from './autopilot.js'
+export { WATCH_ENV, watchStallFromEnvironment } from './watch.js'
 export type { SupervisorModelPort, SupervisorQuotas } from './runner.js'
+
+/** The operator's quotas with a default token bound per 24 h window, unless one is configured. */
+export function withDefaultSpendBound(quotas: Partial<SupervisorQuotas> | undefined): Partial<SupervisorQuotas> {
+  if (quotas?.maxTokensPerWindow !== undefined) return quotas
+  return { ...quotas, maxTokensPerWindow: DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW }
+}
 
 /** Env keys read by `xerxes hub`. */
 export const SUPERVISOR_ENV = Object.freeze({
@@ -79,7 +89,7 @@ export interface HubSupervisorOptions {
   readonly workspaces: Pick<HubWorkspaceView, 'list' | 'projection' | 'health'>
   readonly backend: Pick<CommandBackend, 'call'>
   /** Journal for digests; observers feed attention. */
-  readonly events?: DigestEventSource & { onEvents?(observer: (events: readonly { workspace_id: string; session_id?: string; type: string; payload: Readonly<Record<string, unknown>> }[]) => void): () => void }
+  readonly events?: DigestEventSource & { onEvents?(observer: (events: readonly WatchEvent[]) => void): () => void }
   readonly model: SupervisorModelPort
   /** Whether XERXES has a model to run on; `unconfigured` makes `supervisor.message.submit` refuse. */
   readonly configStatus?: () => { readonly status: string; readonly message?: string }
@@ -101,6 +111,14 @@ export interface HubSupervisorOptions {
     /** Autonomous actions (runs without Confirm, answered questions) per workspace per hour. Default 30. */
     readonly maxActionsPerHour?: number
   }
+  /** Sends `supervisor.watch_update` to the people who can read the task. */
+  readonly broadcastWatch?: (workspaceId: string, taskId: string, payload: Readonly<Record<string, unknown>>) => void
+  /** XERXES Watch timings: stall threshold (default 10 min, at least 60 s), wake budgets per task per hour (6 anomaly, 12 review), update throttle (1 s). */
+  readonly watch?: {
+    readonly stallMs?: number; readonly maxAnomalyWakesPerHour?: number; readonly maxReviewWakesPerHour?: number; readonly updateIntervalMs?: number
+    /** Watch wakes across all tasks per hour (default 60) and the per (task, anomaly kind) cooldown (default 30 min). */
+    readonly maxHubWakesPerHour?: number; readonly anomalyCooldownMs?: number
+  }
   readonly clock?: () => number
   readonly onError?: (error: unknown, context: string) => void
 }
@@ -115,6 +133,7 @@ export interface HubSupervisor {
   readonly runner: SupervisorRunner
   readonly autopilot: AutopilotSettings
   readonly waker: AutopilotWaker
+  readonly watch: WatchService
   attachSink(sink: SupervisorEventSink | undefined): void
   close(): void
 }
@@ -218,6 +237,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     autopilotBudget: actionBudget,
     autopilotNotice: ({ workspaceId, sessionId, ownerId, text }) => postShared(workspaceId, sessionId, ownerId, text),
     ...(options.sendPush === undefined ? {} : { push: (userId: string, message: { title: string; body: string; url: string }) => options.sendPush!(userId, message) }),
+    // Declared below; a card can only be proposed once a turn runs, long after construction.
+    onWatchCard: action => watch.cardProposed(action),
     onError: report,
   })
 
@@ -254,11 +275,16 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     readonly threadId: string; readonly workspaceId: string; readonly sessionId: string; readonly requestId: string
     readonly answers: Readonly<Record<string, string>>; readonly requester: UserPrincipal
     readonly reader: ScopeReader; readonly trigger: boolean; readonly othersInContext: boolean
+    readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   }): Promise<Record<string, unknown>> => {
     const { workspaceId, sessionId, requestId } = input
     const active = autopilot.active(workspaceId)
     if (active === undefined) throw new SupervisorDenied('Autopilot is off for this workspace, so XERXES cannot answer its questions. Tell the owner instead.')
     if (input.requester.id !== active.ownerId) throw new SupervisorDenied('Only Autopilot, acting for the Hub owner, can answer a task\'s question. Ask the owner.')
+    // A Hub wake-up answers questions only on the task it is about.
+    if (input.trigger && (input.target === undefined || input.target.workspaceId !== workspaceId || input.target.sessionId !== sessionId)) {
+      throw new SupervisorDenied('This wake-up is about another task, so XERXES will not answer this question here. Tell the owner instead.')
+    }
     const grant = autopilotGrant(input)
     if (grant === undefined) {
       throw new SupervisorDenied('Other people are in this conversation, so XERXES will not answer a task\'s question for the owner here. Ask the owner to answer it.')
@@ -424,13 +450,39 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     onError: report,
   })
 
+  const watch = new WatchService({
+    db,
+    workspaces,
+    isHubOwner: options.isHubOwner ?? (userId => threads.principalOrStored(userId)?.hubOwner === true),
+    audit: record => identity.audit(record),
+    ...(options.events === undefined ? {} : { events: options.events }),
+    ...(options.broadcastWatch === undefined ? {} : { broadcast: options.broadcastWatch }),
+    threads,
+    enqueue: input => runner.enqueue(input),
+    post: (workspaceId, taskId, ownerId, text) => postShared(workspaceId, taskId, ownerId, text),
+    ...(options.sendPush === undefined ? {} : { push: options.sendPush }),
+    autopilot: workspaceId => autopilot.active(workspaceId),
+    ready: () => options.configStatus === undefined || options.configStatus().status === 'configured',
+    clock,
+    ...(options.watch?.stallMs === undefined ? {} : { stallMs: options.watch.stallMs }),
+    ...(options.watch?.maxAnomalyWakesPerHour === undefined ? {} : { maxAnomalyWakesPerHour: options.watch.maxAnomalyWakesPerHour }),
+    ...(options.watch?.maxReviewWakesPerHour === undefined ? {} : { maxReviewWakesPerHour: options.watch.maxReviewWakesPerHour }),
+    ...(options.watch?.updateIntervalMs === undefined ? {} : { updateIntervalMs: options.watch.updateIntervalMs }),
+    ...(options.watch?.maxHubWakesPerHour === undefined ? {} : { maxHubWakesPerHour: options.watch.maxHubWakesPerHour }),
+    ...(options.watch?.anomalyCooldownMs === undefined ? {} : { anomalyCooldownMs: options.watch.anomalyCooldownMs }),
+    onError: report,
+  })
+
   const offEvents = options.events?.onEvents?.(events => {
     attention.observeEvents(events)
     try { waker.onEvents(events) } catch (error) { report(error, 'autopilot events') }
+    try { watch.onEvents(events) } catch (error) { report(error, 'watch events') }
   })
   const sweeper = setInterval(() => {
     void actions.sweep().catch(error => report(error, 'supervisor sweep'))
     try { autopilot.sweep() } catch (error) { report(error, 'autopilot sweep') }
+    try { watch.sweep() } catch (error) { report(error, 'watch sweep') }
+    try { watch.tick() } catch (error) { report(error, 'watch tick') }
   }, 30_000)
   sweeper.unref?.()
   attention.start()
@@ -498,13 +550,14 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
 
   let closed = false
   return {
-    handlers: { ...handlers, ...autopilot.handlers }, voice, threads, actions, attention, digests, runner, autopilot, waker,
+    handlers: { ...handlers, ...autopilot.handlers, ...watch.handlers }, voice, threads, actions, attention, digests, runner, autopilot, waker, watch,
     attachSink: sink => threads.setSink(sink),
     close() {
       if (closed) return
       closed = true
       clearInterval(sweeper)
       waker.stop()
+      watch.stop()
       // Queued turns never start and running ones are cancelled before the database closes.
       runner.shutdown()
       attention.stop()

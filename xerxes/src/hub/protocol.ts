@@ -57,6 +57,8 @@ export const HUB_METHODS = [
   'supervisor.config.set',
   'supervisor.autopilot.get',
   'supervisor.autopilot.set',
+  'supervisor.watch.list',
+  'supervisor.watch.set',
 ] as const
 export type HubMethod = (typeof HUB_METHODS)[number]
 
@@ -86,6 +88,7 @@ export const HUB_EVENT_TYPES = [
   'supervisor.confirmation',
   'supervisor.config_changed',
   'supervisor.autopilot_changed',
+  'supervisor.watch_update',
 ] as const
 export type HubEventType = (typeof HUB_EVENT_TYPES)[number]
 
@@ -103,6 +106,8 @@ export type HubErrorCode =
   | 'rate_limited'
   | 'unsupported'
   | 'unconfigured'
+  /** A Hub-wide bound was reached (for example 50 watched tasks). */
+  | 'limit'
   | 'internal'
 
 export type PrincipalKind = 'user' | 'agent'

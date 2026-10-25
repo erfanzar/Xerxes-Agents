@@ -7,7 +7,7 @@ import type { ConnectionStatus } from './bridge.js'
 import { foldSummaryEvent, presenceChips, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
 import {
   taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
-  type TaskSummary, type WorkspaceView,
+  type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type SessionTail } from './sessionFold.js'
 import type { TaskStatus } from './taskTypes.js'
@@ -194,13 +194,71 @@ export function autopilotPendingCount(state: Pick<HubState, 'autopilotThread'>):
 }
 
 /**
- * Whether the Autopilot thread view is offered: only the Hub owner (`can_edit`),
- * only while a workspace is active (or cards still wait for a Confirm), and
- * never after the Hub refused to open it.
+ * Watch per task (`supervisor.watch.list`). `canEdit` is false until the Hub
+ * says the person is the owner; `rows` is empty until it answers. Rows are
+ * unique per workspace id + task id.
  */
-export function autopilotThreadAvailable(state: Pick<HubState, 'autopilot' | 'autopilotThread' | 'selfUserId'>): boolean {
-  if (!state.autopilot.canEdit || state.selfUserId === undefined || state.autopilotThread.phase === 'hidden') return false
-  return state.autopilot.rows.some(row => row.active) || autopilotPendingCount(state) > 0
+export interface WatchState {
+  readonly phase: LoadPhase
+  readonly canEdit: boolean
+  readonly rows: readonly WatchRow[]
+  readonly error?: string
+  /** A save is in flight for this `watchKey`. */
+  readonly savingKey?: string
+  readonly saveError?: string
+  /** True once this Hub said it does not know Watch: the section is hidden. */
+  readonly unsupported: boolean
+}
+
+/** `savingKey: undefined` explicitly ends a save; an absent key leaves it alone. */
+export interface WatchPatch {
+  readonly phase?: LoadPhase
+  readonly error?: string
+  readonly savingKey?: string | undefined
+  readonly saveError?: string
+  readonly unsupported?: boolean
+}
+
+export function initialWatch(): WatchState {
+  return { phase: 'idle', canEdit: false, rows: [], unsupported: false }
+}
+
+/** The key of one watched task in `WatchState.rows` and `savingKey`. */
+export function watchKey(workspaceId: string, taskId: string): string {
+  return `${workspaceId}\u001f${taskId}`
+}
+
+/** Watches that are on right now (the Hub's verdict). */
+export function activeWatchRows(state: Pick<HubState, 'watch'>): readonly WatchRow[] {
+  return state.watch.rows.filter(row => row.active)
+}
+
+/** The row for one task, if the Hub listed it. */
+export function watchRowFor(state: Pick<HubState, 'watch'>, workspaceId: string, taskId: string): WatchRow | undefined {
+  return state.watch.rows.find(row => row.workspaceId === workspaceId && row.taskId === taskId)
+}
+
+/**
+ * Whether this person is the Hub owner. Autopilot's `can_edit` answers it once
+ * the Autopilot list has loaded. While that list is unknown (never loaded,
+ * failed, or this Hub has no Autopilot) Watch's `can_edit` is the signal, since
+ * the Hub gives both to the owner only. A loaded Autopilot answer always wins.
+ */
+export function isHubOwner(state: Pick<HubState, 'autopilot' | 'watch'>): boolean {
+  if (state.autopilot.canEdit) return true
+  const autopilotKnown = state.autopilot.phase === 'ready' && !state.autopilot.unsupported
+  return !autopilotKnown && state.watch.canEdit
+}
+
+/**
+ * Whether the Autopilot thread view is offered: only the Hub owner (see
+ * `isHubOwner`), while a workspace has Autopilot on, or a task is being
+ * watched (watch wakes land in this thread too), or cards still wait for a
+ * Confirm; and never after the Hub refused to open it.
+ */
+export function autopilotThreadAvailable(state: Pick<HubState, 'autopilot' | 'autopilotThread' | 'selfUserId' | 'watch'>): boolean {
+  if (!isHubOwner(state) || state.selfUserId === undefined || state.autopilotThread.phase === 'hidden') return false
+  return state.autopilot.rows.some(row => row.active) || state.watch.rows.some(row => row.active) || autopilotPendingCount(state) > 0
 }
 
 /** Rows that are on right now (the Hub's verdict). */
@@ -224,6 +282,7 @@ export interface HubState {
   readonly supervisorConfig: SupervisorConfigState
   readonly autopilot: AutopilotState
   readonly autopilotThread: AutopilotThreadState
+  readonly watch: WatchState
 }
 
 export function initialSupervisorConfig(): SupervisorConfigState {
@@ -246,6 +305,7 @@ export function initialHubState(): HubState {
     supervisorConfig: initialSupervisorConfig(),
     autopilot: initialAutopilot(),
     autopilotThread: initialAutopilotThread(),
+    watch: initialWatch(),
   }
 }
 
@@ -295,6 +355,12 @@ export type HubAction =
   | { readonly type: 'autopilotThreadMessages'; readonly messages: readonly SupervisorMessage[] }
   | { readonly type: 'autopilotThreadConfirmations'; readonly confirmations: readonly SupervisorConfirmation[] }
   | { readonly type: 'autopilotThreadConfirmation'; readonly id: string; readonly patch: Partial<SupervisorConfirmation> }
+  /** A fresh `supervisor.watch.list` answer replaces every row. */
+  | { readonly type: 'watchView'; readonly view: WatchView }
+  /** One row from `supervisor.watch.set` or a `supervisor.watch_update` event. */
+  | { readonly type: 'watchRow'; readonly row: WatchRow }
+  /** Loading, errors, saving and unsupported. */
+  | { readonly type: 'watch'; readonly patch: WatchPatch }
 
 export function presenceKey(workspaceId: string, sessionId?: string): string {
   return `${workspaceId}\u001f${sessionId ?? ''}`
@@ -556,6 +622,31 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
         }
       }
       return { ...state, autopilot: next }
+    }
+    case 'watchView': {
+      const { error: _error, saveError: _saveError, savingKey: _savingKey, ...rest } = state.watch
+      return { ...state, watch: { ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.watches, unsupported: false } }
+    }
+    case 'watchRow': {
+      const rows = state.watch.rows
+      const index = rows.findIndex(row => row.workspaceId === action.row.workspaceId && row.taskId === action.row.taskId)
+      const next = index === -1 ? [...rows, action.row] : rows.map((row, i) => (i === index ? action.row : row))
+      return { ...state, watch: { ...state.watch, rows: next } }
+    }
+    case 'watch': {
+      const { savingKey: patchSaving, ...patch } = action.patch
+      const next: WatchState = { ...state.watch, ...patch }
+      const mutable = next as { error?: string; saveError?: string; savingKey?: string }
+      // A fresh phase without an error clears the old one; a new save clears the old save error.
+      if (patch.phase !== undefined && patch.error === undefined) delete mutable.error
+      if ('savingKey' in action.patch) {
+        if (patchSaving === undefined) delete mutable.savingKey
+        else {
+          mutable.savingKey = patchSaving
+          if (patch.saveError === undefined) delete mutable.saveError
+        }
+      }
+      return { ...state, watch: next }
     }
   }
 }

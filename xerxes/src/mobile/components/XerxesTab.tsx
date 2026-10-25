@@ -5,11 +5,13 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import { AUTOPILOT_COMPOSER_HINT, AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { relativeTime } from '../../client/format.js'
+import { watchChipText } from '../../client/watch.js'
 import type { ConfirmationState, SupervisorConfirmation } from '../../client/hubParsers.js'
 import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
 import { useHubState, useNow, useServices } from '../context.js'
 import { supervisorHeading } from '../viewModel.js'
 import { AutopilotSheet } from './AutopilotSheet.js'
+import { WatchCards, WatchSheet } from './WatchSheet.js'
 import { ModelChooser, ModelSheet } from './ModelChooser.js'
 import { TalkButton } from './TalkButton.js'
 import { VoiceStatus } from './VoiceStatus.js'
@@ -105,7 +107,9 @@ export function XerxesTab(): ReactElement {
   const [sheet, setSheet] = useState(false)
   const [autopilotSheet, setAutopilotSheet] = useState(false)
   const [threadView, setThreadView] = useState(false)
+  const [watchSheet, setWatchSheet] = useState(false)
   const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
   const showThread = threadAvailable && threadView
   const threadPending = autopilotPendingCount(state)
@@ -154,7 +158,11 @@ export function XerxesTab(): ReactElement {
             {state.autopilot.unsupported ? null : (
               <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setAutopilotSheet(true)}>{state.autopilot.canEdit || state.autopilot.phase !== 'ready' ? 'Autopilot' : 'Autopilot (view)'}</button>
             )}
+            {state.watch.unsupported ? null : (
+              <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setWatchSheet(true)}>{state.watch.canEdit || state.watch.phase !== 'ready' ? 'Watch' : 'Watch (view)'}</button>
+            )}
             {autopilotChip === undefined ? null : <span className="chip" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
+            {watchChip === undefined ? null : <span className="chip" role="status" aria-label="Watch status">{watchChip}</span>}
             {threadAvailable ? (
               <button
                 type="button"
@@ -169,6 +177,8 @@ export function XerxesTab(): ReactElement {
           </div>
           {sheet ? <ModelSheet onClose={() => setSheet(false)} /> : null}
           {autopilotSheet ? <AutopilotSheet onClose={() => setAutopilotSheet(false)} /> : null}
+          {watchSheet ? <WatchSheet onClose={() => setWatchSheet(false)} /> : null}
+          <WatchCards />
           {unconfigured ? (
             <div className="empty-state" role="status">
               <h2>Choose XERXES's model</h2>

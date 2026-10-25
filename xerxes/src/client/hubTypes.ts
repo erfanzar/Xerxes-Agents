@@ -136,6 +136,80 @@ export interface AutopilotView {
   readonly workspaces: readonly AutopilotRow[]
 }
 
+// ── watch ─────────────────────────────────────────────────────────────
+
+/** The fixed set of things the Hub's watcher flags. A kind outside it makes the row unreadable. */
+export type WatchAnomalyKind = 'loop' | 'stall' | 'test_fail_repeat' | 'error_burst' | 'context_high' | 'goal_blocked'
+
+/** One open problem on a watched run. `detail` came from the run: untrusted text. */
+export interface WatchAnomaly {
+  readonly kind: WatchAnomalyKind
+  /** ISO time the problem opened. */
+  readonly since: string
+  readonly detail: string
+}
+
+export interface WatchTests {
+  readonly runs: number
+  readonly passed: number
+  readonly failed: number
+  readonly last: 'pass' | 'fail' | null
+  /** Names of the last failing tests (untrusted text, at most a handful). */
+  readonly lastFailing: readonly string[]
+}
+
+/** What the Hub's watcher has counted since it began reading the run. All numbers are counts. */
+export interface WatchStats {
+  readonly since: string
+  readonly lastActivityAt: string | null
+  /** The run's status as the Hub's projection reports it (`working`, `idle`, …). */
+  readonly status: string
+  readonly turns: number
+  readonly toolCalls: number
+  readonly toolFailures: number
+  readonly errors: number
+  readonly edits: number
+  readonly filesTouched: number
+  readonly tests: WatchTests
+  readonly repeatedCall: { readonly name: string; readonly count: number } | null
+  readonly contextTokens: number | null
+  readonly maxContext: number | null
+  readonly totalTokens: number | null
+  readonly agents: { readonly running: number; readonly total: number }
+  readonly anomalies: readonly WatchAnomaly[]
+  readonly reviews: { readonly wakesThisHour: number; readonly lastWakeAt: string | null }
+  /** Hub-rendered one-liner. Untrusted text. */
+  readonly summaryLine: string
+}
+
+/**
+ * One watched task (`supervisor.watch.list` row, `supervisor.watch.set` answer
+ * or `supervisor.watch_update` event). `active` is the Hub's verdict: enabled,
+ * not expired, and the person who enabled it is still the Hub owner. `title`,
+ * `workspaceLabel` and everything in `stats` came from a task: plain text only.
+ */
+export interface WatchRow {
+  readonly workspaceId: string
+  readonly taskId: string
+  readonly title: string
+  readonly workspaceLabel: string
+  readonly enabled: boolean
+  readonly active: boolean
+  /** Minutes between XERXES reviews of the run, or null for none. */
+  readonly reviewIntervalMinutes: number | null
+  readonly expiresAt: string | null
+  readonly enabledBy: AutopilotPerson | null
+  readonly updatedAt: string | null
+  readonly stats: WatchStats | null
+}
+
+/** The shape of `supervisor.watch.list`. */
+export interface WatchView {
+  /** Whether this person may change Watch (the Hub owner only). */
+  readonly canEdit: boolean
+  readonly watches: readonly WatchRow[]
+}
+
 export function taskKey(workspaceId: string, sessionId: string): string {
   return `${workspaceId}\u001f${sessionId}`
 }

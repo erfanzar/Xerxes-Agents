@@ -38,8 +38,10 @@ export interface SupervisorTurnState {
   readonly reader: ScopeReader
   /** Set when a tool was refused for lack of authority. The runner stops the turn on it. */
   denial: string | undefined
-  /** Present when the Hub started this turn by itself (XERXES Autopilot). */
-  readonly trigger?: 'autopilot'
+  /** Present when the Hub started this turn by itself (XERXES Autopilot or Watch). */
+  readonly trigger?: 'autopilot' | 'watch'
+  /** The one task a Hub wake-up is about; only actions on it may run without a Confirm tap. */
+  readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   /** Whether a user message by anyone but the requester is in this turn's context. Absent counts as true. */
   readonly othersInContext?: boolean
 }
@@ -69,6 +71,8 @@ export interface SupervisorAutopilotPort {
     readonly reader: ScopeReader
     readonly trigger: boolean
     readonly othersInContext: boolean
+    /** The task a Hub wake-up is about; a wake may answer questions on that task only. */
+    readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   }): Promise<Record<string, unknown>>
 }
 
@@ -305,7 +309,9 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       try {
         return await deps.autopilot.answer({
           threadId: turn.threadId, workspaceId, sessionId: taskId, requestId: str(args, 'request_id')!, answers, requester: turn.requester,
-          reader: turn.reader, trigger: turn.trigger === 'autopilot', othersInContext: turn.othersInContext ?? true,
+          // Any Hub-started turn (Autopilot or Watch) is a wake turn, never an "owner alone" conversation.
+          reader: turn.reader, trigger: turn.trigger !== undefined, othersInContext: turn.othersInContext ?? true,
+          ...(turn.target === undefined ? {} : { target: turn.target }),
         })
       } catch (error) {
         if (error instanceof SupervisorDenied) {
@@ -356,7 +362,10 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     try {
       const action = await deps.actions.createIntent({
         threadId: turn.threadId, tool: spec.name, args, requester: turn.requester, reader: turn.reader,
-        turn: { ...(turn.trigger === undefined ? {} : { trigger: turn.trigger }), othersInContext: turn.othersInContext ?? true },
+        turn: {
+          ...(turn.trigger === undefined ? {} : { trigger: turn.trigger }), othersInContext: turn.othersInContext ?? true,
+          ...(turn.target === undefined ? {} : { target: turn.target }),
+        },
       })
       if (action.auto) {
         // XERXES Autopilot ran it at once for the owner: report what really happened.

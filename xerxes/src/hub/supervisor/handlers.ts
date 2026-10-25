@@ -5,7 +5,7 @@ import type { AuthenticatedContext } from '../identityPort.js'
 import { HubProtocolError, readId, type HubMethod } from '../protocol.js'
 import type { HubMethodContext, HubMethodHandler } from '../server.js'
 import { actionToWire, type ActionService } from './actions.js'
-import { MAX_MESSAGE_CHARS, messageToWire, type MessageSource, type SupervisorThreads, type ThreadMessage, type ThreadRecord, type UserPrincipal } from './threads.js'
+import { MAX_MESSAGE_CHARS, autopilotThreadId, messageToWire, type MessageSource, type SupervisorThreads, type ThreadMessage, type ThreadRecord, type UserPrincipal } from './threads.js'
 
 /**
  * The four `supervisor.*` Hub methods. Request and response shapes match what
@@ -25,6 +25,7 @@ export type SupervisorHandlers = Readonly<Partial<Record<HubMethod, HubMethodHan
 
 export interface SupervisorHandlerCore {
   readonly threads: Pick<SupervisorThreads, 'ensureShared' | 'privateFor' | 'access' | 'messagesFor' | 'participants' | 'isWorking'>
+    & Partial<Pick<SupervisorThreads, 'autopilotFor'>>
   readonly actions: Pick<ActionService, 'cardsFor' | 'respond' | 'status'>
   /** The model id shown in the thread; a function so a hot-swapped model shows at once. */
   readonly modelId: string | (() => string)
@@ -69,8 +70,12 @@ export function createSupervisorHandlers(core: SupervisorHandlerCore): Superviso
     const principal = requireUser(ctx.context)
     exactKeys(params, ['thread_id', 'private', 'fresh'])
     let id: string
-    if (params.thread_id !== undefined) id = readId(params.thread_id, 'thread_id')
-    else if (params.private === true) id = core.threads.privateFor(principal, params.fresh === true).id
+    if (params.thread_id !== undefined) {
+      id = readId(params.thread_id, 'thread_id')
+      // The Hub owner's own Autopilot thread opens even before the first wake (Watch cards land
+      // there while Autopilot is off). Anyone else's id still answers not_found.
+      if (id === autopilotThreadId(principal.id) && principal.hubOwner) core.threads.autopilotFor?.(principal.id)
+    } else if (params.private === true) id = core.threads.privateFor(principal, params.fresh === true).id
     else id = core.threads.ensureShared().id
     return snapshot(core, core.threads.access(id, principal), principal)
   }
@@ -134,5 +139,7 @@ export function createUnsupportedSupervisorHandlers(reason: string): SupervisorH
     'supervisor.action.status': refuse,
     'supervisor.autopilot.get': refuse,
     'supervisor.autopilot.set': refuse,
+    'supervisor.watch.list': refuse,
+    'supervisor.watch.set': refuse,
   }
 }

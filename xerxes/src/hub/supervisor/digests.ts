@@ -83,8 +83,19 @@ export interface DigestEventSource {
     filter: { readonly workspaceIds: readonly string[]; readonly sessionIds?: readonly string[] },
     limit?: number,
     maxBytes?: number,
-  ): { readonly events: readonly HubEvent[]; readonly throughSequence: number; readonly hasMore: boolean; readonly gap?: 'retention' }
+    /** Read no further than this sequence (HubEventStore supports it). */
+    throughSequence?: number,
+  ): {
+    readonly events: readonly HubEvent[]; readonly throughSequence: number; readonly hasMore: boolean; readonly gap?: 'retention'
+    /** First retained position (HubEventStore reports it); lets a reader restart after a retention gap. */
+    readonly oldestSequence?: number
+  }
   watermark(): number
+}
+
+/** An id as printed into a prompt: only [A-Za-z0-9_.:-], clipped. Anything else becomes `_`. */
+export function promptId(id: string, max = 80): string {
+  return id.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, max)
 }
 
 export type DigestCacheState = 'hit' | 'miss' | 'refreshed' | 'debounced'

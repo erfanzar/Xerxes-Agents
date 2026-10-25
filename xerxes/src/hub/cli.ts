@@ -9,7 +9,7 @@ import { createHubIdentity } from './identity/index.js'
 import { runHubIdentityCli } from './identity/cli.js'
 import { createHubService, type HubService } from './service.js'
 import { loadOrCreateHubSigner } from './signer.js'
-import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort } from './supervisor/index.js'
+import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort, watchStallFromEnvironment } from './supervisor/index.js'
 import { createVoiceRuntimeConfig } from './voice/providerFactory.js'
 import type { VoiceRuntimeConfig } from './voice/config.js'
 import type { HubServiceSupervisorConfig } from './service.js'
@@ -477,6 +477,13 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
         } catch (error) {
           err(`Hub Autopilot check-in uses the default: ${error instanceof Error ? error.message : String(error)}`)
         }
+        // A bad Watch stall value is reported and the default (10 minutes) applies.
+        let watchStall: number | undefined
+        try {
+          watchStall = watchStallFromEnvironment(environment)
+        } catch (error) {
+          err(`Hub Watch stall threshold uses the default: ${error instanceof Error ? error.message : String(error)}`)
+        }
         try {
           service = createHubService({
             paths, signer, identity, lifecycle: handle,
@@ -486,6 +493,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
             sendPush: (userId, message) => identity.admin.sendPush(userId, message),
             isHubOwner: userId => identity.admin.ownerUserId() === userId,
             ...(autopilotCheckIn === undefined ? {} : { autopilot: { checkInMs: autopilotCheckIn } }),
+            ...(watchStall === undefined ? {} : { watch: { stallMs: watchStall } }),
             onError: (error, context) => err(`Hub ${context} failed: ${error instanceof Error ? error.message : String(error)}`),
           })
         } catch (error) {

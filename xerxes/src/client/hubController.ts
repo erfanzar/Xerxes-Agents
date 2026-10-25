@@ -7,9 +7,9 @@ import { newCommandId } from './bridge.js'
 import { HubRequestError, type HubConnection, type SubscriptionHandle } from './hubConnection.js'
 import {
   parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
-  parseSupervisorOptions, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
+  parseSupervisorOptions, parseWatchRow, parseWatchView, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
-import { canMutate, type DecisionKind, type HubStore } from './hubStore.js'
+import { canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
 import type { WorkspaceView } from './hubTypes.js'
 import type { PreparedImage } from './imagePrep.js'
 import { arr, rec, str } from './parse.js'
@@ -66,7 +66,26 @@ export interface HubController {
   autopilotThreadOpen(): Promise<void>
   /** Confirm or cancel a card held in the Autopilot thread. */
   autopilotThreadRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void>
+  /** Loads `supervisor.watch.list` into `state.watch`. */
+  loadWatches(): Promise<void>
+  /** Resolves true only when the Hub saved the row. A refusal is left in `watch.saveError`. Never retried. */
+  setWatch(input: WatchInput): Promise<boolean>
 }
+
+export interface WatchInput {
+  readonly workspaceId: string
+  readonly taskId: string
+  readonly enabled: boolean
+  /** Omitted: keep the saved interval. null: no review. Otherwise whole minutes, 5 to 120. */
+  readonly reviewIntervalMinutes?: number | null
+  /** Omitted: keep the saved expiry. null: no expiry. Otherwise an ISO time in the future. */
+  readonly expiresAt?: string | null
+}
+
+export const WATCH_REVIEW_MIN_MINUTES = 5
+export const WATCH_REVIEW_MAX_MINUTES = 120
+/** At most one full re-list per this long when `supervisor.watch_update` payloads are unreadable. */
+export const WATCH_RELIST_MS = 2_000
 
 export interface AutopilotInput {
   readonly workspaceId: string
@@ -379,6 +398,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
       }
       void supervisorConfigGet()
       void loadAutopilot()
+      void loadWatches()
     } catch (error) {
       if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
       else store.dispatch({ type: 'supervisor', patch: { phase: 'error', error: failureMessage(error) } })
@@ -538,6 +558,89 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
+  // ── watch ──────────────────────────────────────────────────────────
+
+  async function loadWatches(): Promise<void> {
+    store.dispatch({ type: 'watch', patch: { phase: 'loading' } })
+    try {
+      const view = parseWatchView(await call('supervisor.watch.list'))
+      if (view === undefined) store.dispatch({ type: 'watch', patch: { phase: 'error', error: 'The Hub sent a Watch answer this app cannot read.' } })
+      else {
+        store.dispatch({ type: 'watchView', view })
+        void maybeOpenAutopilotThread()
+      }
+    } catch (error) {
+      if (error instanceof HubRequestError && (error.code === 'unsupported' || error.code === 'invalid_request')) {
+        // This Hub predates Watch: the section stays hidden.
+        store.dispatch({ type: 'watch', patch: { phase: 'ready', unsupported: true } })
+      } else store.dispatch({ type: 'watch', patch: { phase: 'error', error: failureMessage(error) } })
+    }
+  }
+
+  async function setWatch(input: WatchInput): Promise<boolean> {
+    const interval = input.reviewIntervalMinutes
+    if (interval !== undefined && interval !== null && (!Number.isInteger(interval) || interval < WATCH_REVIEW_MIN_MINUTES || interval > WATCH_REVIEW_MAX_MINUTES)) {
+      store.dispatch({ type: 'watch', patch: { savingKey: undefined, saveError: `The review interval must be a whole number of minutes from ${WATCH_REVIEW_MIN_MINUTES} to ${WATCH_REVIEW_MAX_MINUTES}.` } })
+      return false
+    }
+    store.dispatch({ type: 'watch', patch: { savingKey: watchKey(input.workspaceId, input.taskId) } })
+    try {
+      const result = await call('supervisor.watch.set', {
+        workspace_id: input.workspaceId,
+        task_id: input.taskId,
+        enabled: input.enabled,
+        ...(interval === undefined ? {} : { review_interval_minutes: interval }),
+        ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
+      })
+      const row = parseWatchRow(result.watch)
+      if (row === undefined) {
+        // Never show a guess: read back what the Hub holds.
+        store.dispatch({ type: 'watch', patch: { savingKey: undefined, saveError: 'The Hub sent an answer this app cannot read. Checking what it saved…' } })
+        void loadWatches()
+        return false
+      }
+      store.dispatch({ type: 'watchRow', row })
+      store.dispatch({ type: 'watch', patch: { savingKey: undefined } })
+      void maybeOpenAutopilotThread()
+      return true
+    } catch (error) {
+      if (error instanceof HubRequestError && error.uncertain) {
+        // Never send it again: read back what the Hub holds now.
+        store.dispatch({ type: 'watch', patch: { savingKey: undefined, saveError: UNKNOWN_OUTCOME } })
+        await loadWatches()
+        // The fresh list clears save errors; the person still has to be told the outcome was unclear.
+        store.dispatch({ type: 'watch', patch: { saveError: UNKNOWN_OUTCOME } })
+        return false
+      }
+      store.dispatch({ type: 'watch', patch: { savingKey: undefined, saveError: failureMessage(error) } })
+      return false
+    }
+  }
+
+  /**
+   * An unreadable `supervisor.watch_update` asks for a fresh list. A burst of
+   * them must not become a burst of full lists: the first goes out at once,
+   * later ones within the window collapse into one trailing list that is
+   * always sent, so the last bad update is never lost.
+   */
+  let relistTimer: ReturnType<typeof setTimeout> | undefined
+  let lastRelistAt = Number.NEGATIVE_INFINITY
+
+  function requestWatchRelist(): void {
+    if (relistTimer !== undefined) return // the trailing list is already scheduled
+    const wait = Math.max(0, lastRelistAt + WATCH_RELIST_MS - now())
+    if (wait === 0) {
+      lastRelistAt = now()
+      void loadWatches()
+      return
+    }
+    relistTimer = setTimeout(() => {
+      relistTimer = undefined
+      lastRelistAt = now()
+      void loadWatches()
+    }, wait)
+  }
+
   // ── the owner's Autopilot thread ───────────────────────────────────
 
   const isAutopilotThread = (threadId: unknown): boolean => {
@@ -545,11 +648,11 @@ export function createHubController(options: HubControllerOptions): HubControlle
     return typeof threadId === 'string' && self !== undefined && threadId === autopilotThreadId(self)
   }
 
-  /** Opens the thread when the owner has an active workspace. Anyone else never asks. */
+  /** Opens the thread when the owner has an active workspace or an active watch (watch wakes land here). Anyone else never asks. */
   async function maybeOpenAutopilotThread(): Promise<void> {
     const snapshot = store.getSnapshot()
-    if (!snapshot.autopilot.canEdit || snapshot.selfUserId === undefined) return
-    if (!snapshot.autopilot.rows.some(row => row.active)) return
+    if (!isHubOwner(snapshot) || snapshot.selfUserId === undefined) return
+    if (!snapshot.autopilot.rows.some(row => row.active) && !snapshot.watch.rows.some(row => row.active)) return
     await autopilotThreadOpen()
   }
 
@@ -558,7 +661,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     const self = snapshot.selfUserId
     const phase = snapshot.autopilotThread.phase
     // Only the Hub owner has this thread. `hidden` is the Hub's answer; asking again would loop.
-    if (!snapshot.autopilot.canEdit || self === undefined) return
+    if (!isHubOwner(snapshot) || self === undefined) return
     if (phase === 'loading' || phase === 'ready' || phase === 'hidden') return
     const threadId = autopilotThreadId(self)
     store.dispatch({ type: 'autopilotThread', patch: { phase: 'loading', threadId } })
@@ -628,6 +731,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
       void machinesList()
       if (store.getSnapshot().supervisorConfig.phase !== 'idle') void supervisorConfigGet()
       if (store.getSnapshot().autopilot.phase !== 'idle' && !store.getSnapshot().autopilot.unsupported) void loadAutopilot()
+      if (store.getSnapshot().watch.phase !== 'idle' && !store.getSnapshot().watch.unsupported) void loadWatches()
       const current = selected()
       if (current && !sessionSub) startSelected(current.workspaceId, current.sessionId)
     }))
@@ -667,6 +771,14 @@ export function createHubController(options: HubControllerOptions): HubControlle
           store.dispatch({ type: 'autopilotRow', row })
           void maybeOpenAutopilotThread()
         } else void loadAutopilot()
+      } else if ((type as string) === 'supervisor.watch_update') {
+        // One row, replaced whole (the Hub sends the latest stats, at most one per task per second).
+        // An unreadable row is a reason to ask again, not to guess.
+        const row = parseWatchRow(payload.watch)
+        if (row) {
+          store.dispatch({ type: 'watchRow', row })
+          void maybeOpenAutopilotThread()
+        } else requestWatchRelist()
       } else if (type === 'supervisor.confirmation') {
         const confirmation = parseConfirmation(payload.confirmation ?? payload)
         if (confirmation) store.dispatch({ type: 'supervisorConfirmations', confirmations: [confirmation] })
@@ -678,6 +790,8 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   function dispose(): void {
     for (const stop of disposers.splice(0)) stop()
+    if (relistTimer !== undefined) clearTimeout(relistTimer)
+    relistTimer = undefined
     inboxSub?.dispose()
     sessionSub?.dispose()
     inboxSub = undefined
@@ -690,6 +804,6 @@ export function createHubController(options: HubControllerOptions): HubControlle
     start, dispose, refreshInbox, openSession, closeSession, loadOlder, submit, steer, stopTurn, decide, answerQuestion,
     setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond,
     machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet, loadAutopilot, setAutopilot,
-    autopilotThreadOpen, autopilotThreadRespond,
+    autopilotThreadOpen, autopilotThreadRespond, loadWatches, setWatch,
   }
 }

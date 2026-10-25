@@ -191,7 +191,11 @@ While a workspace's Autopilot is active:
   `agent.message` (a wake turn's `task.start`, `goal.set` and `model.set` become
   Confirm cards with an `Autopilot needs you: confirm …` notice and push), or (b)
   the enabling owner's own message started the turn and no other person's message
-  is in that turn's context window. Everything else, and anything past the cap of
+  is in that turn's context window (a XERXES reply written in an earlier wake turn
+  counts as another person, and comes back fenced). A wake turn acts without
+  Confirm only on the task it is about (its trigger carries `{workspaceId,
+  sessionId}`); an action or answer on any other task is a Confirm card.
+  Everything else, and anything past the cap of
   30 autonomous actions per workspace per hour (one notice), is a normal Confirm
   card. An automatic run uses the normal confirm path (single-winner state change,
   fail-closed audit, stale checks, never retrying `unknown`) with the owner as
@@ -218,6 +222,130 @@ While a workspace's Autopilot is active:
 - **Permissions.** A waiting permission request posts `Autopilot needs you:
   “<title>” is asking for permission. Only a person can answer it.` and pushes the
   owner. XERXES never decides it.
+
+## XERXES Watch
+
+The Hub owner can watch a task. A model-free watcher on the Hub reads every
+journal event of a watched task live (costs no model calls) and keeps bounded
+stats; XERXES wakes only when an anomaly opens, or for an optional periodic
+review. Rows live in `hub_supervisor_watch` (supervisor database). Source:
+`xerxes/src/hub/supervisor/watch.ts`.
+
+| Method | Params | Result |
+|---|---|---|
+| `supervisor.watch.list` | none | `{can_edit, watches: WatchRow[]}`: only tasks the caller can read (`session.read`); disabled rows are kept for display |
+| `supervisor.watch.set` (owner) | `{workspace_id, task_id, enabled, review_interval_minutes? (integer 5..120, or null = off), expires_at? (ISO, future, ≤30 days, or null)}` | `{watch: WatchRow}` |
+
+`set` refuses agents and non-owners (`forbidden`, audited), unknown keys and bad
+values (`invalid_request`), unknown workspaces or tasks (`not_found`), more than
+50 enabled watches Hub-wide (`limit`), and an unavailable audit log
+(`unavailable`). Omitted `review_interval_minutes` and `expires_at` keep the stored
+values; only an explicit `null` clears them. `enabled:true` with a kept expiry that
+has passed is refused. `enabled:false` keeps the row and stops the watcher and its
+wakes. A stored watch can be turned off even when its task is gone. At most 200
+rows are stored; the oldest disabled row makes room.
+
+```
+WatchRow = { workspace_id, task_id, title, workspace_label,
+  enabled, active /* enabled && not expired && enabler still owner */,
+  review_interval_minutes: number|null, expires_at: string|null,
+  enabled_by: {id, name}|null, updated_at: string|null,
+  stats: null | { since, last_activity_at, status, turns, tool_calls, tool_failures, errors,
+    edits, files_touched, tests: {runs, passed, failed, last: 'pass'|'fail'|null, last_failing: string[]},
+    repeated_call: {name, count}|null, context_tokens, max_context, total_tokens,
+    agents: {running, total},
+    anomalies: [{kind: 'loop'|'stall'|'test_fail_repeat'|'error_burst'|'context_high'|'goal_blocked', since, detail}],
+    reviews: {wakes_this_hour /* anomaly + review wakes of this task */, last_wake_at},
+    summary_line } }
+```
+
+`stats` is `null` while the watch is disabled. Every string that came from a task
+(title, test names, detail, summary_line) is untrusted plain text.
+
+Event `supervisor.watch_update {watch: WatchRow}` goes to people who can read the
+task, after every set and sweep change and whenever the stats change, throttled to
+at most one per task per second (the latest state is sent; a trailing send is
+guaranteed).
+
+**Watcher.** On enable the task's recent journal events (bounded window) are
+replayed once; afterwards live events are applied as they are committed. It counts
+turns, tool calls, failures (`permitted:false` or a result starting with `Tool
+execution failed:`), errors, edits (Edit/Write/FileEditTool/WriteFile/NotebookEdit/
+apply_patch) and distinct `file_path`/`path` arguments (count only, capped at 500).
+A shell call (exec_command, ExecuteShell, Bash, shell, run_command) running a test
+runner is a test run; its result is parsed for pass/fail counts and failing names
+(last 5). Child agents' tool calls and failures (`subagent_event`) are counted too.
+`question_request` and `approval_request` are counted only; a permission request's
+inputs are never copied. Step lines are Hub-rendered, at most 240 characters, and
+show a tool's name and its argument KEYS only (file tools add the file's base
+name). Argument values (commands, URLs, bodies, tokens) never appear: the tool call
+after an approved permission carries exactly the approved inputs. Every other piece
+of task text in a step line (errors, notices, the first line of a failed non-shell
+result, test names) is redacted (`security/redact.ts`) and has its URLs removed; a
+failed shell call shows no output. A ring keeps at most 200 lines / 16 KiB since
+XERXES last looked. Transcripts are never read.
+
+A shell call is a test run only when a runner (bun test, vitest, jest, pytest, go
+test, cargo test, npm/pnpm/yarn test) is in command position (the start of a
+command, or after `&&`, `;`, `|`), not followed by `.` or `-config`: `cat
+jest.config.js`, `rg pytest` and `git commit -m "bun test fix"` do not count. A run
+with no pass/fail counts has outcome `unknown`: it is counted in `tests.runs` but is
+neither a pass nor a fail and stays out of the failure streak. FAIL/FAILED lines
+are read as test names only when counts were found.
+
+**Replay.** On enable the task's NEWEST journal events (at most 1000, from a bounded
+window) are replayed once. A retention gap restarts from the oldest retained event
+and adds a step noting that older events are gone. After a Hub restart, enabled
+watches are rebuilt the same way with anomaly opening suppressed (stats only) until
+the task's first live event, so old loops or stalls never wake XERXES.
+
+**Anomalies** (each opens once and clears when its condition ends): `loop` (the
+same tool and arguments ≥5 times in the last 20 calls), `stall` (status `working`
+and no event for 10 minutes, `XERXES_HUB_WATCH_STALL_MS`), `test_fail_repeat` (the
+same failing test in 3 consecutive runs, or 3 failed runs in a row),
+`error_burst` (≥5 failures or errors within 5 minutes), `context_high` (context
+≥90% of `max_context`), `goal_blocked`.
+
+**Wakes.** An opened anomaly on an active watch, and the periodic review (every
+`review_interval_minutes` since XERXES last looked, while the task is `working`),
+post `Watch: woke for <anomalies|a review> in “<title>”.` to `shared` (readers of
+the task and the owner) and start a turn in the enabling owner's
+`autopilot-<ownerId>` thread with the owner as requester and a `watch` trigger.
+The wake text is Hub-authored; anomalies, stats and the step lines since the last
+look are fenced as untrusted, as is the workspace label; printed ids are limited to
+`[A-Za-z0-9_.:-]`. The wake text is built, the steps taken and the look recorded
+only when the turn actually starts; a turn that stops other than `completed`
+(model error, quota, timeout, cancel) gives the steps back and re-arms its
+anomalies, which may wake again after their cooldown, within the budget. Anomaly
+wakes push the owner `Watch: a task needs a look.` (no task title on the lock
+screen; dedupe key per task and anomaly kinds); reviews do not push.
+Bounds: per task, separate from Autopilot, 6 anomaly and 12 review wakes per hour;
+Hub-wide, 60 watch wakes per hour; a 30-minute cooldown per (task, anomaly kind)
+after a wake, even if the anomaly cleared and reopened; at most one watch turn per
+task queued or running (anything that opens meanwhile waits for the next tick).
+Each cap posts at most one notice per hour. Runner quotas still apply, and when
+the Hub wires the supervisor it applies a default of 2,000,000 tokens per 24-hour
+window unless `maxTokensPerWindow` is configured. No wake unless the model status is
+`configured`; nothing is recorded unless the wake notice posts. The 30-second
+sweeper turns off expired watches and ones whose enabler is no longer the owner
+(`Watch: stopped watching “<title>” because …`), checks for stalls and runs due
+reviews.
+
+**Actions in a watch wake.** When Autopilot is active for the workspace (and the
+same owner), the Autopilot wake-turn rules apply: steer, stop, message and answer
+run without a Confirm tap; start, goal and model become Confirm cards. When
+Autopilot is not active, every action is a normal Confirm card in the owner's
+Autopilot thread and the owner is pushed `Watch: an action waits for your Confirm.`
+(dedupe key per task). Every Hub wake trigger (Autopilot and Watch) carries the
+`{workspaceId, sessionId}` it is about: an action or answer on any other task is a
+normal Confirm card (`Autopilot needs you: confirm … (not the task this wake-up is
+about)`). A watch turn is never treated as an "owner alone" conversation. XERXES
+replies written in a wake turn are stored with `origin: wake`; in later turns they
+come back fenced as untrusted, and a thread with one in its context window counts as
+having other people in it, so nothing auto-runs there. Permission requests stay
+human-only.
+`supervisor.thread.open {thread_id: 'autopilot-<selfUserId>'}` works for the Hub
+owner even before the first wake; anyone else gets `not_found`.
 
 ## Identity and pairing
 

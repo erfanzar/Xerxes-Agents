@@ -109,10 +109,12 @@ export interface AutopilotGrant {
 
 /** What the turn that proposes an action looked like. */
 export interface ActionTurnInfo {
-  /** Set when the Hub started the turn (an Autopilot wake-up). */
-  readonly trigger?: 'autopilot'
+  /** Set when the Hub started the turn (an Autopilot or Watch wake-up). */
+  readonly trigger?: 'autopilot' | 'watch'
   /** Whether a user message by anyone but the requester was in the turn's context. Unknown counts as true. */
   readonly othersInContext?: boolean
+  /** The one task a Hub wake-up is about. A wake's action on anything else is a normal Confirm card. */
+  readonly target?: { readonly workspaceId: string; readonly sessionId: string }
 }
 
 /** The only actions an Autopilot wake-up runs without a Confirm tap. */
@@ -194,6 +196,8 @@ export interface ActionServiceOptions {
   readonly autopilotNotice?: (input: { readonly workspaceId: string; readonly sessionId?: string; readonly ownerId: string; readonly text: string }) => void
   /** Minimal-text push to the owner about an autonomous action. Best effort. */
   readonly push?: (userId: string, message: { readonly title: string; readonly body: string; readonly url: string }) => Promise<unknown>
+  /** XERXES Watch: a watch wake proposed an action that waits for a Confirm (Autopilot is not active). Best effort. */
+  readonly onWatchCard?: (action: ActionRecord) => void
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -486,15 +490,22 @@ export class ActionService {
     // XERXES Autopilot: decide before anything is stored whether this runs without a Confirm tap.
     const grant = this.options.autopilot?.({
       workspaceId, threadId: input.threadId, requester,
-      trigger: input.turn?.trigger === 'autopilot', othersInContext: input.turn?.othersInContext ?? true,
+      // Any Hub-started turn counts as a wake: it can never fall into the "owner alone" rule.
+      trigger: input.turn?.trigger !== undefined, othersInContext: input.turn?.othersInContext ?? true,
     })
     const ownerGrants = grant === undefined ? [] : this.options.identity.grantsFor(grant.owner.id)
+    // A Hub wake-up may act without Confirm only on the exact task it is about. No target: nothing auto-runs.
+    const wakeTarget = input.turn?.trigger === undefined ? undefined : input.turn.target
+    const offTarget = input.turn?.trigger !== undefined
+      && (wakeTarget === undefined || wakeTarget.workspaceId !== workspaceId || wakeTarget.sessionId !== sessionId)
     let held: { readonly text: string; readonly push: string } | undefined
     let eligible = false
     if (grant !== undefined) {
       const owner = grant.owner
       if (grant.wake && !WAKE_AUTO_TOOLS.has(tool)) {
         held = { text: `Autopilot needs you: confirm ${record.summary}`, push: 'Autopilot needs you to confirm an action.' }
+      } else if (offTarget) {
+        held = { text: `Autopilot needs you: confirm ${record.summary} (not the task this wake-up is about)`, push: 'Autopilot needs you to confirm an action.' }
       } else if (!hasScope(owner, ownerGrants, accessTarget, scope, now)) {
         held = { text: `Autopilot needs you: ${owner.displayName} cannot ${tool} here, so this waits for a person to confirm: ${record.summary}`, push: 'Autopilot needs you.' }
       } else {
@@ -531,6 +542,9 @@ export class ActionService {
     )
     if (auto && grant !== undefined) return await this.confirmAndDispatch(record.id, grant.owner, ownerGrants, undefined, true)
     this.announce(record)
+    if (grant === undefined && input.turn?.trigger === 'watch') {
+      try { this.options.onWatchCard?.(record) } catch (error) { this.options.onError?.(error, 'watch card') }
+    }
     if (held !== undefined && grant !== undefined) {
       this.autopilotNote(record, grant.owner.id, held.text)
       await this.pushOwner(grant.owner.id, held.push)

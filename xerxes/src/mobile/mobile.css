@@ -205,6 +205,8 @@ code, pre { font-family: var(--mono); font-size: 0.95em; }
 .badge-attention { background: var(--x-needs-bg); color: var(--x-needs-text); border-color: var(--x-needs-border); }
 .chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.45rem; }
 .chip { background: var(--x-chip); border: 1px solid var(--x-hairline); padding: 0.05rem 0.45rem; font-size: 10.5px; color: var(--x-secondary); }
+.chip-bad { color: var(--x-needs-text); border-color: var(--x-needs-border); }
+.chip-anomaly { background: var(--x-needs-bg); color: var(--x-needs-text); border-color: var(--x-needs-border); overflow-wrap: anywhere; }
 
 /* ── Status ────────────────────────────────────────────────────────── */
 .status { display: inline-flex; align-items: center; gap: 0.5rem; margin: 0.15rem 0; font-size: 11.5px; color: var(--x-secondary); line-height: 1; }

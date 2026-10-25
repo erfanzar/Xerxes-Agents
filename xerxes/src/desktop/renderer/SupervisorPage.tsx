@@ -7,12 +7,14 @@ import type { ConnectionStatus } from '../../client/bridge.js'
 import { relativeTime } from '../../client/format.js'
 import { HubConnection } from '../../client/hubConnection.js'
 import { AUTOPILOT_COMPOSER_HINT, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
-import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput } from '../../client/hubController.js'
-import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
+import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput, type WatchInput } from '../../client/hubController.js'
+import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, orderTasks, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
+import { watchChipText } from '../../client/watch.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AutopilotPanel } from './AutopilotPanel.js'
 import { AutopilotThreadView } from './AutopilotThreadView.js'
+import { WatchPanel, WatchStrip } from './WatchPanel.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
@@ -131,6 +133,11 @@ export interface SupervisorViewProps {
   readonly autopilotThreadOpen?: boolean
   readonly onAutopilotThreadChange?: (open: boolean) => void
   readonly onRespondAutopilot?: (confirmationId: string, decision: 'confirm' | 'cancel') => void
+  /** Watch panel open state. Absent: the panel cannot be opened (the live cards still show). */
+  readonly watchOpen?: boolean
+  readonly onWatchChange?: (open: boolean) => void
+  readonly onSaveWatch?: (input: WatchInput) => Promise<boolean>
+  readonly onRetryWatch?: () => void
 }
 
 /**
@@ -150,6 +157,11 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const threadAvailable = props.onAutopilotThreadChange !== undefined && autopilotThreadAvailable(state)
   const showThread = threadAvailable && props.autopilotThreadOpen === true && supervisor.phase !== 'unsupported'
   const threadPending = autopilotPendingCount(state)
+  const watch = state.watch
+  const watchAvailable = props.onWatchChange !== undefined && !watch.unsupported
+  const showWatch = watchAvailable && props.watchOpen === true && supervisor.phase !== 'unsupported'
+  const watchChip = watch.unsupported ? undefined : watchChipText(watch.rows)
+  const watchTasks = useMemo(() => orderTasks(Object.values(state.tasks), state.workspaces), [state.tasks, state.workspaces])
   const live = state.connection.state === 'live'
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
@@ -214,13 +226,27 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             {threadPending > 0 ? <span className="supervisor__badge" aria-label={pendingBadgeLabel(threadPending)}>{threadPending}</span> : null}
           </button>
         ) : null}
+        {watchChip === undefined ? null : <span className="supervisor__autopilot" role="status" aria-label="Watch status">{watchChip}</span>}
         {autopilotAvailable ? <button type="button" className="btn" aria-expanded={showAutopilot} onClick={() => props.onAutopilotChange?.(!props.autopilotOpen)}>Autopilot</button> : null}
+        {watchAvailable ? <button type="button" className="btn" aria-expanded={showWatch} onClick={() => props.onWatchChange?.(!props.watchOpen)}>Watch</button> : null}
         <button type="button" className="btn" aria-expanded={showChooser} onClick={() => props.onChooserChange(!props.chooserOpen)}>Model</button>
         <button type="button" className="btn" onClick={onOpenSettings}>Hub settings</button>
       </header>
-      {note || showChooser || showAutopilot ? (
+      {note || showChooser || showAutopilot || showWatch || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
         <div className="supervisor__panel">
           {note ? <p role="status" className="notice">{note}</p> : null}
+          {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
+          {showWatch ? (
+            <WatchPanel
+              watch={watch}
+              tasks={watchTasks}
+              workspaces={state.workspaces}
+              live={live}
+              onSave={props.onSaveWatch ?? (async () => false)}
+              onRetry={props.onRetryWatch ?? (() => undefined)}
+              onClose={() => props.onWatchChange?.(false)}
+            />
+          ) : null}
           {showAutopilot ? (
             <AutopilotPanel
               autopilot={autopilot}
@@ -366,6 +392,7 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
   const [chooserOpen, setChooserOpen] = useState(false)
   const [autopilotOpen, setAutopilotOpen] = useState(false)
   const [autopilotThreadOpen, setAutopilotThreadOpen] = useState(false)
+  const [watchOpen, setWatchOpen] = useState(false)
   useEffect(() => {
     session.controller.start()
     return () => {
@@ -397,6 +424,10 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
       autopilotThreadOpen={autopilotThreadOpen}
       onAutopilotThreadChange={open => { setAutopilotThreadOpen(open); if (open) void session.controller.autopilotThreadOpen() }}
       onRespondAutopilot={(id, decision) => { void session.controller.autopilotThreadRespond(id, decision) }}
+      watchOpen={watchOpen}
+      onWatchChange={open => { setWatchOpen(open); if (open) void session.controller.loadWatches() }}
+      onSaveWatch={input => session.controller.setWatch(input)}
+      onRetryWatch={() => { void session.controller.loadWatches() }}
     />
   )
 }

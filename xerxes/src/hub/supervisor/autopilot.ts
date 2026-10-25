@@ -10,7 +10,7 @@ import type { AuthenticatedContext, HubAuditInput } from '../identityPort.js'
 import { HubProtocolError, isRecord, readId, type HubMethod } from '../protocol.js'
 import type { HubMethodHandler, HubWorkspaceView } from '../server.js'
 import type { AttentionItem } from './attention.js'
-import { fenceUntrusted, type DigestEventSource } from './digests.js'
+import { fenceUntrusted, promptId, type DigestEventSource } from './digests.js'
 import { messageToWire, type SupervisorThreads, type UserPrincipal } from './threads.js'
 
 /**
@@ -406,6 +406,8 @@ const REASON_TEXT: Readonly<Record<AutopilotWakeReason, string>> = {
 export interface AutopilotTrigger {
   readonly kind: 'autopilot'
   readonly text: string
+  /** The one task this wake is about. Only actions on it may run without a Confirm tap. */
+  readonly target: { readonly workspaceId: string; readonly sessionId: string }
 }
 
 export interface AutopilotPush {
@@ -696,6 +698,7 @@ export class AutopilotWaker {
     this.wakeTimes.set(workspaceId, times)
     const trigger: AutopilotTrigger = {
       kind: 'autopilot',
+      target: { workspaceId, sessionId },
       text: autopilotTriggerText({
         reason, workspaceId, label: this.label(workspaceId), sessionId, title: rawTitle, ownerName: owner.displayName,
         instruction: active.instruction, ...(options.otherTasks === undefined ? {} : { otherTasks: options.otherTasks }),
@@ -719,10 +722,11 @@ export function autopilotTriggerText(input: {
 }): string {
   const lines = [
     `Autopilot: the Hub woke you for ${REASON_TEXT[input.reason]}. This message comes from the Hub, not from a task.`,
-    `You act for ${input.ownerName}, the Hub owner. In this wake-up, steering a task, stopping a task, messaging an agent and answering a question run immediately, without a Confirm tap. Starting a task, setting a goal or changing a model only creates a card the owner must confirm.`,
-    `Workspace: ${input.workspaceId} (${clipTitle(input.label, 80)}). Task id: ${input.sessionId}.`,
+    `You act for ${input.ownerName}, the Hub owner. In this wake-up, steering this task, stopping it, messaging its agents and answering its questions run immediately, without a Confirm tap. Anything on another task, starting a task, setting a goal or changing a model only creates a card the owner must confirm.`,
+    `Workspace id: ${promptId(input.workspaceId)}. Task id: ${promptId(input.sessionId)}.`,
+    `Workspace label:\n${fenceUntrusted('workspace_label', clipTitle(input.label, 80))}`,
     `Task title:\n${fenceUntrusted('task_title', clipTitle(input.title, 200))}`,
-    ...(input.otherTasks !== undefined && input.otherTasks.length > 0 ? [`Other working tasks in this workspace: ${input.otherTasks.join(', ')}.`] : []),
+    ...(input.otherTasks !== undefined && input.otherTasks.length > 0 ? [`Other working tasks in this workspace: ${input.otherTasks.map(id => promptId(id)).join(', ')}.`] : []),
     input.instruction === ''
       ? `${input.ownerName} left no standing instruction.`
       : `Standing instruction from ${input.ownerName} (the owner wrote this):\n${input.instruction}`,

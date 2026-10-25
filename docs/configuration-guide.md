@@ -122,8 +122,9 @@ and a person confirms each change; it can never approve permissions or reviews.
 most 30 days. While it is on, XERXES wakes on task events (a waiting question, a failed
 or blocked task, a blocked or finished goal) and on a periodic check-in. Wake-ups run in
 the owner's own Autopilot thread, which nobody else can open. In a wake-up it may steer,
-stop or message a task's agents and answer pending questions without a Confirm tap;
-starting a task, setting a goal or changing a model still needs the owner's Confirm.
+stop or message the agents of the task it woke for, and answer that task's pending
+questions, without a Confirm tap; anything on another task, starting a task, setting a
+goal or changing a model still needs the owner's Confirm.
 The owner's own messages run immediately only while nobody else is talking in the
 conversation. At most 30 autonomous actions run per workspace per hour; past that they
 become Confirm cards. Every autonomous action is posted in the shared thread (to people
@@ -134,6 +135,24 @@ and says so. Leaving the expiry out of a change keeps the current one.
 `XERXES_HUB_AUTOPILOT_CHECKIN_MS` sets the check-in period (default 900000, 15 minutes;
 `0` disables it; otherwise at least 60000). An invalid value is reported and the default
 applies.
+
+**Watch.** The Hub owner can watch a task in the apps (`supervisor.watch.set`), with an
+optional periodic review (every 5 to 120 minutes) and an expiry of at most 30 days. The
+Hub follows every event of a watched task without using the model and shows a live card
+(edits, tests, agents, anomalies). XERXES wakes only when something looks wrong (a loop,
+a stall, the same tests failing, a burst of errors, a nearly full context, a blocked goal),
+or for the review, and sees everything since its last look (tool names and argument
+names only, never argument values; other task text is redacted). Wake-ups run in the
+owner's Autopilot thread; each task has its own budget of 6 anomaly and 12 review
+wake-ups per hour, each anomaly kind waits 30 minutes before it can wake XERXES again,
+only one watch turn per task runs at a time, and the whole Hub allows 60 watch wake-ups
+per hour. XERXES's model is limited to 2,000,000 tokens per 24 hours unless another
+token quota is configured. When Autopilot is on for the workspace, XERXES may steer or
+stop the watched task at once; otherwise every action is a Confirm card and the owner is
+pushed (lock-screen text never names the task). After a Hub restart, watches resume
+without waking for anything that happened before. At most 50 tasks are watched at once. `XERXES_HUB_WATCH_STALL_MS` sets how long a working task may go quiet
+before it counts as stalled (default 600000, 10 minutes; at least 60000). An invalid
+value is reported and the default applies.
 
 Voice is off unless `XERXES_HUB_VOICE_ENABLED=true` and the supervisor is configured.
 Providers come from `XERXES_HUB_VOICE_STT_*`, `_TTS_*` and `_REALTIME_*`, with keys in
