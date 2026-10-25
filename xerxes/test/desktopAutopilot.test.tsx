@@ -16,7 +16,7 @@ const noop = (): void => {}
 
 function row(patch: Record<string, unknown> = {}): AutopilotRow {
   const parsed = parseAutopilotRow({
-    workspace_id: 'w1', label: 'One · app', enabled: true, instruction: 'Keep going', expires_at: '2026-10-25T00:00:00.000Z',
+    workspace_id: 'w1', label: 'One · app', enabled: true, instruction: 'Keep going', expires_at: '2099-01-01T00:00:00.000Z',
     enabled_by: { id: 'u1', name: 'Ann' }, updated_at: '2026-10-24T10:00:00.000Z', active: true, ...patch,
   })
   if (!parsed) throw new Error('fixture row is malformed')
