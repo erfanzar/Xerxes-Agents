@@ -134,6 +134,14 @@ export function checkComputerUse(options: DoctorOptions = {}): Diagnosis {
     return diagnosis('computer-use', 'ok', 'computer_use macOS backend is not applicable on ' + platform)
   }
   const exists = options.fileExists ?? existsSync
+  const driver = (options.environment ?? process.env)['XERXES_CUA_DRIVER'] ?? '/Applications/CuaDriver.app/Contents/MacOS/cua-driver'
+  if (exists(driver)) {
+    return diagnosis(
+      'computer-use', 'ok',
+      'computer_use: CuaDriver executable detected at ' + driver + '; auto prefers its accessibility-tree backend. Accessibility and Screen Recording are checked lazily, not verified by doctor. The legacy macos backend instead needs grants for Xerxes Agents, VS Code, or your terminal app in Privacy & Security.',
+      'For CuaDriver Accessibility or Screen Recording errors run `cua-driver permissions grant`; Xerxes never changes its grants or configuration.',
+    )
+  }
   const missing = MACOS_COMPUTER_USE_BINARIES.filter(path => !exists(path))
   if (missing.length) {
     return diagnosis(

@@ -6,14 +6,14 @@ import type { ToolDefinition } from '../../types/toolCalls.js'
 /**
  * Compact model-agnostic schema for privileged desktop control.
  *
- * The tool is not registered by default. A host must explicitly inject a
- * ComputerUseSession backed by a real, approved desktop automation service.
+ * A host injects a ComputerUseSession backed by a real desktop service.
+ * The macOS runtime defaults to CuaDriver when installed, or its pixel port.
  */
 export const COMPUTER_USE_SCHEMA = {
   name: 'computer_use',
   description: [
     'Drive a configured privileged desktop backend: capture accessibility-aware screenshots, click, type, scroll, drag, and focus apps.',
-    'Prefer action="capture" with mode="som", then address an element by its 1-based element index rather than pixel coordinates.',
+    'Prefer action="capture" with mode="som", then address an element by its 1-based element index rather than pixel coordinates. Capture again after an action before reusing an element index. type accepts an optional element target.',
     'This tool is unavailable unless the host explicitly configures a real ComputerUsePort; it never substitutes browser automation or cursor simulation.',
   ].join(' '),
   parameters: {
@@ -61,16 +61,16 @@ export const COMPUTER_USE_SCHEMA = {
       element: {
         type: 'integer',
         minimum: 1,
-        description: '1-based element index from the most recent capture.',
+        description: '1-based element index from the most recent capture. Supported by click, type, set_value, and scroll. Capture again after an action before reusing an index.',
       },
-      x: { type: 'integer', minimum: 0, description: 'Logical pixel X coordinate.' },
-      y: { type: 'integer', minimum: 0, description: 'Logical pixel Y coordinate.' },
+      x: { type: 'integer', minimum: 0, description: 'X coordinate in pixels of the last captured image (window-local for CuaDriver window captures).' },
+      y: { type: 'integer', minimum: 0, description: 'Y coordinate in pixels of the last captured image.' },
       start_element: { type: 'integer', minimum: 1, description: '1-based drag start element index.' },
-      start_x: { type: 'integer', minimum: 0, description: 'Logical pixel drag start X coordinate.' },
-      start_y: { type: 'integer', minimum: 0, description: 'Logical pixel drag start Y coordinate.' },
+      start_x: { type: 'integer', minimum: 0, description: 'Captured-image pixel drag start X coordinate.' },
+      start_y: { type: 'integer', minimum: 0, description: 'Captured-image pixel drag start Y coordinate.' },
       end_element: { type: 'integer', minimum: 1, description: '1-based drag end element index.' },
-      end_x: { type: 'integer', minimum: 0, description: 'Logical pixel drag end X coordinate.' },
-      end_y: { type: 'integer', minimum: 0, description: 'Logical pixel drag end Y coordinate.' },
+      end_x: { type: 'integer', minimum: 0, description: 'Captured-image pixel drag end X coordinate.' },
+      end_y: { type: 'integer', minimum: 0, description: 'Captured-image pixel drag end Y coordinate.' },
       dx: { type: 'integer', default: 0, description: 'Horizontal scroll delta; positive moves right.' },
       dy: { type: 'integer', default: 0, description: 'Vertical scroll delta; positive moves down.' },
       text: { type: 'string', description: 'Text to type for action="type".' },

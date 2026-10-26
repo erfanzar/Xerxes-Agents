@@ -173,7 +173,7 @@ import {
   savedSessionSummary,
   selectSavedSession,
 } from "./runtime/sessionExport.js";
-import { createMacOSComputerUseToolOptions } from "./tools/computerUse/macosPort.js";
+import { MacOSComputerUseHost } from "./tools/computerUse/host.js";
 import { registerCreatorForgeTool } from "./tools/creatorForge.js";
 import { registerAgentPresetTools } from "./tools/agentPresets.js";
 import {
@@ -1919,6 +1919,7 @@ function daemonRuntime(
   // One for the host's lifetime: settings changes rebuild runners, and each
   // session's prompt must stay byte-identical across those rebuilds.
   const promptSnapshots = new SessionPromptSnapshots();
+  const computerUseHost = new MacOSComputerUseHost();
   const createWorkspaceRunner = (settings: Readonly<Record<string, unknown>>, workspaceRoot: string, resources: WorkspaceResources) => {
     let subagentHost = subagentHosts.get(workspaceRoot);
     const configuredConnection = runtimeConnection(
@@ -1966,7 +1967,7 @@ function daemonRuntime(
         console.error(`Project plugins in ${workspaceRoot} were not loaded: ${errorMessage(error)}`);
       });
     }
-    const computerUseTool = createMacOSComputerUseToolOptions({
+    const computerUseTool = computerUseHost.toolOptions({
       ...config.runtime,
       ...settings,
     });
@@ -2447,8 +2448,11 @@ function daemonRuntime(
       // audit log, so the audit sink is only closed after they settle.
       try { await Promise.all([...subagentHosts.values()].map(host => host.manager.shutdown())); }
       finally {
-        try { await lspManager.close(); }
-        finally { await auditEmitter?.close(); }
+        try { await computerUseHost.dispose(); }
+        finally {
+          try { await lspManager.close(); }
+          finally { await auditEmitter?.close(); }
+        }
       }
     },
     onSessionEvict: sessionId => {
@@ -2669,6 +2673,7 @@ async function acpServer(
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
+  const computerUseHost = new MacOSComputerUseHost();
   try {
   await startConfiguredMcpServers(mcpManager, mcpHostOptions(workspaceRoot));
   const tools = new ToolRegistry();
@@ -2677,7 +2682,7 @@ async function acpServer(
   const skillRegistry = new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills() });
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
-  const acpComputerUseTool = createMacOSComputerUseToolOptions(config.runtime);
+  const acpComputerUseTool = computerUseHost.toolOptions(config.runtime);
   registerCoreTools(tools, {
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
@@ -2780,11 +2785,15 @@ async function acpServer(
     server: new AcpServer({ runner, onSessionClose: sessionId => subagentHost.cancelSource(sessionId) }),
     shutdown: async () => {
       try { await subagentHost.manager.shutdown(); }
-      finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
+      finally {
+        try { await computerUseHost.dispose(); }
+        finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
+      }
     },
   };
   } catch (error) {
-    try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); }
+    try { await computerUseHost.dispose(); }
+    finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
     throw error;
   }
 }
@@ -2857,6 +2866,7 @@ async function runOneShot(
   const workspaceRoot = config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
+  const computerUseHost = new MacOSComputerUseHost();
   try {
   await startConfiguredMcpServers(mcpManager, mcpHostOptions(workspaceRoot));
   const tools = new ToolRegistry();
@@ -2866,7 +2876,7 @@ async function runOneShot(
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
-  const computerUseTool = createMacOSComputerUseToolOptions(config.runtime);
+  const computerUseTool = computerUseHost.toolOptions(config.runtime);
   registerCoreTools(tools, {
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
@@ -3061,7 +3071,8 @@ async function runOneShot(
   // must learn about it through the exit code rather than stdout alone.
   if (terminalProviderError !== undefined) process.exitCode = 1;
   } finally {
-    try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); }
+    try { await computerUseHost.dispose(); }
+    finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
   }
 }
 

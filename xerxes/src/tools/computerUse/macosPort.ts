@@ -8,7 +8,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  ComputerUseSession,
   ComputerUseUnavailableError,
   type ActionResult,
   type CaptureRequest,
@@ -37,7 +36,7 @@ import {
   MODIFIER_ALIASES,
 } from './macosScripts.js'
 import { ConfigurationError, ValidationError } from '../../core/errors.js'
-import type { ComputerUseToolsOptions } from './tool.js'
+export { createMacOSComputerUseToolOptions } from './host.js'
 
 // Vision models are billed per image token and lose click precision on very
 // large screenshots, so captures are capped at a longest edge that current
@@ -216,7 +215,7 @@ export class MacOSComputerUsePort implements ComputerUsePort {
 
   async capture(request: CaptureRequest, signal?: AbortSignal): Promise<CaptureResult> {
     if (request.mode === 'ax') {
-      return { elements: [], height: 0, mode: 'ax', width: 0 }
+      return { backend: 'macos', elements: [], height: 0, mode: 'ax', width: 0 }
     }
     // Unique temp name per capture so concurrent turns cannot clobber each
     // other's screenshot file.
@@ -276,6 +275,7 @@ export class MacOSComputerUsePort implements ComputerUsePort {
       // the right logical point; see logicalPoint().
       this.coordinateScale = shownWidth / logicalWidth
       return {
+        backend: 'macos',
         elements: [],
         height: shownHeight,
         mediaType,
@@ -352,6 +352,7 @@ export class MacOSComputerUsePort implements ComputerUsePort {
   }
 
   type(request: TextRequest, signal?: AbortSignal): Promise<ActionResult> {
+    if (request.element !== undefined) return Promise.resolve(unavailable('type', 'element-targeted type requires an accessibility-tree backend; capture and click by x/y first'))
     return this.runJxaAction('type', JXA_TYPE, [request.text], request.captureAfter, signal)
   }
 
@@ -626,44 +627,6 @@ function permissionHint(message: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/**
- * Build the CoreTools `computerUseTool` option.
- *
- * Desktop control is part of the baseline agent surface: it is enabled by
- * default whenever the zero-install macOS backend can run on this host. A
- * user opts out with `runtime.computer_use_enabled: false` or
- * `XERXES_COMPUTER_USE=off`. Force-enabling on an unsupported host
- * (`computer_use_enabled: true`) registers the tool anyway so calls fail
- * with an explicit unavailability error instead of a silent absence.
- */
-export function createMacOSComputerUseToolOptions(
-  settings: Readonly<Record<string, unknown>>,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-  hostAvailable?: () => boolean,
-): ComputerUseToolsOptions | undefined {
-  const bounds = resolveComputerUseCaptureBounds(settings, environment)
-  const flag = environment['XERXES_COMPUTER_USE']?.trim().toLowerCase()
-  // Opt-out wins over everything: a user who said "no desktop control" must
-  // never have the tool registered, regardless of host capability or any
-  // other setting.
-  const explicitlyDisabled = settings['computer_use_enabled'] === false
-    || flag === '0' || flag === 'false' || flag === 'no' || flag === 'off'
-  if (explicitlyDisabled) return undefined
-  // A non-macos backend selection means another port owns this surface;
-  // registering the macOS port too would shadow it.
-  const backend = settings['computer_use_backend']
-  if (backend !== undefined && backend !== 'macos') return undefined
-  const explicitlyEnabled = settings['computer_use_enabled'] === true
-    || flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on'
-  const available = hostAvailable?.() ?? new MacOSComputerUsePort().isAvailable()
-  // Default-on semantics: with no explicit setting the tool registers
-  // whenever the host can actually run it. Force-enable (`true`/`on`)
-  // registers even on an unsupported host so calls fail loudly with an
-  // unavailability error instead of the tool silently going missing.
-  if (!explicitlyEnabled && !available) return undefined
-  return { session: new ComputerUseSession({ port: new MacOSComputerUsePort(bounds) }) }
 }
 
 export interface ComputerUseCaptureBounds {

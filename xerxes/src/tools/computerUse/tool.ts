@@ -62,7 +62,7 @@ const ACTION_FIELDS: Readonly<Record<ComputerUseAction, readonly string[]>> = {
     'capture_after',
   ],
   scroll: ['action', 'element', 'x', 'y', 'dx', 'dy', 'capture_after'],
-  type: ['action', 'text', 'capture_after'],
+  type: ['action', 'text', 'element', 'capture_after'],
   key: ['action', 'key', 'capture_after'],
   set_value: ['action', 'element', 'value', 'capture_after'],
   wait: ['action', 'ms'],
@@ -141,7 +141,7 @@ export async function computerUse(
       return formatActionResult(await session.scroll(scrollRequest(inputs), signal), captureAfter(inputs))
     case 'type':
       return formatActionResult(
-        await session.type({ text: requiredStringValue(inputs, 'text'), captureAfter: captureAfter(inputs) }, signal),
+        await session.type({ text: requiredStringValue(inputs, 'text'), captureAfter: captureAfter(inputs), ...optionalElement(inputs, 'element') }, signal),
         captureAfter(inputs),
       )
     case 'key':
@@ -177,6 +177,7 @@ export function formatCaptureResult(capture: CaptureResult, maxElements = DEFAUL
     'Screen capture: ' + capture.width + 'x' + capture.height,
     'Mode: ' + capture.mode,
   ]
+  if (capture.backend) lines.push('Backend: ' + capture.backend)
   if (capture.app) lines.push('App: ' + capture.app)
   if (capture.windowTitle) lines.push('Window: ' + capture.windowTitle)
   if (elements.length) {

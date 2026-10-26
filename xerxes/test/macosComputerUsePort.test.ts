@@ -116,7 +116,7 @@ test('capture downscales to logical points capped at the max edge, re-encodes as
 test('capture mode ax performs no screenshot work', async () => {
   const fake = fakeRunner()
   const capture = await makePort(fake).capture({ mode: 'ax' })
-  expect(capture).toEqual({ elements: [], height: 0, mode: 'ax', width: 0 })
+  expect(capture).toEqual({ backend: 'macos', elements: [], height: 0, mode: 'ax', width: 0 })
   expect(fake.calls).toEqual([])
 })
 

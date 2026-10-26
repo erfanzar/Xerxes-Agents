@@ -3,6 +3,8 @@
 
 export * from './backend.js'
 export * from './cuaBackend.js'
+export { DEFAULT_CUA_DRIVER, MacOSComputerUseHost } from './host.js'
+export type { MacOSComputerUseHostOptions } from './host.js'
 export * from './macosPort.js'
 export * from './macosScripts.js'
 export * from './schema.js'

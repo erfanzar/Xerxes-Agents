@@ -19,6 +19,7 @@ import {
   wrapToolsWithCache,
 } from '../streaming/promptCaching.js'
 import { deterministicToolCallId } from '../streaming/toolCallIds.js'
+import { screenshotParts } from '../context/screenshotSuperseder.js'
 import type { ChatMessage, ContentPart, MessageContent } from '../types/messages.js'
 import { messageText } from '../types/messages.js'
 import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
@@ -69,7 +70,7 @@ export type AnthropicContentBlock =
   | { readonly text: string; readonly type: 'text' }
   | { readonly source: { readonly data: string; readonly media_type: string; readonly type: 'base64' }; readonly type: 'image' }
   | { readonly input: JsonObject; readonly id: string; readonly name: string; readonly type: 'tool_use' }
-  | { readonly content: string; readonly is_error?: boolean; readonly tool_use_id: string; readonly type: 'tool_result' }
+  | { readonly content: AnthropicToolResultContent; readonly is_error?: boolean; readonly tool_use_id: string; readonly type: 'tool_result' }
   | { readonly content: readonly { readonly tool_name: string; readonly type: 'tool_reference' }[]; readonly is_error?: boolean; readonly tool_use_id: string; readonly type: 'tool_result' }
   | { readonly data: string; readonly type: 'redacted_thinking' }
   | { readonly signature: string; readonly thinking: string; readonly type: 'thinking' }
@@ -192,7 +193,7 @@ export function messagesToAnthropic(
           : {
             type: 'tool_result',
             tool_use_id: toolMessage.tool_call_id,
-            content,
+            content: anthropicToolResultContent(content),
             ...(toolMessage.is_error ? { is_error: true } : {}),
           })
         if (references.length) displacedContent.push({ type: 'text', text: content })
@@ -756,7 +757,7 @@ function anthropicHeaders(apiKey: string, version: string, accept: string): Reco
   return {
     Accept: accept,
     'Content-Type': 'application/json',
-    'User-Agent': 'xerxes-agents/0.8.12',
+    'User-Agent': 'xerxes-agents/0.8.13',
     'anthropic-version': version,
     'x-api-key': apiKey,
   }
@@ -770,6 +771,22 @@ function anthropicUserContent(content: MessageContent): AnthropicContent {
   return blocks.some(block => block.type === 'text' && block.text.trim())
     ? blocks
     : [...blocks, { type: 'text', text: '(see attached image)' }]
+}
+
+/** A tool result's content: its text, or (a screenshot) text plus image blocks. */
+type AnthropicToolResultContent = string | readonly (
+  | { readonly text: string; readonly type: 'text' }
+  | { readonly source: { readonly data: string; readonly media_type: string; readonly type: 'base64' }; readonly type: 'image' }
+)[]
+
+/** A screenshot tool result as text plus an image block; anything else as its text. */
+function anthropicToolResultContent(content: string): AnthropicToolResultContent {
+  const shot = screenshotParts(content)
+  if (!shot) return content
+  return [
+    { type: 'text', text: shot.text },
+    ...shot.images.map(image => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: image.mediaType, data: image.data } })),
+  ]
 }
 
 function anthropicContentPart(part: ContentPart): AnthropicContentBlock[] {

@@ -45,7 +45,7 @@ test('computer_use doctor check reports platform fit, missing tools, and permiss
   expect(checkComputerUse({ platform: 'linux' }).severity).toBe('ok')
   expect(checkComputerUse({ platform: 'linux' }).message).toContain('not applicable')
 
-  const missing = checkComputerUse({ platform: 'darwin', fileExists: path => !path.includes('sips') })
+  const missing = checkComputerUse({ platform: 'darwin', environment: {}, fileExists: path => !path.includes('sips') && !path.includes('CuaDriver') })
   expect(missing.severity).toBe('warn')
   expect(missing.message).toContain('sips')
 

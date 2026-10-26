@@ -1,5 +1,45 @@
 # Configuration guide
 
+## macOS computer use
+
+`computer_use` defaults to `runtime.computer_use_backend: auto` on macOS. If
+`/Applications/CuaDriver.app/Contents/MacOS/cua-driver` exists, Xerxes lazily opens
+one `cua-driver mcp` stdio connection per runtime and uses the CuaDriver 0.28
+accessibility backend. Otherwise it uses the existing macOS screenshot/pixel
+backend. Set `runtime.computer_use_backend` to `cua` to require CuaDriver (missing
+or unavailable drivers fail explicitly), or `macos` to keep the pixel backend.
+`runtime.computer_use_enabled: false` or `XERXES_COMPUTER_USE=off` always wins.
+
+Override the binary with an absolute `runtime.computer_use_cua_driver` path or
+`XERXES_CUA_DRIVER` (environment wins). No PATH entry is required. Xerxes does not
+install the driver or modify its configuration, telemetry, autostart, or grants.
+CuaDriver owns its own Accessibility and Screen Recording permissions
+(`com.trycua.driver`); Xerxes checks them without prompting on first use. If they
+are missing, run `cua-driver permissions grant` yourself, using the full binary
+path if needed. `auto` does **not** silently switch backends after a driver
+startup failure or a possibly executed action. Calls are bounded to 30 seconds,
+cancellable, and never replayed automatically; runtime shutdown closes its MCP
+connection. Doctor only detects the executable; it does not verify permissions.
+
+Capture with `mode: som` (image + AX elements), `ax` (AX only), or `vision`
+(image only), optionally targeting an app name or bundle ID. Window captures use
+`computer_use_max_edge` / `XERXES_COMPUTER_USE_MAX_EDGE` (default 1568) and at most
+300 AX nodes; `max_elements` controls how many are displayed in the tool result.
+Element indices are Xerxes' 1-based references to opaque driver snapshot tokens,
+not the driver's zero-based indices. `click`, `type`, `set_value`, and `scroll`
+can target an element; capture again after an action before reusing indices.
+`capture_after: true` obtains a fresh snapshot after successful input.
+
+Coordinates are **pixels in the last returned image**, not macOS logical points.
+CuaDriver reverses Retina and `max_dimension` scaling itself, so Xerxes passes
+window-local image coordinates unchanged. Element-based drags use AX frame
+centers converted from screen points into that image's window-local pixels.
+Without an app or usable window, captures use the full desktop in native pixels
+and subsequent pixel input has explicit desktop scope; the result warns that the
+driver cannot bound a desktop capture with `max_dimension`. The legacy `macos`
+backend has no AX element addressing and uses `computer_use_jpeg_quality` /
+`XERXES_COMPUTER_USE_JPEG_QUALITY` (default 70) for its bounded JPEG pipeline.
+
 ## Hub
 
 The Hub is a separate, opt-in Bun process. Running or stopping it does not start, stop,

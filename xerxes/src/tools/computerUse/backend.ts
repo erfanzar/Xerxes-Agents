@@ -30,6 +30,7 @@ export interface UIElement {
 /** A screenshot and/or accessibility tree captured by a privileged backend. */
 export interface CaptureResult {
   readonly app?: string
+  readonly backend?: string
   readonly elements?: readonly UIElement[]
   readonly height: number
   /**
@@ -94,6 +95,7 @@ export interface ScrollRequest {
 
 export interface TextRequest {
   readonly captureAfter: boolean
+  readonly element?: number
   readonly text: string
 }
 
@@ -312,6 +314,7 @@ export class ComputerUseSession {
     try {
       available = Boolean(await port.isAvailable(signal))
     } catch (error) {
+      if (error instanceof ComputerUseUnavailableError) throw error
       throw new ComputerUseUnavailableError('configured ComputerUsePort could not determine availability', error)
     }
     if (!available) {
@@ -321,6 +324,7 @@ export class ComputerUseSession {
       try {
         await port.start?.(signal)
       } catch (error) {
+        if (error instanceof ComputerUseUnavailableError) throw error
         throw new ComputerUseUnavailableError('configured ComputerUsePort could not start', error)
       }
       this.started = true
@@ -365,6 +369,7 @@ export function normalizeCaptureResult(source: CaptureResult): CaptureResult {
     ? []
     : normalizeElements(source.elements)
   const app = source.app === undefined ? undefined : portString(source.app, 'capture app')
+  const backend = source.backend === undefined ? undefined : portString(source.backend, 'capture backend')
   const windowTitle = source.windowTitle === undefined ? undefined : portString(source.windowTitle, 'capture window title')
   const warning = source.warning === undefined ? undefined : portString(source.warning, 'capture warning')
   return Object.freeze({
@@ -376,6 +381,7 @@ export function normalizeCaptureResult(source: CaptureResult): CaptureResult {
     ...(mediaType === undefined ? {} : { mediaType }),
     elements: Object.freeze(elements),
     ...(app === undefined ? {} : { app }),
+    ...(backend === undefined ? {} : { backend }),
     ...(windowTitle === undefined ? {} : { windowTitle }),
     ...(warning === undefined ? {} : { warning }),
   })

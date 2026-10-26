@@ -61,7 +61,9 @@ The model is optional; `whisper-1` is the default. Recording is limited to two m
 
 ## macOS permissions
 
-Computer use needs **Accessibility** to post clicks and keystrokes and **Screen Recording** to take screenshots. macOS gives these permissions to the app that runs Xerxes. When the desktop app starts the runtime, that app is **Xerxes Agents** (a source launch shows up as **Electron**). When the VS Code extension started the shared runtime, VS Code needs the permissions. When you start Xerxes from a terminal, that terminal app needs them.
+Computer use needs **Accessibility** to post clicks and keystrokes and **Screen Recording** to take screenshots. With the default `computer_use_backend: auto`, an installed CuaDriver 0.28 supplies real accessibility elements and owns its own permissions as **CuaDriver** (`com.trycua.driver`). Xerxes checks them without prompting on first use; missing grants produce instructions to run `cua-driver permissions grant`. The desktop permission panel below still reports the desktop app's grants, not the driver's. See [macOS computer-use settings](configuration-guide.md#macos-computer-use).
+
+When CuaDriver is absent, or `computer_use_backend: macos` is selected, the legacy pixel backend uses the permissions of the app that runs Xerxes. When the desktop app starts the runtime, that app is **Xerxes Agents** (a source launch shows up as **Electron**). When the VS Code extension started the shared runtime, VS Code needs the permissions. When you start Xerxes from a terminal, that terminal app needs them.
 
 At start the app reads these permissions silently; it never makes macOS prompt you. If Accessibility or Screen Recording is off, a notice offers **Open settings**, which goes straight to the matching System Settings › Privacy & Security pane. The notice also offers **Relaunch now**, because macOS applies a new Screen Recording grant only after a relaunch, plus **Not now** and **Don't remind me**. The opt-out is stored in `~/.xerxes/desktop-permissions.json`. The app checks again when its window regains focus, at most once every five seconds, so coming back from System Settings updates the notice.
 

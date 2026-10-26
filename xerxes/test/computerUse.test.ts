@@ -185,21 +185,24 @@ test('CuaBackend maps an injected MCP transport without launching or installing 
   const capture = await execute(registry, { action: 'capture', mode: 'som' })
   expect(capture._multimodal).toBe(true)
   expect(capture.text_summary).toContain('Screen capture: 640x480')
-  expect(capture.text_summary).toContain('[7] AXButton "Save"')
+  expect(capture.text_summary).toContain('[1] AXButton "Save"')
 
   expect(await execute(registry, { action: 'right_click', x: 12, y: 8 })).toEqual({
     ok: true,
     action: 'right_click',
-    message: 'clicked',
+    message: 'CuaDriver: clicked',
     meta: {},
   })
   expect(driver.events).toEqual([
     'available',
     'available',
     'start',
-    'capture:{"mode":"som"}',
+    'check_permissions:{"prompt":false,"probe_direct_capture":false}',
+    'list_apps:{}',
+    'list_windows:{"pid":123}',
+    'get_window_state:{"pid":123,"window_id":456,"include_screenshot":true,"include_accessibility_tree":true,"max_dimension":1568,"max_elements":300}',
     'available',
-    'click:{"button":"right","click_count":1,"x":12,"y":8}',
+    'click:{"pid":123,"window_id":456,"scope":"window","x":12,"y":8,"button":"right","count":1}',
   ])
 
   expect(parseCuaWindows('- Safari (pid 123) "Docs" [window_id: 456]')).toEqual([
@@ -382,12 +385,15 @@ class FakeCuaDriver implements CuaDriverMcpPort {
 
   callTool(name: string, arguments_: JsonObject): MCPToolCallResult {
     this.events.push(name + ':' + JSON.stringify(arguments_))
-    if (name === 'capture') {
+    if (name === 'check_permissions') return { content: [], structuredContent: { accessibility: true, screen_recording: true } }
+    if (name === 'list_apps') return { content: [], structuredContent: { apps: [{ name: 'Safari', active: true, running: true, pid: 123 }] } }
+    if (name === 'list_windows') return { content: [], structuredContent: { windows: [{ pid: 123, window_id: 456, is_on_screen: true, bounds: { width: 640, height: 480 } }] } }
+    if (name === 'get_window_state') {
       return {
         content: [
-          { type: 'text', text: '- [7] AXButton "Save"' },
           { type: 'image', mimeType: 'image/png', data: png640x480() },
         ],
+        structuredContent: { snapshot_id: 's00000001', screenshot_width: 640, screenshot_height: 480, elements: [{ element_index: 0, element_token: 's00000001:0', role: 'AXButton', label: 'Save' }] },
       }
     }
     return { content: [{ type: 'text', text: 'clicked' }] }

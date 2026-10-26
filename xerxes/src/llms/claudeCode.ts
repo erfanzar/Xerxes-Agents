@@ -28,6 +28,7 @@ import { parseStreamingJson } from '@earendil-works/pi-ai'
 import { claudeCodeLogin, claudeExecutable } from '../auth/claudeCodeLogin.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { fitImage } from '../core/imageFit.js'
+import { screenshotParts } from '../context/screenshotSuperseder.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { ensureClaudeCode } from '../runtime/companionInstall.js'
 import type { ChatMessage, ContentPart } from '../types/messages.js'
@@ -181,6 +182,21 @@ function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): InputBlo
   return /^https?:\/\//.test(url) ? { type: 'image', source: { type: 'url', url } } : undefined
 }
 
+/**
+ * A tool result's text. A screenshot becomes its summary, and its picture is
+ * queued as an image block: sent as text it reached the model as hundreds of
+ * kilobytes of base64 and no image, so computer use was blind.
+ */
+function toolResultBody(content: unknown, images: InputBlock[]): string {
+  const shot = screenshotParts(content)
+  if (!shot) return String(content)
+  for (const image of shot.images) {
+    const fitted = fitImage({ mediaType: image.mediaType, data: image.data })
+    images.push({ type: 'image', source: { type: 'base64', media_type: fitted.mediaType, data: fitted.data } })
+  }
+  return `${shot.text}\n(screenshot attached below as an image)`
+}
+
 const escapeAttribute = (value: string) => value.replace(/[&"<>]/g, char => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[char]!)
 
 /**
@@ -196,15 +212,19 @@ const escapeAttribute = (value: string) => value.replace(/[&"<>]/g, char => ({ '
 export function claudeCodeTranscript(messages: readonly ChatMessage[]): InputBlock[] {
   const blocks: InputBlock[] = []
   let results: string[] = []
+  // Screenshots from this step's tool results, sent as real image blocks after their text.
+  let resultImages: InputBlock[] = []
   const flushResults = (): void => {
     if (results.length) blocks.push({ type: 'text', text: results.join('\n') })
+    blocks.push(...resultImages)
     results = []
+    resultImages = []
   }
   for (const message of messages) {
     if (message.role === 'system') continue
     if (message.role === 'tool') {
       const name = message.name ? ` name="${escapeAttribute(message.name)}"` : ''
-      results.push(`<tool_result${name} id="${escapeAttribute(message.tool_call_id)}"${message.is_error ? ' error="true"' : ''}>\n${neutralizeRoleTags(String(message.content))}\n</tool_result>`)
+      results.push(`<tool_result${name} id="${escapeAttribute(message.tool_call_id)}"${message.is_error ? ' error="true"' : ''}>\n${neutralizeRoleTags(toolResultBody(message.content, resultImages))}\n</tool_result>`)
       continue
     }
     flushResults()

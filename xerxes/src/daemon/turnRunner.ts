@@ -19,6 +19,7 @@ import {
 } from '../context/assembly.js'
 import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
+import { isScreenshotToolResult } from '../context/screenshotSuperseder.js'
 import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
 import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
@@ -1053,7 +1054,7 @@ export class AgentTurnRunner implements TurnRunner {
     const directory = this.options.toolResultDirectory
     if (!directory) return (_toolName, content) => content
     return (toolName, content) => {
-      if (content.length <= TOOL_RESULT_INLINE_LIMIT_CHARS) return content
+      if (keepsToolResultInline(content)) return content
       let store = this.toolResultStores.get(session.id)
       if (!store) {
         try {
@@ -1162,6 +1163,16 @@ export class AgentTurnRunner implements TurnRunner {
  */
 const TOOL_RESULT_INLINE_LIMIT_CHARS = 16_000
 const TOOL_RESULT_PREVIEW_CHARS = 4_000
+
+/**
+ * Results that reach the model whole. A screenshot is bounded where it is
+ * taken (downscaled JPEG) and only the latest stays inline
+ * (screenshotSuperseder); spilling it to disk left the model a text preview
+ * of base64 and no image, so computer use was blind.
+ */
+export function keepsToolResultInline(content: string): boolean {
+  return content.length <= TOOL_RESULT_INLINE_LIMIT_CHARS || isScreenshotToolResult(content)
+}
 
 /**
  * Render the stand-in the provider sees. The envelope is a tag rather than the
