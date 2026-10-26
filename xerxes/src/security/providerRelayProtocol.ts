@@ -5,6 +5,7 @@ import { COMPACTION_SUMMARY_MARKER } from '../context/compressor.js'
 import { parseChatCompletionRequest } from '../api-server/protocol.js'
 import { isQuerySource, type CompletionRequest, type LlmDelta } from '../llms/client.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import { isHarnessOrigin } from '../types/messages.js'
 import { LocalProviderRelayError, type RelayFailureCode } from './localProviderRelay.js'
 
 export type ProviderRelayRequest = { op: 'next'; id: string; request?: CompletionRequest } | { op: 'cancel'; id: string }
@@ -35,7 +36,7 @@ export function decodeRelayCompletion(value: unknown): CompletionRequest {
     const messages = parsed.messages.map((message, index) => {
       const source = object((raw.messages as unknown[])[index])
       const common = ['role', 'content']
-      keys(source, [...common, ...(message.role === 'assistant' ? ['thinking','thinking_signature','tool_calls'] : message.role === 'tool' ? ['name','tool_call_id','is_error','added_tool_names'] : message.role === 'user' ? ['displayText', COMPACTION_SUMMARY_MARKER] : [])])
+      keys(source, [...common, ...(message.role === 'assistant' ? ['thinking','thinking_signature','tool_calls'] : message.role === 'tool' ? ['name','tool_call_id','is_error','added_tool_names'] : message.role === 'user' ? ['displayText', 'origin', COMPACTION_SUMMARY_MARKER] : [])])
       if (message.role === 'assistant') return { ...message,
         ...(source.thinking === undefined ? {} : { thinking: string(source.thinking) }),
         ...(source.thinking_signature === undefined ? {} : { thinking_signature: string(source.thinking_signature) }) }
@@ -44,6 +45,9 @@ export function decodeRelayCompletion(value: unknown): CompletionRequest {
         ...(source.added_tool_names === undefined ? {} : { added_tool_names: strings(source.added_tool_names) }) }
       // Internal summary provenance stays in the remote transcript, not the model request.
       if (source[COMPACTION_SUMMARY_MARKER] !== undefined) boolean(source[COMPACTION_SUMMARY_MARKER])
+      // Harness-written prompts (goal rounds, reminders, nudges) carry their author.
+      // It is transcript provenance: validated, then left out of the model request.
+      if (source.origin !== undefined && !isHarnessOrigin(source.origin)) bad()
       return message
     })
     const tools = parsed.tools?.map((tool, index): ToolDefinition => {

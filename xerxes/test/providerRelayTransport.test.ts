@@ -165,3 +165,21 @@ test('compacted native history crosses the relay without serializing internal su
   expect(() => decodeRelayCompletion({ ...input, messages: [{ ...input.messages[0], xerxes_compaction_summary: 'invalid' }] })).toThrow('unsupported')
   expect(() => decodeRelayCompletion({ ...input, messages: [{ ...input.messages[0], arbitrary_metadata: 'unknown' }] })).toThrow('unsupported')
 })
+
+test('harness-written prompts (goal rounds, reminders) cross the relay without their origin tag', async () => {
+  for (const origin of ['goal', 'monitor', 'schedule', 'harness', 'agent']) {
+    const input = { ...request, messages: [{ role: 'user', content: 'Goal round 2/8', origin }] }
+    expect(decodeRelayCompletion(input).messages).toEqual([{ role: 'user', content: 'Goal round 2/8' }])
+  }
+  expect(() => decodeRelayCompletion({ ...request, messages: [{ role: 'user', content: 'x', origin: 'someone-else' }] })).toThrow('unsupported')
+  // The whole remote path: a transcript with a goal-round prompt reaches the local provider.
+  const seen: unknown[] = []
+  const fixture = endpoint({ async *stream(sent) { seen.push(sent.messages); yield { content: 'ok' } } })
+  const client = new LocalRelayClient(frame => fixture.host.handle(frame))
+  try {
+    const deltas: unknown[] = []
+    for await (const delta of client.stream({ ...request, messages: [{ role: 'user', content: 'start' }, { role: 'assistant', content: 'working' }, { role: 'user', content: 'Goal round 2/8', origin: 'goal' }] })) deltas.push(delta)
+    expect(deltas).toEqual([{ content: 'ok' }])
+    expect(JSON.stringify(seen)).not.toContain('origin')
+  } finally { fixture.close() }
+})
