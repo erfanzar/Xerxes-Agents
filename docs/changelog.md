@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.12 — 2026-10-26
+
+- **Remote chats that use this computer's provider no longer fail with "unsupported or oversized request".** Messages Xerxes writes into a chat itself (goal rounds, reminders, empty-reply nudges, sub-agent results) carry a tag naming who wrote them. The local provider relay accepted only a fixed set of message fields and refused the whole request when it saw that tag, so once such a message was in a remote chat's history, every later turn through the relayed provider failed. The relay now accepts the tag, refuses an unknown value, and leaves it out of the model request. Both the remote host and this computer need 0.8.12, since each checks the request.
+- **SSH chats move back to the server's own sign-in.** Only a brand-new SSH chat used to check whether the host's own Claude Code sign-in works, so a chat that had once run through this computer stayed "via this Mac" for good, even on a host with a working login. Now, whenever such a chat is idle, the app checks the host again and moves the chat there when its sign-in works. A chat you explicitly put on this computer ("Use via Mac") stays there. Settings also offers **Run on the server** for a relayed chat whose host reports a working sign-in. The host confirms the switch through `set_model {host_credentials: true}`; an older host that does not confirm keeps the chat on this computer, so a half-finished switch can't happen.
+
 ## 0.8.11 — 2026-10-25
 
 - **Remote runtimes match the app that installs them.** Setting up or updating a runtime on an SSH host used to install whatever was newest on GitHub `main`, so an app could put a runtime newer than itself on a host, and then could neither use it fully nor restart it. The app and the terminal UI now install their own release tag (`v<version>`); only a build with no matching tag (a development build) still uses `main`.
