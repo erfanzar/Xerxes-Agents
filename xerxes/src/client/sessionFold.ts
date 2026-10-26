@@ -17,12 +17,16 @@ const TEXT_LIMIT = 8_000
 const OUTPUT_LIMIT = 600
 const RESOLVED_LIMIT = 50
 
-export type Block =
+/** Stable daemon action identity for authoritative history-window reconciliation. */
+interface HistoryIdentity { readonly historyActionId?: string }
+
+export type Block = HistoryIdentity & (
   | { readonly kind: 'user'; readonly id: string; readonly text: string; readonly images: number; readonly author?: string; readonly steer: boolean }
   | { readonly kind: 'assistant'; readonly id: string; readonly text: string; readonly streaming: boolean }
   | { readonly kind: 'thinking'; readonly id: string; readonly text: string; readonly streaming: boolean }
   | { readonly kind: 'tool'; readonly id: string; readonly callId: string; readonly name: string; readonly summary: string; readonly state: 'working' | 'done' | 'error'; readonly output?: string }
   | { readonly kind: 'notice'; readonly id: string; readonly text: string; readonly error: boolean }
+)
 
 export interface QuestionItem {
   readonly id: string
@@ -250,15 +254,16 @@ export function foldSessionEvent(tail: SessionTail, input: FoldInput): SessionTa
       return text ? appendStreaming(base, 'thinking', input.id, text) : base
     }
     case 'tool_call': {
-      const callId = str(payload.id) ?? input.id
+      const callId = str(payload.tool_call_id) ?? str(payload.id) ?? input.id
+      if (base.blocks.some(block => block.kind === 'tool' && block.callId === callId)) return base
       const name = str(payload.name) ?? 'tool'
       const added = pushBlock(settleStreaming(base.blocks), { kind: 'tool', id: input.id, callId, name, summary: toolSummary(payload.arguments), state: 'working' })
       return { ...base, blocks: added.blocks, truncated: base.truncated || added.dropped }
     }
     case 'tool_result': {
       const callId = str(payload.tool_call_id)
-      const failed = payload.is_error === true || payload.error !== undefined
-      const raw = payload.return_value ?? payload.output ?? payload.error
+      const raw = payload.return_value ?? payload.result ?? payload.output ?? payload.error
+      const failed = payload.is_error === true || payload.error != null || payload.permitted === false || (typeof raw === 'string' && raw.startsWith('Tool execution failed:'))
       const output = typeof raw === 'string' ? clip(raw, OUTPUT_LIMIT) : raw === undefined ? undefined : clip(JSON.stringify(raw) ?? '', OUTPUT_LIMIT)
       let changed = false
       const blocks = base.blocks.map(block => {

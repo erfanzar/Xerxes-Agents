@@ -266,6 +266,7 @@ params fall back to per-connection defaults.
 | `git.log` | `{ session_key?, limit? }` | `{ ok, commits }` | Recent commits (default 20, max 200). |
 | `git.commitMessage` | `{ session_key? }` | `{ ok, message, staged, truncated }` | Drafts a message from the staged diff (or all changes when nothing is staged) with the session model, matching recent commit subjects. Dispatched concurrently. |
 | `terminal.open` | `{ session_key?, cols?, rows? }` | `{ ok, terminal_id }` | Opens a login shell PTY in the session folder, owned by the session (listed by `terminal.list` with `kind: "pty"`, empty `command`). Input and kill use `terminal.control`. |
+| `terminal.run` | `{ session_key?, command, cols?, rows? }` | `{ ok, terminal_id, opened }` | A person's "Run" on a code block: types `command` (≤16 KiB, no NUL) plus Enter into one of the session's user shells that waits at its prompt, or opens a new user shell (`opened: true`). Never writes into an agent PTY or a busy shell. Not accepted from the Hub (`hub_auth`). |
 | `terminal.attach` / `terminal.detach` | `{ session_key?, terminal_id }` | `{ ok, data, running, exit_code }` / `{ ok }` | Attach replays up to 200K retained characters and subscribes this connection to `terminal_output` events in the same synchronous step (no gap, no duplicate). Subscriptions end on detach, exit, or disconnect. |
 | `terminal.resize` | `{ session_key?, terminal_id, cols, rows }` | `{ ok }` | Resizes an owned PTY (SIGWINCH to the program). |
 

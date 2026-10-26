@@ -50,6 +50,29 @@ optional `session_id`, `type`, `payload`, `occurred_at`, optional `actor`.
 - `hub.stream_gap.reason`: `retention`, `stream_replaced`,
   `journal_unavailable`, `scope_changed`.
 
+## Task history
+
+`hub.history {workspace_id, session_id, limit?, before?}` requires `session.read`
+and returns `{session_id, history:{actions, before, has_more, total_actions}}`.
+`limit` is an integer from **1 to 40** (default 10). The Hub may halve the page
+until it fits the 256 KiB frame target; even a single oversized action fails
+with `frame_too_large`. Actions are chronological (newest last): one message /
+reasoning entry or one tool call/result pair. `history.before` is an opaque,
+exclusive cursor for the next older page; stop when `has_more` is false.
+
+The phone opens with the latest 30 actions and follows only events after a
+scoped live watermark, not the journal's entire replay. Near-top scrolling
+prepends older pages with a visible-message scroll anchor and a fallback button.
+The Hub's summary journal deliberately excludes conversation text deltas. The
+phone therefore refetches latest history after `turn_end` and coalesces tool
+activity into a refresh every four seconds while work continues. History action
+IDs replace overlapping windows; tool call IDs reconcile covered live steps.
+Uncovered newer live steps remain after history, and the view keeps at most 400
+blocks, dropping oldest blocks. Consecutive tools share one collapsed group.
+For a task already waiting on a person, a separate background metadata-only
+replay recovers pending questions/approvals, without replaying any conversation
+or tool blocks into the view; live resolutions take precedence.
+
 ## Commands
 
 `hub.command {workspace_id, session_id?, command_id, action, args, expected_revision?}`

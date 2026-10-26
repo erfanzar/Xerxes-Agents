@@ -25,3 +25,15 @@ test('malformed and empty daemon session lists are safe to display', () => {
   expect(contextSessions(null, { sessions: [] })).toEqual([])
   expect(contextSessions([null, 42, {}, { id: '', cwd: '/repo' }, { id: 'no-path' }], [])).toEqual([])
 })
+test('context navigation bounds session identities, absolute paths, titles and row counts at the boundary', () => {
+  expect(contextSessions([
+    { id: 'bad\nid', cwd: '/repo' }, { id: 'x'.repeat(257), cwd: '/repo' },
+    { id: 'relative', cwd: 'repo' }, { id: 'control', cwd: '/bad\npath' },
+    { id: 'safe', cwd: '/repo', title: 'Train\u0000\n safely' },
+    { id: 'long', cwd: '/repo', title: 'x'.repeat(1000) },
+  ], [])).toEqual([
+    { id: 'safe', cwd: '/repo', title: 'Train   safely', status: 'idle' },
+    { id: 'long', cwd: '/repo', title: 'x'.repeat(512), status: 'idle' },
+  ])
+  expect(contextSessions(Array.from({ length: 1000 }, (_, i) => ({ id: `chat-${i}`, cwd: '/repo' })), [])).toHaveLength(200)
+})

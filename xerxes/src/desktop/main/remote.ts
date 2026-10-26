@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { remoteBootstrapScript } from '../../ui/lib/remoteBootstrap.js'
 import { XERXES_VERSION } from '../../core/version.js'
 import { remoteResumeProgram } from './remoteResume.js'
+import { remoteAttachAddress, remoteAttachProgram } from './remoteAttach.js'
 import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
 
 export interface RemoteTarget {
@@ -115,38 +116,42 @@ export interface RemoteConnection {
   reconnect(signal: AbortSignal, onFailure: (error: Error) => void): Promise<RemoteConnection>
   close(): Promise<void>
 }
+const sshOptions = [
+  '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15',
+  '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+  '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no',
+]
+const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+export type RemoteRunner = typeof runCaptured
+export function probeRemote(machine: RemoteTarget, program: string, signal: AbortSignal, run: RemoteRunner = runCaptured): Promise<string> {
+  return run('ssh', [...sshOptions, '-T', '--', sshDestination(machine.target),
+    'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(program))], signal, 20000)
+}
+export interface RemoteOpenPorts {
+  run?: RemoteRunner
+  spawnTunnel?: (args: string[]) => ChildProcess
+}
 /** Own only the forwarding process; the remote daemon and its durable sessions survive disconnect. */
 export async function openRemote(
   value: unknown,
   signal: AbortSignal,
   onFailure: (error: Error) => void,
   previousAddress?: ReturnType<typeof remoteAddress>,
+  ports: RemoteOpenPorts = {},
 ): Promise<RemoteConnection> {
   const machine = remoteTarget(value)
   const destination = sshDestination(machine.target)
-  const ssh = [
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=yes',
-    '-o',
-    'ConnectTimeout=15',
-    '-o',
-    'ServerAliveInterval=15',
-    '-o',
-    'ServerAliveCountMax=3',
-  ]
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+  const ssh = sshOptions
+  const run = ports.run ?? runCaptured
   let address: ReturnType<typeof remoteAddress> | undefined
-  let reused = false
   if (previousAddress) {
-    const probe = await runCaptured('ssh', [...ssh, '-T', '--', destination,
-      'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(remoteResumeProgram(previousAddress.socketPath)))], signal, 20000)
-    if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) { address = previousAddress; reused = true }
+    const probe = await probeRemote(machine, remoteResumeProgram(previousAddress.socketPath), signal, run)
+    if (probe.split('\n').includes('XERXES_REMOTE_ALIVE')) address = previousAddress
     else if (!probe.split('\n').includes('XERXES_REMOTE_MISSING')) throw new Error('Remote runtime probe did not return a valid status.')
   }
+  if (!address) address = remoteAttachAddress(await probeRemote(machine, remoteAttachProgram(machine.workspacePath), signal, run)) ?? undefined
   if (!address) {
-    const output = await runCaptured(
+    const output = await run(
       'ssh',
       [
         ...ssh,
@@ -183,9 +188,7 @@ export async function openRemote(
   try {
     signal.addEventListener('abort', abort, { once: true })
     signal.throwIfAborted()
-    tunnel = spawn(
-      'ssh',
-      [
+    tunnel = (ports.spawnTunnel ?? (args => spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })))([
         ...ssh,
         '-S',
         'none',
@@ -201,9 +204,7 @@ export async function openRemote(
         `${socketPath}:${address.socketPath}`,
         '--',
         destination,
-      ],
-      { stdio: ['ignore', 'ignore', 'pipe'] },
-    )
+      ])
     const failed = (error: Error) => {
       if (!closing) {
         failure = error
@@ -229,9 +230,9 @@ export async function openRemote(
     }
     let reconnectAddress = address
     const connection: RemoteConnection = { socketPath, projectDir: address.projectDir, expectedBuildId: address.expectedBuildId, close,
-      reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress),
+      reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress, ports),
       async update(force = false) {
-        const updated = remoteAddress(await runCaptured('ssh', [...ssh, '-T', '--', destination,
+        const updated = remoteAddress(await run('ssh', [...ssh, '-T', '--', destination,
           'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force, version: XERXES_VERSION }))], updateController.signal, 300000))
         if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
         reconnectAddress = updated
@@ -241,12 +242,9 @@ export async function openRemote(
           : { ok: true }
       },
     }
-    // A reused runtime skipped setup, so nothing compared it with the newest
-    // build: an outdated one stayed forever and had to be replaced by hand.
-    // Check in the background — an idle runtime is replaced now; a busy one
-    // keeps working and the app offers the update once it is idle.
-    // A failed check (offline, GitHub down) leaves the working connection as it is.
-    if (reused) void connection.update().catch(error => { if (!closing) console.error('Remote runtime update check failed:', error instanceof Error ? error.message : error) })
+    // Attaching/reconnecting never updates a running host. Only the person's
+    // explicit runtime-panel action may call update(). Its target build stays
+    // unknown until then; the running build is not the expected release build.
     return connection
   } catch (error) {
     await close()

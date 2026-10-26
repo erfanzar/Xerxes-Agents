@@ -3313,7 +3313,7 @@ export class DaemonServer {
     if (method === "terminal.control") {
       return this.controlTerminal(connection, params);
     }
-    if (method === "terminal.open" || method === "terminal.attach" || method === "terminal.detach" || method === "terminal.resize") {
+    if (method === "terminal.open" || method === "terminal.run" || method === "terminal.attach" || method === "terminal.detach" || method === "terminal.resize") {
       return this.interactiveTerminal(connection, method, params);
     }
     if (method === "channel.list") {
@@ -7353,8 +7353,7 @@ export class DaemonServer {
     const size = (value: unknown, fallback: number, max: number): number =>
       typeof value === "number" && Number.isFinite(value) ? Math.max(2, Math.min(max, Math.trunc(value))) : fallback;
     try {
-      if (method === "terminal.open") {
-        if (!this.ptySessions) return { ok: false, error: "Interactive terminals are not available in this runtime" };
+      const openUserShell = async (pty: PtySessionManager): Promise<string> => {
         const cwd = this.runtime.sessionStatus(sessionKey(connection, params))?.cwd;
         const options = {
           ownerSessionId: owner,
@@ -7370,8 +7369,27 @@ export class DaemonServer {
         // started it) would reject this workspace — and a silent fallback
         // then opened the shell in another project.
         const folder = cwd || this.projectDirectory || homedir();
-        const opened = await this.ptySessions.createSession("", { ...options, quiet: true, trustedWorkdir: folder });
-        return { ok: true, terminal_id: opened.sessionId };
+        const opened = await pty.createSession("", { ...options, quiet: true, trustedWorkdir: folder });
+        return opened.sessionId;
+      };
+      if (method === "terminal.open") {
+        if (!this.ptySessions) return { ok: false, error: "Interactive terminals are not available in this runtime" };
+        return { ok: true, terminal_id: await openUserShell(this.ptySessions) };
+      }
+      if (method === "terminal.run") {
+        // A person's "Run" on a code block: type it into one of their own
+        // shells that sits at its prompt, or a new one. Never an agent PTY,
+        // never a shell already running something.
+        const pty = this.ptySessions;
+        if (!pty) return { ok: false, error: "Interactive terminals are not available in this runtime" };
+        const command = typeof params.command === "string" ? params.command.replace(/\r\n?/g, "\n").replace(/\n+$/, "") : "";
+        if (!command.trim()) return { ok: false, error: "command is required" };
+        if (command.length > 16_384 || command.includes("\u0000")) return { ok: false, error: "command is too long or contains a NUL character" };
+        const idle = registry.list(owner).find(terminal => terminal.running && terminal.kind === "pty"
+          && terminal.label === USER_SHELL_LABEL && pty.isAtPrompt(terminal.id));
+        const terminalId = idle?.id ?? await openUserShell(pty);
+        await registry.write(owner, terminalId, command.replace(/\n/g, "\r") + "\r");
+        return { ok: true, terminal_id: terminalId, opened: idle === undefined };
       }
       const id = optionalString(params.terminal_id);
       if (!id) return { ok: false, error: "terminal_id is required" };

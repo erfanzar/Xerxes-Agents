@@ -216,37 +216,77 @@ function partsText(content: unknown): { readonly text: string; readonly images: 
  * (`{id, messages, executions, thinking}`) turned into display blocks. A
  * malformed action is skipped, never guessed at.
  */
-export function parseHistoryPage(result: Readonly<Record<string, unknown>>): { readonly blocks: readonly Block[]; readonly cursor?: string | number; readonly hasMore: boolean } {
+export interface HistoryPage {
+  readonly blocks: readonly Block[]
+  readonly actionIds: readonly string[]
+  readonly cursor?: string | number
+  readonly hasMore: boolean
+}
+
+export function parseHistoryPage(result: Readonly<Record<string, unknown>>): HistoryPage {
   const history = rec(result.history)
+  if (!Array.isArray(history.actions)) throw new Error('The Hub did not return a history page. Try opening this task again.')
   const blocks: Block[] = []
-  for (const [index, raw] of arr(history.actions).entries()) {
+  const actionIds: string[] = []
+  for (const raw of arr(history.actions)) {
     const action = rec(raw)
-    const base = str(action.id) ?? `a${index}`
+    const base = str(action.id)
+    if (!base) continue
+    actionIds.push(base)
     let n = 0
-    const nextId = (): string => `${base}:${n++}`
+    const identity = (): { id: string; historyActionId: string } => ({ id: `${base}:${n++}`, historyActionId: base })
     for (const item of arr(action.thinking)) {
       const text = typeof item === 'string' ? item : str(rec(item).text) ?? str(rec(item).think)
-      if (text && text.trim()) blocks.push({ kind: 'thinking', id: nextId(), text: clip(text, 4000), streaming: false })
+      if (text && text.trim()) blocks.push({ kind: 'thinking', ...identity(), text, streaming: false })
+    }
+    const executions = new Map<string, Readonly<Record<string, unknown>>>()
+    const results = new Map<string, Readonly<Record<string, unknown>>>()
+    const calls = new Map<string, Readonly<Record<string, unknown>>>()
+    for (const rawExec of arr(action.executions)) {
+      const exec = rec(rawExec)
+      executions.set(str(exec.toolCallId) ?? str(exec.tool_call_id) ?? `${base}:execution:${executions.size}`, exec)
     }
     for (const rawMessage of arr(action.messages)) {
       const message = rec(rawMessage)
+      if (message.role === 'tool') {
+        const id = str(message.tool_call_id)
+        if (id) results.set(id, message)
+        continue
+      }
       const { text, images } = partsText(message.content)
-      if (message.role === 'user') blocks.push({ kind: 'user', id: nextId(), text, images, steer: false })
-      else if (message.role === 'assistant' && text) blocks.push({ kind: 'assistant', id: nextId(), text, streaming: false })
+      // History is already frame-bounded; unlike the live preview, conversation text is not clipped.
+      const fullText = typeof message.content === 'string' ? message.content : arr(message.content).flatMap(part => {
+        const p = rec(part)
+        return p.type === 'text' && typeof p.text === 'string' ? [p.text] : []
+      }).join('\n')
+      if (message.role === 'user') blocks.push({ kind: 'user', ...identity(), text: fullText, images, steer: false })
+      else if (message.role === 'assistant' && text) blocks.push({ kind: 'assistant', ...identity(), text: fullText, streaming: false })
+      for (const rawCall of arr(message.tool_calls)) {
+        const call = rec(rawCall)
+        const id = str(call.id)
+        if (id) calls.set(id, rec(call.function))
+      }
     }
-    for (const rawExec of arr(action.executions)) {
-      const exec = rec(rawExec)
-      const name = str(exec.name) ?? str(exec.toolName) ?? str(exec.tool_name) ?? 'tool'
-      const callId = str(exec.toolCallId) ?? str(exec.tool_call_id) ?? nextId()
-      const failed = exec.is_error === true || exec.error !== undefined || exec.status === 'error'
-      const out = exec.result ?? exec.output ?? exec.error
+    // An in-flight call may exist in messages before toolExecutions is populated.
+    for (const id of new Set([...calls.keys(), ...executions.keys()])) {
+      const call = calls.get(id) ?? {}
+      const exec = executions.get(id) ?? {}
+      const result = results.get(id)
+      const out = exec.result ?? exec.output ?? exec.error ?? result?.content
+      const failed = exec.is_error === true || result?.is_error === true || exec.error != null || exec.permitted === false || exec.status === 'error' || (typeof out === 'string' && out.startsWith('Tool execution failed:'))
       const output = typeof out === 'string' ? clip(out, 600) : out === undefined ? undefined : clip(JSON.stringify(out) ?? '', 600)
-      blocks.push({ kind: 'tool', id: nextId(), callId, name, summary: toolSummary(exec.arguments ?? exec.args ?? exec.input), state: failed ? 'error' : 'done', ...(output ? { output } : {}) })
+      blocks.push({
+        kind: 'tool', ...identity(), callId: id,
+        name: str(call.name) ?? str(exec.name) ?? str(exec.toolName) ?? str(exec.tool_name) ?? 'tool',
+        summary: toolSummary(call.arguments ?? exec.arguments ?? exec.args ?? exec.inputs ?? exec.input),
+        state: failed ? 'error' : out !== undefined || executions.has(id) ? 'done' : 'working',
+        ...(output ? { output } : {}),
+      })
     }
   }
   const before = history.before
   const cursor = typeof before === 'string' && before.length > 0 ? before : typeof before === 'number' && Number.isFinite(before) ? before : undefined
-  return { blocks, ...(cursor === undefined ? {} : { cursor }), hasMore: history.has_more === true && cursor !== undefined }
+  return { blocks, actionIds, ...(cursor === undefined ? {} : { cursor }), hasMore: history.has_more === true && cursor !== undefined }
 }
 
 // ── supervisor ────────────────────────────────────────────────────────

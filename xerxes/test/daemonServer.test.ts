@@ -3600,7 +3600,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.8.12",
+      daemon_version: "0.8.13",
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
     await client.next(eventFrame("init_done"));
@@ -10653,6 +10653,52 @@ test('terminal.open gives the desktop a live shell: replayed history, pushed out
     const closed = await client.next(frame => frame.method === 'event' && frame.params?.type === 'terminal_output' && (frame.params.payload as Record<string, unknown> | undefined)?.closed === true);
     expect((closed.params!.payload as Record<string, unknown>).terminal_id).toBe(terminalId);
     expect(await call('terminal.detach', { terminal_id: terminalId })).toEqual({ ok: true });
+  } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('terminal.run types a command into an idle user shell, opens one when every shell is busy, and refuses empty input', async () => {
+  if (process.platform === 'win32') return
+  const directory = await mkdtemp(join(tmpdir(), 'xr-rpc-run-'));
+  const terminals = new TerminalRegistry({ runHistory: new RunHistory(join(directory, 'runs.sqlite')) });
+  const ptySessions = new PtySessionManager({ terminals, workspaceRoot: directory });
+  const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: directory, sessionDirectory: join(directory, 'sessions') });
+  const server = new DaemonServer({ socketPath: join(directory, 'rpc.sock'), runtime, terminalRegistry: terminals, ptySessions });
+  await server.start();
+  const client = await SocketTestClient.connect(join(directory, 'rpc.sock'));
+  let id = 0;
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const request = ++id;
+    client.send({ jsonrpc: '2.0', id: request, method, params: { session_key: 'run-owner', ...params } });
+    return (await client.next(frame => frame.id === request)).result as Record<string, any>;
+  };
+  const output = async (terminalId: string, pattern: RegExp) => {
+    for (let tries = 0; tries < 60; tries += 1) {
+      const page = await call('terminal.inspect', { terminal_id: terminalId });
+      if (pattern.test(String(page.terminal?.output ?? ''))) return true;
+      await Bun.sleep(150);
+    }
+    return false;
+  };
+  try {
+    await call('session.open');
+    expect(await call('terminal.run', { command: '   ' })).toMatchObject({ ok: false });
+    // No shell yet: one is opened and the command runs in it.
+    const first = await call('terminal.run', { command: 'echo run-$((40+2))' });
+    expect(first).toMatchObject({ ok: true, opened: true });
+    expect(await output(first.terminal_id, /run-42/)).toBe(true);
+    await Bun.sleep(300);
+    // That shell is back at its prompt: it is reused.
+    const second = await call('terminal.run', { command: 'echo again-$((3+4))' });
+    expect(second).toMatchObject({ ok: true, terminal_id: first.terminal_id, opened: false });
+    expect(await output(first.terminal_id, /again-7/)).toBe(true);
+    // Busy with a long command: a new shell is opened instead of typing into it.
+    await call('terminal.control', { terminal_id: first.terminal_id, action: 'write', chars: 'sleep 20\r' });
+    await Bun.sleep(600);
+    const third = await call('terminal.run', { command: 'echo fresh-$((5+5))' });
+    expect(third).toMatchObject({ ok: true, opened: true });
+    expect(third.terminal_id).not.toBe(first.terminal_id);
+    expect(await output(third.terminal_id, /fresh-10/)).toBe(true);
+    expect((await call('terminal.list')).terminals.filter((row: { label: string; running: boolean }) => row.label === 'User shell' && row.running)).toHaveLength(2);
   } finally { client.close(); await ptySessions.disposeAll(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 

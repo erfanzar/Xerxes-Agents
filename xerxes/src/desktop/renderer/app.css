@@ -1447,6 +1447,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
   padding: 4px 8px 4px 10px; background: var(--x-chrome); border-bottom: 1px solid var(--x-hairline);
 }
 .md__lang { color: var(--x-meta); font: var(--ui-small) var(--mono); text-transform: lowercase; }
+.md__codeactions { display: flex; align-items: center; gap: 6px; }
 /* The block already has the wrapper's border. */
 .md__codewrap .md__code { margin: 0; border: 0; border-radius: 0; }
 /* Only show the bar's affordance on hover/focus so the transcript stays calm. */

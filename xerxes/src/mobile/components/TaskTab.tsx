@@ -10,7 +10,7 @@ import { composerMode, isRunning, resolutionNotices } from '../../client/taskVie
 import { useHubState, useServices } from '../context.js'
 import { statusOfSelected, viewForSelected, workspaceLabel } from '../viewModel.js'
 import { ApprovalSheet } from './ApprovalSheet.js'
-import { BlockList } from './BlockList.js'
+import { TaskTranscript } from './TaskTranscript.js'
 import { Composer } from './Composer.js'
 import { StatusBadge } from './StatusBadge.js'
 import { EffortSheet, GoalSheet, ModelSheet } from './TaskSheets.js'
@@ -71,9 +71,9 @@ export function TaskTab({ workspaceId, sessionId }: { workspaceId?: string | und
         </div>
       </header>
 
-      {selected.phase === 'error' ? (
+      {selected.error !== undefined ? (
         <div role="alert" className="notice is-error">
-          <p>Could not open this task: {selected.error ?? 'unknown error'}</p>
+          <p>{selected.phase === 'error' ? 'Could not open this task' : 'Could not refresh this task'}: {selected.error}</p>
           <button type="button" className="btn" onClick={() => { if (workspaceId !== undefined && sessionId !== undefined) controller.openSession(workspaceId, sessionId) }}>Try again</button>
         </div>
       ) : null}
@@ -102,20 +102,7 @@ export function TaskTab({ workspaceId, sessionId }: { workspaceId?: string | und
       {notices.length === 0 ? null : <ul className="notes" role="status">{notices.map(notice => <li key={notice.id}>{notice.text}</li>)}</ul>}
       {selected.tail.queuedSteers > 0 ? <p className="block-meta">{plural(selected.tail.queuedSteers, 'steer')} queued for the next step.</p> : null}
 
-      {selected.hasOlder && selected.phase === 'ready' ? (
-        <div className="older">
-          {selected.older.length > 0 ? <h2 className="section-title">Earlier history</h2> : null}
-          <BlockList blocks={selected.older} prefix="o" />
-          {selected.olderError === undefined ? null : <p role="alert" className="field-error">{selected.olderError}</p>}
-          <button type="button" className="btn" disabled={selected.loadingOlder} onClick={() => { void controller.loadOlder() }}>
-            {selected.loadingOlder ? 'Loading…' : selected.older.length > 0 ? 'Load earlier' : 'Show earlier history'}
-          </button>
-        </div>
-      ) : null}
-
-      <h2 className="section-title">Latest</h2>
-      {selected.phase === 'ready' && selected.tail.blocks.length === 0 ? <p className="empty">Nothing recorded for this task yet.</p> : null}
-      <BlockList blocks={selected.tail.blocks} prefix="b" />
+      <TaskTranscript key={`${selected.workspaceId}:${selected.sessionId}`} selected={selected} />
 
       <Composer draftKey={draftKey} mode={composerMode(status)} running={isRunning(status)} canSend={mutable} sendMessage={sendProblem} />
 

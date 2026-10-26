@@ -99,6 +99,20 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
     return () => { current = false }
   }, [call, open, online, attempt])
 
+  // A code block's Run used (or opened) a shell: list it and show it.
+  const focus = snap.terminalFocus
+  useEffect(() => {
+    if (!focus) return
+    let current = true
+    void call('terminal.list').then(result => {
+      if (!current) return
+      const rows = userShells(Array.isArray(result.terminals) ? result.terminals as RpcRecord[] : [])
+      setShells(rows)
+      if (rows.some(row => row.id === focus.id)) setActive(focus.id)
+    }).catch(() => { /* the regular list effect reports failures */ })
+    return () => { current = false }
+  }, [call, focus?.id, focus?.revision])
+
   // The tab goes at once; the shell shuts down in the background. Waiting on
   // the kill made closing feel laggy.
   const close = (id: string): void => {

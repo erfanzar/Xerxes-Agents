@@ -715,8 +715,8 @@ export class HubServer {
     if (!this.options.workspaces.list().some(row => row.id === workspaceId)) throw new HubProtocolError('not_found', 'unknown workspace')
     let limit = 10
     if (params.limit !== undefined) {
-      if (typeof params.limit !== 'number' || !Number.isInteger(params.limit) || params.limit < 1 || params.limit > 25) {
-        throw new HubProtocolError('invalid_request', 'limit must be an integer from 1 to 25')
+      if (typeof params.limit !== 'number' || !Number.isInteger(params.limit) || params.limit < 1 || params.limit > 40) {
+        throw new HubProtocolError('invalid_request', 'limit must be an integer from 1 to 40')
       }
       limit = params.limit
     }

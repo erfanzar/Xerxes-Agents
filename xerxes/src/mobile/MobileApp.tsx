@@ -22,7 +22,9 @@ function useScreenMemory(key: string, main: React.RefObject<HTMLElement | null>)
   const { scroll } = useServices()
   const first = useRef(true)
   useEffect(() => {
-    window.scrollTo(0, scroll.get(key) ?? 0)
+    // TaskTranscript owns bottom-following and history prepend anchors. A
+    // shell-level restore would override its initial bottom scroll.
+    if (!key.startsWith('task:')) window.scrollTo(0, scroll.get(key) ?? 0)
     if (!first.current) main.current?.focus({ preventScroll: true })
     first.current = false
     return () => { scroll.set(key, window.scrollY) }

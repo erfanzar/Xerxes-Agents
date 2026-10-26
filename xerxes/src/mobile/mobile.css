@@ -281,7 +281,11 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 
 /* ── Transcript ────────────────────────────────────────────────────── */
 .task-head { margin-bottom: 0.75rem; padding-bottom: 0.9rem; border-bottom: 1px solid var(--x-hairline); }
-.older { margin-bottom: 1rem; }
+.older { margin-bottom: 0.5rem; }
+.task-transcript { overflow-anchor: none; }
+.tool-rows { list-style: none; padding: 0 0 0 0.8rem; margin: 0; border-left: 1px solid var(--x-hairline); }
+.tool-error { color: var(--x-failed-text); }
+.tool-working { color: var(--x-activity); }
 .blocks .block { padding: 0.65rem 0; border-bottom: 1px solid var(--x-divider); }
 .block-who { margin-bottom: 0.3rem; }
 .block-user .block-who { color: var(--x-accent); }

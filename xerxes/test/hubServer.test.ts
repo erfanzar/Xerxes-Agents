@@ -160,7 +160,10 @@ describe('Hub server: reads are filtered server-side', () => {
     const guest = await f.client('guest')
     expect(await guest.ok('hub.history', { workspace_id: 'w1', session_id: 's1' })).toMatchObject({ session_id: 's1' })
     expect(await guest.fails('hub.history', { workspace_id: 'w1', session_id: 's2' })).toBe('forbidden')
-    expect(await alice.fails('hub.history', { workspace_id: 'w1', session_id: 's1', limit: 26 })).toBe('invalid_request')
+    expect(await alice.ok('hub.history', { workspace_id: 'w1', session_id: 's1', limit: 30 })).toMatchObject({ history: { blob: 'small' } })
+    expect(f.backend.callsTo('session.history').some(call => call.params.history_limit === 30)).toBe(true)
+    expect(await alice.ok('hub.history', { workspace_id: 'w1', session_id: 's1', limit: 40 })).toMatchObject({ history: { blob: 'small' } })
+    expect(await alice.fails('hub.history', { workspace_id: 'w1', session_id: 's1', limit: 41 })).toBe('invalid_request')
     expect(await alice.fails('hub.history', { workspace_id: 'w1', session_id: 'ghost' })).toBe('not_found')
   })
 

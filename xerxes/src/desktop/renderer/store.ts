@@ -452,6 +452,8 @@ export interface Snapshot {
   readonly appUpdate: AppUpdateView | null
   /** Set while an SSH conversation's prompts run through this computer. */
   readonly providerRelay: ProviderRelayView | null
+  /** The shell a code block's Run just used; the Terminal tab shows it (revision re-triggers). */
+  readonly terminalFocus?: { readonly id: string; readonly revision: number }
   /** How eagerly this conversation fans out to agents (the composer's Agents chip). */
   readonly delegationMode: 'off' | 'auto' | 'eager'
   readonly delegationMenuOpen: boolean
@@ -2871,6 +2873,26 @@ export class Store {
     })
     if (result.ok === false) throw new Error(str(result.error) || 'could not inspect terminal')
     return terminalDetailOf(result.terminal)
+  }
+
+  /**
+   * A code block's Run: the runtime types it into one of this person's shells
+   * that waits at its prompt, or opens a new one (`terminal.run`).
+   */
+  async runInTerminal(command: string): Promise<string> {
+    let result: Record<string, unknown>
+    try { result = await this.bridge.call('terminal.run', { session_key: this.sessionKey, command }) }
+    catch (error) { throw new Error(desktopError(error)) }
+    if (result.ok === false) {
+      const message = str(result.error)
+      throw new Error(/Unknown method: terminal\.run/.test(message)
+        ? "This workspace's runtime is older than the app. Update it from the runtime status to run commands from the chat."
+        : message || 'Could not run the command')
+    }
+    const id = str(result.terminal_id)
+    if (!id) throw new Error('The runtime did not say which shell ran it')
+    this.patch({ terminalFocus: { id, revision: (this.frame.terminalFocus?.revision ?? 0) + 1 } })
+    return id
   }
 
   /** Send input to, interrupt, or kill one terminal (`terminal.control`). */

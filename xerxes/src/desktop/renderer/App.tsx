@@ -18,6 +18,7 @@ import { CopyButton } from './CopyButton.js'
 import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
+import { CodeRunContext } from './codeRun.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PanelDivider, usePanelLayout } from './layout.js'
@@ -693,7 +694,7 @@ export function SidebarViews({ page, open }: { page: DesktopPageName | null; ope
   return <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button><button aria-pressed={page === 'xerxes'} className={page === 'xerxes' ? 'is-selected' : ''} onClick={() => open('xerxes')}>XERXES</button></div>
 }
 
-function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
+export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
   const [filter, setFilter] = useState('')
@@ -776,9 +777,11 @@ function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName | null 
       <nav className="side__list">
         {snap.contexts?.map(context => (
           <div className="wgroup" key={`context-${context.id}`}>
-            <button className="wgroup__cap" title={context.workspace} onClick={() => void store.activateContext(context.id)}>
+            <button className="wgroup__cap" title={[context.workspace, context.reason].filter(Boolean).join(' · ')} onClick={() => void store.activateContext(context.id)}>
               <Icon name="folder" size={14} /> {context.label}
+              {context.availability && <span className="sess__s"> · {context.availability === 'no-runtime' ? 'no runtime' : context.availability}</span>}
             </button>
+            {context.reason && <div className="sess__s">{context.reason}</div>}
             {context.sessions.filter(row => !filter || row.title.toLowerCase().includes(filter.toLowerCase())).map(row => (
               <button className="sess" key={row.id} title={`${context.label} · ${row.cwd}`} onClick={() => void store.activateContext(context.id, row.id)}>
                 <span className="sess__dot" style={{ background: statusColor(row.status) }} />
@@ -1268,6 +1271,20 @@ function UserMessage({ text, images = [] }: { text: string; images?: readonly st
   </div>
 }
 
+/** Agent prose whose shell code blocks offer Run: an idle Terminal shell (or a new one) runs it, shown in the rail. */
+function RunnableReply({ text, streaming }: { text: string; streaming: boolean }): ReactElement {
+  const navigate = useDesktopNavigation()
+  const run = useCallback(async (command: string) => {
+    await store.runInTerminal(command)
+    navigate('terminal')
+  }, [navigate])
+  return (
+    <CodeRunContext.Provider value={isVscodeHost() ? undefined : run}>
+      <Markdown text={text} className="md--agent" tail={streaming ? CARET : undefined} />
+    </CodeRunContext.Provider>
+  )
+}
+
 // Memoized: the turn clock re-renders the conversation every second, and an
 // unchanged block (same object) has nothing new to draw.
 const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
@@ -1286,7 +1303,7 @@ const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks']
             renderer is React-elements-only, so model output cannot inject
             markup; the streaming caret trails only the live tail block. */}
         <div className="msg__text">
-          <Markdown text={block.text} className="md--agent" tail={block.streaming ? CARET : undefined} />
+          <RunnableReply text={block.text} streaming={block.streaming} />
         </div>
         <ReplyActionRow blockId={block.id} />
       </section>

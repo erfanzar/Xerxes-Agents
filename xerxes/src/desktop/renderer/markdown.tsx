@@ -13,10 +13,59 @@
  */
 
 import type { ReactElement, ReactNode } from 'react'
-import { Fragment, memo } from 'react'
+import { Fragment, memo, useContext, useEffect, useRef, useState } from 'react'
 
+import { CodeRunContext, commandOf, isRunnableBlock } from './codeRun.js'
 import { CopyButton } from './CopyButton.js'
 import { Icon } from './Icon.js'
+
+/** Run beside Copy: types the command into an idle shell of the Terminal tab, or a new one. */
+function RunButton({ code }: { code: string }): ReactElement | null {
+  const run = useContext(CodeRunContext)
+  const [state, setState] = useState<'idle' | 'running' | 'sent' | 'failed'>('idle')
+  const [message, setMessage] = useState('')
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  if (!run) return null
+  return (
+    <button
+      type="button"
+      className="copybtn runbtn"
+      disabled={state === 'running'}
+      aria-label={state === 'sent' ? 'Sent to the terminal' : 'Run in terminal'}
+      title={state === 'failed' ? message || 'Could not run it' : 'Run in an idle Terminal shell (a new one if none is idle)'}
+      onClick={event => {
+        event.stopPropagation()
+        event.preventDefault()
+        setState('running')
+        clearTimeout(timer.current)
+        run(commandOf(code)).then(
+          () => setState('sent'),
+          failure => { setMessage(failure instanceof Error ? failure.message : String(failure)); setState('failed') },
+        ).finally(() => { timer.current = setTimeout(() => setState('idle'), 1800) })
+      }}
+    >
+      {state === 'running' ? 'Running…' : state === 'sent' ? 'Sent' : state === 'failed' ? 'Failed' : 'Run'}
+    </button>
+  )
+}
+
+function CodeBlock({ code, language }: { code: string; language: string }): ReactElement {
+  return (
+    <figure className="md__codewrap">
+      <figcaption className="md__codebar">
+        <span className="md__lang">{language || 'text'}</span>
+        <span className="md__codeactions">
+          {isRunnableBlock(language, code) && <RunButton code={code} />}
+          <CopyButton text={code} label="Copy code" />
+        </span>
+      </figcaption>
+      <pre className="md__code" data-lang={language || undefined}>
+        <code>{code}</code>
+      </pre>
+    </figure>
+  )
+}
 
 const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*\))/g
 
@@ -125,17 +174,7 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
       // nothing, and a code block in a coding tool had no way to be copied.
       const code = body.join('\n')
       const language = fence[2] || ''
-      out.push(
-        <figure key={`${prefix}-c${key++}`} className="md__codewrap">
-          <figcaption className="md__codebar">
-            <span className="md__lang">{language || 'text'}</span>
-            <CopyButton text={code} label="Copy code" />
-          </figcaption>
-          <pre className="md__code" data-lang={language || undefined}>
-            <code>{code}</code>
-          </pre>
-        </figure>,
-      )
+      out.push(<CodeBlock key={`${prefix}-c${key++}`} code={code} language={language} />)
       i = j
       continue
     }

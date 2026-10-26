@@ -4,12 +4,12 @@
 import type { UsageReportView } from '../auth/usageView.js'
 import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
-import { foldSummaryEvent, presenceChips, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
+import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
 import {
   taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
-import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type SessionTail } from './sessionFold.js'
+import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type PendingInteraction, type SessionTail } from './sessionFold.js'
 import type { TaskStatus } from './taskTypes.js'
 
 /**
@@ -18,7 +18,8 @@ import type { TaskStatus } from './taskTypes.js'
  * Compatible with React's useSyncExternalStore (stable getSnapshot).
  */
 
-export const OLDER_BLOCKS_LIMIT = 400
+// Together with the 40-block live tail, keep at most 400 transcript blocks.
+export const OLDER_BLOCKS_LIMIT = 360
 export const SUPERVISOR_MESSAGE_LIMIT = 100
 
 export type ConfigPhase = 'idle' | 'requested' | 'accepted' | 'rejected' | 'unknown'
@@ -59,7 +60,9 @@ export interface SelectedSession {
   readonly phase: 'loading' | 'ready' | 'error'
   readonly error?: string
   readonly tail: SessionTail
+  /** Authoritative history, chronological. The live tail follows it. */
   readonly older: readonly Block[]
+  readonly historyActionIds: readonly string[]
   readonly olderCursor?: string | number
   readonly hasOlder: boolean
   readonly loadingOlder: boolean
@@ -322,9 +325,10 @@ export type HubAction =
   | { readonly type: 'presence'; readonly workspaceId: string; readonly sessionId?: string; readonly entries: readonly PresenceEntry[] }
   | { readonly type: 'select'; readonly workspaceId: string; readonly sessionId: string }
   | { readonly type: 'deselect' }
-  /** The replay of the open task reached the live edge. */
+  | { readonly type: 'historyLoaded'; readonly workspaceId: string; readonly sessionId: string; readonly page: HistoryPage; readonly throughIds: readonly string[] }
+  | { readonly type: 'pendingRestored'; readonly workspaceId: string; readonly sessionId: string; readonly pending: readonly PendingInteraction[] }
   | { readonly type: 'sessionReady'; readonly workspaceId: string; readonly sessionId: string }
-  /** The stream was reset (gap, expired cursor): drop the folded tail and replay again. */
+  /** The stream was reset (gap, expired cursor): refetch history, never replay the journal. */
   | { readonly type: 'sessionReset'; readonly workspaceId: string; readonly sessionId: string }
   | { readonly type: 'sessionError'; readonly workspaceId: string; readonly sessionId: string; readonly message: string }
   | { readonly type: 'olderLoading' }
@@ -377,6 +381,7 @@ function freshSelected(workspaceId: string, sessionId: string): SelectedSession 
     phase: 'loading',
     tail: EMPTY_TAIL,
     older: [],
+    historyActionIds: [],
     hasOlder: false,
     loadingOlder: false,
     model: INITIAL_CONFIG,
@@ -419,8 +424,12 @@ function applyEvents(state: HubState, events: readonly HubEvent[], foldTail: boo
         tasks = copy
       }
       if (foldTail && selected && selected.workspaceId === event.workspace_id && selected.sessionId === sessionId) {
-        const tail = foldSessionEvent(selected.tail, { id: event.event_id, type: event.type, payload: event.payload, ...(event.actor ? { actor: event.actor } : {}) })
-        if (tail !== selected.tail) {
+        const input = { id: event.event_id, type: event.type, payload: event.payload, ...(event.actor ? { actor: event.actor } : {}) }
+        const folded = foldSessionEvent(selected.tail, input)
+        const historyTools = new Set(selected.older.flatMap(block => block.kind === 'tool' ? [block.callId] : []))
+        const tail = event.type === 'tool_call' ? { ...folded, blocks: folded.blocks.filter(block => block.kind !== 'tool' || !historyTools.has(block.callId)) } : folded
+        const older = event.type === 'tool_result' ? foldSessionEvent({ ...EMPTY_TAIL, blocks: selected.older }, input).blocks : selected.older
+        if (tail !== selected.tail || older !== selected.older) {
           // A resolved interaction clears any decision UI that was waiting on it.
           const decisions: Record<string, DecisionState> = { ...selected.decisions }
           for (const id of Object.keys(selected.decisions)) {
@@ -431,12 +440,40 @@ function applyEvents(state: HubState, events: readonly HubEvent[], foldTail: boo
               else if (mine) decisions[id] = { ...mine, phase: 'resolved', ...(resolution?.by ? { by: resolution.by } : {}) }
             }
           }
-          selected = syncConfig({ ...selected, tail, decisions })
+          selected = syncConfig({ ...selected, tail, older, decisions })
         }
       }
     }
   }
   return tasks === state.tasks && selected === state.selected ? state : { ...state, tasks, ...(selected ? { selected } : {}) }
+}
+
+/** History replaces its whole overlapping window, including blocks whose contents changed. */
+function reconcileHistory(selected: SelectedSession, page: HistoryPage, throughIds: readonly string[]): SelectedSession {
+  const pageIds = new Set(page.actionIds)
+  const firstOverlap = selected.historyActionIds.findIndex(id => pageIds.has(id))
+  const prefixIds = new Set(firstOverlap < 0 ? [] : selected.historyActionIds.slice(0, firstOverlap))
+  const prefix = selected.older.filter(block => block.historyActionId !== undefined && prefixIds.has(block.historyActionId))
+  const history = [...prefix, ...page.blocks]
+  const tools = new Set(history.flatMap(block => block.kind === 'tool' ? [block.callId] : []))
+  const through = new Set(throughIds)
+  let covered = -1
+  selected.tail.blocks.forEach((block, index) => {
+    if (block.kind === 'tool' && tools.has(block.callId)) covered = index
+    else if (block.kind === 'user' && through.has(block.id) && page.blocks.some(item => item.kind === 'user' && item.text === block.text && item.images === block.images)) covered = index
+  })
+  const live = selected.tail.blocks.slice(covered + 1).filter(block => block.kind !== 'tool' || !tools.has(block.callId))
+  const { error: _error, olderCursor: _cursor, ...rest } = selected
+  const keepCursor = prefixIds.size > 0
+  const cursor = keepCursor ? selected.olderCursor : page.cursor
+  return {
+    ...rest, phase: 'ready',
+    older: bounded(history, OLDER_BLOCKS_LIMIT),
+    historyActionIds: bounded([...prefixIds, ...page.actionIds], OLDER_BLOCKS_LIMIT),
+    tail: { ...selected.tail, blocks: live },
+    hasOlder: keepCursor ? selected.hasOlder : page.hasMore,
+    ...(cursor === undefined ? {} : { olderCursor: cursor }),
+  }
 }
 
 export function reduceHub(state: HubState, action: HubAction): HubState {
@@ -479,26 +516,41 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
     }
     case 'select': {
       if (state.selected && state.selected.workspaceId === action.workspaceId && state.selected.sessionId === action.sessionId) return state
-      return { ...state, selected: freshSelected(action.workspaceId, action.sessionId) }
+      const fresh = freshSelected(action.workspaceId, action.sessionId)
+      const task = state.tasks[taskKey(action.workspaceId, action.sessionId)]
+      const selected = task ? syncConfig({ ...fresh, tail: { ...fresh.tail, title: task.title, status: task.status, effective: { model: task.model, goal: task.goalSummary } } }) : fresh
+      return { ...state, selected }
     }
     case 'deselect': {
       if (!state.selected) return state
       const { selected: _selected, ...rest } = state
       return rest
     }
+    case 'pendingRestored': {
+      const selected = state.selected
+      if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
+      const known = new Set(selected.tail.pending.map(item => item.id))
+      const added = action.pending.filter(item => !known.has(item.id) && selected.tail.resolved[item.id] === undefined)
+      if (added.length === 0) return state
+      return { ...state, selected: { ...selected, tail: { ...selected.tail, pending: [...selected.tail.pending, ...added] } } }
+    }
+    case 'historyLoaded': {
+      const selected = state.selected
+      if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
+      return { ...state, selected: reconcileHistory(selected, action.page, action.throughIds) }
+    }
     case 'sessionReady': {
       const selected = state.selected
       if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
       if (selected.phase === 'ready') return state
       const { error: _error, ...rest } = selected
-      // Earlier turns come from hub.history; the replayed tail only covers what the journal kept.
-      return { ...state, selected: { ...rest, phase: 'ready', hasOlder: true } }
+      return { ...state, selected: { ...rest, phase: 'ready' } }
     }
     case 'sessionReset': {
       const selected = state.selected
       if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
       const { error: _error, olderCursor: _oc, olderError: _oe, ...rest } = selected
-      return { ...state, selected: { ...rest, phase: 'loading', tail: EMPTY_TAIL, older: [], hasOlder: false, loadingOlder: false } }
+      return { ...state, selected: { ...rest, phase: 'loading', tail: EMPTY_TAIL, older: [], historyActionIds: [], hasOlder: false, loadingOlder: false } }
     }
     case 'sessionError': {
       const selected = state.selected
@@ -510,8 +562,12 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
       const selected = state.selected
       if (!selected) return state
       const { olderError: _oe, olderCursor: _oc, ...rest } = selected
-      const older = bounded([...action.blocks, ...selected.older], OLDER_BLOCKS_LIMIT)
-      return { ...state, selected: { ...rest, older, loadingOlder: false, hasOlder: action.hasMore, ...(action.cursor ? { olderCursor: action.cursor } : {}) } }
+      const known = new Set(selected.older.map(block => block.id))
+      const incoming = action.blocks.filter(block => !known.has(block.id))
+      const combined = [...incoming, ...selected.older]
+      const older = bounded(combined, OLDER_BLOCKS_LIMIT)
+      const historyActionIds = [...new Set(older.flatMap(block => block.historyActionId === undefined ? [] : [block.historyActionId]))]
+      return { ...state, selected: { ...rest, older, historyActionIds, loadingOlder: false, hasOlder: action.hasMore && combined.length < OLDER_BLOCKS_LIMIT, ...(action.cursor === undefined ? {} : { olderCursor: action.cursor }) } }
     }
     case 'olderFailed': return state.selected ? { ...state, selected: { ...state.selected, loadingOlder: false, olderError: action.message } } : state
     case 'decision': {

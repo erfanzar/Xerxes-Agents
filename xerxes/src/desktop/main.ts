@@ -22,6 +22,7 @@ import { SurfaceSession } from './main/surfaceSession.js'
 import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
 import { desktopMachineCommand } from './main/machines.js'
+import { SavedHostContexts } from './main/savedHosts.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
@@ -215,6 +216,16 @@ const cleanupWindows = new Set<() => void>()
 const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
+const savedHostContexts = new SavedHostContexts({ list: () => desktopMachineCommand(join(xerxesHome(), 'machines.json'), 'list') })
+function openContextRemotes(host?: BrowserWindow): RemoteTarget[] {
+  const remotes: RemoteTarget[] = []
+  for (const [id, surface] of workspaceSurfaces) {
+    if (host && surface.host !== host) continue
+    const machine = windowStates.get(id)?.().remote
+    if (machine) remotes.push(machine)
+  }
+  return remotes
+}
 const surfaceSessions = new Map<number, SurfaceSession>()
 /** Views that can be closed on their own; a window's own page closes with the window. */
 const viewClosers = new Map<number, () => void>()
@@ -527,10 +538,18 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       scopes.add(scope)
       readers.push(read())
     }
-    return Promise.all(readers)
+    const open = openContextRemotes(window)
+    void savedHostContexts.refresh(open)
+    return [...await Promise.all(readers), ...savedHostContexts.contexts(open)]
   })
   handle('desktop:activate-context', async (_event, contextId: unknown, sessionId?: unknown) => {
-    if (typeof contextId !== 'number' || workspaceSurfaces.get(contextId)?.host !== window) throw new Error('Workspace context is unavailable')
+    if (typeof contextId !== 'number' || !Number.isSafeInteger(contextId) || sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId))) throw new Error('Invalid workspace context')
+    if (contextId < 0) {
+      const selection = savedHostContexts.selection(contextId, sessionId)
+      openRemoteView(window, selection.machine, selection.sessionId)
+      return
+    }
+    if (workspaceSurfaces.get(contextId)?.host !== window) throw new Error('Workspace context is unavailable')
     const state = windowStates.get(contextId)?.()
     if (!state) throw new Error('Workspace context is closed')
     if (sessionId === undefined) { activateSurface(contextId); return }
@@ -1000,6 +1019,12 @@ void app.whenReady().then(async () => {
     for (const id of selected) activateSurface(id)
   }
   else createWorkspaceWindow(loadWorkspace())
+  // Probe saved endpoints without opening views or running setup. Results are
+  // cached globally and each host has its own timeout and single-flight guard.
+  void savedHostContexts.refresh(openContextRemotes())
+  const savedHostTimer = setInterval(() => { void savedHostContexts.refresh(openContextRemotes()) }, 60000)
+  savedHostTimer.unref()
+  app.once('will-quit', () => { clearInterval(savedHostTimer); savedHostContexts.dispose() })
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWorkspaceWindow(loadWorkspace()) })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

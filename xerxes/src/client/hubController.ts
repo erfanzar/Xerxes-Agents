@@ -4,16 +4,17 @@
 import type { HubCommandResult, HubMethod } from '../hub/protocol.js'
 import { AUTOPILOT_THREAD_PREFIX, autopilotThreadId } from './autopilot.js'
 import { newCommandId } from './bridge.js'
-import { HubRequestError, type HubConnection, type SubscriptionHandle } from './hubConnection.js'
+import { HubRequestError, type HubConnection, type SubscriptionHandle, type Timers } from './hubConnection.js'
 import {
   parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
   parseSupervisorOptions, parseWatchRow, parseWatchView, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
 import { canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
-import type { WorkspaceView } from './hubTypes.js'
+import { taskKey, type WorkspaceView } from './hubTypes.js'
 import type { PreparedImage } from './imagePrep.js'
 import { arr, rec, str } from './parse.js'
 import { usageExtrasFromResult, usageFromResult } from './usageMerge.js'
+import { EMPTY_TAIL, foldSessionEvent } from './sessionFold.js'
 
 /**
  * Wires one HubConnection to one HubStore: loads the Inbox (watermark, then
@@ -118,7 +119,12 @@ export interface HubControllerOptions {
   readonly now?: () => number
   /** The Hub's command router currently takes `text` only. Set true once it accepts images. */
   readonly imagesSupported?: boolean
+  /** Injected by offline tests; production uses browser timers. */
+  readonly timers?: Timers
 }
+
+export const HISTORY_PAGE_SIZE = 30
+export const HISTORY_REFRESH_MS = 4_000
 
 const DECISION_RESPONSE: Readonly<Record<DecisionKind, string>> = { once: 'approve', deny: 'reject', session: 'approve_for_session' }
 const UNKNOWN_OUTCOME = 'Could not confirm whether this was applied. Check the task before trying again.'
@@ -143,7 +149,16 @@ export function createHubController(options: HubControllerOptions): HubControlle
   let inboxSub: SubscriptionHandle | undefined
   let inboxKey = ''
   let sessionSub: SubscriptionHandle | undefined
+  let interactionReplay: SubscriptionHandle | undefined
   let openToken = 0
+  let startingSelected = false
+  let historyRefresh: Promise<void> | undefined
+  let refreshAgain = false
+  let historyTimer: unknown
+  const timers = options.timers ?? {
+    setTimeout: (callback: () => void, ms: number) => globalThis.setTimeout(callback, ms),
+    clearTimeout: (handle: unknown) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+  }
   let supervisorThread: string | undefined
 
   let optionsToken = 0
@@ -215,38 +230,180 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   // ── selected task ──────────────────────────────────────────────────
 
-  function startSelected(workspaceId: string, sessionId: string): void {
-    sessionSub?.dispose()
-    // The Hub has no per-session snapshot: the task is rebuilt by replaying its
-    // journal (bounded by retention), then followed live. `caughtUp` marks the end of the replay.
-    sessionSub = connection.subscribe(
-      { workspaceIds: [workspaceId], sessionIds: [sessionId] },
-      {
-        apply: event => store.dispatch({ type: 'events', events: [event] }),
-        caughtUp: () => store.dispatch({ type: 'sessionReady', workspaceId, sessionId }),
-        reset: () => {
-          store.dispatch({ type: 'sessionReset', workspaceId, sessionId })
-          return { fromStart: true }
-        },
-        error: error => store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: error.message }),
+  function cancelHistoryRefresh(): void {
+    if (historyTimer !== undefined) timers.clearTimeout(historyTimer)
+    historyTimer = undefined
+  }
+
+  const currentToken = (token: number): boolean => token === openToken && selected() !== undefined
+
+  async function readLatest(token: number): Promise<void> {
+    const current = selected()
+    if (!current || !currentToken(token)) return
+    const throughIds = current.tail.blocks.map(block => block.id)
+    const page = parseHistoryPage(await connection.request('hub.history', {
+      workspace_id: current.workspaceId, session_id: current.sessionId, limit: HISTORY_PAGE_SIZE,
+    }))
+    if (currentToken(token)) store.dispatch({ type: 'historyLoaded', workspaceId: current.workspaceId, sessionId: current.sessionId, page, throughIds })
+  }
+
+  function refreshLatest(): Promise<void> {
+    cancelHistoryRefresh()
+    if (historyRefresh) {
+      // In particular, a turn_end during a read must get a final read after it.
+      refreshAgain = true
+      return historyRefresh
+    }
+    const token = openToken
+    const current = selected()
+    if (!current) return Promise.resolve()
+    const pending = readLatest(token).catch(error => {
+      if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId: current.workspaceId, sessionId: current.sessionId, message: failureMessage(error) })
+    }).finally(() => {
+      if (!currentToken(token)) return
+      historyRefresh = undefined
+      if (refreshAgain) {
+        refreshAgain = false
+        void refreshLatest()
+      }
+    })
+    historyRefresh = pending
+    return pending
+  }
+
+  function scheduleHistoryRefresh(): void {
+    // Coalesce new tool events without starving a long, continuously working turn.
+    if (historyTimer !== undefined) return
+    historyTimer = timers.setTimeout(() => {
+      historyTimer = undefined
+      void refreshLatest()
+    }, HISTORY_REFRESH_MS)
+  }
+
+  function restorePending(workspaceId: string, sessionId: string, token: number): void {
+    interactionReplay?.dispose()
+    interactionReplay = undefined
+    const task = store.getSnapshot().tasks[taskKey(workspaceId, sessionId)]
+    if (!task?.pendingCount) return
+    // History has no pending-interaction snapshot. Only for a waiting task,
+    // recover that metadata in the background; never put replayed conversation
+    // or tool blocks into the visible list, nor delay the history-first view.
+    let recovered = EMPTY_TAIL
+    const finish = (): void => {
+      interactionReplay?.dispose()
+      interactionReplay = undefined
+    }
+    const metadata = new Set(['approval_request', 'permission_request', 'question_request', 'approval_response', 'permission_response', 'permission_resolved', 'question_response', 'question_resolved', 'interaction_resolved', 'turn_end'])
+    interactionReplay = connection.subscribe({ workspaceIds: [workspaceId], sessionIds: [sessionId] }, {
+      apply: event => {
+        if (currentToken(token) && metadata.has(event.type)) recovered = foldSessionEvent(recovered, { id: event.event_id, type: event.type, payload: event.payload, ...(event.actor ? { actor: event.actor } : {}) })
       },
-    )
-    void connection.request('hub.presence.update', { workspace_id: workspaceId, session_id: sessionId, state: 'viewing' }).catch(() => undefined)
+      caughtUp: () => {
+        if (!currentToken(token)) return
+        store.dispatch({ type: 'pendingRestored', workspaceId, sessionId, pending: recovered.pending.slice(-50) })
+        finish()
+      },
+      reset: () => { if (currentToken(token)) finish(); return undefined },
+      error: error => {
+        if (!currentToken(token)) return
+        finish()
+        store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: error.message })
+      },
+    })
+  }
+
+  async function startSelected(workspaceId: string, sessionId: string): Promise<void> {
+    interactionReplay?.dispose()
+    interactionReplay = undefined
+    sessionSub?.dispose()
+    sessionSub = undefined
+    startingSelected = true
+    const token = ++openToken
+    cancelHistoryRefresh()
+    historyRefresh = undefined
+    refreshAgain = false
+    const scope = { workspaceIds: [workspaceId], sessionIds: [sessionId] }
+    try {
+      // History is requested first; capture the live cursor while it loads. A
+      // second read after subscribing closes the history/watermark race without
+      // ever replaying the journal from its beginning.
+      const [_, cursor] = await Promise.all([readLatest(token), connection.watermark(scope)])
+      if (!currentToken(token)) return
+      sessionSub = connection.subscribe(scope, {
+        apply: event => {
+          if (!currentToken(token)) return
+          store.dispatch({ type: 'events', events: [event] })
+          if (event.type === 'turn_begin' || event.type === 'turn_end') {
+            interactionReplay?.dispose()
+            interactionReplay = undefined
+          }
+          if (event.type === 'turn_end') void refreshLatest()
+          else if (event.type === 'tool_call' || event.type === 'tool_result') scheduleHistoryRefresh()
+        },
+        reset: async () => {
+          if (!currentToken(token)) return undefined
+          cancelHistoryRefresh()
+          await historyRefresh
+          try {
+            const cursor = await connection.watermark(scope)
+            if (!currentToken(token)) return { cursor }
+            store.dispatch({ type: 'sessionReset', workspaceId, sessionId })
+            try {
+              await readLatest(token)
+              if (currentToken(token)) restorePending(workspaceId, sessionId, token)
+            }
+            catch (error) {
+              if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: failureMessage(error) })
+            }
+            return { cursor }
+          } catch (error) {
+            if (currentToken(token)) {
+              // With no safe boundary, stop instead of silently replaying the
+              // entire journal. The visible error offers an explicit retry.
+              sessionSub?.dispose()
+              sessionSub = undefined
+              store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: failureMessage(error) })
+            }
+            return undefined
+          }
+        },
+        error: error => {
+          if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: error.message })
+        },
+      }, { cursor })
+      void refreshLatest()
+      restorePending(workspaceId, sessionId, token)
+      void connection.request('hub.presence.update', { workspace_id: workspaceId, session_id: sessionId, state: 'viewing' }).catch(() => undefined)
+    } catch (error) {
+      if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: failureMessage(error) })
+    } finally {
+      if (currentToken(token)) startingSelected = false
+    }
   }
 
   function openSession(workspaceId: string, sessionId: string): void {
     const current = selected()
-    if (current && current.workspaceId === workspaceId && current.sessionId === sessionId && current.phase !== 'error') return
+    if (current && current.workspaceId === workspaceId && current.sessionId === sessionId && current.phase !== 'error' && current.error === undefined) return
+    interactionReplay?.dispose()
+    interactionReplay = undefined
     sessionSub?.dispose()
     sessionSub = undefined
     openToken += 1
     store.dispatch({ type: 'deselect' })
     store.dispatch({ type: 'select', workspaceId, sessionId })
-    if (live()) startSelected(workspaceId, sessionId)
+    cancelHistoryRefresh()
+    historyRefresh = undefined
+    startingSelected = false
+    if (live()) void startSelected(workspaceId, sessionId)
   }
 
   function closeSession(): void {
     openToken += 1
+    cancelHistoryRefresh()
+    historyRefresh = undefined
+    startingSelected = false
+    interactionReplay?.dispose()
+    interactionReplay = undefined
     sessionSub?.dispose()
     sessionSub = undefined
     store.dispatch({ type: 'deselect' })
@@ -254,19 +411,25 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   async function loadOlder(): Promise<void> {
     const current = selected()
-    if (!current || current.loadingOlder || !current.hasOlder) return
+    if (!current || current.phase !== 'ready' || current.loadingOlder || !current.hasOlder) return
+    const token = openToken
     store.dispatch({ type: 'olderLoading' })
     try {
       const result = await connection.request('hub.history', {
         workspace_id: current.workspaceId,
         session_id: current.sessionId,
-        limit: 20,
+        limit: HISTORY_PAGE_SIZE,
         ...(current.olderCursor === undefined ? {} : { before: current.olderCursor }),
       })
+      if (!currentToken(token)) return
+      if (selected()?.olderCursor !== current.olderCursor) {
+        store.dispatch({ type: 'olderFailed', message: 'History changed. Try loading earlier history again.' })
+        return
+      }
       const page = parseHistoryPage(result)
-      store.dispatch({ type: 'olderLoaded', blocks: page.blocks, hasMore: page.hasMore, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) })
+      store.dispatch({ type: 'olderLoaded', blocks: page.blocks, hasMore: page.hasMore && page.cursor !== current.olderCursor, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) })
     } catch (error) {
-      store.dispatch({ type: 'olderFailed', message: failureMessage(error) })
+      if (currentToken(token)) store.dispatch({ type: 'olderFailed', message: failureMessage(error) })
     }
   }
 
@@ -733,7 +896,8 @@ export function createHubController(options: HubControllerOptions): HubControlle
       if (store.getSnapshot().autopilot.phase !== 'idle' && !store.getSnapshot().autopilot.unsupported) void loadAutopilot()
       if (store.getSnapshot().watch.phase !== 'idle' && !store.getSnapshot().watch.unsupported) void loadWatches()
       const current = selected()
-      if (current && !sessionSub) startSelected(current.workspaceId, current.sessionId)
+      if (current && !sessionSub && !startingSelected) void startSelected(current.workspaceId, current.sessionId)
+      else if (current && sessionSub) void refreshLatest()
     }))
     disposers.push(connection.onNotice((type, payload) => {
       if (type === 'hub.presence') {
@@ -789,10 +953,14 @@ export function createHubController(options: HubControllerOptions): HubControlle
   }
 
   function dispose(): void {
+    openToken += 1
+    cancelHistoryRefresh()
     for (const stop of disposers.splice(0)) stop()
     if (relistTimer !== undefined) clearTimeout(relistTimer)
     relistTimer = undefined
     inboxSub?.dispose()
+    interactionReplay?.dispose()
+    interactionReplay = undefined
     sessionSub?.dispose()
     inboxSub = undefined
     sessionSub = undefined
