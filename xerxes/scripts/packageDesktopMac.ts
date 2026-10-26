@@ -161,10 +161,47 @@ async function packageDesktopMac(): Promise<void> {
       console.warn('signed but not notarized — set ASC key credentials to notarize')
     }
   } else {
-    await run('codesign', ['--force', '--deep', '--sign', '-', applicationBundle])
-    console.warn('no Developer ID identity — ad-hoc signed; downloads will be quarantine-blocked')
+    // An ad-hoc signature is pinned to this build's hash, so macOS treats every
+    // update as a new app and forgets its Screen Recording and Accessibility
+    // grants. A local certificate that stays the same across builds keeps them
+    // on this Mac (create it once with `bun run --cwd xerxes signing:local`).
+    const local = await localSigningIdentity()
+    if (local) {
+      await run('codesign', ['--force', '--deep', '--sign', local, applicationBundle])
+      console.warn(`signed with the local identity "${LOCAL_SIGNING_NAME}" — permissions persist on this Mac; downloads still need a Developer ID`)
+    } else {
+      await run('codesign', ['--force', '--deep', '--sign', '-', applicationBundle])
+      console.warn('no Developer ID or local signing identity — ad-hoc signed; macOS forgets privacy permissions on every update and downloads will be quarantine-blocked')
+    }
   }
   console.log(`packaged ${applicationBundle}`)
+}
+
+/** Common name of the self-signed certificate created by scripts/createLocalSigningIdentity.ts. */
+export const LOCAL_SIGNING_NAME = 'Xerxes Agents Local Signing'
+
+/**
+ * SHA-1 of the local signing identity in a `security find-identity -p codesigning`
+ * listing. A self-signed certificate is reported as not trusted, so the listing
+ * must be the full one (without -v); codesign signs with it regardless.
+ */
+export function parseLocalSigningIdentity(listing: string): string | undefined {
+  for (const line of listing.split('\n')) {
+    const match = /^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/.exec(line)
+    if (match && match[2] === LOCAL_SIGNING_NAME) return match[1]
+  }
+  return undefined
+}
+
+async function localSigningIdentity(): Promise<string | undefined> {
+  try {
+    const proc = Bun.spawn(['security', 'find-identity', '-p', 'codesigning'], { stdout: 'pipe', stderr: 'ignore' })
+    const listing = await new Response(proc.stdout).text()
+    await proc.exited
+    return parseLocalSigningIdentity(listing)
+  } catch {
+    return undefined
+  }
 }
 
 /** First "Developer ID Application" identity in the keychain, if any. */

@@ -1,6 +1,6 @@
 {
   "name": "@xerxes/runtime",
-  "version": "0.8.12",
+  "version": "0.8.13",
   "private": true,
   "type": "module",
   "description": "Bun-native TypeScript runtime for Xerxes.",
@@ -36,6 +36,7 @@
     "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts",
     "build:desktop": "bun run build:runtime && bun scripts/buildDesktop.ts && bun scripts/packageDesktopMac.ts",
     "build:installer": "bun run build:desktop && bun scripts/buildDesktopInstaller.ts",
+    "signing:local": "bun scripts/createLocalSigningIdentity.ts",
     "build:vscode": "bun run build:runtime && bun scripts/buildDesktop.ts && bun scripts/buildVscode.ts",
     "publish:vscode": "bun scripts/publishVscode.ts",
     "desktop": "bun run build:desktop && bun scripts/runDesktop.ts",
