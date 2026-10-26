@@ -240,6 +240,26 @@ for (const method of ['provider_select', 'set_model']) it(`${method} explicitly 
   } finally {await f.close()}
 })
 
+it('host_credentials moves a relayed task onto this host\'s own profile of the same name', async () => {
+  const f = await fixture({ async *stream() { yield {content:'local'} } })
+  try {
+    await f.bind()
+    const session = f.runtime.listSessions().find(s=>s.id===f.created.session_id)!
+    // The host has its own profile carrying the relayed route's name.
+    f.profiles.save({name:'local-profile',provider:'openai',baseUrl:'https://provider.invalid/v1',model:'gpt-4o',apiKey:'synthetic-host-key'})
+    // Without the flag the same name re-selects the relayed route.
+    expect(await f.client.request('set_model',{model:'gpt-4o',provider_profile:'local-profile'})).toMatchObject({ok:true,provider_profile:'local-profile'})
+    expect(Object.hasOwn(session.metadata,LOCAL_PROVIDER_BINDING)).toBe(true)
+    const moved = await f.client.request('set_model',{model:'gpt-4o',provider_profile:'local-profile',host_credentials:true})
+    expect(moved).toMatchObject({ok:true,host_credentials:true})
+    expect(Object.hasOwn(session.metadata,LOCAL_PROVIDER_BINDING)).toBe(false)
+    expect(session.metadata.provider_profile).toBe('local-profile')
+    expect(f.bindings.client(session,session.model)).toBeUndefined()
+    // The flag needs a named host profile.
+    expect(await f.client.request('set_model',{model:'gpt-4o',host_credentials:true})).toMatchObject({ok:false})
+  } finally { await f.close() }
+})
+
 it('implicit model selection and busy remote overrides leave local authority unchanged', async () => {
   const f = await fixture({async *stream(){yield {content:'local'}}})
   try {

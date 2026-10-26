@@ -63,6 +63,8 @@ export class DesktopProviderForwarding {
   private readonly chosen = new Map<string, string>()
   /** Conversations put on the host's own sign-in (its copy of this computer's profile). */
   private readonly hostOwn = new Map<string, { profile: string; model: string }>()
+  /** Conversations the person explicitly put on this computer; never moved to the host automatically. */
+  private readonly pinnedLocal = new Set<string>()
   private changed: (() => void) | undefined
   /** `preferred` names this computer's active profile; without it nothing is followed automatically. */
   constructor(private readonly local: Rpc, private readonly remote: Rpc,
@@ -189,6 +191,19 @@ export class DesktopProviderForwarding {
     if (!this.preferred) return { status: 'skipped', reason: 'automatic provider access is off' }
     try {
       const review = await this.inspect()
+      // A conversation relayed through this computer moves to the host's own
+      // working sign-in once idle: it used to stay here for good after its first
+      // turn. A person's explicit "use via Mac" in this window is kept.
+      if (review.source !== 'remote' && !review.running && !this.pinnedLocal.has(review.sessionKey)) {
+        const name = review.savedRoute?.profile ?? this.chosen.get(review.sessionKey) ?? await this.preferred()
+        const saved = review.savedRoute
+        const model = saved && saved.profile === name ? saved.model : review.profiles.find(profile => profile.name === name)?.model ?? ''
+        if (name && await this.useHostSignIn(review.sessionKey, { name, model }, true)) {
+          this.chosen.delete(review.sessionKey)
+          await this.revokeSession(review.sessionKey)
+          return { status: 'skipped', reason: `the host has its own ${name} sign-in` }
+        }
+      }
       if (review.source === 'local' && (review.expiresAt ?? 0) - Date.now() > RENEW_BEFORE_MS) {
         this.scheduleRenewal(review.expiresAt!)
         return { status: 'skipped', reason: 'already following' }
@@ -238,15 +253,37 @@ export class DesktopProviderForwarding {
     if (!primary.supported) throw new Error(primary.setup || `${name} cannot run through this computer.`)
     if (review.running) throw new Error('This task or its agents are working. Wait until they finish before changing its provider.')
     await this.bindPrimary(review, primary)
+    this.pinnedLocal.add(review.sessionKey)
+    while (this.pinnedLocal.size > MAX_ACTIVITY) this.pinnedLocal.delete(this.pinnedLocal.values().next().value!)
     return { ok: true }
   }
 
   /**
-   * Put a fresh conversation on the host's own copy of `primary` when the host
-   * reports that sign-in working. False (relay as before) on an older host, a
-   * host without it, or any failure: never a silent half-switch.
+   * Move the open SSH conversation from this computer to the host's own sign-in
+   * for `name` because the person chose it (Settings → Run on the server).
    */
-  private async useHostSignIn(sessionKey: string, primary: ShareableLocalProfile): Promise<boolean> {
+  async useHost(name: unknown): Promise<{ ok: true }> {
+    if (typeof name !== 'string' || !name) throw new Error('Choose a provider profile to run on the host.')
+    const review = await this.inspect()
+    if (review.running) throw new Error('This task or its agents are working. Wait until they finish before changing its provider.')
+    const model = (review.savedRoute?.profile === name ? review.savedRoute.model : undefined) ?? review.profiles.find(profile => profile.name === name)?.model ?? ''
+    if (!await this.useHostSignIn(review.sessionKey, { name, model }, review.source !== 'remote')) {
+      throw new Error(`The host has no working ${name} sign-in, or its runtime is too old to switch. Sign in on the host or update its runtime, then try again.`)
+    }
+    this.pinnedLocal.delete(review.sessionKey)
+    this.chosen.delete(review.sessionKey)
+    await this.revokeSession(review.sessionKey)
+    return { ok: true }
+  }
+
+  /**
+   * Put a conversation on the host's own copy of `primary` when the host
+   * reports that sign-in working. False (relay as before) on an older host, a
+   * host without it, or any failure: never a silent half-switch. `fromRelay`
+   * moves a conversation that runs through this computer, which needs a host
+   * that confirms it dropped the relayed route.
+   */
+  private async useHostSignIn(sessionKey: string, primary: { readonly name: string; readonly model: string }, fromRelay = false): Promise<boolean> {
     let listed: Record<string, unknown>
     try { listed = await this.remote('provider_list', { with_readiness: true }) } catch { return false }
     if (listed.ok !== true || listed.readiness_supported !== true || !Array.isArray(listed.profiles)) return false
@@ -255,8 +292,9 @@ export class DesktopProviderForwarding {
     const model = primary.model || (typeof row.model === 'string' ? row.model : '')
     if (!model) return false
     try {
-      const set = await this.remote('set_model', { model, provider_profile: primary.name, session_key: sessionKey })
-      if (set.ok !== true) return false
+      const set = await this.remote('set_model', { model, provider_profile: primary.name, session_key: sessionKey, ...(fromRelay ? { host_credentials: true } : {}) })
+      // An older host ignores host_credentials and would keep the relayed route.
+      if (set.ok !== true || (fromRelay && set.host_credentials !== true)) return false
     } catch { return false }
     this.hostOwn.set(sessionKey, { profile: primary.name, model })
     while (this.hostOwn.size > MAX_ACTIVITY) this.hostOwn.delete(this.hostOwn.keys().next().value!)

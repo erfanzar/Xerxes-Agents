@@ -2114,6 +2114,22 @@ export class Store {
       .finally(() => { this.patch({ providerSwitching: null }) })
   }
 
+  /** Move this SSH task from this computer to the host's own working sign-in. */
+  useHostProvider(name: string): void {
+    if (this.frame.turnActive || this.frame.providerSwitching || !window.xerxes.remote) return
+    this.patch({ providerSwitching: name, providerSwitchError: null })
+    void window.xerxes.remote('provider-use-host', { profile: name })
+      .then(result => {
+        const row = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+        if (row.ok === false) { this.patch({ providerSwitchError: str(row.error) || 'Could not run that provider on the host.' }); return }
+        this.refreshProviderRelay()
+        void this.loadProviders()
+        this.loadModels(true)
+      })
+      .catch(error => { this.patch({ providerSwitchError: desktopError(error) }) })
+      .finally(() => { this.patch({ providerSwitching: null }) })
+  }
+
   /** Put this SSH task on one of this computer's sign-in providers. */
   useLocalProvider(name: string): void {
     if (this.frame.turnActive || this.frame.providerSwitching || !window.xerxes.remote) return

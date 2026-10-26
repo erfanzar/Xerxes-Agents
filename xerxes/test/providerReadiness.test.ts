@@ -69,9 +69,9 @@ test('provider_list carries readiness only when asked and only for sign-in profi
 })
 
 /** A desktop window over a fake host whose readiness answer the test controls. */
-function forwardingWith(host: { readiness?: boolean; ready?: boolean; setModel?: boolean }) {
+function forwardingWith(host: { readiness?: boolean; ready?: boolean; setModel?: boolean; relayed?: boolean; oldHost?: boolean }) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
-  let grants = 0, bound = false
+  let grants = 0, bound = host.relayed === true
   const profile = { name: 'claude-code', model: 'claude-code/opus', supported: true, credential_source: 'local provider authentication or environment', output_limit_mode: 'request-bound' }
   const forwarding = new DesktopProviderForwarding(async method => {
     if (method === 'provider.relay.inventory') return { ok: true, profiles: [profile] }
@@ -81,10 +81,16 @@ function forwardingWith(host: { readiness?: boolean; ready?: boolean; setModel?:
     calls.push({ method, params })
     if (method === 'provider_list') return host.readiness === false ? { ok: true, profiles: [{ name: 'claude-code', signs_in: true }] }
       : { ok: true, readiness_supported: true, profiles: [{ name: 'claude-code', provider: 'claude-code', model: '', signs_in: true, ready: host.ready === true }] }
-    if (method === 'set_model') return host.setModel === false ? { ok: false, error: 'refused' } : { ok: true }
+    if (method === 'set_model') {
+      if (host.setModel === false) return { ok: false, error: 'refused' }
+      // An older host ignores host_credentials and keeps the relayed route.
+      if (params.host_credentials === true && host.oldHost !== true) { bound = false; return { ok: true, host_credentials: true } }
+      return { ok: true }
+    }
     if (method === 'provider.remote.bind') { bound = true; return { ok: true, binding: { workspace: '/project', profile: params.profile, model: params.model, binding: 'a'.repeat(32) } } }
     return { ok: true, provider_binding_session_guard_supported: true, provider_binding_busy: false, provider_binding_lost: false,
-      session: { key: 'task', cwd: '/project', status: 'idle', turn_count: 0, ...(bound ? { local_provider_label: 'Local provider: claude-code' } : {}) } }
+      session: { key: 'task', cwd: '/project', status: 'idle', turn_count: host.relayed ? 12 : 0,
+        ...(bound ? { local_provider_label: 'Local provider: claude-code', local_provider_route: { profile: 'claude-code', model: 'claude-code/opus' } } : {}) } }
   }, 'tpu-host', '/project', async () => 'claude-code')
   return { forwarding, calls, grants: () => grants }
 }
@@ -113,6 +119,42 @@ test('a host without a working sign-in, an older host, or a refused switch still
       expect((await forwarding.current()).bound).toBe(true)
     } finally { await forwarding.disconnect() }
   }
+})
+
+test('a task already relayed through this computer moves to the host\'s own working sign-in once idle', async () => {
+  const { forwarding, calls, grants } = forwardingWith({ ready: true, relayed: true })
+  try {
+    expect(await forwarding.follow()).toEqual({ status: 'skipped', reason: 'the host has its own claude-code sign-in' })
+    expect(grants()).toBe(0)
+    expect(calls.find(call => call.method === 'set_model')?.params).toEqual({ model: 'claude-code/opus', provider_profile: 'claude-code', session_key: 'task', host_credentials: true })
+    expect(await forwarding.current()).toMatchObject({ bound: false, onHost: { profile: 'claude-code', model: 'claude-code/opus' } })
+  } finally { await forwarding.disconnect() }
+})
+
+test('a relayed task stays on this computer when the host cannot run it, or is too old to confirm the switch', async () => {
+  for (const host of [{ ready: false, relayed: true }, { ready: true, relayed: true, oldHost: true }]) {
+    const { forwarding, grants } = forwardingWith(host)
+    try {
+      expect(await forwarding.follow()).toEqual({ status: 'bound' })
+      expect(grants()).toBe(1)
+      expect((await forwarding.current()).bound).toBe(true)
+    } finally { await forwarding.disconnect() }
+  }
+})
+
+test('an explicit "use via Mac" is kept; "run on the server" moves it back', async () => {
+  const { forwarding, calls } = forwardingWith({ ready: true })
+  try {
+    await forwarding.useLocal('claude-code')
+    expect((await forwarding.current()).bound).toBe(true)
+    expect(await forwarding.follow()).toEqual({ status: 'skipped', reason: 'already following' })
+    expect(calls.some(call => call.method === 'set_model' && call.params.host_credentials === true)).toBe(false)
+    expect(await forwarding.useHost('claude-code')).toEqual({ ok: true })
+    expect(await forwarding.current()).toMatchObject({ bound: false, onHost: { profile: 'claude-code' } })
+  } finally { await forwarding.disconnect() }
+  const old = forwardingWith({ ready: true, relayed: true, oldHost: true })
+  try { await expect(old.forwarding.useHost('claude-code')).rejects.toThrow('no working claude-code sign-in') }
+  finally { await old.forwarding.disconnect() }
 })
 
 test('a host-ready sign-in row is no longer forced through this computer', () => {

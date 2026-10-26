@@ -718,6 +718,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before choosing a provider on this computer.')
         return providerForwarding.useLocal(params.profile)
       }
+      if (action === 'provider-use-host') {
+        if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before choosing a provider on the host.')
+        return providerForwarding.useHost(params.profile)
+      }
       if (action === 'provider-activity') {
         if (!remote || !daemon?.online || !providerForwarding) return { ok: true, bound: false }
         return providerForwarding.current()

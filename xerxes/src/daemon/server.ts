@@ -3732,7 +3732,7 @@ export class DaemonServer {
       if (!model) {
         return { ok: false, error: "model id is required" };
       }
-      return this.setModel(connection, model, sessionKey(connection, params), optionalString(params.provider_profile));
+      return this.setModel(connection, model, sessionKey(connection, params), optionalString(params.provider_profile), params.host_credentials === true);
     }
     if (method === "set_reasoning") {
       const effort = optionalString(params.reasoning_effort)
@@ -10799,13 +10799,17 @@ export class DaemonServer {
     model: string,
     targetSessionKey = connection.activeSessionKey,
     providerName?: string,
+    // The desktop moves a relayed conversation onto this host's own sign-in of
+    // the same name: skip matching the relayed route and use this host's profile.
+    hostCredentials = false,
   ): Promise<JsonRpcPayload> {
     if (this.runtime.setSessionModel === undefined) {
       return { ok: false, error: "this runtime does not support session model selection" };
     }
     const current = this.runtime.sessionStatus(targetSessionKey);
     if (!current) return { ok: false, error: 'no active session' };
-    if (Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING)) {
+    if (hostCredentials && !providerName) return { ok: false, error: 'Choose this host\'s provider profile to run on its own credentials.' };
+    if (Object.hasOwn(current.metadata, LOCAL_PROVIDER_BINDING) && !hostCredentials) {
       const approved = localProviderSelections(current.metadata);
       const routes = approved.filter(route => route.model === model && (!providerName || route.profile === providerName));
       const selected = routes.find(route => route.profile === current.metadata.local_provider_profile) ?? (routes.length === 1 ? routes[0] : undefined);
@@ -10856,7 +10860,7 @@ export class DaemonServer {
       await this.emitProviderInit(connection);
     }
     this.emitStatus(connection, session);
-    return { ok: true, model: session.model };
+    return { ok: true, model: session.model, ...(hostCredentials ? { host_credentials: true } : {}) };
     } catch (error) {
       if (hadLocalRequirement) {
         current.metadata[LOCAL_PROVIDER_BINDING] = previousLocalRequirement;

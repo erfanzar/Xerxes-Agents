@@ -2171,6 +2171,12 @@ Explicit idle-task `provider_select` or `set_model` with `provider_profile` can
 select remote credentials and remove the local requirement; implicit model
 changes cannot. Active provider work prevents the override. Failed selection
 retains the local requirement and does not restore revoked authority.
+`set_model {provider_profile, host_credentials: true}` selects this host's own
+profile even when it has the same name as a relayed route (the desktop moves a
+relayed task onto the host's working sign-in this way). A host that applied it
+answers `host_credentials: true`; a client must treat a reply without it as "not
+switched" and keep the relayed route. `host_credentials` without
+`provider_profile` is refused.
 
 The machine consent defaults to keeping current setup. Enter opens a local
 profile review; A authorizes only its displayed scope. C additionally accepts
