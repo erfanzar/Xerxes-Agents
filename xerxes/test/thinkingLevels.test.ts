@@ -5,6 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { AnthropicMessagesClient } from '../src/llms/anthropic.js'
 import { clearReportedCapabilities, reportModelCapability } from '../src/llms/modelsDev.js'
+import { clearModelsDev } from './fixtures/modelsDev.js'
 import { OpenAiCompatibleClient, type CompletionRequest, type LlmDelta } from '../src/llms/client.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import { runTurn } from '../src/streaming/loop.js'
@@ -90,6 +91,9 @@ test('runTurn threads the thinking directive into the provider request', async (
 })
 
 test('OpenAI-compatible payload maps neutral thinking to reasoning fields', async () => {
+  // "Nothing known about glm-5.2" is the premise: another file's seed must not decide it.
+  clearModelsDev()
+  clearReportedCapabilities()
   let body: Record<string, unknown> = {}
   const client = new OpenAiCompatibleClient({
     apiKey: 'test-key',
