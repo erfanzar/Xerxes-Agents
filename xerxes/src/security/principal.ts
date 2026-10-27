@@ -35,6 +35,7 @@ export const HUB_SCOPES = [
    * permission request; `permission.respond` stays human-only everywhere.
    */
   'question.delegated',
+  'lessons.sync',
 ] as const
 export type HubScope = (typeof HUB_SCOPES)[number]
 
@@ -61,7 +62,7 @@ const OPERATOR: readonly HubScope[] = [
   'permission.respond',
   'question.respond',
 ]
-const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model', 'question.delegated']
+const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model', 'question.delegated', 'lessons.sync']
 
 export const ROLE_SCOPES: Readonly<Record<HubRole, ReadonlySet<HubScope>>> = Object.freeze({
   viewer: new Set(VIEWER),
@@ -81,6 +82,7 @@ export const AGENT_SCOPE_CEILING: ReadonlySet<HubScope> = new Set<HubScope>([
   'goal.write',
   'supervisor.model',
   'question.delegated',
+  'lessons.sync',
 ])
 
 export type HubPrincipal =

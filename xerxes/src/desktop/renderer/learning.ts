@@ -64,7 +64,8 @@ function readLesson(value: unknown): Lesson {
     || typeof row.createdAt !== 'number' || !Number.isFinite(row.createdAt) || typeof row.confidence !== 'number' || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1
     || (row.reviewStatus !== 'pending' && row.reviewStatus !== 'approved') || !hasText(evidence.summary)
     || (evidence.kind === 'tool_call' ? !hasText(evidence.toolName) || !hasText(evidence.toolCallId)
-      : evidence.kind !== 'test' || !hasText(evidence.command) || typeof evidence.exitCode !== 'number' || !Number.isSafeInteger(evidence.exitCode))) {
+      : evidence.kind === 'shared' ? !hasText(evidence.host) || (evidence.source !== 'repo' && evidence.source !== 'hub')
+        : evidence.kind !== 'test' || !hasText(evidence.command) || typeof evidence.exitCode !== 'number' || !Number.isSafeInteger(evidence.exitCode))) {
     throw new Error('Invalid lesson from the runtime. Refresh before reviewing it.')
   }
   return row as unknown as Lesson
@@ -74,7 +75,8 @@ export function readLearningList(value: unknown): LearningList {
   if (row.ok !== true) throw new Error(text(row.error) || 'Could not load what Xerxes learned.')
   if (!hasText(row.workspace)) throw new Error('The runtime did not identify this learning workspace.')
   const proposals = records(row.proposals).map(readProposal), lessons = records(row.lessons).map(readLesson)
-  if ([...proposals, ...lessons].some(item => item.workspace !== row.workspace)
+  if (proposals.some(item => item.workspace !== row.workspace)
+    || lessons.some(item => item.workspace !== row.workspace && !(typeof row.repo === 'string' && /^git:[0-9a-f]{32}$/u.test(row.repo) && item.repo === row.repo))
     || new Set(proposals.map(item => item.id)).size !== proposals.length || new Set(lessons.map(item => item.id)).size !== lessons.length) {
     throw new Error('The runtime returned duplicate or cross-workspace learned items. Refresh before reviewing.')
   }

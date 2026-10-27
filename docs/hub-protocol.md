@@ -89,7 +89,7 @@ mid-call). `unknown` is resolved with `hub.command.status`, never by replaying.
 | viewer | `session.read`, `usage.read`, `presence.read` |
 | steer | viewer + `session.steer` |
 | operator | steer + `session.submit`, `session.cancel`, `session.configure`, `goal.write`, `permission.respond`, `question.respond` |
-| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model`, `question.delegated` |
+| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model`, `question.delegated`, `lessons.sync` |
 
 `supervisor.model` lets a principal run one model completion on a daemon's own
 provider profiles (`hub.model.complete`). An agent principal may hold it; the Hub
@@ -147,6 +147,75 @@ per-project entries on the same socket.
 models_supported, workspace_ids}]}`. The owner sees every machine; others see
 machines holding a workspace they can read broadly (a session-only grant never
 reveals a machine). `models_supported` is the daemon's `hub_models_v1_supported`.
+
+## Shared lessons between machines
+
+The Hub runs a model-free lesson synchronizer on startup, when a workspace comes
+online, and every 60 seconds. It only visits online, verified daemons advertising
+both `principal_auth_v1_supported` and `lessons_sync_v1_supported`; read-only and
+older daemons are skipped. Duplicate workspaces sharing `(runtime_id, project_dir)`
+are visited once. Passes never overlap, and workspace errors are reported without
+stopping other workspaces.
+
+These are internal Hub-to-daemon RPCs, **not** phone methods or generic RPC
+passthroughs:
+
+| Daemon method | Params | Result | Signed scope |
+|---|---|---|---|
+| `lessons.shared.list` | `{project_dir, after_id?}` | `{ok:true, repo:string\|null, lessons:[SharedLessonWire], next_after_id:string\|null}` | `session.read` |
+| `lessons.shared.apply` | `{project_dir, repo, lessons:[SharedLessonWire]}` | `{ok:true, applied, retired, skipped:[{id, reason}]}` | `lessons.sync` |
+
+Calls use agent principal `hub-lesson-sync` (display name `Hub lesson sync`),
+`workspace_id` of the routed workspace, and exactly the scope above. The
+`params_hash` covers `project_dir` and all other parameters before the Hub adds
+`hub_auth`. Calls time out after at most 30 seconds; list replies contain at most
+1000 lessons **per page**, apply batches at most 200, and request/reply payloads
+at most 1 MiB (including the request's signature). Invalid and wrong-repo rows are
+dropped. Paginated replies list ids in ascending order. The Hub follows
+`next_after_id` with a signed `after_id` parameter until null, for at most 10 pages
+per workspace per pass. An absent `next_after_id` means complete for older daemons.
+Invalid/non-advancing cursors, out-of-order pages and repo changes fail closed.
+When the page bound is reached, the Hub reports an incomplete listing and pushes
+only ids at or below the last listed id; it never assumes the unseen tail is absent.
+
+`repo` is a path-independent Git identity (`git:<32 lowercase hex characters>`),
+computed by the daemon; the Hub treats it as opaque. Folders without a repo
+identity return `repo:null` and do not share. Only previously approved lessons
+and their retirement tombstones sync; pending/never-approved lessons do not.
+**Imported active lessons are approved automatically on receiving daemons**,
+without a second review. Daemons still validate content and refuse unsafe imports.
+
+The Hub persists `shared_lessons(repo, id, body, status, updated_at)` in
+`hub.sqlite`, keyed by `(repo,id)`, with at most 5000 ids per repo. IDs are never
+evicted: retired absorbs active, including after a restart; corrections use a
+new id and `supersedes`, not in-place edits. Incoming copies must match every
+immutable field of an existing id; only `status`, `updated_at` and
+`retired_reason` may differ. Content conflicts are skipped and reported during
+both merge and push selection, so a retired copy cannot rewrite the lesson body.
+A pass gathers and merges all daemon copies before pushing only lessons that
+`sharedLessonChanges(daemonCopy, hubCopy)` identifies as changes, in byte-bounded
+batches and within the known listing prefix.
+
+A daemon apply acknowledgement with `skipped:[{id, reason:"conflict"}]` also marks
+that `(repo, runtime, id)` as conflicted. Conflicting ids are not pushed again in
+this Hub run, including through another workspace on the same runtime. The
+run-local conflict cache retains up to 10000 keys without eviction; saturation
+reports an error and disables further pushes for the run rather than retrying
+forgotten conflicts. Normal Hub process startup creates an empty cache.
+
+`HubLessonSync.syncNow()` requests a coalesced pass; its internal `status()` exposes
+`enabled`, `running`, `interval_ms`, `last_run` (last completed pass, nullable),
+per-repo `lessons`, `active`, `retired` counts, `conflicts` and
+`suppressed_conflicts` (distinct conflicting keys retained for the current run),
+`conflict_limit_reached`, and `incomplete_listings` (page-bound workspaces in the
+last completed pass). There is no new app UI or RPC.
+
+Set `XERXES_HUB_LESSON_SYNC=off` in the Hub environment to disable all Hub lesson
+sync, including explicit/internal passes. `XERXES_HUB_LESSON_SYNC_MS` changes the
+interval (minimum 10000 ms, default 60000; invalid values use the default).
+Set `XERXES_LESSON_SYNC=off` on a daemon to refuse sharing/imports there. Hub sync
+does not require a `.xerxes/lessons/` repo folder; that folder is a separate,
+opt-in Git-based sharing transport. No provider or SSH credentials are shared.
 
 ## XERXES model
 

@@ -11,6 +11,7 @@ import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
 import { xerxesCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
+import { sharedLessonsRpc } from './lessonSync.js';
 import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
 
@@ -491,6 +492,8 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   "hub.models.catalog",
   "hub.models.options",
   "hub.model.complete",
+  "lessons.shared.list",
+  "lessons.shared.apply",
 ]);
 
 /**
@@ -508,6 +511,8 @@ const HUB_SESSIONLESS_METHODS: ReadonlySet<string> = new Set([
   "hub.models.catalog",
   "hub.models.options",
   "hub.model.complete",
+  "lessons.shared.list",
+  "lessons.shared.apply",
 ]);
 
 /**
@@ -2270,7 +2275,7 @@ export class DaemonServer {
       }
       connection = this.connectionLeases.owner(connection);
       const session = this.runtime.sessionStatus(sessionKey(connection, request.params));
-      const opening = request.method === 'initialize' || request.method === 'session.open';
+      const opening = request.method === 'initialize' || request.method === 'session.open' || request.method === 'lessons.shared.list' || request.method === 'lessons.shared.apply';
       const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
       const resources = await this.workspaceResources?.(cwd);
       if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
@@ -2997,6 +3002,9 @@ export class DaemonServer {
           return { ok: true, revision: saved.revision, warnings, server: manager.status(params.name) ?? null };
         } finally { this.mcpSettingsUpdates.delete(connection); }
       } catch { return { ok: false, error: "MCP settings could not be read or saved; refresh settings and check file validity, lock ownership and server connection health" }; }
+    }
+    if (method === 'lessons.shared.list' || method === 'lessons.shared.apply') {
+      return sharedLessonsRpc(method, params, this.learning?.sharing);
     }
     if (method === "learning.list" || method === "learning.review") {
       if (params.session_key !== undefined && (typeof params.session_key !== 'string' || !params.session_key.trim())) {
@@ -4159,7 +4167,7 @@ export class DaemonServer {
         .map(record => ({ value: `/xerxes ${proposalId[1]} ${record.id} `, label: record.id, meta: `${record.status}: ${record.proposal.kind} ${record.proposal.target}` })) };
     }
     const lessonAction = /^\/xerxes\s+lessons\s+(\S*)$/.exec(text);
-    if (lessonAction) return { ok: true, kind: 'slash', completions: LESSON_REVIEW_ACTIONS
+    if (lessonAction) return { ok: true, kind: 'slash', completions: [...LESSON_REVIEW_ACTIONS, 'share', 'sync']
       .filter(action => action.startsWith(lessonAction[1] ?? ''))
       .map(action => ({ value: `/xerxes lessons ${action} `, label: action, meta: 'Review a lesson' })) };
     const lessonId = /^\/xerxes\s+lessons\s+(approve|reject|rollback)\s+(\S*)$/.exec(text);
@@ -11105,6 +11113,7 @@ export class DaemonServer {
       connection_lease_supported: true,
       principal_auth_v1_supported: true,
       hub_models_v1_supported: true,
+      lessons_sync_v1_supported: true,
       collaboration_v1_supported: true,
       attributed_steer_supported: true,
       session_owned_turns_supported: true,
@@ -11330,6 +11339,7 @@ export class DaemonServer {
       event_stream_supported: this.eventJournal.available,
       principal_auth_v1_supported: true,
       hub_models_v1_supported: true,
+      lessons_sync_v1_supported: true,
       collaboration_v1_supported: true,
       attributed_steer_supported: true,
       ok: true,

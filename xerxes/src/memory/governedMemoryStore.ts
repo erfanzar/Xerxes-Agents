@@ -29,6 +29,21 @@ export interface GovernedMemoryState {
   readonly records: ReadonlyMap<string, MemoryRecord>
 }
 
+/** Read-only history projection; expiration never removes an identity here. */
+export interface MemoryHistoryRecord extends MemoryRecord {
+  readonly everApproved: boolean
+  readonly reviewedAt?: number
+  readonly reviewReason?: string
+  readonly expiredAt?: number
+  readonly expiredReason?: string
+  /** Optional transport provenance for an imported retirement. */
+  readonly expiredPayload?: JsonObject
+}
+
+export interface GovernedMemoryHistory {
+  readonly records: ReadonlyMap<string, MemoryHistoryRecord>
+}
+
 export interface GovernedMemoryOptions {
   readonly directory: string
   readonly now?: () => number
@@ -62,6 +77,34 @@ export class GovernedMemoryStore {
     return project(events)
   }
 
+  async loadHistory(): Promise<GovernedMemoryHistory> {
+    const records = new Map<string, MemoryHistoryRecord>()
+    for (const event of await this.readEvents()) {
+      if (event.type === 'recorded') {
+        const previous = records.get(event.record.id)
+        records.set(event.record.id, { ...previous, ...event.record,
+          everApproved: previous?.everApproved === true || event.record.reviewStatus === 'approved' })
+        continue
+      }
+      const current = records.get(event.id)
+      if (!current) continue
+      if (event.type === 'reviewed') {
+        const { reviewReason: _previousReason, ...record } = current
+        records.set(event.id, { ...record, reviewStatus: event.status, reviewedAt: event.reviewedAt,
+          everApproved: current.everApproved || event.status === 'approved', ...(event.reason === undefined ? {} : { reviewReason: event.reason }) })
+      } else if (event.type === 'classified') {
+        records.set(event.id, { ...current, sensitivity: event.sensitivity })
+      } else if (event.type === 'payload_updated') {
+        records.set(event.id, { ...current, payload: { ...current.payload, ...event.patch } })
+      } else {
+        const { expiredReason: _previousReason, expiredPayload: _previousPayload, ...record } = current
+        records.set(event.id, { ...record, expiredAt: event.expiredAt,
+          ...(event.reason === undefined ? {} : { expiredReason: event.reason }), ...(event.payload === undefined ? {} : { expiredPayload: event.payload }) })
+      }
+    }
+    return { records }
+  }
+
   async record(options: RecordMemoryOptions): Promise<MemoryRecord> {
     const record = buildRecord(options, this.now())
     const event: GovernedMemoryEvent = { type: 'recorded', record }
@@ -74,6 +117,11 @@ export class GovernedMemoryStore {
 
   async review(id: string, status: ReviewStatus, reason?: string): Promise<void> {
     await this.append({ type: 'reviewed', id, status, reviewedAt: this.now(), ...(reason === undefined ? {} : { reason }) })
+  }
+
+  /** Sharing metadata is append-only too; never re-record or resurrect an expired identity. */
+  async updatePayload(id: string, patch: JsonObject): Promise<void> {
+    await this.append({ type: 'payload_updated', id, patch })
   }
 
   async classify(id: string, sensitivity: SensitivityLevel): Promise<void> {
@@ -98,8 +146,8 @@ export class GovernedMemoryStore {
     return this.record({ ...recordOptions, ...(payload === undefined ? {} : { payload }) })
   }
 
-  async expire(id: string, reason?: string): Promise<void> {
-    await this.append({ type: 'expired', id, expiredAt: this.now(), ...(reason === undefined ? {} : { reason }) })
+  async expire(id: string, reason?: string, provenance?: { readonly at: number; readonly payload: JsonObject }): Promise<void> {
+    await this.append({ type: 'expired', id, expiredAt: provenance?.at ?? this.now(), ...(reason === undefined ? {} : { reason }), ...(provenance === undefined ? {} : { payload: provenance.payload }) })
   }
 
   private async append(event: GovernedMemoryEvent): Promise<void> {
@@ -129,7 +177,8 @@ type GovernedMemoryEvent =
   | { readonly type: 'recorded'; readonly record: MemoryRecord }
   | { readonly type: 'reviewed'; readonly id: string; readonly status: ReviewStatus; readonly reviewedAt: number; readonly reason?: string }
   | { readonly type: 'classified'; readonly id: string; readonly sensitivity: SensitivityLevel; readonly classifiedAt: number }
-  | { readonly type: 'expired'; readonly id: string; readonly expiredAt: number; readonly reason?: string }
+  | { readonly type: 'payload_updated'; readonly id: string; readonly patch: JsonObject }
+  | { readonly type: 'expired'; readonly id: string; readonly expiredAt: number; readonly reason?: string; readonly payload?: JsonObject }
 
 function buildRecord(options: RecordMemoryOptions, now: number): MemoryRecord {
   const base = {
@@ -172,6 +221,11 @@ function project(events: readonly GovernedMemoryEvent[]): GovernedMemoryState {
         }
         break
       }
+      case 'payload_updated': {
+        const existing = records.get(event.id)
+        if (existing) records.set(event.id, { ...existing, payload: { ...existing.payload, ...event.patch } })
+        break
+      }
       case 'expired': {
         records.delete(event.id)
         break
@@ -186,6 +240,8 @@ function isGovernedMemoryEvent(value: unknown): value is GovernedMemoryEvent {
   switch (value.type) {
     case 'recorded':
       return isRecord(value.record) && typeof value.record.id === 'string'
+    case 'payload_updated':
+      return typeof value.id === 'string' && isRecord(value.patch)
     case 'reviewed':
     case 'classified':
     case 'expired':

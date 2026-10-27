@@ -1,14 +1,17 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { realpath } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { hostname } from 'node:os'
 import { GovernedMemoryStore, type MemoryRecord, type ReviewStatus } from './governedMemoryStore.js'
+import { REPO_KEY_PATTERN } from './sharedLessonWire.js'
 import type { JsonObject } from '../types/toolCalls.js'
 
 export type LessonEvidence =
   | { readonly kind: 'tool_call'; readonly toolCallId: string; readonly toolName: string; readonly summary: string }
   | { readonly kind: 'test'; readonly command: string; readonly exitCode: number; readonly summary: string }
+  | { readonly kind: 'shared'; readonly host: string; readonly source: 'repo' | 'hub'; readonly summary: string }
 
 /** Tool-call identity and outcome always come from the host, never the caller. */
 export type LessonEvidenceInput =
@@ -35,6 +38,7 @@ export interface Lesson {
   readonly evidence: LessonEvidence
   readonly confidence: number
   readonly workspace: string
+  readonly repo?: string
   readonly agentId: string
   readonly createdAt: number
   readonly reviewStatus: ReviewStatus
@@ -56,6 +60,8 @@ export interface RecordLessonInput {
 export interface LessonStoreOptions {
   readonly memory: GovernedMemoryStore
   readonly resolveToolCall?: ResolveLessonToolCall
+  readonly resolveRepo?: (root: string) => Promise<string | undefined>
+  readonly hostname?: () => string
 }
 
 export type LessonErrorCode =
@@ -99,7 +105,21 @@ export class LessonStore {
   constructor(options: LessonStoreOptions) {
     this.memory = options.memory
     this.resolveToolCall = options.resolveToolCall
+    this.resolveRepo = options.resolveRepo
+    this.originHost = options.hostname ?? hostname
   }
+
+  private readonly originHost: () => string
+  private readonly resolveRepo: LessonStoreOptions['resolveRepo']
+
+  async repoForWorkspace(workspace: string): Promise<string | undefined> {
+    const repo = await this.resolveRepo?.(await canonicalWorkspace(workspace))
+    if (repo !== undefined && !REPO_KEY_PATTERN.test(repo)) throw new LessonError('The repository resolver returned an invalid repository key.', 'LESSON_INVALID_INPUT')
+    return repo
+  }
+
+  /** Sharing commits through the same governed store and invalidates the same views. */
+  async notifySharedChange(workspace: string): Promise<void> { await this.changed(workspace) }
 
   async record(input: RecordLessonInput, resolveToolCall?: ResolveLessonToolCall): Promise<Lesson> {
     const cue = requiredText(input.cue, 'cue')
@@ -111,12 +131,13 @@ export class LessonStore {
     }
     const evidence = await resolveEvidence(input.evidence, input.sessionId, resolveToolCall ?? this.resolveToolCall)
     const workspace = await canonicalWorkspace(input.workspace)
+    const repo = await this.repoForWorkspace(workspace)
     const record = await this.memory.record({
       id: `lesson-${crypto.randomUUID()}`,
       content: lesson,
       source: 'lesson',
       agentId,
-      payload: { kind: 'lesson', version: 1, cue, evidence: { ...evidence }, confidence: input.confidence, workspace },
+      payload: { kind: 'lesson', version: 1, cue, evidence: { ...evidence }, confidence: input.confidence, workspace, origin_host: this.originHost(), ...(repo === undefined ? {} : { repo }) },
     })
     await this.changed(workspace)
     return projectLesson(record)!
@@ -133,7 +154,8 @@ export class LessonStore {
     const record = (await this.memory.load()).records.get(id)
     if (record === undefined || (record.expiresAt !== undefined && record.expiresAt <= this.memory.now())) return undefined
     const lesson = projectLesson(record)
-    return lesson && (root === undefined || lesson.workspace === root) ? lesson : undefined
+    const repo = root === undefined ? undefined : await this.repoForWorkspace(root)
+    return lesson && (root === undefined || lesson.workspace === root || (repo !== undefined && lesson.repo === repo)) ? lesson : undefined
   }
 
   async recall(cue: string, workspace: string, options: { readonly limit?: number } = {}): Promise<Lesson[]> {
@@ -157,7 +179,7 @@ export class LessonStore {
     if (reason !== undefined) reason = requiredText(reason, 'review reason')
     const lesson = await this.requireLesson(id, workspace)
     await this.memory.review(id, status, reason)
-    await this.changed(lesson.workspace)
+    await this.changed(workspace === undefined ? lesson.workspace : await canonicalWorkspace(workspace))
     return { ...lesson, reviewStatus: status }
   }
 
@@ -165,7 +187,7 @@ export class LessonStore {
     reason = requiredText(reason, 'rollback reason')
     const lesson = await this.requireLesson(id, workspace)
     await this.memory.expire(id, reason)
-    await this.changed(lesson.workspace)
+    await this.changed(workspace === undefined ? lesson.workspace : await canonicalWorkspace(workspace))
   }
 
   /** Correct text while retaining the original, already-recorded evidence. */
@@ -179,9 +201,13 @@ export class LessonStore {
     // intermediate record must not make an older, still-superseded lesson
     // reappear while its descendant correction remains active.
     const supersedes = [...new Set([id, ...supersededIds(original.payload)])]
+    // A correction is a new locally authored identity, not the original imported wire record.
+    const { shared: _shared, shared_once: _sharedOnce, repo: _repo, origin_host: _originHost, ...payload } = original.payload
+    const root = await canonicalWorkspace(workspace ?? String(payload.workspace))
+    const repo = await this.repoForWorkspace(root)
     const corrected = await this.memory.correct({
       originalId: id, newId: `lesson-${crypto.randomUUID()}`, content, reason,
-      payload: { ...original.payload, supersedes },
+      payload: { ...payload, workspace: root, origin_host: this.originHost(), ...(repo === undefined ? {} : { repo }), supersedes },
     })
     const lesson = projectLesson(corrected)!
     await this.changed(lesson.workspace)
@@ -203,12 +229,13 @@ export class LessonStore {
   private async visibleLessons(workspace: string): Promise<Lesson[]> {
     const root = await canonicalWorkspace(workspace)
     const now = this.memory.now()
+    const repo = await this.repoForWorkspace(root)
     const lessons: Lesson[] = []
     const records = (await this.memory.load()).records
     for (const record of records.values()) {
       if (record.expiresAt !== undefined && record.expiresAt <= now) continue
       const lesson = projectLesson(record)
-      if (lesson?.workspace === root && lesson.reviewStatus !== 'rejected') lessons.push(lesson)
+      if (lesson && (lesson.workspace === root || (repo !== undefined && lesson.repo === repo)) && lesson.reviewStatus !== 'rejected') lessons.push(lesson)
     }
     const superseded = new Set(lessons.flatMap(lesson => [
       ...(lesson.correctionOf === undefined ? [] : [lesson.correctionOf]),
@@ -219,6 +246,7 @@ export class LessonStore {
 }
 
 export function lessonProvenance(evidence: LessonEvidence): string {
+  if (evidence.kind === 'shared') return `shared from ${evidence.host} via ${evidence.source} — ${evidence.summary}`
   return evidence.kind === 'tool_call'
     ? `tool call ${evidence.toolName} (${evidence.toolCallId}) — ${evidence.summary}`
     : `test result (reported) ${evidence.command}; exit code ${evidence.exitCode} — ${evidence.summary}`
@@ -297,7 +325,7 @@ function projectLesson(record: MemoryRecord): Lesson | undefined {
   if (evidence === undefined) throw new LessonError(`Stored lesson ${record.id} has invalid evidence; inspect the governed event log rather than inventing proof.`, 'LESSON_INVALID_STORED_RECORD')
   return {
     id: record.id, cue: payload.cue, lesson: record.content, evidence, confidence: payload.confidence,
-    workspace: payload.workspace, agentId: record.agentId, createdAt: record.createdAt, reviewStatus: record.reviewStatus,
+    workspace: payload.workspace, ...(typeof payload.repo === 'string' ? { repo: payload.repo } : {}), agentId: record.agentId, createdAt: record.createdAt, reviewStatus: record.reviewStatus,
     ...(record.correctionOf === undefined ? {} : { correctionOf: record.correctionOf }),
     ...(record.correctionReason === undefined ? {} : { correctionReason: record.correctionReason }),
   }
@@ -312,8 +340,11 @@ function supersededIds(payload: JsonObject | undefined): string[] {
   return value
 }
 
-function storedEvidence(value: unknown): LessonEvidence | undefined {
+export function storedEvidence(value: unknown): LessonEvidence | undefined {
   if (!isObject(value) || !hasText(value.summary)) return undefined
+  if (value.kind === 'shared' && hasText(value.host) && (value.source === 'repo' || value.source === 'hub')) {
+    return { kind: 'shared', host: value.host, source: value.source, summary: value.summary }
+  }
   if (value.kind === 'tool_call' && hasText(value.toolCallId) && hasText(value.toolName)) {
     return { kind: 'tool_call', toolCallId: value.toolCallId, toolName: value.toolName, summary: value.summary }
   }
@@ -323,9 +354,13 @@ function storedEvidence(value: unknown): LessonEvidence | undefined {
   return undefined
 }
 
-async function canonicalWorkspace(workspace: string): Promise<string> {
+export async function canonicalWorkspace(workspace: string): Promise<string> {
   const path = requiredText(workspace, 'workspace project root')
-  try { return await realpath(resolve(path)) } catch (error) {
+  try {
+    const root = await realpath(resolve(path))
+    if (!(await stat(root)).isDirectory()) throw new LessonError(`Workspace project root is not a directory: ${path}.`, 'LESSON_INVALID_INPUT')
+    return root
+  } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
       throw new LessonError(`Workspace project root does not exist: ${path}. Supply an existing project directory.`, 'LESSON_INVALID_INPUT')
     }

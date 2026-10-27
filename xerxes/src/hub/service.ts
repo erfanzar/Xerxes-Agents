@@ -13,6 +13,7 @@ import {
 import { canSeeWorkspace, grantedSessionIds, hasScope, type HubGrant } from '../security/principal.js'
 import type { AuthenticatedContext, HubIdentityPort } from './identityPort.js'
 import type { HubHandle, HubWorkspaceHealth } from './lifecycle.js'
+import { HubLessonSync } from './lessonSync.js'
 import type { HubPaths } from './paths.js'
 import type { HubEventSink, UpstreamEvent } from './ports.js'
 import { HubRuntimePool, type PoolWorkspace, type HubRuntimePoolOptions, type PoolHealth } from './runtimePool.js'
@@ -125,6 +126,8 @@ export interface HubService {
   readonly server: HubServer | undefined
   readonly pool: HubRuntimePool | undefined
   readonly store: HubEventStore | undefined
+  /** Internal, model-free shared lesson synchronization (not a phone RPC). */
+  readonly lessonSync: HubLessonSync | undefined
   /** Present only when the supervisor is configured and the Hub has an identity subsystem. */
   readonly supervisor: HubSupervisor | undefined
 }
@@ -190,6 +193,7 @@ export function createHubService(options: HubServiceOptions): HubService {
   let server: HubServer | undefined
   let supervisor: HubSupervisor | undefined
   let modelControl: SupervisorModelControl | undefined
+  let lessonSync: HubLessonSync | undefined
   let tunnel: HubTunnelHandle | undefined
   let settled: Promise<void> = Promise.resolve()
   let stopping: Promise<void> | undefined
@@ -256,7 +260,10 @@ export function createHubService(options: HubServiceOptions): HubService {
   const append = (workspaceId: string, payload: Record<string, unknown>): void => {
     try { store?.append({ workspace_id: workspaceId, type: 'hub.workspace_status', payload }) } catch (error) { report(error, 'workspace status event') }
   }
-  const onHealth = (workspaceId: string, health: PoolHealth): void => append(workspaceId, { health: health.state, degraded: health.degraded })
+  const onHealth = (workspaceId: string, health: PoolHealth): void => {
+    append(workspaceId, { health: health.state, degraded: health.degraded })
+    if (health.state === 'online') lessonSync?.workspaceOnline()
+  }
 
   async function teardown(): Promise<void> {
     const errors: unknown[] = []
@@ -268,6 +275,7 @@ export function createHubService(options: HubServiceOptions): HubService {
     await attempt(() => registrySync)
     await attempt(() => server?.stop())
     await attempt(() => tunnel?.close())
+    await attempt(() => lessonSync?.close())
     await attempt(() => pool?.stop())
     await attempt(() => settled)
     await attempt(() => supervisor?.close())
@@ -284,6 +292,7 @@ export function createHubService(options: HubServiceOptions): HubService {
     get server() { return server },
     get pool() { return pool },
     get store() { return store },
+    get lessonSync() { return lessonSync },
     get supervisor() { return supervisor },
 
     workspaceHealth() {
@@ -338,6 +347,9 @@ export function createHubService(options: HubServiceOptions): HubService {
           onInterrupted: notice => { for (const id of notice.workspaceIds) append(id, { interrupted: true }) },
         })
         pool = runtimePool
+        lessonSync = new HubLessonSync({
+          databasePath: options.paths.databasePath, signer: options.signer, backend: runtimePool, onError: report,
+        })
         const backend = {
           call: (workspaceId: string, method: string, params: Readonly<Record<string, unknown>> = {}, callOptions = {}) => runtimePool.call(workspaceId, method, params, callOptions),
           projectDir: projectDirOf,
@@ -486,6 +498,7 @@ export function createHubService(options: HubServiceOptions): HubService {
         }
         options.lifecycle?.registerShutdownHook(() => service.stop())
         options.lifecycle?.setHttpReady(true)
+        lessonSync.start()
         // Connect in the background: one unreachable SSH host must not delay HTTP readiness.
         settled = runtimePool.start([...snapshot.workspaces.map(toPoolWorkspace)]).catch(error => report(error, 'workspace start'))
         const pollMs = options.registryPollMs ?? 3000

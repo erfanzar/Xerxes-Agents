@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
 
+import { SHARED_LESSON_LIMITS } from '../memory/sharedLessonWire.js'
 import { HubDaemonClient, DaemonRpcError, DaemonTransportError } from './daemonClient.js'
 import type { DaemonCallOptions, DaemonHandshake, HubDaemonClientOptions } from './daemonClient.js'
 import { HubOperatorError, isPrivateProviderType, parseUpstreamEvent } from './ports.js'
@@ -99,6 +100,16 @@ export const HUB_MODEL_DAEMON_METHODS = ['hub.models.catalog', 'hub.models.optio
 const MODEL_METHODS: ReadonlySet<string> = new Set(HUB_MODEL_DAEMON_METHODS)
 /** A completion is capped at 120 s on the daemon; leave room for the round trip. */
 const MODEL_CALL_TIMEOUT_MS = 130_000
+/** Separate from generic RPCs: only the lesson synchronizer may use this path. */
+export const HUB_LESSON_DAEMON_METHODS = ['lessons.shared.list', 'lessons.shared.apply'] as const
+export type HubLessonDaemonMethod = (typeof HUB_LESSON_DAEMON_METHODS)[number]
+const LESSON_METHODS: ReadonlySet<string> = new Set(HUB_LESSON_DAEMON_METHODS)
+export const LESSON_CALL_TIMEOUT_MS = 30_000
+export interface PoolLessonWorkspace {
+  readonly id: string
+  readonly projectDir: string
+  readonly runtimeId: string
+}
 /** Most derived workspaces one machine may hold, and how many saved sessions one discovery pass reads. */
 export const MAX_DERIVED_WORKSPACES = 100
 const DISCOVERY_SESSION_LIMIT = 300
@@ -158,6 +169,8 @@ interface Lane {
   signedCommands: boolean
   /** The daemon advertised hub_models_v1: it can run XERXES's model calls. */
   modelsSupported: boolean
+  /** The daemon advertised lessons_sync_v1_supported. */
+  lessonsSupported: boolean
   /** Last health published for this lane; derived workspaces start from it. */
   health: PoolHealth | undefined
   /** Project dirs the current event subscription covers; a change means resubscribe. */
@@ -308,7 +321,7 @@ export class HubRuntimePool {
       }) })
     lane = { client, controls: new Map(), socketPath: workspace.endpoint.kind === 'local' && !routed ? workspace.endpoint.socketPath : undefined,
       workspaces: new Map([[workspace.id, workspace]]), abort, endpointKeys: new Set([endpointKey]), active: true,
-      everOnline: false, runtimeId: `unverified:${workspace.id}`, verified: false, signedCommands: false, modelsSupported: false, health: undefined, subscribedKey: undefined, instanceId: undefined, subscriptionId: undefined, streamId: undefined,
+      everOnline: false, runtimeId: `unverified:${workspace.id}`, verified: false, signedCommands: false, modelsSupported: false, lessonsSupported: false, health: undefined, subscribedKey: undefined, instanceId: undefined, subscriptionId: undefined, streamId: undefined,
       degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0,
       entry: workspace, routeIndex: 0, routeConfirmed: true, badRoutes: new Map(), betterProbeAt: 0 }
     this.lanes.add(lane); this.endpoints.set(endpointKey, lane); this.owners.set(workspace.id, lane)
@@ -523,6 +536,7 @@ export class HubRuntimePool {
     lane.instanceId = instance
     lane.signedCommands = handshake.status.principal_auth_v1_supported === true
     lane.modelsSupported = handshake.status.hub_models_v1_supported === true
+    lane.lessonsSupported = handshake.status.lessons_sync_v1_supported === true
     lane.degraded = handshake.status.event_stream_supported !== true || !lane.verified
     await this.configure(lane)
   }
@@ -708,6 +722,47 @@ export class HubRuntimePool {
       return reject(error instanceof DaemonRpcError ? 'daemon_rejected' : 'unavailable', error instanceof Error ? error.message : String(error))
     }
   }
+  /** Online, verified, writable lesson lanes. Machine discovery entries are never projects. */
+  lessonWorkspaces(): readonly PoolLessonWorkspace[] {
+    const rows: PoolLessonWorkspace[] = []
+    for (const [id, workspace] of this.workspaces) {
+      const lane = this.owners.get(id)
+      if (workspace.discover === true || !lane || this.stopped || !lane.verified || !lane.signedCommands
+        || !lane.lessonsSupported || !lane.client.online || this.health(id)?.state !== 'online') continue
+      rows.push({ id, projectDir: workspace.projectDir, runtimeId: lane.runtimeId })
+    }
+    return rows
+  }
+
+  /**
+   * Session-less lesson RPCs only. The synchronizer includes project_dir BEFORE signing;
+   * pinning the same value here prevents navigation or supplied params from retargeting it.
+   * Applies are idempotent merges: a lost answer is an error, never an automatic replay.
+   */
+  async callLessons(workspaceId: string, method: string, params: Readonly<Record<string, unknown>>, options: DaemonCallOptions = {}): Promise<PoolCallResult> {
+    const reject = (code: string, message: string): PoolCallResult => ({ state: 'rejected', error: { code, message } })
+    if (!LESSON_METHODS.has(method)) return reject('forbidden', 'Daemon method is not a Hub lesson method')
+    const workspace = this.workspaces.get(workspaceId), lane = this.owners.get(workspaceId)
+    if (!workspace || workspace.discover === true || !lane || this.stopped || !lane.verified || !lane.client.online
+      || this.health(workspaceId)?.state !== 'online') return reject('unavailable', 'Workspace is not online and verified')
+    if (!lane.signedCommands) return reject('read_only', READ_ONLY_MESSAGE)
+    if (!lane.lessonsSupported) return reject('unsupported', 'This daemon does not support shared lesson sync')
+    if (params.project_dir !== workspace.projectDir || !isRecord(params.hub_auth)) return reject('invalid_request', 'Lesson requests must be signed with the workspace project_dir')
+    const scoped = { ...params, project_dir: workspace.projectDir }
+    if (method === 'lessons.shared.apply' && (!Array.isArray(params.lessons) || params.lessons.length > SHARED_LESSON_LIMITS.applyLessons)) return reject('invalid_request', 'Too many lessons in an apply batch')
+    try {
+      if (Buffer.byteLength(JSON.stringify(scoped)) > SHARED_LESSON_LIMITS.payloadBytes) return reject('invalid_request', 'Lesson request exceeds 1 MiB')
+      const timeoutMs = options.timeoutMs === undefined || !Number.isFinite(options.timeoutMs)
+        ? LESSON_CALL_TIMEOUT_MS : Math.max(1, Math.min(options.timeoutMs, LESSON_CALL_TIMEOUT_MS))
+      const result = await lane.client.call(method, scoped, { ...options, timeoutMs })
+      if (Buffer.byteLength(JSON.stringify(result)) > SHARED_LESSON_LIMITS.payloadBytes) return reject('invalid_response', 'Lesson reply exceeds 1 MiB')
+      if (result.ok === false) return reject(typeof result.code === 'string' ? result.code : 'daemon_rejected', typeof result.error === 'string' ? result.error : 'Daemon refused lesson sync')
+      return { state: 'accepted', result }
+    } catch (error) {
+      return reject(error instanceof DaemonRpcError ? 'daemon_rejected' : 'unavailable', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private async summaries(lane: Lane): Promise<void> {
     const result = await lane.client.call('session.active_list', { history_limit: 0 })
     if (result.ok !== true || !Array.isArray(result.sessions)) throw new Error('Daemon did not return session summaries')

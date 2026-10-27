@@ -212,6 +212,50 @@ registry produces a typed error and is **preserved**, never replaced with an emp
 repair the original file manually before another mutation. Unknown commands fail with
 usage and a nonzero exit status. `xerxes hub --help` lists the full command surface.
 
+### Shared lessons across linked machines
+
+The Hub automatically syncs approved lessons between linked daemons working on
+the same Git repository, even when their clone paths differ. No model call or
+`.xerxes/lessons/` directory is needed for Hub sync. Pending and never-approved
+lessons stay local; retirements also sync and cannot be undone by a stale active
+copy. **Imported active lessons are approved automatically**, without a second
+review on the receiving machine. Each daemon still validates imports and rejects
+unsafe content. Folders without a Git repo identity do not share.
+
+Only online, verified, writable daemons advertising `lessons_sync_v1_supported`
+participate; older/view-only lanes are skipped. The Hub stores at most 5000
+lessons (including retirement tombstones) per repo in `hub.sqlite`. It checks on
+startup, when workspaces come online, and every 60 seconds, using signed,
+workspace-bound requests with a 30-second timeout, at most 200 lessons per apply
+batch and 1 MiB per payload. Lists are paged in id order (up to 1000 lessons per
+page, at most 10 pages per workspace per pass). Hitting that bound is reported;
+only the observed prefix can receive pushes, not the unseen tail. Older daemons
+without pagination metadata are treated as returning a complete list. A failing
+workspace does not stop other workspaces.
+
+An existing id's content cannot be rewritten by a conflicting copy, even one
+marked retired: only status, update time and retirement reason may change.
+Conflicts are reported, counted, and excluded from further pushes for that
+`(repo, runtime, id)` during this Hub run, including conflicts acknowledged by a
+daemon's apply reply. This avoids sending the same refused lesson every minute.
+The run-local cache holds at most 10000 conflicts; saturation disables pushes
+for the rest of the run rather than evicting entries and retrying them.
+
+- `XERXES_HUB_LESSON_SYNC=off`: disable the synchronizer on the Hub.
+- `XERXES_HUB_LESSON_SYNC_MS`: interval in milliseconds (default `60000`, minimum
+  `10000`; invalid values use the default).
+- `XERXES_LESSON_SYNC=off`: refuse shared lesson operations on one daemon,
+  including repo-folder imports. Its ordinary local lessons remain available.
+
+These settings belong to the respective process environment. No runtime or Hub
+restart is performed by synchronization. The internal `service.lessonSync`
+object provides `syncNow()` and `status()` (last completed pass, per-repo
+active/retired counts, retained conflict counts, conflict-cache saturation and
+incomplete listings); these are not phone RPC methods. Workspace failures and
+invalid rows are reported through the Hub's normal error reporter. See
+[Hub protocol: shared lessons](hub-protocol.md#shared-lessons-between-machines)
+for the signed daemon RPC contract.
+
 ## Xerxes learning controls
 
 The integration is Bun-native and adopts ideas, not upstream runners or published benchmark claims.

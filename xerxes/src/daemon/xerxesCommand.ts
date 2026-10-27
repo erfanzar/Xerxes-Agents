@@ -3,6 +3,7 @@
 
 import { IMPROVE_CLI_USAGE, runImproveCli } from '../../playground/improveCli.js'
 import { renderLessons, type LessonStore } from '../memory/lessons.js'
+import type { LessonSharing } from '../memory/lessonSharing.js'
 import type { JsonRpcPayload } from '../protocol/jsonRpc.js'
 import type { ReflectionApplier, ReflectionProposalStore, StoredReflectionProposal } from '../runtime/reflection.js'
 import { runWithActiveSession } from '../runtime/sessionContext.js'
@@ -12,6 +13,7 @@ export interface LearningServices {
   readonly store: ReflectionProposalStore
   readonly applier: ReflectionApplier
   readonly lessons: LessonStore
+  readonly sharing?: LessonSharing
 }
 
 export const XERXES_SUBCOMMANDS = ['help', 'proposals', 'show', 'approve', 'reject', 'lessons', 'improve'] as const
@@ -25,6 +27,8 @@ export const XERXES_USAGE = [
   '  /xerxes approve <id> [reason]',
   '  /xerxes reject <id> <reason>',
   '  /xerxes lessons [cue]',
+  '  /xerxes lessons share',
+  '  /xerxes lessons sync',
   '  /xerxes lessons approve <id> [reason]',
   '  /xerxes lessons reject <id> <reason>',
   '  /xerxes lessons rollback <id> <reason>',
@@ -32,6 +36,8 @@ export const XERXES_USAGE = [
   '',
   'Proposals never change files until a human approves. Plugin ideas only suggest /plugin-creator.',
   'Only approved matching lessons are automatically attached to future turns as reviewed guidance.',
+  'share and sync authorize file sharing locally for this repo; run sync once on each fresh machine.',
+  'The local opt-in is outside the repo. Cloned folders and PR branches cannot enable imports.',
   'improve always previews (--dry-run); execution requires an explicit transport in the CLI.',
 ].join('\n')
 
@@ -48,7 +54,8 @@ export async function listLearning(workspace: string, services?: LearningService
   try {
     const [records, lessons] = await Promise.all([services.store.list(workspace), services.lessons.list(workspace)])
     const proposals = [...records].sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
-    return { ok: true, workspace, proposals, lessons, counts: {
+    const repo = await services.lessons.repoForWorkspace(workspace)
+    return { ok: true, workspace, ...(repo === undefined ? {} : { repo }), proposals, lessons, counts: {
       pending_proposals: proposals.filter(record => record.status === 'pending').length,
       pending_lessons: lessons.filter(lesson => lesson.reviewStatus === 'pending').length,
     } }
@@ -145,6 +152,13 @@ export async function xerxesCommand(args: string, workspace: string, services?: 
       case 'reject':
         return reviewLearning({ target: 'proposal', id, action, ...(reason ? { reason } : {}) }, workspace, services, session)
       case 'lessons': {
+        if (rest[0] === 'share' || rest[0] === 'sync') {
+          if (rest.length !== 1) return refusal(`Usage: /xerxes lessons ${rest[0]}`)
+          if (!services.sharing) return refusal('Lesson sharing is not configured by this daemon host.')
+          const result = rest[0] === 'share' ? await services.sharing.share(workspace) : await services.sharing.sync(workspace)
+          const warning = 'ignored' in result && result.ignored ? '\nWarning: Git ignores .xerxes/lessons/. Change the ignore rule before committing shared lessons.' : ''
+          return { ok: true, ...result, report: `Lesson sharing: ${result.exported} exported; ${result.applied} applied, ${result.retired} retired, ${result.skipped.length} skipped.${result.enabled ? '' : '\nNot enabled: run /xerxes lessons share to create .xerxes/lessons/.'}${result.repo ? '' : '\nNo Git repository identity; sharing is unavailable.'}${warning}` }
+        }
         if (LESSON_REVIEW_ACTIONS.some(value => value === rest[0])) {
           const explanation = rest.slice(2).join(' ')
           return reviewLearning({ target: 'lesson', action: rest[0], id: rest[1], ...(explanation ? { reason: explanation } : {}) }, workspace, services, session)

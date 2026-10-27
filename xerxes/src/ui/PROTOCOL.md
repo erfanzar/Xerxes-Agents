@@ -220,6 +220,8 @@ params fall back to per-connection defaults.
 | `runtime.reload`                     | `{ reflection?: "goals" \| "all" \| "off", ... }` | `{ ok, reflection, ... }`                                      | Reload runtime config; re-emits status. `reflection` defaults to `goals`; `all` also enables long-turn background review and `off` disables it. `runtime.status` reports the same policy. `/xerxes` and the additive learning methods below share review behavior. |
 | `learning.list`                      | `{ session_key?: string }`                     | `{ ok: true, workspace: string, proposals: StoredReflectionProposal[], lessons: Lesson[], counts: { pending_proposals: number, pending_lessons: number } }` or `{ ok: false, error }` | Read-only and concurrency-safe. Workspace is the named/active session's cwd. Every proposal status, newest first; lessons are pending/approved only (no rejected, expired or superseded records), approved first then newest. Unconfigured services refuse explicitly. |
 | `learning.review`                    | `{ session_key?: string, target: 'proposal' \| 'lesson', id: string, action: 'approve' \| 'reject' \| 'rollback', reason?: string }` | `{ ok: boolean, report: string, proposal?: StoredReflectionProposal, lesson?: Lesson, error?: string }` | Human authority, shared with typed `/xerxes` review. Reason is required for reject/rollback; rollback is lessons-only and expires the lesson while returning its prior record. Proposal approve invokes the shared applier in the active session. Validation, not-found/not-pending and failed applies return ok false, not exceptions. |
+| `lessons.shared.list`                | `{ project_dir: string, after_id?: string }` | `{ ok: true, repo: string \| null, lessons: SharedLessonWire[], next_after_id: string \| null }` | Session-less, concurrent; local unsigned or Hub-signed `session.read`. IDs ascending; exclusive cursor. At most 1000 lessons and 1 MiB per page. Follow `next_after_id` until null (complete). Explicit project enrollment uses `project_dir`, never the active session. |
+| `lessons.shared.apply`               | `{ project_dir: string, repo: string, lessons: SharedLessonWire[] }` | `{ ok: true, applied: number, retired: number, skipped: { id, reason }[] }` or `{ ok: false, code: 'repo_mismatch' \| 'invalid_request' \| 'disabled', error }` | Session-less, concurrent; local unsigned or Hub-signed `lessons.sync` (agent-allowed, not human-only). At most 200 lessons / 1 MiB per call. Same IDs, auto-approved imports, immutable content, retirement absorbs active. |
 | `browser.manage`                     | `{ action?, cdp_url? }`                        | `{ ok, status?, pages?, error? }`                              | `connect` attaches to an explicitly supplied, already-running Chromium CDP endpoint; `disconnect` only detaches. |
 | `slash`                              | `{ command }`                                  | `{ ok }`                                                       | Native daemon slash dispatch; unsupported commands report an explicit result. Client-side controls (`/paste`, `/queue`, `/skin`, `/statusbar`, `/voice`) additionally return `handled: boolean` — see below. |
 | `set_plan_mode`                      | `{ enabled \| plan_mode, mode? }`              | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
@@ -2494,6 +2496,48 @@ messages are scrubbed of both.
 | `hub.models.options` | `{ profile, model? }` | `{ ok:true, profile, provider, models:[{ id, label? }], models_note?, model, efforts:[{ effort, description? }], default_effort: string \| null }` | `models` comes from the daemon's model discovery; when listing fails it falls back to the configured model (plus models cached on the profile) and sets `models_note`. `model` is the requested model or the profile's. `efforts` are the selectable reasoning levels, resolved as `reasoning_levels` does. Unknown profile: `{ ok:false, code:"unknown_profile", error }`. |
 | `hub.model.complete` | `{ profile, model, effort?, system, messages, tools, max_tokens? }` | `{ ok:true, text, tool_calls:[{ id, name, arguments }], usage:{ input_tokens, output_tokens } }` | One non-streaming completion through the profile's provider client. `messages` are chat messages (`system`/`user`/`assistant` with optional `tool_calls`/`tool` with `tool_call_id`), `tools` are `{ type:"function", function:{ name, description, parameters } }`; `arguments` in the result is a JSON string. Bounds: request JSON at most 1 MiB, `max_tokens` 1–8192 (default 2048), at most 2 concurrent completions, 120 s timeout; the completion is aborted when the connection closes. Failures: `{ ok:false, code, error }` with `code` one of `unknown_profile`, `invalid_request` (oversize, bad shape, unsupported `effort`, a model the profile cannot serve), `busy`, `provider_failed`, `timeout`. `effort` maps onto the same thinking request fields the turn loop uses (`off` sends none). |
 
+**Shared lessons (`lessons_sync_v1`).** `runtime.status` and `initialize` advertise
+`lessons_sync_v1_supported: true`. `lessons.shared.list` and `lessons.shared.apply`
+(see the request table) are session-less and concurrent. Enrollment is checked
+against the explicit `project_dir`, not the attached session's cwd. `list` needs
+`session.read`; `apply` needs `lessons.sync`, which is inside the agent ceiling and
+is **not** a human-only approval scope. This dedicated import path automatically
+approves imported lessons by the owner's explicit choice; ordinary learning
+review remains human-only. `XERXES_LESSON_SYNC=off` returns `code: "disabled"`.
+
+`SharedLessonWire` is `{ id: "lesson-<uuid>", repo: "git:<32 hex>", status:
+"active" | "retired", cue, lesson, confidence, evidence: string, supersedes:
+string[], origin: { host, agent_id }, recorded_at, updated_at, retired_reason? }`.
+Dates are canonical ISO timestamps. All approved IDs, including locally superseded
+ones, remain represented for replica convergence. Pending and confidential/restricted
+records are not exported. Tombstones are exported only for IDs previously shared
+(imported, emitted active, or already present in the repo folder), not private
+rejected/rolled-back text. Origin host is captured at record time; legacy export
+fields are frozen persistently on first sharing. Content is immutable per id,
+retired absorbs active, and the earliest retirement wins and is persisted.
+Mismatched repositories and scanner-modified imports are refused/skipped; identical
+known content may always be retired without a scanner veto. Original provenance
+is retained on re-export. `Lesson.evidence` additionally accepts
+`{ kind: "shared", host, source: "repo" | "hub", summary }`; that is provenance,
+not evidence verified on this machine. `learning.list` may include `repo`, allowing
+lessons with that repo key from another local clone's workspace path.
+
+`/xerxes lessons share` creates `.xerxes/lessons/<id>.json` at the Git toplevel and
+warns when Git ignores it. Both `share` and `sync` authorize file sharing locally,
+persisted atomically in `<XERXES_HOME>/governed-memory/lesson-sharing.json` as
+`{ repos: { "git:<key>": { enabled_at: "<ISO>" } } }`. **A fresh machine must run
+`/xerxes lessons sync` once**: a cloned folder/PR branch never enables imports.
+Hub list/apply do not require this local opt-in because Hub enrollment is their
+trust decision. `sync` forces import/export; files are never deleted, invalid or
+conflicting files are reported, replacements use temporary files + atomic rename,
+and unchanged bytes are not rewritten. Normal turns skip busy queues, honor the
+turn signal, and wait at most about 1.5 seconds (remaining work can finish in the
+background). File sync is throttled for 30 seconds unless files/local lessons change;
+`XERXES_LESSON_SYNC=off` is quiet during turns. The context walker excludes the folder.
+List pages are ordered by ID and bounded by both count and bytes: pass the last
+page's `next_after_id` as `after_id` until null. A malformed cursor is `invalid_request`;
+apply validates the repo directly without generating an export snapshot.
+
 **`hub_auth` envelope.** `params.hub_auth` is the signed envelope of
 `security/hubAuthEnvelope.ts`. The daemon verifies, in order: structure and signature
 against the pinned key, time window (lifetime at most 5 minutes), method, `params_hash`,
@@ -2515,8 +2559,9 @@ the error `hub_auth refused: ...` (code `-32001`):
 `set_model` → `session.configure`; `session.goal` mutations → `goal.write` (a bare
 `/goal` or `milestone` read needs `session.read`); reads (`session.open`,
 `session.history`, `session.active_list`, `session.list`, `goal.inspect`,
-`learning.list`, `runtime.status`, `subagent.inspect`, `events.*`) → `session.read`;
-`hub.models.catalog`/`hub.models.options`/`hub.model.complete` → `supervisor.model`.
+`learning.list`, `lessons.shared.list`, `runtime.status`, `subagent.inspect`, `events.*`) → `session.read`;
+`hub.models.catalog`/`hub.models.options`/`hub.model.complete` → `supervisor.model`;
+`lessons.shared.apply` → `lessons.sync`.
 Everything else (slash and shell routes, permission-mode changes, plugin/provider
 management, `goal.decision`, `learning.review`, enrollment) is refused for every hub
 principal. A principal of kind `agent` can never use a human-only route

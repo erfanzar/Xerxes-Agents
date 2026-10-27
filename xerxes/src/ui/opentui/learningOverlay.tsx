@@ -27,7 +27,9 @@ export function learningDetail(row: ReviewRow): string {
     const item = row.item
     const evidence = item.evidence.kind === 'test'
       ? `${item.evidence.command} · exit ${item.evidence.exitCode}\n${item.evidence.summary}`
-      : `${item.evidence.toolName} · ${item.evidence.toolCallId}\n${item.evidence.summary}`
+      : item.evidence.kind === 'shared'
+        ? `Shared from ${item.evidence.host} via ${item.evidence.source}\n${item.evidence.summary}`
+        : `${item.evidence.toolName} · ${item.evidence.toolCallId}\n${item.evidence.summary}`
     return `Cue: ${item.cue}\nStatus: ${item.reviewStatus}\nConfidence: ${item.confidence}\n\nLesson\n${item.lesson}\n\nEvidence\n${evidence}`
   }
   const item = row.item

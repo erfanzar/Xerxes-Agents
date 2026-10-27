@@ -39,7 +39,7 @@ const CONTEXT_ROOTS = [
   // notes, test logs) written by review and release workflows; they describe
   // past work, not how to work here, and were re-sent on every turn.
   // `plugins/` loads through its own trust decision, like skills.
-  { name: '.xerxes', excluded: ['agents', 'skills', 'commands', 'plugins', 'review', 'reports'], priority: ['AGENTS.md', 'README.md', 'repo-map.yaml', 'repo-map.yml', 'ops/OPS.md', 'projects/README.md'] },
+  { name: '.xerxes', excluded: ['agents', 'skills', 'commands', 'plugins', 'review', 'reports', 'lessons'], priority: ['AGENTS.md', 'README.md', 'repo-map.yaml', 'repo-map.yml', 'ops/OPS.md', 'projects/README.md'] },
 ] as const
 /**
  * Hard cap on discovered Markdown files. Bounds bootstrap latency and prompt

@@ -108,6 +108,8 @@ import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
 import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution, successfulGoalEvidence } from './runtime/goalEvidence.js';
 import { GovernedMemoryStore } from './memory/governedMemoryStore.js';
 import { LessonStore, renderApprovedLessonsForTurn } from './memory/lessons.js';
+import { LessonSharing } from './memory/lessonSharing.js';
+import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
@@ -1761,14 +1763,17 @@ function mcpHostOptions(workspace: string) {
 }
 
 function createLearningServices(workspaceRoot: string, registry?: SkillRegistry): {
-  store: ReflectionProposalStore; applier: ReflectionApplier; lessons: LessonStore;
+  store: ReflectionProposalStore; applier: ReflectionApplier; lessons: LessonStore; sharing: LessonSharing;
 } {
   const activeWorkspace = () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot;
   const skills = new SkillBundleStore({ directory: join(xerxesHome(), 'skills'), ...(registry ? { registry } : {}) });
+  const memory = new GovernedMemoryStore({ directory: join(xerxesHome(), 'governed-memory') });
+  const lessons = new LessonStore({ memory, resolveRepo: createRepoIdentityResolver() });
+  const sharing = new LessonSharing({ memory, lessons, report: message => console.error(`lessons: ${message}`) });
   return {
     store: new ReflectionProposalStore({ directory: join(xerxesHome(), 'reflection') }),
     applier: createReflectionApplier({ skills, activeWorkspace }),
-    lessons: new LessonStore({ memory: new GovernedMemoryStore({ directory: join(xerxesHome(), 'governed-memory') }) }),
+    lessons, sharing,
   };
 }
 
@@ -2235,6 +2240,7 @@ function daemonRuntime(
       lessonsForTurn: async (session, userText, signal) => {
         signal.throwIfAborted();
         if (!userText.trim()) return '';
+        await learning.sharing.syncBeforeTurn(session.cwd, signal);
         const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 5 });
         signal.throwIfAborted();
         return renderApprovedLessonsForTurn(lessons);

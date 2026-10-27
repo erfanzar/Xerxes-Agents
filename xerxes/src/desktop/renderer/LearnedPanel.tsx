@@ -58,7 +58,7 @@ export function LessonCard({ lesson, snap, actions }: ReviewProps & { lesson: Le
   return <article className="railcard learned-card" aria-label={`Lesson: ${lesson.cue}`}>
     <div className="railcard__head"><strong className="railcard__title">{lesson.cue}</strong><span className="railcard__meta">Confidence {Math.round(lesson.confidence * 100)}%</span></div>
     <p className="learning-prose">{lesson.lesson}</p>
-    <pre className="studio-source">{evidence.kind === 'tool_call' ? `${evidence.toolName} — ${evidence.summary}` : `Test (reported): ${evidence.command}\nexit code ${evidence.exitCode} — ${evidence.summary}`}</pre>
+    <pre className="studio-source">{evidence.kind === 'shared' ? `Shared from ${evidence.host} via ${evidence.source} — ${evidence.summary}` : evidence.kind === 'tool_call' ? `${evidence.toolName} — ${evidence.summary}` : `Test (reported): ${evidence.command}\nexit code ${evidence.exitCode} — ${evidence.summary}`}</pre>
     <ReviewResult target="lesson" id={lesson.id} snap={snap} />
     {(lesson.reviewStatus === 'pending' || lesson.reviewStatus === 'approved') && <LearningReviewControls target="lesson" id={lesson.id} approved={lesson.reviewStatus === 'approved'} snap={snap} actions={actions} />}
   </article>

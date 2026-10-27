@@ -261,7 +261,7 @@ export type HubMethodPolicy =
 
 const READ_METHODS = new Set([
   'session.open', 'session.history', 'session.active_list', 'session.list', 'goal.inspect',
-  'learning.list', 'runtime.status', 'subagent.inspect', 'events.subscribe', 'events.read', 'events.unsubscribe',
+  'learning.list', 'lessons.shared.list', 'runtime.status', 'subagent.inspect', 'events.subscribe', 'events.read', 'events.unsubscribe',
 ])
 
 const WRITE_METHODS: Readonly<Record<string, HubScope>> = {
@@ -278,6 +278,7 @@ const WRITE_METHODS: Readonly<Record<string, HubScope>> = {
   set_model: 'session.configure',
   // Reviewing what Xerxes learned is a human-only act.
   'learning.review': 'approvals.manage',
+  'lessons.shared.apply': 'lessons.sync',
 }
 
 /**
