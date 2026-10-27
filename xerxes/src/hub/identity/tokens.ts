@@ -15,7 +15,8 @@ import {
   type IdentityContext,
   type IssuedTokens,
 } from './core.js'
-import { fireRevocations, parseCeilingList, revokeDeviceRows, syncRevocations, type RevocationEvent } from './devices.js'
+import { auditAction } from './audit.js'
+import { fireRevocations, parseCeilingList, revokeDeviceRows, revokeFamilyRows, syncRevocations, type RevocationEvent } from './devices.js'
 import { listGrants } from './grants.js'
 import type { DeviceRow, FamilyRow, SessionRow, UserRow } from './store.js'
 
@@ -25,13 +26,15 @@ import type { DeviceRow, FamilyRow, SessionRow, UserRow } from './store.js'
  * - One token family per device; a refresh token is `xr1.<random>`, a session
  *   token `xs1.<random>`. Only keyed hashes are stored.
  * - Refresh rotates atomically (one SQLite write transaction).
- * - Presenting a retired refresh token is token theft or a replayed request:
- *   the whole device (family, sessions, push subscriptions) is revoked. The one
- *   exception is the grace window: a retired token seen again within
- *   `refreshGraceMs` of its rotation returns the *same* successor that was
- *   already issued (two tabs or a retried request racing). The successor is
- *   held in memory only for that window; after a Hub restart a late retry is
- *   treated as reuse, which is the safe direction.
+ * - A retired refresh token seen again within `refreshGraceMs` of its rotation
+ *   returns the *same* successor that was already issued (two tabs or a
+ *   retried request racing). The successor is held in memory only.
+ * - A retired token seen later is a second cookie jar of the same device (iOS
+ *   Safari vs. the home-screen app) or a refresh reply the phone lost while
+ *   suspended. It starts a new token family once (`forkFamily`): the token is
+ *   then spent, the fork is audited, and a device keeps at most
+ *   MAX_FAMILIES_PER_DEVICE live families. It no longer revokes the device;
+ *   that locked owners out of their phones several times a day.
  */
 
 export const REFRESH_PREFIX = 'xr1.'
@@ -133,15 +136,32 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
       }
       return { outcome: { kind: 'pending' }, events: [] }
     }
-    if (device.absolute_expires_at <= now || family.last_used_at + ctx.limits.inactivityMs <= now) {
+    if (device.absolute_expires_at <= now) {
       return { outcome: { kind: 'expired' }, events: revokeDeviceRows(ctx, device.id, 'expired') }
+    }
+    if (family.last_used_at + ctx.limits.inactivityMs <= now) {
+      // An idle cookie jar ends alone while another jar of the same device is still in use.
+      const otherActive = ctx.store.one<{ id: string }>(
+        'SELECT id FROM hub_token_families WHERE device_id = ? AND id != ? AND revoked_at IS NULL AND last_used_at > ? LIMIT 1',
+        device.id,
+        family.id,
+        now - ctx.limits.inactivityMs,
+      )
+      const events = otherActive ? revokeFamilyRows(ctx, family, 'expired') : revokeDeviceRows(ctx, device.id, 'expired')
+      return { outcome: { kind: 'expired' }, events }
+    }
+    if (token.generation === SPENT_GENERATION) {
+      // Already used once to start a branch: a racing retry inside the grace window gets that same branch.
+      const grace = ctx.graceCache.get(hash)
+      if (grace && grace.expiresAt > now) return { outcome: { kind: 'ok', tokens: grace.tokens, user, device }, events: [] }
+      return { outcome: { kind: 'invalid' }, events: [] }
     }
     if (token.generation !== family.generation) {
       const grace = ctx.graceCache.get(hash)
       if (grace && grace.expiresAt > now && token.generation === family.generation - 1) {
         return { outcome: { kind: 'ok', tokens: grace.tokens, user, device }, events: [] }
       }
-      return { outcome: { kind: 'reuse' }, events: revokeDeviceRows(ctx, device.id, 'refresh_token_reuse', actorFor(user, device.id)) }
+      return forkFamily(ctx, hash, token.generation, family, device, user, now)
     }
     const next = family.generation + 1
     const successor = REFRESH_PREFIX + randomToken(ctx, 32)
@@ -159,6 +179,48 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
   pruneGrace(ctx)
   fireRevocations(ctx, result.events)
   return result.outcome
+}
+
+/** A retired refresh token may start one new branch; afterwards its row carries this generation. */
+const SPENT_GENERATION = -1
+/** Live token families (browser cookie jars) per device; beyond this the least recently used one is retired. */
+export const MAX_FAMILIES_PER_DEVICE = 4
+
+/**
+ * A retired refresh token outside the grace window. One phone can hold several
+ * cookie jars for the same device (Safari and the home-screen app, which iOS
+ * copies at install), and a suspended phone can lose a refresh reply; both
+ * present an older token later. Revoking the whole device for that locked the
+ * owner out of their phone, so the token instead starts a new family once:
+ * the token is marked spent (a second presentation is refused without a
+ * revocation), the fork is audited, the device keeps at most
+ * MAX_FAMILIES_PER_DEVICE live families, and each family still expires after
+ * the inactivity window and with the device's absolute lifetime.
+ */
+function forkFamily(
+  ctx: IdentityContext,
+  hash: string,
+  generation: number,
+  family: FamilyRow,
+  device: DeviceRow,
+  user: UserRow,
+  now: number,
+): InternalOutcome {
+  const spent = ctx.store.run('UPDATE hub_refresh_tokens SET generation = ? WHERE hash = ? AND generation = ?', SPENT_GENERATION, hash, generation)
+  if (spent !== 1) return { outcome: { kind: 'invalid' }, events: [] }
+  const actor = actorFor(user, device.id)
+  const events: RevocationEvent[] = []
+  const live = ctx.store.all<FamilyRow>(
+    'SELECT * FROM hub_token_families WHERE device_id = ? AND revoked_at IS NULL ORDER BY last_used_at ASC, created_at ASC',
+    device.id,
+  )
+  for (const old of live.slice(0, Math.max(0, live.length - (MAX_FAMILIES_PER_DEVICE - 1)))) {
+    events.push(...revokeFamilyRows(ctx, old, 'family_limit', actor))
+  }
+  const tokens = startFamily(ctx, device)
+  ctx.store.run('UPDATE hub_devices SET last_seen_at = ? WHERE id = ?', now, device.id)
+  auditAction(ctx, { actor, action: `identity.family.fork:${device.id}`, params: { from: family.id, generation } })
+  return { outcome: { kind: 'ok', tokens, user, device }, events, remember: { hash, tokens } }
 }
 
 function pruneGrace(ctx: IdentityContext): void {

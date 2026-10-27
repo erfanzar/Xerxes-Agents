@@ -6,7 +6,7 @@ import type { HubActor } from '../protocol.js'
 import { isHubScope, type HubScope } from '../../security/principal.js'
 import { LOCAL_ADMIN_ACTOR, auditAction } from './audit.js'
 import { HubIdentityError, type IdentityContext } from './core.js'
-import type { DeviceRow, UserRow } from './store.js'
+import type { DeviceRow, FamilyRow, UserRow } from './store.js'
 
 /**
  * Device listing and revocation. Revocation writes rows inside the caller's
@@ -42,6 +42,23 @@ export function revokeDeviceRows(ctx: IdentityContext, deviceId: string, reason:
   return [makeEvent(device.user_id, deviceId, reason), ...sessions.map(session => makeEvent(device.user_id, deviceId, reason, session.id))]
 }
 
+/**
+ * Retire one token family (one browser cookie jar) and its browser sessions.
+ * The device and its other families stay signed in, so this only emits
+ * per-session events.
+ */
+export function revokeFamilyRows(ctx: IdentityContext, family: Pick<FamilyRow, 'id' | 'device_id'>, reason: string, actor: HubActor = LOCAL_ADMIN_ACTOR): RevocationEvent[] {
+  const device = ctx.store.one<DeviceRow>('SELECT * FROM hub_devices WHERE id = ?', family.device_id)
+  if (!device) return []
+  const now = ctx.clock.now()
+  const sessions = ctx.store.all<{ id: string }>('SELECT id FROM hub_sessions WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ?', family.id, now)
+  const changed = ctx.store.run('UPDATE hub_token_families SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', now, family.id)
+  ctx.store.run('UPDATE hub_sessions SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL', now, family.id)
+  if (changed === 0) return []
+  auditAction(ctx, { actor, action: `identity.family.revoke:${device.id}`, params: { reason, family: family.id } })
+  return sessions.map(session => makeEvent(device.user_id, device.id, reason, session.id))
+}
+
 export function revokeUserRows(ctx: IdentityContext, userId: string, reason: string, actor: HubActor = LOCAL_ADMIN_ACTOR): RevocationEvent[] {
   const user = ctx.store.one<UserRow>('SELECT * FROM hub_users WHERE id = ?', userId)
   if (!user) throw new HubIdentityError('not_found', 'user does not exist')
@@ -72,7 +89,8 @@ export function revokeAllRows(ctx: IdentityContext, reason: string, actor: HubAc
 /** Run after the transaction committed. A throwing listener never blocks the others. */
 export function fireRevocations(ctx: IdentityContext, events: readonly RevocationEvent[]): void {
   for (const event of events) {
-    if (event.deviceId !== undefined) ctx.revocationState.fired.add(event.deviceId)
+    // Only a device-level event means the device is gone; a session event can come from retiring one family.
+    if (event.deviceId !== undefined && event.browserSessionId === undefined) ctx.revocationState.fired.add(event.deviceId)
     for (const listener of [...ctx.listeners]) {
       try {
         listener(event)

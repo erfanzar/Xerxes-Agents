@@ -46,20 +46,91 @@ describe('refresh rotation', () => {
     expect(sessionOf(r2).refresh).not.toBe(s1.refresh)
   })
 
-  test('reusing a retired refresh token revokes the whole family', async () => {
+  test('a retired refresh token from a second cookie jar starts its own branch; the device stays signed in', async () => {
     const h = await makeHarness()
     const events: RevocationEvent[] = []
     h.identity.onRevoked(event => events.push(event))
     const s0 = await pairDevice(h)
     const s1 = sessionOf(await refresh(h, s0.refresh))
     h.clock.advance(11 * SECOND)
-    const replay = await refresh(h, s0.refresh)
-    expect(replay.status).toBe(401)
-    expect(replay.setCookies.join('\n')).toContain('Max-Age=0')
-    expect(events.some(event => event.deviceId === s0.deviceId && event.reason === 'refresh_token_reuse')).toBe(true)
-    expect((await refresh(h, s1.refresh)).status).toBe(401)
-    expect(await authenticate(h, s1)).toBeNull()
-    expect(h.admin.listAudit().some(event => event.action === `identity.device.revoke:${s0.deviceId}`)).toBe(true)
+    const fork = await refresh(h, s0.refresh)
+    expect(fork.status).toBe(200)
+    const branch = sessionOf(fork)
+    expect(branch.refresh).not.toBe(s1.refresh)
+    expect(await authenticate(h, branch)).not.toBeNull()
+    expect(await authenticate(h, s1)).not.toBeNull()
+    expect((await refresh(h, s1.refresh)).status).toBe(200)
+    expect((await refresh(h, branch.refresh)).status).toBe(200)
+    expect(events).toHaveLength(0)
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
+    expect(h.admin.listAudit().some(event => event.action === `identity.family.fork:${s0.deviceId}`)).toBe(true)
+  })
+
+  test('a token that already started a branch is refused afterwards, without revoking the device', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    const s1 = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    const branch = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(3 * SECOND)
+    // A racing retry inside the grace window gets the same branch.
+    const retry = sessionOf(await refresh(h, s0.refresh))
+    expect(retry.refresh).toBe(branch.refresh)
+    h.clock.advance(11 * SECOND)
+    const late = await refresh(h, s0.refresh)
+    expect(late.status).toBe(401)
+    expect(events).toHaveLength(0)
+    expect(await authenticate(h, s1)).not.toBeNull()
+    expect((await refresh(h, branch.refresh)).status).toBe(200)
+  })
+
+  test('a device keeps at most four branches; the least recently used one is retired alone', async () => {
+    const h = await makeHarness()
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    // Rotate the original family several times so its old tokens can each start a branch.
+    const retired: string[] = [s0.refresh]
+    let current = s0.refresh
+    for (let index = 0; index < 5; index += 1) {
+      h.clock.advance(SECOND)
+      current = sessionOf(await refresh(h, current)).refresh
+      retired.push(current)
+    }
+    retired.pop()
+    h.clock.advance(11 * SECOND)
+    const branches = []
+    for (const token of retired.slice(0, 4)) {
+      h.clock.advance(SECOND)
+      const result = await refresh(h, token)
+      expect(result.status).toBe(200)
+      branches.push(sessionOf(result))
+    }
+    // The original family was the least recently used and has been retired; the device is still active.
+    expect((await refresh(h, current)).status).toBe(401)
+    expect(events.every(event => event.browserSessionId !== undefined && event.reason === 'family_limit')).toBe(true)
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
+    for (const branch of branches) expect(await authenticate(h, branch)).not.toBeNull()
+  })
+
+  test('an idle branch expires alone while another branch of the device is in use', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    const s1 = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    const idle = sessionOf(await refresh(h, s0.refresh))
+    let active = s1.refresh
+    for (let day = 1; day <= 8; day += 1) {
+      h.clock.advance(DAY)
+      const result = await refresh(h, active)
+      expect(result.status).toBe(200)
+      active = sessionOf(result).refresh
+    }
+    expect((await refresh(h, idle.refresh)).status).toBe(401)
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
+    expect((await refresh(h, active)).status).toBe(200)
   })
 
   test('grace window: a retried request within it gets the same successor, nothing is revoked', async () => {
@@ -86,13 +157,15 @@ describe('refresh rotation', () => {
     expect(new Set(results.map(result => sessionOf(result).refresh)).size).toBe(1)
   })
 
-  test('grace window covers only the immediately previous token', async () => {
+  test('grace window covers only the immediately previous token; an older one forks', async () => {
     const h = await makeHarness()
     const s0 = await pairDevice(h)
     const s1 = sessionOf(await refresh(h, s0.refresh))
-    expect((await refresh(h, s1.refresh)).status).toBe(200)
-    expect((await refresh(h, s0.refresh)).status).toBe(401)
-    expect(h.admin.listDevices({ includeRevoked: true }).find(device => device.id === s0.deviceId)?.status).toBe('revoked')
+    const s2 = sessionOf(await refresh(h, s1.refresh))
+    const older = await refresh(h, s0.refresh)
+    expect(older.status).toBe(200)
+    expect(sessionOf(older).refresh).not.toBe(s2.refresh)
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
   })
 
   test('refresh needs an allowed Origin and a cookie', async () => {

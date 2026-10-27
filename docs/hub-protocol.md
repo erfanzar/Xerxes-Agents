@@ -408,11 +408,17 @@ uses a session.
 Limits can only be tightened (`limits` option).
 
 **Refresh rotation.** `POST /api/hub/v1/session/refresh` rotates atomically.
-Presenting a retired refresh token revokes the whole device (family, sessions,
-push subscriptions). Exception, the grace window (10 s by default): the immediately
-previous token seen again within the window returns the *same* successor, so two
-tabs or a retried request do not log the user out. The successor is held in memory
-only; after a Hub restart a late retry is treated as reuse (the safe direction).
+Grace window (10 s by default): the immediately previous token seen again within
+the window returns the *same* successor, so two tabs or a retried request agree.
+A retired token seen later (a second cookie jar of the same device, such as iOS
+Safari and the home-screen app, or a refresh reply the phone lost while
+suspended) starts a new token family once instead of revoking the device. The
+token is then spent: presenting it again outside the grace window gets 401
+without a revocation. Every fork is audited (`identity.family.fork:<device>`). A
+device keeps at most 4 live families, and the least recently used one is retired
+alone (`family_limit`). An idle family expires after the inactivity window without
+ending the device while another family of it is still in use. Revoking the device
+still ends every family.
 
 **Revocation.** `revokeDevice`, `revokeUser` and `revokeAll` mark rows and call
 `onRevoked` listeners synchronously after commit (one device-level event plus one
