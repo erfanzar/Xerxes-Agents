@@ -326,6 +326,11 @@ test('unprovable driver pixel frames never permit pixel input, but remain honest
   const capture = await session.capture({ mode: 'som' })
   expect(capture.pngB64).toBeUndefined()
   expect(capture.warning).toContain('px_frame_mismatch')
+  driver.state.screenshot_error = { code: 'px_capture_unavailable', reason: 'window 100 capture failed: off-screen' }
+  const offscreen = await session.capture({ mode: 'som' })
+  expect(offscreen.warning).toContain('px_capture_unavailable')
+  expect(offscreen.warning).toContain('off-screen')
+  expect(offscreen.warning).toContain('focus_app')
   await expect(session.click({ ...click, x: 10, y: 20 })).rejects.toThrow('no pixel frame')
   expect(driver.calls.some(call => call.name === 'click')).toBe(false)
   await session.click({ ...click, element: 2 })
@@ -403,6 +408,55 @@ test('stdio adapter disposal rejects an in-flight call promptly, even if the cli
   await expect(pending).rejects.toThrow('closed')
   expect(client.signals[0]?.aborted).toBe(true)
   expect(client.disconnects).toBe(1)
+})
+
+class EndingClient extends FakeClient {
+  calls: { name: string; args: JsonObject }[] = []
+  ended = true
+  reviveFails = false
+  override callTool(name: string, args: JsonObject): Promise<MCPToolCallResult> {
+    this.calls.push({ name, args })
+    if (name === 'start_session') {
+      if (this.reviveFails) return Promise.resolve({ isError: true, content: [{ type: 'text', text: 'cannot revive' }] })
+      this.ended = false
+      return Promise.resolve({ content: [{ type: 'text', text: `Session '${String(args.session)}' is active.` }] })
+    }
+    if (this.ended) {
+      return Promise.resolve({ isError: true, content: [{ type: 'text', text: `session 'mcp-1-2' has ended; tool call '${name}' was rejected. Call start_session with this id to revive it before issuing further actions, or use a new session id.` }] })
+    }
+    return Promise.resolve(ok({ done: name }))
+  }
+}
+
+test('stdio adapter revives an ended CuaDriver session and repeats the rejected call once', async () => {
+  const client = new EndingClient()
+  const port = new MCPClientCuaDriverPort(client)
+  const result = await port.callTool('list_apps', {})
+  expect(result.isError).not.toBe(true)
+  expect(client.calls.map(call => call.name)).toEqual(['list_apps', 'start_session', 'list_apps'])
+  expect(client.calls[1]?.args).toEqual({ session: 'mcp-1-2' })
+  expect(client.disconnects).toBe(0)
+})
+
+test('a failed revival returns the original rejection without repeating the call', async () => {
+  const client = new EndingClient()
+  client.reviveFails = true
+  const port = new MCPClientCuaDriverPort(client)
+  const result = await port.callTool('click', {})
+  expect(result.isError).toBe(true)
+  expect(client.calls.map(call => call.name)).toEqual(['click', 'start_session'])
+})
+
+test('other driver errors are never retried', async () => {
+  const client = new EndingClient()
+  client.ended = false
+  const port = new MCPClientCuaDriverPort(client)
+  client.callTool = (name: string, args: JsonObject) => {
+    client.calls.push({ name, args })
+    return Promise.resolve({ isError: true, content: [{ type: 'text', text: 'element token is stale' }] })
+  }
+  expect((await port.callTool('click', {})).isError).toBe(true)
+  expect(client.calls).toHaveLength(1)
 })
 
 test('stdio adapter propagates cancellation to MCP, closes, and never retries input', async () => {

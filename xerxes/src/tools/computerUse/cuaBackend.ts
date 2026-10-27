@@ -262,7 +262,7 @@ export class CuaBackend implements ComputerUseBackend {
     const warnings = [
       !target ? 'Desktop scope: full-display native pixels; CuaDriver does not support max_dimension for desktop captures.' : '',
       typeof state.degraded_reason === 'string' ? state.degraded_reason : '',
-      request.mode !== 'ax' && !image ? 'CuaDriver returned no screenshot/pixel frame; use AX elements or capture again.' : '',
+      request.mode !== 'ax' && !image ? 'CuaDriver returned no screenshot/pixel frame; use AX elements or capture again.' + screenshotErrorHint(state.screenshot_error) : '',
     ].filter(Boolean)
     return {
       mode: request.mode, width, height, elements, backend: 'cua',
@@ -432,6 +432,14 @@ function requireSuccess(result: MCPToolCallResult): void {
     if (/permission|accessibility.*(denied|missing)|screen.recording.*(denied|missing)/i.test(message)) throw new ComputerUseUnavailableError(PERMISSION_HINT + '\n' + message)
     throw new ClientError('computer_use', 'CuaDriver: ' + message)
   }
+}
+/** CuaDriver's own reason for a missing frame (e.g. an off-screen or minimized window), bounded. */
+function screenshotErrorHint(value: unknown): string {
+  const error = record(value)
+  const code = typeof error.code === 'string' ? error.code.slice(0, 80) : ''
+  const reason = typeof error.reason === 'string' ? error.reason.slice(0, 300) : ''
+  if (!code && !reason) return ''
+  return ` Driver reason${code ? ` (${code})` : ''}: ${reason || 'unspecified'}. If the window is off-screen or minimized, focus_app to bring it forward, then capture again.`
 }
 function recapture(reason: string): ClientError { return new ClientError('computer_use', 'CuaDriver: ' + reason + '; capture again before addressing elements or pixels') }
 function throwIfAborted(signal?: AbortSignal): void { if (signal?.aborted) throw new ClientError('computer_use', 'computer-use action was cancelled before the driver call') }

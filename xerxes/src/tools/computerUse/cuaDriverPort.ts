@@ -12,7 +12,23 @@ export interface MCPClientCuaDriverPortOptions {
   readonly timeoutMs?: number
 }
 
-/** One lazy, runtime-owned stdio MCP connection. No retries of uncertain actions. */
+const ENDED_SESSION = /session '([^'\s]{1,200})' has ended; tool call '[^']*' was rejected/
+
+/** The session id CuaDriver 0.28 names when it refused a call because that session ended, else undefined. */
+export function endedSessionId(result: MCPToolCallResult): string | undefined {
+  if (result.isError !== true) return undefined
+  for (const content of result.content) {
+    if (content.type !== 'text') continue
+    const match = ENDED_SESSION.exec(content.text)
+    if (match) return match[1]
+  }
+  return undefined
+}
+
+/**
+ * One lazy, runtime-owned stdio MCP connection. No retries of uncertain actions; the one retry is a
+ * call the driver explicitly rejected unexecuted because its session had ended (revived first).
+ */
 export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
   private connecting: Promise<void> | undefined
   private connected = false
@@ -60,6 +76,14 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
 
   async callTool(name: string, arguments_: JsonObject, signal?: AbortSignal): Promise<MCPToolCallResult> {
     await this.start(signal)
+    this.check(signal)
+    const result = await this.bounded(callSignal => this.client.callTool(name, arguments_, { signal: callSignal }), signal)
+    const ended = endedSessionId(result)
+    if (ended === undefined || name === 'start_session' || name === 'end_session') return result
+    // CuaDriver ends idle sessions and then rejects every call *before running it*, naming the session to
+    // revive. Reviving and repeating the call once is therefore safe: the rejected action never happened.
+    const revived = await this.bounded(callSignal => this.client.callTool('start_session', { session: ended }, { signal: callSignal }), signal)
+    if (revived.isError) return result
     this.check(signal)
     return this.bounded(callSignal => this.client.callTool(name, arguments_, { signal: callSignal }), signal)
   }
