@@ -40,7 +40,7 @@ describe('collapsed tool groups', () => {
     expect(html).toContain('1 failed')
     expect(html).toContain('Ran 1 command')
     expect(html.match(/class="fold tool-group"/g)).toHaveLength(2)
-    expect(html).toContain('<p class="block-text">The full reply</p>')
+    expect(html).toContain('<div class="md block-md"><p>The full reply</p></div>')
     expect(html).toContain('<p class="block-text">The full question</p>')
     expect(html).toContain('<summary>Thought it through</summary>')
     expect(html).not.toMatch(/<details[^>]*\sopen[\s=>]/)

@@ -41,6 +41,7 @@
   --glass-blur: blur(14px) saturate(140%);
   --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
   --sans: var(--mono);
+  --read: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --r: 0px;
   --r-sm: 2px;
   --tap: 44px;
@@ -290,8 +291,43 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .block-who { margin-bottom: 0.3rem; }
 .block-user .block-who { color: var(--x-accent); }
 .block-user .block-text { color: var(--x-title); border-left: 2px solid var(--x-accent-line); padding-left: 0.65rem; }
-.block-text { white-space: pre-wrap; color: var(--x-prose); line-height: 1.6; font-size: 12.5px; }
+.block-text { white-space: pre-wrap; color: var(--x-prose); line-height: 1.5; font: 400 15px/1.5 var(--read); }
 .block-dim { color: var(--x-meta); }
+
+/* ── Rendered replies (markdown) ───────────────────────────────────── */
+.md { font: 400 15px/1.55 var(--read); color: var(--x-prose); overflow-wrap: anywhere; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 0.7rem; }
+.md h3, .md h4 { font-family: var(--read); color: var(--x-title); margin: 1rem 0 0.4rem; line-height: 1.3; }
+.md h3 { font-size: 16.5px; font-weight: 650; }
+.md h4 { font-size: 15px; font-weight: 650; }
+.md > h3:first-child, .md > h4:first-child { margin-top: 0; }
+.md strong { color: var(--x-title); font-weight: 650; }
+.md a { color: var(--x-accent); text-decoration: underline; text-underline-offset: 2px; }
+.md ul, .md ol { margin: 0 0 0.7rem; padding-left: 1.25rem; }
+.md li { margin: 0.2rem 0; padding-left: 0.15rem; }
+.md li > ul, .md li > ol { margin: 0.2rem 0 0.1rem; }
+.md ul > li::marker { color: var(--x-faint); }
+.md ol > li::marker { color: var(--x-meta); font-variant-numeric: tabular-nums; }
+.md code {
+  font: 400 0.84em/1.4 var(--mono); background: var(--x-chip); border: 1px solid var(--x-hairline);
+  padding: 0.05em 0.35em; border-radius: var(--r-sm); color: var(--x-title); overflow-wrap: anywhere;
+}
+.md .md-code {
+  margin: 0 0 0.7rem; background: var(--x-screen); border: 1px solid var(--x-hairline); padding: 0.6rem 0.75rem;
+  overflow-x: auto; white-space: pre; -webkit-overflow-scrolling: touch;
+}
+.md .md-code code { background: none; border: 0; padding: 0; font-size: 12px; color: var(--x-secondary); overflow-wrap: normal; }
+.md blockquote { margin: 0 0 0.7rem; padding-left: 0.75rem; border-left: 2px solid var(--x-hairline-hi); color: var(--x-secondary); }
+.md hr { border: 0; border-top: 1px solid var(--x-hairline); margin: 0.9rem 0; }
+.md .md-table { overflow-x: auto; margin: 0 0 0.7rem; -webkit-overflow-scrolling: touch; }
+.md table { border-collapse: collapse; font-size: 13.5px; }
+.md th, .md td { border: 1px solid var(--x-hairline); padding: 0.3rem 0.55rem; text-align: left; vertical-align: top; }
+.md th { color: var(--x-title); font-weight: 600; background: var(--x-chip); }
+.md .md-box {
+  display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1em; margin-right: 0.45rem;
+  border: 1px solid var(--x-hairline-hi); font-size: 0.75em; vertical-align: -0.1em; color: var(--x-done);
+}
 .block-code {
   display: block; background: var(--x-screen); border: 1px solid var(--x-hairline); padding: 0.5rem 0.7rem;
   overflow-x: auto; white-space: pre; max-width: 100%; font-size: 11.5px; color: var(--x-secondary);

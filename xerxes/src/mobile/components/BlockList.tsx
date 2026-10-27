@@ -6,6 +6,7 @@ import type { ReactElement } from 'react'
 import { plural } from '../../client/format.js'
 import type { Block } from '../../client/sessionFold.js'
 import { toolPhrase } from '../../client/taskTypes.js'
+import { Markdown } from './Markdown.js'
 
 function BlockView({ block }: { block: Block }): ReactElement {
   switch (block.kind) {
@@ -21,7 +22,7 @@ function BlockView({ block }: { block: Block }): ReactElement {
       return (
         <>
           <p className="block-who">Xerxes</p>
-          <p className="block-text">{block.text}</p>
+          <Markdown text={block.text} className="block-md" />
         </>
       )
     case 'thinking':

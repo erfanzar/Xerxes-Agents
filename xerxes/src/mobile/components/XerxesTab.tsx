@@ -13,6 +13,7 @@ import { supervisorHeading } from '../viewModel.js'
 import { AutopilotSheet } from './AutopilotSheet.js'
 import { WatchCards, WatchSheet } from './WatchSheet.js'
 import { ModelChooser, ModelSheet } from './ModelChooser.js'
+import { Markdown } from './Markdown.js'
 import { TalkButton } from './TalkButton.js'
 import { VoiceStatus } from './VoiceStatus.js'
 
@@ -81,7 +82,7 @@ export function AutopilotThreadBody(): ReactElement {
               {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Autopilot' : message.author ?? 'You'}
               <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
             </p>
-            <p className="block-text">{message.text}</p>
+            {message.role === 'user' ? <p className="block-text">{message.text}</p> : <Markdown text={message.text} className="block-md" />}
           </li>
         ))}
       </ol>
@@ -199,7 +200,7 @@ export function XerxesTab(): ReactElement {
                   {message.source === 'voice' ? ' · voice' : ''}
                   <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
                 </p>
-                <p className="block-text">{message.text}</p>
+                {message.role === 'user' ? <p className="block-text">{message.text}</p> : <Markdown text={message.text} className="block-md" />}
               </li>
             ))}
           </ol>
