@@ -7,4 +7,4 @@
  * install the matching runtime on a remote host, without importing the daemon.
  * Keep in sync with xerxes/package.json "version" (the release bump does).
  */
-export const XERXES_VERSION = '0.8.13'
+export const XERXES_VERSION = '0.8.14'

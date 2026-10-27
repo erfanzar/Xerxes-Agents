@@ -9,7 +9,7 @@ import { Sidebar } from '../src/desktop/renderer/App.js'
 import { Store } from '../src/desktop/renderer/store.js'
 
 const machine = { alias: 'v5p-128', target: 'user@worker', workspacePath: '/srv/project' }
-const attach = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: machine.workspacePath, version: '0.8.13', buildId: 'a'.repeat(16) })
+const attach = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: machine.workspacePath, version: '0.8.14', buildId: 'a'.repeat(16) })
 const output = attach + '\nXERXES_REMOTE_SESSIONS ' + JSON.stringify({
   saved: [{ id: 'saved-chat', cwd: '/srv/other-project', title: 'Train v5p-128', status: 'idle' }],
   live: [{ session_id: 'saved-chat', cwd: '/srv/other-project', title: '', active_turn_id: 'turn' }, { id: 'child', cwd: '/srv/project', kind: 'subagent' }],
