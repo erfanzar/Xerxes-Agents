@@ -57,6 +57,7 @@
     "@xterm/xterm": "6.0.0",
     "fast-png": "^8.0.0",
     "jpeg-js": "^0.4.4",
+    "jsqr": "1.4.0",
     "nanostores": "^1.2.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",

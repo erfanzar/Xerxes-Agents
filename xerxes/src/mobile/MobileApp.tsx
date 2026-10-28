@@ -9,6 +9,7 @@ import { AppCallHost } from './components/CallControls.js'
 import { browserVoiceCallService } from './voice/call/browser.js'
 import { InboxTab } from './components/Inbox.js'
 import { PairPage } from './components/PairPage.js'
+import { SignedOut } from './components/SignedOut.js'
 import { TaskTab } from './components/TaskTab.js'
 import { UsageTab } from './components/UsageTab.js'
 import { XerxesTab } from './components/XerxesTab.js'
@@ -68,11 +69,7 @@ function Shell(): ReactElement {
       </header>
       <main id="main" ref={main} tabIndex={-1} className="app-main">
         {revoked ? (
-          <section aria-labelledby="revoked-title">
-            <h1 id="revoked-title" className="page-title">Signed out</h1>
-            <p>{state.connection.state === 'revoked' ? state.connection.reason : ''}</p>
-            <p>On the desktop, create a new pairing code and scan it with this phone. This page will not reconnect on its own.</p>
-          </section>
+          <SignedOut reason={state.connection.state === 'revoked' ? state.connection.reason : ''} />
         ) : route.name === 'inbox' ? <InboxTab />
           : route.name === 'task' ? <TaskTab workspaceId={route.workspaceId} sessionId={route.sessionId} />
             : route.name === 'xerxes' ? <XerxesTab />

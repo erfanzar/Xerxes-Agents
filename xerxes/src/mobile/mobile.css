@@ -462,6 +462,18 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
   margin: 1.25rem 0; padding: 1rem 0.5rem 1rem 0.85rem; background: var(--x-card); border: 1px solid var(--x-accent-line);
 }
 
+/* ── Signed out: re-pair in place ──────────────────────────────────── */
+.repair { max-width: 30rem; }
+.repair-steps { margin: 0.75rem 0 1rem; padding-left: 1.2rem; color: var(--x-prose); font-size: 12.5px; line-height: 1.6; }
+.repair-steps strong { color: var(--x-title); }
+.repair-scan { width: 100%; }
+.repair-scanner { display: grid; gap: 0.6rem; margin: 0.5rem 0; }
+.repair-video { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--x-backdrop); border: 1px solid var(--x-accent-line); }
+.repair-note { color: var(--x-meta); font-size: 11.5px; margin: 0.75rem 0; }
+.repair-paste { margin: 0.75rem 0; }
+.repair-paste summary { cursor: pointer; color: var(--x-secondary); font-size: 12px; min-height: var(--tap); display: flex; align-items: center; }
+.repair-paste form { margin-top: 0.5rem; }
+
 @media (min-width: 900px) {
   .app-main { padding-top: 2rem; }
 }
