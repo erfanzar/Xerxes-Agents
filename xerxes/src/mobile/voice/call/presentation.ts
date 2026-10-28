@@ -23,6 +23,8 @@ export function voiceStateLine(state: VoiceCallSnapshot): string {
  * Only bytes not already in this browser's caches are shown as a download.
  */
 function loadingLine(state: VoiceCallSnapshot): string {
+  // A speech-engine restart reloads models the phone already has; it is never a download.
+  if (state.call.restoring === true) return 'Restoring speech'
   const cache = state.phoneCache
   const cachedBytes = cache ? Math.max(0, cache.cachedBytes) : 0
   const totalBytes = cache?.totalBytes ?? state.call.progress?.total ?? tierDownloadBytes(state.tier)

@@ -75,7 +75,7 @@ export function CallView(): ReactElement {
           </button>
         </div>
         <h2 className="voice-state" role="status" aria-live="polite">{voiceStateLine(state)}</h2>
-        {current.phase === 'loading' && missingBytes > 0 ? <progress className="voice-download" aria-label="Voice model bytes downloaded" max={missingBytes} value={Math.min(missingBytes, Math.max(0, (current.progress?.loaded ?? 0) - cachedBytes))} /> : null}
+        {current.phase === 'loading' && current.restoring !== true && missingBytes > 0 ? <progress className="voice-download" aria-label="Voice model bytes downloaded" max={missingBytes} value={Math.min(missingBytes, Math.max(0, (current.progress?.loaded ?? 0) - cachedBytes))} /> : null}
         <div className="voice-captions" aria-label="Live call captions" aria-live="polite" aria-atomic="true">
           {current.heard ? <p className="voice-heard"><span>You</span> {shortVoiceCaption(current.heard)}</p> : null}
           {current.spokenSentence ? <p className="voice-spoken"><span>XERXES</span> {shortVoiceCaption(current.spokenSentence)}</p> : null}

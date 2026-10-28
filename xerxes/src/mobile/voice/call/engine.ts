@@ -12,6 +12,8 @@ export const VAD_RESPONSE_TIMEOUT_MS = 10_000
 export const CALL_STILL_WORKING = "XERXES is still working; I'll read the reply when it arrives."
 export const CALL_DIDNT_CATCH = "Didn't catch that — say it again."
 export const SPEECH_RESTART_LOADING_DELAY_MS = 750
+/** Longest first spoken chunk; it breaks at a comma when one is near. */
+export const FIRST_SPEECH_CHARS = 120
 export type CallPhase = 'idle' | 'loading' | 'listening' | 'hearing' | 'transcribing' | 'thinking' | 'speaking' | 'error'
 export interface CallSnapshot {
   readonly phase: CallPhase
@@ -22,6 +24,8 @@ export interface CallSnapshot {
   readonly notice?: string
   readonly error?: string
   readonly progress?: CallProgress
+  /** The speech engine is being replaced after a failure; models come from the phone's cache, not a download. */
+  readonly restoring?: boolean
   /** Display-only meters/caption; never used for VAD or turn decisions. */
   readonly inputLevel?: number
   readonly outputLevel?: number
@@ -172,7 +176,8 @@ export class CallEngine {
     const models = this.models
     const output = this.output
     if (!models || !output || turn.signal.aborted) return
-    const sentences = prepareCallSpeech(text)
+    // A short first chunk gets the first audio out sooner; later chunks keep full sentences.
+    const sentences = prepareCallSpeech(text, 4000, 240, FIRST_SPEECH_CHARS)
     if (sentences.length === 0) { this.resetInput(); this.update({ phase: 'listening' }); return }
     this.speech?.abort()
     const speech = new AbortController()
@@ -182,18 +187,27 @@ export class CallEngine {
     this.resetInput()
     this.update({ phase: 'speaking' })
     try {
-      for (const sentence of sentences) {
-        if (speech.signal.aborted) break
-        if (this.snapshot.tier === 'light') {
+      if (this.snapshot.tier === 'light') {
+        for (const sentence of sentences) {
+          if (speech.signal.aborted) break
           this.update({ spokenSentence: sentence })
           await output.speak(sentence, speech.signal)
         }
-        else {
-          const audio = await models.synthesize(sentence, speech.signal)
-          if (!speech.signal.aborted) {
-            this.update({ spokenSentence: sentence })
-            await output.play(audio, speech.signal)
-          }
+      } else {
+        // Streamed playback: the next sentence is synthesized while the current one plays, so speech
+        // flows without a pause between sentences. A barge-in aborts both through the same signal.
+        const synth = (sentence: string): Promise<CallAudio> => {
+          const pending = models.synthesize(sentence, speech.signal)
+          pending.catch(() => undefined)
+          return pending
+        }
+        let next: Promise<CallAudio> | undefined = synth(sentences[0]!)
+        for (let index = 0; index < sentences.length && next; index++) {
+          const audio = await next
+          if (speech.signal.aborted) break
+          next = index + 1 < sentences.length ? synth(sentences[index + 1]!) : undefined
+          this.update({ spokenSentence: sentences[index]! })
+          await output.play(audio, speech.signal)
         }
       }
     } catch (error) { if (!speech.signal.aborted) throw error } finally {
@@ -227,7 +241,7 @@ export class CallEngine {
           this.update({ notice: "Didn't catch that — restoring speech…", spokenSentence: '' })
           stopReloadTimer()
           reloadTimer = setTimeout(() => {
-            if (!turn.signal.aborted && this.turn === turn) this.update({ phase: 'loading', progress: reloadProgress })
+            if (!turn.signal.aborted && this.turn === turn) this.update({ phase: 'loading', progress: reloadProgress, restoring: true })
           }, SPEECH_RESTART_LOADING_DELAY_MS)
         },
         progress: progress => {
@@ -237,6 +251,7 @@ export class CallEngine {
         },
       })
       stopReloadTimer()
+      if (this.snapshot.restoring) this.update({ restoring: false })
       if (turn.signal.aborted) return
       if (debugEpoch === this.debugEpoch && this.snapshot.debugCapture) this.update({ debugCapture: { ...this.snapshot.debugCapture, transcript: transcript ?? '' } })
       if (transcript === null) {

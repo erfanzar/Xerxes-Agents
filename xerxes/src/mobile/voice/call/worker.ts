@@ -5,6 +5,7 @@ import { AutoTokenizer, StyleTextToSpeech2Model, pipeline, type AutomaticSpeechR
 import { KokoroTTS } from 'kokoro-js'
 
 import { VOICE_CALL_TTS_VOICE, VOICE_MODELS, tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
+import { padToSttFrames } from './logic.js'
 import type { CallWorkerRequest, CallWorkerResponse } from './protocol.js'
 import { configureCallWorker, workerErrorDetail } from './workerEnvironment.js'
 
@@ -87,7 +88,7 @@ async function handle(request: CallWorkerRequest): Promise<void> {
   else if (request.type === 'transcribe') {
     if (!stt || request.samples.length > 480_000) throw new Error('Transcription not ready or audio too long.')
     let result
-    try { result = await stt(request.samples, { max_new_tokens: 256 }) } catch (error) {
+    try { result = await stt(padToSttFrames(request.samples), { max_new_tokens: 256 }) } catch (error) {
       if (cancelled.has(request.id) || stopping) throw error
       // Both transformers' inference chain and ONNX's WASM runtime can stay poisoned after an error
       // (including bare numeric exceptions). Recreating a pipeline in this worker is not recovery.

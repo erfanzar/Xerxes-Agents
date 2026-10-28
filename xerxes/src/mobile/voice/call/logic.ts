@@ -7,6 +7,27 @@ export const CALL_SAMPLE_RATE = 16_000
 export const VAD_FRAME_SAMPLES = 512
 export const REPLY_TIMEOUT_MS = 120_000
 
+/** Voice barge-in while XERXES speaks: Silero probability and how long it must last. */
+export const BARGE_IN_PROBABILITY = 0.85
+export const BARGE_IN_SECONDS = 0.7
+
+/** One Moonshine Streaming encoder frame: 5 ms at 16 kHz. */
+export const STT_FRAME_SAMPLES = 80
+
+/**
+ * Zero-pad audio to a whole number of encoder frames. Moonshine Streaming small (ONNX, WASM) throws a bare
+ * numeric ONNX error for any other length, whatever the audio is (measured: every failing clip passed once
+ * padded; one extra sample broke a passing clip). The VAD cuts in 512-sample frames plus pre-roll, so most
+ * real utterances would otherwise crash.
+ */
+export function padToSttFrames(samples: Float32Array, frame = STT_FRAME_SAMPLES): Float32Array {
+  const length = Math.ceil(samples.length / frame) * frame
+  if (length === samples.length) return samples
+  const padded = new Float32Array(length)
+  padded.set(samples)
+  return padded
+}
+
 export function chooseCallTier(memory: number | undefined, requested?: VoiceModelTier): VoiceModelTier {
   return requested ?? (memory !== undefined && memory < 4 ? 'light' : 'standard')
 }
@@ -121,8 +142,10 @@ export class VadSegmenter {
   }
   push(frame: Float32Array, probability: number, speaking: boolean): VadStep {
     if (frame.length !== VAD_FRAME_SAMPLES || !Number.isFinite(probability)) throw new Error('Invalid VAD frame.')
-    this.speakingRun = speaking && probability >= 0.5 ? this.speakingRun + frame.length : 0
-    const bargeIn = this.speakingRun >= 0.3 * CALL_SAMPLE_RATE
+    // While XERXES speaks, its own voice can leak from the speaker into the mic (phone echo cancellation
+    // is weak for Web Audio playback). Only clear, sustained speech interrupts; tapping the orb always does.
+    this.speakingRun = speaking && probability >= BARGE_IN_PROBABILITY ? this.speakingRun + frame.length : 0
+    const bargeIn = this.speakingRun >= BARGE_IN_SECONDS * CALL_SAMPLE_RATE
     if (bargeIn) this.speakingRun = 0
     if (!this.active) {
       if (probability >= 0.5) {
