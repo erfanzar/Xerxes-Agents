@@ -7,6 +7,7 @@ import { tierDownloadBytes } from '../../client/voiceModelManifest.js'
 import { useCallService, useHubState, useServices } from '../context.js'
 import { shortVoiceCaption, voiceMegabytes, voiceOrbLevel, voiceStateLine } from '../voice/call/presentation.js'
 import { isCallActive } from '../voice/call/service.js'
+import { CallDebugCapture } from './CallDebugCapture.js'
 
 /** Full-screen voice scene. Unmounting/minimizing this view NEVER owns or ends the call. */
 export function CallView(): ReactElement {
@@ -32,7 +33,7 @@ export function CallView(): ReactElement {
   const onKey = (event: KeyboardEvent<HTMLElement>): void => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); chat(); return }
     if (event.key !== 'Tab' || !panel.current) return
-    const items = [...panel.current.querySelectorAll<HTMLElement>('button:not([disabled]), summary, select:not([disabled]), [tabindex="0"]')]
+    const items = [...panel.current.querySelectorAll<HTMLElement>('button:not([disabled]), summary, select:not([disabled]), input:not([disabled]), [tabindex="0"]')]
       .filter(item => !item.closest('details:not([open])') || item.tagName === 'SUMMARY')
     const first = items[0]
     const last = items.at(-1)
@@ -50,13 +51,16 @@ export function CallView(): ReactElement {
           <div className="voice-settings-panel">
             <label className="field"><span>Voice quality / download size</span>
               <select value={active ? current.tier : state.tier} disabled={active} onChange={event => call.setTier(event.target.value === 'light' ? 'light' : 'standard')}>
-                <option value="standard">Standard · {voiceMegabytes(state.models?.standard.bytes ?? tierDownloadBytes('standard'))} · Moonshine base + Kokoro</option>
+                <option value="standard">Standard · {voiceMegabytes(state.models?.standard.bytes ?? tierDownloadBytes('standard'))} · Moonshine Streaming small + Kokoro</option>
                 <option value="light">Light · {voiceMegabytes(state.models?.light.bytes ?? tierDownloadBytes('light'))} · Moonshine tiny + local phone voice</option>
               </select>
             </label>
             <p>English · speech runs on your phone. No Hub voice provider is needed.</p>
             <p>Light needs an installed local English voice. Change tiers before starting a call.</p>
             {state.models ? <p>{state.models[state.tier].ready ? 'Models are cached on the Hub; this phone may still need to download them.' : 'The Hub will fetch and verify models on the first call.'}</p> : null}
+            <label className="voice-debug-toggle"><input type="checkbox" checked={state.debugCaptureEnabled} onChange={event => call.setDebugCaptureEnabled(event.target.checked)} /><span>Keep last utterance for debugging</span></label>
+            <p>Off by default. Keeps only the last 30 seconds or less in memory on this phone. Audio is never uploaded; End or turning this off clears it. Only this setting is remembered.</p>
+            {state.debugCaptureEnabled && current.debugCapture ? <CallDebugCapture capture={current.debugCapture} /> : null}
           </div>
         </details>
       </header>
@@ -77,7 +81,7 @@ export function CallView(): ReactElement {
         {current.notice ? <p role="status" className="voice-notice">{current.notice}</p> : null}
       </div>
       {!active ? <div className="voice-start">
-        {!state.downloadNoticeSeen ? <p className="voice-notice">First call downloads ~160 MB once in Standard mode (Light: ~32 MB). Cached on this phone after that.</p> : null}
+        {!state.downloadNoticeSeen ? <p className="voice-notice">First call downloads ~{voiceMegabytes(tierDownloadBytes('standard'))} once in Standard mode (Light: ~{voiceMegabytes(tierDownloadBytes('light'))}). Cached on this phone after that.</p> : null}
         {!ready ? <p className="voice-notice">Connect to the Hub and choose XERXES’s model to start.</p> : null}
         <button type="button" className="voice-start-button" disabled={!ready || !state.models || state.checking} onClick={() => { void call.start() }}>Start voice</button>
         {state.error ? <button type="button" className="voice-retry" onClick={() => { void call.loadStatus() }}>Retry voice models</button> : null}

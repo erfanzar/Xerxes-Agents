@@ -92,17 +92,23 @@ export class VadFrames {
   }
 }
 
-export interface VadStep {
-  readonly hearing: boolean
-  readonly bargeIn: boolean
-  readonly utterance?: Float32Array
+/** Offsets in the exact returned 16 kHz clip, including its pre-roll. End is exclusive. */
+export interface VadUtteranceOffsets {
+  readonly startSample: number
+  readonly endSample: number
+  readonly preRollSamples: number
 }
+export type VadStep = { readonly hearing: boolean; readonly bargeIn: boolean } & (
+  | { readonly utterance: Float32Array; readonly offsets: VadUtteranceOffsets }
+  | { readonly utterance?: undefined; readonly offsets?: undefined }
+)
 
 /** Silero probabilities enter here; no browser or inference dependency. All timing is counted in 16 kHz samples. */
 export class VadSegmenter {
   private pre = new Float32Array(0)
   private chunks: Float32Array[] = []
   private length = 0
+  private preRollSamples = 0
   private candidate = 0
   private silence = 0
   private speakingRun = 0
@@ -110,7 +116,7 @@ export class VadSegmenter {
   reset(): void {
     this.pre = new Float32Array(0)
     this.chunks = []
-    this.length = this.candidate = this.silence = this.speakingRun = 0
+    this.length = this.preRollSamples = this.candidate = this.silence = this.speakingRun = 0
     this.active = false
   }
   push(frame: Float32Array, probability: number, speaking: boolean): VadStep {
@@ -123,6 +129,7 @@ export class VadSegmenter {
         if (this.candidate === 0) {
           this.chunks = [this.pre]
           this.length = this.pre.length
+          this.preRollSamples = this.pre.length
         }
         this.chunks.push(frame)
         this.length += frame.length
@@ -151,8 +158,13 @@ export class VadSegmenter {
       offset += take
       if (offset === utterance.length) break
     }
+    const offsets: VadUtteranceOffsets = {
+      startSample: this.preRollSamples,
+      endSample: Math.min(utterance.length, this.length - this.silence),
+      preRollSamples: this.preRollSamples,
+    }
     this.reset()
-    return { hearing: false, bargeIn, utterance }
+    return { hearing: false, bargeIn, utterance, offsets }
   }
 }
 

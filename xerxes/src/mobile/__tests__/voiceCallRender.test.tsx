@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { tierDownloadBytes } from '../../client/voiceModelManifest.js'
+import { createDebugCapture } from '../voice/call/debugCapture.js'
 import type { CallSnapshot } from '../voice/call/engine.js'
 import { MobileApp } from '../MobileApp.js'
 import { voiceStateLine } from '../voice/call/presentation.js'
@@ -37,7 +38,9 @@ describe('app-level voice scene', () => {
     expect(html).toContain('class="voice-orb"')
     expect(html).not.toContain('sheet-fullscreen')
     expect(html).toContain('aria-label="Voice settings"')
-    expect(html).toContain('First call downloads ~160 MB once')
+    // Sizes come from the manifest, so a model change can never leave stale text behind.
+    expect(html).toContain(`First call downloads ~${Math.round(tierDownloadBytes('standard') / 1_000_000)} MB once`)
+    expect(html).toContain('Moonshine Streaming small + Kokoro')
     expect(html).toContain(`Light · ${Math.round(tierDownloadBytes('light') / 1_000_000)} MB`)
     expect(html).toContain('>Mute</span>')
     expect(html).toContain('>Chat</span>')
@@ -93,6 +96,42 @@ describe('app-level voice scene', () => {
     expect(html).not.toContain('class="voice-screen')
     expect(html).not.toContain('aria-label="Voice call in progress"')
     expect(f.engine.hangup).toHaveBeenCalledOnce()
+    f.service.dispose()
+  })
+  it('renders the debug capture preference off by default, with local-only retention text and no capture panel', async () => {
+    const f = voiceServiceFixture()
+    await f.service.loadStatus()
+    f.service.open()
+    const html = plain(renderToStaticMarkup(<MobileApp services={makeServices(ready(), '/xerxes', { call: f.service })} />))
+    expect(html).toContain('Keep last utterance for debugging')
+    expect(html.match(/<input[^>]*type="checkbox"[^>]*>/u)?.[0]).not.toContain('checked')
+    expect(html).toContain('Audio is never uploaded')
+    expect(html).not.toContain('aria-label="Last utterance capture"')
+    expect(html).not.toContain('>Save WAV</button>')
+    f.service.dispose()
+  })
+  it('renders the enabled capture transcript, precise duration/levels, VAD offsets and local Play/Save controls, then removes it when disabled', async () => {
+    const f = voiceServiceFixture()
+    f.service.setDebugCaptureEnabled(true)
+    await f.service.loadStatus()
+    await f.service.start()
+    const capture = { ...createDebugCapture(new Float32Array(16000).fill(0.25), { startSample: 3200, endSample: 12000, preRollSamples: 3200 }), transcript: 'Check <this> sentence.' }
+    f.emit({ debugCapture: capture })
+    const services = makeServices(ready(), '/xerxes', { call: f.service })
+    let html = plain(renderToStaticMarkup(<MobileApp services={services} />))
+    expect(html.match(/<input[^>]*type="checkbox"[^>]*>/u)?.[0]).toContain('checked')
+    expect(html).toContain('aria-label="Last utterance capture"')
+    expect(html).toContain('Check &lt;this&gt; sentence.')
+    expect(html).toContain('1.000 s · 16 kHz mono · 16,000 samples')
+    expect(html).toContain('Peak 0.2500 · RMS 0.2500')
+    expect(html).toContain('VAD start 0.200 s · end 0.750 s · pre-roll 0.200 s')
+    expect(html).toContain('>Play</button>')
+    expect(html).toContain('>Save WAV</button>')
+    f.service.setDebugCaptureEnabled(false)
+    html = plain(renderToStaticMarkup(<MobileApp services={services} />))
+    expect(html).not.toContain('aria-label="Last utterance capture"')
+    expect(f.service.getSnapshot().call.debugCapture).toBeUndefined()
+    expect(f.engine.hangup).not.toHaveBeenCalled()
     f.service.dispose()
   })
   it('renders Connecting without ending or disposing the call', async () => {

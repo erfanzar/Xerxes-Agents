@@ -15,10 +15,11 @@ export function voiceServiceFixture() {
     getSnapshot: () => state,
     subscribe: observer => { observers.add(observer); return () => { observers.delete(observer) } },
     start: vi.fn(async tier => { emit({ phase: 'listening', tier }) }),
-    hangup: vi.fn(() => emit({ phase: 'idle' })),
+    hangup: vi.fn(() => emit({ phase: 'idle', debugCapture: undefined })),
     mute: vi.fn(muted => emit({ muted })),
     interrupt: vi.fn(() => emit({ phase: 'listening' })),
     visibility: vi.fn(),
+    setDebugCaptureEnabled: vi.fn(enabled => { if (!enabled) emit({ debugCapture: undefined }) }),
   }
   const createEngine = vi.fn(() => engine)
   const modelsStatus = vi.fn(async () => ({ standard: { bytes: tierDownloadBytes('standard'), ready: true }, light: { bytes: tierDownloadBytes('light'), ready: true } }))

@@ -3,7 +3,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { browserCallModels, browserCallOutput } from '../voice/call/browser.js'
+import { createHubStore } from '../../client/hubStore.js'
+import { browserCallModels, browserCallOutput, browserVoiceCallService } from '../voice/call/browser.js'
+import { liveState, stubController } from './helpers.js'
 import type { CallWorkerRequest, CallWorkerResponse } from '../voice/call/protocol.js'
 import { browserLiveCaptureDeps } from '../voice/liveCapture.js'
 
@@ -143,6 +145,35 @@ describe('call worker browser adapter', () => {
     await expect(loading).rejects.toThrow('worker stopped')
     model.dispose()
     await vi.advanceTimersByTimeAsync(2000)
+  })
+})
+
+describe('debug capture browser preference', () => {
+  it('defaults off, restores the opt-in and persists only a boolean, never samples or transcript', () => {
+    const values = new Map<string, string>()
+    const setItem = vi.fn((key: string, value: string) => { values.set(key, value) })
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem })
+    const controller = stubController()
+    const store = createHubStore(liveState())
+    const first = browserVoiceCallService(controller, store)
+    expect(first.getSnapshot().debugCaptureEnabled).toBe(false)
+    first.setDebugCaptureEnabled(true)
+    expect(setItem).toHaveBeenCalledExactlyOnceWith('xerxes-call-debug-utterance', 'true')
+    const restored = browserVoiceCallService(controller, store)
+    expect(restored.getSnapshot().debugCaptureEnabled).toBe(true)
+    restored.setDebugCaptureEnabled(false)
+    expect(setItem).toHaveBeenLastCalledWith('xerxes-call-debug-utterance', 'false')
+    expect(restored.getSnapshot().call.debugCapture).toBeUndefined()
+    first.dispose()
+    restored.dispose()
+  })
+  it('defaults off when localStorage is unavailable and still allows a memory-only opt-in', () => {
+    vi.stubGlobal('localStorage', { getItem() { throw new Error('Storage blocked') }, setItem() { throw new Error('Storage blocked') } })
+    const service = browserVoiceCallService(stubController(), createHubStore(liveState()))
+    expect(service.getSnapshot().debugCaptureEnabled).toBe(false)
+    service.setDebugCaptureEnabled(true)
+    expect(service.getSnapshot().debugCaptureEnabled).toBe(true)
+    service.dispose()
   })
 })
 

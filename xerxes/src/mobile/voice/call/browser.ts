@@ -293,5 +293,7 @@ export function browserVoiceCallService(controller: HubController, store: HubSto
     ...(memory === undefined ? {} : { deviceMemory: memory }),
     noticeSeen: () => { try { return localStorage.getItem('xerxes-call-download-notice') === 'seen' } catch { return false } },
     rememberNotice: () => { try { localStorage.setItem('xerxes-call-download-notice', 'seen') } catch { /* storage is optional */ } },
+    debugEnabled: () => { try { return localStorage.getItem('xerxes-call-debug-utterance') === 'true' } catch { return false } },
+    rememberDebugEnabled: enabled => { try { localStorage.setItem('xerxes-call-debug-utterance', String(enabled)) } catch { /* only the preference, never audio, is stored */ } },
   })
 }

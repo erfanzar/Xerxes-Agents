@@ -54,16 +54,23 @@ export const VOICE_MODELS: Readonly<Record<VoiceModelId, VoiceModel>> = Object.f
       { path: 'onnx/model.onnx', size: 2243022, sha256: 'a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808' },
     ],
   },
+  // Moonshine Streaming small (community ONNX export, MIT). Measured in Chrome/WASM on 13 real-speech clips:
+  // 5.5% WER vs 6.8% for Moonshine base; loads with transformers.js 3.8.1.
   stt_base: {
-    repo: 'onnx-community/moonshine-base-ONNX',
-    revision: 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
+    repo: 'Workmind/moonshine-streaming-small-ONNX',
+    revision: 'bfd8beba2893ce694f67ce7c7424843ba3ae91eb',
     dtype: 'q8',
     license: 'MIT',
     files: [
-      { path: 'config.json', size: 922, sha256: 'fab7241d1e9fc6c2370c4c6dfb5da79bb54d67ed9ab6b507ac51d29d2abe01d1' },
-      ...MOONSHINE_SHARED,
-      { path: 'onnx/encoder_model_quantized.onnx', size: 20513063, sha256: '1dd9ab0a7f987113d30affcba5a068d11c8f90fa0223caa3e491ade431ad9751' },
-      { path: 'onnx/decoder_model_merged_quantized.onnx', size: 42498870, sha256: 'cc9f3cd6698a369c6008b41aa60aa3fb3322e7f03c9bdf19d8e6b7200afca4f3' },
+      { path: 'config.json', size: 1745, sha256: '849ca79b5af5603b1e7b8eeebf67265f931c70117434446fca6f35a26fc03df1' },
+      { path: 'generation_config.json', size: 163, sha256: 'fd54ad15ad0a14f68db3c58a8d8e5e8f3791ef95e1ea92ee46cd71b4a5d7528c' },
+      { path: 'preprocessor_config.json', size: 284, sha256: '58d5920c0d2ada22a7254d26727dede50aad3d5692cbe755c564a639d76af70a' },
+      { path: 'processor_config.json', size: 340, sha256: '41db69af4b4f77d88e3d9d403d3bda2d027547b8880cda6507f2ac23dc09f1c1' },
+      { path: 'special_tokens_map.json', size: 96, sha256: '7755e8a96f77dea5458262fb120decdd6a654be977f3540bc781a0a3443f5974' },
+      { path: 'tokenizer.json', size: 3761754, sha256: '7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f' },
+      { path: 'tokenizer_config.json', size: 301, sha256: 'd84ef83190b3821f41de5cc1ee258925aff99d705d1019708c037d15829d85dd' },
+      { path: 'onnx/encoder_model_quantized.onnx', size: 74923158, sha256: '69c786908794eb9e2e50d7137c4e755abdde7b4bdebffd68fe0c292eee5ffc55' },
+      { path: 'onnx/decoder_model_merged_quantized.onnx', size: 90830447, sha256: '3bd2e7a7e94c608b1988fa035be1f1b1f2acdbe059f7fe5cc70d85201c2835f5' },
     ],
   },
   stt_tiny: {

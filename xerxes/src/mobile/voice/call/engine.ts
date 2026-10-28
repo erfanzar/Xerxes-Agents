@@ -4,7 +4,8 @@
 import { prepareCallSpeech } from '../../../client/callSpeech.js'
 import type { VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import type { LiveCapture, LiveCaptureDeps } from '../liveCapture.js'
-import { CallResampler, VadFrames, VadSegmenter, type CallReply } from './logic.js'
+import { createDebugCapture, type CallDebugCapture } from './debugCapture.js'
+import { CallResampler, VadFrames, VadSegmenter, type CallReply, type VadUtteranceOffsets } from './logic.js'
 import type { CallAudio, CallModels, CallProgress } from './protocol.js'
 
 export const VAD_RESPONSE_TIMEOUT_MS = 10_000
@@ -23,6 +24,8 @@ export interface CallSnapshot {
   readonly inputLevel?: number
   readonly outputLevel?: number
   readonly spokenSentence?: string
+  /** Opt-in, local-only last model input. Never part of a supervisor request. */
+  readonly debugCapture?: CallDebugCapture | undefined
 }
 export interface CallOutput {
   unlock(): Promise<void>
@@ -55,6 +58,8 @@ export class CallEngine {
   private frames: Float32Array[] = []
   private processing = false
   private inputEpoch = 0
+  private keepDebugUtterance = false
+  private debugEpoch = 0
   private hiddenTimer: ReturnType<typeof setTimeout> | undefined
   constructor(private readonly deps: CallEngineDeps) {}
   readonly getSnapshot = (): CallSnapshot => this.snapshot
@@ -152,7 +157,7 @@ export class CallEngine {
         }
         if (step.utterance) {
           this.resetInput()
-          if (this.snapshot.phase !== 'speaking') void this.respond(step.utterance, lifetime)
+          if (this.snapshot.phase !== 'speaking') void this.respond(step.utterance, step.offsets, lifetime)
         }
       }
     } catch (error) { if (!lifetime.signal.aborted) this.fail(error) } finally {
@@ -198,7 +203,7 @@ export class CallEngine {
     }
   }
 
-  private async respond(samples: Float32Array, lifetime: AbortController): Promise<void> {
+  private async respond(samples: Float32Array, offsets: VadUtteranceOffsets, lifetime: AbortController): Promise<void> {
     const models = this.models
     if (!models) return
     this.turn?.abort()
@@ -207,9 +212,12 @@ export class CallEngine {
     const abort = (): void => turn.abort()
     lifetime.signal.addEventListener('abort', abort, { once: true })
     try {
-      this.update({ phase: 'transcribing' })
-      const text = (await models.transcribe(samples, turn.signal)).trim()
+      const debugEpoch = ++this.debugEpoch
+      this.update({ phase: 'transcribing', debugCapture: this.keepDebugUtterance ? createDebugCapture(samples, offsets) : undefined })
+      const transcript = await models.transcribe(samples, turn.signal)
       if (turn.signal.aborted) return
+      if (debugEpoch === this.debugEpoch && this.snapshot.debugCapture) this.update({ debugCapture: { ...this.snapshot.debugCapture, transcript } })
+      const text = transcript.trim()
       if (!text) { this.resetInput(); this.update({ phase: 'listening' }); return }
       this.update({ heard: text, reply: '', spokenSentence: '', phase: 'thinking' })
       const reply = await this.deps.reply(text, turn.signal, () => {
@@ -231,6 +239,13 @@ export class CallEngine {
       if (this.turn === turn) this.turn = undefined
       if (this.lateTurn === turn) this.lateTurn = undefined
     }
+  }
+
+  setDebugCaptureEnabled(enabled: boolean): void {
+    if (enabled === this.keepDebugUtterance) return
+    this.keepDebugUtterance = enabled
+    this.debugEpoch += 1
+    if (!enabled) this.update({ debugCapture: undefined })
   }
 
   /** Local voice-view interrupt; does not cancel the supervisor turn or dispose the session. */
@@ -272,7 +287,8 @@ export class CallEngine {
     this.inputEpoch += 1
     this.frames = []
     this.vad.reset()
-    this.update({ phase: 'idle', muted: false, inputLevel: 0, outputLevel: 0, spokenSentence: '', ...(notice ? { notice } : {}) })
+    this.debugEpoch += 1
+    this.update({ phase: 'idle', muted: false, inputLevel: 0, outputLevel: 0, spokenSentence: '', debugCapture: undefined, ...(notice ? { notice } : {}) })
   }
   private fail(error: unknown): void {
     this.hangup()

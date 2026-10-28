@@ -214,8 +214,8 @@ xerxes hub voice-models fetch --tier light --json
 xerxes hub voice-models status --json
 ```
 
-`standard` (the default) uses Moonshine base plus Kokoro (about 160 MB);
-`light` uses Moonshine tiny and the phone's browser voice (about 32 MB).
+`standard` (the default) uses Moonshine Streaming small plus Kokoro (about 265 MB);
+`light` uses Moonshine tiny and the phone's browser voice (about 34 MB).
 `--tier all` downloads both. JSON mode emits exactly one object on stdout;
 fetch progress goes to stderr. `status` only inspects disk and never downloads.
 Files live in `<XERXES_HOME>/hub/voice-models/` with private directories. Every

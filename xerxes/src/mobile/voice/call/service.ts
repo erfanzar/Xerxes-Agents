@@ -5,7 +5,7 @@ import type { VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import type { CallEngine, CallSnapshot } from './engine.js'
 import { chooseCallTier, type CallModelsStatus } from './logic.js'
 
-export type CallEngineControl = Pick<CallEngine, 'start' | 'hangup' | 'mute' | 'interrupt' | 'visibility' | 'getSnapshot' | 'subscribe'>
+export type CallEngineControl = Pick<CallEngine, 'start' | 'hangup' | 'mute' | 'interrupt' | 'visibility' | 'setDebugCaptureEnabled' | 'getSnapshot' | 'subscribe'>
 export interface VoiceCallSnapshot {
   readonly view: 'closed' | 'voice' | 'chat'
   readonly call: CallSnapshot
@@ -15,6 +15,7 @@ export interface VoiceCallSnapshot {
   readonly models?: CallModelsStatus
   readonly error?: string
   readonly downloadNoticeSeen: boolean
+  readonly debugCaptureEnabled: boolean
 }
 export interface VoiceCallServiceDeps {
   readonly engine: () => CallEngineControl
@@ -24,6 +25,8 @@ export interface VoiceCallServiceDeps {
   readonly deviceMemory?: number
   readonly noticeSeen?: () => boolean
   readonly rememberNotice?: () => void
+  readonly debugEnabled?: () => boolean
+  readonly rememberDebugEnabled?: (enabled: boolean) => void
 }
 export const isCallActive = (call: CallSnapshot): boolean => call.phase !== 'idle' && call.phase !== 'error'
 
@@ -37,7 +40,7 @@ export class VoiceCallService {
   constructor(private readonly deps: VoiceCallServiceDeps) {
     const tier = chooseCallTier(deps.deviceMemory)
     this.snapshot = { view: 'closed', tier, connected: true, checking: false, downloadNoticeSeen: deps.noticeSeen?.() ?? false,
-      call: { phase: 'idle', tier, muted: false, heard: '', reply: '' } }
+      debugCaptureEnabled: deps.debugEnabled?.() ?? false, call: { phase: 'idle', tier, muted: false, heard: '', reply: '' } }
   }
   readonly getSnapshot = (): VoiceCallSnapshot => this.snapshot
   readonly subscribe = (observer: () => void): (() => void) => { this.observers.add(observer); return () => { this.observers.delete(observer) } }
@@ -53,6 +56,11 @@ export class VoiceCallService {
   minimize(): void { this.update({ view: isCallActive(this.snapshot.call) ? 'chat' : 'closed' }) }
   setConnected(connected: boolean): void { if (connected !== this.snapshot.connected) this.update({ connected }) }
   setTier(tier: VoiceModelTier): void { if (!isCallActive(this.snapshot.call)) this.update({ tier }) }
+  setDebugCaptureEnabled(enabled: boolean): void {
+    this.deps.rememberDebugEnabled?.(enabled)
+    this.engine?.setDebugCaptureEnabled(enabled)
+    this.update({ debugCaptureEnabled: enabled })
+  }
   async loadStatus(): Promise<void> {
     this.check?.abort()
     const check = new AbortController()
@@ -82,6 +90,7 @@ export class VoiceCallService {
           this.update({ call, ...(call.phase === 'error' ? { view: 'voice' as const } : ended ? { view: 'closed' as const } : {}) })
         })
       }
+      this.engine.setDebugCaptureEnabled(this.snapshot.debugCaptureEnabled)
       this.deps.rememberNotice?.()
       this.update({ view: 'voice', downloadNoticeSeen: true })
       await this.engine.start(this.snapshot.tier)

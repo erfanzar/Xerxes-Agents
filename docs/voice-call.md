@@ -26,8 +26,9 @@ real-time performance vary; Light is recommended for low-memory phones.
 
 ## Downloads and memory
 
-- **Standard:** approximately 162 MB once: Silero VAD v5 (fp32, 2.2 MB), Moonshine base q8,
-  Kokoro-82M q8, and the English `af_heart` voice.
+- **Standard:** approximately 265 MB once: Silero VAD v5 (fp32, 2.2 MB), Moonshine Streaming
+  small q8 (166 MB), Kokoro-82M q8, and the English `af_heart` voice. On 13 real-speech clips in
+  Chrome/WASM, Moonshine Streaming small made 5.5% word errors versus 6.8% for Moonshine base.
 - **Light:** approximately 34 MB once: Silero VAD v5 and Moonshine tiny q8. Replies use an
   **installed local English phone voice**. If there is no local English voice, install one in
   the phone’s speech settings or use Standard; network speech-synthesis voices are refused.
@@ -71,6 +72,33 @@ Code blocks, URLs and Markdown markup are omitted from speech. Long replies are 
 4,000 characters, spoken in bounded sentences as audio becomes ready; the complete response
 stays on screen. Interrupting cancels local playback and pending synthesis, **not** the task or
 supervisor run. Permission approvals remain human-only and are never answered by call mode.
+
+## Inspect what speech recognition actually heard
+
+If recognition is inaccurate, open the voice **settings gear** and enable **Keep last utterance
+for debugging**. It is **off by default**; only that preference is remembered in localStorage.
+After the next utterance, the settings panel shows the raw transcript, exact duration/sample
+count, unnormalised peak and RMS levels (1 = full scale), and VAD start/end offsets. Offsets
+are measured from the beginning of the captured clip: start includes the retained pre-roll;
+end is exclusive and excludes the trailing silence used to finish the turn. The audio itself
+still contains both pre-roll and trailing silence, exactly as passed to transcription.
+
+**Play** uses Web Audio to play those original 16 kHz Float32 samples without normalising or
+re-encoding them. It interrupts reply speech and temporarily mutes the live microphone so the
+clip cannot trigger another voice turn; stopping/finishing playback restores an unmuted mic if
+it was unmuted before. Use headphones to inspect quiet speech, clipping, noise or cut-off words.
+**Save WAV** creates a 16-bit, mono, 16 kHz PCM WAV locally. On phones supporting file sharing it
+opens the system share sheet so you choose the destination; otherwise it downloads
+`xerxes-utterance.wav` and revokes the temporary download URL afterwards. Cancelling the share
+sheet does not start a download. WAV conversion quantises/clips to 16-bit PCM; Play and the
+reported levels use the untouched Float32 model input.
+
+Only the **last utterance**, at most **30 seconds** (480,000 Float32 samples, about 1.9 MB), is
+retained in memory. A new utterance replaces it; **End**, a call error, turning the toggle off,
+or reloading/leaving the app clears it. Turning the toggle off during transcription cannot
+restore that clip when recognition finishes. Audio is never put in localStorage, browser
+caches, the chat thread, logs or an automatic upload. Only you can explicitly export it with
+Save WAV; recognised text still follows the normal chat behaviour described above.
 
 ## Troubleshooting
 
