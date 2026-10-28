@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -139,17 +139,30 @@ async function buildMobile(): Promise<void> {
     }
   }
   // Resolve the ONNX version actually owned by transformers, not an unrelated workspace runtime.
-  const transformerEntry = import.meta.resolve('@huggingface/transformers')
-  // Compare real files, not URLs: on Windows Bun links packages with junctions, so resolving from inside
-  // kokoro-js returns the same file through kokoro's own node_modules link (and drive-letter case can differ).
-  const realFile = (url: string): string => {
-    const path = realpathSync(fileURLToPath(url))
-    return process.platform === 'win32' ? path.toLowerCase() : path
+  // Compare package roots by real path, resolved from directories with Bun.resolveSync. URL-based
+  // import.meta.resolve with a parent failed this check on the Windows CI host even though bun.lock holds
+  // one transformers.js; junction links and drive-letter case can spell one package two ways there.
+  const packageRoot = (file: string, name: string): string => {
+    let dir = dirname(realpathSync(file))
+    for (;;) {
+      const manifest = join(dir, 'package.json')
+      if (existsSync(manifest) && (JSON.parse(readFileSync(manifest, 'utf8')) as { name?: unknown }).name === name) {
+        return process.platform === 'win32' ? dir.toLowerCase() : dir
+      }
+      const parent = dirname(dir)
+      if (parent === dir) throw new Error(`No ${name} package.json above ${file}`)
+      dir = parent
+    }
   }
-  if (realFile(import.meta.resolve('@huggingface/transformers', import.meta.resolve('kokoro-js'))) !== realFile(transformerEntry)) {
-    throw new Error('Kokoro and call models must resolve one shared transformers.js runtime')
+  const scriptsDirectory = dirname(fileURLToPath(import.meta.url))
+  const transformerFile = Bun.resolveSync('@huggingface/transformers', scriptsDirectory)
+  const transformerRoot = packageRoot(transformerFile, '@huggingface/transformers')
+  const kokoroFile = Bun.resolveSync('kokoro-js', scriptsDirectory)
+  const kokoroTransformerRoot = packageRoot(Bun.resolveSync('@huggingface/transformers', dirname(realpathSync(kokoroFile))), '@huggingface/transformers')
+  if (kokoroTransformerRoot !== transformerRoot) {
+    throw new Error(`Kokoro and call models must resolve one shared transformers.js runtime (app: ${transformerRoot}; kokoro-js: ${kokoroTransformerRoot})`)
   }
-  const ortDirectory = dirname(fileURLToPath(import.meta.resolve('onnxruntime-web', transformerEntry)))
+  const ortDirectory = dirname(realpathSync(Bun.resolveSync('onnxruntime-web', transformerRoot)))
   const ortOutput = join(outputDirectory, 'voice-ort')
   await mkdir(ortOutput, { recursive: true })
   for (const name of await readdir(ortDirectory)) {
