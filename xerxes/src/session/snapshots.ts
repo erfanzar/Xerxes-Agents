@@ -363,8 +363,10 @@ export class SnapshotManager {
       const file = await open(temporary, 'wx', 0o600)
       try { await file.writeFile(body); await file.sync() } finally { await file.close() }
       await rename(temporary, filename)
-      const directory = await open(this.shadowDirectory, 'r')
-      try { await directory.sync() } finally { await directory.close() }
+      if (process.platform !== 'win32') {
+        const directory = await open(this.shadowDirectory, 'r')
+        try { await directory.sync() } finally { await directory.close() }
+      }
     } finally { await rm(temporary, { force: true }) }
   }
 

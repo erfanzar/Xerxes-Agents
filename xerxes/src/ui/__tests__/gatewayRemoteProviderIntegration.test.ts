@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { mkdtemp, rm, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import type { Socket } from 'node:net'
 import { expect, it, vi } from 'vitest'
 import { AgentTurnRunner } from '../../daemon/turnRunner.js'
@@ -24,6 +24,7 @@ seedModelsDev()
 
 async function fixture(provider: LlmClient, model = 'gpt-4o') {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'xr-bind-')))
+  const socketPath = process.platform === 'win32' ? '\\\\.\\pipe\\' + basename(dir) : join(dir, 'rpc.sock')
   const bindings = new RemoteProviderBindings(1000)
   const profiles = new ProfileStore(join(dir, 'profiles.json'))
   const fallback = vi.fn()
@@ -31,14 +32,14 @@ async function fixture(provider: LlmClient, model = 'gpt-4o') {
   const auxiliaryFallback = vi.fn(() => remote)
   const runner = new AgentTurnRunner({ model, llm: remote, fallbackModel: 'other-model', createLlmForModel: () => remote, remoteProviderBindings: bindings, tools: [] })
   const runtime = new InMemoryDaemonRuntime(runner, { model, currentProjectDirectory: dir, sessionDirectory: join(dir, 'sessions') })
-  const server = new DaemonServer({ runtime, socketPath: join(dir, 'rpc.sock'), projectDirectory: dir, remoteProviderBindings: bindings,
+  const server = new DaemonServer({ runtime, socketPath, projectDirectory: dir, remoteProviderBindings: bindings,
     titleClientFactory: auxiliaryFallback, projectAgentClientFactory: auxiliaryFallback, profileStore: profiles })
   const authority = new LocalProviderRelay(), peer = { destination: 'isolated-fixture', workspace: dir }
   const grant = authority.authorize(peer, { profile: 'local-profile', model, expiresAt: Date.now()+60_000, maxRequests: 8, maxOutputTokens: 8192, maxConcurrent: 1 }, () => ({ client: provider, routeIdentity: 'fixed' }), 'fixed')
   const endpoint = new LocalProviderEndpoint(authority, peer, grant.token)
   let expectedBinding = ''
   const privateRequests: unknown[] = [], publicEvents: unknown[] = []
-  const client = new GatewayClient({ externalSocketPath: join(dir, 'rpc.sock'), projectDir: dir,
+  const client = new GatewayClient({ externalSocketPath: socketPath, projectDir: dir,
     providerRelay: async (binding, frame) => { expect(binding).toBe(expectedBinding); privateRequests.push(frame); return endpoint.handle(frame) } })
   client.on('event', event => publicEvents.push(event))
   await server.start(); await client.start();

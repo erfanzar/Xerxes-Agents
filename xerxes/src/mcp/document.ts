@@ -1,13 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
+import { openRegularFileSync } from '../security/regularFile.js'
 
 /** Startup permits linked configuration; editing requires a uniquely owned file.
  * Both paths bound reads and reject special files without waiting for a writer.
  */
 export function readMcpDocument(path: string, forEditing = false): string | undefined {
   let fd: number
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (forEditing ? constants.O_NOFOLLOW : 0)) }
+  try { fd = (forEditing ? openRegularFileSync : openSync)(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)) }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error

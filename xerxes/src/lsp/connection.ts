@@ -36,6 +36,7 @@ export class LspConnection {
     const plan = planSpawn(options.command, options.args ?? [])
     try {
       this.child = Bun.spawn(plan.argv, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+        windowsHide: true,
         ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}) })
     } catch { throw new Error('Cannot launch configured language server; verify its executable, arguments and workspace directory') }
     this.stdout = this.child.stdout.getReader(); this.stderr = this.child.stderr.getReader()

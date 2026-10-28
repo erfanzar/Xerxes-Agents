@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { GoalInspectorDisclosure } from "./GoalInspector.js"
+import { shortcutLabel } from './platform.js'
 import { createPortal } from 'react-dom'
 import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
@@ -753,8 +754,8 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
           className="newchat"
           disabled={!online}
           onClick={() => { if (!snap.turnActive) open(null); store.newChat() }}
-          title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N, or ⇧⌘N to choose a preset and worktree)` : 'Start a new task (⌘N)'}
-        ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
+          title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (${shortcutLabel('⌘N')}, or ${shortcutLabel('⌥⌘N')} to choose a preset and worktree)` : `Start a new task (${shortcutLabel('⌘N')})`}
+        ><Icon name="plus" /><span>New task</span><kbd>{shortcutLabel('⌘ N')}</kbd></button>
         <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span><LearnedBadge snap={snap} /></button>
         <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
         <button className={`studio-nav${page === "schedules" ? " is-selected" : ""}`} aria-pressed={page === 'schedules'} disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
@@ -1159,7 +1160,7 @@ function WorkspaceGate(): ReactElement {
         <button className="btn btn--solid wsgate__btn" onClick={() => store.chooseWorkspace()}>
           Choose your first folder…
         </button>
-        <p className="studio-muted">The macOS app includes Bun. Git and SSH are needed only for their respective features.</p>
+        <p className="studio-muted">The desktop app includes Bun. Git and SSH are needed only for their respective features.</p>
       </div>
     </main>
   )

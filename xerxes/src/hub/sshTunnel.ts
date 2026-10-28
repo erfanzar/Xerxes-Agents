@@ -14,7 +14,7 @@ export const bunSshPort: SshPort = {
   spawn(command, args) {
     const env: Record<string, string> = {}
     for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SSH_AUTH_SOCK']) if (process.env[key] !== undefined) env[key] = process.env[key]!
-    const child = Bun.spawn([command, ...args], { stdin: 'ignore', stdout: 'ignore', stderr: 'pipe', env })
+    const child = Bun.spawn([command, ...args], { stdin: 'ignore', stdout: 'ignore', stderr: 'pipe', env, windowsHide: true })
     return { stderr: child.stderr, exited: child.exited, kill: signal => { child.kill(signal ?? 'SIGTERM') } }
   },
 }

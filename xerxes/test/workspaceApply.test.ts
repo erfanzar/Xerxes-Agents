@@ -4,10 +4,11 @@ import { expect, test } from 'bun:test'
 import { mkdtemp, realpath, rm, readdir, rename } from 'node:fs/promises'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { nativeSubagentWorktrees } from '../src/runtime/subagentWorktrees.js'
 import { applyWorkspacePatch, recoverWorkspaceApply, type WorkspaceGit } from '../src/runtime/workspaceApply.js'
 
-async function fixture() {
+async function fixture(autocrlf = false, attributes = '') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-apply-')))
   const git: WorkspaceGit = async (args, cwd = root, env = {}, raw = false) => {
     const child = Bun.spawn(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args], { cwd, env: { ...Bun.env, GIT_OPTIONAL_LOCKS: '0', ...env }, stdout: 'pipe', stderr: 'pipe' })
@@ -16,6 +17,8 @@ async function fixture() {
     return raw ? output : output.trim()
   }
   await git(['init'])
+  await git(['config', 'core.autocrlf', String(autocrlf)])
+  if (attributes) await Bun.write(join(root, '.gitattributes'), attributes)
   await Bun.write(join(root, 'a.txt'), 'original a\n')
   await Bun.write(join(root, 'b.txt'), 'original b\n')
   await Bun.write(join(root, 'binary.bin'), new Uint8Array([0, 1, 255]))
@@ -27,6 +30,16 @@ async function fixture() {
   await Bun.write(join(tree.path, 'b.txt'), 'agent b\n')
   return { root, git, port, tree, id, storage: join(root, '.git/xerxes-agent-worktrees') }
 }
+
+test.each(['', '*.txt text eol=lf\n'])('integration predicts destination EOL conversions with autocrlf and attributes (%s)', async attributes => {
+  const f = await fixture(true, attributes)
+  try {
+    const review = await f.port.inspect(f.id), check = await f.port.checkApply(f.id, review.reviewId)
+    const applied = await f.port.apply(f.id, review.reviewId, check.destinationState!)
+    expect(applied.status).toBe('applied')
+    expect(await Bun.file(join(f.root, 'a.txt')).text()).toBe(attributes ? 'agent a\n' : 'agent a\r\n')
+  } finally { await rm(f.root, { recursive: true, force: true }) }
+})
 
 test('checked integration applies text, binary, rename and new files while preserving the parent index and source', async () => {
   const f = await fixture()
@@ -121,7 +134,7 @@ test.each(['preparation', 'apply', 'recovery'])('killed workers leave recoverabl
   const f = await fixture()
   try {
     const review = await f.port.inspect(f.id), check = await f.port.checkApply(f.id, review.reviewId)
-    const modulePath = new URL('../src/runtime/workspaceApply.ts', import.meta.url).pathname
+    const modulePath = fileURLToPath(new URL('../src/runtime/workspaceApply.ts', import.meta.url))
     const workerPath = join(f.storage, 'crash-worker.ts')
     await Bun.write(workerPath, `
       import { applyWorkspacePatch } from ${JSON.stringify(modulePath)};

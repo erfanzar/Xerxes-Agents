@@ -22,6 +22,7 @@ export interface DaemonEvent {
 }
 
 export interface XerxesBridge {
+  readonly platform?: string
   getWindowChrome?(): Promise<{ trafficLights: boolean }>
   onWindowChrome?(handler: (state: { trafficLights: boolean }) => void): () => void
   /** Menu items the main process routes to the focused shell. */

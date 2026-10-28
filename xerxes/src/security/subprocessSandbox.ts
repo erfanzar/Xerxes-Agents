@@ -271,6 +271,7 @@ export class SubprocessSandboxBackend implements SandboxBackend {
         stderr: 'pipe',
         signal: controller.signal,
         killSignal: 'SIGKILL',
+        windowsHide: true,
         maxBuffer: invocation.maxOutputChars * 8,
       })
       const [exitCode, stdout, stderr] = await Promise.all([

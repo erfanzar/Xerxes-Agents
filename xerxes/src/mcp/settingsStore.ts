@@ -70,7 +70,7 @@ export class McpSettingsStore {
       // Failure after rename must not make the live host retain old settings.
       // Report durability/cleanup uncertainty on the successful commit instead.
       let directory: number | undefined
-      try { directory = openSync(dirname(this.path), constants.O_RDONLY); fsyncSync(directory) }
+      try { if (process.platform !== 'win32') { directory = openSync(dirname(this.path), constants.O_RDONLY); fsyncSync(directory) } }
       catch { committed.warnings = ['MCP settings saved, but directory synchronization failed; crash durability is uncertain'] }
       finally { if (directory !== undefined) { try { closeSync(directory) } catch { (committed.warnings ??= []).push('MCP settings directory handle cleanup failed') } } }
       return committed

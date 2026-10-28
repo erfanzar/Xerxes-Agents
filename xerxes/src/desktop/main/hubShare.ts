@@ -87,13 +87,13 @@ export function createNodeShareDeps(options: { readonly home: string; readonly c
       try { return parseStoredHub(readFileSync(path, 'utf8'))?.target } catch { return undefined }
     },
     ssh: (args, timeoutMs) => new Promise(resolve => {
-      execFile(ssh, [...args], { timeout: timeoutMs, maxBuffer: 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+      execFile(ssh, [...args], { timeout: timeoutMs, maxBuffer: 1024 * 1024, encoding: 'utf8', windowsHide: true }, (error, stdout, stderr) => {
         const code = error === null ? 0 : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : null
         resolve({ code, stdout, stderr })
       })
     }),
     spawnSsh: args => {
-      const child = spawn(ssh, [...args], { stdio: ['ignore', 'ignore', 'ignore'] })
+      const child = spawn(ssh, [...args], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true })
       return {
         exited: new Promise(resolve => { child.once('exit', code => resolve(code)); child.once('error', () => resolve(null)) }),
         kill: () => { child.kill('SIGTERM') },

@@ -12,7 +12,7 @@ describe('production TUI build', () => {
     const directory = await mkdtemp(join(tmpdir(), 'xerxes-ui-build-'))
     const output = join(directory, 'entry.js')
     try {
-      const child = Bun.spawn([process.execPath, 'scripts/buildTui.ts'], {
+      const child = Bun.spawn([process.execPath, join(PACKAGE_ROOT, 'scripts/buildTui.ts')], {
         cwd: PACKAGE_ROOT,
         env: { ...process.env, XERXES_TUI_BUILD_OUT: output },
         stderr: 'pipe',

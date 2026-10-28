@@ -86,8 +86,8 @@ export function startAppUpdates(options: { readonly settingsDirectory: string; r
         pid: process.pid,
         ports: {
           fetch: (url, init) => fetch(url, init),
-          run: argv => new Promise((resolve, reject) => execFile(argv[0]!, argv.slice(1), { maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => error ? reject(new Error(String(stderr || error.message).trim())) : resolve(String(stdout)))),
-          spawnDetached: argv => spawn(argv[0]!, argv.slice(1), { detached: true, stdio: 'ignore' }).unref(),
+          run: argv => new Promise((resolve, reject) => execFile(argv[0]!, argv.slice(1), { maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => error ? reject(new Error(String(stderr || error.message).trim())) : resolve(String(stdout)))),
+          spawnDetached: argv => spawn(argv[0]!, argv.slice(1), { detached: true, stdio: 'ignore', windowsHide: true }).unref(),
         },
         onProgress: (received, total) => {
           const now = Date.now()

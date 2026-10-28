@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { realpath, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 export type CaptureGit = (args: readonly string[], directory: string, environment?: Record<string, string>, raw?: boolean) => Promise<string>
 
@@ -27,7 +27,7 @@ export async function captureWorkingTree(options: {
     if (await git(['ls-files', '--others', '--exclude-standard'], directory, environment)) throw new Error('Working tree changed during capture; retry when edits settle')
     for (const path of links) {
       const nested = join(directory, path)
-      if (await realpath(nested) !== nested || await git(['rev-parse', '--show-toplevel'], nested) !== nested) throw new Error(`Initialize the nested repository at ${path} before capturing this workspace`)
+      if (await realpath(nested) !== nested || resolve(await git(['rev-parse', '--show-toplevel'], nested)) !== nested) throw new Error(`Initialize the nested repository at ${path} before capturing this workspace`)
       const childBase = await git(['rev-parse', 'HEAD'], nested)
       const child = await captureWorkingTree({ ...options, directory: nested, base: childBase, depth: depth + 1 })
       await importObjects(nested, child.tree, directory)

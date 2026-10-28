@@ -69,6 +69,8 @@ function cleanEvent(frame: unknown): { type: string; payload: Record<string, unk
 
 export function createBridge(transport: BridgeTransport) {
   return {
+  /** Host platform, for platform-aware shortcut labels in the renderer. */
+  platform: typeof process === 'undefined' ? undefined : process.platform,
   /** UI scale: zoom this window's page (0.5–3). */
   setZoomFactor(factor: unknown): void {
     if (typeof factor !== 'number' || !Number.isFinite(factor) || factor < 0.5 || factor > 3) throw new TypeError('invalid zoom factor')

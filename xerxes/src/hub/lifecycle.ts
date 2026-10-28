@@ -304,7 +304,7 @@ export async function runHub(options: HubRunOptions = {}): Promise<HubHandle> {
 async function spawnDetached(request: HubSpawnRequest): Promise<{ readonly pid: number }> {
   const log = await open(request.logPath, 'ax', 0o600)
   try {
-    const child = Bun.spawn([...request.argv], { env: request.environment, stdin: 'ignore', stdout: log.fd, stderr: log.fd, detached: true })
+    const child = Bun.spawn([...request.argv], { env: request.environment, stdin: 'ignore', stdout: log.fd, stderr: log.fd, detached: true, windowsHide: true })
     child.unref()
     return { pid: child.pid }
   } finally { await log.close() }

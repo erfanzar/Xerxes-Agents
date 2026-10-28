@@ -884,7 +884,7 @@ async function* streamLines(stream: ReadableStream<Uint8Array>): AsyncIterable<s
 }
 
 const launchClaudeCode: ClaudeCodeLauncher = (argv, options) => {
-  const child = Bun.spawn([...argv], { cwd: options.cwd, env: options.env, stdin: new Blob([options.input]), stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([...argv], { cwd: options.cwd, env: options.env, stdin: new Blob([options.input]), stdout: 'pipe', stderr: 'pipe', windowsHide: true })
   return {
     lines: streamLines(child.stdout),
     exited: child.exited,

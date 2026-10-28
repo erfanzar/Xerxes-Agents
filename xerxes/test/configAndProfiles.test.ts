@@ -58,7 +58,8 @@ test('profile store preserves active selection and filters sampling keys', async
     expect(store.updateSampling('constructor', { temperature: 0.2 })).toBeUndefined()
     expect(store.get('__proto__')).toBeUndefined()
     expect(store.get('constructor')).toBeUndefined()
-    expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
+    // Windows has no POSIX permission bits; the 0o600 contract is Unix-only.
+    if (process.platform !== 'win32') expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
   } finally {
     await rm(normalizedHome, { recursive: true, force: true })
   }
@@ -104,7 +105,8 @@ test('profile store writes atomically and leaves no temporary files behind', asy
     expect(document.profiles.one?.api_key).toBe('sk-one')
     expect(document.profiles.two?.api_key).toBe('sk-two')
     expect((await readdir(normalizedHome)).filter(entry => entry.includes('.tmp'))).toEqual([])
-    expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
+    // Windows has no POSIX permission bits; the 0o600 contract is Unix-only.
+    if (process.platform !== 'win32') expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
   } finally {
     await rm(normalizedHome, { recursive: true, force: true })
   }

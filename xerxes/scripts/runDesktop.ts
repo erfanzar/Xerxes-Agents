@@ -52,7 +52,9 @@ if (process.platform === 'darwin') {
 
 const command = process.platform === 'darwin'
   ? [bundleBinary]
-  : ['bunx', '--bun', '--no-install', 'electron', join(packageDirectory, 'dist', 'desktop')]
+  : process.platform === 'win32'
+    ? [join(packageDirectory, 'dist', `Xerxes Agents-win32-${process.arch}`, 'Xerxes Agents.exe')]
+    : ['bunx', '--bun', '--no-install', 'electron', join(packageDirectory, 'dist', 'desktop')]
 
 const desktop = Bun.spawn(command, {
   cwd: packageDirectory,

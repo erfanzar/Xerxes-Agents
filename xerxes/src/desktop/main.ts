@@ -60,8 +60,11 @@ const APP_NAME = 'Xerxes Agents'
 const REATTACH_GRACE_MS = 35_000
 const here = dirname(fileURLToPath(import.meta.url))
 // Prefer the packaged runtime while preserving explicit developer overrides.
-const bundledBun = join(here, '..', 'bun')
-const bundledRuntime = join(here, '..', 'runtime', 'cli.js')
+const bundledBun = join(here, '..', process.platform === 'win32' ? 'bun.exe' : 'bun')
+const packagedRuntime = join(here, '..', 'runtime', 'cli.js')
+// A built development shell must use the CLI from the same build too. Using
+// source beside it makes its fingerprint disagree and repeatedly restarts it.
+const bundledRuntime = existsSync(packagedRuntime) ? packagedRuntime : join(here, '..', 'cli.js')
 if (!process.env.XERXES_TUI_BUN_DAEMON && !process.env.XERXES_BUN_DAEMON && existsSync(bundledRuntime)) process.env.XERXES_BUN_DAEMON = bundledRuntime
 if (!process.env.XERXES_TUI_BUN && !process.env.XERXES_BUN && existsSync(bundledBun)) process.env.XERXES_BUN = bundledBun
 
@@ -70,6 +73,7 @@ if (!process.env.XERXES_TUI_BUN && !process.env.XERXES_BUN && existsSync(bundled
 // before ready. Keep native menus, notifications, window titles, and the macOS
 // dock label aligned with the product instead of exposing the host runtime.
 app.setName(APP_NAME)
+if (process.platform === 'win32') app.setAppUserModelId('dev.xerxes.agents')
 process.title = APP_NAME
 
 // Electron scopes this lock to userData, so isolated profiles remain independent.
@@ -895,7 +899,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       })()
     }
     const machine = remoteMachine ?? saved?.remote
-    return { id, label: machine ? `${machine.alias} · SSH` : 'This Mac',
+    return { id, label: machine ? `${machine.alias} · SSH` : 'This computer',
       workspace: selectedWorkspace ?? machine?.workspacePath ?? '', remote: Boolean(machine), sessions: cachedSessions }
   })
   for (const event of layoutEvents) window.on(event as 'move', scheduleWindowSave)

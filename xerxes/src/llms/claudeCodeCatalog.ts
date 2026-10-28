@@ -76,7 +76,7 @@ export interface ClaudeCodeCatalogOptions {
 }
 
 async function initializeThroughCli(argv: readonly string[], env: Record<string, string>, timeoutMs: number): Promise<unknown> {
-  const child = Bun.spawn([...argv], { env, stdin: 'pipe', stdout: 'pipe', stderr: 'ignore' })
+  const child = Bun.spawn([...argv], { env, stdin: 'pipe', stdout: 'pipe', stderr: 'ignore', windowsHide: true })
   const timer = setTimeout(() => child.kill(), timeoutMs)
   try {
     child.stdin.write(JSON.stringify({ type: 'control_request', request_id: 'xerxes-models', request: { subtype: 'initialize' } }) + '\n')

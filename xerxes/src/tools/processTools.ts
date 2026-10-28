@@ -433,6 +433,9 @@ export async function executeCommand(
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
+      // Hosts that run the runtime without a console (desktop app, VS Code)
+      // must not pop a console window per command on Windows.
+      windowsHide: true,
       ...(PROCESS_GROUPS_AVAILABLE ? { detached: true } : {}),
     })
     child = process

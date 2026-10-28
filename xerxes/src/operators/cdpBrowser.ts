@@ -2,11 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { constants } from 'node:fs'
-import { lstat, mkdir, open } from 'node:fs/promises'
+import { lstat, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { ClientError, ValidationError } from '../core/errors.js'
+import { openRegularFile } from '../security/regularFile.js'
 import type {
   BrowserAdapter,
   BrowserClickRequest,
@@ -199,7 +200,7 @@ export class CdpBrowserAdapter implements BrowserAdapter {
     const path = this.screenshotPath(refId, options.path)
     await this.prepareScreenshotDirectory(path)
     try {
-      const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600)
+      const file = await openRegularFile(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600)
       try {
         await file.writeFile(Buffer.from(data, 'base64'))
       } finally {

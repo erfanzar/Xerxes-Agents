@@ -35,7 +35,7 @@ export const defaultPluginTestRunner: PluginTestRunner = async (file, options) =
     const value = process.env[key]
     if (value) env[key] = value
   }
-  const child = Bun.spawn([process.execPath, '--no-env-file', 'test', file], { cwd: options.cwd, env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([process.execPath, '--no-env-file', 'test', file], { cwd: options.cwd, env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true })
   let timedOut = false
   const timer = setTimeout(() => { timedOut = true; try { child.kill('SIGKILL') } catch { /* gone */ } }, options.timeoutMs)
   try {

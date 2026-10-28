@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { openRegularFile } from '../security/regularFile.js'
 
 const MAX_BYTES = 128 * 1024
 
@@ -18,7 +20,7 @@ async function workspaceFile(cwd: string, path: unknown, action: 'preview' | 'ed
   const root = await realpath(cwd)
   const file = await realpath(resolve(root, path))
   const local = relative(root, file)
-  if (!local || local === '..' || local.startsWith('../') || isAbsolute(local)) {
+  if (!local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) {
     throw new Error(`File ${action} is limited to the selected workspace`)
   }
   if (!(await stat(file)).isFile()) throw new Error(`Choose a regular file to ${action === 'preview' ? 'preview' : 'edit'}`)
@@ -28,9 +30,15 @@ async function workspaceFile(cwd: string, path: unknown, action: 'preview' | 'ed
 /** Explicit workspace reads never follow a symlink outside the selected workspace. */
 export async function previewWorkspaceFile(cwd: string, path: unknown) {
   const { file, local } = await workspaceFile(cwd, path, 'preview')
-  const blob = Bun.file(file)
-  const truncated = blob.size > MAX_BYTES
-  const bytes = new Uint8Array(await blob.slice(0, MAX_BYTES).arrayBuffer())
+  const handle = await openRegularFile(file, constants.O_RDONLY)
+  let truncated: boolean
+  let bytes: Uint8Array
+  try {
+    truncated = (await handle.stat()).size > MAX_BYTES
+    const buffer = new Uint8Array(MAX_BYTES)
+    const read = await handle.read(buffer, 0, MAX_BYTES, 0)
+    bytes = buffer.slice(0, read.bytesRead)
+  } finally { await handle.close() }
   let content: string
   try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: truncated }) }
   catch { throw new Error('This file is not UTF-8 text and cannot be previewed') }
@@ -53,10 +61,20 @@ export async function writeWorkspaceFile(cwd: string, path: unknown, content: un
   if (encoded.byteLength > MAX_BYTES) throw new Error('Files over 128 KiB cannot be edited here')
   if (content.includes('\0')) throw new Error('Text files cannot contain NUL characters')
   const { file, local } = await workspaceFile(cwd, path, 'editing')
-  const current = new Uint8Array(await Bun.file(file).arrayBuffer())
-  if (versionOf(current) !== baseVersion) {
-    return { ok: false as const, conflict: true, path: local, error: 'This file changed on disk since you opened it. Reload it to see the new version, then edit again.' }
-  }
-  await Bun.write(file, encoded)
+  const handle = await openRegularFile(file, constants.O_RDWR)
+  try {
+    const current = new Uint8Array(await handle.readFile())
+    if (versionOf(current) !== baseVersion) {
+      return { ok: false as const, conflict: true, path: local, error: 'This file changed on disk since you opened it. Reload it to see the new version, then edit again.' }
+    }
+    let offset = 0
+    while (offset < encoded.length) {
+      const { bytesWritten } = await handle.write(encoded, offset, encoded.length - offset, offset)
+      if (!bytesWritten) throw new Error('Could not complete the file edit')
+      offset += bytesWritten
+    }
+    await handle.truncate(encoded.length)
+    await handle.sync()
+  } finally { await handle.close() }
   return { ok: true as const, path: local, version: versionOf(encoded) }
 }
