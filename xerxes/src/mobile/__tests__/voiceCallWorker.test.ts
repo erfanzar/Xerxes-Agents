@@ -73,25 +73,29 @@ describe('call inference worker with fake transformers and Kokoro', () => {
     expect(fake.autoModel).not.toHaveBeenCalled()
     expect(await dispatch({ id: 1, type: 'load', tier: 'light' })).toMatchObject({ type: 'loaded', tier: 'light' })
     expect(fake.autoModel).not.toHaveBeenCalled()
-    expect(fake.pipeline).toHaveBeenCalledWith('automatic-speech-recognition', VOICE_MODELS.stt_tiny.repo, expect.objectContaining({ revision: VOICE_MODELS.stt_tiny.revision, device: 'webgpu', dtype: 'int8' }))
+    expect(fake.pipeline).toHaveBeenCalledWith('automatic-speech-recognition', VOICE_MODELS.stt_tiny.repo, expect.objectContaining({ revision: VOICE_MODELS.stt_tiny.revision, device: 'wasm', dtype: VOICE_MODELS.stt_tiny.dtype }))
     expect(fake.ttsLoad).not.toHaveBeenCalled()
   })
   it('runs Silero independently with its custom config, context and recurrent state, then disposes it', async () => {
     await import('../voice/call/vadWorker.js')
     await dispatch({ id: 1, type: 'load', tier: 'light' })
-    expect(fake.autoModel).toHaveBeenCalledWith(VOICE_MODELS.vad.repo, expect.objectContaining({ config: expect.objectContaining({ model_type: 'custom' }), revision: VOICE_MODELS.vad.revision, device: 'wasm', dtype: 'int8' }))
+    expect(fake.autoModel).toHaveBeenCalledWith(VOICE_MODELS.vad.repo, expect.objectContaining({ config: expect.objectContaining({ model_type: 'custom' }), revision: VOICE_MODELS.vad.revision, device: 'wasm', dtype: VOICE_MODELS.vad.dtype }))
     expect(await dispatch({ id: 2, type: 'vad', samples: new Float32Array(512) })).toMatchObject({ type: 'probability', probability: 0.75 })
     expect(fake.vad).toHaveBeenCalledWith(expect.objectContaining({ input: expect.objectContaining({ dims: [1, 576] }), state: expect.objectContaining({ dims: [2, 1, 128] }), sr: expect.objectContaining({ data: [16000n], dims: [] }) }))
     expect(fake.pipeline).not.toHaveBeenCalled()
     await dispatch({ id: 3, type: 'dispose' })
     expect(fake.vad.dispose).toHaveBeenCalledOnce()
   })
-  it('requests fresh-worker WASM recovery after an inference-time WebGPU failure', async () => {
-    await dispatch({ id: 1, type: 'load', tier: 'light' })
-    fake.stt.mockRejectedValueOnce(new Error('WebGPU inference failed'))
-    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'retry-wasm' })
-    expect(fake.stt).toHaveBeenCalledTimes(1)
-    expect(fake.pipeline).toHaveBeenCalledTimes(1) // do not reuse a possibly poisoned inference chain
+  it('never runs quantized speech recognition on WebGPU, even when the browser offers it', async () => {
+    // Measured in Chrome: q8 Moonshine on WebGPU decoded repeated multilingual junk; on WASM it was correct.
+    expect(VOICE_MODELS.stt_base.dtype).toBe('q8')
+    await dispatch({ id: 1, type: 'load', tier: 'standard' })
+    expect(fake.pipeline).toHaveBeenCalledWith('automatic-speech-recognition', VOICE_MODELS.stt_base.repo, expect.objectContaining({ device: 'wasm' }))
+    expect(fake.pipeline).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ device: 'webgpu' }))
+    fake.stt.mockRejectedValueOnce(new Error('inference failed'))
+    // A WASM failure is a plain error, never a WebGPU-recovery loop.
+    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'error' })
+    expect(fake.pipeline).toHaveBeenCalledTimes(1)
     await dispatch({ id: 3, type: 'dispose' })
     expect(fake.stt.dispose).toHaveBeenCalledOnce()
   })
@@ -110,9 +114,10 @@ describe('call inference worker with fake transformers and Kokoro', () => {
     expect(fake.generate).toHaveBeenCalledWith('Ready.', { voice: 'af_heart' })
     expect(await dispatch({ id: 2, type: 'synthesize', text: 'Hello.' })).toMatchObject({ type: 'audio', audio: { sampleRate: 24_000, samples: expect.any(Float32Array) } })
   })
-  it('requests fresh-worker WASM recovery when WebGPU STT initialization fails', async () => {
+  it('reports a WASM speech-recognition load failure as an error, never a WebGPU retry', async () => {
     fake.pipeline.mockRejectedValueOnce(new Error('No adapter'))
-    expect(await dispatch({ id: 1, type: 'load', tier: 'light' })).toMatchObject({ type: 'retry-wasm' })
+    expect(await dispatch({ id: 1, type: 'load', tier: 'light' })).toMatchObject({ type: 'error' })
+    expect(messages.some(message => message.type === 'retry-wasm')).toBe(false)
     expect(fake.pipeline).toHaveBeenCalledTimes(1)
   })
   it('disposes failed Kokoro and loads Moonshine tiny when voice initialization fails', async () => {

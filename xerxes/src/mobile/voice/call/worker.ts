@@ -6,7 +6,7 @@ import { KokoroTTS } from 'kokoro-js'
 
 import { VOICE_CALL_TTS_VOICE, VOICE_MODELS, tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import type { CallWorkerRequest, CallWorkerResponse } from './protocol.js'
-import { configureCallWorker } from './workerEnvironment.js'
+import { configureCallWorker, workerErrorDetail } from './workerEnvironment.js'
 
 const scope = configureCallWorker()
 let stt: AutomaticSpeechRecognitionPipeline | undefined
@@ -27,7 +27,7 @@ function emit(response: CallWorkerResponse, transfer?: Transferable[]): void {
 async function loadStt(device: 'webgpu' | 'wasm', progress?: ProgressCallback): Promise<AutomaticSpeechRecognitionPipeline> {
   const spec = tier === 'standard' ? VOICE_MODELS.stt_base : VOICE_MODELS.stt_tiny
   const loaded = await pipeline<'automatic-speech-recognition'>('automatic-speech-recognition', spec.repo, {
-    revision: spec.revision, dtype: 'int8', device, ...(progress ? { progress_callback: progress } : {}),
+    revision: spec.revision, dtype: spec.dtype, device, ...(progress ? { progress_callback: progress } : {}),
   })
   sttDevice = device
   return loaded
@@ -53,7 +53,7 @@ async function load(request: Extract<CallWorkerRequest, { type: 'load' }>): Prom
     let model: StyleTextToSpeech2Model | undefined
     try {
       // q8 Kokoro is reliable on WASM; WebGPU is recommended for fp32, which we deliberately do not download.
-      model = await StyleTextToSpeech2Model.from_pretrained(spec.repo, { revision: spec.revision, dtype: 'q8', device: 'wasm', progress_callback: progress })
+      model = await StyleTextToSpeech2Model.from_pretrained(spec.repo, { revision: spec.revision, dtype: spec.dtype, device: 'wasm', progress_callback: progress })
       const tokenizer = await AutoTokenizer.from_pretrained(spec.repo, { revision: spec.revision, progress_callback: progress })
       tts = new KokoroTTS(model, tokenizer)
       await tts.generate('Ready.', { voice: VOICE_CALL_TTS_VOICE })
@@ -65,7 +65,10 @@ async function load(request: Extract<CallWorkerRequest, { type: 'load' }>): Prom
     }
   }
   if (stopping) return
-  const useGpu = scope.navigator.gpu !== undefined && request.forceWasm !== true
+  // Quantized (q8) Moonshine decodes garbage on WebGPU (measured in Chrome: repeated multilingual
+  // tokens after 8.5 s) and is correct on WASM (0.3 s). Only full-precision weights may use WebGPU.
+  const sttSpec = tier === 'standard' ? VOICE_MODELS.stt_base : VOICE_MODELS.stt_tiny
+  const useGpu = sttSpec.dtype === 'fp32' && scope.navigator.gpu !== undefined && request.forceWasm !== true
   try { stt = await loadStt(useGpu ? 'webgpu' : 'wasm', progress) } catch (error) {
     if (!useGpu) throw error
     emit({ id: request.id, type: 'retry-wasm' })
@@ -114,8 +117,8 @@ async function drain(): Promise<void> {
       const request = queue.shift()!
       try {
         if (!cancelled.has(request.id) && (!stopping || request.type === 'dispose')) await handle(request)
-      } catch {
-        emit({ id: request.id, type: 'error', message: `On-phone ${request.type} failed. Try Light mode or check that the Hub’s call models are available.` })
+      } catch (error) {
+        emit({ id: request.id, type: 'error', message: `On-phone ${request.type} failed (${workerErrorDetail(error)}). Try Light mode or check that the Hub’s call models are available.` })
       } finally { liveIds.delete(request.id); cancelled.delete(request.id) }
     }
   } finally { running = false }

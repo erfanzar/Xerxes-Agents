@@ -13,18 +13,19 @@ real-time performance vary; Light is recommended for low-memory phones.
 
 ## Downloads and memory
 
-- **Standard:** approximately 160 MB once: Silero VAD v5, Moonshine base int8, Kokoro-82M q8,
-  and the English `af_heart` voice.
-- **Light:** approximately 32 MB once: Silero VAD v5 and Moonshine tiny int8. Replies use an
+- **Standard:** approximately 162 MB once: Silero VAD v5 (fp32, 2.2 MB), Moonshine base q8,
+  Kokoro-82M q8, and the English `af_heart` voice.
+- **Light:** approximately 34 MB once: Silero VAD v5 and Moonshine tiny q8. Replies use an
   **installed local English phone voice**. If there is no local English voice, install one in
   the phone’s speech settings or use Standard; network speech-synthesis voices are refused.
 
 The picker shows exact model-download totals reported by the Hub. These are download sizes,
 not peak RAM: inference needs additional working memory. Devices reporting less than 4 GB of
 RAM default to Light. You can choose either tier. If Kokoro cannot initialize, the call switches
-to Light (including Moonshine tiny) and displays one notice. Kokoro q8 runs on single-threaded
-WASM (q8 WebGPU is unreliable). STT tries WebGPU when the browser exposes it and retries once
-on WASM if model loading or inference fails.
+to Light (including Moonshine tiny) and displays one notice. All three models run on
+single-threaded WASM. Quantized models are not used on WebGPU: in Chrome, q8 Moonshine on WebGPU
+decoded garbage, while on WASM it transcribed correctly in about 0.3 s. int8 files are not used
+at all, because ONNX Runtime Web has no `ConvInteger` kernel and cannot load them.
 
 Models load only when you start a call. The Hub downloads and verifies pinned files once;
 the phone then downloads them from that same Hub. Transformers.js caches model files in the

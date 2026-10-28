@@ -14,6 +14,16 @@ export interface CallWorkerScope {
   postMessage(message: CallWorkerResponse, transfer?: Transferable[]): void
 }
 
+/**
+ * A short, user-visible reason for a failed worker job: the error's own message with URLs
+ * and paths removed, clipped. Enough to diagnose a phone without leaking where files live.
+ */
+export function workerErrorDetail(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : typeof error === 'string' ? error : 'unknown error'
+  const cleaned = raw.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/giu, '<url>').replace(/(?:^|\s)\/[^\s:]+/gu, ' <path>').replace(/\s+/gu, ' ').trim()
+  return cleaned.length > 160 ? `${cleaned.slice(0, 157)}...` : cleaned || 'unknown error'
+}
+
 /** Each worker owns its own single-threaded session; both use the same pinned runtime assets. */
 export function configureCallWorker(): CallWorkerScope {
   const scope = globalThis as unknown as CallWorkerScope

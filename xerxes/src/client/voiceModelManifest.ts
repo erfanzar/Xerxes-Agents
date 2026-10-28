@@ -21,8 +21,11 @@ export interface VoiceModel {
   readonly repo: string
   /** Full commit sha on Hugging Face. */
   readonly revision: string
-  /** transformers.js `dtype` that selects the listed ONNX files. */
-  readonly dtype: string
+  /**
+   * transformers.js `dtype` that selects the listed ONNX files. Never `int8`: ONNX Runtime Web
+   * has no ConvInteger kernel, so int8-quantized conv layers fail to create a session in the browser.
+   */
+  readonly dtype: 'fp32' | 'q8'
   readonly license: string
   readonly files: readonly VoiceModelFile[]
 }
@@ -45,34 +48,34 @@ export const VOICE_MODELS: Readonly<Record<VoiceModelId, VoiceModel>> = Object.f
   vad: {
     repo: 'onnx-community/silero-vad',
     revision: 'e71cae966052b992a7eca6b17738916ce0eca4ec',
-    dtype: 'int8',
+    dtype: 'fp32',
     license: 'MIT',
     files: [
-      { path: 'onnx/model_int8.onnx', size: 639383, sha256: '90b026c95f054d59d7bf79387b0ed93c8950f35a4d8b741cd78d4bb23a7d2776' },
+      { path: 'onnx/model.onnx', size: 2243022, sha256: 'a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808' },
     ],
   },
   stt_base: {
     repo: 'onnx-community/moonshine-base-ONNX',
     revision: 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
-    dtype: 'int8',
+    dtype: 'q8',
     license: 'MIT',
     files: [
       { path: 'config.json', size: 922, sha256: 'fab7241d1e9fc6c2370c4c6dfb5da79bb54d67ed9ab6b507ac51d29d2abe01d1' },
       ...MOONSHINE_SHARED,
-      { path: 'onnx/encoder_model_int8.onnx', size: 20488801, sha256: '4edb38db96b52ddee5a3b25d2211bb6394f9a9a2d95f67bce0e8c861da018a4d' },
-      { path: 'onnx/decoder_model_merged_int8.onnx', size: 42427261, sha256: '45febab0347ffbe1326459e092ae20a2cfda10ca33ab018b3c299247284de61b' },
+      { path: 'onnx/encoder_model_quantized.onnx', size: 20513063, sha256: '1dd9ab0a7f987113d30affcba5a068d11c8f90fa0223caa3e491ade431ad9751' },
+      { path: 'onnx/decoder_model_merged_quantized.onnx', size: 42498870, sha256: 'cc9f3cd6698a369c6008b41aa60aa3fb3322e7f03c9bdf19d8e6b7200afca4f3' },
     ],
   },
   stt_tiny: {
     repo: 'onnx-community/moonshine-tiny-ONNX',
     revision: 'a6da1241cd305dcd64eab1edbd615f2bb9aabb95',
-    dtype: 'int8',
+    dtype: 'q8',
     license: 'MIT',
     files: [
       { path: 'config.json', size: 921, sha256: '558e1e02069137c796ace1e50c48d8fe451f04a295929138e6bea885517f0edb' },
       ...MOONSHINE_SHARED,
-      { path: 'onnx/encoder_model_int8.onnx', size: 7919835, sha256: '2981b85cfd6a4647ec37fe139e268cbc2c8a24102bf1fbb70dedeb7964995be8' },
-      { path: 'onnx/decoder_model_merged_int8.onnx', size: 20189512, sha256: 'bd126e9e95c62b2236116f676f80877ddde488599631014149f92196cd8ae3a7' },
+      { path: 'onnx/encoder_model_quantized.onnx', size: 7937661, sha256: 'c6fc4b7bc5af75c0591fd157a1f3829b533d18e9769a888fd95a62e470dd4f4a' },
+      { path: 'onnx/decoder_model_merged_quantized.onnx', size: 20243286, sha256: 'eed87831c3a6103534aae7d47a5d485025c659a1323901513961c39fe8a1a367' },
     ],
   },
   // Kokoro-82M; transformers.js dtype `q8` selects onnx/model_quantized.onnx.

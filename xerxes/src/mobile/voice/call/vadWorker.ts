@@ -6,7 +6,7 @@ import { AutoModel, PretrainedConfig, Tensor, type PreTrainedModel } from '@hugg
 import { VOICE_MODELS } from '../../../client/voiceModelManifest.js'
 import { VAD_FRAME_SAMPLES } from './logic.js'
 import type { CallWorkerRequest } from './protocol.js'
-import { configureCallWorker } from './workerEnvironment.js'
+import { configureCallWorker, workerErrorDetail } from './workerEnvironment.js'
 
 // Silero is intentionally isolated: synchronous STT/TTS WASM must never block turn detection or barge-in.
 const scope = configureCallWorker()
@@ -30,7 +30,7 @@ async function handle(request: CallWorkerRequest): Promise<void> {
     const spec = VOICE_MODELS.vad
     model = await AutoModel.from_pretrained(spec.repo, {
       config: new PretrainedConfig({ model_type: 'custom' }), revision: spec.revision,
-      dtype: 'int8', device: 'wasm',
+      dtype: spec.dtype, device: 'wasm',
       progress_callback: progress => {
         if (progress.status === 'progress') scope.postMessage({ id: request.id, type: 'progress', progress: { loaded: progress.loaded, total: spec.files[0]!.size } })
       },
@@ -65,7 +65,7 @@ async function handle(request: CallWorkerRequest): Promise<void> {
 scope.onmessage = event => {
   const request = event.data
   // One recurrent-state owner at a time, on a worker that never executes a speech-recognition/synthesis job.
-  queue = queue.then(() => handle(request)).catch(() => {
-    scope.postMessage({ id: request.id, type: 'error', message: 'On-phone VAD failed. Restart the call or try another browser.' })
+  queue = queue.then(() => handle(request)).catch((error: unknown) => {
+    scope.postMessage({ id: request.id, type: 'error', message: `On-phone VAD failed (${workerErrorDetail(error)}). Restart the call or try another browser.` })
   })
 }
