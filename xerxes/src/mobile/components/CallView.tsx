@@ -1,108 +1,93 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, useRef, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type ReactElement } from 'react'
 
-import { tierDownloadBytes, type VoiceModelTier } from '../../client/voiceModelManifest.js'
-import { useHubState, useServices } from '../context.js'
-import { browserCallEngine } from '../voice/call/browser.js'
-import { type CallEngine, type CallSnapshot } from '../voice/call/engine.js'
-import { chooseCallTier, fetchCallModelsStatus, type CallModelsStatus } from '../voice/call/logic.js'
-import { Sheet } from './Sheet.js'
+import { tierDownloadBytes } from '../../client/voiceModelManifest.js'
+import { useCallService, useHubState, useServices } from '../context.js'
+import { shortVoiceCaption, voiceMegabytes, voiceOrbLevel, voiceStateLine } from '../voice/call/presentation.js'
+import { isCallActive } from '../voice/call/service.js'
 
-const INITIAL: CallSnapshot = { phase: 'idle', tier: 'standard', muted: false, heard: '', reply: '' }
-const noopSubscribe = (): (() => void) => () => undefined
-const initialSnapshot = (): CallSnapshot => INITIAL
-const PHASE_LABEL = {
-  idle: 'Ready to call', loading: 'Loading on-phone models…', listening: 'Listening', hearing: 'Hearing you…',
-  transcribing: 'Transcribing on your phone…', thinking: 'XERXES is thinking…', speaking: 'XERXES is speaking', error: 'Call ended',
-} as const
-const mb = (bytes: number): string => `${Math.round(bytes / 1_000_000)} MB`
-
-/** Independent of Hub voice providers: only ordinary supervisor messages leave the phone. */
-export function CallView({ onClose }: { onClose: () => void }): ReactElement {
-  const { controller, store, voice } = useServices()
+/** Full-screen voice scene. Unmounting/minimizing this view NEVER owns or ends the call. */
+export function CallView(): ReactElement {
+  const call = useCallService()
+  const state = useSyncExternalStore(call.subscribe, call.getSnapshot, call.getSnapshot)
   const hub = useHubState()
-  const [engine, setEngine] = useState<CallEngine>()
-  const snapshot = useSyncExternalStore(engine?.subscribe ?? noopSubscribe, engine?.getSnapshot ?? initialSnapshot, initialSnapshot)
-  const [tier, setTier] = useState<VoiceModelTier>(() => chooseCallTier(typeof navigator === 'undefined' ? undefined : (navigator as Navigator & { deviceMemory?: number }).deviceMemory))
-  const [status, setStatus] = useState<CallModelsStatus>()
-  const [error, setError] = useState<string>()
-  const [seen, setSeen] = useState(false)
-  const active = snapshot.phase !== 'idle' && snapshot.phase !== 'error'
-  const live = hub.connection.state === 'live'
-  const ready = live && hub.supervisor.phase === 'ready' && hub.supervisorConfig.status !== 'unconfigured'
+  const { router } = useServices()
+  const panel = useRef<HTMLElement>(null)
+  const current = state.call
+  const active = isCallActive(current)
+  const ready = state.connected && hub.supervisor.phase === 'ready' && hub.supervisorConfig.status !== 'unconfigured'
+  const chat = (): void => { call.minimize(); router.navigate({ name: 'xerxes' }) }
+  const end = (): void => { call.end(); router.navigate({ name: 'xerxes' }) }
+  const style: CSSProperties & { '--voice-level': number } = { '--voice-level': voiceOrbLevel(state) }
 
   useEffect(() => {
-    const abort = new AbortController()
-    voice?.cancel()
-    voice?.live?.stop()
-    voice?.interrupt?.()
-    void voice?.armReply?.(false)
-    try { setSeen(localStorage.getItem('xerxes-call-download-notice') === 'seen') } catch { /* private mode: show notice */ }
-    void fetchCallModelsStatus(fetch, abort.signal).then(setStatus, (failure: unknown) => {
-      if (!abort.signal.aborted) setError(failure instanceof Error ? failure.message : 'Call models are unavailable.')
-    })
-    return () => abort.abort()
-  }, [voice])
-  useEffect(() => {
-    if (!engine) return
-    const visibility = (): void => engine.visibility(document.hidden)
-    visibility()
-    document.addEventListener('visibilitychange', visibility)
-    return () => { document.removeEventListener('visibilitychange', visibility); engine.hangup() }
-  }, [engine])
-  useEffect(() => { if (!live) engine?.connectionLost() }, [engine, live])
-
-  const close = (): void => { engine?.hangup(); onClose() }
-  const start = (): void => {
-    if (!status || !ready) return
-    try {
-      const next = engine ?? browserCallEngine(controller, store)
-      setEngine(next)
-      setError(undefined)
-      try { localStorage.setItem('xerxes-call-download-notice', 'seen') } catch { /* storage is optional */ }
-      void next.start(tier)
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Call mode is unavailable in this browser.')
-    }
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const overflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    panel.current?.focus()
+    return () => { document.body.style.overflow = overflow; if (previous?.isConnected) previous.focus() }
+  }, [])
+  const onKey = (event: KeyboardEvent<HTMLElement>): void => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); chat(); return }
+    if (event.key !== 'Tab' || !panel.current) return
+    const items = [...panel.current.querySelectorAll<HTMLElement>('button:not([disabled]), summary, select:not([disabled]), [tabindex="0"]')]
+      .filter(item => !item.closest('details:not([open])') || item.tagName === 'SUMMARY')
+    const first = items[0]
+    const last = items.at(-1)
+    if (!first || !last) return
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
   }
-  const progress = snapshot.progress
+
   return (
-    <Sheet title="Call XERXES" onClose={close} fullScreen>
-      <div className="call-view">
-        <p className="block-meta">English · on-phone speech · {active ? snapshot.tier : tier} mode</p>
-        <div className={`call-orb call-orb-${snapshot.phase}`} aria-hidden="true">X</div>
-        <h3 role="status" aria-live="polite">{snapshot.muted && snapshot.phase === 'listening' ? 'Microphone muted' : PHASE_LABEL[snapshot.phase]}</h3>
-        {snapshot.phase === 'loading' ? <div>
-          <progress aria-label="Model bytes loaded" max={progress?.total ?? tierDownloadBytes(tier)} value={progress?.loaded ?? 0} />
-          <p className="block-meta">{mb(progress?.loaded ?? 0)} / {mb(progress?.total ?? tierDownloadBytes(tier))} · first download and initialization can take several minutes</p>
-        </div> : null}
-        {snapshot.notice ? <p role="status" className="notice">{snapshot.notice}</p> : null}
-        {error || snapshot.error ? <p role="alert" className="field-error">{error ?? snapshot.error}</p> : null}
-        {!active ? <>
-          <label className="field"><span>Voice quality / download size</span>
-            <select value={tier} onChange={event => setTier(event.target.value === 'light' ? 'light' : 'standard')}>
-              <option value="standard">Standard · {mb(status?.standard.bytes ?? tierDownloadBytes('standard'))} · Moonshine base + Kokoro</option>
-              <option value="light">Light · {mb(status?.light.bytes ?? tierDownloadBytes('light'))} · Moonshine tiny + local phone voice</option>
-            </select>
-          </label>
-          {!seen ? <p className="notice">First call downloads ~160 MB once in Standard mode (Light: ~32 MB). Models are cached on this phone; clearing browser storage downloads them again.</p> : null}
-          <p className="block-meta">Audio stays on this phone. Transcripts go to XERXES as normal messages. No Hub voice provider is needed. Light needs an installed local English voice.</p>
-          {status ? <p className="block-meta">{status[tier].ready ? 'Models are cached on the Hub; this phone may still need to download them.' : 'The Hub will fetch and verify models on the first call.'}</p> : !error ? <p role="status">Checking Hub call models…</p> : null}
-          {!ready ? <p role="status">Connect to the Hub and configure XERXES’s model before starting a call.</p> : null}
-          <button type="button" className="btn btn-primary" disabled={!status || !ready} onClick={start}>Start call</button>
-        </> : null}
-        <section className="call-captions" aria-label="Live call captions" aria-live="polite">
-          {snapshot.heard ? <p><strong>You:</strong> {snapshot.heard}</p> : null}
-          {snapshot.reply ? <p><strong>XERXES:</strong> {snapshot.reply}</p> : null}
-        </section>
-        <div className="call-controls">
-          <button type="button" className="btn" disabled={!active || snapshot.phase === 'loading'} aria-pressed={snapshot.muted} onClick={() => engine?.mute(!snapshot.muted)}>{snapshot.muted ? 'Unmute' : 'Mute'}</button>
-          <button type="button" className="btn btn-danger" onClick={close}>Hang up</button>
+    <section ref={panel} className={`voice-screen voice-phase-${current.phase}`} role="dialog" aria-modal="true" aria-labelledby="voice-title" tabIndex={-1} onKeyDown={onKey}>
+      <header className="voice-head">
+        <h1 id="voice-title">XERXES <span>voice</span></h1>
+        <details className="voice-settings">
+          <summary aria-label="Voice settings" title="Voice settings"><span aria-hidden="true">⚙</span></summary>
+          <div className="voice-settings-panel">
+            <label className="field"><span>Voice quality / download size</span>
+              <select value={active ? current.tier : state.tier} disabled={active} onChange={event => call.setTier(event.target.value === 'light' ? 'light' : 'standard')}>
+                <option value="standard">Standard · {voiceMegabytes(state.models?.standard.bytes ?? tierDownloadBytes('standard'))} · Moonshine base + Kokoro</option>
+                <option value="light">Light · {voiceMegabytes(state.models?.light.bytes ?? tierDownloadBytes('light'))} · Moonshine tiny + local phone voice</option>
+              </select>
+            </label>
+            <p>English · speech runs on your phone. No Hub voice provider is needed.</p>
+            <p>Light needs an installed local English voice. Change tiers before starting a call.</p>
+            {state.models ? <p>{state.models[state.tier].ready ? 'Models are cached on the Hub; this phone may still need to download them.' : 'The Hub will fetch and verify models on the first call.'}</p> : null}
+          </div>
+        </details>
+      </header>
+      <div className="voice-stage">
+        <div className="voice-orb-wrap" style={style}>
+          <button type="button" className="voice-orb" disabled={current.phase !== 'speaking'} aria-label={current.phase === 'speaking' ? 'Interrupt XERXES' : 'Voice activity'} onClick={() => call.interrupt()}>
+            <span className="voice-orb-aura" aria-hidden="true" /><span className="voice-orb-core" aria-hidden="true" /><span className="voice-orb-shine" aria-hidden="true" />
+          </button>
         </div>
-        <p className="block-meta">Speak to interrupt XERXES. Hiding this tab for 60 seconds ends the call.</p>
+        <h2 className="voice-state" role="status" aria-live="polite">{voiceStateLine(state)}</h2>
+        {current.phase === 'loading' ? <progress className="voice-download" aria-label="Voice model bytes loaded" max={current.progress?.total ?? tierDownloadBytes(state.tier)} value={current.progress?.loaded ?? 0} /> : null}
+        <div className="voice-captions" aria-label="Live call captions" aria-live="polite" aria-atomic="true">
+          {current.heard ? <p className="voice-heard"><span>You</span> {shortVoiceCaption(current.heard)}</p> : null}
+          {current.spokenSentence ? <p className="voice-spoken"><span>XERXES</span> {shortVoiceCaption(current.spokenSentence)}</p> : null}
+          {!current.heard && !current.spokenSentence ? <p className="voice-caption-hint">{active ? 'Go ahead. I’m listening.' : 'A conversation, without the keyboard.'}</p> : null}
+        </div>
+        {state.error || current.error ? <p role="alert" className="voice-error">{state.error ?? current.error}</p> : null}
+        {current.notice ? <p role="status" className="voice-notice">{current.notice}</p> : null}
       </div>
-    </Sheet>
+      {!active ? <div className="voice-start">
+        {!state.downloadNoticeSeen ? <p className="voice-notice">First call downloads ~160 MB once in Standard mode (Light: ~32 MB). Cached on this phone after that.</p> : null}
+        {!ready ? <p className="voice-notice">Connect to the Hub and choose XERXES’s model to start.</p> : null}
+        <button type="button" className="voice-start-button" disabled={!ready || !state.models || state.checking} onClick={() => { void call.start() }}>Start voice</button>
+        {state.error ? <button type="button" className="voice-retry" onClick={() => { void call.loadStatus() }}>Retry voice models</button> : null}
+      </div> : null}
+      <footer className="voice-controls" aria-label="Voice controls">
+        <button type="button" disabled={!active || current.phase === 'loading'} aria-pressed={current.muted} className={current.muted ? 'voice-control is-muted' : 'voice-control'} onClick={() => call.mute()}><span aria-hidden="true">{current.muted ? '⊘' : '●'}</span><span>{current.muted ? 'Unmute' : 'Mute'}</span></button>
+        <button type="button" className="voice-control" onClick={chat}><span aria-hidden="true">▤</span><span>Chat</span><span className="visually-hidden"> — keep voice running</span></button>
+        <button type="button" className="voice-control voice-end" aria-label="End voice call" onClick={end}><span aria-hidden="true">×</span><span>End</span></button>
+      </footer>
+      <p className="voice-footer-note">{current.phase === 'speaking' ? 'Tap the orb or speak to interrupt.' : 'Chat keeps voice on. End stops it.'}</p>
+    </section>
   )
 }

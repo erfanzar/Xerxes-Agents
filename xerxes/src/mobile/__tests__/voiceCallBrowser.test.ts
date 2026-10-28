@@ -182,6 +182,41 @@ class FakeUtterance {
   constructor(readonly text: string) {}
 }
 
+describe('real playback-level metering', () => {
+  it('reads Web Audio output for the orb and stops the meter when playback is flushed', async () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const cancel = vi.fn()
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => { nextFrame = callback; return 1 }))
+    vi.stubGlobal('cancelAnimationFrame', cancel)
+    const analyser = { fftSize: 256, connect: vi.fn(), disconnect: vi.fn(), getFloatTimeDomainData: (samples: Float32Array) => samples.fill(0.125) }
+    const source = { buffer: undefined as unknown, connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null as (() => void) | null }
+    vi.stubGlobal('AudioContext', class {
+      state = 'running'
+      destination = {}
+      resume = async () => undefined
+      close = async () => undefined
+      createAnalyser = () => analyser
+      createBuffer = () => ({ getChannelData: () => new Float32Array(512) })
+      createBufferSource = () => source
+    })
+    const output = browserCallOutput()
+    const level = vi.fn()
+    output.onLevel?.(level)
+    const playing = output.play({ samples: new Float32Array(512), sampleRate: 16000 }, new AbortController().signal)
+    await Promise.resolve()
+    await Promise.resolve()
+    nextFrame?.(0)
+    expect(source.connect).toHaveBeenCalledWith(analyser)
+    expect(level).toHaveBeenCalledWith(0.5)
+    output.flush()
+    await playing
+    expect(level).toHaveBeenLastCalledWith(0)
+    expect(cancel).toHaveBeenCalled()
+    output.close()
+    expect(analyser.disconnect).toHaveBeenCalledOnce()
+  })
+})
+
 describe('local phone voice output', () => {
   function outputFixture(local: boolean) {
     const close = vi.fn(async () => undefined)

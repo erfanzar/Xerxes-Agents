@@ -12,6 +12,7 @@ import type { HubHttp } from './api.js'
 import type { PairingRead } from './pairing.js'
 import type { PushService } from './pwa/push.js'
 import { parseRoute, type Route, type Router } from './routes.js'
+import type { VoiceCallService } from './voice/call/service.js'
 
 /** Everything the pair page needs; the fragment was already read and cleared before render. */
 export interface PairEnv {
@@ -43,6 +44,8 @@ export interface AppServices {
   readonly now: () => number
   /** Injected by the voice phase. When absent the talk button is not rendered. */
   readonly voice?: VoiceControl | undefined
+  /** App-scoped phone call. MobileApp supplies it when the embedding host does not inject one. */
+  readonly call?: VoiceCallService
   readonly push?: PushService | undefined
   readonly pair?: PairEnv | undefined
   /** Browser image engine; tests inject a fake. */
@@ -59,6 +62,12 @@ export function useServices(): AppServices {
   const services = useContext(ServicesContext)
   if (services === null) throw new Error('useServices must be used inside ServicesProvider')
   return services
+}
+
+export function useCallService(): VoiceCallService {
+  const { call } = useServices()
+  if (!call) throw new Error('Voice UI requires the app-scoped call service.')
+  return call
 }
 
 export function useHubState(): HubState {

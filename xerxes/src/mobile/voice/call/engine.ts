@@ -19,6 +19,10 @@ export interface CallSnapshot {
   readonly notice?: string
   readonly error?: string
   readonly progress?: CallProgress
+  /** Display-only meters/caption; never used for VAD or turn decisions. */
+  readonly inputLevel?: number
+  readonly outputLevel?: number
+  readonly spokenSentence?: string
 }
 export interface CallOutput {
   unlock(): Promise<void>
@@ -26,6 +30,8 @@ export interface CallOutput {
   speak(text: string, signal: AbortSignal): Promise<void>
   flush(): void
   close(): void
+  /** Optional display-only output meter (PCM has real Web Audio levels; browser voices expose no PCM). */
+  onLevel?(listener: (level: number) => void): void
 }
 export interface CallEngineDeps {
   readonly capture: LiveCaptureDeps
@@ -67,6 +73,7 @@ export class CallEngine {
     try {
       const output = this.deps.output()
       this.output = output
+      output.onLevel?.(outputLevel => { if (!lifetime.signal.aborted) this.update({ outputLevel }) })
       await output.unlock()
       if (lifetime.signal.aborted) return
       const models = this.deps.models()
@@ -81,8 +88,14 @@ export class CallEngine {
       const splitter = new VadFrames()
       this.update({ phase: 'listening' })
       capture.onFrame(samples => {
+        if (lifetime.signal.aborted) return
+        // Display-only RMS: inference still receives the original, unmodified frames and uses Silero probabilities.
+        let energy = 0
+        for (const sample of samples) energy += sample * sample
+        const inputLevel = this.snapshot.muted ? 0 : Math.min(1, Math.sqrt(energy / Math.max(1, samples.length)) * 4)
+        if (Math.abs(inputLevel - (this.snapshot.inputLevel ?? 0)) > 0.01) this.update({ inputLevel })
         // Discard input during transcription/thinking rather than replaying stale microphone frames later.
-        if (lifetime.signal.aborted || this.snapshot.muted || !this.acceptsAudio()) return
+        if (this.snapshot.muted || !this.acceptsAudio()) return
         this.frames.push(...splitter.push(resampler.push(samples)))
         // Keep recent audio, not an unbounded latency backlog. A busy speech worker must never end the call.
         if (this.frames.length > 64) this.frames.splice(0, this.frames.length - 64)
@@ -164,10 +177,16 @@ export class CallEngine {
     try {
       for (const sentence of sentences) {
         if (speech.signal.aborted) break
-        if (this.snapshot.tier === 'light') await output.speak(sentence, speech.signal)
+        if (this.snapshot.tier === 'light') {
+          this.update({ spokenSentence: sentence })
+          await output.speak(sentence, speech.signal)
+        }
         else {
           const audio = await models.synthesize(sentence, speech.signal)
-          if (!speech.signal.aborted) await output.play(audio, speech.signal)
+          if (!speech.signal.aborted) {
+            this.update({ spokenSentence: sentence })
+            await output.play(audio, speech.signal)
+          }
         }
       }
     } catch (error) { if (!speech.signal.aborted) throw error } finally {
@@ -192,7 +211,7 @@ export class CallEngine {
       const text = (await models.transcribe(samples, turn.signal)).trim()
       if (turn.signal.aborted) return
       if (!text) { this.resetInput(); this.update({ phase: 'listening' }); return }
-      this.update({ heard: text, reply: '', phase: 'thinking' })
+      this.update({ heard: text, reply: '', spokenSentence: '', phase: 'thinking' })
       const reply = await this.deps.reply(text, turn.signal, () => {
         if (turn.signal.aborted || this.turn !== turn) return
         this.lateTurn = turn
@@ -214,9 +233,17 @@ export class CallEngine {
     }
   }
 
+  /** Local voice-view interrupt; does not cancel the supervisor turn or dispose the session. */
+  interrupt(): void {
+    if (this.snapshot.phase !== 'speaking') return
+    this.speech?.abort()
+    this.output?.flush()
+    this.resetInput()
+    this.update({ phase: 'listening', outputLevel: 0, spokenSentence: '' })
+  }
   mute(muted: boolean): void {
     this.resetInput()
-    this.update({ muted, ...(this.snapshot.phase === 'hearing' ? { phase: 'listening' as const } : {}) })
+    this.update({ muted, inputLevel: 0, ...(this.snapshot.phase === 'hearing' ? { phase: 'listening' as const } : {}) })
   }
   connectionLost(): void {
     if (this.snapshot.phase !== 'error' && this.snapshot.phase !== 'idle') this.hangup('Connection lost. The call ended; your messages remain in the thread.')
@@ -245,7 +272,7 @@ export class CallEngine {
     this.inputEpoch += 1
     this.frames = []
     this.vad.reset()
-    this.update({ phase: 'idle', muted: false, ...(notice ? { notice } : {}) })
+    this.update({ phase: 'idle', muted: false, inputLevel: 0, outputLevel: 0, spokenSentence: '', ...(notice ? { notice } : {}) })
   }
   private fail(error: unknown): void {
     this.hangup()

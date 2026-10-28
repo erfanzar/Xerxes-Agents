@@ -1,10 +1,23 @@
 # Call XERXES from your phone
 
-Open the phone app’s **Xerxes** tab, tap **Call**, choose a voice tier, then **Start call**.
-Allow microphone access. Speak naturally; after a short pause XERXES answers aloud. Speak for
-about a third of a second to interrupt its voice. **Mute** stops listening; **Hang up** releases
-the microphone, audio device and models. Escape or closing the call view also hangs up.
-If the tab stays hidden for 60 seconds, the call ends automatically.
+Open the phone app’s **Xerxes** tab and tap the round **waveform voice button next to Send**.
+The full-screen voice scene shows a glowing orb, a state line and short captions. Tap **Start
+voice** and allow microphone access. The small **settings gear** holds the Standard/Light picker
+and download sizes; choose a tier before starting. The first-call download notice stays visible
+until you start a call.
+
+Speak naturally; after a short pause XERXES answers aloud. The orb reacts to microphone audio
+and, in Standard mode, to actual playback levels. Light uses the phone’s built-in voice, whose
+PCM levels browsers do not expose, so it uses a speaking-state glow instead. Reduced-motion
+preferences disable the rotating/pulsing motion. Captions show what was just heard and the
+current spoken sentence. Speak for about a third of a second, or **tap the orb**, to interrupt.
+
+Bottom controls are **Mute**, **Chat**, and the red **End ×** button. **Chat** (or Escape) minimizes
+voice to a slim pill at the top of the Xerxes tab **without hanging up**. Voice keeps listening
+and speaking; you can read the normal thread and send typed messages. Tap the pill or composer
+voice button to return to the orb. Moving between app tabs also keeps the same call alive.
+Only **End**, a call error, leaving the app entirely, or hiding the browser tab for 60 seconds
+releases the microphone and models. The minimized pill has its own End button.
 
 The supervisor’s ordinary model must already be configured and the phone must be connected
 to the Hub over HTTPS. **No Hub speech-provider key or voice-provider configuration is needed.**

@@ -1,10 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, type ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
 import { connectionBanner, inboxCounts } from '../client/hubStore.js'
 import { AppLink } from './components/AppLink.js'
+import { AppCallHost } from './components/CallControls.js'
+import { browserVoiceCallService } from './voice/call/browser.js'
 import { InboxTab } from './components/Inbox.js'
 import { PairPage } from './components/PairPage.js'
 import { TaskTab } from './components/TaskTab.js'
@@ -93,9 +95,13 @@ function Shell(): ReactElement {
 }
 
 export function MobileApp({ services }: { services: AppServices }): ReactElement {
+  const [call] = useState(() => services.call ?? browserVoiceCallService(services.controller, services.store, services.voice))
+  const appServices = useMemo(() => ({ ...services, call }), [services, call])
+  useEffect(() => () => call.dispose(), [call])
   return (
-    <ServicesProvider services={services}>
+    <ServicesProvider services={appServices}>
       <Shell />
+      <AppCallHost />
     </ServicesProvider>
   )
 }

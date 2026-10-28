@@ -3,10 +3,12 @@
 
 import type { HubController } from '../../../client/hubController.js'
 import type { HubStore } from '../../../client/hubStore.js'
+import type { VoiceControl } from '../../../client/voiceControl.js'
 import { tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import { browserLiveCaptureDeps } from '../liveCapture.js'
 import { CallEngine, type CallOutput } from './engine.js'
-import { waitForCallReply } from './logic.js'
+import { fetchCallModelsStatus, waitForCallReply } from './logic.js'
+import { VoiceCallService } from './service.js'
 import type { CallModels, CallProgress, CallWorkerRequest, CallWorkerResponse } from './protocol.js'
 
 export const CALL_WORKER_URL = '/voice-call-worker.js'
@@ -130,6 +132,28 @@ export function browserCallModels(): CallModels {
 export function browserCallOutput(): CallOutput {
   const context = new AudioContext()
   const sources = new Map<AudioBufferSourceNode, () => void>()
+  const analyser = context.createAnalyser?.()
+  if (analyser) { analyser.fftSize = 256; analyser.connect(context.destination) }
+  const levels = new Float32Array(256)
+  let reportLevel: ((level: number) => void) | undefined
+  let meterFrame: number | undefined
+  const stopMeter = (): void => {
+    if (meterFrame !== undefined) cancelAnimationFrame(meterFrame)
+    meterFrame = undefined
+    reportLevel?.(0)
+  }
+  const startMeter = (): void => {
+    if (!analyser || !reportLevel || meterFrame !== undefined || typeof requestAnimationFrame === 'undefined') return
+    const tick = (): void => {
+      if (sources.size === 0) { stopMeter(); return }
+      analyser.getFloatTimeDomainData(levels)
+      let energy = 0
+      for (const sample of levels) energy += sample * sample
+      reportLevel?.(Math.min(1, Math.sqrt(energy / levels.length) * 4))
+      meterFrame = requestAnimationFrame(tick)
+    }
+    meterFrame = requestAnimationFrame(tick)
+  }
   let endSpeech: (() => void) | undefined
   const synth = typeof speechSynthesis === 'undefined' ? undefined : speechSynthesis
   const flush = (): void => {
@@ -138,6 +162,7 @@ export function browserCallOutput(): CallOutput {
       finish()
     }
     sources.clear()
+    stopMeter()
     synth?.cancel()
     endSpeech?.()
   }
@@ -166,7 +191,7 @@ export function browserCallOutput(): CallOutput {
       buffer.getChannelData(0).set(audio.samples)
       const source = context.createBufferSource()
       source.buffer = buffer
-      source.connect(context.destination)
+      source.connect(analyser ?? context.destination)
       await new Promise<void>(resolve => {
         let ended = false
         const finish = (): void => {
@@ -176,6 +201,7 @@ export function browserCallOutput(): CallOutput {
           source.onended = null
           source.disconnect()
           sources.delete(source)
+          if (sources.size === 0) stopMeter()
           resolve()
         }
         const abort = (): void => { try { source.stop() } catch { /* already ended */ }; finish() }
@@ -183,6 +209,7 @@ export function browserCallOutput(): CallOutput {
         sources.set(source, finish)
         signal.addEventListener('abort', abort, { once: true })
         source.start()
+        startMeter()
       })
     },
     async speak(text, signal) {
@@ -226,8 +253,9 @@ export function browserCallOutput(): CallOutput {
         synth.speak(utterance)
       })
     },
+    onLevel(listener) { reportLevel = listener },
     flush,
-    close() { flush(); void context.close().catch(() => undefined) },
+    close() { flush(); analyser?.disconnect(); reportLevel = undefined; void context.close().catch(() => undefined) },
   }
 }
 
@@ -248,5 +276,22 @@ export function browserCallEngine(controller: HubController, store: HubStore): C
         send: () => controller.supervisorSend(text, 'voice', messageId),
       })
     },
+  })
+}
+
+/** Created once by MobileApp; no worker/microphone is opened until Start voice is pressed. */
+export function browserVoiceCallService(controller: HubController, store: HubStore, voice?: VoiceControl): VoiceCallService {
+  const memory = typeof navigator === 'undefined' ? undefined : (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+  return new VoiceCallService({
+    engine: () => browserCallEngine(controller, store),
+    modelsStatus: signal => fetchCallModelsStatus(fetch, signal),
+    canStart: () => {
+      const state = store.getSnapshot()
+      return state.connection.state === 'live' && state.supervisor.phase === 'ready' && state.supervisorConfig.status !== 'unconfigured'
+    },
+    beforeStart: () => { voice?.cancel(); voice?.live?.stop(); voice?.interrupt?.(); void voice?.armReply?.(false) },
+    ...(memory === undefined ? {} : { deviceMemory: memory }),
+    noticeSeen: () => { try { return localStorage.getItem('xerxes-call-download-notice') === 'seen' } catch { return false } },
+    rememberNotice: () => { try { localStorage.setItem('xerxes-call-download-notice', 'seen') } catch { /* storage is optional */ } },
   })
 }

@@ -16,7 +16,7 @@ import { ModelChooser, ModelSheet } from './ModelChooser.js'
 import { Markdown } from './Markdown.js'
 import { TalkButton } from './TalkButton.js'
 import { VoiceStatus } from './VoiceStatus.js'
-import { CallView } from './CallView.js'
+import { CallPill, ComposerVoiceButton } from './CallControls.js'
 
 export const SUPERVISOR_UNAVAILABLE = 'Supervisor not available on this hub'
 
@@ -110,7 +110,6 @@ export function XerxesTab(): ReactElement {
   const [autopilotSheet, setAutopilotSheet] = useState(false)
   const [threadView, setThreadView] = useState(false)
   const [watchSheet, setWatchSheet] = useState(false)
-  const [call, setCall] = useState(false)
   const autopilotChip = autopilotChipText(activeAutopilotRows(state))
   const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
@@ -142,6 +141,7 @@ export function XerxesTab(): ReactElement {
 
   return (
     <section aria-labelledby="xerxes-title">
+      <CallPill />
       <h1 id="xerxes-title" className="page-title">{supervisorHeading(config.config)}</h1>
       {supervisor.phase === 'unsupported' ? (
         <div role="status" className="empty-state">
@@ -156,9 +156,7 @@ export function XerxesTab(): ReactElement {
         </div>
       ) : (
         <>
-          {call ? <CallView onClose={() => setCall(false)} /> : null}
           <div className="config-row">
-            <button type="button" className="btn btn-primary" aria-haspopup="dialog" disabled={!live || supervisor.phase !== 'ready' || unconfigured} onClick={() => setCall(true)}>Call</button>
             <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setSheet(true)}>{config.canEdit ? 'Model' : 'Model (view)'}</button>
             {state.autopilot.unsupported ? null : (
               <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setAutopilotSheet(true)}>{state.autopilot.canEdit || state.autopilot.phase !== 'ready' ? 'Autopilot' : 'Autopilot (view)'}</button>
@@ -224,6 +222,7 @@ export function XerxesTab(): ReactElement {
             </label>
             <div className="composer-row">
               <TalkButton voice={voice} onTranscript={spoken => { update(text === '' ? spoken : `${text} ${spoken}`); setFromVoice(true) }} />
+              <ComposerVoiceButton />
               <button type="submit" className="btn btn-primary" disabled={supervisor.phase !== 'ready' || !live || supervisor.busy || text.trim() === ''}>{supervisor.busy ? 'Sending…' : 'Send'}</button>
             </div>
           </form>
