@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createHubStore } from '../../client/hubStore.js'
-import { browserCallModels, browserCallOutput, browserVoiceCallService } from '../voice/call/browser.js'
+import { browserCallModels, browserCallOutput, browserVoiceCallService, SPEECH_RESTART_TIMEOUT_MS } from '../voice/call/browser.js'
 import { liveState, stubController } from './helpers.js'
 import type { CallWorkerRequest, CallWorkerResponse } from '../voice/call/protocol.js'
 import { browserLiveCaptureDeps } from '../voice/liveCapture.js'
@@ -144,6 +144,161 @@ describe('call worker browser adapter', () => {
     FakeWorker.instances[0]!.onerror?.({ preventDefault() {} } as ErrorEvent)
     await expect(loading).rejects.toThrow('worker stopped')
     model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+  })
+})
+
+const flushWorkerJobs = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve() }
+
+async function loadedSpeechFixture() {
+  vi.useFakeTimers()
+  vi.setSystemTime(0)
+  vi.stubGlobal('Worker', FakeWorker)
+  const model = browserCallModels()
+  const original = FakeWorker.current
+  const vad = FakeWorker.instances[0]!
+  const loading = model.load('standard', () => undefined, new AbortController().signal)
+  vad.reply({ id: vad.messages.at(-1)!.id, type: 'loaded', tier: 'standard' })
+  await flushWorkerJobs()
+  original.reply({ id: original.messages.at(-1)!.id, type: 'loaded', tier: 'standard' })
+  await loading
+  return { model, original, vad }
+}
+
+async function recoverDroppedClip(model: ReturnType<typeof browserCallModels>): Promise<FakeWorker> {
+  const previous = FakeWorker.current
+  const pending = model.transcribe(new Float32Array(64_000), new AbortController().signal)
+  previous.reply({ id: previous.messages.at(-1)!.id, type: 'restart-speech' })
+  await flushWorkerJobs()
+  const fresh = FakeWorker.current
+  fresh.reply({ id: fresh.messages.at(-1)!.id, type: 'loaded', tier: 'standard' })
+  await expect(pending).resolves.toBeNull()
+  return fresh
+}
+
+describe('poisoned WASM speech-runtime recovery', () => {
+  it('drops a failed mid-call utterance, terminates the poisoned worker immediately and reloads both STT/Kokoro, preserving VAD and speech output', async () => {
+    const f = await loadedSpeechFixture()
+    const restarting = vi.fn()
+    const progress = vi.fn()
+    const pending = f.model.transcribe(new Float32Array(64_000), new AbortController().signal, { restarting, progress })
+    f.original.reply({ id: f.original.messages.at(-1)!.id, type: 'restart-speech' })
+    await flushWorkerJobs()
+    const fresh = FakeWorker.current
+    expect(fresh).not.toBe(f.original)
+    expect(f.original.terminate).toHaveBeenCalledOnce()
+    expect(f.vad.terminate).not.toHaveBeenCalled()
+    expect(restarting).toHaveBeenCalledOnce()
+    expect(fresh.messages).toEqual([{ id: 1, type: 'load', tier: 'standard', forceWasm: true }])
+    fresh.reply({ id: 1, type: 'progress', progress: { loaded: 12, total: 20 } })
+    expect(progress).toHaveBeenCalledWith({ loaded: 12, total: 20 })
+    fresh.reply({ id: 1, type: 'loaded', tier: 'standard' })
+    await expect(pending).resolves.toBeNull()
+    expect(fresh.messages.some(message => message.type === 'transcribe')).toBe(false)
+    const audio = { samples: new Float32Array(240), sampleRate: 24000 }
+    const spoken = f.model.synthesize('Speech still works.', new AbortController().signal)
+    fresh.reply({ id: fresh.messages.at(-1)!.id, type: 'audio', audio })
+    await expect(spoken).resolves.toEqual(audio)
+    const next = f.model.transcribe(new Float32Array(16_000), new AbortController().signal)
+    fresh.reply({ id: fresh.messages.at(-1)!.id, type: 'transcript', text: 'The next utterance works.' })
+    await expect(next).resolves.toBe('The next utterance works.')
+    expect(f.vad.messages.filter(message => message.type === 'load')).toHaveLength(1)
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+    for (const worker of FakeWorker.instances) expect(worker.terminate).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('stops on the third restart request within 60 seconds instead of allocating more workers', async () => {
+    const f = await loadedSpeechFixture()
+    await recoverDroppedClip(f.model)
+    await recoverDroppedClip(f.model)
+    const current = FakeWorker.current
+    const pending = f.model.transcribe(new Float32Array(64_000), new AbortController().signal)
+    const assertion = expect(pending).rejects.toThrow('3 restarts within 60 seconds')
+    current.reply({ id: current.messages.at(-1)!.id, type: 'restart-speech' })
+    await assertion
+    expect(FakeWorker.instances).toHaveLength(4) // one VAD + original speech + two fresh speech workers
+    expect(current.terminate).toHaveBeenCalledOnce()
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+    for (const worker of FakeWorker.instances) expect(worker.terminate).toHaveBeenCalledOnce()
+  })
+  it('expires old restarts in a rolling 60-second window', async () => {
+    const f = await loadedSpeechFixture()
+    await recoverDroppedClip(f.model)
+    await recoverDroppedClip(f.model)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await recoverDroppedClip(f.model)
+    expect(FakeWorker.instances).toHaveLength(5)
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+  })
+  it.each([false, true])('hang-up/cancellation during a restart kills the replacement and ignores late load/transcript responses (dispose: %s)', async dispose => {
+    const f = await loadedSpeechFixture()
+    const abort = new AbortController()
+    const progress = vi.fn()
+    const pending = f.model.transcribe(new Float32Array(64_000), abort.signal, { restarting: vi.fn(), progress })
+    const assertion = expect(pending).rejects.toThrow(/Call (?:ended|cancelled)/u)
+    f.original.reply({ id: f.original.messages.at(-1)!.id, type: 'restart-speech' })
+    await flushWorkerJobs()
+    const fresh = FakeWorker.current
+    const late = fresh.onmessage
+    const loadId = fresh.messages.at(-1)!.id
+    if (dispose) f.model.dispose()
+    else abort.abort()
+    await assertion
+    expect(fresh.terminate).toHaveBeenCalledOnce()
+    late?.(new MessageEvent('message', { data: { id: loadId, type: 'progress', progress: { loaded: 20, total: 20 } } }))
+    late?.(new MessageEvent('message', { data: { id: loadId, type: 'loaded', tier: 'standard' } }))
+    late?.(new MessageEvent('message', { data: { id: loadId, type: 'transcript', text: 'Stale' } }))
+    expect(progress).not.toHaveBeenCalled()
+    expect(FakeWorker.instances).toHaveLength(3)
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+    for (const worker of FakeWorker.instances) expect(worker.terminate).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('ignores stale transcripts from the old worker even when request IDs collide with the replacement', async () => {
+    const f = await loadedSpeechFixture()
+    const oldHandler = f.original.onmessage
+    const fresh = await recoverDroppedClip(f.model)
+    const pending = f.model.transcribe(new Float32Array(16_000), new AbortController().signal)
+    const id = fresh.messages.at(-1)!.id
+    let settled = false
+    void pending.then(() => { settled = true })
+    oldHandler?.(new MessageEvent('message', { data: { id, type: 'transcript', text: 'Wrong worker, same ID.' } }))
+    await flushWorkerJobs()
+    expect(settled).toBe(false)
+    fresh.reply({ id, type: 'transcript', text: 'Fresh worker transcript.' })
+    await expect(pending).resolves.toBe('Fresh worker transcript.')
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+  })
+  it('fails clearly and kills a replacement whose reload never finishes', async () => {
+    const f = await loadedSpeechFixture()
+    const pending = f.model.transcribe(new Float32Array(64_000), new AbortController().signal)
+    const assertion = expect(pending).rejects.toThrow('too long to restart. Choose Light mode')
+    f.original.reply({ id: f.original.messages.at(-1)!.id, type: 'restart-speech' })
+    await flushWorkerJobs()
+    const fresh = FakeWorker.current
+    await vi.advanceTimersByTimeAsync(SPEECH_RESTART_TIMEOUT_MS)
+    await assertion
+    expect(fresh.terminate).toHaveBeenCalledOnce()
+    f.model.dispose()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not silently switch to Light if Kokoro fails to reload mid-call', async () => {
+    const f = await loadedSpeechFixture()
+    const pending = f.model.transcribe(new Float32Array(64_000), new AbortController().signal)
+    const assertion = expect(pending).rejects.toThrow('Speech output could not reload. Choose Light mode')
+    f.original.reply({ id: f.original.messages.at(-1)!.id, type: 'restart-speech' })
+    await flushWorkerJobs()
+    const fresh = FakeWorker.current
+    fresh.reply({ id: fresh.messages.at(-1)!.id, type: 'loaded', tier: 'light' })
+    await assertion
+    expect(fresh.terminate).toHaveBeenCalledOnce()
+    f.model.dispose()
     await vi.advanceTimersByTimeAsync(2000)
   })
 })

@@ -20,15 +20,23 @@ export type CallWorkerResponse =
   | { readonly id: number; readonly type: 'probability'; readonly probability: number }
   | { readonly id: number; readonly type: 'transcript'; readonly text: string }
   | { readonly id: number; readonly type: 'retry-wasm' }
+  /** WASM inference poisoned this runtime. Drop the utterance and replace the entire speech worker. */
+  | { readonly id: number; readonly type: 'restart-speech' }
   | { readonly id: number; readonly type: 'audio'; readonly audio: CallAudio }
   | { readonly id: number; readonly type: 'done' }
   | { readonly id: number; readonly type: 'error'; readonly message: string }
+
+export interface CallTranscriptionRecovery {
+  restarting(): void
+  progress(value: CallProgress): void
+}
 
 export interface CallModels {
   load(tier: VoiceModelTier, progress: (value: CallProgress) => void, signal: AbortSignal): Promise<{ tier: VoiceModelTier; notice?: string }>
   vad(frame: Float32Array, signal: AbortSignal): Promise<number>
   resetVad(): void
-  transcribe(samples: Float32Array, signal: AbortSignal): Promise<string>
+  /** Null means a failed utterance was dropped after successfully replacing the speech runtime. */
+  transcribe(samples: Float32Array, signal: AbortSignal, recovery?: CallTranscriptionRecovery): Promise<string | null>
   synthesize(text: string, signal: AbortSignal): Promise<CallAudio>
   /** Cancels pending RPCs, requests model disposal, then terminates the worker (also frees a still-loading model). */
   dispose(): void

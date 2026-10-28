@@ -68,6 +68,20 @@ older Hubs use the next new non-wake supervisor reply. Autopilot/Watch wake mess
 The microphone queue drops old frames rather than ending a call when busy. A VAD worker that
 fails to answer for 10 seconds ends the call with a specific error.
 
+If on-phone WASM recognition fails (including a bare numeric ONNX error), that utterance is
+**dropped**, never replayed or sent as a partial message. The call briefly shows “Didn't catch
+that — restoring speech…” and **replaces the whole speech worker**, reloading both Moonshine
+and Kokoro from the browser’s model cache. Recreating a pipeline in the same worker is not
+sufficient: an ONNX failure can poison the runtime. VAD and the microphone stay open; input
+received during the short reload is discarded, and “Didn't catch that — say it again” appears
+when listening resumes. A loading/progress state is shown only if recovery takes more than
+750 ms. Speech output uses the freshly reloaded Kokoro, not the failed runtime.
+
+The third recovery request within a rolling 60 seconds ends the call with a clear suggestion
+to choose **Light**. A reload that fails, changes tier, or takes more than 30 seconds also ends
+the call with a Light-mode error. End/cancellation kills an in-progress replacement worker;
+late worker results cannot submit a transcript or restart a call after hang-up.
+
 Code blocks, URLs and Markdown markup are omitted from speech. Long replies are shortened to
 4,000 characters, spoken in bounded sentences as audio becomes ready; the complete response
 stays on screen. Interrupting cancels local playback and pending synthesis, **not** the task or

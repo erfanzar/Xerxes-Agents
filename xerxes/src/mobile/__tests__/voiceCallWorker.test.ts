@@ -93,19 +93,39 @@ describe('call inference worker with fake transformers and Kokoro', () => {
     expect(fake.pipeline).toHaveBeenCalledWith('automatic-speech-recognition', VOICE_MODELS.stt_base.repo, expect.objectContaining({ device: 'wasm' }))
     expect(fake.pipeline).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ device: 'webgpu' }))
     fake.stt.mockRejectedValueOnce(new Error('inference failed'))
-    // A WASM failure is a plain error, never a WebGPU-recovery loop.
-    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'error' })
+    // A WASM failure drops the clip and replaces the whole runtime; never retry it in this worker.
+    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'restart-speech' })
     expect(fake.pipeline).toHaveBeenCalledTimes(1)
     await dispatch({ id: 3, type: 'dispose' })
     expect(fake.stt.dispose).toHaveBeenCalledOnce()
   })
-  it('honors forced WASM recovery and does not loop when that inference also fails', async () => {
+  it('honors forced WASM and requests a fresh runtime instead of rebuilding the poisoned pipeline', async () => {
     await dispatch({ id: 1, type: 'load', tier: 'light', forceWasm: true })
     expect(fake.pipeline).toHaveBeenCalledWith('automatic-speech-recognition', VOICE_MODELS.stt_tiny.repo, expect.objectContaining({ device: 'wasm' }))
     fake.stt.mockRejectedValueOnce(new Error('WASM failed'))
-    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'error' })
+    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(16_000) })).toMatchObject({ type: 'restart-speech' })
     expect(fake.stt).toHaveBeenCalledTimes(1)
     expect(fake.pipeline).toHaveBeenCalledTimes(1)
+  })
+  it('handles bare numeric ONNX exceptions as a recoverable dropped utterance without echoing them', async () => {
+    await dispatch({ id: 1, type: 'load', tier: 'standard' })
+    fake.stt.mockRejectedValueOnce(72549904)
+    expect(await dispatch({ id: 2, type: 'transcribe', samples: new Float32Array(64_000) })).toEqual({ id: 2, type: 'restart-speech' })
+    expect(fake.pipeline).toHaveBeenCalledOnce()
+    expect(fake.stt).toHaveBeenCalledOnce()
+    expect(messages.some(message => message.type === 'error')).toBe(false)
+  })
+  it.each(['cancel', 'dispose'] as const)('does not emit a late transcript/restart after %s during blocked inference', async action => {
+    await dispatch({ id: 1, type: 'load', tier: 'standard' })
+    let finish = (_value: { text: string }): void => undefined
+    fake.stt.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    send({ id: 2, type: 'transcribe', samples: new Float32Array(64_000) })
+    await ticks()
+    send(action === 'cancel' ? { id: 2, type: 'cancel' } : { id: 3, type: 'dispose' })
+    finish({ text: 'Stale speech' })
+    await ticks()
+    expect(messages.some(message => message.id === 2)).toBe(false)
+    if (action === 'dispose') expect(messages).toContainEqual({ id: 3, type: 'done' })
   })
   it('pins Kokoro’s model AND tokenizer revisions, primes only af_heart, and returns 24 kHz PCM', async () => {
     await dispatch({ id: 1, type: 'load', tier: 'standard' })

@@ -7,9 +7,9 @@ import { prepareCallSpeech } from '../../client/callSpeech.js'
 import { parseSupervisorMessage } from '../../client/hubParsers.js'
 import { VOICE_MODELS, tierDownloadBytes, voiceModelFileUrlPath, type VoiceModelTier } from '../../client/voiceModelManifest.js'
 import { fetchDecision } from '../pwa/swCore.js'
-import { CallEngine, type CallOutput } from '../voice/call/engine.js'
+import { CALL_DIDNT_CATCH, CallEngine, SPEECH_RESTART_LOADING_DELAY_MS, type CallOutput } from '../voice/call/engine.js'
 import { CALL_SAMPLE_RATE, CallResampler, VadFrames, VadSegmenter, callFetchUrl, chooseCallTier, createCallFetch, fetchCallModelsStatus, matchCallReply, waitForCallReply, type CallReply } from '../voice/call/logic.js'
-import type { CallModels } from '../voice/call/protocol.js'
+import type { CallModels, CallTranscriptionRecovery } from '../voice/call/protocol.js'
 import type { LiveCapture } from '../voice/liveCapture.js'
 
 const frame = (value = 0): Float32Array => new Float32Array(512).fill(value)
@@ -235,6 +235,98 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     expect(f.output.close).toHaveBeenCalledOnce()
     expect(f.playbackSignal()?.aborted).toBe(true)
     expect(f.engine.getSnapshot().phase).toBe('idle')
+  })
+  it('drops an utterance after a fast speech-runtime recovery, stays loaded/listening, and transcribes/speaks the next one', async () => {
+    vi.useFakeTimers()
+    const f = callFixture()
+    f.engine.setDebugCaptureEnabled(true)
+    await f.engine.start('standard')
+    const phases: string[] = []
+    f.engine.subscribe(() => phases.push(f.engine.getSnapshot().phase))
+    vi.mocked(f.model.transcribe).mockImplementationOnce(async (_samples, _signal, recovery) => { recovery?.restarting(); return null })
+    await f.utterance()
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'listening', notice: CALL_DIDNT_CATCH })
+    expect(phases).not.toContain('loading')
+    expect(f.engine.getSnapshot().debugCapture?.transcript).toBe('')
+    expect(f.reply).not.toHaveBeenCalled()
+    expect(f.close).not.toHaveBeenCalled()
+    expect(f.model.dispose).not.toHaveBeenCalled()
+    await f.utterance()
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'speaking', heard: 'What needs me?', notice: '' })
+    expect(f.reply).toHaveBeenCalledOnce()
+    expect(f.model.synthesize).toHaveBeenCalledOnce()
+    expect(f.output.play).toHaveBeenCalledOnce()
+    f.engine.hangup()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('shows restart loading/progress only after 750 ms, then resumes listening without reopening the mic', async () => {
+    vi.useFakeTimers()
+    const f = callFixture()
+    let complete = (_text: string | null): void => undefined
+    let callbacks: CallTranscriptionRecovery | undefined
+    vi.mocked(f.model.transcribe).mockImplementationOnce((_samples, _signal, recovery) => {
+      callbacks = recovery
+      recovery?.restarting()
+      return new Promise<string | null>(resolve => { complete = resolve })
+    })
+    await f.engine.start('standard')
+    await f.utterance()
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'transcribing', notice: "Didn't catch that — restoring speech…" })
+    callbacks?.progress({ loaded: 100, total: 200 })
+    await vi.advanceTimersByTimeAsync(SPEECH_RESTART_LOADING_DELAY_MS - 1)
+    expect(f.engine.getSnapshot().phase).toBe('transcribing')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'loading', progress: { loaded: 100, total: 200 } })
+    callbacks?.progress({ loaded: 180, total: 200 })
+    expect(f.engine.getSnapshot().progress?.loaded).toBe(180)
+    complete(null)
+    await settle()
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'listening', notice: CALL_DIDNT_CATCH })
+    callbacks?.restarting() // Stale callbacks from this completed recovery cannot change the next state.
+    callbacks?.progress({ loaded: 0, total: 200 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(f.engine.getSnapshot().phase).toBe('listening')
+    expect(f.close).not.toHaveBeenCalled()
+    f.engine.hangup()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('hang-up during a speech restart cancels the delayed UI and ignores late progress/completion', async () => {
+    vi.useFakeTimers()
+    const f = callFixture()
+    let complete = (_text: string | null): void => undefined
+    let callbacks: CallTranscriptionRecovery | undefined
+    let signal: AbortSignal | undefined
+    vi.mocked(f.model.transcribe).mockImplementationOnce((_samples, abort, recovery) => {
+      signal = abort
+      callbacks = recovery
+      recovery?.restarting()
+      return new Promise<string | null>(resolve => { complete = resolve })
+    })
+    await f.engine.start('standard')
+    await f.utterance()
+    f.engine.hangup()
+    expect(signal?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    callbacks?.restarting()
+    callbacks?.progress({ loaded: 1, total: 1 })
+    complete('A late transcript must not be sent.')
+    await settle()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(f.engine.getSnapshot().phase).toBe('idle')
+    expect(f.reply).not.toHaveBeenCalled()
+    expect(f.close).toHaveBeenCalledOnce()
+    expect(f.model.dispose).toHaveBeenCalledOnce()
+  })
+  it('ends the call and preserves a clear Light-mode error when the restart budget is exhausted', async () => {
+    const f = callFixture()
+    await f.engine.start('standard')
+    vi.mocked(f.model.transcribe).mockRejectedValueOnce(new Error('Speech recognition needed 3 restarts within 60 seconds. End this call and choose Light mode.'))
+    await f.utterance()
+    expect(f.engine.getSnapshot()).toMatchObject({ phase: 'error', error: expect.stringContaining('choose Light mode') })
+    expect(f.close).toHaveBeenCalledOnce()
+    expect(f.model.dispose).toHaveBeenCalledOnce()
+    expect(f.output.close).toHaveBeenCalledOnce()
+    expect(f.reply).not.toHaveBeenCalled()
   })
   it('does not retain debug audio by default', async () => {
     const f = callFixture()

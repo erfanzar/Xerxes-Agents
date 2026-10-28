@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { prepareCallSpeech } from '../../../client/callSpeech.js'
-import type { VoiceModelTier } from '../../../client/voiceModelManifest.js'
+import { tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import type { LiveCapture, LiveCaptureDeps } from '../liveCapture.js'
 import { createDebugCapture, type CallDebugCapture } from './debugCapture.js'
 import { CallResampler, VadFrames, VadSegmenter, type CallReply, type VadUtteranceOffsets } from './logic.js'
@@ -10,6 +10,8 @@ import type { CallAudio, CallModels, CallProgress } from './protocol.js'
 
 export const VAD_RESPONSE_TIMEOUT_MS = 10_000
 export const CALL_STILL_WORKING = "XERXES is still working; I'll read the reply when it arrives."
+export const CALL_DIDNT_CATCH = "Didn't catch that — say it again."
+export const SPEECH_RESTART_LOADING_DELAY_MS = 750
 export type CallPhase = 'idle' | 'loading' | 'listening' | 'hearing' | 'transcribing' | 'thinking' | 'speaking' | 'error'
 export interface CallSnapshot {
   readonly phase: CallPhase
@@ -211,15 +213,40 @@ export class CallEngine {
     this.turn = turn
     const abort = (): void => turn.abort()
     lifetime.signal.addEventListener('abort', abort, { once: true })
+    let reloadTimer: ReturnType<typeof setTimeout> | undefined
+    let reloadProgress: CallProgress = { loaded: 0, total: tierDownloadBytes(this.snapshot.tier) }
+    const stopReloadTimer = (): void => { if (reloadTimer !== undefined) clearTimeout(reloadTimer); reloadTimer = undefined }
+    turn.signal.addEventListener('abort', stopReloadTimer, { once: true })
     try {
       const debugEpoch = ++this.debugEpoch
       this.update({ phase: 'transcribing', debugCapture: this.keepDebugUtterance ? createDebugCapture(samples, offsets) : undefined })
-      const transcript = await models.transcribe(samples, turn.signal)
+      const transcript = await models.transcribe(samples, turn.signal, {
+        restarting: () => {
+          if (turn.signal.aborted || this.turn !== turn) return
+          this.resetInput()
+          this.update({ notice: "Didn't catch that — restoring speech…", spokenSentence: '' })
+          stopReloadTimer()
+          reloadTimer = setTimeout(() => {
+            if (!turn.signal.aborted && this.turn === turn) this.update({ phase: 'loading', progress: reloadProgress })
+          }, SPEECH_RESTART_LOADING_DELAY_MS)
+        },
+        progress: progress => {
+          if (turn.signal.aborted || this.turn !== turn) return
+          reloadProgress = progress
+          if (this.snapshot.phase === 'loading') this.update({ progress })
+        },
+      })
+      stopReloadTimer()
       if (turn.signal.aborted) return
-      if (debugEpoch === this.debugEpoch && this.snapshot.debugCapture) this.update({ debugCapture: { ...this.snapshot.debugCapture, transcript } })
+      if (debugEpoch === this.debugEpoch && this.snapshot.debugCapture) this.update({ debugCapture: { ...this.snapshot.debugCapture, transcript: transcript ?? '' } })
+      if (transcript === null) {
+        this.resetInput()
+        this.update({ phase: 'listening', notice: CALL_DIDNT_CATCH })
+        return
+      }
       const text = transcript.trim()
       if (!text) { this.resetInput(); this.update({ phase: 'listening' }); return }
-      this.update({ heard: text, reply: '', spokenSentence: '', phase: 'thinking' })
+      this.update({ heard: text, reply: '', spokenSentence: '', phase: 'thinking', notice: '' })
       const reply = await this.deps.reply(text, turn.signal, () => {
         if (turn.signal.aborted || this.turn !== turn) return
         this.lateTurn = turn
@@ -235,6 +262,8 @@ export class CallEngine {
       this.update({ reply: reply.text })
       await this.say(reply.text, turn)
     } catch (error) { if (!turn.signal.aborted) this.fail(error) } finally {
+      stopReloadTimer()
+      turn.signal.removeEventListener('abort', stopReloadTimer)
       lifetime.signal.removeEventListener('abort', abort)
       if (this.turn === turn) this.turn = undefined
       if (this.lateTurn === turn) this.lateTurn = undefined

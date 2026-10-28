@@ -88,11 +88,11 @@ async function handle(request: CallWorkerRequest): Promise<void> {
     if (!stt || request.samples.length > 480_000) throw new Error('Transcription not ready or audio too long.')
     let result
     try { result = await stt(request.samples, { max_new_tokens: 256 }) } catch (error) {
-      if (sttDevice !== 'webgpu' || cancelled.has(request.id) || stopping) throw error
-      // transformers.js chains inference promises internally. An execution error can poison that chain;
-      // ask the page to retry once in a fresh WASM speech worker rather than reusing this runtime.
+      if (cancelled.has(request.id) || stopping) throw error
+      // Both transformers' inference chain and ONNX's WASM runtime can stay poisoned after an error
+      // (including bare numeric exceptions). Recreating a pipeline in this worker is not recovery.
       await yieldToMessages()
-      emit({ id: request.id, type: 'retry-wasm' })
+      emit({ id: request.id, type: sttDevice === 'webgpu' ? 'retry-wasm' : 'restart-speech' })
       return
     }
     await yieldToMessages()
