@@ -533,6 +533,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
           service = createHubService({
             paths, signer, identity, lifecycle: handle,
             voiceModelsEnvironment: environment,
+            prefetchVoiceModels: true,
             exposure: exposureConfigFromEnvironment(environment),
             supervisor: supervisorConfigFromEnvironment(environment),
             ...(voice === undefined ? {} : { voice }),

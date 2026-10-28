@@ -61,6 +61,7 @@ export class HubVoiceModelStore {
   private readonly shutdown = new AbortController()
   private readonly waiters = new Set<() => void>()
   private active = 0
+  private prefetching: Promise<void> | undefined
 
   constructor(private readonly options: HubVoiceModelStoreOptions) {
     const env = options.environment ?? process.env
@@ -126,7 +127,8 @@ export class HubVoiceModelStore {
     const signal = AbortSignal.any([this.shutdown.signal, controller.signal])
     const job = this.withSlot(signal, () => this.prepare(resolved, path, signal)).catch((error: unknown) => {
       const sanitized = error instanceof VoiceModelsUnavailable ? error : new VoiceModelsUnavailable()
-      this.options.onError?.(sanitized, 'voice model download')
+      // A download the store itself cancelled while closing is not a failure worth reporting.
+      if (!this.shutdown.signal.aborted) this.options.onError?.(sanitized, 'voice model download')
       throw sanitized
     }).finally(() => { clearTimeout(timer); this.pending.delete(path) })
     this.pending.set(path, job)
@@ -164,9 +166,33 @@ export class HubVoiceModelStore {
     } finally { clearTimeout(timer) }
   }
 
+  /**
+   * Download and verify every pinned file of `tier` in the background, one file at a time
+   * (the second download slot stays free for a phone's own request). A failed pass is retried
+   * after `backoffMs` (the last value repeats) until every file is ready or the store closes.
+   * Failures reach `onError` through `get`; this never rejects. Concurrent calls share one run.
+   */
+  prefetch(tier: VoiceModelTier | 'all' = 'all', backoffMs: readonly number[] = PREFETCH_BACKOFF_MS): Promise<void> {
+    if (!this.enabled || this.shutdown.signal.aborted || backoffMs.length === 0) return Promise.resolve()
+    this.prefetching ??= this.runPrefetch(tier, backoffMs).finally(() => { this.prefetching = undefined })
+    return this.prefetching
+  }
+
+  private async runPrefetch(tier: VoiceModelTier | 'all', backoffMs: readonly number[]): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      let failed = false
+      for (const resolved of this.files(tier)) {
+        if (this.shutdown.signal.aborted) return
+        try { await this.get(resolved) } catch { failed = true }
+      }
+      if (!failed || this.shutdown.signal.aborted) return
+      await pause(backoffMs[Math.min(attempt, backoffMs.length - 1)]!, this.shutdown.signal)
+    }
+  }
+
   async close(): Promise<void> {
     this.shutdown.abort()
-    await Promise.allSettled([...this.pending.values()])
+    await Promise.allSettled([...this.pending.values(), ...(this.prefetching ? [this.prefetching] : [])])
   }
 
   private async withSlot<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
@@ -291,6 +317,21 @@ export class HubVoiceModelStore {
     }
     throw new VoiceModelsUnavailable('Model download exceeded the redirect limit.')
   }
+}
+
+/** Retry delays for a failed background prefetch pass: 30 s, 2 min, 10 min, then hourly. */
+export const PREFETCH_BACKOFF_MS: readonly number[] = Object.freeze([30_000, 120_000, 600_000, 3_600_000])
+
+/** Wait `ms`, or less if `signal` aborts first. Never rejects and never keeps the process alive. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) { resolve(); return }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const done = (): void => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve() }
+    timer = setTimeout(done, ms)
+    timer.unref?.()
+    signal.addEventListener('abort', done, { once: true })
+  })
 }
 
 function releaseReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {

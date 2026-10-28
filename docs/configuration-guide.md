@@ -201,8 +201,12 @@ provider-backed voice is unavailable, its WebSocket path is not served.
 
 **On-phone call models** are separate: the Hub serves Silero VAD, Moonshine STT and
 Kokoro TTS to signed-in phones, which run inference locally. This model cache does
-not require voice provider keys or `XERXES_HUB_VOICE_ENABLED`. Models are fetched on
-first use, or can be downloaded beforehand without starting or restarting the Hub:
+not require voice provider keys or `XERXES_HUB_VOICE_ENABLED`. `xerxes hub` downloads and
+verifies every model by itself in the background once it is serving: one file at a time, so a
+phone's own request is never queued behind it, retrying a failed pass after 30 s, 2 min, 10 min,
+then hourly until all files are ready. Nothing needs to be run by hand. A file a phone asks for
+before the background download reaches it is fetched on demand. The commands below are only for
+checking status or forcing a download outside a running Hub:
 
 ```bash
 xerxes hub voice-models fetch --tier standard --json

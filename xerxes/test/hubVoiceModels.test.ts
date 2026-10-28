@@ -460,3 +460,70 @@ describe('Hub voice-models CLI', () => {
     expect(stderr).toEqual(['Model downloads are disabled.'])
   })
 })
+
+describe('Hub voice model background prefetch', () => {
+  test('downloads and verifies every pinned file, one at a time, then reports ready', async () => {
+    let active = 0, peak = 0
+    const f = await fixtureStore({ fetch: async url => {
+      f.calls.push(url); active += 1; peak = Math.max(peak, active)
+      await Bun.sleep(2); active -= 1
+      return new Response(bytes)
+    } })
+    await f.store.prefetch('all', [10])
+    const total = f.store.files('all').length
+    expect(new Set(f.calls).size).toBe(total)
+    expect(peak).toBe(1) // the second download slot stays free for a phone's own request
+    const status = await f.store.status()
+    expect(status.tiers.standard.ready && status.tiers.light.ready).toBe(true)
+  })
+
+  test('retries a failed pass after the backoff and stops once everything is ready', async () => {
+    let failures = 2
+    const f = await fixtureStore({ fetch: async url => {
+      f.calls.push(url)
+      if (failures > 0) { failures -= 1; return new Response('gone', { status: 503 }) }
+      return new Response(bytes)
+    }, onError: () => undefined })
+    await f.store.prefetch('light', [5])
+    expect((await f.store.status()).tiers.light.ready).toBe(true)
+    const callsAfter = f.calls.length
+    await f.store.prefetch('light', [5]) // already cached: no new downloads
+    expect(f.calls.length).toBe(callsAfter)
+  })
+
+  test('close ends a prefetch that is waiting out its backoff; disabled stores never fetch', async () => {
+    const f = await fixtureStore({ fetch: async url => { f.calls.push(url); return new Response('down', { status: 503 }) }, onError: () => undefined })
+    const running = f.store.prefetch('light', [60_000])
+    await until(() => f.calls.length > 0)
+    const started = Date.now()
+    await f.store.close()
+    await running
+    expect(Date.now() - started).toBeLessThan(2000)
+
+    const off = await fixtureStore({ environment: { XERXES_HUB_VOICE_MODELS: 'off' } })
+    await off.store.prefetch()
+    expect(off.calls).toHaveLength(0)
+  })
+
+  test('the service prefetches only when asked, after HTTP is ready', async () => {
+    for (const prefetch of [false, true]) {
+      const f = await fixtureStore()
+      const paths = hubPaths({ XERXES_HOME: f.stateDir })
+      await ensureHubDirectories(paths)
+      const service = createHubService({
+        paths, signer: testSigner(), identity: standardUsers(new FakeIdentity()), exposure: { port: 0 },
+        voiceModels: f.store, registryPollMs: 0, prefetchVoiceModels: prefetch, onError: error => { throw error },
+      })
+      registerCleanup(() => service.stop())
+      await service.start()
+      if (prefetch) {
+        const total = f.store.files('all').length
+        await until(() => new Set(f.calls).size === total)
+      } else {
+        await Bun.sleep(50)
+        expect(f.calls).toHaveLength(0)
+      }
+      await service.stop()
+    }
+  })
+})

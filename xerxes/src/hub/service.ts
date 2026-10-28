@@ -87,6 +87,12 @@ export interface HubServiceOptions {
   readonly voiceModels?: HubVoiceModelStore
   /** Environment for the service-owned cache (defaults to process.env). */
   readonly voiceModelsEnvironment?: Readonly<Record<string, string | undefined>>
+  /**
+   * Download and verify every on-phone voice model in the background once HTTP is ready,
+   * retrying with backoff, so no one has to run `xerxes hub voice-models fetch`. `xerxes hub`
+   * turns this on; embedders and tests leave it off unless they want network downloads.
+   */
+  readonly prefetchVoiceModels?: boolean
   /** Minimal-text push to a user (identity.admin.sendPush). Absent: no push is attempted. */
   readonly sendPush?: PushLike
   /** Live Hub-owner check (identity.admin.ownerUserId). XERXES Autopilot stays active only while its enabler is the owner. */
@@ -185,13 +191,15 @@ export function toPoolWorkspace(workspace: HubWorkspace): PoolWorkspace {
 export function createHubService(options: HubServiceOptions): HubService {
   const exposure: HubExposure = resolveHubExposure(options.exposure)
   const registry = options.registry ?? new WorkspaceRegistry(options.paths.workspacesPath)
-  const voiceModels = options.voiceModels ?? new HubVoiceModelStore({
-    stateDir: options.paths.stateDir, environment: options.voiceModelsEnvironment ?? process.env,
-  })
   const report = (error: unknown, context: string): void => {
     if (options.onError) options.onError(error, context)
     else console.error(`Hub ${context} failed`, error)
   }
+  const voiceModels = options.voiceModels ?? new HubVoiceModelStore({
+    stateDir: options.paths.stateDir, environment: options.voiceModelsEnvironment ?? process.env,
+    // Only the sanitized reason and cause: never an upstream URL or a cache path.
+    onError: (error, context) => report(new Error(`${error.reason} (${String(error.cause)})`), context),
+  })
 
   let state: 'created' | 'running' | 'stopped' = 'created'
   let store: HubEventStore | undefined
@@ -509,6 +517,8 @@ export function createHubService(options: HubServiceOptions): HubService {
         options.lifecycle?.registerShutdownHook(() => service.stop())
         options.lifecycle?.setHttpReady(true)
         lessonSync.start()
+        // The first phone call should not wait for ~200 MB of models: fetch them now, in the background.
+        if (options.prefetchVoiceModels === true) void voiceModels.prefetch().catch(error => report(error, 'voice model prefetch'))
         // Connect in the background: one unreachable SSH host must not delay HTTP readiness.
         settled = runtimePool.start([...snapshot.workspaces.map(toPoolWorkspace)]).catch(error => report(error, 'workspace start'))
         const pollMs = options.registryPollMs ?? 3000

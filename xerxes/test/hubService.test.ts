@@ -215,7 +215,8 @@ describe('hub run wiring', () => {
     const paths = hubPaths({ XERXES_HOME: home })
     const lines: string[] = []
     const errors: string[] = []
-    const environment = { XERXES_HOME: home, XERXES_HUB_PORT: '0' }
+    // `hub run` prefetches on-phone voice models; an offline test must never reach huggingface.co.
+    const environment = { XERXES_HOME: home, XERXES_HUB_PORT: '0', XERXES_HUB_VOICE_MODELS: 'off' }
     const running = runHubCli(['run'], { paths, lifecycle: { paths, environment }, stdout: line => lines.push(line), stderr: line => errors.push(line) })
     registerCleanup(async () => { await stopHub({ paths }).catch(() => undefined); await running.catch(() => undefined) })
     const listening = await until(() => lines.map(line => JSON.parse(line) as Record<string, unknown>).find(row => row.event === 'hub.listening'), 10_000)
