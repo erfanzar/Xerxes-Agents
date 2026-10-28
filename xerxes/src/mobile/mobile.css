@@ -89,7 +89,15 @@
 }
 
 * { box-sizing: border-box; }
-html { background: var(--x-backdrop); }
+/* App, not page: no rubber-band bounce or pull-to-refresh, no double-tap zoom, no long-press
+   callouts or text selection on chrome. Messages, code and inputs stay selectable. */
+html { background: var(--x-backdrop); overscroll-behavior: none; }
+body { overscroll-behavior-y: none; touch-action: manipulation; }
+button, .btn, .tab, .tabs, .app-head, summary, .card-link, .voice-screen, .voice-control, .composer-voice, .badge, .chip, .section-title, .page-title {
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+img, svg { -webkit-user-drag: none; -webkit-touch-callout: none; }
+.block-text, .md, .block-code, .approval-command, input, textarea { -webkit-user-select: text; user-select: text; }
 body {
   margin: 0; min-height: 100dvh; color: var(--x-prose); font: 400 13px/1.55 var(--mono);
   background-color: var(--x-backdrop);
@@ -103,6 +111,8 @@ h1, h2, h3 { color: var(--x-title); font-weight: 600; }
 a { color: inherit; }
 strong { color: var(--x-title); font-weight: 600; }
 code, pre { font-family: var(--mono); font-size: 0.95em; }
+/* Browsers give form controls their own system font (Arial on some); every control uses the app's face. */
+button, input, select, textarea { font-family: inherit; }
 :focus-visible { outline: 1px solid var(--x-accent); outline-offset: 2px; }
 ::selection { background: var(--x-accent-soft); color: var(--x-strong); }
 
@@ -238,7 +248,7 @@ code, pre { font-family: var(--mono); font-size: 0.95em; }
 .btn-primary:active { background: var(--x-accent); filter: brightness(0.95); }
 .btn-danger { background: var(--x-failed-bg); border-color: var(--x-failed-border); color: var(--x-failed-text); }
 .btn-quiet { background: transparent; border-color: transparent; color: var(--x-secondary); }
-.btn-segment { min-height: 30px; padding: 0.25rem 0.65rem; font-size: 10.5px; color: var(--x-secondary); border-color: var(--x-hairline); }
+.btn-segment { min-height: var(--tap); padding: 0.25rem 0.75rem; font-size: 10.5px; color: var(--x-secondary); border-color: var(--x-hairline); }
 .btn-segment[aria-pressed="true"] { background: var(--x-accent-soft); color: var(--x-accent); border-color: var(--x-accent-line); }
 .btn-talk.is-recording { background: var(--x-failed); color: #fff; border-color: transparent; }
 .voice-status { margin: 0.5rem 0; font-size: 11.5px; }
@@ -266,7 +276,7 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .filters { margin-bottom: 1rem; }
 .segments, .config-row, .composer-row, .approval-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .config-row { margin-top: 0.7rem; }
-.config-row .btn { min-height: 30px; padding: 0.25rem 0.6rem; font-size: 10.5px; color: var(--x-secondary); border-color: var(--x-hairline); text-transform: none; letter-spacing: 0.02em; }
+.config-row .btn { min-height: var(--tap); padding: 0.25rem 0.7rem; font-size: 10.5px; color: var(--x-secondary); border-color: var(--x-hairline); text-transform: none; letter-spacing: 0.02em; }
 .approval-actions { margin-top: 0.8rem; }
 .approval-actions .btn { flex: 1 1 10rem; }
 
@@ -276,7 +286,7 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
   padding: 0.5rem 0.7rem; border: 1px solid var(--x-hairline); background: var(--x-card); font-size: 11.5px; color: var(--x-secondary);
 }
 .model-summary strong { color: var(--x-accent); font-weight: 500; }
-.model-summary .btn { margin-left: auto; min-height: 30px; padding: 0.2rem 0.6rem; font-size: 10.5px; }
+.model-summary .btn { margin-left: auto; min-height: var(--tap); padding: 0.2rem 0.6rem; font-size: 10.5px; }
 .model-form { display: grid; gap: 0.1rem; }
 .model-form .approval-actions, .model-form .composer-row { margin-top: 0.5rem; }
 
@@ -336,7 +346,7 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .block-notice.is-error { color: var(--x-failed-text); }
 .tool-state { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--x-meta); margin-left: 0.4rem; }
 .fold > summary {
-  min-height: 36px; display: flex; align-items: center; gap: 0.4rem; cursor: pointer; list-style: none;
+  min-height: var(--tap); display: flex; align-items: center; gap: 0.4rem; cursor: pointer; list-style: none;
   color: var(--x-secondary); font-size: 11.5px;
 }
 .fold > summary::-webkit-details-marker { display: none; }
@@ -375,30 +385,32 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .sheet-tall { max-height: 100dvh; min-height: 70dvh; }
 .sheet-fullscreen { max-width: none; height: 100dvh; max-height: 100dvh; padding-top: calc(1rem + var(--safe-top)); }
 /* Voice is an app-level scene, not a sheet. Its dark palette is independent of the chat theme. */
-.composer-voice { display: inline-grid; place-items: center; width: 48px; height: 48px; flex: 0 0 auto; border: 0; border-radius: 50%; background: var(--x-title); color: var(--x-screen); cursor: pointer; }
-.composer-voice.is-active { background: #69d0fd; color: #07141e; box-shadow: 0 0 0 4px #69d0fd22; }
+.composer-voice { display: inline-grid; place-items: center; width: var(--tap); height: var(--tap); flex: 0 0 auto; border: 1px solid var(--x-hairline-hi); border-radius: 0; background: transparent; color: var(--x-title); cursor: pointer; }
+.composer-voice:hover { border-color: var(--x-accent-line); }
+.composer-voice.is-active { background: var(--x-accent-soft); border-color: var(--x-accent); color: var(--x-accent); }
 .composer-voice:disabled { opacity: 0.35; cursor: default; }
 .voice-screen { position: fixed; inset: 0; z-index: 50; height: 100dvh; overflow-y: auto; display: flex; flex-direction: column; background: radial-gradient(ellipse at 50% 40%, #141c30 0, #090c14 48%, #07090e 85%); color: #f2f5ff; padding: calc(1rem + var(--safe-top)) max(1.25rem, env(safe-area-inset-left)) calc(0.75rem + var(--safe-bottom)); font-family: var(--read); outline: none; color-scheme: dark; }
 .voice-head { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; }
-.voice-head h1 { margin: 0; font: 600 0.85rem var(--read); letter-spacing: 0.14em; }
+.voice-head h1 { margin: 0; font: 600 12px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
 .voice-head h1 span { margin-left: 0.5rem; font-weight: 400; color: #8993ac; letter-spacing: 0.03em; }
 .voice-settings { position: relative; z-index: 2; }
-.voice-settings summary { list-style: none; cursor: pointer; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; color: #aeb8cc; font-size: 1.4rem; }
+.voice-settings summary { list-style: none; cursor: pointer; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 0; border: 1px solid #ffffff1f; color: #aeb8cc; font-size: 1.2rem; }
 .voice-settings summary::-webkit-details-marker { display: none; }
 .voice-settings[open] summary { background: #ffffff12; color: white; }
-.voice-settings-panel { position: absolute; right: 0; top: 3rem; width: min(23rem, 88vw); max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 7rem); overflow-y: auto; padding: 1.2rem; background: #141b29; border: 1px solid #ffffff24; border-radius: 1rem; box-shadow: 0 1rem 3rem #0008; }
+.voice-settings-panel { position: absolute; right: 0; top: 3rem; width: min(23rem, 88vw); max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 7rem); overflow-y: auto; padding: 1.2rem; background: #141b29; border: 1px solid #ffffff24; border-top: 1px solid var(--x-accent); border-radius: 0; box-shadow: 0 1rem 3rem #0008; }
 .voice-settings-panel p { color: #aeb8cc; font-size: 0.8rem; line-height: 1.5; }
-.voice-settings-panel select { color: #eaf0ff; background: #0b101c; border-radius: 0.5rem; }
+.voice-settings-panel select { color: #eaf0ff; background: #0b101c; border-radius: 0; }
 .voice-debug-toggle { display: flex; align-items: center; gap: 0.65rem; min-height: 44px; font-size: 0.85rem; cursor: pointer; }
 .voice-debug-toggle input { width: 20px; height: 20px; flex: 0 0 auto; }
 .voice-debug-capture { border-top: 1px solid #ffffff24; margin-top: 0.8rem; padding-top: 0.8rem; }
 .voice-debug-capture h3 { margin: 0; font-size: 0.9rem; }
 .voice-debug-transcript { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 10rem; overflow-y: auto; }
 .voice-debug-actions { display: flex; gap: 0.65rem; }
-.voice-debug-actions button { min-height: 44px; border: 1px solid #ffffff24; border-radius: 0.5rem; padding: 0.5rem 0.85rem; color: #dceeff; background: #ffffff0d; cursor: pointer; }
+.voice-debug-actions button { min-height: 44px; border: 1px solid #ffffff24; border-radius: 0; padding: 0.5rem 0.85rem; color: #dceeff; background: #ffffff0d; cursor: pointer; }
 .voice-debug-actions button:disabled { opacity: 0.5; cursor: default; }
-.voice-stage { flex: 1 0 auto; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: clamp(1rem, 5vh, 3rem) 0 0.5rem; }
-.voice-orb-wrap { --voice-level: 0; width: min(66vw, 19rem); aspect-ratio: 1; margin: 1rem auto 2.5rem; transform: scale(calc(1 + var(--voice-level) * 0.12)); transition: transform 90ms linear; }
+.voice-stage { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: clamp(0.5rem, 3dvh, 2rem) 0 0.25rem; }
+/* The orb is sized by the screen height too, so Mute / Chat / End always stay on screen. */
+.voice-orb-wrap { --voice-level: 0; width: min(62vw, 18rem, 34dvh); aspect-ratio: 1; margin: 0.5rem auto clamp(1rem, 3dvh, 2rem); transform: scale(calc(1 + var(--voice-level) * 0.12)); transition: transform 90ms linear; }
 .voice-orb { width: 100%; height: 100%; border: 0; border-radius: 50%; position: relative; isolation: isolate; padding: 0; background: transparent; cursor: pointer; }
 .voice-orb:disabled { opacity: 1; cursor: default; }
 .voice-orb-aura { position: absolute; inset: -14%; border-radius: 50%; background: conic-gradient(from 20deg, #0faaff44, #866bff55, #fd75c555, #5dcfff55, #0faaff44); filter: blur(30px); opacity: calc(0.45 + var(--voice-level) * 0.55); transition: opacity 100ms; }
@@ -408,7 +420,7 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .voice-phase-speaking .voice-orb-core { animation-duration: 2s; }
 .voice-phase-error .voice-orb-aura { background: #e8737d44; }
 .voice-state { margin: 0 0 1.1rem; min-height: 1.5em; font: 500 clamp(1.05rem, 4vw, 1.3rem)/1.5 var(--read); letter-spacing: 0.02em; }
-.voice-captions { width: min(100%, 34rem); min-height: 5rem; color: #d8dfef; font-size: clamp(0.95rem, 3.8vw, 1.1rem); line-height: 1.6; overflow-wrap: anywhere; }
+.voice-captions { width: min(100%, 34rem); min-height: 3.5rem; color: #d8dfef; font-size: clamp(0.95rem, 3.8vw, 1.1rem); line-height: 1.6; overflow-wrap: anywhere; }
 .voice-captions p { margin: 0 0 0.65rem; }
 .voice-captions p span { display: block; color: #74839f; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.13em; }
 .voice-heard { color: #939fb9; }
@@ -417,24 +429,25 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 .voice-error { max-width: 30rem; color: #ffa3a3; font-size: 0.9rem; }
 .voice-notice { max-width: 29rem; color: #9ca9c2; text-align: center; font: 400 0.78rem/1.5 var(--read); margin: 0.4rem auto; }
 .voice-start { text-align: center; margin: 0 auto 0.5rem; }
-.voice-start-button { border: 0; border-radius: 2rem; background: #dceeff; color: #101e30; font: 600 1rem var(--read); padding: 0.85rem 2rem; margin: 0.75rem auto; min-height: 48px; cursor: pointer; }
+.voice-start-button { border: 1px solid var(--x-accent); border-radius: 0; background: var(--x-accent); color: var(--x-on-accent); font: 600 12px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; padding: 0.85rem 2rem; margin: 0.5rem auto; min-height: 48px; min-width: min(100%, 16rem); cursor: pointer; }
 .voice-start-button:disabled { opacity: 0.4; cursor: default; }
 .voice-retry { background: transparent; border: 0; color: #9cd5ff; text-decoration: underline; padding: 0.75rem; }
-.voice-controls { display: flex; justify-content: center; gap: clamp(1.75rem, 10vw, 4rem); padding: 1rem 0 0.25rem; flex: 0 0 auto; }
-.voice-control { border: 0; background: none; color: #a9b5cd; display: grid; justify-items: center; gap: 0.65rem; font: 400 0.75rem var(--read); min-width: 56px; padding: 0; cursor: pointer; }
-.voice-control > span:first-child { display: grid; place-items: center; width: 56px; height: 56px; font-size: 1.5rem; border-radius: 50%; background: #ffffff0d; color: #e1e9fa; border: 1px solid #ffffff12; }
+.voice-controls { display: flex; justify-content: center; gap: clamp(1.5rem, 9vw, 4rem); padding: 0.75rem 0 0.25rem; flex: 0 0 auto; }
+.voice-control { border: 0; background: none; color: #a9b5cd; display: grid; justify-items: center; gap: 0.5rem; font: 500 10.5px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; min-width: 56px; padding: 0; cursor: pointer; }
+.voice-control > span:first-child { display: grid; place-items: center; width: 56px; height: 56px; font-size: 1.4rem; border-radius: 0; background: #ffffff0d; color: #e1e9fa; border: 1px solid #ffffff12; }
 .voice-control:disabled { opacity: 0.35; cursor: default; }
 .voice-control.is-muted > span:first-child { background: #dceeff; color: #152337; }
 .voice-end > span:first-child { background: #ee5b64; color: white; font-size: 2.2rem; border-color: transparent; }
-.voice-footer-note { flex: 0 0 auto; text-align: center; font: 400 0.7rem/1.5 var(--read); color: #697893; margin: 1rem auto 0; }
+.voice-footer-note { flex: 0 0 auto; text-align: center; font: 400 10.5px/1.5 var(--mono); color: #697893; margin: 0.5rem auto 0; }
 .voice-screen :focus-visible { outline: 2px solid #9cd9ff; outline-offset: 5px; }
-.voice-pill { display: flex; align-items: center; gap: 0.5rem; position: sticky; top: 0.5rem; z-index: 5; margin: 0 0 1.2rem; padding: 0.25rem; border: 1px solid var(--x-accent-line); background: var(--x-card); border-radius: 1.2rem; box-shadow: 0 0.25rem 1rem #0001; }
+/* Sticks just below the sticky app header (38px + safe area), never on top of it. */
+.voice-pill { display: flex; align-items: center; gap: 0.5rem; position: sticky; top: calc(var(--safe-top) + 46px); z-index: 4; margin: 0 0 1.2rem; padding: 0.25rem; border: 1px solid var(--x-accent-line); background: var(--x-card); border-radius: 0; }
 .voice-pill-return { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.8rem; min-height: 48px; background: none; border: 0; color: var(--x-title); padding: 0.5rem 0.75rem; text-align: left; cursor: pointer; }
 .voice-pill-return strong { font-size: 0.8rem; font-weight: 500; }
 .voice-pill-state { display: block; font-size: 0.7rem; color: var(--x-secondary); margin-top: 0.2rem; }
 .voice-pill-open { margin-left: auto; color: var(--x-secondary); }
 .voice-live-dot { width: 8px; height: 8px; flex: 0 0 auto; background: #63bded; border-radius: 50%; animation: voice-dot 1.8s ease-in-out infinite; }
-.voice-pill-end { width: 44px; height: 44px; flex: 0 0 auto; border: 0; border-radius: 50%; background: var(--x-failed-bg); color: var(--x-failed); font-size: 1.6rem; cursor: pointer; }
+.voice-pill-end { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid var(--x-failed-border); border-radius: 0; background: var(--x-failed-bg); color: var(--x-failed); font-size: 1.6rem; cursor: pointer; }
 @keyframes voice-float { from { transform: rotate(-12deg) scale(0.96); border-radius: 46% 54% 49% 51%; } to { transform: rotate(15deg) scale(1.03); border-radius: 53% 47% 54% 46%; } }
 @keyframes voice-orbit { to { transform: rotate(360deg); } }
 @keyframes voice-dot { 50% { box-shadow: 0 0 0 5px #63bded11; opacity: 0.6; } }
@@ -461,6 +474,11 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
   font: 600 2.2rem/1.2 var(--mono); letter-spacing: 0.35em; text-align: center; font-variant-numeric: tabular-nums; color: var(--x-title);
   margin: 1.25rem 0; padding: 1rem 0.5rem 1rem 0.85rem; background: var(--x-card); border: 1px solid var(--x-accent-line);
 }
+
+/* ── Install hint (browser tab only) ───────────────────────────────── */
+.install-hint { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 1rem; padding: 0.55rem 0.7rem; border: 1px solid var(--x-accent-line); background: var(--x-accent-soft); font-size: 11.5px; color: var(--x-prose); }
+.install-hint p { margin: 0; flex: 1; }
+.install-hint .btn { flex: 0 0 auto; }
 
 /* ── Signed out: re-pair in place ──────────────────────────────────── */
 .repair { max-width: 30rem; }

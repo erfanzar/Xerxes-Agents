@@ -1,15 +1,22 @@
 {
+  "id": "/",
   "name": "Xerxes",
   "short_name": "Xerxes",
-  "description": "Your Xerxes tasks, approvals and usage from your phone.",
+  "description": "Your Xerxes tasks, approvals, voice and usage from your phone.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone"],
   "orientation": "portrait",
-  "background_color": "#0b0d10",
-  "theme_color": "#0b0d10",
+  "background_color": "#07080c",
+  "theme_color": "#07080c",
+  "categories": ["productivity", "developer"],
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Inbox", "url": "/" },
+    { "name": "Talk to XERXES", "url": "/xerxes" }
   ]
 }

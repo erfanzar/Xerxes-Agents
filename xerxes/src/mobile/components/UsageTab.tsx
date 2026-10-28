@@ -31,6 +31,15 @@ function ProfileCard({ profile, now }: { profile: UsageProfileView; now: number 
   )
 }
 
+/** Names, never raw workspace ids; workspaces this phone cannot see are only counted. */
+export function unavailableNotice(ids: readonly string[], label: (id: string) => string | undefined): string | undefined {
+  if (ids.length === 0) return undefined
+  const names = [...new Set(ids.map(label).filter((name): name is string => name !== undefined && name !== ''))]
+  const unknown = ids.filter(id => !label(id)).length
+  const parts = [...names, ...(unknown > 0 ? [`${unknown} other workspace${unknown === 1 ? '' : 's'}`] : [])]
+  return `Usage is not available yet for ${parts.join(', ')}. Those runtimes did not report usage.`
+}
+
 export function UsageTab(): ReactElement {
   const state = useHubState()
   const { controller, now } = useServices()
@@ -43,6 +52,11 @@ export function UsageTab(): ReactElement {
   const report = usage.phase === 'idle' ? undefined : usage.report
   const extras = usage.phase === 'idle' ? undefined : usage.extras
   const stamp = now()
+  const missing = unavailableNotice(extras?.unavailable ?? [], id => state.workspaces[id]?.label)
+  const profileLabels = new Map((report?.profiles ?? []).map(profile => [profile.profile, profile.label] as const))
+  const models = report?.models ?? []
+  // The same model under several provider profiles is otherwise three identical rows.
+  const repeated = new Set(models.map(model => model.model).filter((name, index, all) => all.indexOf(name) !== index))
 
   return (
     <section aria-labelledby="usage-title">
@@ -55,7 +69,7 @@ export function UsageTab(): ReactElement {
           <button type="button" className="btn" onClick={() => { void controller.loadUsage() }}>Try again</button>
         </div>
       ) : null}
-      {extras === undefined || extras.unavailable.length === 0 ? null : <p className="notice">Usage is unavailable for: {extras.unavailable.join(', ')}.</p>}
+      {missing === undefined ? null : <p className="notice">{missing}</p>}
 
       {report !== undefined && report.profiles.length > 0 ? (
         <>
@@ -69,9 +83,12 @@ export function UsageTab(): ReactElement {
         <>
           <h2 className="section-title">By model</h2>
           <ul className="cards">
-            {(report.models ?? []).map(model => (
+            {models.map(model => (
               <li key={`${model.profile ?? ''}/${model.model}`} className="card card-plain">
                 <h3 className="card-title">{model.model}</h3>
+                {model.profile !== undefined && (repeated.has(model.model) || profileLabels.has(model.profile))
+                  ? <p className="block-meta">Profile: {profileLabels.get(model.profile) ?? model.profile}</p>
+                  : null}
                 <p><strong>{costLabel(model.costUsd, model.costBasis)}</strong></p>
                 <p className="block-meta">{modelUsageSummary(model)}</p>
               </li>

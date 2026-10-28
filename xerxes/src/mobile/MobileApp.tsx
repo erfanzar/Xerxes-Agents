@@ -10,6 +10,7 @@ import { browserVoiceCallService } from './voice/call/browser.js'
 import { InboxTab } from './components/Inbox.js'
 import { PairPage } from './components/PairPage.js'
 import { SignedOut } from './components/SignedOut.js'
+import { InstallHint } from './components/InstallHint.js'
 import { TaskTab } from './components/TaskTab.js'
 import { UsageTab } from './components/UsageTab.js'
 import { XerxesTab } from './components/XerxesTab.js'
@@ -27,7 +28,8 @@ function useScreenMemory(key: string, main: React.RefObject<HTMLElement | null>)
   useEffect(() => {
     // TaskTranscript owns bottom-following and history prepend anchors. A
     // shell-level restore would override its initial bottom scroll.
-    if (!key.startsWith('task:')) window.scrollTo(0, scroll.get(key) ?? 0)
+    // The XERXES chat follows its newest message the same way, so neither is restored here.
+    if (!key.startsWith('task:') && key !== 'xerxes') window.scrollTo(0, scroll.get(key) ?? 0)
     if (!first.current) main.current?.focus({ preventScroll: true })
     first.current = false
     return () => { scroll.set(key, window.scrollY) }
@@ -68,6 +70,7 @@ function Shell(): ReactElement {
         </div>
       </header>
       <main id="main" ref={main} tabIndex={-1} className="app-main">
+        <InstallHint env={services.install} />
         {revoked ? (
           <SignedOut reason={state.connection.state === 'revoked' ? state.connection.reason : ''} />
         ) : route.name === 'inbox' ? <InboxTab />

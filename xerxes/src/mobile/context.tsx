@@ -9,6 +9,7 @@ import type { HubState, HubStore } from '../client/hubStore.js'
 import type { ImageEngine } from '../client/imagePrep.js'
 import type { VoiceControl } from '../client/voiceControl.js'
 import type { HubHttp } from './api.js'
+import type { InstallEnvironment } from './components/InstallHint.js'
 import type { PairingRead } from './pairing.js'
 import type { PushService } from './pwa/push.js'
 import { parseRoute, type Route, type Router } from './routes.js'
@@ -50,6 +51,8 @@ export interface AppServices {
   readonly pair?: PairEnv | undefined
   /** Browser image engine; tests inject a fake. */
   readonly imageEngine?: ImageEngine | undefined
+  /** Installed-app detection for the "Add to Home Screen" hint; read from the browser when absent. */
+  readonly install?: InstallEnvironment | undefined
 }
 
 const ServicesContext = createContext<AppServices | null>(null)

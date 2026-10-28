@@ -266,8 +266,35 @@ describe('Usage tab', () => {
     expect(html).toContain('$1.50')
     expect(html).not.toContain('$3.00')
     expect(html).toContain('42% used')
-    expect(html).toContain('Usage is unavailable for: w2')
+    // A workspace this phone cannot see is counted, never shown as a raw id.
+    expect(html).toContain('Usage is not available yet for 1 other workspace.')
+    expect(html).not.toContain('w2')
     expect(html).toContain('listed once')
+  })
+
+  it('names unavailable workspaces by label and repeats the profile only for duplicate model rows', () => {
+    const base = { calls: 1, input: 1000, output: 10, cacheRead: 0, cacheWrite: 0 }
+    const state: HubState = {
+      ...liveState([], [workspace('w1', 'Mac'), workspace('m-d12a2c7d-3e7b31b91354', 'TPU box')]),
+      usage: {
+        phase: 'ready',
+        report: {
+          fetchedAt: 1,
+          profiles: [],
+          models: [
+            { ...base, model: 'claude-code/opus', profile: 'cc' },
+            { ...base, model: 'claude-code/opus', profile: 'cc-work' },
+            { ...base, model: 'gpt-6.1-sol' },
+          ],
+        },
+        extras: { inputTokens: 3000, outputTokens: 30, unavailable: ['m-d12a2c7d-3e7b31b91354'] },
+      },
+    }
+    const html = plain(render(state, '/usage'))
+    expect(html).toContain('Usage is not available yet for TPU box.')
+    expect(html).not.toContain('m-d12a2c7d')
+    expect(html).toContain('Profile: cc<')
+    expect(html).toContain('Profile: cc-work<')
   })
 
   it('shows an error with the last result kept', () => {

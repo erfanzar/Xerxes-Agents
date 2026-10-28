@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react'
 
 import { AUTOPILOT_COMPOSER_HINT, AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { relativeTime } from '../../client/format.js'
@@ -9,6 +9,7 @@ import { watchChipText } from '../../client/watch.js'
 import type { ConfirmationState, SupervisorConfirmation } from '../../client/hubParsers.js'
 import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
 import { useHubState, useNow, useServices } from '../context.js'
+import { createTranscriptScroll } from '../transcriptScroll.js'
 import { supervisorHeading } from '../viewModel.js'
 import { AutopilotSheet } from './AutopilotSheet.js'
 import { WatchCards, WatchSheet } from './WatchSheet.js'
@@ -122,6 +123,28 @@ export function XerxesTab(): ReactElement {
     if (state.connection.state === 'live') void controller.supervisorOpen()
   }, [controller, state.connection.state])
 
+  // Open on the newest message and keep following it while the reader is at the bottom,
+  // exactly like the task transcript; reading older messages is never yanked away.
+  const conversation = useRef<HTMLOListElement>(null)
+  const follow = useRef<ReturnType<typeof createTranscriptScroll> | undefined>(undefined)
+  useLayoutEffect(() => {
+    follow.current = createTranscriptScroll({
+      y: () => window.scrollY,
+      height: () => document.documentElement.scrollHeight,
+      viewport: () => window.innerHeight,
+      top: () => conversation.current?.getBoundingClientRect().top ?? Infinity,
+      blocks: () => Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-block-id]') ?? [])
+        .map(element => ({ id: element.dataset.blockId!, top: element.getBoundingClientRect().top })),
+      scrollTo: y => window.scrollTo(0, y),
+    })
+    const onScroll = (): void => { follow.current?.moved() }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => { window.removeEventListener('scroll', onScroll); follow.current = undefined }
+  }, [])
+  useLayoutEffect(() => {
+    if (supervisor.phase === 'ready') follow.current?.changed()
+  }, [supervisor.phase, supervisor.messages, supervisor.confirmations, supervisor.working, threadView])
+
   const live = state.connection.state === 'live'
   const update = (value: string): void => {
     setText(value)
@@ -194,9 +217,9 @@ export function XerxesTab(): ReactElement {
           {showThread ? null : <>
           {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
           {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? <p className="empty">No messages yet. Try “What needs me right now?”</p> : null}
-          <ol className="blocks" aria-label="Conversation">
+          <ol ref={conversation} className="blocks" aria-label="Conversation">
             {supervisor.messages.map(message => (
-              <li key={message.id} className={`block block-${message.role === 'user' ? 'user' : 'assistant'}`}>
+              <li key={message.id} data-block-id={message.id} className={`block block-${message.role === 'user' ? 'user' : 'assistant'}`}>
                 <p className="block-who">
                   {message.role === 'xerxes' ? 'XERXES' : message.author ?? 'You'}
                   {message.source === 'voice' ? ' · voice' : ''}
