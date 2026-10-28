@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -139,7 +140,13 @@ async function buildMobile(): Promise<void> {
   }
   // Resolve the ONNX version actually owned by transformers, not an unrelated workspace runtime.
   const transformerEntry = import.meta.resolve('@huggingface/transformers')
-  if (import.meta.resolve('@huggingface/transformers', import.meta.resolve('kokoro-js')) !== transformerEntry) {
+  // Compare real files, not URLs: on Windows Bun links packages with junctions, so resolving from inside
+  // kokoro-js returns the same file through kokoro's own node_modules link (and drive-letter case can differ).
+  const realFile = (url: string): string => {
+    const path = realpathSync(fileURLToPath(url))
+    return process.platform === 'win32' ? path.toLowerCase() : path
+  }
+  if (realFile(import.meta.resolve('@huggingface/transformers', import.meta.resolve('kokoro-js'))) !== realFile(transformerEntry)) {
     throw new Error('Kokoro and call models must resolve one shared transformers.js runtime')
   }
   const ortDirectory = dirname(fileURLToPath(import.meta.resolve('onnxruntime-web', transformerEntry)))
