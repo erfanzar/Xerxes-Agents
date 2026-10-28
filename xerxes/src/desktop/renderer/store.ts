@@ -4070,12 +4070,22 @@ export class Store {
         const contents = Array.isArray(payload.contents) ? payload.contents.filter((value): value is string => typeof value === 'string') : []
         if (!contents.length) break
         let queue = this.queue
+        let shownOther = false
         for (const content of contents) {
-          const index = queue.findIndex(item => item.text === content.trim())
-          if (index >= 0) queue = [...queue.slice(0, index), ...queue.slice(index + 1)]
-          for (const [id, steer] of this.pendingSteers) if (steer.session === this.sessionKey && steer.text === content.trim()) { this.pendingSteers.delete(id); break }
+          const text = content.trim()
+          let ours = false
+          const index = queue.findIndex(item => item.text === text)
+          if (index >= 0) { queue = [...queue.slice(0, index), ...queue.slice(index + 1)]; ours = true }
+          for (const [id, steer] of this.pendingSteers) {
+            // @-mentions expand the applied text, so a pending steer contained in it is still ours.
+            if (steer.session === this.sessionKey && (steer.text === text || (steer.text !== '' && text.includes(steer.text)))) { this.pendingSteers.delete(id); ours = true; break }
+          }
+          // A steer from the phone, the Hub or another client: its acceptance echo went only to the
+          // sender, so this is the first time this window hears of it. Show it where the model saw it.
+          if (!ours && text) { this.builder.pushUser(text); shownOther = true }
         }
         if (queue !== this.queue) { this.queue = queue; this.patch({ queue }) }
+        if (shownOther) this.notify()
         break
       }
       case 'steer_input': {

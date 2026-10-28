@@ -33,7 +33,9 @@ function shownUserText(text: string): string {
   return LEGACY_RETRY.test(clean) ? 'Continue' : clean
 }
 
-const STEER_PREFIX = /^\[(?:mid-turn steer from user|steer from user(?: saved for next turn)?)\](?:\r?\n|$)/
+// Same marker the daemon strips (server.ts): steers from the phone or another person carry their
+// display name, e.g. `[steer from Erfan]`, not only `[steer from user]`.
+const STEER_PREFIX = /^\[(?:mid-turn steer from user|steer from [^\]\r\n]+?(?: saved for next turn)?)\](?:\r?\n|$)/
 
 function withoutSteerPrefix(text: string): string {
   return text.replace(STEER_PREFIX, '')

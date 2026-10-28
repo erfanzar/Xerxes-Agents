@@ -387,6 +387,15 @@ test('accepted steering remains an ordinary user message after cancel and reload
   expect(blocks.filter(block => block.kind === 'user').map(block => block.text)).toEqual(['continue', 'New instruction', 'Pending instruction'])
 })
 
+test('a steer from the phone or another person reloads without its named marker', () => {
+  const blocks = blocksFromStoredMessages([
+    { role: 'user', content: 'continue' },
+    { role: 'user', content: '[steer from Erfan]\nCan we make it streaming TTS?' },
+    { role: 'user', content: '[steer from Ann saved for next turn]\nLater' },
+  ])
+  expect(blocks.filter(block => block.kind === 'user').map(block => block.text)).toEqual(['continue', 'Can we make it streaming TTS?', 'Later'])
+})
+
 test('steering leaves an earlier tool live and its result updates the original group', () => {
   const builder = new BlockBuilder()
   builder.push('tool_call', { id: 'running', name: 'exec_command', arguments: { command: 'long command' } })

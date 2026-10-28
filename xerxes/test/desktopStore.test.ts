@@ -799,6 +799,20 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().turnActive).toBe(true)
   })
 
+  test('a steer sent from the phone appears in the desktop chat when the model receives it', async () => {
+    bridge.push('turn_begin', { user_input: 'keep improving overnight' })
+    await store.submit('my own steer')
+    bridge.push('steer_input', { content: 'my own steer' })
+    const users = () => store.getSnapshot().blocks.filter(block => block.kind === 'user').map(block => block.text)
+    expect(users().filter(text => text === 'my own steer')).toHaveLength(1)
+    // The Hub's steer_input echo went only to the phone; steer_applied is all this window sees.
+    bridge.push('steer_applied', { contents: ['Can we make it streaming TTS?', 'my own steer'], count: 2 })
+    expect(users()).toContain('Can we make it streaming TTS?')
+    // Our own steer is not shown twice.
+    expect(users().filter(text => text === 'my own steer')).toHaveLength(1)
+    expect(store.getSnapshot().queue).toHaveLength(0)
+  })
+
   test('the Agents chip sets the conversation mode through /delegate and follows the runtime echo', async () => {
     expect(store.getSnapshot().delegationMode).toBe('auto')
     store.toggleDelegationMenu()
