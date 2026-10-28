@@ -298,6 +298,9 @@ export interface SupervisorMessage {
   readonly at: string
   readonly author?: string
   readonly source: 'text' | 'voice'
+  readonly threadId?: string
+  readonly causalMessageId?: string
+  readonly origin?: 'wake'
 }
 
 export type ConfirmationState = 'pending' | 'confirming' | 'confirmed' | 'cancelled' | 'expired' | 'failed'
@@ -324,7 +327,9 @@ export function parseSupervisorMessage(raw: unknown): SupervisorMessage | undefi
   if (!id || text === undefined) return undefined
   const role = m.role === 'user' || m.role === 'system' ? m.role : 'xerxes'
   const actor = asActor(m.actor)
-  return { id, role, text: clip(text, 8000), at: isoOr(m.at ?? m.occurred_at, new Date(0).toISOString()), source: m.source === 'voice' ? 'voice' : 'text', ...(actor ? { author: actor.display_name } : str(m.author) ? { author: str(m.author)! } : {}) }
+  const threadId = str(m.thread_id)
+  const causalMessageId = str(m.causal_message_id)
+  return { id, role, text: clip(text, 8000), at: isoOr(m.at ?? m.occurred_at, new Date(0).toISOString()), source: m.source === 'voice' ? 'voice' : 'text', ...(m.origin === 'wake' ? { origin: 'wake' as const } : {}), ...(threadId ? { threadId } : {}), ...(causalMessageId ? { causalMessageId } : {}), ...(actor ? { author: actor.display_name } : str(m.author) ? { author: str(m.author)! } : {}) }
 }
 
 const CONFIRMATION_STATES: ReadonlySet<string> = new Set(['pending', 'confirming', 'confirmed', 'cancelled', 'expired', 'failed'])

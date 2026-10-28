@@ -9,7 +9,7 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), textar
  * A modal sheet: labelled dialog, focus moves in, Tab stays inside, Escape and
  * the Close button dismiss it, and focus returns to what opened it.
  */
-export function Sheet({ title, onClose, children, tall = false }: { title: string; onClose: () => void; children: ReactNode; tall?: boolean }): ReactElement {
+export function Sheet({ title, onClose, children, tall = false, fullScreen = false }: { title: string; onClose: () => void; children: ReactNode; tall?: boolean; fullScreen?: boolean }): ReactElement {
   const titleId = useId()
   const panel = useRef<HTMLDivElement>(null)
 
@@ -42,7 +42,7 @@ export function Sheet({ title, onClose, children, tall = false }: { title: strin
   return (
     <div className="sheet-layer">
       <button type="button" className="sheet-backdrop" aria-label="Close" tabIndex={-1} onClick={onClose} />
-      <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={`sheet${tall ? ' sheet-tall' : ''}`} onKeyDown={onKeyDown}>
+      <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={`sheet${tall ? ' sheet-tall' : ''}${fullScreen ? ' sheet-fullscreen' : ''}`} onKeyDown={onKeyDown}>
         <header className="sheet-head">
           <h2 id={titleId}>{title}</h2>
           <button type="button" className="btn btn-quiet" onClick={onClose}>Close</button>

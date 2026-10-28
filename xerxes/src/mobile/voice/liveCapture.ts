@@ -39,13 +39,25 @@ export function browserLiveCaptureDeps(workletUrl: string = LIVE_WORKLET_URL): L
         stopTracks()
         throw new MicrophoneError('cancelled', 'The live session was cancelled.')
       }
-      const context = new AudioContext()
+      let context: AudioContext
+      try { context = new AudioContext() } catch (error) {
+        stopTracks()
+        throw new MicrophoneError('unavailable', 'Microphone audio could not initialize.', error)
+      }
+      let closed = false
       const closeAll = (): void => {
+        if (closed) return
+        closed = true
+        signal.removeEventListener('abort', closeAll)
         stopTracks()
         void context.close().catch(() => undefined)
       }
+      signal.addEventListener('abort', closeAll, { once: true })
       try {
         await context.audioWorklet.addModule(workletUrl)
+        if (signal.aborted) throw new MicrophoneError('cancelled', 'The live session was cancelled.')
+        await context.resume()
+        if (context.state !== 'running') throw new MicrophoneError('unavailable', 'The browser blocked microphone audio. Tap Start again to allow it.')
         if (signal.aborted) throw new MicrophoneError('cancelled', 'The live session was cancelled.')
         const source = context.createMediaStreamSource(stream)
         const node = new AudioWorkletNode(context, PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
@@ -71,6 +83,7 @@ export function browserLiveCaptureDeps(workletUrl: string = LIVE_WORKLET_URL): L
         }
       } catch (error) {
         closeAll()
+        if (signal.aborted) throw new MicrophoneError('cancelled', 'The live session was cancelled.')
         if (error instanceof MicrophoneError) throw error
         throw new MicrophoneError('unavailable', 'Live voice could not start on this browser.', error)
       }

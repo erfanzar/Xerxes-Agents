@@ -46,7 +46,7 @@ export interface HubController {
   loadUsage(): Promise<void>
   setPresence(state: PresenceState): void
   supervisorOpen(): Promise<void>
-  supervisorSend(text: string, source?: 'text' | 'voice'): Promise<boolean>
+  supervisorSend(text: string, source?: 'text' | 'voice', messageId?: string): Promise<boolean>
   supervisorRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void>
   /** Loads `hub.machines.list` into `state.machines`. */
   machinesList(): Promise<void>
@@ -568,8 +568,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
-  async function supervisorSend(text: string, source: 'text' | 'voice' = 'text'): Promise<boolean> {
-    const messageId = newCommandId()
+  async function supervisorSend(text: string, source: 'text' | 'voice' = 'text', messageId: string = newCommandId()): Promise<boolean> {
     store.dispatch({ type: 'supervisor', patch: { busy: true } })
     try {
       const result = await connection.request('supervisor.message.submit', { message_id: messageId, text, source, ...(supervisorThread ? { thread_id: supervisorThread } : {}) })

@@ -93,7 +93,7 @@ export function fetchDecision(input: {
   try { url = new URL(input.url) } catch { return 'network' }
   if (url.origin !== input.origin) return 'network'
   // The API, the socket and every identity route are never touched by the worker.
-  if (url.pathname.startsWith('/api/')) return 'network'
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/voice-models/')) return 'network'
   if (input.shell.has(url.pathname)) return 'shell'
   if (input.mode === 'navigate') return 'navigation'
   return 'network'

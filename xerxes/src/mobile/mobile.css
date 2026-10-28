@@ -373,6 +373,15 @@ input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-c
 }
 .sheet::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--x-accent); }
 .sheet-tall { max-height: 100dvh; min-height: 70dvh; }
+.sheet-fullscreen { max-width: none; height: 100dvh; max-height: 100dvh; padding-top: calc(1rem + var(--safe-top)); }
+.call-view { max-width: 40rem; margin: auto; text-align: center; display: grid; gap: 0.8rem; }
+.call-orb { width: min(40vw, 11rem); aspect-ratio: 1; margin: 1rem auto; border-radius: 50%; display: grid; place-items: center; font-size: 3rem; color: var(--x-title); border: 3px solid var(--x-accent); box-shadow: 0 0 3rem var(--x-accent-line); }
+.call-orb-hearing, .call-orb-speaking { animation: call-pulse 1s ease-in-out infinite alternate; }
+.call-orb-error { border-color: var(--x-needs-text); }
+.call-captions { text-align: left; overflow-wrap: anywhere; white-space: pre-wrap; }
+.call-controls { display: flex; justify-content: center; gap: 1rem; position: sticky; bottom: 0; background: var(--x-screen); padding: 1rem 0; }
+.call-view progress { width: 100%; }
+@keyframes call-pulse { to { transform: scale(1.06); opacity: 0.7; } }
 .sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
 .sheet-head h2 { margin: 0; }
 .sheet-body { display: block; }

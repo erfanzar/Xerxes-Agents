@@ -501,7 +501,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     if (!duplicate) {
       threads.emit(thread.id, 'supervisor.thread_event', { message: messageToWire(message) })
       // Only a person's message starts a turn. Replies, notices and confirmation echoes never do.
-      runner.enqueue({ threadId: thread.id, requester: principal }).catch(error => report(error, 'supervisor turn'))
+      runner.enqueue({ threadId: thread.id, requester: principal, causalMessageId: message.id }).catch(error => report(error, 'supervisor turn'))
     }
     return { message, duplicate }
   }

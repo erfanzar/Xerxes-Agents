@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -110,7 +110,59 @@ async function buildMobile(): Promise<void> {
   if (html.includes('{{')) throw new Error('index.html still has an unreplaced placeholder')
   await writeFile(join(outputDirectory, 'index.html'), html, 'utf8')
 
-  // Shell = index.html plus content-hashed assets. Never an /api/ path.
+  // Build AudioWorklet separately: it has its own global scope, and liveCapture loads this exact URL.
+  for (const [entry, name] of [
+    ['voice/worklet/pcmCapture.worklet.ts', 'voice-worklet.js'],
+    ['voice/call/worker.ts', 'voice-call-worker.js'],
+    ['voice/call/vadWorker.ts', 'voice-vad-worker.js'],
+  ] as const) {
+    const result = await Bun.build({
+      entrypoints: [join(sourceDirectory, entry)], outdir: outputDirectory,
+      target: 'browser', format: 'esm', minify: true, naming: { entry: name },
+      define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+      plugins: [{
+        name: 'browser-transformers-stub-metadata',
+        setup(build) {
+          build.onLoad({ filter: /transformers\.web\.js$/u }, async ({ path }) => ({
+            loader: 'js',
+            // The browser distribution contains empty Webpack native-module stubs. Remove only their generated
+            // banners/import annotations, not licenses or code; the post-build check rejects native code references.
+            contents: (await readFile(path, 'utf8')).replace(/\/\*![\s\S]*?\*\//gu, comment => /(?:onnxruntime-node|sharp) \(ignored\)|^\/\*!\s*(?:onnxruntime-node|sharp)\s*\*\/$/u.test(comment) ? '' : comment),
+          }))
+        },
+      }],
+    })
+    if (!result.success) {
+      for (const log of result.logs) console.error(log)
+      throw new Error(`${name} build failed`)
+    }
+  }
+  // Resolve the ONNX version actually owned by transformers, not an unrelated workspace runtime.
+  const transformerEntry = import.meta.resolve('@huggingface/transformers')
+  if (import.meta.resolve('@huggingface/transformers', import.meta.resolve('kokoro-js')) !== transformerEntry) {
+    throw new Error('Kokoro and call models must resolve one shared transformers.js runtime')
+  }
+  const ortDirectory = dirname(fileURLToPath(import.meta.resolve('onnxruntime-web', transformerEntry)))
+  const ortOutput = join(outputDirectory, 'voice-ort')
+  await mkdir(ortOutput, { recursive: true })
+  for (const name of await readdir(ortDirectory)) {
+    if (/^ort-wasm-simd-threaded(?:\.jsep)?\.(?:wasm|mjs)$/u.test(name)) await cp(join(ortDirectory, name), join(ortOutput, name))
+  }
+  const ortFiles = await readdir(ortOutput)
+  if (ortFiles.length !== 4 || ortFiles.filter(name => name.endsWith('.wasm')).length !== 2) throw new Error('Call build did not copy both WASM / WebGPU ONNX backends')
+  for (const name of ['voice-worklet.js', 'voice-call-worker.js', 'voice-vad-worker.js', ...ortFiles.map(name => `voice-ort/${name}`)]) {
+    const file = Bun.file(join(outputDirectory, name))
+    if (!(await file.exists()) || file.size === 0) throw new Error(`Missing call asset: ${name}`)
+    console.log(`call asset ${name}: ${file.size} bytes`)
+  }
+  // Browser dependencies must never leak native adapters into the shipped phone bundle.
+  for (const name of ['voice-worklet.js', 'voice-call-worker.js', 'voice-vad-worker.js', ...ortFiles.filter(name => name.endsWith('.mjs')).map(name => `voice-ort/${name}`), ...app.outputs.filter(output => output.path.endsWith('.js')).map(output => `assets/${basename(output.path)}`)]) {
+    const text = await readFile(join(outputDirectory, name), 'utf8')
+    const native = /onnxruntime-node|sharp/u.exec(text)
+    if (native) throw new Error(`Native inference dependency leaked into ${name}: ${text.slice(Math.max(0, native.index - 100), native.index + 140)}`)
+  }
+
+  // Shell = index.html plus content-hashed assets. Models and inference assets are loaded only when a call starts.
   const shell = ['/index.html', scriptName, styleName]
   const version = createHash('sha256').update(shell.join('\n')).digest('hex').slice(0, 12)
   const worker = await Bun.build({

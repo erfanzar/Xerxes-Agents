@@ -16,6 +16,7 @@ import { ModelChooser, ModelSheet } from './ModelChooser.js'
 import { Markdown } from './Markdown.js'
 import { TalkButton } from './TalkButton.js'
 import { VoiceStatus } from './VoiceStatus.js'
+import { CallView } from './CallView.js'
 
 export const SUPERVISOR_UNAVAILABLE = 'Supervisor not available on this hub'
 
@@ -109,6 +110,7 @@ export function XerxesTab(): ReactElement {
   const [autopilotSheet, setAutopilotSheet] = useState(false)
   const [threadView, setThreadView] = useState(false)
   const [watchSheet, setWatchSheet] = useState(false)
+  const [call, setCall] = useState(false)
   const autopilotChip = autopilotChipText(activeAutopilotRows(state))
   const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
@@ -154,7 +156,9 @@ export function XerxesTab(): ReactElement {
         </div>
       ) : (
         <>
+          {call ? <CallView onClose={() => setCall(false)} /> : null}
           <div className="config-row">
+            <button type="button" className="btn btn-primary" aria-haspopup="dialog" disabled={!live || supervisor.phase !== 'ready' || unconfigured} onClick={() => setCall(true)}>Call</button>
             <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setSheet(true)}>{config.canEdit ? 'Model' : 'Model (view)'}</button>
             {state.autopilot.unsupported ? null : (
               <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setAutopilotSheet(true)}>{state.autopilot.canEdit || state.autopilot.phase !== 'ready' ? 'Autopilot' : 'Autopilot (view)'}</button>

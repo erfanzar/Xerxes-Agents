@@ -29,6 +29,7 @@ import { messageToWire } from './supervisor/threads.js'
 import { WorkspaceRegistry, type HubWorkspace } from './workspaceRegistry.js'
 import { allowedModes, type VoiceRuntimeConfig } from './voice/config.js'
 import { createHubVoiceRoute, type HubVoiceRoute } from './voice/route.js'
+import { HubVoiceModelStore } from './voice/modelStore.js'
 
 /**
  * Composition root of the Hub: WorkspaceRegistry -> HubRuntimePool (sink = the
@@ -82,6 +83,10 @@ export interface HubServiceOptions {
    * are all present; otherwise the path is not mounted and the phone hides its talk button.
    */
   readonly voice?: VoiceRuntimeConfig
+  /** Caller-owned on-phone model cache. It is never closed by this service. */
+  readonly voiceModels?: HubVoiceModelStore
+  /** Environment for the service-owned cache (defaults to process.env). */
+  readonly voiceModelsEnvironment?: Readonly<Record<string, string | undefined>>
   /** Minimal-text push to a user (identity.admin.sendPush). Absent: no push is attempted. */
   readonly sendPush?: PushLike
   /** Live Hub-owner check (identity.admin.ownerUserId). XERXES Autopilot stays active only while its enabler is the owner. */
@@ -180,6 +185,9 @@ export function toPoolWorkspace(workspace: HubWorkspace): PoolWorkspace {
 export function createHubService(options: HubServiceOptions): HubService {
   const exposure: HubExposure = resolveHubExposure(options.exposure)
   const registry = options.registry ?? new WorkspaceRegistry(options.paths.workspacesPath)
+  const voiceModels = options.voiceModels ?? new HubVoiceModelStore({
+    stateDir: options.paths.stateDir, environment: options.voiceModelsEnvironment ?? process.env,
+  })
   const report = (error: unknown, context: string): void => {
     if (options.onError) options.onError(error, context)
     else console.error(`Hub ${context} failed`, error)
@@ -273,6 +281,7 @@ export function createHubService(options: HubServiceOptions): HubService {
     // Clients first (WebSocket close 1001), then the daemon relays, then the journal.
     clearInterval(registryTimer); registryTimer = undefined
     await attempt(() => registrySync)
+    if (options.voiceModels === undefined) await attempt(() => voiceModels.close())
     await attempt(() => server?.stop())
     await attempt(() => tunnel?.close())
     await attempt(() => lessonSync?.close())
@@ -463,6 +472,7 @@ export function createHubService(options: HubServiceOptions): HubService {
         server = new HubServer({
           ...options.server,
           ...(voiceRoute === undefined ? {} : { voice: voiceRoute }),
+          voiceModels,
           methodHandlers: { ...options.server?.methodHandlers, ...supervisorHandlers },
           hubId: options.signer.hubId,
           exposure,

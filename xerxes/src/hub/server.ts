@@ -4,6 +4,8 @@
 import { realpath } from 'node:fs/promises'
 import { basename, extname, resolve, sep } from 'node:path'
 import type { ServerWebSocket } from 'bun'
+import { VOICE_MODELS_PATH_PREFIX } from '../client/voiceModelManifest.js'
+import { VoiceModelsUnavailable, type HubVoiceModelStore } from './voice/modelStore.js'
 
 import {
   canSeeWorkspace, effectiveScopes, grantedSessionIds, hasScope,
@@ -79,6 +81,10 @@ export interface HubServerOptions {
   readonly methodHandlers?: Readonly<Partial<Record<HubMethod, HubMethodHandler>>>
   /** Voice endpoint; absent means the voice path is not served (the phone hides its talk button). */
   readonly voice?: HubVoiceRoute
+  /** Same-origin on-phone model cache, independent of provider-backed voice. */
+  readonly voiceModels?: HubVoiceModelStore
+  /** HTTP timeout port for embedding hosts/tests; defaults to Bun's per-request timeout. */
+  readonly setRequestTimeout?: (request: Request, seconds: number) => void
   readonly ready?: () => boolean
   readonly onError?: (error: unknown, context: string) => void
 }
@@ -232,7 +238,7 @@ export class HubServer {
     const connect = ["'self'", ...this.allowedOrigins.map(origin => origin.replace(/^http/, 'ws'))].join(' ')
     return {
       'content-security-policy': [
-        "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:", "font-src 'self'",
+        "default-src 'self'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self'", "img-src 'self' data:", "font-src 'self'",
         `connect-src ${connect}`, "manifest-src 'self'", "worker-src 'self'", "object-src 'none'",
         "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
       ].join('; '),
@@ -240,6 +246,7 @@ export class HubServer {
       'referrer-policy': 'no-referrer',
       'x-frame-options': 'DENY',
       'cross-origin-opener-policy': 'same-origin',
+      'permissions-policy': 'microphone=(self)',
     }
   }
 
@@ -306,6 +313,11 @@ export class HubServer {
       const info = this.httpInfo(request, address)
       if (path === HUB_WS_PATH) return await this.upgrade(request, server, info, address)
       if (this.options.voice !== undefined && path === this.options.voice.path) return await this.upgradeVoice(request, server, info, this.options.voice)
+      // Keep the original path for traversal rejection: URL.pathname normalizes dot segments.
+      const rawPath = /^https?:\/\/[^/]+([^?#]*)/u.exec(request.url)?.[1] ?? path
+      if (rawPath.startsWith(VOICE_MODELS_PATH_PREFIX) || path.startsWith(VOICE_MODELS_PATH_PREFIX) || path === '/api/hub/v1/voice/models') {
+        return await this.serveVoiceModels(request, info, rawPath, server)
+      }
       const handled = await identity.handleHttp(request, info)
       if (handled !== undefined) return this.secure(handled)
       if (api) return this.secure(json(404, { error: 'not_found' }))
@@ -313,6 +325,46 @@ export class HubServer {
     } catch (error) {
       this.options.onError?.(error, 'http')
       return this.secure(json(500, { error: 'internal' }))
+    }
+  }
+
+  private async serveVoiceModels(request: Request, info: HubHttpRequestInfo, rawPath: string, server: Bun.Server<SocketData>): Promise<Response> {
+    let context: AuthenticatedContext | null
+    try { context = await this.options.identity!.authenticate(info) } catch (error) {
+      this.options.onError?.(error, 'authenticate voice models')
+      return this.secure(json(503, { error: 'authentication_unavailable' }))
+    }
+    if (context === null) return this.secure(json(401, { error: 'unauthorized' }))
+    if (request.method !== 'GET' && request.method !== 'HEAD') return this.secure(json(405, { error: 'method_not_allowed' }, { allow: 'GET, HEAD' }))
+    const models = this.options.voiceModels
+    try {
+      if (rawPath === '/api/hub/v1/voice/models' && models !== undefined) {
+        if (request.method !== 'GET') return this.secure(json(405, { error: 'method_not_allowed' }, { allow: 'GET' }))
+        return this.secure(json(200, await models.status()))
+      }
+      let relative: string
+      try { relative = decodeURIComponent(rawPath.slice(VOICE_MODELS_PATH_PREFIX.length)) } catch { return this.secure(json(404, { error: 'not_found' })) }
+      const resolved = models?.resolve(relative)
+      if (resolved === undefined) return this.secure(json(404, { error: 'not_found' }))
+      // Only authenticated, allowlisted file GET/HEAD requests may outlive Bun's
+      // idle deadline. Queueing and verification share the store's own deadline.
+      if (this.options.setRequestTimeout) this.options.setRequestTimeout(request, 0)
+      else server.timeout(request, 0)
+      const file = await models!.openFile(resolved)
+      const headers = {
+        'content-length': String(resolved.file.size),
+        'content-type': resolved.file.path.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+        'cache-control': 'private, max-age=31536000, immutable',
+        etag: `"${resolved.file.sha256}"`,
+      }
+      const matches = request.headers.get('if-none-match')?.split(',').some(tag => tag.trim() === headers.etag || tag.trim() === `W/${headers.etag}` || tag.trim() === '*')
+      if (matches) return this.secure(new Response(null, { status: 304, headers }))
+      return this.secure(new Response(request.method === 'HEAD' ? null : file, { status: 200, headers }))
+    } catch (error) {
+      // Report only the fixed reason and sanitized cause, never the original error.
+      const sanitized = error instanceof VoiceModelsUnavailable ? error : new VoiceModelsUnavailable()
+      this.options.onError?.(sanitized, 'voice model download')
+      return this.secure(json(503, { error: 'voice_models_unavailable', reason: sanitized.reason }))
     }
   }
 

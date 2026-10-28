@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { HubProtocolError, type HubActor } from '../src/hub/protocol.js'
 import { SupervisorGrantOverlay, createHubSupervisor, createUnsupportedSupervisorHandlers, SUPERVISOR_SETUP_HINT } from '../src/hub/supervisor/index.js'
 import { emptyProjection, replaceSessionSummaries } from '../src/hub/projections.js'
-import { disposeAll, startFixture, tempDir, FakeIdentity, standardUsers } from './hubHarness.js'
+import { disposeAll, startFixture, tempDir, FakeIdentity, standardUsers, until } from './hubHarness.js'
 import { makeWorld, scriptedModel, T0 } from './hubSupervisorHarness.js'
 
 afterEach(disposeAll)
@@ -115,6 +115,24 @@ describe('supervisor service', () => {
     const dup = await t.supervisor.handlers['supervisor.message.submit']!(ctx, { message_id: 'm1', text: 'status?' })
     expect(dup.duplicate).toBe(true)
     expect(t.sent.some(item => item.type === 'supervisor.thread_event')).toBe(true)
+  })
+
+  test('submitted shared-thread voice and text messages retain their own reply correlation through enqueue and wire events', async () => {
+    const t = await configured()
+    try {
+      const events: Record<string, unknown>[] = []
+      t.supervisor.attachSink({ send: (_to, type, payload) => {
+        if (type === 'supervisor.thread_event' && typeof payload.message === 'object') events.push(payload.message as Record<string, unknown>)
+      } })
+      const ctx = (name: string) => ({ context: t.identity.context(name), grants: t.identity.grantsFor(name) })
+      await Promise.all([
+        t.supervisor.handlers['supervisor.message.submit']!(ctx('alice'), { message_id: 'voice-a', text: 'My question', source: 'voice' }),
+        t.supervisor.handlers['supervisor.message.submit']!(ctx('owner'), { message_id: 'text-b', text: 'Another question', source: 'text' }),
+      ])
+      await until(() => !t.supervisor.runner.busy('shared'))
+      expect(t.supervisor.threads.messagesFor('shared', 'alice').filter(message => message.role === 'xerxes').map(message => message.causalMessageId)).toEqual(['voice-a', 'text-b'])
+      expect(events.filter(message => message.role === 'xerxes').map(message => message.causal_message_id)).toEqual(['voice-a', 'text-b'])
+    } finally { t.supervisor.close() }
   })
 
   test('an agent principal cannot use the supervisor methods, and bad input is rejected', async () => {

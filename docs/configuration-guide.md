@@ -194,10 +194,44 @@ without waking for anything that happened before. At most 50 tasks are watched a
 before it counts as stalled (default 600000, 10 minutes; at least 60000). An invalid
 value is reported and the default applies.
 
-Voice is off unless `XERXES_HUB_VOICE_ENABLED=true` and the supervisor is configured.
-Providers come from `XERXES_HUB_VOICE_STT_*`, `_TTS_*` and `_REALTIME_*`, with keys in
-`XERXES_VOICE_<STT|TTS|REALTIME>_API_KEY`. Audio is never stored. When voice is not
-available, the voice path is not served and the phone hides its talk button.
+Provider-backed voice is off unless `XERXES_HUB_VOICE_ENABLED=true` and the supervisor
+is configured. Providers come from `XERXES_HUB_VOICE_STT_*`, `_TTS_*` and `_REALTIME_*`,
+with keys in `XERXES_VOICE_<STT|TTS|REALTIME>_API_KEY`. Audio is never stored. When
+provider-backed voice is unavailable, its WebSocket path is not served.
+
+**On-phone call models** are separate: the Hub serves Silero VAD, Moonshine STT and
+Kokoro TTS to signed-in phones, which run inference locally. This model cache does
+not require voice provider keys or `XERXES_HUB_VOICE_ENABLED`. Models are fetched on
+first use, or can be downloaded beforehand without starting or restarting the Hub:
+
+```bash
+xerxes hub voice-models fetch --tier standard --json
+xerxes hub voice-models fetch --tier light --json
+xerxes hub voice-models status --json
+```
+
+`standard` (the default) uses Moonshine base plus Kokoro (about 160 MB);
+`light` uses Moonshine tiny and the phone's browser voice (about 32 MB).
+`--tier all` downloads both. JSON mode emits exactly one object on stdout;
+fetch progress goes to stderr. `status` only inspects disk and never downloads.
+Files live in `<XERXES_HOME>/hub/voice-models/` with private directories. Every
+file is pinned by repository revision, size and SHA-256 in the shipped manifest;
+unlisted files are never downloaded or served. Downloads are streamed into
+private temporary files, verified, then renamed atomically. At most two files
+download concurrently, with a five-minute limit per file including queue time.
+Download failures are reported with sanitized causes, not URLs or cache paths.
+When embedding the Hub service, an injected model store remains caller-owned;
+the service only closes its own default store. Cached bytes are
+verified once per process before serving (and rechecked if their metadata changes).
+Readiness uses a size-only disk inspection, so it is advisory until that verification.
+
+Set `XERXES_HUB_VOICE_MODELS=off` to disable downloading **and serving** models.
+`XERXES_HUB_VOICE_MODELS_URL` optionally selects an HTTPS mirror implementing the
+Hugging Face `<repo>/resolve/<pinned-revision>/<path>` layout. Redirects must stay
+HTTPS; mirror URLs must not contain credentials. No upstream URL or filesystem
+path is returned in model errors. The PWA's CSP permits same-origin WebAssembly
+and workers, not third-party model origins; microphone access is restricted to
+self. See [the model HTTP contract](hub-protocol.md#on-phone-voice-models).
 
 SSH entries store an SSH-config alias (or a validated `user@host[:port]` target),
 never key material or passwords. Authentication stays in the host's SSH configuration.

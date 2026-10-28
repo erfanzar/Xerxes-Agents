@@ -12,6 +12,7 @@ import { loadOrCreateHubSigner } from './signer.js'
 import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort, watchStallFromEnvironment } from './supervisor/index.js'
 import { createVoiceRuntimeConfig } from './voice/providerFactory.js'
 import type { VoiceRuntimeConfig } from './voice/config.js'
+import { HubVoiceModelStore, VoiceModelsUnavailable } from './voice/modelStore.js'
 import type { HubServiceSupervisorConfig } from './service.js'
 import { getHubStatus, restartHub, runHub, startHub, stopHub, type HubLifecycleOptions, type HubStatus } from './lifecycle.js'
 import { hubPaths, type HubPaths } from './paths.js'
@@ -62,6 +63,9 @@ export const HUB_HELP = `Usage: xerxes hub [command]
   stop                             Stop only the Hub, never workspace daemons
   restart                          Stop and start the Hub
   status [--json]                  Show process, listeners and workspace health
+  voice-models fetch [--tier standard|light|all] [--json]
+                                   Download and verify on-phone voice models (default: standard)
+  voice-models status [--json]      Show on-phone model cache readiness (no network)
   workspaces list [--json]          List registered workspaces
   workspaces add-local <dir> [--socket <daemon-socket>] [--label <label>]
   workspaces add-ssh <alias> <remote-dir> --socket <remote-socket> [--label <label>]
@@ -126,6 +130,8 @@ export interface HubCliOptions {
   readonly lifecycle?: HubLifecycleOptions
   readonly stdout?: (line: string) => void
   readonly stderr?: (line: string) => void
+  /** Explicit offline model cache for embedding hosts/tests. */
+  readonly voiceModels?: HubVoiceModelStore
 }
 
 export function formatHubStatus(status: HubStatus): string {
@@ -239,6 +245,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
     baseEnvironment = settingsEnvironment(options.lifecycle?.environment ?? process.env, await loadHubSettings(paths))
   } catch (error) {
     err(error instanceof Error ? error.message : String(error))
+    if (command === 'voice-models' && rest.includes('--json')) out(JSON.stringify({ error: 'voice_models_unavailable', reason: 'Hub settings could not be loaded.' }))
     return 1
   }
   if (IDENTITY_COMMANDS.has(command)) {
@@ -327,6 +334,44 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
       if (result.stderr) err(result.stderr.replace(/\n$/, ''))
       if (result.timedOut) { err('The remote command timed out.'); return 124 }
       return result.code
+    }
+    if (command === 'voice-models') {
+      const [action, ...parameters] = rest
+      const parsed = parseFlags(parameters, new Set(['tier']))
+      if ((action !== 'fetch' && action !== 'status') || parsed.positional.length || [...parsed.flags].some(flag => flag !== 'json')
+        || (action === 'status' && parsed.values.has('tier')) || (parsed.values.get('tier')?.length ?? 0) > 1) {
+        throw new Error('usage: xerxes hub voice-models fetch [--tier standard|light|all] [--json] | status [--json]')
+      }
+      const tier = parsed.values.get('tier')?.[0] ?? 'standard'
+      if (tier !== 'standard' && tier !== 'light' && tier !== 'all') throw new Error('--tier must be standard, light or all')
+      const models = options.voiceModels ?? new HubVoiceModelStore({
+        stateDir: paths.stateDir, environment: baseEnvironment,
+        onError: error => err(`Voice model download failed: ${String(error.cause)}`),
+      })
+      try {
+        let fetched = 0
+        if (action === 'fetch') {
+          if (!models.enabled) throw new VoiceModelsUnavailable('Model downloads are disabled.')
+          for (const resolved of models.files(tier)) {
+            err(`Verifying ${resolved.id}: ${resolved.file.path} (${resolved.file.size} bytes)`)
+            await models.get(resolved)
+            fetched += 1
+          }
+        }
+        const status = await models.status()
+        const result = action === 'fetch' ? { ok: true, tier, files: fetched, ...status } : status
+        if (parsed.flags.has('json')) out(JSON.stringify(result))
+        else out([`On-phone voice models: ${status.enabled ? 'enabled' : 'disabled'}`,
+          ...Object.entries(status.tiers).map(([name, row]) => `${name}: ${row.bytes} bytes · ${row.ready ? 'ready' : 'not downloaded'}`)].join('\n'))
+        return 0
+      } catch (error) {
+        const reason = error instanceof VoiceModelsUnavailable ? error.reason : 'Model storage or download failed.'
+        err(reason)
+        if (parsed.flags.has('json')) out(JSON.stringify({ error: 'voice_models_unavailable', reason }))
+        return 1
+      } finally {
+        if (options.voiceModels === undefined) await models.close()
+      }
     }
     if (command === 'info') {
       const parsed = parseFlags(rest, new Set())
@@ -487,6 +532,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
         try {
           service = createHubService({
             paths, signer, identity, lifecycle: handle,
+            voiceModelsEnvironment: environment,
             exposure: exposureConfigFromEnvironment(environment),
             supervisor: supervisorConfigFromEnvironment(environment),
             ...(voice === undefined ? {} : { voice }),
@@ -626,6 +672,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
     return 1
   } catch (error) {
     err(`${error instanceof Error ? error.message : String(error)}\n${HUB_HELP}`)
+    if (command === 'voice-models' && rest.includes('--json')) out(JSON.stringify({ error: 'invalid_request', reason: 'Invalid voice-models arguments.' }))
     return 1
   }
 }

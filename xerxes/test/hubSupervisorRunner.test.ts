@@ -79,6 +79,33 @@ describe('supervisor runner', () => {
     expect(world.threads.messagesFor('shared', 'alice').at(-1)).toMatchObject({ role: 'xerxes', text: 'Two tasks; one is working.' })
   })
 
+  test('shared-thread replies persist and emit the exact causal message id, even when another person speaks', async () => {
+    const world = makeWorld()
+    world.threads.access('shared', world.user('alice'))
+    world.threads.access('shared', world.user('owner'))
+    const first = world.threads.append({ threadId: 'shared', role: 'user', text: 'My voice question', source: 'voice', author: { id: 'alice', name: 'Alice' } }).message
+    const runner = makeRunner(world, scriptedModel([reply('First answer'), reply('Second answer')], { delayMs: 10 }).model)
+    const firstTurn = runner.enqueue({ ...turn(world), causalMessageId: first.id })
+    const second = world.threads.append({ threadId: 'shared', role: 'user', text: 'Someone else asks', author: { id: 'owner', name: 'Owner' } }).message
+    const secondTurn = runner.enqueue({ ...turn(world, 'owner'), causalMessageId: second.id })
+    const results = await Promise.all([firstTurn, secondTurn])
+    expect(results.map(result => result.reply?.causalMessageId)).toEqual([first.id, second.id])
+    const persisted = world.threads.messagesFor('shared', 'alice').filter(message => message.role === 'xerxes')
+    expect(persisted.map(message => message.causalMessageId)).toEqual([first.id, second.id])
+    const emitted = world.events.flatMap(event => event.type === 'supervisor.thread_event' && typeof event.payload.message === 'object'
+      ? [event.payload.message as Record<string, unknown>] : []).filter(message => message.role === 'xerxes')
+    expect(emitted.map(message => message.causal_message_id)).toEqual([first.id, second.id])
+  })
+
+  test('Hub wake replies do not falsely claim to answer an earlier user message', async () => {
+    const world = makeWorld()
+    say(world)
+    const result = await makeRunner(world, scriptedModel([reply('Wake result')]).model).enqueue({
+      ...turn(world), trigger: { kind: 'watch', text: 'Check this task' },
+    })
+    expect(result.reply?.causalMessageId).toBeUndefined()
+  })
+
   test('at most 8 tool calls per turn, then it stops and tells the thread', async () => {
     const world = makeWorld()
     say(world)

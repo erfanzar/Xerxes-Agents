@@ -28,6 +28,78 @@ Every frame is one JSON object with `v: 1`.
   `interaction_already_resolved`, `gap`, `rate_limited`, `unsupported`,
   `unconfigured`, `internal`.
 
+## On-phone voice models
+
+These HTTP routes use the same signed-in cookie session as the identity API;
+an absent, expired or revoked session returns **401**. They are independent of
+the provider-backed voice WebSocket and need no voice provider credentials.
+Normal XERXES replies persist and emit `causal_message_id` in
+`supervisor.thread_event.message`, naming the exact user message that queued the
+turn (also when another person speaks in the shared thread). Hub-started wake
+replies do not claim to answer an earlier user message.
+
+- `GET|HEAD /voice-models/<repo>/resolve/<revision|main>/<path>` serves only files
+  in `src/client/voiceModelManifest.ts`. URL-decoded paths are checked against
+  that exact allowlist; traversal, backslashes, unknown revisions and unknown
+  files return **404**. `main` is only an alias for the pinned revision: the
+  upstream fetch always uses the exact commit, never the moving branch.
+- **200** has exact verified bytes, `Content-Length`, `Content-Type:
+  application/json` for `.json` (otherwise `application/octet-stream`),
+  `Cache-Control: private, max-age=31536000, immutable`, `ETag: "<sha256>"`,
+  and `X-Content-Type-Options: nosniff`. `HEAD` has the same headers and no body.
+  A matching `If-None-Match` returns **304**, after authentication and verification.
+- Disabled downloads/serving (`XERXES_HUB_VOICE_MODELS=off`), storage errors,
+  timeouts or failed upstream verification return **503**:
+  `{ "error": "voice_models_unavailable", "reason": "<public-safe reason>" }`.
+  Reasons contain neither filesystem paths nor upstream URLs.
+- `GET /api/hub/v1/voice/models` returns:
+
+```json
+{
+  "enabled": true,
+  "tiers": {
+    "standard": { "bytes": 0, "ready": false },
+    "light": { "bytes": 0, "ready": false }
+  },
+  "models": {
+    "vad": { "bytes": 0, "ready": false },
+    "stt_base": { "bytes": 0, "ready": false },
+    "stt_tiny": { "bytes": 0, "ready": false },
+    "tts": { "bytes": 0, "ready": false }
+  }
+}
+```
+
+Here `bytes` is the actual sum of the pinned file sizes (zero above is a shape
+placeholder). `ready` means every file is on disk with the expected size. Status
+never hashes or downloads; serving verifies SHA-256 once per process, and again
+when cached file metadata changes. Status remains available with `enabled:false`
+when model serving is disabled.
+
+The Hub downloads through a bounded native streaming cache: two downloads at
+once, five minutes per file **including time waiting for a slot**, size checked
+while reading, SHA-256 checked before atomic publication. Requests for the same
+file share a download. Native `Bun.file` responses are stat-checked inside cache
+admission, with one retry if the file disappears before that check. Only an
+authenticated, manifest-resolved file GET/HEAD disables the HTTP idle timeout;
+the status endpoint and rejected requests keep the default timeout. Download
+errors are reported with sanitized causes (for example `upstream status 503`,
+`size exceeded`, `hash mismatch`), never raw upstream or filesystem errors. HTTPS is
+required for the origin, optional mirror (`XERXES_HUB_VOICE_MODELS_URL`) and every
+redirect. The phone never fetches models from a third-party origin.
+
+The PWA response headers include `script-src 'self' 'wasm-unsafe-eval'`,
+`worker-src 'self'` and `Permissions-Policy: microphone=(self)`. `connect-src`
+stays same-origin plus the configured WebSocket origins. COOP stays `same-origin`;
+COEP is not added (the phone uses single-threaded ONNX WebAssembly).
+
+CLI equivalents, usable while the Hub is stopped:
+`xerxes hub voice-models fetch [--tier standard|light|all] [--json]` (default
+`standard`) and `xerxes hub voice-models status [--json]`. Fetch JSON adds
+`{ok:true,tier,files}` to the status shape; a failed fetch returns the safe error
+object above and a nonzero exit code. JSON stdout contains one object and fetch
+progress goes only to stderr.
+
 ## Actors
 
 The actor of every request is derived from the authenticated connection, never

@@ -240,7 +240,7 @@ export class SupervisorRunner {
    * `trigger` marks a Hub-started XERXES Autopilot turn: its Hub-authored text is
    * the last message of the turn, and the requester is the enabling owner.
    */
-  enqueue(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger }): Promise<SupervisorTurnResult> {
+  enqueue(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger; readonly causalMessageId?: string }): Promise<SupervisorTurnResult> {
     const previous = this.tails.get(input.threadId) ?? Promise.resolve()
     const start = (): Promise<SupervisorTurnResult> => (this.closed
       ? Promise.resolve({ stop: 'cancelled', toolCalls: 0, modelCalls: 0 })
@@ -283,7 +283,7 @@ export class SupervisorRunner {
     return { stop, ...counts, ...(detail === undefined ? {} : { detail }) }
   }
 
-  private async run(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger }): Promise<SupervisorTurnResult> {
+  private async run(input: { readonly threadId: string; readonly requester: UserPrincipal; readonly trigger?: SupervisorTurnTrigger; readonly causalMessageId?: string }): Promise<SupervisorTurnResult> {
     const { threads, registry, model } = this.options
     const { threadId, requester } = input
     const counts = { toolCalls: 0, modelCalls: 0 }
@@ -318,7 +318,9 @@ export class SupervisorRunner {
         messages.push({ role: 'user', content: text })
       }
       // The person's message this turn answers; voice uses it to match a reply to its submission.
-      const inReplyTo = stored.filter(message => message.role === 'user').at(-1)?.id
+      const inReplyTo = input.trigger === undefined
+        ? input.causalMessageId ?? stored.filter(message => message.role === 'user').at(-1)?.id
+        : undefined
       const tools = registry.definitions()
       let turnTokens = 0
 
@@ -349,7 +351,9 @@ export class SupervisorRunner {
         if (response.toolCalls.length === 0) {
           const text = clip(response.text.trim(), MAX_MESSAGE_CHARS)
           const { message } = threads.append({
-            threadId, role: 'xerxes', text: text === '' ? 'I have nothing to add.' : text, ...(input.trigger === undefined ? {} : { origin: 'wake' as const }),
+            threadId, role: 'xerxes', text: text === '' ? 'I have nothing to add.' : text,
+            ...(inReplyTo === undefined ? {} : { causalMessageId: inReplyTo }),
+            ...(input.trigger === undefined ? {} : { origin: 'wake' as const }),
           })
           threads.emit(threadId, 'supervisor.thread_event', { message: messageToWire(message) })
           threads.publishReply(threadId, { id: message.id, text: message.text, ...(inReplyTo === undefined ? {} : { inReplyTo }) })
