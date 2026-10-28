@@ -25,6 +25,31 @@ describe('HubConnection lifecycle', () => {
     expect(h.hub.sockets).toHaveLength(1)
   })
 
+  it('refreshes once and reconnects after an unauthorized hello instead of signing out', async () => {
+    let checks = 0
+    let helloCalls = 0
+    const h = harness({ ensureSession: async () => { checks += 1; return 'ok' } })
+    h.hub.handlers.set('hub.hello', () => (++helloCalls === 1
+      ? { __error: { code: 'unauthorized', message: 'session lapsed' } }
+      : { principal: { id: 'u1', display_name: 'Ann' } }))
+    await goLive(h)
+    expect(h.conn.status().state).toBe('reconnecting')
+    h.timers.advance(60_000)
+    await settle()
+    h.hub.socket(h.hub.sockets.length - 1).open()
+    await settle()
+    expect(h.conn.status().state).toBe('live')
+    expect(checks).toBeGreaterThanOrEqual(2)
+  })
+
+  it('signs out after an unauthorized hello only when the refresh is also denied', async () => {
+    let checks = 0
+    const h = harness({ ensureSession: async () => (++checks === 1 ? 'ok' : 'denied') })
+    h.hub.handlers.set('hub.hello', () => ({ __error: { code: 'unauthorized', message: 'no' } }))
+    await goLive(h)
+    expect(h.conn.status().state).toBe('revoked')
+  })
+
   it('stops reconnecting after hub.revoked', async () => {
     const h = harness()
     const socket = await goLive(h)

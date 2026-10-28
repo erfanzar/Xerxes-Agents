@@ -109,9 +109,12 @@ export function cookiesFor(ctx: IdentityContext, tokens: IssuedTokens): string[]
   ]
 }
 
+/** Why a refresh token was not accepted. Diagnostic only: it never names a token or a secret. */
+export type RefreshRefusal = 'malformed' | 'unknown_token' | 'family_revoked' | 'device_revoked' | 'spent_token' | 'race'
+
 export type RefreshOutcome =
   | { readonly kind: 'ok'; readonly tokens: IssuedTokens; readonly user: UserRow; readonly device: DeviceRow }
-  | { readonly kind: 'invalid' }
+  | { readonly kind: 'invalid'; readonly reason?: RefreshRefusal }
   | { readonly kind: 'pending' }
   | { readonly kind: 'expired' }
   | { readonly kind: 'reuse' }
@@ -119,16 +122,16 @@ export type RefreshOutcome =
 type InternalOutcome = { readonly outcome: RefreshOutcome; readonly events: readonly RevocationEvent[]; readonly remember?: { readonly hash: string; readonly tokens: IssuedTokens } }
 
 export function refreshTokens(ctx: IdentityContext, refreshToken: string): RefreshOutcome {
-  if (!refreshToken.startsWith(REFRESH_PREFIX) || refreshToken.length > MAX_TOKEN_LENGTH) return { kind: 'invalid' }
+  if (!refreshToken.startsWith(REFRESH_PREFIX) || refreshToken.length > MAX_TOKEN_LENGTH) return { kind: 'invalid', reason: 'malformed' }
   const hash = hashSecret(ctx, 'refresh', refreshToken)
   const result = ctx.store.transaction<InternalOutcome>(() => {
     const token = ctx.store.one<{ hash: string; family_id: string; generation: number }>('SELECT hash, family_id, generation FROM hub_refresh_tokens WHERE hash = ?', hash)
-    if (!token) return { outcome: { kind: 'invalid' }, events: [] }
+    if (!token) return { outcome: { kind: 'invalid', reason: 'unknown_token' }, events: [] }
     const family = ctx.store.one<FamilyRow>('SELECT * FROM hub_token_families WHERE id = ?', token.family_id)
-    if (!family || family.revoked_at !== null) return { outcome: { kind: 'invalid' }, events: [] }
+    if (!family || family.revoked_at !== null) return { outcome: { kind: 'invalid', reason: 'family_revoked' }, events: [] }
     const device = ctx.store.one<DeviceRow>('SELECT * FROM hub_devices WHERE id = ?', family.device_id)
     const user = device ? ctx.store.one<UserRow>('SELECT * FROM hub_users WHERE id = ?', device.user_id) : undefined
-    if (!device || !user || device.status === 'revoked' || user.revoked_at !== null) return { outcome: { kind: 'invalid' }, events: [] }
+    if (!device || !user || device.status === 'revoked' || user.revoked_at !== null) return { outcome: { kind: 'invalid', reason: 'device_revoked' }, events: [] }
     const now = ctx.clock.now()
     if (device.status === 'pending') {
       if (device.created_at + ctx.limits.confirmTtlMs <= now) {
@@ -154,7 +157,7 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
       // Already used once to start a branch: a racing retry inside the grace window gets that same branch.
       const grace = ctx.graceCache.get(hash)
       if (grace && grace.expiresAt > now) return { outcome: { kind: 'ok', tokens: grace.tokens, user, device }, events: [] }
-      return { outcome: { kind: 'invalid' }, events: [] }
+      return { outcome: { kind: 'invalid', reason: 'spent_token' }, events: [] }
     }
     if (token.generation !== family.generation) {
       const grace = ctx.graceCache.get(hash)
@@ -167,7 +170,7 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
     const successor = REFRESH_PREFIX + randomToken(ctx, 32)
     ctx.store.run('INSERT INTO hub_refresh_tokens (hash, family_id, generation, issued_at) VALUES (?, ?, ?, ?)', hashSecret(ctx, 'refresh', successor), family.id, next, now)
     const changed = ctx.store.run('UPDATE hub_token_families SET generation = ?, rotated_at = ?, last_used_at = ? WHERE id = ? AND generation = ? AND revoked_at IS NULL', next, now, now, family.id, family.generation)
-    if (changed !== 1) return { outcome: { kind: 'invalid' }, events: [] }
+    if (changed !== 1) return { outcome: { kind: 'invalid', reason: 'race' }, events: [] }
     ctx.store.run('UPDATE hub_devices SET last_seen_at = ? WHERE id = ?', now, device.id)
     ctx.store.run('DELETE FROM hub_sessions WHERE family_id = ? AND expires_at < ?', family.id, now - 60 * 60 * 1000)
     const tokens = mintSession(ctx, family.id, device, successor)

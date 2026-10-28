@@ -28,7 +28,8 @@ export type RefreshOutcome =
   | { readonly status: 'ok'; readonly csrfToken?: string }
   /** 202: the device exists but the owner has not confirmed it yet. */
   | { readonly status: 'pending' }
-  | { readonly status: 'denied' }
+  /** 401 only. `reason` is the Hub's refusal code (`no_session`: this browser was never paired). */
+  | { readonly status: 'denied'; readonly reason?: string }
   | { readonly status: 'unavailable'; readonly message: string }
 
 export type ConsumeOutcome =
@@ -97,7 +98,13 @@ export function createHubHttp(fetchFn: FetchLike): HubHttp {
       } catch (error) {
         return { status: 'unavailable', message: error instanceof Error ? error.message : 'Network error' }
       }
-      if (result.status === 401 || result.status === 403) return { status: 'denied' }
+      // Only 401 means the sign-in is gone. A 403 here is an Origin-header problem (a proxy or an
+      // extension), not a revoked device: signing out for it locked phones out for no reason.
+      if (result.status === 401) {
+        const reason = isRecord(result.body.error) && typeof result.body.error.reason === 'string' ? result.body.error.reason : undefined
+        return reason === undefined ? { status: 'denied' } : { status: 'denied', reason }
+      }
+      if (result.status === 403) return { status: 'unavailable', message: messageOf(result.body, 'The Hub refused this request (403). Retrying.') }
       if (result.status === 202) return { status: 'pending' }
       if (result.status >= 200 && result.status < 300) {
         const token = typeof result.body.csrf_token === 'string' && result.body.csrf_token.length > 0 ? result.body.csrf_token : undefined

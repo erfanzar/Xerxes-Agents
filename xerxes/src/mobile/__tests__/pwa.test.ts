@@ -233,6 +233,9 @@ describe('http helper', () => {
   it('maps pairing and refresh responses', async () => {
     const respond = (status: number, body: unknown): FetchLike => async () => new Response(JSON.stringify(body), { status })
     expect(await createHubHttp(respond(401, {})).refresh()).toEqual({ status: 'denied' })
+    expect(await createHubHttp(respond(401, { error: { code: 'unauthorized', message: 'x', reason: 'no_session' } })).refresh()).toEqual({ status: 'denied', reason: 'no_session' })
+    // A 403 is an Origin problem, not a revoked device: never a sign-out.
+    expect((await createHubHttp(respond(403, { error: { code: 'forbidden', message: 'origin is not allowed' } })).refresh()).status).toBe('unavailable')
     expect((await createHubHttp(respond(500, {})).refresh()).status).toBe('unavailable')
     expect(await createHubHttp(respond(200, { status: 'pending_confirmation', comparison_code: '1234' })).consumePairing({ pairing_id: 'p', code: 'c', device_label: 'iPhone' })).toEqual({ status: 'accepted', active: false, comparisonCode: '1234' })
     expect(await createHubHttp(respond(200, { status: 'active', comparison_code: '1234' })).consumePairing({ pairing_id: 'p', code: 'c', device_label: 'iPhone' })).toEqual({ status: 'accepted', active: true, comparisonCode: '1234' })

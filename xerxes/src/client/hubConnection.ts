@@ -295,6 +295,8 @@ export class HubConnection {
   private reconnectTimer: unknown
   private stopped = true
   private revoked = false
+  /** One refresh-and-retry after an unauthorized hello; reset once the connection goes live. */
+  private helloRetried = false
   private lastError: string | undefined
   private hello: HelloInfo = {}
 
@@ -529,6 +531,19 @@ export class HubConnection {
     } catch (error) {
       if (generation !== this.generation) return
       if (error instanceof HubRequestError && (error.code === 'unauthorized' || error.code === 'forbidden')) {
+        // The 5-minute browser session can lapse between the refresh and the hello (a suspended
+        // phone). Refresh once and retry before deciding the device is signed out.
+        if (this.options.ensureSession && !this.helloRetried) {
+          this.helloRetried = true
+          let check: SessionCheck
+          try { check = await this.options.ensureSession() } catch { check = 'unavailable' }
+          if (generation !== this.generation || this.stopped) return
+          if (check === 'denied') { this.markRevoked('Signed out. Pair this device again.'); return }
+          this.lastError = 'Session expired; reconnecting'
+          this.dropSocket(1000, 'session refresh')
+          this.scheduleReconnect()
+          return
+        }
         this.markRevoked('Signed out. Pair this device again.')
         return
       }
@@ -544,6 +559,7 @@ export class HubConnection {
     }))
     if (generation !== this.generation || this.stopped) return
     this.attempt = 0
+    this.helloRetried = false
     this.lastError = undefined
     this.setStatus({ state: 'live' })
   }

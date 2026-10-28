@@ -147,8 +147,28 @@ function sessionResponse(
   )
 }
 
-function endedResponse(): Response {
-  return jsonResponse(401, { error: { code: 'unauthorized', message: 'the session ended; pair this device again' } }, [clearHostCookie(REFRESH_COOKIE), clearHostCookie(SESSION_COOKIE)])
+/**
+ * `reason` tells the client why (for example `no_session`: this browser holds no sign-in at all,
+ * which on iPhone usually means Safari was paired but the Home Screen app was not). It names no secret.
+ */
+function endedResponse(reason?: string): Response {
+  return jsonResponse(401, { error: { code: 'unauthorized', message: 'the session ended; pair this device again', ...(reason === undefined ? {} : { reason }) } }, [clearHostCookie(REFRESH_COOKIE), clearHostCookie(SESSION_COOKIE)])
+}
+
+/** Record why a refresh was refused, so a phone that "signs out" leaves evidence. Never stores the token. */
+function auditRefusal(call: Call, reason: string, token?: string): void {
+  try {
+    let device = ''
+    if (token !== undefined) {
+      try { device = deviceForRefreshToken(call.ctx, token)?.device.id ?? '' } catch { device = '' }
+    }
+    auditAction(call.ctx, {
+      actor: { principal_kind: 'user', principal_id: 'anonymous', display_name: 'Unauthenticated caller' },
+      action: `identity.refresh.refused:${reason}${device ? `:${device}` : ''}`,
+      decision: 'denied',
+      outcome: 'rejected',
+    })
+  } catch { /* Diagnostics must never change the answer. */ }
 }
 
 const consume: Route = async call => {
@@ -191,11 +211,16 @@ const refresh: Route = call => {
     throw new HubIdentityError('rate_limited', 'too many refresh attempts')
   }
   const token = parseCookieHeader(call.info.cookie).get(REFRESH_COOKIE)
-  if (token === undefined) return endedResponse()
+  if (token === undefined) {
+    auditRefusal(call, 'no_session')
+    return endedResponse('no_session')
+  }
   const outcome = refreshTokens(call.ctx, token)
   if (outcome.kind === 'ok') return sessionResponse(call.ctx, 'active', outcome.tokens, outcome.user, outcome.device)
   if (outcome.kind === 'pending') return jsonResponse(202, { status: 'pending_confirmation' })
-  return endedResponse()
+  const reason = outcome.kind === 'invalid' ? outcome.reason ?? 'invalid' : outcome.kind
+  auditRefusal(call, reason, token)
+  return endedResponse(reason)
 }
 
 const logout: Route = call => {
