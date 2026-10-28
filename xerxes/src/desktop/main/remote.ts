@@ -123,9 +123,16 @@ const sshOptions = [
 ]
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
 export type RemoteRunner = typeof runCaptured
+/**
+ * The shell a read-only probe runs on the host. A host without Bun has no Xerxes runtime either: it answers
+ * XERXES_REMOTE_MISSING (so the caller bootstraps, which installs Bun) instead of failing with 127.
+ */
+export function remoteProbeCommand(program: string): string {
+  return 'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; '
+    + 'if command -v bun >/dev/null 2>&1; then exec bun -e ' + quote(program) + '; else echo XERXES_REMOTE_MISSING; fi')
+}
 export function probeRemote(machine: RemoteTarget, program: string, signal: AbortSignal, run: RemoteRunner = runCaptured): Promise<string> {
-  return run('ssh', [...sshOptions, '-T', '--', sshDestination(machine.target),
-    'exec sh -c ' + quote('PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"; export PATH; exec bun -e ' + quote(program))], signal, 20000)
+  return run('ssh', [...sshOptions, '-T', '--', sshDestination(machine.target), remoteProbeCommand(program)], signal, 20000)
 }
 export interface RemoteOpenPorts {
   run?: RemoteRunner
