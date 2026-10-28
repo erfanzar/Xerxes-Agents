@@ -11,11 +11,25 @@ export function voiceStateLine(state: VoiceCallSnapshot): string {
   if (!state.connected) return 'Connecting'
   switch (state.call.phase) {
     case 'idle': return state.checking ? 'Connecting' : 'Ready for voice'
-    case 'loading': return `Loading voice (${voiceMegabytes(state.call.progress?.loaded ?? 0)} of ${voiceMegabytes(state.call.progress?.total ?? tierDownloadBytes(state.tier))})`
+    case 'loading': return loadingLine(state)
     case 'listening': case 'hearing': return state.call.muted ? 'Microphone muted' : 'Listening'
     case 'thinking': case 'transcribing': return 'Thinking'
     case 'speaking': return 'Speaking'
   }
+}
+
+/**
+ * Loader progress counts cached files too, so it would climb to the full tier size on every call.
+ * Only bytes not already in this browser's caches are shown as a download.
+ */
+function loadingLine(state: VoiceCallSnapshot): string {
+  const cache = state.phoneCache
+  const cachedBytes = cache ? Math.max(0, cache.cachedBytes) : 0
+  const totalBytes = cache?.totalBytes ?? state.call.progress?.total ?? tierDownloadBytes(state.tier)
+  if (cache && cachedBytes >= totalBytes) return 'Starting voice'
+  const remaining = Math.max(0, totalBytes - cachedBytes)
+  const loaded = Math.min(remaining, Math.max(0, (state.call.progress?.loaded ?? 0) - cachedBytes))
+  return `Downloading voice (${voiceMegabytes(loaded)} of ${voiceMegabytes(remaining)})`
 }
 
 /** Meter data affects only the orb's paint, never recognition or playback. */

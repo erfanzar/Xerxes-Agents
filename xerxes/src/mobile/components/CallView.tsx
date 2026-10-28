@@ -22,6 +22,10 @@ export function CallView(): ReactElement {
   const chat = (): void => { call.minimize(); router.navigate({ name: 'xerxes' }) }
   const end = (): void => { call.end(); router.navigate({ name: 'xerxes' }) }
   const style: CSSProperties & { '--voice-level': number } = { '--voice-level': voiceOrbLevel(state) }
+  // Only bytes this browser does not already hold count as a download.
+  const totalBytes = state.phoneCache?.totalBytes ?? tierDownloadBytes(active ? current.tier : state.tier)
+  const cachedBytes = Math.min(totalBytes, Math.max(0, state.phoneCache?.cachedBytes ?? 0))
+  const missingBytes = totalBytes - cachedBytes
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -71,7 +75,7 @@ export function CallView(): ReactElement {
           </button>
         </div>
         <h2 className="voice-state" role="status" aria-live="polite">{voiceStateLine(state)}</h2>
-        {current.phase === 'loading' ? <progress className="voice-download" aria-label="Voice model bytes loaded" max={current.progress?.total ?? tierDownloadBytes(state.tier)} value={current.progress?.loaded ?? 0} /> : null}
+        {current.phase === 'loading' && missingBytes > 0 ? <progress className="voice-download" aria-label="Voice model bytes downloaded" max={missingBytes} value={Math.min(missingBytes, Math.max(0, (current.progress?.loaded ?? 0) - cachedBytes))} /> : null}
         <div className="voice-captions" aria-label="Live call captions" aria-live="polite" aria-atomic="true">
           {current.heard ? <p className="voice-heard"><span>You</span> {shortVoiceCaption(current.heard)}</p> : null}
           {current.spokenSentence ? <p className="voice-spoken"><span>XERXES</span> {shortVoiceCaption(current.spokenSentence)}</p> : null}
@@ -81,7 +85,11 @@ export function CallView(): ReactElement {
         {current.notice ? <p role="status" className="voice-notice">{current.notice}</p> : null}
       </div>
       {!active ? <div className="voice-start">
-        {!state.downloadNoticeSeen ? <p className="voice-notice">First call downloads ~{voiceMegabytes(tierDownloadBytes('standard'))} once in Standard mode (Light: ~{voiceMegabytes(tierDownloadBytes('light'))}). Cached on this phone after that.</p> : null}
+        {state.phoneCache !== undefined && missingBytes === 0
+          ? <p className="voice-notice">Voice models are downloaded on this phone. Nothing to download.</p>
+          : !state.downloadNoticeSeen || state.phoneCache !== undefined
+            ? <p className="voice-notice">This call downloads ~{voiceMegabytes(missingBytes)} once{state.tier === 'standard' ? ` (Light needs ~${voiceMegabytes(tierDownloadBytes('light'))})` : ''}. Kept on this phone after that.</p>
+            : null}
         {!ready ? <p className="voice-notice">Connect to the Hub and choose XERXES’s model to start.</p> : null}
         <button type="button" className="voice-start-button" disabled={!ready || !state.models || state.checking} onClick={() => { void call.start() }}>Start voice</button>
         {state.error ? <button type="button" className="voice-retry" onClick={() => { void call.loadStatus() }}>Retry voice models</button> : null}

@@ -39,7 +39,7 @@ describe('app-level voice scene', () => {
     expect(html).not.toContain('sheet-fullscreen')
     expect(html).toContain('aria-label="Voice settings"')
     // Sizes come from the manifest, so a model change can never leave stale text behind.
-    expect(html).toContain(`First call downloads ~${Math.round(tierDownloadBytes('standard') / 1_000_000)} MB once`)
+    expect(html).toContain(`This call downloads ~${Math.round(tierDownloadBytes('standard') / 1_000_000)} MB once`)
     expect(html).toContain('Moonshine Streaming small + Kokoro')
     expect(html).toContain(`Light · ${Math.round(tierDownloadBytes('light') / 1_000_000)} MB`)
     expect(html).toContain('>Mute</span>')
@@ -50,7 +50,7 @@ describe('app-level voice scene', () => {
     f.service.dispose()
   })
   it.each([
-    ['loading', 'Loading voice (80 MB of 162 MB)'], ['listening', 'Listening'], ['hearing', 'Listening'],
+    ['loading', 'Downloading voice (80 MB of 162 MB)'], ['listening', 'Listening'], ['hearing', 'Listening'],
     ['transcribing', 'Thinking'], ['thinking', 'Thinking'], ['speaking', 'Speaking'],
   ] satisfies readonly [CallSnapshot['phase'], string][])('renders %s with short captions and the appropriate state', async (phase, expected) => {
     const f = voiceServiceFixture()

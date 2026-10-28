@@ -16,6 +16,9 @@ export interface VoiceCallSnapshot {
   readonly error?: string
   readonly downloadNoticeSeen: boolean
   readonly debugCaptureEnabled: boolean
+  /** Bytes of the selected tier already in this browser's caches (display-only). */
+  readonly phoneCache?: { readonly cachedBytes: number; readonly totalBytes: number }
+  readonly storagePersisted?: 'granted' | 'denied' | 'unsupported'
 }
 export interface VoiceCallServiceDeps {
   readonly engine: () => CallEngineControl
@@ -27,6 +30,10 @@ export interface VoiceCallServiceDeps {
   readonly rememberNotice?: () => void
   readonly debugEnabled?: () => boolean
   readonly rememberDebugEnabled?: (enabled: boolean) => void
+  /** Reports how much of a tier is already cached on the phone. */
+  readonly phoneCache?: (tier: VoiceModelTier) => Promise<{ readonly cachedBytes: number; readonly totalBytes: number }>
+  /** Asks the browser not to evict cached models (navigator.storage.persist). */
+  readonly persistStorage?: () => Promise<boolean>
 }
 export const isCallActive = (call: CallSnapshot): boolean => call.phase !== 'idle' && call.phase !== 'error'
 
@@ -37,6 +44,8 @@ export class VoiceCallService {
   private check: AbortController | undefined
   private snapshot: VoiceCallSnapshot
   private readonly observers = new Set<() => void>()
+  private persistRequested = false
+  private cacheProbe = 0
   constructor(private readonly deps: VoiceCallServiceDeps) {
     const tier = chooseCallTier(deps.deviceMemory)
     this.snapshot = { view: 'closed', tier, connected: true, checking: false, downloadNoticeSeen: deps.noticeSeen?.() ?? false,
@@ -55,7 +64,34 @@ export class VoiceCallService {
   /** Chat/Escape only hides the voice screen. The engine, microphone, models and observers are untouched. */
   minimize(): void { this.update({ view: isCallActive(this.snapshot.call) ? 'chat' : 'closed' }) }
   setConnected(connected: boolean): void { if (connected !== this.snapshot.connected) this.update({ connected }) }
-  setTier(tier: VoiceModelTier): void { if (!isCallActive(this.snapshot.call)) this.update({ tier }) }
+  setTier(tier: VoiceModelTier): void {
+    if (isCallActive(this.snapshot.call)) return
+    const { phoneCache: _stale, ...previous } = this.snapshot
+    this.snapshot = previous
+    this.update({ tier })
+    void this.refreshPhoneCache()
+  }
+  /** Display-only: a failed probe leaves the previous (or no) cache figure in place. */
+  private async refreshPhoneCache(): Promise<void> {
+    const probe = this.deps.phoneCache
+    if (!probe) return
+    const tier = this.snapshot.tier
+    const id = ++this.cacheProbe
+    try {
+      const phoneCache = await probe(tier)
+      if (id === this.cacheProbe && tier === this.snapshot.tier) this.update({ phoneCache })
+    } catch { /* cache status only changes the progress wording */ }
+  }
+  /** Asked once per service lifetime; never delays or fails a call. */
+  private requestPersistentStorage(): void {
+    if (this.persistRequested) return
+    this.persistRequested = true
+    const persist = this.deps.persistStorage
+    if (!persist) { this.update({ storagePersisted: 'unsupported' }); return }
+    void (async () => {
+      try { this.update({ storagePersisted: (await persist()) ? 'granted' : 'denied' }) } catch { this.update({ storagePersisted: 'unsupported' }) }
+    })()
+  }
   setDebugCaptureEnabled(enabled: boolean): void {
     this.deps.rememberDebugEnabled?.(enabled)
     this.engine?.setDebugCaptureEnabled(enabled)
@@ -69,7 +105,7 @@ export class VoiceCallService {
     this.snapshot = previous
     this.update({ checking: true })
     try {
-      const models = await this.deps.modelsStatus(check.signal)
+      const [models] = await Promise.all([this.deps.modelsStatus(check.signal), this.refreshPhoneCache()])
       if (!check.signal.aborted) this.update({ models, checking: false })
     } catch (error) {
       if (!check.signal.aborted) this.update({ checking: false, error: error instanceof Error ? error.message : 'Voice models are unavailable.' })
@@ -79,6 +115,7 @@ export class VoiceCallService {
     if (!this.snapshot.models || !this.deps.canStart() || isCallActive(this.snapshot.call)) return
     const { error: _error, ...previous } = this.snapshot
     this.snapshot = previous
+    this.requestPersistentStorage()
     try {
       this.deps.beforeStart?.()
       if (!this.engine) {
@@ -87,7 +124,9 @@ export class VoiceCallService {
         this.stopObserving = engine.subscribe(() => {
           const call = engine.getSnapshot()
           const ended = isCallActive(this.snapshot.call) && call.phase === 'idle'
+          const stopped = isCallActive(this.snapshot.call) && !isCallActive(call)
           this.update({ call, ...(call.phase === 'error' ? { view: 'voice' as const } : ended ? { view: 'closed' as const } : {}) })
+          if (stopped) void this.refreshPhoneCache()
         })
       }
       this.engine.setDebugCaptureEnabled(this.snapshot.debugCaptureEnabled)

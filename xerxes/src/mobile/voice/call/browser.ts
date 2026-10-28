@@ -8,6 +8,7 @@ import { tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceMod
 import { browserLiveCaptureDeps } from '../liveCapture.js'
 import { CallEngine, type CallOutput } from './engine.js'
 import { fetchCallModelsStatus, waitForCallReply } from './logic.js'
+import { cachedTierBytes } from './phoneCache.js'
 import { VoiceCallService } from './service.js'
 import type { CallModels, CallProgress, CallTranscriptionRecovery, CallWorkerRequest, CallWorkerResponse } from './protocol.js'
 
@@ -356,5 +357,8 @@ export function browserVoiceCallService(controller: HubController, store: HubSto
     rememberNotice: () => { try { localStorage.setItem('xerxes-call-download-notice', 'seen') } catch { /* storage is optional */ } },
     debugEnabled: () => { try { return localStorage.getItem('xerxes-call-debug-utterance') === 'true' } catch { return false } },
     rememberDebugEnabled: enabled => { try { localStorage.setItem('xerxes-call-debug-utterance', String(enabled)) } catch { /* only the preference, never audio, is stored */ } },
+    phoneCache: tier => cachedTierBytes(tier, typeof location === 'undefined' ? '' : location.origin, typeof caches === 'undefined' ? undefined : caches),
+    ...(typeof navigator !== 'undefined' && typeof navigator.storage?.persist === 'function'
+      ? { persistStorage: () => navigator.storage.persist() } : {}),
   })
 }

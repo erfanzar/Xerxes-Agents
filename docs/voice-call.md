@@ -45,6 +45,12 @@ Models load only when you start a call. The Hub downloads and verifies pinned fi
 the phone then downloads them from that same Hub. Transformers.js caches model files in the
 browser after the first call. Clearing site data, browser storage eviction or a new model
 revision requires another download. The app shell service worker does **not** precache models.
+Before a call the phone checks which model files are already in its browser caches. If all of them
+are there, the call view shows **Starting voice** while it loads them into memory, with no
+download. Otherwise it shows **Downloading voice (X of Y MB)**, where Y counts only the files that
+are still missing. On the first call the app asks the browser to keep this storage
+(`navigator.storage.persist()`). That makes eviction less likely, but the browser may still
+refuse.
 The ONNX runtime and phonemizer are also served/bundled locally; no third-party origin is
 contacted by the phone. A missing model route or disabled/unavailable Hub model store is
 reported in the call view rather than silently contacting another server.
