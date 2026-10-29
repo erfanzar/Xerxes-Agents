@@ -87,7 +87,7 @@ export const AUTOPILOT_READ_ONLY_NOTE = 'Only the Hub owner can change Autopilot
 
 export const AUTOPILOT_INSTRUCTION_PLACEHOLDER = 'Keep going until the goal is done; take the recommended option'
 
-/** Some actions run unconfirmed; the owner's own messages stop doing so while another person is in the thread. */
+/** XERXES acts for the owner without a Confirm, except while another person is in the thread. */
 export const AUTOPILOT_COMPOSER_HINT = 'XERXES acts for you at once. If another person wrote in this thread recently, its actions wait for Confirm.'
 
 export const AUTOPILOT_EXPIRY_LAPSED_NOTE = 'The previous expiry has passed. Choose a new one before you save.'

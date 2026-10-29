@@ -117,7 +117,8 @@ describe('autopilot helpers', () => {
     // Enabled but not active (expired, or the enabler is no longer owner) is not "on".
     expect(autopilotChipText([{ ...rows[0]!, active: false }])).toBeUndefined()
     expect(autopilotChipText([])).toBeUndefined()
-    expect(AUTOPILOT_COMPOSER_HINT).toContain('without confirmation')
+    expect(AUTOPILOT_COMPOSER_HINT).toContain('acts for you at once')
+    expect(AUTOPILOT_COMPOSER_HINT).toContain('wait for Confirm')
     expect(autoCardNote('Ann')).toBe('Done automatically on behalf of Ann.')
     expect(autoCardNote(undefined)).toBe('Done automatically by Autopilot.')
   })

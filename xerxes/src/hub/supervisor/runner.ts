@@ -17,9 +17,9 @@ import { MAX_MESSAGE_CHARS, messageToWire, type SupervisorThreads, type ThreadMe
  *   asserted at construction, so a registry with a forbidden or extra tool
  *   never runs.
  * - Turns are serialized per thread.
- * - A turn makes at most 8 tool calls and is bounded in model calls, tokens,
- *   cost and wall time. It stops, and tells the thread, on a denial or when a
- *   quota runs out.
+ * - By default a turn has no cap on tool calls, model calls, tokens or wall
+ *   time; an operator may configure quotas. It stops, and tells the thread, on
+ *   a denial or when a configured quota runs out.
  * - Only a person's message starts a turn. The supervisor's own replies,
  *   confirmation echoes and notices never do.
  * - Tool results are task data: they enter the prompt fenced as untrusted.
