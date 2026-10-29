@@ -8,7 +8,7 @@ import type {
   SupervisorOptions, TaskSummary, WatchAnomaly, WatchAnomalyKind, WatchRow, WatchStats, WatchTests, WatchView, WorkspaceView,
 } from './hubTypes.js'
 import { arr, clip, isoOr, num, rec, str } from './parse.js'
-import { toolSummary, userInputOf, type Block, type FoldInput } from './sessionFold.js'
+import { toolSummary, userInputOf, withoutTurnContext, type Block, type FoldInput } from './sessionFold.js'
 import { NO_ACTIVITY, activityAfter, taskStatusOf, type TaskActivity } from './taskTypes.js'
 
 /**
@@ -259,7 +259,7 @@ export function parseHistoryPage(result: Readonly<Record<string, unknown>>): His
         const p = rec(part)
         return p.type === 'text' && typeof p.text === 'string' ? [p.text] : []
       }).join('\n')
-      if (message.role === 'user') blocks.push({ kind: 'user', ...identity(), text: fullText, images, steer: false })
+      if (message.role === 'user') blocks.push({ kind: 'user', ...identity(), text: withoutTurnContext(fullText), images, steer: false })
       else if (message.role === 'assistant' && text) blocks.push({ kind: 'assistant', ...identity(), text: fullText, streaming: false })
       for (const rawCall of arr(message.tool_calls)) {
         const call = rec(rawCall)

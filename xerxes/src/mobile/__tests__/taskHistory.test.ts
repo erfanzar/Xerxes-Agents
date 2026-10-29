@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createHubController, HISTORY_REFRESH_MS } from '../../client/hubController.js'
 import { parseHistoryPage } from '../../client/hubParsers.js'
+import { userInputOf } from '../../client/sessionFold.js'
 import { createHubStore, reduceHub } from '../../client/hubStore.js'
 import { batch, ev, goLive, harness, settle } from './fakes.js'
 import { liveState, summary } from './helpers.js'
@@ -225,6 +226,16 @@ describe('authoritative history windows', () => {
     load(Array.from({ length: 1000 }, (_, i) => message(`${i}:message`, 'assistant', String(i))))
     expect(state.selected?.older.length).toBeLessThanOrEqual(360)
     expect(state.selected?.historyActionIds.length).toBeLessThanOrEqual(360)
+  })
+
+  it('shows only what the person typed, never the model-only turn-context block', () => {
+    const wrapped = '<turn-context>\nCurrent goal: ship it\n<memory-context>notes</memory-context>\n</turn-context>\n\nY'
+    const parsed = parseHistoryPage(page([message('0:message', 'user', wrapped)]))
+    expect(parsed.blocks[0]).toMatchObject({ kind: 'user', text: 'Y' })
+    expect(userInputOf(wrapped).text).toBe('Y')
+    expect(userInputOf([{ type: 'text', text: wrapped }]).text).toBe('Y')
+    // Text that merely mentions the tag later on is the person's own and stays.
+    expect(userInputOf('why does <turn-context> leak?').text).toBe('why does <turn-context> leak?')
   })
 
   it('rejects unreadable pages rather than treating missing history as an empty conversation', () => {

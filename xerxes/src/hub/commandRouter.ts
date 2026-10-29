@@ -508,7 +508,10 @@ export class HubCommandRouter {
       ...(requestedBy === undefined ? {} : { requested_by: requestedBy }),
       ...(context.actor.confirmed_by === undefined ? {} : { confirmed_by: context.actor.confirmed_by }),
       workspace_id: request.workspaceId,
-      ...(request.sessionId === undefined ? {} : { session_id: request.sessionId }),
+      // The daemon binds every session-scoped request to its session id or its session key.
+      // A fresh session.open has no id yet, so bind it to the key it is opened under;
+      // leaving the claim out made every new task fail with session_mismatch.
+      session_id: request.sessionId ?? sessionKey,
       method: spec.method,
       params_hash: paramsHash(wire),
       request_id: key,

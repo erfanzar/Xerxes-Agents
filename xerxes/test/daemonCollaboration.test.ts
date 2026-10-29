@@ -199,6 +199,22 @@ test('capabilities are advertised and a request without hub_auth keeps the legac
   } finally { runner.gate.resolve(); await r.stop() }
 })
 
+test('a hub-signed session.open for a new task is bound to the session key it opens', async () => {
+  const runner = new Runner()
+  runner.gate.resolve()
+  const r = await rig(runner)
+  try {
+    const params = { session_key: 'hub:new-task', project_dir: r.root, history_limit: 0 }
+    // What the Hub router sends for task.start: no session id exists yet, so the claim carries the key.
+    const opened = await r.client.call('session.open', r.sign(ALICE, 'session.open', params, { session_id: 'hub:new-task' }))
+    expect(opened.ok).not.toBe(false)
+    // The binding is still enforced: an envelope signed for another session is refused.
+    const other = { ...params, session_key: 'hub:other-task' }
+    await expect(r.client.call('session.open', r.sign(ALICE, 'session.open', other, { session_id: 'hub:new-task' })))
+      .rejects.toThrow('session_mismatch')
+  } finally { runner.gate.resolve(); await r.stop() }
+})
+
 test('a forged, replayed or unscoped hub_auth request is a JSON-RPC error and never runs as an anonymous human', async () => {
   const runner = new Runner()
   const r = await rig(runner)

@@ -93,9 +93,17 @@ function actorName(actor: HubActor | undefined): string | undefined {
   return actor.display_name
 }
 
+/**
+ * Drop the model-only `<turn-context>` block Xerxes puts in front of a prompt
+ * (goal state, refreshed memory). The person sees only what they typed.
+ */
+export function withoutTurnContext(text: string): string {
+  return text.replace(/^\s*<turn-context>[\s\S]*?<\/turn-context>\s*/, '')
+}
+
 /** Text and image count of a `turn_begin.user_input` (string or Part[]). */
 export function userInputOf(value: unknown): { readonly text: string; readonly images: number } {
-  if (typeof value === 'string') return { text: clip(value, TEXT_LIMIT), images: 0 }
+  if (typeof value === 'string') return { text: clip(withoutTurnContext(value), TEXT_LIMIT), images: 0 }
   let images = 0
   const parts: string[] = []
   for (const part of arr(value)) {
@@ -103,7 +111,7 @@ export function userInputOf(value: unknown): { readonly text: string; readonly i
     if (item.type === 'text' && typeof item.text === 'string') parts.push(item.text)
     else if (item.type === 'image_url') images += 1
   }
-  return { text: clip(parts.join('\n'), TEXT_LIMIT), images }
+  return { text: clip(withoutTurnContext(parts.join('\n')), TEXT_LIMIT), images }
 }
 
 const ARG_KEYS = ['command', 'cmd', 'path', 'file_path', 'pattern', 'query', 'url', 'text'] as const

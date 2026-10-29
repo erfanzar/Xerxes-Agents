@@ -283,6 +283,17 @@ describe('Hub command router', () => {
     expect(tampered).toEqual({ ok: false, reason: 'params_mismatch' })
   })
 
+  test('signs a fresh session.open with the session key it is opened under', async () => {
+    const t = await setup()
+    await t.router.execute(t.identity.context('alice'), command('session.open', 'open-1'))
+    const [open] = t.mutations()
+    expect(open!.method).toBe('session.open')
+    expect(String(open!.params.session_key)).toMatch(/^hub:/)
+    const claims = (open!.params.hub_auth as { claims: Record<string, unknown> }).claims
+    // The daemon binds session.open to its session key; an envelope without it is session_mismatch.
+    expect(claims.session_id).toBe(open!.params.session_key)
+  })
+
   test('an unknown outcome is recorded and never replayed, even after a restart', async () => {
     const t = await setup()
     const alice = t.identity.context('alice')
