@@ -285,7 +285,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
                 <div className="supervisor__empty">
                   <strong>Ask XERXES about your work</strong>
-                  <p>It sees every task on your Hub, proposes actions and waits for a person to confirm them. It cannot approve anything for you.</p>
+                  <p>It sees every task on your Hub and acts for you: it starts, steers and stops tasks, answers their questions and decides their permission requests. With anyone else in the thread, its actions wait for Confirm.</p>
                   <p className="supervisor__try">Try “What needs me right now?”</p>
                 </div>
               ) : null}
@@ -355,8 +355,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           </div>
           <p className="supervisor__hint">
             {autopilotChip === undefined
-              ? 'XERXES proposes; nothing runs until you confirm.'
-              : `XERXES proposes; most actions wait for your Confirm. ${AUTOPILOT_COMPOSER_HINT}`}
+              ? 'XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.'
+              : AUTOPILOT_COMPOSER_HINT}
             {' '}⏎ send · ⇧⏎ new line
           </p>
         </form>

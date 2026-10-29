@@ -25,10 +25,14 @@ import { MAX_MESSAGE_CHARS, messageToWire, type SupervisorThreads, type ThreadMe
  * - Tool results are task data: they enter the prompt fenced as untrusted.
  */
 
-export const HARD_MAX_TOOL_CALLS_PER_TURN = 8
+/**
+ * XERXES is the owner's personal agent: by default nothing caps a turn. An
+ * operator can still configure any of these quotas; the owner can always stop a
+ * running turn. `Infinity` means unbounded.
+ */
+export const HARD_MAX_TOOL_CALLS_PER_TURN = Number.POSITIVE_INFINITY
 
 export interface SupervisorQuotas {
-  /** Clamped to 8. */
   readonly maxToolCallsPerTurn: number
   readonly maxModelCallsPerTurn: number
   readonly maxTokensPerTurn: number
@@ -41,11 +45,12 @@ export interface SupervisorQuotas {
 }
 
 export const DEFAULT_SUPERVISOR_QUOTAS: SupervisorQuotas = Object.freeze({
-  maxToolCallsPerTurn: HARD_MAX_TOOL_CALLS_PER_TURN,
-  maxModelCallsPerTurn: 10,
-  maxTokensPerTurn: 60_000,
-  maxOutputTokens: 1_200,
-  maxTurnMs: 90_000,
+  maxToolCallsPerTurn: Number.POSITIVE_INFINITY,
+  maxModelCallsPerTurn: Number.POSITIVE_INFINITY,
+  maxTokensPerTurn: Number.POSITIVE_INFINITY,
+  // The daemon's hub.model.complete ceiling (HUB_MODEL_MAX_TOKENS).
+  maxOutputTokens: 8_192,
+  maxTurnMs: Number.POSITIVE_INFINITY,
   windowMs: 24 * 60 * 60 * 1000,
 })
 
@@ -170,8 +175,8 @@ export interface SupervisorRunnerOptions {
   readonly onError?: (error: unknown, context: string) => void
 }
 
-const CONTEXT_MESSAGES = 12
-const TOOL_RESULT_CHARS = 14_000
+const CONTEXT_MESSAGES = 40
+const TOOL_RESULT_CHARS = 60_000
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
@@ -199,7 +204,6 @@ export class SupervisorRunner {
     this.quotas = {
       ...DEFAULT_SUPERVISOR_QUOTAS,
       ...options.quotas,
-      maxToolCallsPerTurn: Math.min(HARD_MAX_TOOL_CALLS_PER_TURN, options.quotas?.maxToolCallsPerTurn ?? HARD_MAX_TOOL_CALLS_PER_TURN),
     }
     // The ceiling is checked here, not left to the caller: a registry with a forbidden or extra tool never runs.
     const names = options.registry.definitions().map(definition => definition.function.name)
@@ -292,7 +296,8 @@ export class SupervisorRunner {
 
     const controller = new AbortController()
     this.active.set(threadId, controller)
-    const timer = setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs)
+    // setTimeout(Infinity) fires at once, so an unbounded turn gets no timer at all.
+    const timer = Number.isFinite(this.quotas.maxTurnMs) ? setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs) : undefined
     threads.setWorking(threadId, true)
     try {
       const stored = threads.messagesFor(threadId, requester.id, CONTEXT_MESSAGES)
@@ -302,8 +307,8 @@ export class SupervisorRunner {
         ...(input.trigger?.target === undefined ? {} : { target: input.trigger.target }),
         // Autopilot runs the requester's own actions only when nobody else spoke in this context window,
         // and no reply from a wake turn (which may quote task text) is in it either.
-        othersInContext: stored.some(message => (message.role === 'user' && message.authorId !== requester.id)
-          || (message.role === 'xerxes' && message.origin === 'wake')),
+        // Only another person's message counts: the owner's own agent acts for the owner without cards.
+        othersInContext: stored.some(message => message.role === 'user' && message.authorId !== requester.id),
       }
       const messages: ChatMessage[] = stored.map(toChat)
       // Hub-authored wake text; anything copied from a task inside it is already fenced.

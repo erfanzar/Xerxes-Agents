@@ -35,7 +35,9 @@ describe('supervisor tool ceiling', () => {
     }
     const world = makeWorld()
     const names = world.registry.definitions().map(definition => definition.function.name)
-    expect(names).toHaveLength(14)
+    expect(names).toHaveLength(16)
+    expect(names).toContain('answer_permission')
+    expect(names).toContain('tasks_search')
     for (const name of ['permission_response', 'permission.respond', 'question.respond']) expect(names).not.toContain(name)
     for (const name of SUPERVISOR_FORBIDDEN_TOOLS) expect(names).not.toContain(name)
     expect(world.registry.get('permission_response')).toBeUndefined()
@@ -75,7 +77,7 @@ describe('supervisor runner', () => {
     expect(result.stop).toBe('completed')
     expect(result.reply?.text).toBe('Two tasks; one is working.')
     expect(scripted.requests[0]!.system).toContain('test persona')
-    expect(scripted.requests[0]!.tools).toHaveLength(14)
+    expect(scripted.requests[0]!.tools).toHaveLength(16)
     expect(world.threads.messagesFor('shared', 'alice').at(-1)).toMatchObject({ role: 'xerxes', text: 'Two tasks; one is working.' })
   })
 
@@ -106,22 +108,38 @@ describe('supervisor runner', () => {
     expect(result.reply?.causalMessageId).toBeUndefined()
   })
 
-  test('at most 8 tool calls per turn, then it stops and tells the thread', async () => {
+  test('by default a turn has no tool-call, model-call, token or time cap', async () => {
+    const world = makeWorld()
+    say(world)
+    const scripted = scriptedModel([calls(20), calls(20), reply('Looked at everything.')])
+    const runner = makeRunner(world, scripted.model)
+    expect(runner.quotas.maxToolCallsPerTurn).toBe(Number.POSITIVE_INFINITY)
+    expect(runner.quotas.maxModelCallsPerTurn).toBe(Number.POSITIVE_INFINITY)
+    expect(runner.quotas.maxTokensPerTurn).toBe(Number.POSITIVE_INFINITY)
+    expect(runner.quotas.maxTurnMs).toBe(Number.POSITIVE_INFINITY)
+    const result = await runner.enqueue(turn(world))
+    expect(result.stop).toBe('completed')
+    expect(result.toolCalls).toBe(40)
+    expect(result.reply?.text).toBe('Looked at everything.')
+  })
+
+  test('an operator-configured tool cap still stops the turn and tells the thread', async () => {
     const world = makeWorld()
     say(world)
     const stopped: SupervisorStoppedInfo[] = []
     const scripted = scriptedModel([calls(9)])
-    const result = await makeRunner(world, scripted.model, { onStopped: info => { stopped.push(info as SupervisorStoppedInfo) } }).enqueue(turn(world))
+    const result = await makeRunner(world, scripted.model, {
+      quotas: { maxToolCallsPerTurn: 8 }, onStopped: info => { stopped.push(info as SupervisorStoppedInfo) },
+    }).enqueue(turn(world))
     expect(result.stop).toBe('tool_cap')
     expect(result.toolCalls).toBe(8)
     expect(stopped[0]).toMatchObject({ stop: 'tool_cap', requester: 'alice' })
-    expect(world.threads.messagesFor('shared', 'alice').at(-1)).toMatchObject({ role: 'system' })
     expect(world.threads.messagesFor('shared', 'alice').at(-1)!.text).toContain('8 tool calls')
   })
 
-  test('a larger configured tool cap is clamped to 8', () => {
+  test('a configured tool cap is not clamped', () => {
     const world = makeWorld()
-    expect(makeRunner(world, scriptedModel([reply('x')]).model, { quotas: { maxToolCallsPerTurn: 50 } }).quotas.maxToolCallsPerTurn).toBe(8)
+    expect(makeRunner(world, scriptedModel([reply('x')]).model, { quotas: { maxToolCallsPerTurn: 50 } }).quotas.maxToolCallsPerTurn).toBe(50)
   })
 
   test('the model-call quota of a turn stops it', async () => {

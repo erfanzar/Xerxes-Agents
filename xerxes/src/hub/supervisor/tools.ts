@@ -17,7 +17,7 @@ import {
 } from './threads.js'
 
 /**
- * The supervisor's DEDICATED tool registry: exactly the fourteen tools in
+ * The supervisor's DEDICATED tool registry: exactly the sixteen tools in
  * `schemas.ts` and nothing else. It never contains workspace plugins, MCP,
  * shell or filesystem tools, Workflow, review or ordinary goal tools.
  *
@@ -28,8 +28,8 @@ import {
  */
 
 export const TURN_METADATA_KEY = 'xerxes_supervisor_turn'
-export const TAIL_MAX_BYTES = 8 * 1024
-export const SEARCH_MAX_BYTES = 8 * 1024
+export const TAIL_MAX_BYTES = 64 * 1024
+export const SEARCH_MAX_BYTES = 64 * 1024
 
 /** Per-turn state handed to every tool through the execution context. */
 export interface SupervisorTurnState {
@@ -55,10 +55,22 @@ export interface SupervisorPushPort {
   (userId: string, message: { readonly title: string; readonly body: string; readonly url: string }): Promise<unknown>
 }
 
-/** XERXES Autopilot hooks for the `task.pending` and `question.answer` tools. Absent: both refuse. */
+/** Hooks for `task.pending`, `question.answer` and `permission.answer`. Absent: the answer tools refuse. */
 export interface SupervisorAutopilotPort {
-  /** What the task waits on, from the Hub journal. Permission details are never included. */
+  /** What the task waits on, from the Hub journal, including permission details. */
   pending(workspaceId: string, sessionId: string): PendingInteractions | undefined
+  /** Approve or reject a waiting permission on the owner's behalf; throws SupervisorDenied for anyone else. */
+  answerPermission?(input: {
+    readonly threadId: string
+    readonly workspaceId: string
+    readonly sessionId: string
+    readonly requestId: string
+    readonly response: 'approve' | 'approve_for_session' | 'reject'
+    readonly requester: UserPrincipal
+    readonly reader: ScopeReader
+    readonly trigger: boolean
+    readonly othersInContext: boolean
+  }): Promise<Record<string, unknown>>
   /** Answer a waiting question on the owner's behalf; throws SupervisorDenied when Autopilot is not active. */
   answer(input: {
     readonly threadId: string
@@ -148,6 +160,12 @@ export function stripArgumentFields(value: unknown, depth = 0): unknown {
   return out
 }
 
+/** Hits of a daemon `session.search` reply: the daemon answers `results`; older fakes used `hits`. */
+function searchHits(result: Readonly<Record<string, unknown>>): unknown[] {
+  if (Array.isArray(result.results)) return result.results
+  return Array.isArray(result.hits) ? result.hits : []
+}
+
 const CURSOR_PREFIX = 'o1.'
 function decodeCursor(cursor: string | undefined): number {
   if (cursor === undefined || !cursor.startsWith(CURSOR_PREFIX)) return 0
@@ -228,7 +246,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       if (typeof args.after === 'number' && args.after > 0) throw new Error('"after" is not supported yet; omit it to read the latest steps')
       const key = await resolveSessionKey(deps.backend, workspaceId, taskId)
       if (key === undefined) throw new Error('that task is not active in its workspace, so it has no live tail')
-      const limit = typeof args.limit === 'number' ? args.limit : 10
+      const limit = typeof args.limit === 'number' ? args.limit : 20
       const result = await poolRead(workspaceId, 'session.history', { session_key: key, history_limit: limit }, signal)
       const tail = renderTail(result.history, TAIL_MAX_BYTES)
       return { steps: tail.lines, truncated: tail.truncated }
@@ -238,9 +256,9 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       const workspaceId = str(args, 'workspace_id')!
       const taskId = str(args, 'task_id')!
       readable(turn, workspaceId, taskId)
-      const limit = typeof args.limit === 'number' ? args.limit : 5
+      const limit = typeof args.limit === 'number' ? args.limit : 10
       const result = await poolRead(workspaceId, 'session.search', { query: str(args, 'query')!, session_id: taskId, limit }, signal)
-      const hits = Array.isArray(result.hits) ? result.hits : []
+      const hits = searchHits(result)
       const kept: unknown[] = []
       let bytes = 2
       let truncated = false
@@ -256,6 +274,43 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
         bytes += size
       }
       return { hits: kept, truncated }
+    },
+
+    'tasks.search': async (args, turn, signal) => {
+      const only = str(args, 'workspace_id')
+      if (only !== undefined) readable(turn, only)
+      const query = str(args, 'query')!
+      const limit = typeof args.limit === 'number' ? args.limit : 30
+      const targets = deps.workspaces.list().filter(workspace => (only === undefined || workspace.id === only) && turn.reader.canRead({ workspaceId: workspace.id }))
+      const settled = await Promise.allSettled(targets.map(async workspace => {
+        const result = await poolRead(workspace.id, 'session.search', { query, limit }, signal)
+        const sessions = deps.workspaces.projection(workspace.id)?.sessions ?? {}
+        // Several derived workspaces can share one daemon: keep only this workspace's own, readable tasks.
+        return searchHits(result).flatMap(hit => {
+          if (!isRecord(hit) || typeof hit.session_id !== 'string') return []
+          const session = sessions[hit.session_id]
+          if (session === undefined || !turn.reader.canRead({ workspaceId: workspace.id, sessionId: hit.session_id })) return []
+          return [{ workspace_id: workspace.id, workspace: workspace.label, task_id: hit.session_id, title: clip(session.title, 120), ...(stripArgumentFields(hit) as Record<string, unknown>) }]
+        })
+      }))
+      const kept: unknown[] = []
+      const seen = new Set<string>()
+      const failed: string[] = []
+      let bytes = 2
+      let truncated = false
+      for (const [index, outcome] of settled.entries()) {
+        if (outcome.status === 'rejected') { failed.push(targets[index]!.label); continue }
+        for (const hit of outcome.value) {
+          const key = `${hit.workspace_id}\u0000${hit.task_id}\u0000${String((hit as Record<string, unknown>).message_index ?? '')}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          const size = utf8ByteLength(JSON.stringify(hit)) + 1
+          if (kept.length >= limit || bytes + size > SEARCH_MAX_BYTES) { truncated = true; break }
+          kept.push(hit)
+          bytes += size
+        }
+      }
+      return { hits: kept, truncated, searched_workspaces: targets.length, ...(failed.length > 0 ? { unreachable_workspaces: failed } : {}) }
     },
 
     'task.pending': (args, turn) => {
@@ -281,9 +336,14 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
             free_form_allowed: item.allow_free_form,
           })),
         })),
-        // Count only: a permission's command and arguments never reach the supervisor.
         permission_requests_waiting: found.permissionIds.length,
-        ...(found.permissionIds.length > 0 ? { permission_note: 'A permission request is waiting. Only a person can answer it; tell the owner.' } : {}),
+        permissions: (found.permissions ?? []).map(permission => ({
+          request_id: permission.request_id,
+          tool: permission.tool,
+          description: permission.description,
+          inputs: permission.inputs,
+        })),
+        ...(found.permissionIds.length > 0 ? { permission_note: 'Decide each with answer_permission (approve, approve_for_session or reject) for the owner.' } : {}),
         waiting_total: count,
         ...(found.complete ? {} : { note: 'The journal window is partial; this list may miss older items.' }),
       }
@@ -312,6 +372,31 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
           // Any Hub-started turn (Autopilot or Watch) is a wake turn, never an "owner alone" conversation.
           reader: turn.reader, trigger: turn.trigger !== undefined, othersInContext: turn.othersInContext ?? true,
           ...(turn.target === undefined ? {} : { target: turn.target }),
+        })
+      } catch (error) {
+        if (error instanceof SupervisorDenied) {
+          turn.denial = error.message
+          return { ok: false, denied: true, message: error.message }
+        }
+        throw error
+      }
+    },
+
+    'permission.answer': async (args, turn) => {
+      const workspaceId = str(args, 'workspace_id')!
+      const taskId = str(args, 'task_id')!
+      readable(turn, workspaceId, taskId)
+      const response = str(args, 'response')
+      if (response !== 'approve' && response !== 'approve_for_session' && response !== 'reject') {
+        throw new Error("response must be 'approve', 'approve_for_session' or 'reject'")
+      }
+      if (deps.autopilot?.answerPermission === undefined) {
+        throw new SupervisorDenied('This Hub cannot answer permission requests, so XERXES cannot. Tell the owner.')
+      }
+      try {
+        return await deps.autopilot.answerPermission({
+          threadId: turn.threadId, workspaceId, sessionId: taskId, requestId: str(args, 'request_id')!, response, requester: turn.requester,
+          reader: turn.reader, trigger: turn.trigger !== undefined, othersInContext: turn.othersInContext ?? true,
         })
       } catch (error) {
         if (error instanceof SupervisorDenied) {
@@ -387,7 +472,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
         action_id: action.id,
         summary: action.summary,
         expires_at: new Date(action.expiresAt).toISOString(),
-        note: 'Nothing has run. A person in this thread must tap Confirm before it does.',
+        note: 'Nothing has run yet. Someone other than the Hub owner is in this conversation, so a person must tap Confirm first.',
       }
     } catch (error) {
       if (error instanceof SupervisorDenied) {
@@ -414,7 +499,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       'default',
       {
         readOnly: spec.gate === 'read', concurrencySafe: spec.gate === 'read', defer: false, destructive: false, openWorld: false,
-        interruptBehavior: 'cancel', maxResultBytes: 16 * 1024,
+        interruptBehavior: 'cancel', maxResultBytes: 64 * 1024,
       },
     )
   }

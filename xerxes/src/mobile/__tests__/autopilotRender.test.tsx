@@ -41,7 +41,7 @@ describe('Xerxes tab Autopilot', () => {
   it('shows "Autopilot on · N workspaces" and the no-confirmation note when any workspace is active', () => {
     const html = plain(render(withAutopilot({ rows: [row(), row({ workspace_id: 'w2', label: 'Server' }), row({ workspace_id: 'w3', active: false })] }), '/xerxes'))
     expect(html).toContain('Autopilot on · 2 workspaces')
-    expect(html).toContain(AUTOPILOT_COMPOSER_HINT)
+    expect(html).toContain('acts for you at once')
     expect(plain(render(withAutopilot({ rows: [row()] }), '/xerxes'))).toContain('Autopilot on · 1 workspace<')
   })
 
@@ -85,7 +85,7 @@ describe('Autopilot sheet', () => {
     const html = sheet(withAutopilot({ rows: [row(), row({ workspace_id: 'w2', label: 'Server', enabled: false, active: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null })] }))
     expect(html).toContain('role="dialog"')
     expect(html).toContain(AUTOPILOT_EXPLANATION)
-    expect(html).toContain('Permission requests (commands, edits) still come to you')
+    expect(html).toContain('questions and permission requests')
     expect(html.match(/type="checkbox"/g)).toHaveLength(2)
     expect(html.match(/<textarea/g)).toHaveLength(2)
     expect(html).toContain('maxLength="2000"')

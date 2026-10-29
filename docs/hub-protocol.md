@@ -161,7 +161,7 @@ mid-call). `unknown` is resolved with `hub.command.status`, never by replaying.
 | viewer | `session.read`, `usage.read`, `presence.read` |
 | steer | viewer + `session.steer` |
 | operator | steer + `session.submit`, `session.cancel`, `session.configure`, `goal.write`, `permission.respond`, `question.respond` |
-| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model`, `question.delegated`, `lessons.sync` |
+| owner | operator + `grants.manage`, `approvals.manage`, `devices.manage`, `supervisor.model`, `question.delegated`, `lessons.sync`, `permission.delegated` |
 
 `supervisor.model` lets a principal run one model completion on a daemon's own
 provider profiles (`hub.model.complete`). An agent principal may hold it; the Hub
@@ -172,8 +172,16 @@ QUESTION on the Hub owner's behalf through the `hub.command` action
 `question.answer` (daemon method `question_response`, same arguments as
 `question.respond`). It is in the agent ceiling and is not human-only.
 `question.answer` is refused for user principals (people use `question.respond`).
-There is no delegated permission route: `permission.respond` stays human-only at
-the Hub router, the daemon verifier and the supervisor tool ceiling.
+
+`permission.delegated` (the owner's XERXES) is the permission counterpart: the
+`hub.command` action `permission.answer` (daemon method `permission_response`,
+same arguments as `permission.respond`) lets the supervisor approve or reject a
+task's waiting permission request on the Hub owner's behalf. Only the owner role
+carries it, it is in the agent ceiling, and the router accepts `permission.answer`
+only from the supervisor principal with scopes from the per-dispatch overlay. A
+daemon accepts an agent's `permission_response` only when the signed scopes carry
+`permission.delegated`, so a daemon must run this version for XERXES to answer
+permissions. `permission.respond` itself stays human-only.
 
 Effective scopes = matching allow grants − matching deny grants, ∩ the device
 ceiling. A hub owner starts from every scope. Session-scoped grants apply only
@@ -383,9 +391,23 @@ While a workspace's Autopilot is active:
   is no longer the owner, broadcasts the change, posts `Autopilot needs you:
   Autopilot is off in <label> because …` to people who can see the workspace, and
   pushes the enabler. Closing the supervisor cancels queued and running turns.
-- **Permissions.** A waiting permission request posts `Autopilot needs you:
-  “<title>” is asking for permission. Only a person can answer it.` and pushes the
-  owner. XERXES never decides it.
+- **Permissions.** `pending_interactions` shows each waiting permission request
+  with its tool, description and clipped inputs (fenced as untrusted data).
+  `answer_permission` decides it under the same owner-only conditions as
+  `answer_question`, checks the id is a waiting permission, dispatches
+  `permission.answer` with the owner's delegated scopes, audits it and posts
+  `XERXES <approved|rejected> <tool> in “<title>” for <owner>.`
+
+**The owner's personal agent (since 0.8.17).** XERXES no longer needs Autopilot
+to act for the Hub owner. When the owner is the requester and no other person's
+message is in the turn's context (or in a Hub wake-up in the owner's own thread),
+every action and answer runs at once, on any task, with no Confirm card. Other
+people in the conversation, and non-owner requesters, still get Confirm cards and
+cannot have questions or permissions answered. By default a supervisor turn has
+no cap on tool calls, model calls, tokens or wall time, there is no daily token
+bound, and Autopilot has no hourly cap on wake-ups or autonomous actions; an
+operator can still configure any of these quotas. The owner can stop a turn at
+any time.
 
 ## XERXES Watch
 

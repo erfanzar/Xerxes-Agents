@@ -502,11 +502,9 @@ export class ActionService {
     let eligible = false
     if (grant !== undefined) {
       const owner = grant.owner
-      if (grant.wake && !WAKE_AUTO_TOOLS.has(tool)) {
-        held = { text: `Autopilot needs you: confirm ${record.summary}`, push: 'Autopilot needs you to confirm an action.' }
-      } else if (offTarget) {
-        held = { text: `Autopilot needs you: confirm ${record.summary} (not the task this wake-up is about)`, push: 'Autopilot needs you to confirm an action.' }
-      } else if (!hasScope(owner, ownerGrants, accessTarget, scope, now)) {
+      // The owner's own agent: any action, on any task, wake-up or not. Only the owner's own scopes bound it.
+      void offTarget
+      if (!hasScope(owner, ownerGrants, accessTarget, scope, now)) {
         held = { text: `Autopilot needs you: ${owner.displayName} cannot ${tool} here, so this waits for a person to confirm: ${record.summary}`, push: 'Autopilot needs you.' }
       } else {
         eligible = true

@@ -36,6 +36,12 @@ export const HUB_SCOPES = [
    */
   'question.delegated',
   'lessons.sync',
+  /**
+   * Answer a task's pending PERMISSION request on the Hub owner's behalf (the owner's
+   * XERXES). Not human-only so an agent can hold it, but only the owner role carries it,
+   * and it reaches the supervisor solely through the per-dispatch overlay for that owner.
+   */
+  'permission.delegated',
 ] as const
 export type HubScope = (typeof HUB_SCOPES)[number]
 
@@ -62,7 +68,7 @@ const OPERATOR: readonly HubScope[] = [
   'permission.respond',
   'question.respond',
 ]
-const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model', 'question.delegated', 'lessons.sync']
+const OWNER: readonly HubScope[] = [...OPERATOR, 'grants.manage', 'approvals.manage', 'devices.manage', 'supervisor.model', 'question.delegated', 'lessons.sync', 'permission.delegated']
 
 export const ROLE_SCOPES: Readonly<Record<HubRole, ReadonlySet<HubScope>>> = Object.freeze({
   viewer: new Set(VIEWER),
@@ -83,6 +89,7 @@ export const AGENT_SCOPE_CEILING: ReadonlySet<HubScope> = new Set<HubScope>([
   'supervisor.model',
   'question.delegated',
   'lessons.sync',
+  'permission.delegated',
 ])
 
 export type HubPrincipal =

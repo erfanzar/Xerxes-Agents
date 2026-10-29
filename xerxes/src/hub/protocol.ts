@@ -71,6 +71,8 @@ export const HUB_COMMAND_ACTIONS = [
   'question.respond',
   /** XERXES Autopilot only: answer a pending question on the Hub owner's behalf (scope question.delegated). */
   'question.answer',
+  /** The owner's XERXES only: answer a pending permission request on the Hub owner's behalf (scope permission.delegated). */
+  'permission.answer',
   'goal.set',
   'model.set',
   'subagent.message',

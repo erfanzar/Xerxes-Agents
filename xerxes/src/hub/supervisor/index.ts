@@ -46,11 +46,14 @@ export { AUTOPILOT_ENV, autopilotCheckInFromEnvironment } from './autopilot.js'
 export { WATCH_ENV, watchStallFromEnvironment } from './watch.js'
 export type { SupervisorModelPort, SupervisorQuotas } from './runner.js'
 
-/** The operator's quotas with a default token bound per 24 h window, unless one is configured. */
+/**
+ * The operator's configured quotas, unchanged. XERXES is the owner's personal agent, so no spend
+ * bound is added by default; `DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW` is only a suggested value.
+ */
 export function withDefaultSpendBound(quotas: Partial<SupervisorQuotas> | undefined): Partial<SupervisorQuotas> {
-  if (quotas?.maxTokensPerWindow !== undefined) return quotas
-  return { ...quotas, maxTokensPerWindow: DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW }
+  return quotas ?? {}
 }
+void DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW
 
 /** Env keys read by `xerxes hub`. */
 export const SUPERVISOR_ENV = Object.freeze({
@@ -180,26 +183,28 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     clock,
   })
 
+  const isOwner = options.isHubOwner ?? ((userId: string) => threads.principalOrStored(userId)?.hubOwner === true)
+
   /**
-   * When an action or answer runs without a Confirm tap:
-   * - a Hub wake turn, in the enabling owner's own Autopilot thread;
-   * - the enabling owner's own message, when no other person's message is in that turn's context.
-   * Anything else (other people, mixed conversations) stays a Confirm card.
+   * XERXES is the Hub owner's personal agent. When the owner is the one talking to it (or a Hub
+   * wake-up runs in the owner's own thread), its actions and answers run at once, with no Confirm
+   * tap, whether or not Autopilot is on. Anyone else in the conversation, or a non-owner requester,
+   * keeps Confirm cards: their messages never borrow the owner's authority.
    */
   const autopilotGrant = (input: {
     readonly workspaceId: string; readonly threadId: string; readonly requester: UserPrincipal
     readonly trigger: boolean; readonly othersInContext: boolean
   }): AutopilotGrant | undefined => {
-    const active = autopilot.active(input.workspaceId)
-    if (active === undefined || input.requester.id !== active.ownerId) return undefined
-    const owner = autopilotOwnerPrincipal(threads, active)
+    if (!input.requester.hubOwner || !isOwner(input.requester.id)) return undefined
+    const owner: UserPrincipal = { ...input.requester, hubOwner: true }
     if (input.trigger) {
       // A wake turn counts only in the owner's own Autopilot thread.
-      return input.threadId === autopilotThreadId(active.ownerId) ? { owner, wake: true } : undefined
+      return input.threadId === autopilotThreadId(owner.id) ? { owner, wake: true } : undefined
     }
     if (input.othersInContext) return undefined
     return { owner, wake: false }
   }
+  void autopilotOwnerPrincipal
 
   const digests = new DigestService({
     workspaces,
@@ -278,16 +283,9 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   }): Promise<Record<string, unknown>> => {
     const { workspaceId, sessionId, requestId } = input
-    const active = autopilot.active(workspaceId)
-    if (active === undefined) throw new SupervisorDenied('Autopilot is off for this workspace, so XERXES cannot answer its questions. Tell the owner instead.')
-    if (input.requester.id !== active.ownerId) throw new SupervisorDenied('Only Autopilot, acting for the Hub owner, can answer a task\'s question. Ask the owner.')
-    // A Hub wake-up answers questions only on the task it is about.
-    if (input.trigger && (input.target === undefined || input.target.workspaceId !== workspaceId || input.target.sessionId !== sessionId)) {
-      throw new SupervisorDenied('This wake-up is about another task, so XERXES will not answer this question here. Tell the owner instead.')
-    }
     const grant = autopilotGrant(input)
     if (grant === undefined) {
-      throw new SupervisorDenied('Other people are in this conversation, so XERXES will not answer a task\'s question for the owner here. Ask the owner to answer it.')
+      throw new SupervisorDenied('XERXES answers a task\'s question only for the Hub owner, in a conversation with nobody else in it. Ask the owner to answer it.')
     }
     // The same shared-scope check createIntent applies: everyone this thread speaks for must be able to answer.
     const target = { workspaceId, sessionId }
@@ -298,7 +296,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     const pending = pendingOf(workspaceId, sessionId)
     if (pending === undefined) throw new Error('waiting questions cannot be read on this Hub, so XERXES will not answer blind')
     if (pending.permissionIds.includes(requestId)) {
-      throw new SupervisorDenied('That is a permission request. Only a person can answer it; tell the owner.')
+      throw new Error('That is a permission request, not a question; decide it with answer_permission.')
     }
     const question = pending.questions.find(row => row.request_id === requestId)
     if (question === undefined) throw new Error('no such waiting question in this task; read pending_interactions again')
@@ -313,15 +311,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     }
     const owner = grant.owner
     const scopes = delegatedScopes(owner, identity.grantsFor(owner.id), target, clock())
-    if (!scopes.has('question.delegated')) throw new SupervisorDenied(`${owner.displayName} cannot answer questions in this task, so Autopilot cannot either.`)
-    const budget = actionBudget.take(workspaceId)
-    if (!budget.ok) {
-      if (budget.notify) {
-        try { postShared(workspaceId, sessionId, owner.id, `Autopilot needs you: it reached its limit of ${budget.limit} autonomous actions this hour, so it did not answer a waiting question.`) } catch (error) { report(error, 'autopilot limit notice') }
-        void options.sendPush?.(owner.id, { title: 'XERXES', body: 'Autopilot needs you.', url: '/xerxes' })?.catch(error => report(error, 'autopilot push'))
-      }
-      throw new SupervisorDenied('Autopilot reached its hourly limit of autonomous actions; the owner must answer this question.')
-    }
+    if (!scopes.has('question.delegated')) throw new SupervisorDenied(`${owner.displayName} cannot answer questions in this task, so XERXES cannot either.`)
 
     const actionId = `ans-${crypto.randomUUID()}`
     const actor = supervisorActor(owner.id, owner.id)
@@ -381,6 +371,82 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     }
   }
 
+  /** The owner's XERXES: approve or reject one waiting PERMISSION request on the owner's behalf. */
+  const answerPermission = async (input: {
+    readonly threadId: string; readonly workspaceId: string; readonly sessionId: string; readonly requestId: string
+    readonly response: 'approve' | 'approve_for_session' | 'reject'; readonly requester: UserPrincipal
+    readonly reader: ScopeReader; readonly trigger: boolean; readonly othersInContext: boolean
+  }): Promise<Record<string, unknown>> => {
+    const { workspaceId, sessionId, requestId, response } = input
+    const grant = autopilotGrant(input)
+    if (grant === undefined) {
+      throw new SupervisorDenied('XERXES answers a permission request only for the Hub owner, in a conversation with nobody else in it. Ask the owner to answer it.')
+    }
+    const target = { workspaceId, sessionId }
+    // The same shared-scope check as questions: everyone this thread speaks for must be able to answer.
+    if (!input.reader.canRead(target) || !input.reader.scopes(target).has('permission.delegated')) {
+      throw new SupervisorDenied('permission.delegated is required on this task for everyone in this thread, so XERXES cannot answer it here.')
+    }
+    if (requestId.length === 0 || requestId.length > 200) throw new Error('request_id must be 1 to 200 characters')
+    const pending = pendingOf(workspaceId, sessionId)
+    if (pending === undefined) throw new Error('waiting permission requests cannot be read on this Hub, so XERXES will not answer blind')
+    if (!pending.permissionIds.includes(requestId)) throw new Error('no such waiting permission request in this task; read pending_interactions again')
+    const owner = grant.owner
+    const scopes = delegatedScopes(owner, identity.grantsFor(owner.id), target, clock())
+    if (!scopes.has('permission.delegated')) throw new SupervisorDenied(`${owner.displayName} cannot answer permission requests in this task, so XERXES cannot either.`)
+
+    const actionId = `perm-${crypto.randomUUID()}`
+    const actor = supervisorActor(owner.id, owner.id)
+    const requestHash = supervisorRequestHash('permission.answer', workspaceId, sessionId, { request_id: requestId, response })
+    const entry = (stage: 'dispatch' | 'outcome', outcome: 'accepted' | 'rejected' | 'unknown' | 'n/a') => ({
+      stage, actor, actionId, tool: 'permission.answer', workspaceId, sessionId, requestHash, decision: 'allowed' as const, outcome,
+    })
+    try {
+      await supervisorAudit.record(entry('dispatch', 'n/a'))
+    } catch (error) {
+      report(error, 'supervisor audit permission')
+      throw new Error('the audit log is unavailable; nothing was answered')
+    }
+    const delegated: HubGrant[] = [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource: { type: 'session', workspaceId, sessionId }, effect: 'allow', scopes: [...scopes] }]
+    const principal: HubPrincipal = { kind: 'agent', id: SUPERVISOR_PRINCIPAL_ID, displayName: SUPERVISOR_DISPLAY_NAME, onBehalfOf: owner.id }
+    const context: AuthenticatedContext = { principal, grants: delegated, browserSessionId: `supervisor:${actionId}`, actor }
+    const params = {
+      workspace_id: workspaceId, session_id: sessionId,
+      command_id: `ap:${requestId}`.slice(0, 200),
+      action: 'permission.answer', args: { request_id: requestId, response },
+    }
+    let state: 'accepted' | 'rejected' | 'unknown'
+    let message: string | undefined
+    try {
+      const result = await options.overlay.run(delegated, () => options.execute(context, params))
+      state = result.state === 'accepted' || result.state === 'rejected' ? result.state : 'unknown'
+      message = result.error?.message
+    } catch (error) {
+      if (error instanceof HubProtocolError) { state = 'rejected'; message = error.message } else {
+        report(error, 'supervisor permission dispatch')
+        state = 'unknown'
+        message = 'The answer may have been sent; its outcome is unknown.'
+      }
+    }
+    await supervisorAudit.recordBestEffort(entry('outcome', state))
+    const tool = pending.permissions?.find(row => row.request_id === requestId)?.tool ?? 'a tool'
+    const rawTitle = workspaces.projection(workspaceId)?.sessions[sessionId]?.title ?? sessionId
+    const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
+    const verb = response === 'reject' ? 'rejected' : response === 'approve_for_session' ? 'approved for the session' : 'approved'
+    try {
+      postShared(workspaceId, sessionId, owner.id, state === 'accepted'
+        ? `XERXES ${verb} ${tool} in “${title}” for ${owner.displayName}.`
+        : `XERXES could not answer a permission request in “${title}”${message === undefined ? '' : ` (${message.slice(0, 200)})`}.`)
+    } catch (error) {
+      report(error, 'supervisor permission notice')
+    }
+    return {
+      state, request_id: requestId, response, on_behalf_of: owner.displayName,
+      ...(message === undefined ? {} : { message }),
+      note: state === 'accepted' ? 'Answered.' : state === 'rejected' ? 'Not answered.' : 'The outcome is unknown. Do not retry.',
+    }
+  }
+
   const registry = createSupervisorToolRegistry({
     workspaces,
     backend: options.backend,
@@ -388,7 +454,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     actions,
     threads,
     ...(options.sendPush === undefined ? {} : { push: (userId: string, message: { title: string; body: string; url: string }) => options.sendPush!(userId, message) }),
-    autopilot: { pending: pendingOf, answer: answerQuestion },
+    autopilot: { pending: pendingOf, answer: answerQuestion, answerPermission },
     onError: report,
   })
 

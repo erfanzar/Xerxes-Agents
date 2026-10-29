@@ -372,12 +372,12 @@ describe('Autopilot actions', () => {
     expect(t.toolResults()).toContain('\\"state\\":\\"unknown\\"')
   })
 
-  test('without Autopilot, or for anyone but the enabling owner, the confirm flow is unchanged', async () => {
-    const off = await setup({ responses: [calls(['task_steer', steer]), reply('Proposed.')] })
+  test('the Hub owner\'s actions run at once even without Autopilot; anyone else keeps the confirm flow', async () => {
+    const off = await setup({ responses: [calls(['task_steer', steer]), reply('Done.')] })
     await off.supervisor.runner.enqueue({ threadId: 'shared', requester: off.user('owner') })
-    expect(off.execCalls).toHaveLength(0)
-    expect(off.supervisor.actions.cardsFor('shared')[0]).toMatchObject({ state: 'pending', auto: false })
-    expect(off.toolResults()).toContain('pending_confirmation')
+    expect(off.execCalls).toHaveLength(1)
+    expect(off.supervisor.actions.cardsFor('shared')[0]).toMatchObject({ state: 'accepted', auto: true })
+    expect(off.toolResults()).not.toContain('pending_confirmation')
 
     const other = await setup({ responses: [calls(['task_steer', steer]), reply('Proposed.')] })
     await other.enable()
@@ -416,7 +416,7 @@ describe('Autopilot questions', () => {
   const pending = { workspace_id: 'w1', task_id: 's1' }
   const answer = (value: string, requestId = 'q1') => ({ workspace_id: 'w1', task_id: 's1', request_id: requestId, answers: { answer: value } })
 
-  test('it reads waiting items (permissions only as a count) and answers a question on the owner\'s behalf', async () => {
+  test('it reads waiting items (permissions with their details) and answers a question on the owner\'s behalf', async () => {
     const t = await setup({ responses: [calls(['pending_interactions', pending], ['answer_question', answer('release (Recommended)')]), reply('Answered.')] })
     t.events.push('question_request', question)
     t.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'rm -rf secret-dir', inputs: { path: 'secret' } })
@@ -426,8 +426,9 @@ describe('Autopilot questions', () => {
     expect(results).toContain('Which build?')
     expect(results).toContain('\\"recommended\\":\\"release (Recommended)\\"')
     expect(results).toContain('\\"permission_requests_waiting\\":1')
-    expect(results).not.toContain('rm -rf')
-    expect(results).not.toContain('secret')
+    // Permission details reach the owner's XERXES, fenced as untrusted tool output.
+    expect(results).toContain('rm -rf secret-dir')
+    expect(results).toContain('UNTRUSTED_DATA label=tool_result.pending_interactions')
     expect(t.execCalls).toHaveLength(1)
     const call = t.execCalls[0]!
     expect(call.params).toMatchObject({ action: 'question.answer', session_id: 's1', args: { request_id: 'q1', answers: { answer: 'release (Recommended)' } } })
@@ -441,18 +442,19 @@ describe('Autopilot questions', () => {
     expect(t.identity.audits.some(entry => entry.action === 'supervisor.dispatch:question.answer' && entry.actor.confirmed_by === 'owner')).toBe(true)
   })
 
-  test('it is refused when Autopilot is off, for a permission id, for a non-owner requester and for an answer outside the options', async () => {
+  test('the owner\'s XERXES answers without Autopilot; a permission id, a non-owner requester and an answer outside the options are refused', async () => {
     const off = await setup({ responses: [calls(['answer_question', answer('nightly')]), reply('x')] })
     off.events.push('question_request', question)
     const result = await off.supervisor.runner.enqueue({ threadId: 'shared', requester: off.user('owner') })
-    expect(result.stop).toBe('denied')
-    expect(off.toolResults()).toContain('Autopilot is off')
+    expect(result.stop).toBe('completed')
+    expect(off.execCalls).toHaveLength(1)
+    expect(off.execCalls[0]!.params).toMatchObject({ action: 'question.answer', args: { request_id: 'q1', answers: { answer: 'nightly' } } })
 
     const permission = await setup({ responses: [calls(['answer_question', answer('approve', 'p1')]), reply('x')] })
     permission.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'rm -rf' })
     await permission.enable()
-    expect((await permission.supervisor.runner.enqueue({ threadId: 'shared', requester: permission.user('owner') })).stop).toBe('denied')
-    expect(permission.toolResults()).toContain('permission request')
+    await permission.supervisor.runner.enqueue({ threadId: 'shared', requester: permission.user('owner') })
+    expect(permission.toolResults()).toContain('answer_permission')
 
     const other = await setup({ responses: [calls(['answer_question', answer('nightly')]), reply('x')] })
     other.events.push('question_request', question)
@@ -465,7 +467,39 @@ describe('Autopilot questions', () => {
     await wrong.supervisor.runner.enqueue({ threadId: 'shared', requester: wrong.user('owner') })
     expect(wrong.toolResults()).toContain('must be one of its options')
 
-    for (const t of [off, permission, other, wrong]) expect(t.execCalls).toHaveLength(0)
+    for (const t of [permission, other, wrong]) expect(t.execCalls).toHaveLength(0)
+  })
+
+  test('the owner\'s XERXES approves a permission request under permission.delegated only', async () => {
+    const decide = (response: string, requestId = 'p1') => ({ workspace_id: 'w1', task_id: 's1', request_id: requestId, response })
+    const t = await setup({ responses: [calls(['answer_permission', decide('approve')]), reply('Approved.')] })
+    t.events.push('approval_request', { id: 'p1', request_id: 'p1', tool_name: 'exec_command', description: 'run tests', inputs: { cmd: 'bun test' } })
+    await t.supervisor.runner.enqueue({ threadId: 'shared', requester: t.user('owner') })
+    expect(t.execCalls).toHaveLength(1)
+    const call = t.execCalls[0]!
+    expect(call.params).toMatchObject({ action: 'permission.answer', session_id: 's1', args: { request_id: 'p1', response: 'approve' } })
+    expect(call.context.principal).toMatchObject({ kind: 'agent', onBehalfOf: 'owner' })
+    const scopes = call.grants.flatMap(grant => grant.scopes ?? [])
+    expect(scopes).toContain('permission.delegated')
+    expect(scopes).not.toContain('permission.respond')
+    expect(t.texts()).toContain('XERXES approved exec_command in “First task” for OWNER.')
+    expect(t.identity.audits.some(entry => entry.action === 'supervisor.dispatch:permission.answer')).toBe(true)
+
+    // A non-owner requester, and an id that is not a waiting permission, are refused without a dispatch.
+    const other = await setup({ responses: [calls(['answer_permission', decide('approve')]), reply('x')] })
+    other.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'x' })
+    expect((await other.supervisor.runner.enqueue({ threadId: 'shared', requester: other.user('alice') })).stop).toBe('denied')
+    const unknown = await setup({ responses: [calls(['answer_permission', decide('reject', 'p9')]), reply('x')] })
+    unknown.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'x' })
+    await unknown.supervisor.runner.enqueue({ threadId: 'shared', requester: unknown.user('owner') })
+    expect(unknown.toolResults()).toContain('no such waiting permission request')
+    // Another person in the conversation keeps it human-only.
+    const mixed = await setup({ responses: [calls(['answer_permission', decide('approve')]), reply('x')] })
+    mixed.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'x' })
+    mixed.say('alice', 'approve it')
+    mixed.say('owner', 'go on')
+    expect((await mixed.supervisor.runner.enqueue({ threadId: 'shared', requester: mixed.user('owner') })).stop).toBe('denied')
+    for (const r of [other, unknown, mixed]) expect(r.execCalls).toHaveLength(0)
   })
 })
 
@@ -533,7 +567,7 @@ describe('Autopilot review fixes', () => {
     mixed.say('alice', 'answer nightly')
     mixed.say('owner', 'go on')
     expect((await mixed.supervisor.runner.enqueue({ threadId: 'shared', requester: mixed.user('owner') })).stop).toBe('denied')
-    expect(mixed.toolResults()).toContain('Other people are in this conversation')
+    expect(mixed.toolResults()).toContain('nobody else in it')
 
     // Alice is in the thread (silent): she lacks question.delegated, so the thread cannot answer.
     const scoped = await setup({ responses: [calls(['answer_question', { workspace_id: 'w1', task_id: 's1', request_id: 'q1', answers: { answer: 'nightly' } }]), reply('x')] })
@@ -562,19 +596,15 @@ describe('Autopilot review fixes', () => {
     await c.idle()
   })
 
-  test('P2-5: a wake turn cannot start a task without Confirm; it tells the owner. Steers still run', async () => {
-    const t = await setup({ responses: [calls(['task_start', { workspace_id: 'w1', text: 'build a new thing' }]), reply('Asked.')] })
+  test('P2-5 (revised): a wake turn of the owner\'s XERXES starts a task at once, like steers', async () => {
+    const t = await setup({ responses: [calls(['task_start', { workspace_id: 'w1', text: 'build a new thing' }]), reply('Started.')] })
+    t.behavior.run = params => ({ ok: true, command_id: String(params.command_id), state: 'accepted', result: { session_id: 'new-1', delivered: true } })
     await t.enable()
     t.supervisor.waker.wake('w1', 's1', 'failed')
     await t.idle()
-    expect(t.execCalls).toHaveLength(0)
+    expect(t.execCalls.length).toBeGreaterThan(0)
     const card = t.supervisor.actions.cardsFor('autopilot-owner')[0]!
-    expect(card).toMatchObject({ tool: 'task.start', state: 'pending', auto: false })
-    expect(t.texts().some(text => text.startsWith('Autopilot needs you: confirm Start a new task: build a new thing'))).toBe(true)
-    expect(t.pushes.some(push => push.userId === 'owner' && push.body === 'Autopilot needs you to confirm an action.')).toBe(true)
-    // The owner confirms it from their Autopilot thread (session.open reports the new task id).
-    t.behavior.run = params => ({ ok: true, command_id: String(params.command_id), state: 'accepted', result: { session_id: 'new-1', delivered: true } })
-    expect((await t.supervisor.actions.respond(t.identity.context('owner'), { confirmation_id: card.id, decision: 'confirm' })).state).toBe('accepted')
+    expect(card).toMatchObject({ tool: 'task.start', state: 'accepted', auto: true })
 
     const s = await setup({ responses: [calls(['task_steer', steerS('s1')]), reply('Done.')] })
     await s.enable()

@@ -212,7 +212,7 @@ export function XerxesTab(): ReactElement {
               <ModelChooser />
             </div>
           ) : null}
-          <p className="summary">Ask XERXES about your tasks. It can look across workspaces, and it proposes actions that wait for your confirmation. It cannot approve anything for you.{autopilotChip === undefined ? '' : ` ${AUTOPILOT_COMPOSER_HINT}`}</p>
+          <p className="summary">Ask XERXES about your tasks. It looks across every workspace and acts for you at once: it starts, steers and stops tasks, answers their questions and decides permission requests. With anyone else in the thread, its actions wait for your Confirm.</p>
           {showThread ? <AutopilotThreadBody /> : null}
           {showThread ? null : <>
           {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}

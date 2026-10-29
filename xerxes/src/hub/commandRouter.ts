@@ -190,14 +190,29 @@ export const COMMAND_SPECS: Readonly<Record<HubCommandAction, CommandSpec>> = Ob
   },
   /**
    * XERXES Autopilot: the same daemon route and arguments as `question.respond`,
-   * under the non-human-only scope `question.delegated`. There is deliberately no
-   * delegated counterpart of `permission.respond`.
+   * under the non-human-only scope `question.delegated`.
    */
   'question.answer': {
     scope: 'question.delegated', method: 'question_response', needsSession: true, interaction: true,
     build: args => {
       shape(args, ['request_id', 'answers'], ['request_id', 'answers'])
       return { request_id: readId(args.request_id, 'args.request_id'), answers: answers(args.answers) }
+    },
+  },
+  /**
+   * The owner's XERXES: the same daemon route and arguments as `permission.respond`,
+   * under `permission.delegated`, which only the Hub owner holds and only the
+   * supervisor's per-dispatch overlay can carry.
+   */
+  'permission.answer': {
+    scope: 'permission.delegated', method: 'permission_response', needsSession: true, interaction: true,
+    build: args => {
+      shape(args, ['request_id', 'response'], ['request_id', 'response'])
+      const response = args.response
+      if (typeof response !== 'string' || !(PERMISSION_RESPONSES as readonly string[]).includes(response)) {
+        throw invalid(`args.response must be one of ${PERMISSION_RESPONSES.join(', ')}`)
+      }
+      return { request_id: readId(args.request_id, 'args.request_id'), response }
     },
   },
   'goal.set': {
@@ -393,7 +408,7 @@ export class HubCommandRouter {
     const humanOnly = HUMAN_ONLY_SCOPES.has(spec.scope)
     // `question.answer` is the XERXES Autopilot route only: the supervisor principal, with scopes
     // that come solely from the per-dispatch overlay (never a stored grant). People use `question.respond`.
-    const autopilotRoute = request.action === 'question.answer'
+    const autopilotRoute = request.action === 'question.answer' || request.action === 'permission.answer'
     const autopilotAllowed = !autopilotRoute || (
       context.principal.kind === 'agent' && context.principal.id === SUPERVISOR_PRINCIPAL_ID
       && this.options.overlayGrants !== undefined

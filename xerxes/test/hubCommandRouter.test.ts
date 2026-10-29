@@ -58,6 +58,7 @@ const EXPECTED: Record<HubCommandAction, readonly [HubScope, string]> = {
   'permission.respond': ['permission.respond', 'permission_response'],
   'question.respond': ['question.respond', 'question_response'],
   'question.answer': ['question.delegated', 'question_response'],
+  'permission.answer': ['permission.delegated', 'permission_response'],
   'goal.set': ['goal.write', 'session.goal'],
   'model.set': ['session.configure', 'set_model'],
   'subagent.message': ['session.steer', 'subagent.steer'],
@@ -70,6 +71,7 @@ const VALID_ARGS: Record<HubCommandAction, Record<string, unknown>> = {
   'permission.respond': { request_id: 'p1', response: 'approve' },
   'question.respond': { request_id: 'q1', answers: { a: 'b' } },
   'question.answer': { request_id: 'q1', answers: { a: 'b' } },
+  'permission.answer': { request_id: 'p1', response: 'approve' },
   'goal.set': { input: 'ship it' },
   'model.set': { model: 'm1' },
   'subagent.message': { task: 't1', message: 'hi' },
@@ -89,9 +91,10 @@ describe('Hub command router', () => {
       expect(commandDaemonMethod(action)).toBe(method)
       expect((HUB_DAEMON_METHODS as readonly string[]).includes(method)).toBe(true)
       t.backend.calls.length = 0
-      // question.answer is the Autopilot route: the supervisor principal, scopes only from the overlay.
-      const result = action === 'question.answer'
-        ? await overlay.run(delegated(), () => router.execute(t.identity.context(SUPERVISOR_PRINCIPAL_ID), command(action, `map-${action}`)))
+      // question.answer / permission.answer are the owner's-XERXES routes: the supervisor principal, scopes only from the overlay.
+      const result = action === 'question.answer' || action === 'permission.answer'
+        ? await overlay.run(delegated(action === 'question.answer' ? ['question.delegated', 'session.read'] : ['permission.delegated', 'session.read']),
+          () => router.execute(t.identity.context(SUPERVISOR_PRINCIPAL_ID), command(action, `map-${action}`)))
         : await router.execute(t.identity.context('alice'), command(action, `map-${action}`))
       expect(result.state).toBe('accepted')
       expect(t.mutations().map(call => call.method)).toEqual([method])

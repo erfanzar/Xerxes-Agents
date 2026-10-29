@@ -48,7 +48,7 @@ test('the header has an Autopilot button beside Model, and no chip while nothing
   expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Autopilot</)
   expect(html).toContain('>Model<')
   expect(html).not.toContain('Autopilot on ·')
-  expect(html).toContain('XERXES proposes; nothing runs until you confirm.')
+  expect(html).toContain('XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.')
   expect(html).not.toContain(AUTOPILOT_COMPOSER_HINT)
 })
 
@@ -59,11 +59,10 @@ test('the chip counts only workspaces the Hub reports as active', () => {
   expect(two).toContain('Autopilot on · 2 workspaces')
 })
 
-test('while Autopilot is on the composer hint says only some actions run unconfirmed, and not while another person is in the thread', () => {
+test('while Autopilot is on the composer hint says XERXES acts at once, except while another person is in the thread', () => {
   const html = view(state({ rows: [row()] }))
   expect(html).toContain(AUTOPILOT_COMPOSER_HINT)
-  expect(html).toContain('most actions wait for your Confirm')
-  expect(AUTOPILOT_COMPOSER_HINT).toContain('Some actions')
+  expect(AUTOPILOT_COMPOSER_HINT).toContain('acts for you at once')
   expect(AUTOPILOT_COMPOSER_HINT).toContain('another person')
 })
 
@@ -71,7 +70,7 @@ test('the owner gets a toggle, a 2000-character instruction box and the expiry c
   const html = view(state({ rows: [row(), row({ workspace_id: 'w2', label: 'Two · api', enabled: false, active: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null })] }), { autopilotOpen: true })
   expect(html).toContain('aria-label="Autopilot"')
   expect(html).toContain(AUTOPILOT_EXPLANATION)
-  expect(html).toContain('Permission requests (commands, edits) still come to you')
+  expect(html).toContain('questions and permission requests')
   expect(html.match(/type="checkbox"/g)).toHaveLength(2)
   expect(html.match(/<textarea[^>]*maxLength="2000"/g)).toHaveLength(2)
   expect(html).toContain('placeholder="Keep going until the goal is done; take the recommended option"')

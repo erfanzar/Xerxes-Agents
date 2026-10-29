@@ -50,6 +50,8 @@ export const SUPERVISOR_TOOL_NAMES = [
   'task.search',
   'task.pending',
   'question.answer',
+  'permission.answer',
+  'tasks.search',
   'task.start',
   'task.steer',
   'task.stop',
@@ -93,13 +95,13 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'task.tail',
     providerName: 'task_tail',
     gate: 'read',
-    description: 'Read the last few user-visible steps of one task, bounded to 8 KiB.',
+    description: 'Read the latest user-visible steps of one task, bounded to 64 KiB.',
     parameters: object(
       {
         workspace_id: WORKSPACE_ID,
         task_id: TASK_ID,
         after: { type: 'integer', minimum: 0 },
-        limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 },
+        limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
       },
       ['workspace_id', 'task_id'],
     ),
@@ -114,7 +116,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
         workspace_id: WORKSPACE_ID,
         task_id: TASK_ID,
         query: { type: 'string', minLength: 1, maxLength: 256 },
-        limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
+        limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
       },
       ['workspace_id', 'task_id', 'query'],
     ),
@@ -123,14 +125,14 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'task.pending',
     providerName: 'pending_interactions',
     gate: 'read',
-    description: 'List what one task is waiting on: its questions (text and options, the recommended option marked) and how many permission requests wait. Permission details are never shown; only a person can answer a permission.',
+    description: 'List what one task is waiting on: its questions (text and options, the recommended option marked) and its permission requests (tool, description and inputs), so you can answer them with answer_question / answer_permission.',
     parameters: object({ workspace_id: WORKSPACE_ID, task_id: TASK_ID }, ['workspace_id', 'task_id']),
   },
   {
     name: 'question.answer',
     providerName: 'answer_question',
     gate: 'autopilot',
-    description: "Answer a task's waiting QUESTION on the Hub owner's behalf. Works only while Autopilot is on for the workspace. Never answers a permission request. answers maps each question id from pending_interactions to the chosen answer text.",
+    description: "Answer a task's waiting QUESTION on the Hub owner's behalf. Works when the owner is the one talking to you, or in the owner's own wake-up thread. answers maps each question id from pending_interactions to the chosen answer text.",
     parameters: object(
       {
         workspace_id: WORKSPACE_ID,
@@ -142,10 +144,36 @@ const SPECS: readonly SupervisorToolSpec[] = [
     ),
   },
   {
+    name: 'permission.answer',
+    providerName: 'answer_permission',
+    gate: 'autopilot',
+    description: "Approve or reject a task's waiting PERMISSION request (a command, edit or other tool call) on the Hub owner's behalf. Read it first with pending_interactions, which shows the tool, its description and inputs. Works when the owner is the one talking to you, or in the owner's own wake-up thread.",
+    parameters: object(
+      {
+        workspace_id: WORKSPACE_ID,
+        task_id: TASK_ID,
+        request_id: { ...ID, description: 'request_id of the waiting permission from pending_interactions.' },
+        response: { type: 'string', enum: ['approve', 'approve_for_session', 'reject'] },
+      },
+      ['workspace_id', 'task_id', 'request_id', 'response'],
+    ),
+  },
+  {
+    name: 'tasks.search',
+    providerName: 'tasks_search',
+    gate: 'read',
+    description: "Search the full history of every task you can read, in one workspace or all of them, in one call. Use it to find which task talked about something.",
+    parameters: object({
+      workspace_id: WORKSPACE_ID,
+      query: { type: 'string', minLength: 1, maxLength: 256 },
+      limit: { type: 'integer', minimum: 1, maximum: 100, default: 30 },
+    }, ['query']),
+  },
+  {
     name: 'task.start',
     providerName: 'task_start',
     gate: 'confirm',
-    description: 'Propose starting a new task (or a new turn in an existing idle task). A human must confirm before it runs.',
+    description: 'Start a new task (or a new turn in an existing idle task). For the Hub owner it runs at once; for anyone else it waits for their Confirm.',
     parameters: object(
       {
         workspace_id: WORKSPACE_ID,
@@ -160,7 +188,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'task.steer',
     providerName: 'task_steer',
     gate: 'confirm',
-    description: 'Propose a steering message for a running task. A human must confirm. It is delivered at the next step and does not start an idle task.',
+    description: 'Send a steering message to a running task (runs at once for the Hub owner). It is delivered at the next step and does not start an idle task.',
     parameters: object(
       { workspace_id: WORKSPACE_ID, task_id: TASK_ID, text: { type: 'string', minLength: 1, maxLength: 2000 } },
       ['workspace_id', 'task_id', 'text'],
@@ -170,7 +198,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'task.stop',
     providerName: 'task_stop',
     gate: 'confirm',
-    description: "Propose stopping a task's current turn (and pausing its goal). With cascade, its running agents are interrupted too. A human must confirm.",
+    description: "Stop a task's current turn (and pause its goal). With cascade, its running agents are interrupted too. Runs at once for the Hub owner.",
     parameters: object(
       { workspace_id: WORKSPACE_ID, task_id: TASK_ID, cascade: { type: 'boolean', default: false } },
       ['workspace_id', 'task_id'],
@@ -180,7 +208,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'agent.message',
     providerName: 'agent_message',
     gate: 'confirm',
-    description: 'Propose a message to one subagent of a task. A human must confirm. A finished agent is reported, never restarted.',
+    description: 'Send a message to one subagent of a task (runs at once for the Hub owner). A finished agent is reported, never restarted.',
     parameters: object(
       { workspace_id: WORKSPACE_ID, task_id: TASK_ID, agent_id: ID, text: { type: 'string', minLength: 1, maxLength: 2000 } },
       ['workspace_id', 'task_id', 'agent_id', 'text'],
@@ -190,7 +218,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'goal.set',
     providerName: 'goal_set',
     gate: 'confirm',
-    description: "Propose setting or replacing a task's goal. expected_revision 0 means the task has no goal yet. A human must confirm. You can never mark a goal complete.",
+    description: "Set or replace a task's goal (runs at once for the Hub owner). expected_revision 0 means the task has no goal yet. You can never mark a goal complete.",
     parameters: object(
       {
         workspace_id: WORKSPACE_ID,
@@ -218,7 +246,7 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'model.set',
     providerName: 'model_set',
     gate: 'confirm',
-    description: "Propose changing one task's model for that session only. Never changes defaults or credentials. A human must confirm.",
+    description: "Change one task's model for that session only (runs at once for the Hub owner). Never changes defaults or credentials.",
     parameters: object(
       { workspace_id: WORKSPACE_ID, task_id: TASK_ID, provider_profile: ID, model: { type: 'string', minLength: 1, maxLength: 512 } },
       ['workspace_id', 'task_id', 'provider_profile', 'model'],
@@ -249,6 +277,8 @@ const BY_PROVIDER_NAME: ReadonlyMap<string, SupervisorToolSpec> = new Map(SPECS.
  * routes are human-only or unbounded.
  */
 export const SUPERVISOR_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  // The human routes stay forbidden; the owner's XERXES uses answer_permission / answer_question,
+  // which dispatch only under the owner's delegated scopes.
   'permission_response',
   'permission.respond',
   'question.respond',

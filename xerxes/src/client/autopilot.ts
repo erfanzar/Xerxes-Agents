@@ -81,14 +81,14 @@ export function autopilotChipText(rows: readonly AutopilotRow[]): string | undef
 }
 
 export const AUTOPILOT_EXPLANATION =
-  'XERXES watches these workspaces, answers a task\u2019s questions and can steer, stop or message tasks on its own. Starting a task, setting a goal and changing a model still wait for your Confirm. Permission requests (commands, edits) still come to you.'
+  'XERXES watches these workspaces and wakes by itself: it answers a task\u2019s questions and permission requests, and starts, steers, stops or messages tasks for you without a Confirm. Everything it does is posted to the thread.'
 
 export const AUTOPILOT_READ_ONLY_NOTE = 'Only the Hub owner can change Autopilot. This is how it is set now.'
 
 export const AUTOPILOT_INSTRUCTION_PLACEHOLDER = 'Keep going until the goal is done; take the recommended option'
 
 /** Some actions run unconfirmed; the owner's own messages stop doing so while another person is in the thread. */
-export const AUTOPILOT_COMPOSER_HINT = 'Some actions in Autopilot workspaces run without confirmation. If another person wrote in this thread recently, yours wait for Confirm.'
+export const AUTOPILOT_COMPOSER_HINT = 'XERXES acts for you at once. If another person wrote in this thread recently, its actions wait for Confirm.'
 
 export const AUTOPILOT_EXPIRY_LAPSED_NOTE = 'The previous expiry has passed. Choose a new one before you save.'
 

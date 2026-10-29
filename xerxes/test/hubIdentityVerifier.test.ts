@@ -181,6 +181,12 @@ test('method scopes are enforced and an agent principal can never use a human-on
   const autopilot = context({ principal_kind: 'agent', scopes: ['session.read', 'question.delegated', 'permission.respond'] })
   expect(hubAuthorizationFailure(autopilot, 'question_response', {})).toBeUndefined()
   expect(hubAuthorizationFailure(autopilot, 'permission_response', {})).toContain('human-only')
+  // The owner's XERXES: permission.delegated lets an agent answer a permission request.
+  const owners = context({ principal_kind: 'agent', scopes: ['session.read', 'permission.delegated'] })
+  expect(hubAuthorizationFailure(owners, 'permission_response', {})).toBeUndefined()
+  expect(hubAuthorizationFailure(owners, 'question_response', {})).toContain('human-only')
+  // A human still needs permission.respond; permission.delegated alone is not enough for a person.
+  expect(hubAuthorizationFailure(context({ scopes: ['permission.delegated'] }), 'permission_response', {})).toContain('permission.respond')
   // A human still needs question.respond; question.delegated alone is not enough for a person.
   expect(hubAuthorizationFailure(context({ scopes: ['question.delegated'] }), 'question_response', {})).toContain('question.respond')
   expect(hubAuthorizationFailure(agent, 'turn.submit', {})).toBeUndefined()

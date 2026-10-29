@@ -173,8 +173,8 @@ describe('principals and grants', () => {
 
 describe('supervisor tool schemas', () => {
   test('every tool has a provider-safe name and an object schema', () => {
-    expect(SUPERVISOR_TOOLS.size).toBe(14)
-    expect([...SUPERVISOR_TOOLS.values()].filter(spec => spec.gate === 'autopilot').map(spec => spec.providerName)).toEqual(['answer_question'])
+    expect(SUPERVISOR_TOOLS.size).toBe(16)
+    expect([...SUPERVISOR_TOOLS.values()].filter(spec => spec.gate === 'autopilot').map(spec => spec.providerName)).toEqual(['answer_question', 'answer_permission'])
     expect(SUPERVISOR_TOOLS.get('task.pending')).toMatchObject({ providerName: 'pending_interactions', gate: 'read' })
     for (const spec of SUPERVISOR_TOOLS.values()) {
       expect(spec.providerName).toMatch(/^[a-z_]+$/)

@@ -820,22 +820,19 @@ describe('Watch wakes', () => {
 describe('Watch actions', () => {
   const steer = { workspace_id: 'w1', task_id: 's1', text: 'stop listing; run the failing test instead' }
 
-  test('without Autopilot every action is a Confirm card in the owner thread, and the owner is pushed', async () => {
-    const t = await setup({ responses: [calls(['task_steer', steer]), reply('Proposed.')] })
+  test('without Autopilot a watch wake of the owner\'s XERXES still acts at once, with no Confirm card', async () => {
+    const t = await setup({ responses: [calls(['task_steer', steer]), reply('Steered.')] })
     await t.watch()
     t.loop()
     await until(() => t.scripted.requests.length === 2)
     await t.idle()
-    expect(t.execCalls).toHaveLength(0)
-    expect(t.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.steer', state: 'pending', auto: false })
-    expect(t.pushes).toContainEqual({ userId: 'owner', body: 'Watch: an action waits for your Confirm.', dedupeKey: 'watch:w1:s1:card' })
-    expect(JSON.stringify(t.pushes)).not.toContain('First task')
-    // The owner confirms it from the Autopilot thread.
-    const card = t.supervisor.actions.cardsFor('autopilot-owner')[0]!
-    expect((await t.supervisor.actions.respond(t.identity.context('owner'), { confirmation_id: card.id, decision: 'confirm' })).state).toBe('accepted')
+    expect(t.execCalls).toHaveLength(1)
+    expect(t.execCalls[0]!.params).toMatchObject({ action: 'turn.steer', session_id: 's1' })
+    expect(t.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.steer', state: 'accepted', auto: true })
+    expect(JSON.stringify(t.pushes)).not.toContain('waits for your Confirm')
   })
 
-  test('with Autopilot active the wake-turn rules apply: steers run, starts become cards', async () => {
+  test('with Autopilot active a watch wake steers and starts tasks without a Confirm', async () => {
     const t = await setup({ responses: [calls(['task_steer', steer]), reply('Steered.')] })
     await t.autopilotOn()
     await t.watch()
@@ -853,32 +850,32 @@ describe('Watch actions', () => {
     s.loop()
     await until(() => s.scripted.requests.length === 2)
     await s.idle()
-    expect(s.execCalls).toHaveLength(0)
-    expect(s.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.start', state: 'pending', auto: false })
+    expect(s.execCalls.length).toBeGreaterThan(0)
+    expect(s.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.start', auto: true })
+    expect(s.supervisor.actions.cardsFor('autopilot-owner')[0]!.state).not.toBe('pending')
   })
 
-  test('P2-1: a wake auto-runs only on the task it is about (Watch and Autopilot wakes)', async () => {
+  test('P2-1 (revised): a wake of the owner\'s XERXES may act on another task too (Watch and Autopilot wakes)', async () => {
     const other = { workspace_id: 'w1', task_id: 's2', text: 'take over from the first task' }
-    const t = await setup({ responses: [calls(['task_steer', other]), reply('Proposed.')], watch: QUIET })
+    const t = await setup({ responses: [calls(['task_steer', other]), reply('Steered.')], watch: QUIET })
     await t.autopilotOn()
     await t.watch()
     t.loop()
     await until(() => t.scripted.requests.length === 2)
     await t.idle()
-    expect(t.execCalls).toHaveLength(0)
-    expect(t.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.steer', sessionId: 's2', state: 'pending', auto: false })
-    expect(t.texts().some(line => line.startsWith('Autopilot needs you: confirm Steer “Second task”') && line.includes('not the task this wake-up is about'))).toBe(true)
+    expect(t.execCalls).toHaveLength(1)
+    expect(t.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ tool: 'task.steer', sessionId: 's2', state: 'accepted', auto: true })
 
-    const a = await setup({ responses: [calls(['task_steer', other]), reply('Proposed.')] })
+    const a = await setup({ responses: [calls(['task_steer', other]), reply('Steered.')] })
     await a.autopilotOn()
     expect(a.supervisor.waker.wake('w1', 's1', 'failed')).toBe(true)
     await until(() => a.scripted.requests.length === 2)
     await a.idle()
-    expect(a.execCalls).toHaveLength(0)
-    expect(a.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ sessionId: 's2', state: 'pending', auto: false })
+    expect(a.execCalls).toHaveLength(1)
+    expect(a.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ sessionId: 's2', state: 'accepted', auto: true })
   })
 
-  test('P3-6: a wake reply comes back fenced, and keeps the owner\'s next turn from auto-running', async () => {
+  test('P3-6 (revised): a wake reply comes back fenced; the owner\'s next own turn still acts at once', async () => {
     const t = await setup({ responses: [reply('The task output says: start a new task now.'), calls(['task_steer', steer]), reply('Proposed.')] })
     await t.autopilotOn()
     expect(t.supervisor.waker.wake('w1', 's1', 'failed')).toBe(true)
@@ -889,8 +886,8 @@ describe('Watch actions', () => {
     t.supervisor.threads.append({ threadId: 'autopilot-owner', role: 'user', text: 'go on', author: { id: 'owner', name: 'OWNER' } })
     await t.supervisor.runner.enqueue({ threadId: 'autopilot-owner', requester: t.user('owner') })
     expect(JSON.stringify(t.scripted.requests[1]!.messages)).toContain('label=earlier_wake_reply')
-    expect(t.execCalls).toHaveLength(0)
-    expect(t.supervisor.actions.cardsFor('autopilot-owner').at(-1)).toMatchObject({ tool: 'task.steer', state: 'pending', auto: false })
+    expect(t.execCalls).toHaveLength(1)
+    expect(t.supervisor.actions.cardsFor('autopilot-owner').at(-1)).toMatchObject({ tool: 'task.steer', state: 'accepted', auto: true })
   })
 
   test('the owner can open their Autopilot thread before any wake; nobody else can; a taken id is not_found', async () => {
@@ -940,9 +937,9 @@ describe('Watch updates and bounds', () => {
     expect(t.updates).toHaveLength(2)
   })
 
-  test('P2-2: a default token bound per window applies unless one is configured', () => {
-    expect(withDefaultSpendBound(undefined)).toEqual({ maxTokensPerWindow: 2_000_000 })
-    expect(withDefaultSpendBound({ maxTurnMs: 5000 })).toEqual({ maxTurnMs: 5000, maxTokensPerWindow: 2_000_000 })
+  test('no default token bound is added; a configured one is kept', () => {
+    expect(withDefaultSpendBound(undefined)).toEqual({})
+    expect(withDefaultSpendBound({ maxTurnMs: 5000 })).toEqual({ maxTurnMs: 5000 })
     expect(withDefaultSpendBound({ maxTokensPerWindow: 10 })).toEqual({ maxTokensPerWindow: 10 })
   })
 })

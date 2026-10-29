@@ -53,18 +53,18 @@ describe('supervisor read tools', () => {
     expect(second.next_cursor).toBeUndefined()
   })
 
-  test('task_tail is bounded to 8 KiB and keeps the newest steps', async () => {
+  test('task_tail is bounded to 64 KiB and keeps the newest steps', async () => {
     const world = makeWorld()
-    const messages = Array.from({ length: 60 }, (_, index) => ({ role: 'assistant', content: `${index}:${'x'.repeat(600)}` }))
+    const messages = Array.from({ length: 160 }, (_, index) => ({ role: 'assistant', content: `${index}:${'x'.repeat(600)}` }))
     world.backendBehavior.run = method => (method === 'session.active_list'
       ? { state: 'accepted', result: { ok: true, sessions: [{ id: 's1', key: 'k1' }] } }
       : { state: 'accepted', result: { ok: true, history: { actions: [{ messages }] } } })
     const tail = await run(world, 'task_tail', { workspace_id: 'w1', task_id: 's1' })
     expect(tail.truncated).toBe(true)
     expect(utf8ByteLength(JSON.stringify(tail.steps))).toBeLessThanOrEqual(TAIL_MAX_BYTES)
-    expect(tail.steps.at(-1).startsWith('assistant: 59:')).toBe(true)
+    expect(tail.steps.at(-1).startsWith('assistant: 159:')).toBe(true)
     const history = world.backendCalls.find(call => call.method === 'session.history')!
-    expect(history.params).toMatchObject({ session_key: 'k1', history_limit: 10 })
+    expect(history.params).toMatchObject({ session_key: 'k1', history_limit: 20 })
     await expect(run(world, 'task_tail', { workspace_id: 'w1', task_id: 's1', after: 3 })).rejects.toThrow('not supported')
   })
 
@@ -81,7 +81,21 @@ describe('supervisor read tools', () => {
     })
     const found = await run(world, 'task_search', { workspace_id: 'w1', task_id: 's1', query: 'mine' })
     expect(found.hits).toEqual([{ session_id: 's1', text: 'mine' }, { text: 'no session field' }])
-    expect(world.backendCalls[0]!.params).toMatchObject({ session_id: 's1', query: 'mine', limit: 5 })
+    expect(world.backendCalls[0]!.params).toMatchObject({ session_id: 's1', query: 'mine', limit: 10 })
+  })
+
+  test('tasks_search searches every readable workspace once and reads the daemon\'s `results` field', async () => {
+    const world = makeWorld()
+    world.backendBehavior.run = () => ({
+      state: 'accepted',
+      result: { ok: true, results: [{ session_id: 's1', excerpt: 'Shading pass', message_index: 3, arguments: { cmd: 'x' } }, { session_id: 'ghost', excerpt: 'not a known task' }] },
+    })
+    const found = await run(world, 'tasks_search', { query: 'Shading' })
+    expect(found.hits).toHaveLength(1)
+    expect(found.hits[0]).toMatchObject({ workspace_id: 'w1', task_id: 's1', excerpt: 'Shading pass' })
+    expect(JSON.stringify(found.hits)).not.toContain('cmd')
+    expect(world.backendCalls[0]!.params).toMatchObject({ query: 'Shading', limit: 30 })
+    expect(world.backendCalls[0]!.params).not.toHaveProperty('session_id')
   })
 
   test('task_search strips argument-like fields from hits at any depth before they reach the model', async () => {
