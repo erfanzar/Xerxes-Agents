@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.16 — 2026-10-29
+
+- **XERXES can start new tasks again.** Confirming a "Start a new task" card from the phone or the desktop XERXES tab always failed with `hub_auth rejected (session_mismatch)`. A new task has no session id when it is opened, so the Hub signed the open request without naming a session, and the runtime refused it. The Hub now signs it with the session key the task is opened under. The runtime still checks every signed request against its session, so a request signed for a different session is still refused. The Hub needs 0.8.16; machines can stay on older versions.
+- **The phone shows only what you typed.** The hidden `<turn-context>` block Xerxes adds in front of a message for the model (goal state, refreshed memory) appeared in phone task chats as if you had written it. The phone now removes it from live messages and loaded history, as the desktop and terminal already did.
+- **Calls stop saying "Didn't catch that" over and over.** On-phone speech recognition (Moonshine Streaming small) crashed whenever a clip's length was not a multiple of 80 samples, which was most real speech. Audio is now padded before it is transcribed. XERXES's spoken replies also stream: the next sentence is prepared while the current one plays, and the first one starts sooner. XERXES's own voice coming back through the microphone no longer interrupts it, because voice barge-in now needs about 0.7 s of clear speech (tapping the orb still interrupts at once).
+- **Steers sent from the phone show up in the desktop chat.** A steer sent from the phone while a turn was running reached the model but never appeared on the desktop. It now appears, including after a reload.
+- **Windows builds of the phone app work again.** The mobile build compared package paths that Windows spells differently through links. It now compares the resolved package roots.
+- **`bun run check` passes in a checkout that has gitignored clones of other projects.** The Bun-only repository check scanned every file on disk. In a git checkout it now checks only what git would commit.
+
 ## 0.8.15 — 2026-10-28
 
 - **Talk to XERXES hands-free from your phone.** A waveform button beside Send opens a full-screen voice view: one orb that follows your voice and XERXES's, a Listening / Thinking / Speaking line, short live captions, and Mute, Chat and End. Speech recognition (Moonshine Streaming small) and the voice (Kokoro-82M) run on the phone, so no Hub voice provider or key is needed. **Light** mode uses Moonshine tiny and the phone's own voice for low-memory phones. Tapping the orb interrupts XERXES. **Chat** shrinks the call to a bar at the top of the XERXES tab and keeps it running while you read or type.
