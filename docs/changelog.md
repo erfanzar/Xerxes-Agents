@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.17 — 2026-10-29
+
+- **XERXES is the Hub owner's personal agent, not a permission box.** When the owner is the one talking to XERXES, everything it does runs at once, on any task, with or without Autopilot: starting, steering and stopping tasks, messaging agents, setting goals and changing models. There are no Confirm cards. If another person writes in the same thread, its actions still become Confirm cards, so nobody else can borrow the owner's authority. Every action is still audited and posted to the thread.
+- **No caps on a XERXES turn.** The limits of 8 tool calls, 10 model calls, 60K tokens and 90 seconds per turn are gone, along with the 2M tokens/day bound and Autopilot's hourly caps on wake-ups and actions. Replies can be up to 8K tokens instead of 1.2K. A Hub operator can still configure any of these quotas, and the owner can stop a turn at any time.
+- **XERXES answers questions and permission requests for the owner.** Answering a task's question no longer needs Autopilot. `pending_interactions` now shows each waiting permission request with its tool, description and inputs, and the new `answer_permission` tool approves or rejects it under a new owner-only scope, `permission.delegated`. A machine's runtime must run 0.8.17 before XERXES can answer permissions there; older runtimes refuse and XERXES says so.
+- **XERXES can search every task at once.** The new `tasks_search` tool searches the history of every task the owner can read in one call. Searching a single task also works again: XERXES read the wrong field of the runtime's search reply, so every search came back empty.
+
 ## 0.8.16 — 2026-10-29
 
 - **XERXES can start new tasks again.** Confirming a "Start a new task" card from the phone or the desktop XERXES tab always failed with `hub_auth rejected (session_mismatch)`. A new task has no session id when it is opened, so the Hub signed the open request without naming a session, and the runtime refused it. The Hub now signs it with the session key the task is opened under. The runtime still checks every signed request against its session, so a request signed for a different session is still refused. The Hub needs 0.8.16; machines can stay on older versions.
