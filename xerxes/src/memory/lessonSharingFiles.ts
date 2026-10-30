@@ -21,15 +21,18 @@ export async function atomicLessonWrite(path: string, text: string, mode = 0o600
   }
 }
 
+const MAX_LESSON_FILE_BYTES = 256 * 1024
+
 /** Bound bytes and reject links with the opened descriptor, not a prior lstat. */
 export async function readLessonFile(path: string): Promise<string> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const stat = await handle.stat()
-    if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('not a regular file or exceeds 64 KiB')
-    const buffer = Buffer.alloc(64 * 1024 + 1)
+    // A full lesson (8 000) plus full evidence (20 000) of 4-byte UTF-8 fits well under this.
+    if (!stat.isFile() || stat.size > MAX_LESSON_FILE_BYTES) throw new Error('not a regular file or exceeds 256 KiB')
+    const buffer = Buffer.alloc(MAX_LESSON_FILE_BYTES + 1)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    if (bytesRead > 64 * 1024) throw new Error('exceeds 64 KiB')
+    if (bytesRead > MAX_LESSON_FILE_BYTES) throw new Error('exceeds 256 KiB')
     return buffer.subarray(0, bytesRead).toString('utf8')
   } finally { await handle.close() }
 }

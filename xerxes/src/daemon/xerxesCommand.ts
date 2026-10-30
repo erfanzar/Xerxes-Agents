@@ -30,7 +30,8 @@ export const XERXES_SYNC_USAGE = [
   'Memory: project memory (not the journal) is three-way merged with .xerxes/memory/.',
   'Skills: skills approved from reflection here, or named with skill <name>, go to .xerxes/skills/,',
   'which every machine loads. Nothing is ever deleted; conflicting edits are reported.',
-  'Run it on each machine (it is also the local opt-in), then commit and pull .xerxes/.',
+  'Pulled .xerxes/lessons/ and .xerxes/skills/ load automatically on the next message;',
+  'run /xerxes-sync to write this machine\'s lessons, memory and skills back, then commit .xerxes/.',
 ].join('\n')
 
 /** `/xerxes-sync [parts...] [skill <name>]... [--dry-run]`; the explicit command is the local trust decision. */

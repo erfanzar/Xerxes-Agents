@@ -260,21 +260,26 @@ test('sharing refuses a symlinked project-settings root before creating a lesson
   expect(await Bun.file(join(outside, 'lessons')).exists()).toBe(false)
 })
 
-test('repo files cannot opt in a machine: explicit sync persists local per-repo trust; Hub imports bypass it', async () => {
+test('a committed lessons folder is read without opt-in; writing back needs the explicit command, which repo files cannot grant', async () => {
   sharing.close()
   const settingsPath = join(root, 'fresh-home', 'lesson-sharing.json')
   sharing = new LessonSharing({ memory, lessons, settingsPath, resolveRoot: async () => root })
   const folder = join(root, '.xerxes', 'lessons'); await mkdir(folder, { recursive: true })
   const incoming = wire(); await writeFile(join(folder, `${incoming.id}.json`), JSON.stringify(incoming))
   await writeFile(join(root, '.xerxes', 'lesson-sharing.json'), JSON.stringify({ repos: { [repo]: { enabled_at: new Date().toISOString() } } }))
-  expect(await sharing.syncRepoFolder(root)).toMatchObject({ enabled: false, applied: 0, exported: 0 })
+  // Reading is automatic: the pulled lesson is imported and recallable, nothing is written.
+  const filesBefore = (await readdir(folder)).sort()
+  expect(await sharing.syncRepoFolder(root)).toMatchObject({ enabled: false, applied: 1, exported: 0, written: 0 })
+  expect((await lessons.recall('Bun fixtures', root)).map(lesson => lesson.id)).toContain(incoming.id)
+  expect((await readdir(folder)).sort()).toEqual(filesBefore)
   const localLesson = await local(); await lessons.review(localLesson.id, 'approved')
   expect(await Bun.file(join(folder, `${localLesson.id}.json`)).exists()).toBe(false)
   const hub = wire()
   expect(await sharing.apply(root, [hub], 'hub')).toMatchObject({ applied: 1 })
   expect((await sharing.snapshot(root)).lessons.some(row => row.id === hub.id)).toBe(true)
-  expect(await sharing.apply(root, [incoming], 'repo')).toMatchObject({ applied: 0 })
-  expect(await sharing.sync(root)).toMatchObject({ enabled: true, applied: 1 })
+  // The explicit command opts in and exports; the already-imported lesson is not applied twice.
+  expect(await sharing.sync(root)).toMatchObject({ enabled: true, applied: 0 })
+  expect(await Bun.file(join(folder, `${localLesson.id}.json`)).exists()).toBe(true)
   expect(JSON.parse(await readFile(settingsPath, 'utf8'))).toMatchObject({ repos: { [repo]: { enabled_at: expect.any(String) } } })
   expect((await stat(settingsPath)).mode & 0o777).toBe(0o600)
   sharing.close()

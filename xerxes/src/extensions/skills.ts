@@ -660,11 +660,20 @@ export function defaultSkillDiscoveryRoots(
   options: DefaultSkillDiscoveryOptions = {},
 ): SkillDiscoveryRoot[] {
   const cwd = resolve(options.cwd ?? process.cwd());
+  // `/xerxes-sync` publishes into `<git root>/.xerxes/skills`; a session started in a
+  // subfolder must still load them. The canonical-root dedup below drops the second
+  // copy when the session folder is the Git root, and name shadowing lists a skill once.
+  const gitRoot = gitToplevel(cwd);
+  const projectRoots: readonly SkillDiscoveryRoot[] = gitRoot === undefined || gitRoot === cwd ? [] : [
+    { path: join(gitRoot, ".xerxes", "skills"), workspace: true, autoLoadInstructions: true },
+    { path: join(gitRoot, ".xerxes", "commands"), workspace: true, autoLoadInstructions: true, format: 'commands' },
+  ];
   const roots: readonly SkillDiscoveryRoot[] = [
     { path: join(cwd, ".agents", "skills"), workspace: true },
     { path: join(cwd, "skills"), workspace: true },
     { path: join(cwd, ".xerxes", "skills"), workspace: true, autoLoadInstructions: true },
     { path: join(cwd, ".xerxes", "commands"), workspace: true, autoLoadInstructions: true, format: 'commands' },
+    ...projectRoots,
     { path: options.userSkillsDirectory ?? join(xerxesHome(), "skills") },
     { path: join(xerxesHome(), "agents", "skills") },
     { path: BUNDLED_SKILLS_DIRECTORY },
@@ -730,6 +739,17 @@ export async function skillNamesUnderRoot(root: string): Promise<Set<string>> {
     }
   }
   return names;
+}
+
+/** Nearest ancestor (or self) holding a `.git` directory or worktree file; no subprocess. */
+function gitToplevel(start: string): string | undefined {
+  let directory = start;
+  for (;;) {
+    if (existsSync(join(directory, ".git"))) return directory;
+    const parent = dirname(directory);
+    if (parent === directory) return undefined;
+    directory = parent;
+  }
 }
 
 /** Canonical discovery-root key: realpath when the directory exists so symlinked roots dedup. */

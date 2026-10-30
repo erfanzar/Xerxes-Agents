@@ -12,7 +12,7 @@ import { LessonStore, renderApprovedLessonsForTurn } from '../src/memory/lessons
 import { lintDiscoveredHarness } from '../src/extensions/harnessLint.js'
 import { defaultSkillDiscoveryRoots, SkillRegistry, trustedHashWorkspaceSkills } from '../src/extensions/skills.js'
 import { recordTrustedSkillContent } from '../src/extensions/skillsGuard.js'
-import { ProjectSync, ProjectSyncError, unionBlocks } from '../src/memory/projectSync.js'
+import { ProjectSync, ProjectSyncError, renderProjectSync, unionBlocks } from '../src/memory/projectSync.js'
 import { ReflectionProposalStore } from '../src/runtime/reflection.js'
 import { loadProjectAgentWorkspace } from '../src/runtime/projectWorkspace.js'
 
@@ -235,6 +235,54 @@ test('the synced memory folder is not injected as always-on project context', as
   const context = await loadProjectAgentWorkspace(root)
   expect(context.prompt).toContain('Project note stays.')
   expect(context.prompt).not.toContain('Synced memory must not be injected.')
+})
+
+test('the report asks for a commit only when the run wrote project files, and explains skipped lessons', () => {
+  const unchanged = { exported: [], imported: [], merged: [], unchanged: 9, skipped: [] }
+  const quiet = renderProjectSync({
+    root, repo, dryRun: false, ignored: [],
+    lessons: { kind: 'synced', exported: 37, written: 0, applied: 0, retired: 0,
+      skipped: [...Array.from({ length: 27 }, (_, i) => ({ id: `l-${i}`, reason: 'conflict' })), { id: 'other', reason: 'repo_mismatch' }] },
+    memory: unchanged,
+    skills: { ...unchanged, unchanged: 1, published: [], available: ['deploy-check'] },
+  })
+  expect(quiet).not.toContain('Commit ')
+  expect(quiet).toContain('nothing to commit')
+  expect(quiet).toContain('37 in .xerxes/lessons (0 new or changed)')
+  expect(quiet).toContain('27 skipped: same id as a lesson on this machine but different content; neither copy was changed (l-0, l-1, l-2, … 24 more)')
+  expect(quiet).toContain('1 skipped: belongs to a different repository (other)')
+
+  const busy = renderProjectSync({
+    root, repo, dryRun: false, ignored: [],
+    lessons: { kind: 'synced', exported: 2, written: 1, applied: 0, retired: 0, skipped: [] },
+    memory: { ...unchanged, merged: ['memory/INSIGHTS.md'] },
+    skills: { ...unchanged, published: [], available: [] },
+  })
+  expect(busy).toContain('Uncommitted changes in .xerxes/lessons, .xerxes/memory: commit them')
+
+  // Git is the authority: files an earlier run left uncommitted are named even when this run wrote nothing.
+  const left = renderProjectSync({ root, repo, dryRun: false, ignored: [], uncommitted: ['.xerxes/memory', '.xerxes/skills'], memory: unchanged })
+  expect(left).toContain('Uncommitted changes in .xerxes/memory, .xerxes/skills')
+  const clean = renderProjectSync({ root, repo, dryRun: false, ignored: [], uncommitted: [], memory: unchanged })
+  expect(clean).toContain('already committed')
+
+  const preview = renderProjectSync({ root, repo, dryRun: true, ignored: [], lessons: { kind: 'preview', shareable: 3 } })
+  expect(preview).not.toContain('commit')
+})
+
+test('project skills load from a session started in a subfolder, and once from the Git root', async () => {
+  await mkdir(join(root, '.git'))
+  const sub = join(root, 'pkg', 'inner'); await mkdir(sub, { recursive: true })
+  await put(join(root, '.xerxes', 'skills', 'deploy-check', 'SKILL.md'), skillDoc('deploy-check'))
+  const projectSkills = join(root, '.xerxes', 'skills')
+  const fromSub = defaultSkillDiscoveryRoots({ cwd: sub, userSkillsDirectory: join(base, 'user-skills') }).map(row => row.path)
+  expect(fromSub).toContain(projectSkills)
+  const fromRoot = defaultSkillDiscoveryRoots({ cwd: root, userSkillsDirectory: join(base, 'user-skills') }).map(row => row.path)
+  expect(fromRoot.filter(path => path === projectSkills)).toHaveLength(1)
+  const registry = new SkillRegistry()
+  await registry.refresh(...defaultSkillDiscoveryRoots({ cwd: sub, userSkillsDirectory: join(base, 'user-skills') }))
+  expect(registry.get('deploy-check')?.sourcePath).toBe(join(projectSkills, 'deploy-check', 'SKILL.md'))
+  expect(registry.all().filter(skill => skill.metadata.name === 'deploy-check')).toHaveLength(1)
 })
 
 test('a folder without a Git identity fails with an actionable error', async () => {

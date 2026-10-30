@@ -8,11 +8,11 @@ import { join } from 'node:path'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import { GovernedMemoryStore } from '../src/memory/governedMemoryStore.js'
-import { LessonStore, renderApprovedLessonsForTurn } from '../src/memory/lessons.js'
+import { LessonStore, lessonIdsInContext, renderApprovedLessonsForTurn } from '../src/memory/lessons.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest } from '../src/llms/client.js'
 
-async function scenario(fail = false, long = false) {
+async function scenario(fail = false, long = false, texts: readonly string[] = ['Bun fixtures', 'Unrelated gardening']) {
   const root = await mkdtemp(join(tmpdir(), 'lesson-turn-'))
   const lessons = new LessonStore({ memory: new GovernedMemoryStore({ directory: join(root, 'memory') }) })
   const requests: CompletionRequest[] = []
@@ -29,15 +29,14 @@ async function scenario(fail = false, long = false) {
     lessonsForTurn: async (session, text, signal) => {
       signal.throwIfAborted(); lookups.push(text)
       if (fail) throw new Error('recall unavailable')
-      return renderApprovedLessonsForTurn(await lessons.recall(text, session.cwd, { limit: 5 }))
+      return renderApprovedLessonsForTurn(await lessons.recall(text, session.cwd, { limit: 30 }), { inContext: lessonIdsInContext(session.messages) })
     },
     llm: { async *stream(request) { requests.push(structuredClone(request)); yield { content: 'Done' } } },
   })
   const runtime = new InMemoryDaemonRuntime(runner, { model: 'gpt-4o', currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') })
   try {
     const session = await runtime.openSession('lessons')
-    await runtime.submitTurn(session.sessionKey, 'Bun fixtures', () => {})
-    await runtime.submitTurn(session.sessionKey, 'Unrelated gardening', () => {})
+    for (const text of texts) await runtime.submitTurn(session.sessionKey, text, () => {})
     return { requests, lookups }
   } finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }) }
 }
@@ -61,13 +60,38 @@ test('matching approved lessons travel in turn context, never the cached system 
   expect(String(last?.content)).not.toContain('Approved lessons')
 })
 
-test('lesson blocks are bounded to five lessons and 2000 characters with explicit clipping', async () => {
+test('a turn carries at most five lessons, each with its full text and never clipped', async () => {
   const { requests } = await scenario(false, true)
   const user = String(requests[0]!.messages.find(message => message.role === 'user')?.content)
   const block = user.slice(user.indexOf('## Approved lessons'), user.indexOf('</turn-context>')).trim()
-  expect(block.length).toBeLessThanOrEqual(2000)
-  expect(block).toContain('[clipped]')
-  expect(block.match(/^- Cue:/gmu)?.length).toBe(5)
+  expect(block).not.toContain('[clipped]')
+  expect(block.match(/^- lesson-/gmu)?.length).toBe(5)
+  expect(block).toContain(`APPROVED use temp directories ${'x'.repeat(5000)}`)
+})
+
+test('a lesson already in the context window is not injected again, and the earlier message is replayed byte-identically', async () => {
+  const { requests } = await scenario(false, false, ['Bun fixtures', 'Bun fixtures again'])
+  const first = requests[0]!.messages.find(message => message.role === 'user')!
+  expect(String(first.content)).toContain('APPROVED use temp directories')
+  // Prefix caching: the second request starts with the first user message exactly as sent.
+  expect(requests[1]!.messages.find(message => message.role === 'user')).toEqual(first)
+  const all = JSON.stringify(requests[1]!.messages)
+  expect(all.split('APPROVED use temp directories').length - 1).toBe(1)
+  expect(String(requests[1]!.messages.at(-1)?.content)).not.toContain('Approved lessons')
+})
+
+test('a duplicate-text twin of a lesson already in context is not injected either', () => {
+  const base = { cue: 'c', confidence: 0.9, workspace: '/w', agentId: 'a', createdAt: 1, reviewStatus: 'approved' as const,
+    evidence: { kind: 'test' as const, command: 'bun test', exitCode: 0, summary: 'ok' } }
+  const shown = { ...base, id: 'lesson-00000000-0000-4000-8000-000000000001', lesson: 'Use temp dirs.' }
+  const twin = { ...base, id: 'lesson-00000000-0000-4000-8000-000000000002', lesson: 'use  temp dirs.' }
+  const other = { ...base, id: 'lesson-00000000-0000-4000-8000-000000000003', lesson: 'Clean up after.' }
+  const inContext = lessonIdsInContext([{ content: `earlier turn context mentions ${shown.id}` }])
+  const rendered = renderApprovedLessonsForTurn([shown, twin, other], { inContext })
+  expect(rendered).not.toContain(shown.id)
+  expect(rendered).not.toContain(twin.id)
+  expect(rendered).toContain(other.id)
+  expect(renderApprovedLessonsForTurn([shown, twin], { inContext })).toBe('')
 })
 
 test('recall failures are logged without failing a turn and empty recall injects nothing', async () => {

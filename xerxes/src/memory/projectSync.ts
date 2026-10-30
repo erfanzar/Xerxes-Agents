@@ -66,6 +66,11 @@ export interface ProjectSyncResult {
   readonly skills?: ProjectSkillSyncResult
   /** Project folders (`.xerxes/<part>/`) that Git ignores, so they would never be committed. */
   readonly ignored: readonly string[]
+  /**
+   * Synced folders with uncommitted changes according to `git status`, whether this run or
+   * an earlier one made them. Absent when Git could not be asked.
+   */
+  readonly uncommitted?: readonly string[]
 }
 export interface ProjectSyncRequest {
   readonly parts?: readonly ProjectSyncPart[]
@@ -140,8 +145,10 @@ export class ProjectSync {
       const folder = `.xerxes/${part}/`
       if ((await lessonGit(root, ['check-ignore', '--quiet', folder]))?.code === 0) ignored.push(folder)
     }
+    const uncommitted = await uncommittedFolders(root, parts)
     return {
       root, repo, dryRun, ignored,
+      ...(uncommitted ? { uncommitted } : {}),
       ...(lessons ? { lessons } : {}),
       ...(memory ? { memory } : {}),
       ...(skills ? { skills } : {}),
@@ -292,8 +299,12 @@ export class ProjectSync {
 export function renderProjectSync(result: ProjectSyncResult): string {
   const lines = [`${result.dryRun ? 'Project sync preview (nothing written)' : 'Project sync'} · ${result.root}`]
   const lessons = result.lessons
-  if (lessons?.kind === 'synced') lines.push(`Lessons: ${lessons.exported} exported (${lessons.written} written), ${lessons.applied} imported, ${lessons.retired} retired, ${lessons.skipped.length} skipped.`)
-  else if (lessons?.kind === 'preview') lines.push(`Lessons: ${lessons.shareable} approved lesson(s) would be shared.`)
+  if (lessons?.kind === 'synced') {
+    lines.push(`Lessons: ${lessons.exported} in .xerxes/lessons (${lessons.written} new or changed), ${lessons.applied} imported, ${lessons.retired} retired, ${lessons.skipped.length} skipped.`)
+    for (const [reason, ids] of groupSkippedLessons(lessons.skipped)) {
+      lines.push(`  ${ids.length} skipped: ${describeLessonSkip(reason)} (${ids.slice(0, 3).join(', ')}${ids.length > 3 ? `, … ${ids.length - 3} more` : ''})`)
+    }
+  } else if (lessons?.kind === 'preview') lines.push(`Lessons: ${lessons.shareable} approved lesson(s) would be shared.`)
   else if (lessons) lines.push(`Lessons: unavailable — ${lessons.error}`)
   const verb = result.dryRun ? 'would be ' : ''
   if (result.memory) {
@@ -316,8 +327,42 @@ export function renderProjectSync(result: ProjectSyncResult): string {
     lines.push(`Warning: Git ignores ${result.ignored.join(', ')}, so it would never be committed.`,
       'If .gitignore ignores all of .xerxes/, replace that line with `.xerxes/*` followed by `!.xerxes/lessons/`, `!.xerxes/memory/` and `!.xerxes/skills/`.')
   }
-  if (!result.dryRun) lines.push('Commit .xerxes/lessons, .xerxes/memory and .xerxes/skills; on another machine pull and run /xerxes-sync.')
+  if (!result.dryRun) {
+    // Git is the authority: an earlier run can have left files uncommitted even when this one wrote nothing.
+    const changed = result.uncommitted ?? [
+      ...(lessons?.kind === 'synced' && lessons.written > 0 ? ['.xerxes/lessons'] : []),
+      ...(result.memory && (result.memory.exported.length || result.memory.merged.length) ? ['.xerxes/memory'] : []),
+      ...(result.skills && result.skills.exported.length ? ['.xerxes/skills'] : []),
+    ]
+    lines.push(changed.length
+      ? `Uncommitted changes in ${changed.join(', ')}: commit them; on another machine, pull and Xerxes loads them on the next message.`
+      : result.uncommitted ? 'Everything in the synced .xerxes folders is already committed.' : 'Nothing new was written to the project folder, so there is nothing to commit.')
+  }
   return lines.join('\n')
+}
+
+/** `.xerxes/<part>` folders with staged, unstaged or untracked changes; undefined when Git cannot answer. */
+async function uncommittedFolders(root: string, parts: readonly ProjectSyncPart[]): Promise<string[] | undefined> {
+  const folders = parts.map(part => `.xerxes/${part}`)
+  const status = await lessonGit(root, ['status', '--porcelain', '--untracked-files=normal', '--', ...folders])
+  if (!status || status.code !== 0) return undefined
+  const lines = status.text.split('\n').filter(Boolean)
+  return folders.filter(folder => lines.some(line => line.slice(3).replace(/^"/u, '').startsWith(`${folder}/`) || line.includes(` -> ${folder}/`)))
+}
+
+function groupSkippedLessons(skipped: readonly { readonly id: string; readonly reason: string }[]): Map<string, string[]> {
+  const groups = new Map<string, string[]>()
+  for (const row of skipped) groups.set(row.reason, [...groups.get(row.reason) ?? [], row.id])
+  return groups
+}
+
+function describeLessonSkip(reason: string): string {
+  switch (reason) {
+    case 'conflict': return 'same id as a lesson on this machine but different content; neither copy was changed'
+    case 'repo_mismatch': return 'belongs to a different repository'
+    case 'scanner_modified': return 'the prompt-injection scanner flagged its text'
+    default: return reason
+  }
 }
 
 function mirror(): MirrorBuilder { return { exported: [], imported: [], merged: [], unchanged: 0, skipped: [] } }

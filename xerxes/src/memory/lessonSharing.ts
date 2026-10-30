@@ -74,10 +74,14 @@ export class LessonSharing {
     this.enabled()
     return this.serial(() => this.snapshotRecords(workspace, options.markShared !== false))
   }
-  private async snapshotRecords(workspace: string, markShared: boolean): Promise<{ repo: string | null; lessons: SharedLessonWire[] }> {
+  /**
+   * `persist` writes what an export makes true (the repo key of a legacy lesson, the frozen
+   * wire); only a preview passes false. `markShared` additionally records publication.
+   */
+  private async snapshotRecords(workspace: string, markShared: boolean, persist = markShared): Promise<{ repo: string | null; lessons: SharedLessonWire[] }> {
     const repo = await this.repoForWorkspace(workspace)
     if (!repo) return { repo: null, lessons: [] }
-    const adopted = await this.adoptLegacyLessons(repo, markShared)
+    const adopted = await this.adoptLegacyLessons(repo, persist)
     const lessons: SharedLessonWire[] = []
     for (const stored of (await this.options.memory.loadHistory()).records.values()) {
       // A preview (markShared false) adopts in memory only; it never writes the store.
@@ -85,7 +89,7 @@ export class LessonSharing {
       if (record.payload?.repo !== repo || record.payload.kind !== 'lesson' || sensitive(record)) continue
       const dead = retired(record, this.options.memory.now())
       if (dead ? !wasShared(record) : record.reviewStatus !== 'approved') continue
-      const wire = await this.wire(record, markShared)
+      const wire = await this.wire(record, persist)
       if (!wire) continue
       lessons.push(wire)
       if (markShared && wire.status === 'active' && record.payload.shared_once !== true) await this.options.memory.updatePayload(record.id, { shared_once: true })
@@ -169,6 +173,9 @@ export class LessonSharing {
     if (!repo) throw new LessonSyncError('repo_mismatch', 'This workspace has no Git repository identity; lesson sharing is unavailable.')
     let applied = 0; let countRetired = 0
     const skipped: { id: string; reason: string }[] = []
+    // Lessons recorded before repo keys must carry the key before comparison; otherwise this
+    // machine's own exported files look like conflicting copies of its own lessons.
+    await this.adoptLegacyLessons(repo, true)
     const records = new Map((await this.options.memory.loadHistory()).records)
     for (const value of input) {
       signal?.throwIfAborted()
@@ -182,7 +189,8 @@ export class LessonSharing {
       let freezeLegacyOrigin = false
       if (current) {
         // An old export is the only durable source of a legacy id's original host.
-        if (current.payload?.origin_host === undefined && !parseSharedLessonWire(current.payload?.shared).ok && matchesRecord(current, incoming)) {
+        // Any record not yet frozen whose fields match the file (including old cut evidence) adopts the file's wire.
+        if (!parseSharedLessonWire(current.payload?.shared).ok && matchesRecord(current, incoming)) {
           freezeLegacyOrigin = true
           currentWire = incoming
         } else currentWire = current.payload?.kind === 'lesson' ? await this.wire(current) : undefined
@@ -277,12 +285,16 @@ export class LessonSharing {
       const signal = options.signal
       signal?.throwIfAborted()
       const repo = await this.repoForWorkspace(workspace)
-      if (!repo || !await this.settings.enabled(repo)) return emptyResult(repo ?? null, false)
+      if (!repo) return emptyResult(null, false)
+      // Reading a committed `.xerxes/lessons/` needs no opt-in: a pulled repo loads its
+      // lessons on the next message. Writing into the repo (export) still needs the
+      // explicit `/xerxes-sync` (or `/xerxes lessons share|sync`) on this machine.
+      const optedIn = await this.settings.enabled(repo)
       const root = await this.root(workspace)
       signal?.throwIfAborted()
       if (!root) return emptyResult(repo, false)
       const folder = await this.folder(root)
-      const empty = emptyResult(repo, folder !== undefined)
+      const empty = emptyResult(repo, optedIn && folder !== undefined)
       if (!folder) return empty
       const allEntries = (await readdir(folder)).filter(name => name.endsWith('.json')).sort()
       const entries = allEntries.slice(0, SHARED_LESSON_LIMITS.listLessons)
@@ -302,7 +314,7 @@ export class LessonSharing {
       }
       signal?.throwIfAborted()
       const imported = await this.applyBatch(root, values, 'repo', signal)
-      const exported = await this.exportFolder(root, signal)
+      const exported = optedIn ? await this.exportFolder(root, signal) : { exported: 0, written: 0 }
       this.synced.set(root, { at: Date.now(), signature })
       return { ...empty, ...imported, ...exported, skipped: [...skipped, ...imported.skipped] }
     })
@@ -328,13 +340,14 @@ export class LessonSharing {
     // Existing files are evidence that an identity previously left this machine.
     for (const record of (await this.options.memory.loadHistory()).records.values()) {
       signal?.throwIfAborted()
-      if (!SHARED_LESSON_ID_PATTERN.test(record.id) || record.payload?.kind !== 'lesson' || record.payload.repo !== repo || wasShared(record) || sensitive(record)) continue
+      if (!SHARED_LESSON_ID_PATTERN.test(record.id) || record.payload?.kind !== 'lesson' || record.payload.repo !== repo || parseSharedLessonWire(record.payload?.shared).ok || sensitive(record)) continue
       try {
         const parsed = parseSharedLessonWire(JSON.parse(await readLessonFile(join(folder, `${record.id}.json`))))
         if (parsed.ok && matchesRecord(record, parsed.lesson)) await this.options.memory.updatePayload(record.id, { shared: jsonWire(parsed.lesson), shared_once: true, origin_host: parsed.lesson.origin.host })
       } catch (error) { if (!isMissingLessonFile(error)) this.report(`Lesson ${record.id} existing file skipped: ${message(error)}`) }
     }
-    const snapshot = await this.snapshotRecords(root, false)
+    // A real export: persist the repo key of legacy lessons, or the next import cannot rebuild them.
+    const snapshot = await this.snapshotRecords(root, false, true)
     let written = 0; let exported = 0
     for (const lesson of snapshot.lessons.slice(0, SHARED_LESSON_LIMITS.listLessons)) {
       signal?.throwIfAborted()
@@ -374,10 +387,15 @@ function matchesRecord(record: MemoryHistoryRecord, wire: SharedLessonWire): boo
   const evidence = storedEvidence(payload.evidence)
   return record.id === wire.id && payload.repo === wire.repo && payload.cue === wire.cue
     && record.content === wire.lesson && payload.confidence === wire.confidence && evidence !== undefined
-    && lessonProvenance(evidence).slice(0, SHARED_LESSON_LIMITS.evidence) === wire.evidence
+    && sameEvidence(lessonProvenance(evidence), wire.evidence)
     && record.agentId === wire.origin.agent_id && new Date(record.createdAt).toISOString() === wire.recorded_at
     && JSON.stringify(ancestry(record).sort()) === JSON.stringify([...wire.supersedes].sort())
     && (payload.origin_host === undefined || payload.origin_host === wire.origin.host)
+}
+/** Exports before 0.8.20 cut evidence to this many characters; those files must still match. */
+const LEGACY_SHARED_EVIDENCE_CHARS = 1000
+function sameEvidence(provenance: string, wireEvidence: string): boolean {
+  return provenance.slice(0, SHARED_LESSON_LIMITS.evidence) === wireEvidence || provenance.slice(0, LEGACY_SHARED_EVIDENCE_CHARS) === wireEvidence
 }
 function jsonWire(wire: SharedLessonWire): JsonObject { return { ...wire, origin: { ...wire.origin }, supersedes: [...wire.supersedes] } }
 function scanned(wire: SharedLessonWire): boolean { return [wire.cue, wire.lesson, wire.evidence, wire.origin.host, wire.origin.agent_id, wire.retired_reason ?? ''].some(text => scanContextContent(text, 'shared lesson') !== text) }

@@ -109,7 +109,7 @@ import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { goalPolicyPrompt, registerGoalTools } from "./runtime/goalTools.js";
 import { findGoalEvidenceExecution, findLatestGoalEvidenceExecution, successfulGoalEvidence } from './runtime/goalEvidence.js';
 import { GovernedMemoryStore } from './memory/governedMemoryStore.js';
-import { LessonStore, renderApprovedLessonsForTurn } from './memory/lessons.js';
+import { LessonStore, MAX_LESSON_EVIDENCE_SUMMARY, lessonIdsInContext, renderApprovedLessonsForTurn } from './memory/lessons.js';
 import { LessonSharing } from './memory/lessonSharing.js';
 import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
@@ -2087,7 +2087,7 @@ function daemonRuntime(
         if (!row) return undefined;
         const id = String(row.toolCallId ?? row.tool_call_id ?? "");
         const result = typeof row.result === "string" ? row.result : "";
-        return { id, name: String(row.name ?? ""), ok: successfulGoalEvidence(row, id), summary: result.length > 500 ? `${result.slice(0, 500)}… [${result.length} chars]` : result };
+        return { id, name: String(row.name ?? ""), ok: successfulGoalEvidence(row, id), summary: result.length > MAX_LESSON_EVIDENCE_SUMMARY ? `${result.slice(0, MAX_LESSON_EVIDENCE_SUMMARY)}… [${result.length} chars]` : result };
       },
     });
     // Compaction archives replaced history verbatim; this lets the model read
@@ -2258,10 +2258,12 @@ function daemonRuntime(
         signal.throwIfAborted();
         if (!userText.trim()) return '';
         await learning.sharing.syncBeforeTurn(session.cwd, signal);
-        // Over-fetch: the renderer drops pending and duplicate-text lessons, then keeps 5.
-        const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 15 });
+        // Over-fetch: the renderer drops pending lessons, duplicate text and lessons the
+        // conversation already shows, then keeps 5. The rendered block is persisted with the
+        // user message, so replayed requests stay byte-identical for prefix caching.
+        const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 30 });
         signal.throwIfAborted();
-        return renderApprovedLessonsForTurn(lessons);
+        return renderApprovedLessonsForTurn(lessons, { inContext: lessonIdsInContext(session.messages) });
       },
       ...(host.reflection ? { reflection: host.reflection } : {}),
       reflectionMode: () => {

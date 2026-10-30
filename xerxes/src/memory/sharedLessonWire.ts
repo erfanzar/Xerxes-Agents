@@ -16,7 +16,8 @@
 export const SHARED_LESSON_LIMITS = Object.freeze({
   cue: 240,
   lesson: 8000,
-  evidence: 1000,
+  /** Holds a full recorded tool-result summary (16 000) plus its provenance prefix. */
+  evidence: 20_000,
   host: 255,
   agentId: 200,
   reason: 500,
