@@ -4,6 +4,7 @@
 import { IMPROVE_CLI_USAGE, runImproveCli } from '../../playground/improveCli.js'
 import { renderLessons, type LessonStore } from '../memory/lessons.js'
 import type { LessonSharing } from '../memory/lessonSharing.js'
+import { PROJECT_SYNC_PARTS, renderProjectSync, type ProjectSync, type ProjectSyncPart } from '../memory/projectSync.js'
 import type { JsonRpcPayload } from '../protocol/jsonRpc.js'
 import type { ReflectionApplier, ReflectionProposalStore, StoredReflectionProposal } from '../runtime/reflection.js'
 import { runWithActiveSession } from '../runtime/sessionContext.js'
@@ -14,6 +15,49 @@ export interface LearningServices {
   readonly applier: ReflectionApplier
   readonly lessons: LessonStore
   readonly sharing?: LessonSharing
+  readonly projectSync?: ProjectSync
+}
+
+export const XERXES_SYNC_USAGE = [
+  'Sync what Xerxes learned in this Git project through <git root>/.xerxes/',
+  'Usage:',
+  '  /xerxes-sync                     lessons, project memory and skills',
+  '  /xerxes-sync lessons|memory|skills ...   only the named parts',
+  '  /xerxes-sync skill <name>        also publish ~/.xerxes/skills/<name> into the project',
+  '  /xerxes-sync --dry-run           show what would change; write nothing',
+  '',
+  'Lessons: approved lessons go to .xerxes/lessons/; imported ones are approved automatically.',
+  'Memory: project memory (not the journal) is three-way merged with .xerxes/memory/.',
+  'Skills: skills approved from reflection here, or named with skill <name>, go to .xerxes/skills/,',
+  'which every machine loads. Nothing is ever deleted; conflicting edits are reported.',
+  'Run it on each machine (it is also the local opt-in), then commit and pull .xerxes/.',
+].join('\n')
+
+/** `/xerxes-sync [parts...] [skill <name>]... [--dry-run]`; the explicit command is the local trust decision. */
+export async function xerxesSyncCommand(args: string, workspace: string, services?: LearningServices): Promise<JsonRpcPayload> {
+  const tokens = args.trim().split(/\s+/u).filter(Boolean)
+  if (tokens[0] === 'help') return { ok: true, report: XERXES_SYNC_USAGE }
+  if (!services?.projectSync) return refusal('Project sync is not configured by this daemon host.')
+  const parts: ProjectSyncPart[] = []
+  const publishSkills: string[] = []
+  let dryRun = false
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!
+    if (token === '--dry-run' || token === 'preview') { dryRun = true; continue }
+    if (token === 'skill' || token === '--skill') {
+      const name = tokens[++index]
+      if (!name) return refusal(`Usage: /xerxes-sync skill <name>\n\n${XERXES_SYNC_USAGE}`)
+      publishSkills.push(name); continue
+    }
+    const part = token === 'lesson' ? 'lessons' : token === 'skill' ? 'skills' : token
+    if ((PROJECT_SYNC_PARTS as readonly string[]).includes(part)) { parts.push(part as ProjectSyncPart); continue }
+    return refusal(`Unknown /xerxes-sync argument '${token}'.\n\n${XERXES_SYNC_USAGE}`)
+  }
+  if (publishSkills.length && parts.length && !parts.includes('skills')) parts.push('skills')
+  try {
+    const result = await services.projectSync.sync(workspace, { ...(parts.length ? { parts } : {}), ...(publishSkills.length ? { publishSkills } : {}), dryRun })
+    return { ok: true, ...result, report: renderProjectSync(result) }
+  } catch (error) { return refusal(error) }
 }
 
 export const XERXES_SUBCOMMANDS = ['help', 'proposals', 'show', 'approve', 'reject', 'lessons', 'improve'] as const
@@ -118,7 +162,10 @@ export function renderReflectionProposal(record: StoredReflectionProposal): stri
 }
 
 export async function xerxesCommand(args: string, workspace: string, services?: LearningServices, session?: DaemonSession): Promise<JsonRpcPayload> {
-  const [action = 'help', ...rest] = args.trim().split(/\s+/u).filter(Boolean)
+  const [typed = 'help', ...rest] = args.trim().split(/\s+/u).filter(Boolean)
+  // `lesson` is what people type; it used to fall through to the usage text, which
+  // clients then showed as a runtime error.
+  const action = typed === 'lesson' ? 'lessons' : typed
   const id = rest[0]
   const reason = rest.slice(1).join(' ')
   try {
@@ -166,7 +213,7 @@ export async function xerxesCommand(args: string, workspace: string, services?: 
         const lessons = rest.length ? await services.lessons.recall(rest.join(' '), workspace) : await services.lessons.list(workspace)
         return { ok: true, lessons, report: renderLessons(lessons, workspace) }
       }
-      default: return refusal(XERXES_USAGE)
+      default: return refusal(`Unknown /xerxes subcommand '${action}'. To sync lessons, memory and skills with the project, use /xerxes-sync.\n\n${XERXES_USAGE}`)
     }
   } catch (error) { return refusal(error) }
 }

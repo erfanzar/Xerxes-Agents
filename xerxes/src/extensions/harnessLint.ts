@@ -54,11 +54,13 @@ export interface DiscoveredHarnessLintOptions extends HarnessLintOptions {
 export function lintHarness(skills: readonly HarnessSkillDocument[], options: HarnessLintOptions = {}): HarnessLintFinding[] {
   const findings: HarnessLintFinding[] = []
   const names = new Map<string, Set<string>>()
+  const contents = new Map<string, string>()
   const visited = new Set<string>()
   for (const document of skills) {
     const identity = resolve(document.path)
     if (visited.has(identity)) continue
     visited.add(identity)
+    contents.set(document.path, document.content)
     for (const diagnosis of lintSkillMarkdown(document.content, document.path).diagnoses) {
       if (diagnosis.severity !== 'fail' && diagnosis.severity !== 'warn') continue
       findings.push({
@@ -108,6 +110,17 @@ export function lintHarness(skills: readonly HarnessSkillDocument[], options: Ha
         code: 'skill-overrides-bundled', severity: 'info', path: own[0]!,
         message: `Skill '${name}' overrides the bundled skill at ${bundled[0]}. Discovery uses this copy.`,
         fixHint: 'Nothing to do if the override is intentional. To use the bundled version instead, remove or rename this copy.',
+      })
+      continue
+    }
+    // `/xerxes-sync` publishes a user skill into the project byte for byte. Discovery
+    // loads the project copy once; two identical copies are one skill, not a clash.
+    const published = [...paths].filter(path => isProjectSkillPath(path))
+    if (published.length === 1 && paths.size === 2 && new Set([...paths].map(path => contents.get(path))).size === 1) {
+      findings.push({
+        code: 'skill-published-copy', severity: 'info', path: published[0]!,
+        message: `Skill '${name}' is published to this project unchanged from ${[...paths].find(path => path !== published[0])}. Discovery loads it once, from the project.`,
+        fixHint: 'Nothing to do. /xerxes-sync keeps the two copies in step.',
       })
       continue
     }
@@ -263,4 +276,9 @@ function knownTool(pattern: string, names: ReadonlySet<string>): boolean {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+}
+
+/** A SKILL.md inside a project's `.xerxes/skills/` folder, where `/xerxes-sync` publishes. */
+function isProjectSkillPath(path: string): boolean {
+  return resolve(path).split(/[\\/]+/u).join('/').includes('/.xerxes/skills/')
 }

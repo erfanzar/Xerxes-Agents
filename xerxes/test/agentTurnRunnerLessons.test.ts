@@ -22,7 +22,7 @@ async function scenario(fail = false, long = false) {
     if (status !== 'pending') await lessons.review(lesson.id, status, 'Reviewed', root)
   }
   if (long) for (let i = 0; i < 8; i++) {
-    const lesson = await lessons.record({ cue: `Bun fixtures ${i}`, lesson: `EXTRA ${'y'.repeat(5000)}`, confidence: 0.8, workspace: root, agentId: 'default', evidence: { kind: 'test', command: 'bun test', exitCode: 0, summary: 'passed' } })
+    const lesson = await lessons.record({ cue: `Bun fixtures ${i}`, lesson: `EXTRA ${i} ${'y'.repeat(5000)}`, confidence: 0.8, workspace: root, agentId: 'default', evidence: { kind: 'test', command: 'bun test', exitCode: 0, summary: 'passed' } })
     await lessons.review(lesson.id, 'approved', 'Reviewed', root)
   }
   const runner = new AgentTurnRunner({ model: 'gpt-4o', toolExecutor: new ToolRegistry(),

@@ -84,7 +84,9 @@ import { createLlmClient } from "./llms/client.js";
 import type { ChatMessage } from "./types/messages.js";
 import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
 import { mergePersistedSubagentSnapshots } from "./agents/subagentPersistence.js";
-import { AgentMemory } from "./memory/agentMemory.js";
+import { AgentMemory, projectMemoryDirectoryFor } from "./memory/agentMemory.js";
+import { ProjectSync } from './memory/projectSync.js';
+import { recordTrustedSkillContent } from './extensions/skillsGuard.js';
 import { getAgentSelfMemory } from "./memory/agentSelfMemory.js";
 import {
   BrowserManager,
@@ -1763,17 +1765,32 @@ function mcpHostOptions(workspace: string) {
 }
 
 function createLearningServices(workspaceRoot: string, registry?: SkillRegistry): {
-  store: ReflectionProposalStore; applier: ReflectionApplier; lessons: LessonStore; sharing: LessonSharing;
+  store: ReflectionProposalStore; applier: ReflectionApplier; lessons: LessonStore; sharing: LessonSharing; projectSync: ProjectSync;
 } {
   const activeWorkspace = () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot;
-  const skills = new SkillBundleStore({ directory: join(xerxesHome(), 'skills'), ...(registry ? { registry } : {}) });
+  const skillsDirectory = join(xerxesHome(), 'skills');
+  const skills = new SkillBundleStore({ directory: skillsDirectory, ...(registry ? { registry } : {}) });
   const memory = new GovernedMemoryStore({ directory: join(xerxesHome(), 'governed-memory') });
-  const lessons = new LessonStore({ memory, resolveRepo: createRepoIdentityResolver() });
+  const resolveRepo = createRepoIdentityResolver();
+  const lessons = new LessonStore({ memory, resolveRepo });
   const sharing = new LessonSharing({ memory, lessons, report: message => console.error(`lessons: ${message}`) });
+  const store = new ReflectionProposalStore({ directory: join(xerxesHome(), 'reflection') });
+  const projectSync = new ProjectSync({
+    // The same directory the daemon's AgentMemory uses for a session in this folder.
+    memoryDirectory: cwd => projectMemoryDirectoryFor(cwd),
+    skillsDirectory,
+    stateDirectory: join(xerxesHome(), 'project-sync'),
+    sharing,
+    resolveRepo,
+    learnedSkills: async cwd => (await store.list(cwd))
+      .filter(record => record.status === 'applied' && (record.proposal.kind === 'skill_create' || record.proposal.kind === 'skill_update'))
+      .map(record => record.proposal.target),
+    trustSkill: (path, content) => recordTrustedSkillContent(path, content, { skillsDirectory }),
+  });
   return {
-    store: new ReflectionProposalStore({ directory: join(xerxesHome(), 'reflection') }),
+    store,
     applier: createReflectionApplier({ skills, activeWorkspace }),
-    lessons, sharing,
+    lessons, sharing, projectSync,
   };
 }
 
@@ -2241,7 +2258,8 @@ function daemonRuntime(
         signal.throwIfAborted();
         if (!userText.trim()) return '';
         await learning.sharing.syncBeforeTurn(session.cwd, signal);
-        const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 5 });
+        // Over-fetch: the renderer drops pending and duplicate-text lessons, then keeps 5.
+        const lessons = await learning.lessons.recall(userText, session.cwd, { limit: 15 });
         signal.throwIfAborted();
         return renderApprovedLessonsForTurn(lessons);
       },

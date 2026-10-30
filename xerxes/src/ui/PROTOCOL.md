@@ -2538,6 +2538,28 @@ List pages are ordered by ID and bounded by both count and bytes: pass the last
 page's `next_after_id` as `after_id` until null. A malformed cursor is `invalid_request`;
 apply validates the repo directly without generating an export snapshot.
 
+**`/xerxes-sync [lessons|memory|skills]... [skill <name>]... [--dry-run]`** syncs what
+Xerxes learned in a Git project through `<git toplevel>/.xerxes/`. With no part named it
+does all three. The reply is `{ ok, root, repo, dryRun, ignored: string[], lessons?, memory?,
+skills?, report }`.
+- `lessons` runs `/xerxes lessons share`, which is also the local opt-in.
+- `memory` three-way merges project agent memory (`<XERXES_HOME>/projects/<hash>/memory`,
+  `journal/` excluded) with `.xerxes/memory/`. It uses per-file digests from the last sync,
+  stored in `<XERXES_HOME>/project-sync/`. When both sides changed a markdown file without
+  frontmatter, its blank-line separated entries are unioned. Any other file changed on both
+  sides is reported and left alone.
+- `skills` publishes skills from `<XERXES_HOME>/skills/` to `.xerxes/skills/`: those created
+  or updated by an applied reflection proposal in this workspace, those named with
+  `skill <name>`, and any published before. A bundle is copied whole or not at all, and
+  never over a project copy that changed elsewhere. The exact published `SKILL.md` bytes are
+  trusted on the publishing machine.
+
+Nothing is deleted. Imports that the prompt scanner changes, or that match a credential
+pattern, are refused. Exports are refused when they match a credential pattern. `--dry-run`
+writes nothing, including the sync state. A folder without a Git identity returns `ok:false`.
+`/xerxes lesson ...` is accepted as `/xerxes lessons ...`. An unknown `/xerxes` subcommand
+now names itself in the error. The context walker excludes `.xerxes/memory/`.
+
 **`hub_auth` envelope.** `params.hub_auth` is the signed envelope of
 `security/hubAuthEnvelope.ts`. The daemon verifies, in order: structure and signature
 against the pinned key, time window (lifetime at most 5 minutes), method, `params_hash`,

@@ -275,6 +275,13 @@ export const opsCommands: SlashCommand[] = [
   },
 
   {
+    group: 'skills',
+    help: 'sync lessons, project memory and skills through the project .xerxes/ folder [lessons|memory|skills] [skill <name>] [--dry-run]',
+    name: 'xerxes-sync',
+    run: (arg, ctx) => runNativeSlash(ctx, `xerxes-sync ${arg.trim()}`.trim(), 'Project sync')
+  },
+
+  {
     help: 'list, search, install local skills, inspect, lint or trust skills and commands',
     name: 'skills',
     run: (arg, ctx) => {

@@ -110,6 +110,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('toolsets', 'List configured toolsets', 'tools'),
   command('skills', 'List, inspect or trust skills and project commands', 'skills', { argsHint: '[list|inspect <name>|diagnostics|lint|trust <name>]' }),
   command('xerxes', 'Review what Xerxes learned: reflection proposals and lessons', 'skills', { argsHint: '[help|proposals|show <id> [--json]|approve <id> [reason]|reject <id> <reason>|lessons [cue|share|sync|approve <id> [reason]|reject <id> <reason>|rollback <id> <reason>]|improve …]' }),
+  command('xerxes-sync', 'Sync lessons, project memory and skills through the project .xerxes/ folder', 'skills', { argsHint: '[lessons|memory|skills] [skill <name>] [--dry-run]' }),
   command('skill', 'Invoke a skill by name', 'skills', { argsHint: '<name>' }),
   command('skill-create', 'Scaffold a new skill directory', 'skills', { argsHint: '<name>' }),
   command('loop', 'Manage bounded follow-ups for this conversation', 'activity', { argsHint: '[list|pause|resume|cancel|run <id>]' }),

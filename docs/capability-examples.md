@@ -77,6 +77,16 @@ Run `/xerxes lessons share` to opt this machine into the repository and create `
 
 When a Hub is configured, capable daemons also expose signed lesson sync RPCs (`session.read` for listing, agent-allowed `lessons.sync` for applying). The Hub can synchronize matching repositories without moving provider credentials. Hub list/apply do not require the file-sharing opt-in: explicitly enrolling that Hub is their trust decision. Set `XERXES_LESSON_SYNC=off` on a daemon to disable **all** lesson import/export (file and Hub). No Git repository identity means sharing is unavailable; no identity is invented.
 
+### One command for lessons, memory and skills: `/xerxes-sync`
+
+Run `/xerxes-sync` in any Git project to carry what an agent learned on this machine to the others, through `<git root>/.xerxes/`:
+
+- **Lessons**: approved lessons go to `.xerxes/lessons/`. This works like `/xerxes lessons share` and is also the local opt-in.
+- **Project memory**: MEMORY.md, topic files and the other notes, but not the journal. They are merged both ways with `.xerxes/memory/`. A file changed on one side flows to the other. Notes appended on both machines are combined. A document edited on both sides is reported, never overwritten.
+- **Skills**: skills that you approved from reflection in this project, or that you name with `/xerxes-sync skill <name>`, are copied from `~/.xerxes/skills/` to `.xerxes/skills/`. Every machine already loads skills from that folder. Once published, later edits follow on each run.
+
+Commit `.xerxes/lessons`, `.xerxes/memory` and `.xerxes/skills`. On the other machine, pull and run `/xerxes-sync` once. Use `--dry-run` to see what would change, or name parts (`/xerxes-sync memory`) to sync only those. Nothing is ever deleted. Imported text goes through the prompt-injection scanner and the credential check, and nothing matching a credential pattern is exported. The command warns when Git ignores one of these folders. If your `.gitignore` ignores all of `.xerxes/`, change that line to `.xerxes/*` followed by `!.xerxes/lessons/`, `!.xerxes/memory/` and `!.xerxes/skills/`.
+
 ### Evidence-backed lessons
 
 Ask: “Use `lesson_record` to retain the reusable lesson from that successful tool call, with a short cue and confidence.” The host resolves the latest successful call, or verifies an explicit `evidence_tool_call_id`. Alternatively, `test_evidence` records a reported command, exit code and summary; it is not labelled host-verified. Missing/failed tool-call evidence is refused. `lesson_recall` matches cues within the active workspace, and `lesson_review` requests approval, rejection or rollback of an exact id with a reason through the normal permission gate; automatic turns cannot approve their own lessons. Corrections and rollback retain governed history; rendered INSIGHTS-style Markdown is only a view.

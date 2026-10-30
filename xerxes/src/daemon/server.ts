@@ -10,7 +10,7 @@ import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
-import { xerxesCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
+import { xerxesCommand, xerxesSyncCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
 import { sharedLessonsRpc } from './lessonSync.js';
 import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
@@ -583,6 +583,7 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "history",
   "goal",
   "xerxes",
+  "xerxes-sync",
   "help",
   "features",
   "machine",
@@ -4166,7 +4167,11 @@ export class DaemonServer {
         .filter(record => record.id.startsWith(proposalId[2] ?? '') && (proposalId[1] === 'show' || record.status === 'pending'))
         .map(record => ({ value: `/xerxes ${proposalId[1]} ${record.id} `, label: record.id, meta: `${record.status}: ${record.proposal.kind} ${record.proposal.target}` })) };
     }
-    const lessonAction = /^\/xerxes\s+lessons\s+(\S*)$/.exec(text);
+    const syncAction = /^\/xerxes-sync(?:\s+\S+)*\s+(\S*)$/.exec(text);
+    if (syncAction && !/\sskill\s+\S*$/.test(text)) return { ok: true, kind: 'slash', completions: ['lessons', 'memory', 'skills', 'skill', '--dry-run', 'help']
+      .filter(action => action.startsWith(syncAction[1] ?? '') && !text.split(/\s+/).slice(1, -1).includes(action))
+      .map(action => ({ value: `${text.slice(0, text.length - (syncAction[1] ?? '').length)}${action} `, label: action, meta: 'Project sync' })) };
+    const lessonAction = /^\/xerxes\s+(?:lessons|lesson)\s+(\S*)$/.exec(text);
     if (lessonAction) return { ok: true, kind: 'slash', completions: [...LESSON_REVIEW_ACTIONS, 'share', 'sync']
       .filter(action => action.startsWith(lessonAction[1] ?? ''))
       .map(action => ({ value: `/xerxes lessons ${action} `, label: action, meta: 'Review a lesson' })) };
@@ -6007,6 +6012,16 @@ export class DaemonServer {
         return this.listPlugins(connection, args, session);
       case "xerxes": {
         const result = await xerxesCommand(args, session?.cwd ?? this.projectDirectory ?? process.cwd(), this.learning, session);
+        this.emitSlash(connection, String(result.report ?? result.error ?? ''), result.ok === true ? 'info' : 'error');
+        return result;
+      }
+      case "xerxes-sync": {
+        const result = await xerxesSyncCommand(args, session?.cwd ?? this.projectDirectory ?? process.cwd(), this.learning);
+        if (result.ok === true && !result.dryRun && result.skills) {
+          // Published project skills are a new discovery root entry for this session.
+          await this.refreshSkills(session);
+          this.runtime.reload({});
+        }
         this.emitSlash(connection, String(result.report ?? result.error ?? ''), result.ok === true ? 'info' : 'error');
         return result;
       }
