@@ -10,6 +10,20 @@ const policy = (): LocalProviderGrant => ({ profile: 'local-selected-profile', m
 const request: CompletionRequest = { model: 'fixture-model', messages: [{ role: 'user', content: 'write code' }] }
 const collect = async (stream: AsyncIterable<unknown>) => { const output = []; for await (const part of stream) output.push(part); return output }
 
+test.each(['C:\\work\\project', 'C:/work/project', '\\\\server\\share\\project'])('relay accepts a fully qualified Windows workspace (%s)', workspace => {
+  const relay = new LocalProviderRelay()
+  try {
+    const link = { destination: 'verified-host', workspace }
+    const grant = relay.authorize(link, policy(), () => ({ client: { async *stream() {} }, routeIdentity: 'fixed' }), 'fixed')
+    expect(relay.inspect(link, grant.token).requestsUsed).toBe(0)
+  } finally { relay.close() }
+})
+test.each(['C:relative', 'relative/project', '\\relative', 'C:/bad\0path'])('relay rejects ambiguous or invalid workspace paths (%s)', workspace => {
+  const relay = new LocalProviderRelay()
+  try { expect(() => relay.authorize({ destination: 'verified-host', workspace }, policy(), () => { throw new Error('unused') }, 'fixed')).toThrow() }
+  finally { relay.close() }
+})
+
 test('relay uses the exact local route, passes coding tools and effort, and exposes no token in its view', async () => {
   const relay = new LocalProviderRelay(), link = peer()
   let received: CompletionRequest | undefined

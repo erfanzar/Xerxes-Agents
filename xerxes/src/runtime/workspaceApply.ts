@@ -6,6 +6,7 @@ import { chmod, lstat, link, mkdir, open, readdir, readlink, realpath, rename, s
 import { dirname, isAbsolute, join } from 'node:path'
 import { hostname } from 'node:os'
 import { Database } from 'bun:sqlite'
+import { openRegularFile } from '../security/regularFile.js'
 
 export type WorkspaceGit = (args: readonly string[], cwd?: string, env?: Record<string, string>, raw?: boolean) => Promise<string>
 interface FileState { path: string; kind: 'missing' | 'file' | 'symlink'; hash?: string; mode?: number; target?: string }
@@ -34,7 +35,7 @@ async function capture(root: string, paths: readonly string[]): Promise<Captured
     if (!info) { result.push({ state: { path, kind: 'missing' } }); continue }
     if (info.isSymbolicLink()) { result.push({ state: { path, kind: 'symlink', target: await readlink(target) } }); continue }
     if (!info.isFile() || info.nlink > 1) throw new Error('Integration requires an ordinary file without hard links: ' + path)
-    const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const file = await openRegularFile(target, constants.O_RDONLY)
     const chunks: Uint8Array[] = []
     try {
       for (;;) {
@@ -55,9 +56,8 @@ function stateId(destination: string, head: string, files: readonly CapturedFile
   return hash(JSON.stringify({ destination, head, files: files.map(file => file.state) }))
 }
 async function durableWrite(path: string, bytes: string | Uint8Array) {
-  await Bun.write(path, bytes, { mode: 0o600 })
-  const file = await open(path, 'r')
-  try { await file.sync() } finally { await file.close() }
+  const file = await openRegularFile(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC)
+  try { await file.writeFile(bytes); await file.sync() } finally { await file.close() }
 }
 async function syncDirectory(path: string) {
   if (process.platform === 'win32') return
@@ -105,7 +105,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SHA256 = /^[0-9a-f]{64}$/
 
 async function readPrivateFile(path: string, limit: number, lockRecord = false): Promise<Buffer> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const file = await openRegularFile(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const info = await file.stat()
     if (!info.isFile() || (!lockRecord && info.nlink !== 1) || info.size > limit) throw new Error('Invalid integration artifact: ' + path)
@@ -233,7 +233,7 @@ export async function recoverWorkspaceApply(options: { git: WorkspaceGit; destin
   const legacy = await lstat(join(options.storage, 'integration-recovery.lock')).catch(error => { if (missing(error)) return null; throw error })
   if (legacy) throw new Error('Legacy recovery guard requires owner inspection before migration')
   const guardPath = join(options.storage, 'integration-recovery.sqlite')
-  const guardFile = await open(guardPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
+  const guardFile = await openRegularFile(guardPath, constants.O_RDWR | constants.O_CREAT | (constants.O_NONBLOCK ?? 0), 0o600)
   try {
     const info = await guardFile.stat()
     if (!info.isFile() || info.nlink !== 1) throw new Error('Invalid recovery guard file')
@@ -317,7 +317,40 @@ export async function applyWorkspacePatch(options: {
         await Bun.write(target, file.bytes!); await chmod(target, file.state.mode!)
       } else await symlink(file.state.target!, target)
     }
+    // Unchanged attributes still control touched files. Copy them into the
+    // prediction tree, including attributes in ancestor directories.
+    const attributes = new Set<string>(['.gitattributes'])
+    for (const path of original.paths) {
+      let parent = dirname(path)
+      while (parent !== '.') {
+        attributes.add(join(parent, '.gitattributes'))
+        const next = dirname(parent)
+        if (next === parent) break
+        parent = next
+      }
+    }
+    for (const path of attributes) {
+      if (original.paths.includes(path)) continue
+      const source = await safePath(original.destination, path)
+      let bytes: Uint8Array
+      try {
+        const handle = await openRegularFile(source, constants.O_RDONLY)
+        try { bytes = await handle.readFile() } finally { await handle.close() }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      const target = await safePath(stage, path)
+      await mkdir(dirname(target), { recursive: true })
+      await durableWrite(target, bytes)
+    }
     await git(['-c', 'init.templateDir=', 'init', stage], original.destination)
+    // Git's working-tree conversions are repository-local. A fresh staging
+    // repository must use the destination's EOL policy before predicting bytes.
+    for (const key of ['core.autocrlf', 'core.eol']) {
+      const value = await git(['config', '--get', key], original.destination).catch(() => '')
+      if (value) await git(['config', key, value], stage)
+    }
     await git(['apply', '--whitespace=nowarn', patch], stage)
     const expected = await capture(stage, original.paths)
     const record = { id, reviewId: options.reviewId, destination: original.destination, head: original.head, original: original.files.map(file => file.state), expected: expected.map(file => file.state), status: 'prepared', at: new Date().toISOString() }
@@ -332,7 +365,7 @@ export async function applyWorkspacePatch(options: {
       if (await git(['rev-parse', 'HEAD'], original.destination) !== original.head) throw new Error('Destination HEAD changed during integration')
       for (const file of actual) {
         const path = await safePath(original.destination, file.state.path)
-        if (file.state.kind === 'file') { const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { await handle.sync() } finally { await handle.close() } }
+        if (file.state.kind === 'file') { const handle = await openRegularFile(path, constants.O_RDWR); try { await handle.sync() } finally { await handle.close() } }
         await syncDirectory(dirname(path))
       }
       await writeRecord(directory, { ...record, status: 'applied' })

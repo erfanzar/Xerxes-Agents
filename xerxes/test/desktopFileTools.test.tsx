@@ -8,6 +8,13 @@ import { FileToolRow, fileToolOf, lineDiff, readBody } from '../src/desktop/rend
 import { workspaceFilePath } from '../src/desktop/renderer/DesktopPanels.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
 
+test('desktop file paths normalize Windows separators and drive casing without rewriting outside absolute paths', () => {
+  expect(workspaceFilePath('C:\\Work\\Project\\src\\file.ts', 'c:/work/project')).toBe('./src/file.ts')
+  expect(workspaceFilePath('src\\file.ts', 'C:\\Work\\Project')).toBe('./src/file.ts')
+  expect(workspaceFilePath('C:\\Other\\file.ts', 'C:\\Work\\Project')).toBe('C:/Other/file.ts')
+  expect(workspaceFilePath('\\\\server\\share\\project\\file.ts', '\\\\SERVER\\share\\project')).toBe('./file.ts')
+})
+
 const item = (name: string, args: Record<string, unknown>, extra: Partial<ToolItem> = {}): ToolItem => ({
   id: 't1', verb: name, arg: '', dur: '0.4s', state: 'done', name, input: JSON.stringify(args), output: '', ...extra,
 })

@@ -69,7 +69,8 @@ const defaultRunner: GitDiffRunner = async (args, cwd) => {
     cwd,
     stderr: 'pipe',
     stdin: 'ignore',
-    stdout: 'pipe'
+    stdout: 'pipe',
+    windowsHide: true
   })
   let failure = ''
   const timer = setTimeout(() => { failure = 'Git preview timed out'; proc.kill() }, 15000)

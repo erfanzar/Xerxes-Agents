@@ -12,7 +12,7 @@ test('LSP settings create private files, preserve revision conflicts and validat
   try {
     const first = store.read(); expect(first.servers).toEqual([])
     const saved = store.save(config, first.revision)
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
     expect(store.read().revision).toBe(saved.revision)
     expect(() => store.save({ servers: [] }, first.revision)).toThrow('changed')
     expect(() => store.save({ servers: [{ ...config.servers[0], enabled: 'false' }] }, saved.revision)).toThrow('boolean')

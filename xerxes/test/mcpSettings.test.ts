@@ -18,7 +18,7 @@ test('MCP settings save preserves siblings and rejects stale, malformed and link
     expect(saved.revision).not.toBe(first.revision)
     expect(store.read()).toEqual(saved)
     expect(saved.servers[1]?.env).toEqual({ TOKEN: 'secret' })
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
     expect(() => store.replace({ name: 'alpha', command: 'stale' }, first.revision)).toThrow('changed')
     expect(() => store.replace({ name: 'alpha', enabled: 'false' }, saved.revision)).toThrow()
     expect(store.read()).toEqual(saved)
@@ -91,7 +91,7 @@ test.each(['success', 'connection', 'shutdown', 'collision'] as const)('new MCP 
       expect(store.read()).toEqual(result)
       expect(manager.getServer('new')?.config.command).toBe('bun')
       expect((await stat(store.path)).nlink).toBe(1)
-      expect((await stat(store.path)).mode & 0o777).toBe(0o600)
+      if (process.platform !== 'win32') expect((await stat(store.path)).mode & 0o777).toBe(0o600)
       await expect(replaceMcpSettings(manager, store, { name: 'new', command: 'other' }, result.revision, undefined, true)).rejects.toThrow('already exists')
     } else {
       await expect(pending).rejects.toThrow()

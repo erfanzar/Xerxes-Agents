@@ -40,7 +40,7 @@ export interface ClaudeCodeMaintenanceOptions {
 }
 
 const defaultRunner: CommandRunner = async (argv, environment, timeoutMs) => {
-  const child = Bun.spawn([...argv], { env: environment, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([...argv], { env: environment, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true })
   const timer = setTimeout(() => child.kill(), timeoutMs)
   try {
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])

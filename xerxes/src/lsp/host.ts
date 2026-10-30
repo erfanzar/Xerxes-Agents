@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { open, realpath } from 'node:fs/promises'
+import { realpath } from 'node:fs/promises'
+import { openRegularFile } from '../security/regularFile.js'
 import { constants } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import type { LspAdapter, LspRequest } from '../tools/claudeTools/search.js'
@@ -181,7 +182,7 @@ function position(value: unknown): value is { line: number; character: number } 
   return record(value) && Number.isSafeInteger(value.line) && Number.isSafeInteger(value.character) && Number(value.line) >= 0 && Number(value.character) >= 0
 }
 async function readDocument(path: string): Promise<string> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const file = await openRegularFile(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     if (!(await file.stat()).isFile()) throw new Error('LSP document must be a regular file')
     const buffer = Buffer.alloc(1_048_577)

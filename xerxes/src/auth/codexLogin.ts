@@ -193,7 +193,7 @@ export function openInBrowser(url: string): void {
       ? { command: 'cmd', args: ['/c', 'start', ''] }
       : { command: 'xdg-open', args: [] as string[] }
   try {
-    const child = spawn(command.command, [...command.args, url], { detached: true, stdio: 'ignore' })
+    const child = spawn(command.command, [...command.args, url], { detached: true, stdio: 'ignore', windowsHide: true })
     // A missing opener surfaces asynchronously; an unhandled 'error' on a
     // ChildProcess would take the process down mid-login.
     child.on('error', () => {})

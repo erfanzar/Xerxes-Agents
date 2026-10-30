@@ -96,6 +96,7 @@ export const defaultScmRunner: ScmRunner = async (args, cwd, options = {}) => {
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
+    windowsHide: true,
     env: {
       ...process.env,
       // A credential or host-key prompt would block forever with no TTY.

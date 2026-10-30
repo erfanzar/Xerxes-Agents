@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parseLspConfig, type LspServerConfig } from './config.js'
+import { openRegularFileSync } from '../security/regularFile.js'
 
 const digest = (source: Uint8Array | string) => createHash('sha256').update(source).digest('hex')
 const MISSING = digest('xerxes:lsp:missing')
@@ -18,7 +19,7 @@ export class LspSettingsStore {
   constructor(readonly path: string) {}
   read(): LspSettingsSnapshot {
     let fd: number
-    try { fd = openSync(this.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) }
+    try { fd = openRegularFileSync(this.path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { revision: MISSING, servers: [] }
       throw new Error('Cannot open user lsp.json; use a readable regular file')
@@ -64,7 +65,7 @@ export class LspSettingsStore {
       else { renameSync(temporary, this.path); exists = false }
       committed = { revision: digest(source), servers, warnings: [] }
       let directory: number | undefined
-      try { directory = openSync(dirname(this.path), constants.O_RDONLY); fsyncSync(directory) }
+      try { if (process.platform !== 'win32') { directory = openSync(dirname(this.path), constants.O_RDONLY); fsyncSync(directory) } }
       catch { committed.warnings.push('Settings saved; directory synchronization failed and crash durability is uncertain') }
       finally { if (directory !== undefined) { try { closeSync(directory) } catch { committed.warnings.push('Settings saved; directory handle cleanup failed') } } }
       return committed

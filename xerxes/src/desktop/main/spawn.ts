@@ -50,6 +50,8 @@ export function canonicalProjectDir(projectDir?: string): string {
       timeout: 1_000,
       killSignal: 'SIGKILL',
       maxBuffer: 64 * 1024,
+      // The desktop main is a GUI process; keep the git probe windowless.
+      windowsHide: true,
     }).trim()
     if (root) return realpathSync(root)
   } catch {
@@ -175,6 +177,9 @@ export function launchDaemon(
   const child = spawn(binary, args, {
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
+    // Bun is a console-subsystem executable: without windowsHide a detached
+    // child of the GUI process gets its own visible console window on Windows.
+    windowsHide: true,
     env: env as NodeJS.ProcessEnv | undefined,
   })
   child.unref()

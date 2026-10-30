@@ -524,7 +524,9 @@ export async function moveFile(inputs: JsonObject, paths: WorkspacePathResolver)
   // no flag combination could move a directory to a fresh destination). The
   // rename then replaces either reservation atomically.
   let reserved = false
-  if (!overwrite) {
+  // Windows directory rename refuses an existing destination atomically. A
+  // directory reservation there would itself make the rename fail with EPERM.
+  if (!overwrite && !(sourceInfo.isDirectory() && process.platform === 'win32')) {
     try {
       if (sourceInfo.isDirectory()) {
         await mkdir(checkedDestination)
@@ -773,6 +775,9 @@ export async function runGit(
       stderr: 'pipe',
       stdout: 'pipe',
       maxBuffer: MAX_GIT_OUTPUT * 4,
+      // Console-less hosts (desktop app, VS Code) must not flash a console
+      // window for every git invocation on Windows.
+      windowsHide: true,
       // Detached on POSIX so the timeout's kill reaches hook helpers and
       // anything else git spawned, not just the git process itself.
       ...(process.platform !== 'win32' ? { detached: true } : {}),

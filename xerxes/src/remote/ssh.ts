@@ -122,7 +122,7 @@ export class RemoteConnection {
       `${this.host.user}@${this.host.host}:${remotePath}/`,
     ]
 
-    const child = spawn('rsync', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('rsync', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     const stderr: Buffer[] = []
     child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
 
@@ -148,7 +148,7 @@ export class RemoteConnection {
       `${localPath}/`,
     ]
 
-    const child = spawn('rsync', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('rsync', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     const stderr: Buffer[] = []
     child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
 

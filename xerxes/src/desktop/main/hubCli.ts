@@ -61,7 +61,9 @@ export function createCliRunner(env: Env = process.env, projectDir: string = hom
         let timedOut = false
         let stopped: string | undefined
         let settled = false
-        const child = spawn(binary, [entry, 'hub', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: env as NodeJS.ProcessEnv })
+        // Console-subsystem children of the GUI process must stay hidden on
+        // Windows or every CLI call flashes a console window on the desktop.
+        const child = spawn(binary, [entry, 'hub', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: env as NodeJS.ProcessEnv, windowsHide: true })
         const finish = (outcome: CliOutcome): void => {
           if (settled) return
           settled = true

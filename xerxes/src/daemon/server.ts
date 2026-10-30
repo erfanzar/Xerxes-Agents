@@ -4851,6 +4851,9 @@ export class DaemonServer {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
+        // The daemon may run without a console (desktop/VS Code hosts); keep
+        // the shell windowless so no console flashes on the user's desktop.
+        windowsHide: true,
       });
       const killer = setTimeout(() => {
         timedOut = true;

@@ -94,7 +94,7 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
     const record = await Bun.file(manifest).json() as Partial<Ownership>
     if (record.id !== id || record.path !== tree.path || record.branch !== tree.branch || typeof record.taskId !== 'string' || typeof record.base !== 'string' || !/^[a-f0-9]{40,64}$/.test(record.base)) throw new Error('Invalid agent worktree ownership record')
     if (record.snapshotTree !== undefined && (typeof record.snapshotTree !== 'string' || !/^[a-f0-9]{40,64}$/.test(record.snapshotTree))) throw new Error('Invalid captured workspace tree')
-    if (await realpath(tree.path) !== tree.path || await git(['rev-parse', '--show-toplevel'], tree.path) !== tree.path || await git(['branch', '--show-current'], tree.path) !== tree.branch) throw new Error('Agent worktree identity changed; preserve it for review')
+    if (await realpath(tree.path) !== tree.path || resolve(await git(['rev-parse', '--show-toplevel'], tree.path)) !== tree.path || await git(['branch', '--show-current'], tree.path) !== tree.branch) throw new Error('Agent worktree identity changed; preserve it for review')
     return { record: record as Ownership, manifest }
   }
   const clean = async (tree: SubagentWorktree, record: Ownership) => {

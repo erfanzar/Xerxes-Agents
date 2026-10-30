@@ -68,7 +68,7 @@ export function runCaptured(
 ): Promise<string> {
   return new Promise((accept, reject) => {
     signal.throwIfAborted()
-    const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     let output = '',
       errors = '',
       settled = false
@@ -195,7 +195,7 @@ export async function openRemote(
   try {
     signal.addEventListener('abort', abort, { once: true })
     signal.throwIfAborted()
-    tunnel = (ports.spawnTunnel ?? (args => spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })))([
+    tunnel = (ports.spawnTunnel ?? (args => spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })))([
         ...ssh,
         '-S',
         'none',

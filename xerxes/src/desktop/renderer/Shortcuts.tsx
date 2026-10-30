@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { shortcutLabel } from './platform.js'
 
 import { useDialogFocus } from './dialogFocus.js'
 
@@ -96,7 +97,7 @@ export function Shortcuts(): ReactElement | null {
               <dl>
                 {group.items.map(item => (
                   <div key={item.keys + item.label}>
-                    <dt><kbd>{item.keys}</kbd></dt>
+                    <dt><kbd>{shortcutLabel(item.keys)}</kbd></dt>
                     <dd>{item.label}</dd>
                   </div>
                 ))}

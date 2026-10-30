@@ -3,6 +3,7 @@
 
 import { classifyError, ErrorKind } from '../runtime/errorClassifier.js'
 import { createHash, randomBytes } from 'node:crypto'
+import { posix, win32 } from 'node:path'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../llms/client.js'
 import { OUTPUT_TOKEN_LIMIT, OutputTokenLimitError } from '../llms/outputTokenLimit.js'
 
@@ -82,7 +83,8 @@ export class LocalProviderRelay {
 
   authorize(peer: RelayPeer, policy: LocalProviderGrant, resolveClient: () => LocalProviderRoute, routeIdentity: string): { token: string; view: LocalProviderGrantView } {
     const lifetime = policy.expiresAt - this.now()
-    if (!routeIdentity || !peer.destination || !peer.workspace.startsWith('/') || !policy.profile || !policy.model ||
+    const absoluteWorkspace = posix.isAbsolute(peer.workspace) || (/^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(peer.workspace) && win32.isAbsolute(peer.workspace))
+    if (!routeIdentity || !peer.destination || !absoluteWorkspace || peer.workspace.includes('\0') || !policy.profile || !policy.model ||
       !Number.isFinite(lifetime) || lifetime <= 0 || lifetime > 8 * 60 * 60 * 1000 ||
       !Number.isSafeInteger(policy.maxRequests) || policy.maxRequests < 1 || policy.maxRequests > 10_000 ||
       (policy.maxOutputTokens !== null && (!Number.isSafeInteger(policy.maxOutputTokens) || policy.maxOutputTokens < 1 || policy.maxOutputTokens > 1_000_000)) ||

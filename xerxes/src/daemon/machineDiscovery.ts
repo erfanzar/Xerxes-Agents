@@ -84,7 +84,7 @@ export async function browseSshFolders(target: string, path: string, options: { 
     const config = await writeSshConnectionConfig(directory)
     return await new Promise<RemoteFolders>((accept, reject) => {
       if (options.signal?.aborted) { reject(new Error('Folder browse cancelled')); return }
-      const child = (options.spawnProcess ?? spawn)('ssh', ['-F', config, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', sshDestination(target), command], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = (options.spawnProcess ?? spawn)('ssh', ['-F', config, '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ConnectTimeout=10', '--', sshDestination(target), command], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       const output: Buffer[] = [], errors: Buffer[] = []
       let bytes = 0, settled = false
       const finish = (error?: Error, value?: RemoteFolders) => {

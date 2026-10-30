@@ -78,6 +78,7 @@ export class SandboxedCodeRunner {
     const child = spawn(this.nodePath, [shimPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {},
+      windowsHide: true,
     })
 
     const bindingCalls: Array<{ readonly binding: string; readonly args: readonly unknown[]; readonly result: unknown }> = []

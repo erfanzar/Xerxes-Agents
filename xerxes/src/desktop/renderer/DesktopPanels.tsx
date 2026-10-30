@@ -1221,9 +1221,13 @@ export function frontMatter(source: string): { fields: Array<[string, string]>; 
 
 /** A tool's path as the file tree names it: `./` + workspace-relative. */
 export function workspaceFilePath(path: string, cwd: string): string {
-  const root = cwd.replace(/\/+$/, '')
-  const relative = root && path.startsWith(root + '/') ? path.slice(root.length + 1) : path
-  return relative.startsWith('/') || relative.startsWith('./') ? relative : './' + relative
+  const root = cwd.replaceAll('\\', '/').replace(/\/+$/, '')
+  const normalized = path.replaceAll('\\', '/')
+  const windows = /^[A-Za-z]:\//.test(root) || root.startsWith('//')
+  const prefix = windows ? root.toLowerCase() : root
+  const candidate = windows ? normalized.toLowerCase() : normalized
+  const relative = root && candidate.startsWith(prefix + '/') ? normalized.slice(root.length + 1) : normalized
+  return relative.startsWith('/') || relative.startsWith('./') || /^[A-Za-z]:\//.test(relative) ? relative : './' + relative
 }
 
 /** The file as last read or saved: what the editor's draft is compared against. */
