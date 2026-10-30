@@ -20,6 +20,7 @@ import {
   loadBuiltinAgentDefinitions,
   parseAgentMarkdown,
   resolveAgentDefinition,
+  subagentCatalogForAgent,
   type AgentDefinition,
 } from '../src/agents/definitions.js'
 import {
@@ -807,5 +808,31 @@ test('source and bundled fallback execution agents expose native terminal lifecy
     }
     const reviewer = definitions.get('reviewer')!
     expect(reviewer.allowedTools ?? reviewer.tools).not.toContain('pty_open')
+  }
+})
+
+test('asset-less fallback keeps the built-in subagent catalogs spawnable', async () => {
+  // A bundle that cannot see its YAML assets must not degrade to an empty
+  // catalog ("allowed profiles: (none)") when 'default' delegates.
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-fallback-catalog-'))
+  try {
+    const definitions = loadAgentDefinitions({
+      builtinDefinitions: loadBuiltinAgentDefinitions(join(root, 'missing-assets')),
+      cwd: root,
+      userDirectory: join(root, 'missing-user-agents'),
+    })
+    const expected: Record<string, string[]> = {
+      default: ['coder', 'objective', 'planner', 'researcher', 'reviewer', 'tester'],
+      objective: ['coder', 'planner', 'researcher', 'reviewer', 'tester'],
+    }
+    for (const [agent, catalogNames] of Object.entries(expected)) {
+      const catalog = subagentCatalogForAgent(definitions, agent)
+      expect(Object.keys(catalog).sort()).toEqual(catalogNames)
+      for (const entry of Object.values(catalog)) {
+        expect(definitions.has(entry.resolvedProfile ?? '')).toBeTrue()
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })
