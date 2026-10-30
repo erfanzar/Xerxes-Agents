@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.19 — 2026-10-30
+
+- **Fix: lesson sync skipped every lesson recorded before 0.8.14.** Those lessons only stored the folder they were recorded in, not a repository identity, and export ignored any lesson without one. On a machine with a long history most lessons never left it: one TPU host exported 4 of its 32. Before exporting, each such lesson now takes the identity of the Git repository its folder belongs to, once. Lessons from another repository, or from a folder that no longer exists, are left alone. Run `/xerxes-sync` (or `/xerxes lessons sync`) again to share them.
+- **`--dry-run` is really read-only for lessons.** A preview used to save a one-time export snapshot on older lessons as a side effect. It now writes nothing to the lesson store.
+
 ## 0.8.18 — 2026-10-30
 
 - **`/xerxes-sync`: pass what one machine learned to the others.** One command, run in any Git project, syncs three things through `<git root>/.xerxes/`. Approved lessons go to `.xerxes/lessons/`. Project memory (MEMORY.md, topic files and other notes, but not the journal) is merged both ways with `.xerxes/memory/`. Skills you approved from reflection in this project, or named with `/xerxes-sync skill <name>`, are published from `~/.xerxes/skills/` to `.xerxes/skills/`, which every machine already loads. Machines match by the git `origin` URL, so clones at different paths and SSH or HTTPS remotes all match. Commit those folders, pull on the other machine and run `/xerxes-sync` once there. Nothing is ever deleted: a file changed on one side flows to the other, notes appended on both machines are combined, and a document edited on both sides is reported and left alone. Imports go through the prompt-injection scanner and the credential check, nothing that looks like a key is exported, and `--dry-run` writes nothing. The command warns when Git ignores one of the folders.
