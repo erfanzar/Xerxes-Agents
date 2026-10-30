@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.20 — 2026-10-30
+
+- **Fix: `/xerxes-sync` reported most lessons as "skipped".** Lessons recorded before 0.8.14 got their repository key only in memory during export, never on disk, so the next import could not rebuild them and counted the machine's own files as conflicts (28 of 37 on one TPU host). The key is now saved, and the report groups skipped lessons by reason.
+- **Committed lessons load without a command.** When a pulled repo contains `.xerxes/lessons/`, its lessons are imported before your next message. Writing this machine's lessons back still needs `/xerxes-sync` once per repo.
+- **Project skills load from subfolders.** `<git root>/.xerxes/skills/` is found even when a session starts in a subfolder, and each skill is still listed once.
+- **No more trimmed lessons.** Lesson text is injected whole, never `[clipped]`. Evidence keeps up to 16,000 characters of the tool result instead of 500, and shared evidence up to 20,000 instead of 1,000. A lesson already in the conversation is not injected again, and earlier messages are replayed unchanged, so prefix caching is unaffected.
+- **Honest commit hint.** `/xerxes-sync` names the `.xerxes/` folders `git status` shows as uncommitted, including ones left by an earlier run, and says so when everything is committed.
+
 ## 0.8.19 — 2026-10-30
 
 - **Fix: lesson sync skipped every lesson recorded before 0.8.14.** Those lessons only stored the folder they were recorded in, not a repository identity, and export ignored any lesson without one. On a machine with a long history most lessons never left it: one TPU host exported 4 of its 32. Before exporting, each such lesson now takes the identity of the Git repository its folder belongs to, once. Lessons from another repository, or from a folder that no longer exists, are left alone. Run `/xerxes-sync` (or `/xerxes lessons sync`) again to share them.
