@@ -77,18 +77,46 @@ export class LessonSharing {
   private async snapshotRecords(workspace: string, markShared: boolean): Promise<{ repo: string | null; lessons: SharedLessonWire[] }> {
     const repo = await this.repoForWorkspace(workspace)
     if (!repo) return { repo: null, lessons: [] }
+    const adopted = await this.adoptLegacyLessons(repo, markShared)
     const lessons: SharedLessonWire[] = []
-    for (const record of (await this.options.memory.loadHistory()).records.values()) {
+    for (const stored of (await this.options.memory.loadHistory()).records.values()) {
+      // A preview (markShared false) adopts in memory only; it never writes the store.
+      const record: MemoryHistoryRecord = adopted.has(stored.id) && stored.payload?.repo === undefined ? { ...stored, payload: { ...stored.payload, repo } } : stored
       if (record.payload?.repo !== repo || record.payload.kind !== 'lesson' || sensitive(record)) continue
       const dead = retired(record, this.options.memory.now())
       if (dead ? !wasShared(record) : record.reviewStatus !== 'approved') continue
-      const wire = await this.wire(record)
+      const wire = await this.wire(record, markShared)
       if (!wire) continue
       lessons.push(wire)
       if (markShared && wire.status === 'active' && record.payload.shared_once !== true) await this.options.memory.updatePayload(record.id, { shared_once: true })
     }
     return { repo, lessons: lessons.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) }
   }
+  /**
+   * Lessons recorded before lessons carried a repository key (pre-0.8.14) only name their
+   * workspace path, so export skipped every one of them. Give each such lesson the key of the
+   * repository its recorded workspace belongs to, once, as an append-only payload update.
+   * A workspace that no longer exists or is not in this repository is left alone.
+   */
+  private async adoptLegacyLessons(repo: string, write: boolean): Promise<Set<string>> {
+    const adopted = new Set<string>()
+    const keys = new Map<string, string | undefined>()
+    for (const record of (await this.options.memory.loadHistory()).records.values()) {
+      const payload = record.payload
+      if (payload?.kind !== 'lesson' || typeof payload.repo === 'string' || typeof payload.workspace !== 'string' || sensitive(record)) continue
+      const workspace = payload.workspace
+      if (!keys.has(workspace)) {
+        let key: string | undefined
+        try { key = await this.options.lessons.repoForWorkspace(workspace) } catch { key = undefined }
+        keys.set(workspace, key)
+      }
+      if (keys.get(workspace) !== repo) continue
+      adopted.add(record.id)
+      if (write) await this.options.memory.updatePayload(record.id, { repo })
+    }
+    return adopted
+  }
+
   /** Mark only rows actually emitted in a bounded RPC page. */
   async markShared(lessons: readonly SharedLessonWire[]): Promise<void> {
     await this.serial(async () => {
@@ -100,7 +128,8 @@ export class LessonSharing {
     })
   }
 
-  private async wire(record: MemoryHistoryRecord): Promise<SharedLessonWire | undefined> {
+  /** `write: false` (a preview) builds the same wire without freezing legacy fields to disk. */
+  private async wire(record: MemoryHistoryRecord, write = true): Promise<SharedLessonWire | undefined> {
     const retirement = parseSharedLessonWire(record.expiredPayload?.shared)
     if (retirement.ok) return retirement.lesson
     const frozen = parseSharedLessonWire(record.payload?.shared)
@@ -117,7 +146,7 @@ export class LessonSharing {
       if (!parsed.ok) { this.report(`Lesson ${record.id} cannot be shared: ${parsed.error}`); return undefined }
       original = parsed.lesson
       // Freeze legacy records once, without re-recording or resurrecting the id.
-      await this.options.memory.updatePayload(record.id, { origin_host: host, shared: jsonWire(original) })
+      if (write) await this.options.memory.updatePayload(record.id, { origin_host: host, shared: jsonWire(original) })
     }
     if (!retired(record, this.options.memory.now()) || original.status === 'retired') return original
     const at = record.expiredAt ?? (record.expiresAt !== undefined && record.expiresAt <= this.options.memory.now() ? record.expiresAt : record.reviewedAt) ?? record.createdAt

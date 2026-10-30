@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { xerxesCommand, xerxesSyncCommand, type LearningServices } from '../src/daemon/xerxesCommand.js'
 import { GovernedMemoryStore } from '../src/memory/governedMemoryStore.js'
+import { LessonSharing } from '../src/memory/lessonSharing.js'
 import { LessonStore, renderApprovedLessonsForTurn } from '../src/memory/lessons.js'
 import { lintDiscoveredHarness } from '../src/extensions/harnessLint.js'
 import { defaultSkillDiscoveryRoots, SkillRegistry, trustedHashWorkspaceSkills } from '../src/extensions/skills.js'
@@ -97,6 +98,29 @@ test('injection-flagged or credential-bearing memory is never imported or export
   })
   await expect(readFile(join(a.memory, 'evil.md'), 'utf8')).rejects.toThrow()
   await expect(readFile(join(root, '.xerxes', 'memory', 'secret.md'), 'utf8')).rejects.toThrow()
+})
+
+test('a lesson dry run previews pre-repo-key lessons without touching the lesson store', async () => {
+  const mem = new GovernedMemoryStore({ directory: join(base, 'gm-dry') })
+  const lessons = new LessonStore({ memory: mem, resolveRepo: async () => repo })
+  const sharing = new LessonSharing({ memory: mem, lessons, resolveRoot: async () => root, report: () => {} })
+  try {
+    for (let i = 0; i < 3; i++) {
+      const id = `lesson-${crypto.randomUUID()}`
+      await mem.record({ id, content: `Old lesson ${i}.`, source: 'lesson', agentId: 'old',
+        payload: { kind: 'lesson', version: 1, cue: 'old', confidence: 0.7, workspace: root, evidence: { kind: 'test', command: 'bun test', exitCode: 0, summary: '1 pass' } } })
+      await mem.review(id, 'approved')
+    }
+    const sync = new ProjectSync({ memoryDirectory: () => join(base, 'm'), skillsDirectory: join(base, 's'), stateDirectory: join(base, 'st'),
+      sharing, resolveRoot: async () => root, resolveRepo: async () => repo })
+    const before = await readFile(mem.logPath, 'utf8')
+    const preview = await sync.sync(root, { parts: ['lessons'], dryRun: true })
+    expect(preview.lessons).toEqual({ kind: 'preview', shareable: 3 })
+    expect(await readFile(mem.logPath, 'utf8')).toBe(before)
+    const real = await sync.sync(root, { parts: ['lessons'] })
+    expect(real.lessons).toMatchObject({ kind: 'synced', exported: 3 })
+    expect((await readdir(join(root, '.xerxes', 'lessons'))).length).toBe(3)
+  } finally { sharing.close() }
 })
 
 test('dry run writes nothing, including the sync state', async () => {

@@ -27,6 +27,47 @@ beforeEach(async () => {
   reports.length = 0
 })
 afterEach(async () => { sharing.close(); await rm(root, { recursive: true, force: true }) })
+
+test('lessons recorded before repo keys are adopted by the repo their workspace belongs to and exported', async () => {
+  const otherRoot = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-lesson-other-')))
+  const otherRepo = `git:${'c'.repeat(32)}`
+  const mem = new GovernedMemoryStore({ directory: join(root, 'legacy-memory'), now: () => ++now })
+  const store = new LessonStore({ memory: mem, resolveRepo: async workspace => workspace === otherRoot ? otherRepo : repo })
+  const share = new LessonSharing({ memory: mem, lessons: store, resolveRoot: async () => root, report: () => {} })
+  try {
+    // Pre-0.8.14 shape: a workspace path and no `repo` field.
+    const legacy = async (workspace: string) => {
+      const id = `lesson-${crypto.randomUUID()}`
+      await mem.record({ id, content: `Legacy lesson ${id}.`, source: 'lesson', agentId: 'old-agent',
+        payload: { kind: 'lesson', version: 1, cue: 'legacy fixtures', confidence: 0.7, workspace, evidence: { kind: 'test', command: 'bun test', exitCode: 0, summary: '1 pass' } } })
+      await mem.review(id, 'approved')
+      return id
+    }
+    const mine = [await legacy(root), await legacy(root)]
+    const foreign = await legacy(otherRoot)
+    const gone = await legacy(join(root, 'deleted-folder'))
+
+    // A preview sees them but writes nothing.
+    const before = (await readFile(mem.logPath, 'utf8')).split('\n').filter(Boolean).length
+    expect((await share.snapshot(root, { markShared: false })).lessons.map(row => row.id).sort()).toEqual([...mine].sort())
+    expect((await mem.loadHistory()).records.get(mine[0]!)?.payload?.repo).toBeUndefined()
+    expect((await readFile(mem.logPath, 'utf8')).split('\n').filter(Boolean).length).toBe(before)
+
+    const snapshot = await share.snapshot(root)
+    expect(snapshot.lessons.map(row => row.id).sort()).toEqual([...mine].sort())
+    expect(snapshot.lessons.every(row => row.repo === repo)).toBe(true)
+    const records = (await mem.loadHistory()).records
+    expect(records.get(mine[0]!)?.payload?.repo).toBe(repo)
+    expect(records.get(foreign)?.payload?.repo).toBeUndefined()
+    expect(records.get(gone)?.payload?.repo).toBeUndefined()
+    // Adoption happens once: a second export appends nothing.
+    const settled = (await readFile(mem.logPath, 'utf8')).split('\n').filter(Boolean).length
+    await share.snapshot(root)
+    expect((await readFile(mem.logPath, 'utf8')).split('\n').filter(Boolean).length).toBe(settled)
+    // The original workspace still recalls them, once each.
+    expect((await store.recall('legacy fixtures', root)).map(lesson => lesson.id).sort()).toEqual([...mine].sort())
+  } finally { share.close(); await rm(otherRoot, { recursive: true, force: true }) }
+})
 function wire(over: Partial<SharedLessonWire> = {}): SharedLessonWire {
   const date = new Date(now).toISOString()
   return { id: `lesson-${crypto.randomUUID()}`, repo, cue: 'Bun fixtures', lesson: 'Use private temporary fixture directories.', status: 'active', confidence: 0.8,
