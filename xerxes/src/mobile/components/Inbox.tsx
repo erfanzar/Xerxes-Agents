@@ -58,11 +58,41 @@ function TaskCard({ task }: { task: TaskSummary }): ReactElement {
   )
 }
 
+export interface InboxFilterChoice {
+  readonly workspaceId?: string | undefined
+  readonly status: InboxStatusFilter
+}
+
+/**
+ * The Inbox filter outlives the Inbox screen: opening a task and coming back
+ * keeps it. Keyed by the app's services object, so each app instance (and
+ * each test) has its own.
+ */
+const FILTER_MEMORY = new WeakMap<object, InboxFilterChoice>()
+
+export function rememberedInboxFilter(owner: object): InboxFilterChoice {
+  return FILTER_MEMORY.get(owner) ?? { status: 'all' }
+}
+
+export function rememberInboxFilter(owner: object, choice: InboxFilterChoice): void {
+  FILTER_MEMORY.set(owner, choice)
+}
+
 export function InboxTab(): ReactElement {
   const state = useHubState()
-  const { controller } = useServices()
-  const [workspaceId, setWorkspaceId] = useState<string | undefined>(undefined)
-  const [status, setStatus] = useState<InboxStatusFilter>('all')
+  const services = useServices()
+  const { controller } = services
+  // The scroll memory is created once per app; it anchors the filter memory too.
+  const owner = services.scroll
+  const [choice, setChoice] = useState<InboxFilterChoice>(() => rememberedInboxFilter(owner))
+  const choose = (next: InboxFilterChoice): void => {
+    rememberInboxFilter(owner, next)
+    setChoice(next)
+  }
+  const workspaceId = choice.workspaceId
+  const status = choice.status
+  const setWorkspaceId = (id: string | undefined): void => choose({ ...choice, workspaceId: id })
+  const setStatus = (value: InboxStatusFilter): void => choose({ ...choice, status: value })
   const tasks = inboxTasks(state, { ...(workspaceId === undefined ? {} : { workspaceId }), status })
   const counts = inboxCounts(state)
   const offline = state.workspaceOrder.map(id => state.workspaces[id]).filter(w => w !== undefined && !workspaceAvailable(w))

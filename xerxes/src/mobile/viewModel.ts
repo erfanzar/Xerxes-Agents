@@ -25,6 +25,16 @@ export function statusOfSelected(state: HubState, selected: SelectedSession): Ta
   return selected.tail.status ?? state.tasks[taskKey(selected.workspaceId, selected.sessionId)]?.status ?? 'unknown'
 }
 
+/**
+ * The task waits on a person, the waiting items were looked for, and none
+ * could be recovered: say "Waiting for approval on the machine; details
+ * unavailable" instead of showing a Needs-you task with nothing to tap.
+ */
+export function pendingDetailsUnavailable(state: HubState, selected: SelectedSession): boolean {
+  const summary = state.tasks[taskKey(selected.workspaceId, selected.sessionId)]
+  return selected.pendingChecked === true && selected.tail.pending.length === 0 && (summary?.pendingCount ?? 0) > 0 && summary?.status === 'needs_you'
+}
+
 export function viewForSelected(state: HubState, selected: SelectedSession): StatusView {
   const summary = state.tasks[taskKey(selected.workspaceId, selected.sessionId)]
   const health = state.workspaces[selected.workspaceId]?.health

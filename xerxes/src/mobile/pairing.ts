@@ -20,6 +20,76 @@ export type PairingRead =
   | { readonly kind: 'found'; readonly fragment: PairFragment }
   | { readonly kind: 'invalid' }
   | { readonly kind: 'missing' }
+  /** The page was reloaded (or discarded by iOS) after the Hub accepted the code, while waiting for the desktop. */
+  | { readonly kind: 'resume'; readonly comparison?: string }
+
+/** sessionStorage subset; access can throw (Safari private mode, storage disabled). */
+export interface PairStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
+const AWAIT_KEY = 'xerxes.pair.awaiting'
+/** How long a reload may resume waiting for the desktop; matches the pair page's own wait plus margin. */
+export const PAIR_AWAIT_TTL_MS = 10 * 60_000
+
+/**
+ * Remember that this tab is waiting for desktop confirmation. Holds no secret: the
+ * pairing code was already spent and the session lives in httpOnly cookies. Only the
+ * comparison code (shown on screen anyway) and a deadline are stored.
+ */
+export function rememberPairingAwait(storage: PairStorage | undefined, now: number, comparison?: string): void {
+  try {
+    storage?.setItem(AWAIT_KEY, JSON.stringify({ until: now + PAIR_AWAIT_TTL_MS, ...(comparison === undefined ? {} : { comparison: comparison.slice(0, 16) }) }))
+  } catch { /* Without storage a reload shows the plain pair page, as before. */ }
+}
+
+/** This tab's sessionStorage, when the browser offers one (undefined in tests and when disabled). */
+export function browserPairStorage(): PairStorage | undefined {
+  try {
+    return typeof sessionStorage === 'undefined' ? undefined : sessionStorage
+  } catch {
+    return undefined
+  }
+}
+
+export function forgetPairingAwait(storage: PairStorage | undefined): void {
+  try { storage?.removeItem(AWAIT_KEY) } catch { /* nothing stored */ }
+}
+
+/** The pending wait, if one was remembered and has not expired. */
+export function pairingAwait(storage: PairStorage | undefined, now: number): { readonly comparison?: string } | undefined {
+  let text: string | null = null
+  try { text = storage?.getItem(AWAIT_KEY) ?? null } catch { return undefined }
+  if (text === null) return undefined
+  try {
+    const value = JSON.parse(text) as unknown
+    if (typeof value !== 'object' || value === null) return undefined
+    const record = value as Record<string, unknown>
+    if (typeof record.until !== 'number' || record.until <= now) {
+      forgetPairingAwait(storage)
+      return undefined
+    }
+    return typeof record.comparison === 'string' && record.comparison.length > 0 ? { comparison: record.comparison.slice(0, 16) } : {}
+  } catch {
+    forgetPairingAwait(storage)
+    return undefined
+  }
+}
+
+/** Read the pair route: a fresh fragment wins; otherwise resume a remembered wait. */
+export function readPairRoute(win: PairWindow, storage: PairStorage | undefined, now: number): PairingRead {
+  const read = takePairingFragment(win)
+  if (read.kind !== 'missing') {
+    // A new code supersedes any earlier wait.
+    forgetPairingAwait(storage)
+    return read
+  }
+  const waiting = pairingAwait(storage, now)
+  if (waiting === undefined) return read
+  return waiting.comparison === undefined ? { kind: 'resume' } : { kind: 'resume', comparison: waiting.comparison }
+}
 
 export interface PairWindow {
   readonly location: { readonly hash: string; readonly pathname: string; readonly search: string }
@@ -101,6 +171,7 @@ function comparisonOf(state: PairState): { readonly comparison?: string } {
 export function initialPairState(read: PairingRead): PairState {
   if (read.kind === 'missing') return { phase: 'missing' }
   if (read.kind === 'invalid') return { phase: 'invalid' }
+  if (read.kind === 'resume') return read.comparison === undefined ? { phase: 'waiting' } : { phase: 'waiting', comparison: read.comparison }
   return read.fragment.comparison === undefined ? { phase: 'submitting' } : { phase: 'submitting', comparison: read.fragment.comparison }
 }
 

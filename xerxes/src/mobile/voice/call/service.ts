@@ -6,6 +6,7 @@ import type { CallEngine, CallSnapshot } from './engine.js'
 import { chooseCallTier, type CallModelsStatus } from './logic.js'
 
 export type CallEngineControl = Pick<CallEngine, 'start' | 'hangup' | 'mute' | 'interrupt' | 'visibility' | 'setDebugCaptureEnabled' | 'getSnapshot' | 'subscribe'>
+  & Partial<Pick<CallEngine, 'setConnected'>>
 export interface VoiceCallSnapshot {
   readonly view: 'closed' | 'voice' | 'chat'
   readonly call: CallSnapshot
@@ -63,7 +64,11 @@ export class VoiceCallService {
   }
   /** Chat/Escape only hides the voice screen. The engine, microphone, models and observers are untouched. */
   minimize(): void { this.update({ view: isCallActive(this.snapshot.call) ? 'chat' : 'closed' }) }
-  setConnected(connected: boolean): void { if (connected !== this.snapshot.connected) this.update({ connected }) }
+  /** A dropped Hub link pauses the call (the engine holds what was said); it never ends it. */
+  setConnected(connected: boolean): void {
+    this.engine?.setConnected?.(connected)
+    if (connected !== this.snapshot.connected) this.update({ connected })
+  }
   setTier(tier: VoiceModelTier): void {
     if (isCallActive(this.snapshot.call)) return
     const { phoneCache: _stale, ...previous } = this.snapshot
@@ -125,9 +130,12 @@ export class VoiceCallService {
           const call = engine.getSnapshot()
           const ended = isCallActive(this.snapshot.call) && call.phase === 'idle'
           const stopped = isCallActive(this.snapshot.call) && !isCallActive(call)
-          this.update({ call, ...(call.phase === 'error' ? { view: 'voice' as const } : ended ? { view: 'closed' as const } : {}) })
+          // An unrequested end (hidden too long, microphone taken) keeps the voice screen open with its reason.
+          const explained = call.phase === 'error' || (ended && call.endReason !== undefined)
+          this.update({ call, ...(explained ? { view: 'voice' as const } : ended ? { view: 'closed' as const } : {}) })
           if (stopped) void this.refreshPhoneCache()
         })
+        engine.setConnected?.(this.snapshot.connected)
       }
       this.engine.setDebugCaptureEnabled(this.snapshot.debugCaptureEnabled)
       this.deps.rememberNotice?.()

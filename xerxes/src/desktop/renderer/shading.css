@@ -1,0 +1,229 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Xerxes Desktop: the Shading style (Settings ▸ General ▸ Style).
+
+   The shadcn/ui visual language (ui.shadcn.com, neutral base), built from
+   the patterns that make it recognisable rather than from the rounded,
+   sans look the Claude layout already has:
+   - the "inset" sidebar: the sidebar is the window, and the conversation
+     and the inspector float on it as bordered, rounded, shadowed cards;
+   - pure neutral (zinc/neutral) greys with no blue tint, and a primary
+     that is near-black in light mode and near-white in dark mode;
+   - filled primary buttons ("New task", Send, your own messages, as in
+     shadcn's chat example), outline buttons with a hairline shadow;
+   - a muted tabs track with a raised trigger, and a 3px focus ring.
+   Semantic colours (done / failed / needs input / working) stay, so state
+   still reads at a glance.
+
+   Rules for this sheet, enforced by test/desktopShadingStyle.test.ts:
+   - every selector starts with `:root[data-style='shading']` and carries
+     `:not(#shading)`. Classic stamps no data-style and Neo stamps 'neo',
+     so nothing here ever reaches them; the id-level `:not(#shading)` lets
+     Shading outrank the Classic and Claude-layout rules without touching
+     atelier.css or app.css.
+   - keyframes are prefixed `shading-`.
+
+   Like Neo, Shading is solid: backdrop.ts paints only a background's
+   colours, and colour themes paint their tokens inline over these.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tokens: dark (default and explicit) ──────────────────────────────
+   Every text token clears WCAG AA 4.5:1 on screen, card, chrome, selected
+   and popover; the test measures them. */
+:root[data-style='shading']:not(#shading){
+  color-scheme:dark;
+  --x-backdrop:#0a0a0a;--x-screen:#0a0a0a;--x-chrome:#171717;--x-card:#171717;
+  --x-selected:#262626;--x-chip:#262626;--x-sunken:#111111;
+  --x-popover:#171717;--x-dialog:#171717;
+  --x-hairline:#ffffff1a;--x-divider:#ffffff10;--x-separator:#ffffff26;--x-seam:#ffffff1a;
+  --x-title:#fafafa;--x-prose:#e5e5e5;--x-strong:#ffffff;--x-secondary:#d4d4d4;
+  --x-meta:#a1a1a1;--x-caption:#a1a1a1;--x-numeric:#a1a1a1;
+  --x-accent:#e5e5e5;--x-accent-soft:#e5e5e514;--x-focus:#a1a1a1;
+  --x-working:#60a5fa;--x-activity:#a78bfa;--x-structure:#67e8f9;--x-fleet-blue:#60a5fa;
+  --x-on-accent:#171717;--x-inverse:#0a0a0a;
+  --x-done:#4ade80;--x-bridge:#4ade80;
+  --x-failed:#ff6467;--x-danger:#ff6467;--x-failed-text:#ff8a8c;--x-failed-bg:#ff646714;--x-failed-border:#ff646740;
+  --x-needs:#fbbf24;--x-needs-text:#fcd34d;--x-needs-bg:#fbbf2414;--x-needs-border:#fbbf2440;
+  --x-diff-add:#4ade8014;--x-diff-del:#ff646714;
+  --x-user-bubble:#e5e5e5;
+  --x-menubar:#171717;--x-menubar-edge:#ffffff1a;--x-menubar-fg:#a1a1a1;--x-menubar-strong:#fafafa;--x-menubar-meta:#a1a1a1;
+  --x-lit:transparent;--x-elev:0 1px 2px #00000066;
+  --mac-control:#ffffff0d;--mac-toolbar:#171717;
+  --glass-navigation:#171717;--glass-overlay:#171717;--glass-edge:#ffffff1a;--glass-highlight:transparent;
+  --glass-blur:none;--glass-control:none;--glass-shadow:none;
+  --mac-shadow:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
+  --grad:none;--accent-soft:#ffffff0d;
+  --sh-ring:color-mix(in srgb,#737373 55%,transparent);
+  --sh-input:#ffffff26;
+  --sh-input-bg:color-mix(in srgb,#ffffff26 30%,transparent);
+  --sh-shadow-xs:0 1px 2px 0 #0000004d;
+  --sh-shadow-sm:0 1px 3px 0 #00000066,0 1px 2px -1px #00000066;
+  --sh-shadow-lg:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Geist','Inter','SF Pro Text','Segoe UI',system-ui,sans-serif;
+  --prose:var(--sans);
+  --mono:'Geist Mono',ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
+  --r-sm:6px;--r-md:8px;--r-lg:12px;
+}
+
+/* ── Tokens: light ─────────────────────────────────────────────────── */
+:root[data-style='shading'][data-theme='light']:not(#shading){
+  color-scheme:light;
+  --x-backdrop:#fafafa;--x-screen:#ffffff;--x-chrome:#fafafa;--x-card:#ffffff;
+  --x-selected:#f0f0f0;--x-chip:#f5f5f5;--x-sunken:#fafafa;
+  --x-popover:#ffffff;--x-dialog:#ffffff;
+  --x-hairline:#e5e5e5;--x-divider:#f0f0f0;--x-separator:#d4d4d4;--x-seam:#e5e5e5;
+  --x-title:#0a0a0a;--x-prose:#262626;--x-strong:#000000;--x-secondary:#525252;
+  --x-meta:#6b6b6b;--x-caption:#6b6b6b;--x-numeric:#6b6b6b;
+  --x-accent:#171717;--x-accent-soft:#17171710;--x-focus:#a1a1a1;
+  --x-working:#1d4ed8;--x-activity:#6d28d9;--x-structure:#0e7490;--x-fleet-blue:#1d4ed8;
+  --x-on-accent:#fafafa;--x-inverse:#ffffff;
+  --x-done:#166534;--x-bridge:#166534;
+  --x-failed:#b91c1c;--x-danger:#b91c1c;--x-failed-text:#991b1b;--x-failed-bg:#dc26260d;--x-failed-border:#dc262633;
+  --x-needs:#92400e;--x-needs-text:#7c2d12;--x-needs-bg:#d977060f;--x-needs-border:#d9770633;
+  --x-diff-add:#16a34a14;--x-diff-del:#dc262612;
+  --x-user-bubble:#171717;
+  --x-menubar:#fafafa;--x-menubar-edge:#e5e5e5;--x-menubar-fg:#525252;--x-menubar-strong:#0a0a0a;--x-menubar-meta:#6b6b6b;
+  --x-elev:0 1px 2px #0000000d;
+  --mac-control:#0000000a;--mac-toolbar:#fafafa;
+  --glass-navigation:#fafafa;--glass-overlay:#ffffff;--glass-edge:#e5e5e5;
+  --mac-shadow:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
+  --accent-soft:#0000000a;
+  --sh-ring:color-mix(in srgb,#a1a1a1 50%,transparent);
+  --sh-input:#e5e5e5;
+  --sh-input-bg:#ffffff;
+  --sh-shadow-xs:0 1px 2px 0 #0000000d;
+  --sh-shadow-sm:0 1px 3px 0 #0000001a,0 1px 2px -1px #0000001a;
+  --sh-shadow-lg:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
+}
+
+/* ── Type: one sans face; code stays mono ─────────────────────────────
+   Sizes stay on --ui-* so Settings ▸ Interface text size still scales. */
+:root[data-style='shading']:not(#shading) body{font-family:var(--sans);-webkit-font-smoothing:antialiased}
+:root[data-style='shading']:not(#shading) :is(button,input,textarea,select){font-family:var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier{
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Geist','Inter','SF Pro Text','Segoe UI',system-ui,sans-serif;
+  --prose:var(--sans);
+  --mono:'Geist Mono',ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
+  --t-caption:500 calc(var(--ui-small) + .5px)/1.45 var(--sans);
+  --t-body:400 calc(var(--ui-font) + 1px)/1.5 var(--sans);
+  --t-title:600 calc(var(--ui-font) + 1px)/1.35 var(--sans);
+  --t-hero:600 calc(var(--ui-large) + 6px)/1.15 var(--sans);
+  --t-num:500 var(--ui-font)/1.4 var(--sans);
+  --t-prose:400 calc(var(--ui-font) + 2px)/1.65 var(--sans);
+  --card-radius:12px;
+  font-variant-numeric:tabular-nums;
+}
+:root[data-style='shading']:not(#shading) .atelier :is(code,pre,kbd,.mono){font-family:var(--mono)}
+:root[data-style='shading']:not(#shading) .atelier :is(.md h1,.md h2,.md h3,.modal__title){font-weight:600;letter-spacing:-.025em}
+:root[data-style='shading']:not(#shading) ::selection{background:color-mix(in srgb,var(--x-working) 30%,transparent)}
+
+/* ── Geometry: one radius, hairline borders, soft shadows ─────────── */
+:root[data-style='shading']:not(#shading) ::-webkit-scrollbar-thumb{border-radius:999px;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 16%,transparent)}
+:root[data-style='shading']:not(#shading) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:none;box-shadow:0 0 0 3px var(--sh-ring)}
+
+/* ── Layout: shadcn's inset sidebar ───────────────────────────────────
+   The sidebar colour is the window; the conversation and the inspector
+   float on it as bordered, rounded cards with a soft shadow. */
+:root[data-style='shading']:not(#shading) .atelier .app__body{background:var(--x-chrome)}
+:root[data-style='shading']:not(#shading) .atelier .side{background:var(--x-chrome);backdrop-filter:none;border-right:0}
+:root[data-style='shading']:not(#shading) .atelier .top{background:var(--x-chrome);backdrop-filter:none;border-bottom:0}
+:root[data-style='shading']:not(#shading) .atelier .chat{margin:8px 8px 8px 0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-screen);box-shadow:var(--sh-shadow-sm);overflow:hidden}
+:root[data-style='shading']:not(#shading) .atelier:is(.atelier--focus,.app--narrow) .chat{margin-left:8px}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail{margin:8px 8px 8px 0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-screen);box-shadow:var(--sh-shadow-sm);backdrop-filter:none;overflow:hidden}
+:root[data-style='shading']:not(#shading) .atelier .chat__head{background:transparent;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .composer-wrap{background:transparent}
+:root[data-style='shading']:not(#shading) .panel-divider{background:transparent}
+:root[data-style='shading']:not(#shading) .panel-divider:hover,
+:root[data-style='shading']:not(#shading) .panel-divider:focus-visible{background:var(--x-separator)}
+
+/* ── Sidebar: a filled primary "New task" and quiet menu items ───── */
+:root[data-style='shading']:not(#shading) .atelier .newchat{justify-content:flex-start;background:var(--x-accent);color:var(--x-on-accent);border:0;border-radius:8px;font-weight:500;box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .newchat:hover{background:color-mix(in srgb,var(--x-accent) 88%,transparent);color:var(--x-on-accent)}
+:root[data-style='shading']:not(#shading) .atelier .newchat svg{color:currentColor}
+:root[data-style='shading']:not(#shading) .atelier .newchat kbd{background:transparent;border:0;color:currentColor;opacity:.6}
+:root[data-style='shading']:not(#shading) .atelier :is(.studio-nav,.studio-side-bottom>button){border-radius:6px}
+:root[data-style='shading']:not(#shading) .atelier :is(.studio-nav,.studio-side-bottom>button):hover{background:var(--x-selected)}
+:root[data-style='shading']:not(#shading) .atelier .studio-nav.is-selected{background:var(--x-selected);color:var(--x-title);font-weight:500;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .side__search{background:var(--sh-input-bg);border:1px solid var(--sh-input);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .sess{border-radius:6px}
+:root[data-style='shading']:not(#shading) .atelier .sess.is-current{background:var(--x-selected);box-shadow:none;font-weight:500}
+:root[data-style='shading']:not(#shading) .atelier .sess:hover:not(.is-current){background:color-mix(in srgb,var(--x-selected) 70%,transparent)}
+
+/* ── Overlays: a popover card with one large soft shadow ──────────── */
+:root[data-style='shading']:not(#shading) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop),
+:root[data-style='shading']:not(#shading) .runtime-popover{background:var(--x-popover);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-lg);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-style='shading']:not(#shading) .atelier .modal__side{background:var(--x-chrome);border-right:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .modal__side :is(button[aria-pressed='true'],button.is-selected){background:var(--x-selected);color:var(--x-title);font-weight:500;box-shadow:none}
+
+/* ── Labels: small, medium weight, muted (shadcn's group labels) ──── */
+:root[data-style='shading']:not(#shading) .atelier :is(.field>label,.studio-label,.wgroup__cap,.railcard__title,.modal__side .cap,.composer-task-summary__label,.composer-queue__heading){font:500 calc(var(--ui-small) + .5px)/1.4 var(--sans);letter-spacing:0;text-transform:none;color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .railcard__title{color:var(--x-title);font-weight:600}
+:root[data-style='shading']:not(#shading) .atelier .railcard__meta{font:var(--t-num);color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier kbd{border:1px solid var(--x-hairline);border-radius:4px;background:var(--x-chip);color:var(--x-meta);font:500 11px/1.5 var(--sans);padding:0 5px}
+
+/* ── Tabs and segmented controls: a muted track, a raised trigger ─── */
+:root[data-style='shading']:not(#shading) .atelier .studio-segment{background:var(--x-selected);border:0;border-radius:10px;padding:3px}
+:root[data-style='shading']:not(#shading) .atelier .studio-segment>button{border-radius:7px;border-bottom:0;color:var(--x-meta);font-weight:500}
+:root[data-style='shading']:not(#shading) .atelier .studio-segment>.is-selected{background:var(--x-screen);color:var(--x-title);box-shadow:var(--sh-shadow-sm),0 0 0 1px var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .seg{background:var(--x-selected);border:0;border-radius:10px;padding:3px}
+:root[data-style='shading']:not(#shading) .atelier .seg button{border-radius:7px;color:var(--x-meta);font-weight:500;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .seg button.is-on{background:var(--x-screen);color:var(--x-title);box-shadow:var(--sh-shadow-sm),0 0 0 1px var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .tab.is-on{color:var(--x-title);border-bottom-color:var(--x-title)}
+
+/* ── Cards ─────────────────────────────────────────────────────────── */
+:root[data-style='shading']:not(#shading) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard,.appupdate__card){background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-sm)}
+:root[data-style='shading']:not(#shading) .atelier .palette-card{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .palette-card:hover{background:var(--x-chip)}
+:root[data-style='shading']:not(#shading) .atelier .palette-card.is-on{border-color:var(--x-title);box-shadow:0 0 0 1px var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier :is(pre,.md pre){background:var(--x-sunken);border:1px solid var(--x-hairline);border-radius:8px}
+:root[data-style='shading']:not(#shading) .atelier :not(pre)>code{background:var(--x-chip);border:1px solid var(--x-hairline);border-radius:5px;padding:.05em .35em;font-size:.88em}
+/* Permission requests are an Alert: an amber edge on a plain card. */
+:root[data-style='shading']:not(#shading) .atelier .approval{border-color:var(--x-needs-border);box-shadow:var(--sh-shadow-sm),inset 3px 0 0 var(--x-needs)}
+
+/* ── Controls: Button variants ────────────────────────────────────────
+   .btn is shadcn's "outline", .btn--solid its "default" (primary). */
+:root[data-style='shading']:not(#shading) .atelier .btn{border:1px solid var(--sh-input);background:var(--sh-input-bg);color:var(--x-title);border-radius:8px;font-weight:500;box-shadow:var(--sh-shadow-xs);transition:background-color 150ms ease,color 150ms ease,box-shadow 150ms ease}
+:root[data-style='shading']:not(#shading) .atelier .btn:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary,.approval .btn--solid){background:var(--x-accent);color:var(--x-on-accent);border-color:var(--x-accent);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:color-mix(in srgb,var(--x-accent) 88%,transparent);color:var(--x-on-accent)}
+:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){background:var(--sh-input-bg);border:1px solid var(--sh-input);border-radius:8px;box-shadow:var(--sh-shadow-xs);font-family:var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']):focus{border-color:var(--x-focus);box-shadow:0 0 0 3px var(--sh-ring);outline:none}
+:root[data-style='shading']:not(#shading) .atelier .switch{background:var(--sh-input);border-radius:999px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .switch.is-on{background:var(--x-accent)}
+:root[data-style='shading']:not(#shading) .atelier .switch::after{border-radius:50%;background:var(--x-screen);box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .switch.is-on::after{background:var(--x-on-accent)}
+:root[data-style='shading']:not(#shading) .atelier .cchip{border-radius:8px}
+:root[data-style='shading']:not(#shading) .atelier .cchip:hover{background:var(--x-selected);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .cchip.is-on{background:var(--x-selected);color:var(--x-title)}
+
+/* ── Conversation ─────────────────────────────────────────────────── */
+:root[data-style='shading']:not(#shading) .atelier :is(.msg,.agent-msg){font:var(--t-prose)}
+/* Tool activity is a collapsible card with a hover row. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:10px;box-shadow:var(--sh-shadow-xs);margin:6px 0}
+:root[data-style='shading']:not(#shading) .atelier .activity-group>summary{padding:8px 12px;border-radius:9px}
+:root[data-style='shading']:not(#shading) .atelier .activity-group>summary:hover{background:var(--x-chip)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body{margin:0;padding:6px 12px 10px;border:0;border-top:1px solid var(--x-hairline);border-radius:0;background:transparent}
+/* Your own turn is filled with the primary colour, as in shadcn's chat example. */
+:root[data-style='shading']:not(#shading) .atelier .msg--user{background:var(--x-user-bubble);border:0;border-radius:14px;box-shadow:var(--sh-shadow-xs);padding:9px 15px}
+:root[data-style='shading']:not(#shading) .atelier .msg--user :is(.msg__text,.msg__text *){color:var(--x-on-accent)}
+:root[data-style='shading']:not(#shading) .atelier .msg--user :not(pre)>code{background:color-mix(in srgb,var(--x-on-accent) 16%,transparent);border-color:transparent;color:var(--x-on-accent)}
+
+/* The composer is a textarea card with a focus ring; the toolbar chips are outline buttons. */
+:root[data-style='shading']:not(#shading) .atelier .composer-dock{background:var(--x-card);border:1px solid var(--sh-input);border-radius:12px;box-shadow:var(--sh-shadow-xs);transition:border-color 150ms ease,box-shadow 150ms ease}
+:root[data-style='shading']:not(#shading) .atelier .composer-dock:focus-within{border-color:var(--x-focus);box-shadow:0 0 0 3px var(--sh-ring)}
+:root[data-style='shading']:not(#shading) .atelier .composer__input{font:400 calc(var(--ui-font) + 1px)/1.5 var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier .composer__input:focus-visible{outline:none;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .composer__send{background:var(--x-accent);color:var(--x-on-accent);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .composer__send:disabled{background:var(--x-selected);color:var(--x-meta);opacity:1;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .composer__send--stop{background:var(--x-screen);color:var(--x-title);box-shadow:inset 0 0 0 1px var(--sh-input)}
+:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip{height:28px;border:1px solid var(--sh-input);background:var(--sh-input-bg);border-radius:7px;box-shadow:var(--sh-shadow-xs);color:var(--x-title);font-weight:500}
+:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip:hover{background:var(--x-selected)}
+:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .composer__icon{border-color:transparent;background:transparent;box-shadow:none}
+
+/* ── Welcome: a tight semibold wordmark with a soft fade-in ───────── */
+:root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark,
+:root[data-style='shading']:not(#shading) .atelier .sidebar-wordmark{font-family:var(--sans);font-weight:700;letter-spacing:-.045em}
+:root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark{animation:shading-rise 420ms cubic-bezier(.16,1,.3,1) both}
+@media (prefers-reduced-motion:reduce){
+  :root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark{animation:none}
+}
+@keyframes shading-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}

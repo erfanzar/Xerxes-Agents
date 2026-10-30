@@ -285,6 +285,85 @@ test('client works with the real in-memory DaemonServer without providers or UI 
 function upstream(sequence: number, project_dir = '/a', instance_id = 'i1'): UpstreamEvent {
   return { event_id: `e${sequence}`, sequence, cursor: `c${sequence}`, runtime_id: 'r', instance_id, project_dir, session_id: 's0', type: 'turn_begin', payload: {}, occurred_at: new Date().toISOString() }
 }
+function delta(sequence: number, type: 'text_part' | 'think_part' | 'tool_call', value: string, session = 's0'): UpstreamEvent {
+  const payload = type === 'text_part' ? { text: value } : type === 'think_part' ? { think: value } : { name: value, arguments: '{}' }
+  return { ...upstream(sequence), session_id: session, type, payload }
+}
+
+test('the Hub subscribes with conversation detail and merges text/thinking deltas into one stored event per run', async () => {
+  const daemon = await fakeDaemon(), store = sink()
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 5000, coalesceMs: 200 })
+  cleanup.push(() => pool.stop()); await pool.start([workspace('w', daemon.socketPath)])
+  expect(daemon.requests.find(row => row.method === 'events.subscribe')?.params.detail).toBe('conversation')
+  daemon.push('event_batch', { subscription_id: 'sub', events: [
+    delta(1, 'think_part', 'hmm '), delta(2, 'think_part', 'ok'),
+    delta(3, 'text_part', 'Hel'), delta(4, 'text_part', 'lo'), delta(5, 'text_part', ' there', 's1'),
+    delta(6, 'tool_call', 'exec_command'),
+  ] })
+  await until(() => store.rows.length === 4)
+  // Upstream order is kept; each merged event commits the cursor of the last delta it holds.
+  expect(store.rows.map(row => [row.type, row.sequence, row.cursor, row.session_id])).toEqual([
+    ['think_part', 2, 'c2', 's0'], ['text_part', 4, 'c4', 's0'], ['text_part', 5, 'c5', 's1'], ['tool_call', 6, 'c6', 's0'],
+  ])
+  expect(store.rows.map(row => row.payload.think ?? row.payload.text ?? row.payload.name)).toEqual(['hmm ok', 'Hello', ' there', 'exec_command'])
+
+  // A trailing run with nothing after it is stored once the coalescing window passes.
+  daemon.push('event_batch', { subscription_id: 'sub', events: [delta(7, 'text_part', 'a'), delta(8, 'text_part', 'b')] })
+  daemon.push('event_batch', { subscription_id: 'sub', events: [delta(9, 'text_part', 'c')] })
+  await until(() => store.rows.length === 5)
+  await Bun.sleep(300)
+  expect(store.rows).toHaveLength(5)
+  expect(store.rows[4]).toMatchObject({ type: 'text_part', sequence: 9, cursor: 'c9', payload: { text: 'abc' } })
+})
+
+test('thinking_part, text_delta and thinking_delta are normalized to text_part / think_part and merged', async () => {
+  const daemon = await fakeDaemon(), store = sink()
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 5000, coalesceMs: 200 })
+  cleanup.push(() => pool.stop()); await pool.start([workspace('w', daemon.socketPath)])
+  const raw = (sequence: number, type: string, payload: Record<string, unknown>): UpstreamEvent => ({ ...upstream(sequence), type, payload })
+  daemon.push('event_batch', { subscription_id: 'sub', events: [
+    raw(1, 'thinking_part', { think: 'a' }), raw(2, 'thinking_delta', { thinking: 'b' }), raw(3, 'think_part', { think: 'c' }),
+    raw(4, 'text_delta', { delta: 'Hel' }), raw(5, 'text_part', { text: 'lo' }),
+    delta(6, 'tool_call', 'exec_command'),
+  ] })
+  await until(() => store.rows.length === 3)
+  expect(store.rows.map(row => [row.type, row.sequence, row.payload])).toEqual([
+    ['think_part', 3, { think: 'abc' }], ['text_part', 5, { text: 'Hello' }], ['tool_call', 6, { name: 'exec_command', arguments: '{}' }],
+  ])
+})
+
+test('streamed text deltas do not re-project the workspace on every merge; other events still do', async () => {
+  const daemon = await fakeDaemon(), store = sink(), projected: string[] = []
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 60_000, coalesceMs: 5,
+    onProjection: (_id, projection) => { projected.push(projection.recent_event_ids.at(-1) ?? '') } })
+  cleanup.push(() => pool.stop()); await pool.start([workspace('w', daemon.socketPath)])
+  daemon.push('event_batch', { subscription_id: 'sub', events: [upstream(1)] })
+  await until(() => store.rows.length === 1)
+  projected.length = 0
+  // Five separately stored text runs (each flushed by the coalescing timer).
+  for (let sequence = 2; sequence <= 6; sequence += 1) {
+    daemon.push('event_batch', { subscription_id: 'sub', events: [delta(sequence, 'text_part', `t${sequence}`)] })
+    await until(() => store.rows.length === sequence)
+  }
+  expect(projected.filter(id => ['e2', 'e3', 'e4', 'e5', 'e6'].includes(id))).toEqual(['e2'])
+  daemon.push('event_batch', { subscription_id: 'sub', events: [delta(7, 'tool_call', 'exec_command')] })
+  await until(() => store.rows.length === 7)
+  expect(projected.at(-1)).toBe('e7')
+  expect(pool.projection('w')?.sessions.s0?.status).toBe('working')
+})
+
+test('buffered deltas are never committed by a lost connection: the resubscribe resumes before them', async () => {
+  const daemon = await fakeDaemon(), store = sink()
+  const pool = new HubRuntimePool({ sink: store.port, clientOptions: retry, pollIntervalMs: 5000, coalesceMs: 60_000 })
+  cleanup.push(() => pool.stop()); await pool.start([workspace('w', daemon.socketPath)])
+  daemon.push('event_batch', { subscription_id: 'sub', events: [upstream(1), delta(2, 'text_part', 'never stored')] })
+  await until(() => store.rows.length === 1)
+  daemon.drop()
+  await until(() => daemon.requests.filter(row => row.method === 'events.subscribe').length === 2 && pool.health('w')?.state === 'online')
+  expect(daemon.requests.filter(row => row.method === 'events.subscribe').at(-1)?.params.after_cursor).toBe('c1')
+  await Bun.sleep(30)
+  expect(store.rows.map(row => row.sequence)).toEqual([1])
+})
 
 test('journal backfill drains bounded pages, including events from the preceding daemon instance', async () => {
   const daemon = await fakeDaemon(), store = sink()

@@ -196,6 +196,8 @@ export class SupervisorRunner {
   private readonly clock: () => number
   private readonly tails = new Map<string, Promise<unknown>>()
   private readonly active = new Map<string, AbortController>()
+  /** The person's message the running turn on each thread answers (unset for Hub wake turns). */
+  private readonly replyTo = new Map<string, string>()
   private usage = { windowStart: 0, tokens: 0, costUsd: 0, calls: 0 }
   private closed = false
 
@@ -276,7 +278,9 @@ export class SupervisorRunner {
   ): SupervisorTurnResult {
     const { threads } = this.options
     if (stop !== 'completed' && stop !== 'cancelled' && stop !== 'gone' && detail !== undefined) {
-      const { message } = threads.append({ threadId, role: 'system', text: `XERXES stopped: ${detail}` })
+      // Carry the person's message this turn answered, so a phone call matches the failure to its own submission.
+      const causal = this.replyTo.get(threadId)
+      const { message } = threads.append({ threadId, role: 'system', text: `XERXES stopped: ${detail}`, ...(causal === undefined ? {} : { causalMessageId: causal }) })
       threads.emit(threadId, 'supervisor.thread_event', { message: messageToWire(message) })
       try {
         this.options.onStopped?.({ threadId, requester: requester.id, stop, detail })
@@ -326,6 +330,8 @@ export class SupervisorRunner {
       const inReplyTo = input.trigger === undefined
         ? input.causalMessageId ?? stored.filter(message => message.role === 'user').at(-1)?.id
         : undefined
+      if (inReplyTo === undefined) this.replyTo.delete(threadId)
+      else this.replyTo.set(threadId, inReplyTo)
       const tools = registry.definitions()
       let turnTokens = 0
 
@@ -391,6 +397,7 @@ export class SupervisorRunner {
     } finally {
       clearTimeout(timer)
       this.active.delete(threadId)
+      this.replyTo.delete(threadId)
       // After shutdown the database may already be closed; there is nobody left to tell.
       if (!this.closed) threads.setWorking(threadId, false)
     }

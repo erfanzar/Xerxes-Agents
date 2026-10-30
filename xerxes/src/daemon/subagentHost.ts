@@ -1882,7 +1882,8 @@ function publishSubagentEvent(
   if (daemonEvent) bus.publish(event.sourceId, daemonEvent)
 }
 
-function daemonEventFromSubagent(
+/** The daemon `subagent_event` one manager event becomes (exported for tests). */
+export function daemonEventFromSubagent(
   event: SubAgentEvent,
   historySessionId: string | undefined,
 ): DaemonEvent | undefined {
@@ -1920,9 +1921,13 @@ function daemonEventFromSubagent(
       return { type: 'subagent_event', payload: { ...base, event: { type: 'turn_begin', payload: { status: 'running' } } } }
     case 'thinking':
       return { type: 'subagent_event', payload: { ...base, event: { type: 'think_part', payload: { think: textValue(data.preview) } } } }
-    case 'text_burst':
-      return { type: 'subagent_event', payload: { ...base, event: { type: 'text_part', payload: { text: textValue(data.preview) } } } }
-    case 'tool_start':
+    case 'text_burst': {
+      // `text` stays the short preview existing surfaces show; `text_full` is the whole burst (clipped at the source).
+      const full = textValue(data.textFull)
+      return { type: 'subagent_event', payload: { ...base, event: { type: 'text_part', payload: { text: textValue(data.preview), ...(full ? { text_full: full } : {}) } } } }
+    }
+    case 'tool_start': {
+      const full = textValue(data.inputFull)
       return {
         type: 'subagent_event',
         payload: {
@@ -1931,12 +1936,15 @@ function daemonEventFromSubagent(
             type: 'tool_call',
             payload: {
               arguments: textValue(data.inputPreview),
+              // The exact JSON input, clipped to 8000 chars at the source; `arguments` stays the preview.
+              ...(full ? { arguments_full: full } : {}),
               id: textValue(data.toolCallId),
               name: textValue(data.tool),
             },
           },
         },
       }
+    }
     case 'tool_end':
       return {
         type: 'subagent_event',
@@ -1949,6 +1957,8 @@ function daemonEventFromSubagent(
               name: textValue(data.tool),
               permitted: data.permitted !== false,
               return_value: textValue(data.resultPreview),
+              // The exact result, clipped to 16000 chars at the source; `return_value` stays the preview.
+              ...(typeof data.resultFull === 'string' ? { result_full: data.resultFull } : {}),
               tool_call_id: textValue(data.toolCallId),
             },
           },

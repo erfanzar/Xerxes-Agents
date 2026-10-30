@@ -14,7 +14,7 @@
 import { createPortal } from 'react-dom'
 import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
-import { saveAppearance, loadAppearance, DEFAULT_FONT_SIZE, DEFAULT_STYLE, FONT_SIZES, FONT_LABELS, STYLES, STYLE_LABELS, type StyleChoice } from './appearance.js'
+import { saveAppearance, loadAppearance, isStyleChoice, DEFAULT_FONT_SIZE, DEFAULT_STYLE, FONT_SIZES, FONT_LABELS, STYLES, STYLE_LABELS, type StyleChoice } from './appearance.js'
 import { chooseStyle } from './appearanceSync.js'
 import { applySessionDensity, applyTerminalFont, applyUiScale, loadSessionDensity, loadTerminalFont, loadUiScale, parseTerminalFont, SESSION_DENSITIES, UI_SCALES, type SessionDensity } from './displayPrefs.js'
 import { loadPalette, PALETTES, paletteVariant, savePalette, type Palette } from './palettes.js'
@@ -257,6 +257,26 @@ function BackdropCard({ label, description, paint, on, onPick }: { label: string
  * image, or the see-through window, and the surfaces, accent and light/dark
  * are derived from it.
  */
+/**
+ * The label of the solid style the page is in (Neo or Shading), or undefined
+ * for Classic, following a switch made anywhere (Settings, ⌘K, another window).
+ */
+function useSolidStyle(): string | undefined {
+  const read = (): string | undefined => {
+    if (typeof document === 'undefined') return undefined
+    const style = document.documentElement.getAttribute('data-style')
+    return style === 'neo' || style === 'shading' ? STYLE_LABELS[style] : undefined
+  }
+  const [solid, setSolid] = useState(read)
+  useEffect(() => {
+    if (typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(() => setSolid(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-style'] })
+    return () => observer.disconnect()
+  }, [])
+  return solid
+}
+
 /** Whether the page is in the Neo style, following a switch made anywhere (Settings, ⌘K, another window). */
 function useNeoStyle(): boolean {
   const read = (): boolean => typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'neo'
@@ -271,7 +291,9 @@ function useNeoStyle(): boolean {
 }
 
 function BackdropField(): ReactElement {
-  const neo = useNeoStyle()
+  // Neo and Shading are solid: a background lends them only its colours.
+  const solidLabel = useSolidStyle()
+  const neo = solidLabel !== undefined
   const [current, setCurrent] = useState<Backdrop>(() => typeof document === 'undefined' ? { kind: 'none' } : loadBackdrop())
   const [error, setError] = useState('')
   const [custom, setCustom] = useState(() => current.kind === 'gradient' ? { from: current.from, to: current.to } : { from: '#1b2a6b', to: '#6b1b5a' })
@@ -299,17 +321,17 @@ function BackdropField(): ReactElement {
       <label id="backdrop-label">Background</label>
       {/* Neo never shows a picture: say so before a choice, and again for the
           one just made, so picking an image there is not a silent no-op. */}
-      {neo && <p className="backdrop-note backdrop-note--neo" role="status" aria-live="polite">{neoBackdropNote(current.kind)}</p>}
+      {neo && <p className="backdrop-note backdrop-note--neo" role="status" aria-live="polite">{neoBackdropNote(current.kind, solidLabel)}</p>}
       {/* Cards like the colour themes: each shows a small window over the
           picture, so you see how the panels will sit on it. */}
       <div className="palette-grid backdrop-grid" role="radiogroup" aria-labelledby="backdrop-label">
-        <BackdropCard label="None" description={neo ? 'Neo\'s own colours' : 'Solid Xerxes surfaces'} paint={undefined} on={current.kind === 'none'} onPick={() => choose({ kind: 'none' })} />
-        {transparencySupported() && <BackdropCard label="Transparent" description={neo ? 'No effect in Neo' : 'Your desktop, blurred through the window'} paint="transparent" on={current.kind === 'transparent'} onPick={() => choose({ kind: 'transparent' })} />}
+        <BackdropCard label="None" description={neo ? `${solidLabel}'s own colours` : 'Solid Xerxes surfaces'} paint={undefined} on={current.kind === 'none'} onPick={() => choose({ kind: 'none' })} />
+        {transparencySupported() && <BackdropCard label="Transparent" description={neo ? `No effect in ${solidLabel}` : 'Your desktop, blurred through the window'} paint="transparent" on={current.kind === 'transparent'} onPick={() => choose({ kind: 'transparent' })} />}
         {BUNDLED_BACKGROUNDS.map(art => (
-          <BackdropCard key={art.name} label={art.name} description={neo ? 'Artwork · colours only in Neo' : 'Artwork'} paint={`center / cover no-repeat url("${art.backdrop.src}")`} on={current.kind === 'image' && current.src === art.backdrop.src} onPick={() => choose(art.backdrop)} />
+          <BackdropCard key={art.name} label={art.name} description={neo ? `Artwork · colours only in ${solidLabel}` : 'Artwork'} paint={`center / cover no-repeat url("${art.backdrop.src}")`} on={current.kind === 'image' && current.src === art.backdrop.src} onPick={() => choose(art.backdrop)} />
         ))}
         {BACKDROP_PRESETS.map(preset => (
-          <BackdropCard key={preset.name} label={preset.name} description={neo ? 'Gradient · colours only in Neo' : 'Gradient'} paint={swatch(preset.backdrop)} on={same(preset.backdrop)} onPick={() => choose(preset.backdrop)} />
+          <BackdropCard key={preset.name} label={preset.name} description={neo ? `Gradient · colours only in ${solidLabel}` : 'Gradient'} paint={swatch(preset.backdrop)} on={same(preset.backdrop)} onPick={() => choose(preset.backdrop)} />
         ))}
         {/* Your own picture; once chosen it shows here as its own card. */}
         {current.kind === 'image' && current.src.startsWith('data:') && <BackdropCard label="Your image" description="Uploaded picture" paint={`center / cover no-repeat url("${current.src}")`} on onPick={() => undefined} />}
@@ -364,6 +386,7 @@ function BackdropField(): ReactElement {
 const STYLE_NOTES: Record<StyleChoice, string> = {
   classic: 'The standard Xerxes design',
   neo: 'Terminal console: one mono font, square corners, flat surfaces',
+  shading: 'shadcn/ui: neutral greys, a sans font, rounded cards with soft shadows',
 }
 
 /**
@@ -375,7 +398,7 @@ function StyleField(): ReactElement {
   const vscode = isVscodeHost()
   // VS Code keeps the choice in its own settings and stamps it on the page.
   const read = (): StyleChoice => typeof document === 'undefined' ? DEFAULT_STYLE
-    : vscode ? (document.documentElement.dataset?.styleChoice === 'classic' ? 'classic' : 'neo')
+    : vscode ? (isStyleChoice(document.documentElement.dataset?.styleChoice) ? document.documentElement.dataset.styleChoice as StyleChoice : 'neo')
     : loadAppearance().style
   const [style, setStyle] = useState<StyleChoice>(read)
   useEffect(() => {
@@ -393,7 +416,7 @@ function StyleField(): ReactElement {
           <button key={value} role="radio" aria-checked={style === value} className={style === value ? 'is-on' : ''} onClick={() => pick(value)}>{STYLE_LABELS[value]}</button>
         ))}
       </div>
-      <p className="field__note">Neo uses its own colours and a monospace font; Classic follows your VS Code theme. Saved as Xerxes: Style in VS Code settings.</p>
+      <p className="field__note">Neo uses its own colours and a monospace font; Shading is the shadcn/ui look; Classic follows your VS Code theme. Saved as Xerxes: Style in VS Code settings.</p>
     </div>
   )
   return (
@@ -404,9 +427,9 @@ function StyleField(): ReactElement {
           <button key={value} role="radio" aria-checked={style === value} title={STYLE_NOTES[value]} className={style === value ? 'is-on' : ''} onClick={() => pick(value)}>{STYLE_LABELS[value]}</button>
         ))}
       </div>
-      <p className="field__note">{style === 'neo'
-        ? 'Colour themes work in Neo. A background is never shown in Neo: only its colours are used.'
-        : STYLE_NOTES.classic + '. Neo is also in the command palette (⌘K).'}</p>
+      <p className="field__note">{style === 'classic'
+        ? STYLE_NOTES.classic + '. Neo and Shading are also in the command palette (⌘K).'
+        : `${STYLE_NOTES[style]}. Colour themes work in ${STYLE_LABELS[style]}. A background is never shown in ${STYLE_LABELS[style]}: only its colours are used.`}</p>
     </div>
   )
 }
@@ -1787,9 +1810,13 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         run: () => setNeedle('/goal '),
       },
       { id: 'compact', label: '/compact — compact this task now', run: () => void store.submit('/compact') },
-      (() => {
-        const next: StyleChoice = typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'neo' ? 'classic' : 'neo'
-        return { id: 'style', icon: 'half', label: `Switch to ${STYLE_LABELS[next]} style`, run: () => chooseStyle(next) } satisfies PaletteAction
+      // One entry per style the page is not in now.
+      ...(() => {
+        const stamped = typeof document !== 'undefined' ? document.documentElement.getAttribute('data-style') : null
+        const current: StyleChoice = isStyleChoice(stamped) ? stamped : 'classic'
+        return STYLES.filter(style => style !== current).map(next => (
+          { id: `style:${next}`, icon: 'half', label: `Switch to ${STYLE_LABELS[next]} style`, run: () => chooseStyle(next) } satisfies PaletteAction
+        ))
       })(),
       { id: 'settings', icon: 'settings', label: 'Settings…', run: () => store.openSettings() },
       { id: 'models-settings', icon: 'spark', label: 'Models & Providers settings…', run: () => store.openSettings('models') },

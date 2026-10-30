@@ -4,7 +4,7 @@
 import { useEffect, useReducer, useState, type ReactElement } from 'react'
 
 import type { PairEnv } from '../context.js'
-import { initialPairState, reducePair, type PairState } from '../pairing.js'
+import { browserPairStorage, forgetPairingAwait, initialPairState, reducePair, rememberPairingAwait, type PairState } from '../pairing.js'
 
 const DEFAULT_POLL_MS = 2_000
 const DEFAULT_MAX_WAIT_MS = 5 * 60_000
@@ -16,7 +16,10 @@ export function PairView({ state, onRetry }: { state: PairState; onRetry: () => 
     <main className="pair" aria-labelledby="pair-title">
       <h1 id="pair-title" className="page-title">Pair this phone</h1>
       {state.phase === 'missing' ? (
-        <p>This page needs a pairing link. On the desktop, create a pairing code and scan its QR code with this phone.</p>
+        <div>
+          <p>This page needs a pairing link. On the desktop, create a pairing code and scan its QR code with this phone.</p>
+          <p><a className="btn" href="/">Open Xerxes</a></p>
+        </div>
       ) : null}
       {state.phase === 'invalid' ? <p role="alert" className="field-error">That pairing link is incomplete. Create a new pairing code on the desktop and scan it again.</p> : null}
       {state.phase === 'rejected' ? <p role="alert" className="field-error">{state.message}</p> : null}
@@ -51,38 +54,45 @@ export function PairPage({ env }: { env: PairEnv }): ReactElement {
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
-    if (env.read.kind !== 'found') return undefined
-    const fragment = env.read.fragment
+    const read = env.read
+    if (read.kind !== 'found' && read.kind !== 'resume') return undefined
+    const storage = browserPairStorage()
     let cancelled = false
     const pollMs = env.pollMs ?? DEFAULT_POLL_MS
     const maxWait = env.maxWaitMs ?? DEFAULT_MAX_WAIT_MS
+    const paired = (): void => {
+      forgetPairingAwait(storage)
+      dispatch({ type: 'confirmed' })
+      env.onPaired()
+    }
     void (async () => {
-      const outcome = await env.http.consumePairing({ pairing_id: fragment.pairingId, code: fragment.code, device_label: env.deviceLabel })
-      if (cancelled) return
-      if (outcome.status === 'rejected') { dispatch({ type: 'rejected', message: outcome.message }); return }
-      if (outcome.status === 'unavailable') { dispatch({ type: 'unavailable', message: outcome.message }); return }
-      dispatch(outcome.comparisonCode === undefined ? { type: 'accepted' } : { type: 'accepted', comparison: outcome.comparisonCode })
-      if (outcome.active) {
-        // No desktop confirmation required: the cookies are already usable.
-        dispatch({ type: 'confirmed' })
-        env.onPaired()
-        return
+      if (read.kind === 'found') {
+        const fragment = read.fragment
+        const outcome = await env.http.consumePairing({ pairing_id: fragment.pairingId, code: fragment.code, device_label: env.deviceLabel })
+        if (cancelled) return
+        if (outcome.status === 'rejected') { dispatch({ type: 'rejected', message: outcome.message }); return }
+        if (outcome.status === 'unavailable') { dispatch({ type: 'unavailable', message: outcome.message }); return }
+        dispatch(outcome.comparisonCode === undefined ? { type: 'accepted' } : { type: 'accepted', comparison: outcome.comparisonCode })
+        if (outcome.active) {
+          // No desktop confirmation required: the cookies are already usable.
+          paired()
+          return
+        }
+        // A reload or an iOS discard while waiting must resume the wait, not show a dead end.
+        rememberPairingAwait(storage, Date.now(), outcome.comparisonCode ?? fragment.comparison)
       }
       const started = Date.now()
       while (!cancelled) {
         // 202 means still waiting for the owner; 200 means confirmed.
         const refreshed = await env.http.refresh()
         if (cancelled) return
-        if (refreshed.status === 'ok') {
-          dispatch({ type: 'confirmed' })
-          env.onPaired()
-          return
-        }
+        if (refreshed.status === 'ok') { paired(); return }
         if (refreshed.status === 'denied') {
+          forgetPairingAwait(storage)
           dispatch({ type: 'rejected', message: 'The desktop did not accept this phone, or the pairing expired. Create a new pairing code and scan it again.' })
           return
         }
-        if (Date.now() - started > maxWait) { dispatch({ type: 'expired' }); return }
+        if (Date.now() - started > maxWait) { forgetPairingAwait(storage); dispatch({ type: 'expired' }); return }
         await new Promise<void>(resolve => { setTimeout(resolve, pollMs) })
       }
     })()

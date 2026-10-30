@@ -6,19 +6,35 @@ import type { HubStore } from '../../../client/hubStore.js'
 import type { VoiceControl } from '../../../client/voiceControl.js'
 import { tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import { browserLiveCaptureDeps } from '../liveCapture.js'
-import { CallEngine, type CallOutput } from './engine.js'
+import { CALL_SYNTH_STALLED, CALL_TRANSCRIBE_STALLED, CallEngine, type CallOutput } from './engine.js'
 import { fetchCallModelsStatus, waitForCallReply } from './logic.js'
 import { cachedTierBytes } from './phoneCache.js'
 import { VoiceCallService } from './service.js'
-import type { CallModels, CallProgress, CallTranscriptionRecovery, CallWorkerRequest, CallWorkerResponse } from './protocol.js'
+import { CallStepError, type CallModels, type CallProgress, type CallTranscriptionRecovery, type CallWorkerRequest, type CallWorkerResponse } from './protocol.js'
 
 export const CALL_WORKER_URL = '/voice-call-worker.js'
 export const CALL_VAD_WORKER_URL = '/voice-vad-worker.js'
 export const SPEECH_RESTART_WINDOW_MS = 60_000
 export const SPEECH_RESTART_LIMIT = 3
 export const SPEECH_RESTART_TIMEOUT_MS = 30_000
+/** Per-job deadlines in the speech worker. On expiry the hung runtime is replaced (the restart path). */
+export const TRANSCRIBE_JOB_TIMEOUT_MS = 30_000
+export const SYNTHESIZE_JOB_TIMEOUT_MS = 45_000
+/** Longest wait for the phone to resume a paused AudioContext (iOS can leave resume() pending). */
+export const AUDIO_RESUME_WAIT_MS = 1500
+export const LIGHT_NO_SYNTH = 'Light mode needs an installed English voice. This browser has no speech synthesis.'
+export const LIGHT_NO_VOICE = 'Light mode needs a local English voice installed in your phone’s speech settings. Network voices are not used.'
+export const CALL_AUDIO_BLOCKED = 'The phone paused call audio, so that reply was not spoken. It is in the thread.'
 type WithoutId<T> = T extends { readonly id: number } ? Omit<T, 'id'> : never
 type WorkerJob = WithoutId<Exclude<CallWorkerRequest, { readonly type: 'cancel' }>>
+
+/** A worker job passed its deadline; the worker may be hung. */
+export class CallWorkerTimeout extends Error {
+  constructor(readonly job: string) {
+    super(`The on-phone ${job} job did not finish in time.`)
+    this.name = 'CallWorkerTimeout'
+  }
+}
 
 function callWorkerClient(url: string) {
   const worker = new Worker(url, { type: 'module', name: url === CALL_VAD_WORKER_URL ? 'xerxes-call-vad' : 'xerxes-call-speech' })
@@ -51,22 +67,30 @@ function callWorkerClient(url: string) {
   }
   worker.onerror = event => {
     event.preventDefault()
-    failure = new Error('The on-phone voice worker stopped. Check browser support and try Light mode.')
+    // Light uses the same workers, so it is never the advice here: the script itself failed to load or run.
+    const detail = [event.message, event.filename].filter(part => typeof part === 'string' && part !== '').join(' · ')
+    failure = new Error(`The on-phone voice worker stopped${detail ? ` (${detail})` : ''}. Reload the app; if it keeps happening, update the Hub.`)
     for (const call of pending.values()) call.reject(failure)
     pending.clear()
   }
-  function request(job: WorkerJob, signal?: AbortSignal, progress?: (value: CallProgress) => void): Promise<CallWorkerResponse> {
+  function request(job: WorkerJob, signal?: AbortSignal, progress?: (value: CallProgress) => void, timeoutMs?: number): Promise<CallWorkerResponse> {
     const message: CallWorkerRequest = { ...job, id: ++id }
     return new Promise((resolve, reject) => {
       if (disposed || signal?.aborted || failure) { reject(failure ?? new Error('Call cancelled.')); return }
-      const abort = (): void => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const cancel = (): void => {
         pending.delete(message.id)
-        worker.postMessage({ type: 'cancel', id: message.id } satisfies CallWorkerRequest)
-        reject(new Error('Call cancelled.'))
+        try { worker.postMessage({ type: 'cancel', id: message.id } satisfies CallWorkerRequest) } catch { /* worker already gone */ }
       }
-      const clean = (): void => signal?.removeEventListener('abort', abort)
+      const clean = (): void => {
+        signal?.removeEventListener('abort', abort)
+        if (timer !== undefined) clearTimeout(timer)
+        timer = undefined
+      }
+      const abort = (): void => { cancel(); clean(); reject(new Error('Call cancelled.')) }
       pending.set(message.id, { resolve: response => { clean(); resolve(response) }, reject: error => { clean(); reject(error) }, ...(progress ? { progress } : {}) })
       signal?.addEventListener('abort', abort, { once: true })
+      if (timeoutMs !== undefined) timer = setTimeout(() => { cancel(); clean(); reject(new CallWorkerTimeout(job.type)) }, timeoutMs)
       try {
         worker.postMessage(message, 'samples' in message ? [message.samples.buffer] : [])
       } catch {
@@ -99,6 +123,8 @@ export function browserCallModels(): CallModels {
   let activeTier: VoiceModelTier = 'standard'
   let disposed = false
   let recovering = false
+  /** Aborted only on dispose: a runtime replacement must finish even if the job that triggered it was cancelled. */
+  const modelsLifetime = new AbortController()
   const restarts: number[] = []
   const checkActive = (signal: AbortSignal): void => { if (disposed || signal.aborted) throw new Error('Call cancelled.') }
   try { speech = callWorkerClient(CALL_WORKER_URL) } catch (error) { vad.dispose(); throw error }
@@ -163,14 +189,22 @@ export function browserCallModels(): CallModels {
     resetVad() { void vad.request({ type: 'reset-vad' }).catch(() => undefined) },
     async transcribe(samples, signal, recovery) {
       checkActive(signal)
-      if (recovering) throw new Error('Speech recognition is still restarting.')
+      if (recovering) throw new CallStepError('Speech recognition is still restarting. Say that again in a moment.')
+      // A hung speech runtime is replaced, then the person is asked to repeat; the call goes on.
+      const timed = async (job: Promise<CallWorkerResponse>): Promise<CallWorkerResponse> => {
+        try { return await job } catch (error) {
+          if (!(error instanceof CallWorkerTimeout)) throw error
+          await restartSpeech(signal, recovery)
+          throw new CallStepError(CALL_TRANSCRIBE_STALLED)
+        }
+      }
       // Retain one bounded copy only for the existing GPU-to-WASM retry. WASM failures drop the clip.
-      let response = await speech.request({ type: 'transcribe', samples: samples.slice() }, signal)
+      let response = await timed(speech.request({ type: 'transcribe', samples: samples.slice() }, signal, undefined, TRANSCRIBE_JOB_TIMEOUT_MS))
       checkActive(signal)
       if (response.type === 'retry-wasm') {
         await restartSpeech(signal)
         checkActive(signal)
-        response = await speech.request({ type: 'transcribe', samples }, signal)
+        response = await timed(speech.request({ type: 'transcribe', samples }, signal, undefined, TRANSCRIBE_JOB_TIMEOUT_MS))
         checkActive(signal)
       }
       if (response.type === 'restart-speech') {
@@ -182,11 +216,18 @@ export function browserCallModels(): CallModels {
       return response.text
     },
     async synthesize(text, signal) {
-      const response = await speech.request({ type: 'synthesize', text }, signal)
+      let response: CallWorkerResponse
+      try { response = await speech.request({ type: 'synthesize', text }, signal, undefined, SYNTHESIZE_JOB_TIMEOUT_MS) } catch (error) {
+        if (!(error instanceof CallWorkerTimeout)) throw error
+        // Replace the hung runtime on the models' own lifetime: a barge-in during the restart must not
+        // leave a terminated speech worker behind.
+        if (!recovering) await restartSpeech(modelsLifetime.signal)
+        throw new CallStepError(CALL_SYNTH_STALLED)
+      }
       if (response.type !== 'audio') throw new Error('Invalid speech response.')
       return response.audio
     },
-    dispose() { if (disposed) return; disposed = true; vad.dispose(); if (recovering) speech.terminate(); else speech.dispose() },
+    dispose() { if (disposed) return; disposed = true; modelsLifetime.abort(); vad.dispose(); if (recovering) speech.terminate(); else speech.dispose() },
   }
 }
 
@@ -228,12 +269,37 @@ export function browserCallOutput(): CallOutput {
     synth?.cancel()
     endSpeech?.()
   }
+  const localVoice = (): SpeechSynthesisVoice | undefined => synth?.getVoices().find(voice => voice.localService && /^en(?:-|$)/iu.test(voice.lang))
+  /** Voices load asynchronously on iOS/Android; wait briefly for the list instead of judging an empty one. */
+  const voicesReady = async (signal?: AbortSignal): Promise<void> => {
+    if (!synth || synth.getVoices().length > 0) return
+    await new Promise<void>(resolve => {
+      const done = (): void => { clearTimeout(timer); synth.removeEventListener('voiceschanged', done); signal?.removeEventListener('abort', done); resolve() }
+      const timer = setTimeout(done, 1500)
+      synth.addEventListener('voiceschanged', done, { once: true })
+      signal?.addEventListener('abort', done, { once: true })
+    })
+  }
+  /** resume() can stay pending on iOS while another app holds audio; never wait on it unbounded. */
+  const resumeBounded = async (): Promise<boolean> => {
+    if (context.state === 'running') return true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      context.resume().catch(() => undefined),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, AUDIO_RESUME_WAIT_MS) }),
+    ])
+    if (timer !== undefined) clearTimeout(timer)
+    // Read again: resume() changed the state after the narrowing check above.
+    const state: string = context.state
+    return state === 'running'
+  }
   return {
     async unlock() {
+      // Called synchronously from the Start tap: resume() and the silent utterance must start before any await.
       const resumed = context.resume()
       // iOS requires speechSynthesis to be unlocked in a gesture as well.
       if (synth) {
-        const voice = synth.getVoices().find(voice => voice.localService && /^en(?:-|$)/iu.test(voice.lang))
+        const voice = localVoice()
         if (voice) {
           const silent = new SpeechSynthesisUtterance(' ')
           silent.voice = voice
@@ -244,10 +310,17 @@ export function browserCallOutput(): CallOutput {
       await resumed
       if (context.state !== 'running') throw new Error('Tap Start again to allow call audio.')
     },
+    async prepare(tier) {
+      if (tier !== 'light') return undefined
+      if (!synth) return LIGHT_NO_SYNTH
+      await voicesReady()
+      return localVoice() ? undefined : LIGHT_NO_VOICE
+    },
+    resume: resumeBounded,
     async play(audio, signal) {
       if (signal.aborted) return
-      await context.resume()
-      if (context.state !== 'running') throw new Error('The phone blocked call audio. Hang up and tap Start again.')
+      // A paused context drops this clip only; the call keeps listening.
+      if (!(await resumeBounded())) throw new CallStepError(CALL_AUDIO_BLOCKED)
       if (signal.aborted) return
       const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate)
       buffer.getChannelData(0).set(audio.samples)
@@ -275,19 +348,13 @@ export function browserCallOutput(): CallOutput {
       })
     },
     async speak(text, signal) {
-      if (!synth) throw new Error('Light mode needs an installed English voice. This browser has no speech synthesis.')
+      if (!synth) throw new CallStepError(LIGHT_NO_SYNTH)
       if (signal.aborted) return
-      if (synth.getVoices().length === 0) {
-        await new Promise<void>(resolve => {
-          const done = (): void => { clearTimeout(timer); synth.removeEventListener('voiceschanged', done); signal.removeEventListener('abort', done); resolve() }
-          const timer = setTimeout(done, 1500)
-          synth.addEventListener('voiceschanged', done, { once: true })
-          signal.addEventListener('abort', done, { once: true })
-        })
-      }
+      // Only wait when the list is still empty: speak() must reach synth.speak synchronously otherwise.
+      if (synth.getVoices().length === 0) await voicesReady(signal)
       if (signal.aborted) return
-      const voice = synth.getVoices().find(voice => voice.localService && /^en(?:-|$)/iu.test(voice.lang))
-      if (!voice) throw new Error('Light mode needs a local English voice installed in your phone’s speech settings. Network voices are not used.')
+      const voice = localVoice()
+      if (!voice) throw new CallStepError(LIGHT_NO_VOICE)
       await new Promise<void>((resolve, reject) => {
         const utterance = new SpeechSynthesisUtterance(text)
         utterance.voice = voice
@@ -309,7 +376,7 @@ export function browserCallOutput(): CallOutput {
         utterance.onerror = () => {
           if (!clean()) return
           if (signal.aborted) resolve()
-          else reject(new Error('The phone’s built-in voice could not speak.'))
+          else reject(new CallStepError('The phone’s built-in voice could not speak. The reply is in the thread.'))
         }
         signal.addEventListener('abort', abort, { once: true })
         synth.speak(utterance)
@@ -328,14 +395,21 @@ export function browserCallEngine(controller: HubController, store: HubStore): C
     capture,
     models: browserCallModels,
     output: browserCallOutput,
-    reply(text, signal, onTimeout) {
-      const messageId = crypto.randomUUID()
+    reply(text, signal, onTimeout, messageId) {
       const threadId = store.getSnapshot().supervisor.threadId
       return waitForCallReply({
         messageId, ...(threadId ? { threadId } : {}), signal, onTimeout,
         messages: () => store.getSnapshot().supervisor.messages,
         subscribe: store.subscribe,
-        send: () => controller.supervisorSend(text, 'voice', messageId),
+        // The Hub's `activity: idle` (or a "XERXES stopped" notice) ends the wait instead of 120 s of silence.
+        working: () => store.getSnapshot().supervisor.working,
+        send: async () => {
+          const ok = await controller.supervisorSend(text, 'voice', messageId)
+          // Offline is not a refusal: throwing marks it as unsent, so the call holds the text and
+          // resends it with the same id when the Hub is back.
+          if (!ok && store.getSnapshot().connection.state !== 'live') throw new Error('The Hub is not connected.')
+          return ok
+        },
       })
     },
   })

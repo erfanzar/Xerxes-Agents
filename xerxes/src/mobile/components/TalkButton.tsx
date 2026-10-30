@@ -7,6 +7,8 @@ import type { VoiceControl } from '../../client/voiceControl.js'
 
 type Phase = 'idle' | 'recording' | 'processing'
 
+export const TALK_CANCELLED = 'Recording cancelled. Hold the button again to talk.'
+
 /**
  * Push-to-talk over an injected VoiceControl: hold to talk (pointer), or press
  * Enter/Space to start and again to stop (keyboard). The transcript only fills
@@ -16,6 +18,7 @@ type Phase = 'idle' | 'recording' | 'processing'
 export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | undefined; onTranscript: (text: string) => void }): ReactElement | null {
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
   const starting = useRef<Promise<void> | undefined>(undefined)
 
   if (voice === undefined) return null
@@ -23,6 +26,7 @@ export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | unde
   const begin = (): void => {
     if (phase !== 'idle') return
     setError(undefined)
+    setNotice(undefined)
     setPhase('recording')
     starting.current = voice.start().catch((reason: unknown) => {
       starting.current = undefined
@@ -54,6 +58,8 @@ export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | unde
     voice.cancel()
     starting.current = undefined
     setPhase('idle')
+    // Never discard a recording silently.
+    setNotice(TALK_CANCELLED)
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
@@ -72,7 +78,14 @@ export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | unde
         className={`btn btn-talk${phase === 'recording' ? ' is-recording' : ''}`}
         aria-pressed={phase === 'recording'}
         disabled={phase === 'processing'}
-        onPointerDown={event => { event.preventDefault(); begin() }}
+        // No browser pan/zoom on the button: a small finger movement must not cancel the pointer.
+        style={{ touchAction: 'none' }}
+        onPointerDown={event => {
+          event.preventDefault()
+          // The release still reaches this button when the finger drifts off it.
+          try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* capture is best effort */ }
+          begin()
+        }}
         onPointerUp={end}
         onPointerCancel={cancel}
         onKeyDown={onKeyDown}
@@ -80,6 +93,7 @@ export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | unde
         {label}
       </button>
       {error === undefined ? null : <span role="alert" className="field-error">{error}</span>}
+      {error === undefined && notice !== undefined ? <span role="status" className="field-error">{notice}</span> : null}
     </span>
   )
 }

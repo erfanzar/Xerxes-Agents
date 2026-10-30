@@ -33,6 +33,17 @@ export function createTranscriptScroll(port: TranscriptScrollPort) {
       remember()
       return !initial && upward && (y <= 140 || (port.top() >= -140 && port.top() <= 140))
     },
+    /** True while the reader is at (or within 100px of) the bottom. */
+    pinned(): boolean {
+      return pinned
+    },
+    /** "Jump to latest": go to the bottom and follow new content again. */
+    toBottom(): void {
+      port.scrollTo(Math.max(0, port.height() - port.viewport()))
+      pinned = true
+      lastY = port.y()
+      remember()
+    },
     beforePrepend(): void {
       remember()
       prependY = port.y()

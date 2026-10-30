@@ -95,7 +95,20 @@ export interface HubConnectionOptions {
   readonly onProtocolError?: (error: Error) => void
   /** Treat a sequence jump as a gap. Default false: the Hub's sequences are global, so scoped streams have holes. */
   readonly contiguousSequences?: boolean
+  /** How long one attempt may take to reach `live` before it is dropped and retried. Default 20 s. */
+  readonly connectTimeoutMs?: number
+  /** Timeout of the liveness probe sent by `verifyLink`. Default 4 s. */
+  readonly probeTimeoutMs?: number
+  /**
+   * While visible and live, probe the link when no frame arrived for this long.
+   * The Hub pings at the WebSocket layer, which a page cannot observe, so a
+   * silent link is checked with a request. 0 or absent disables it.
+   */
+  readonly heartbeatMs?: number
 }
+
+/** Result of a liveness check: the link answered, a reconnect was started, or nothing was checked. */
+export type LinkCheck = 'live' | 'reconnecting' | 'skipped'
 
 export interface ResetBoundary {
   readonly sequence?: number
@@ -183,7 +196,17 @@ export class ScopedCursorTracker extends EventCursorTracker {
   }
 }
 
-const DEFAULT_BACKOFF: BackoffOptions = { baseMs: 500, maxMs: 30_000 }
+/**
+ * A phone on a flaky network should not wait half a minute for its next try,
+ * and a hidden page schedules no retries at all (see `setVisible`), so a low
+ * cap costs nothing in the background.
+ */
+const DEFAULT_BACKOFF: BackoffOptions = { baseMs: 500, maxMs: 8_000 }
+/** Socket open + hello + subscription restarts; generous because a reset may load a snapshot. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 20_000
+const DEFAULT_PROBE_TIMEOUT_MS = 4_000
+/** Consecutive request timeouts on a live link after which the socket is treated as dead. */
+const DEAD_LINK_TIMEOUTS = 2
 
 /** Capped exponential backoff with jitter in [half, full] of the step. */
 export function backoffDelay(attempt: number, options: BackoffOptions = DEFAULT_BACKOFF, random: () => number = Math.random): number {
@@ -299,6 +322,18 @@ export class HubConnection {
   private helloRetried = false
   private lastError: string | undefined
   private hello: HelloInfo = {}
+  /** False while the page is hidden: no reconnect timer runs then; `resume` reconnects at once. */
+  private visible = true
+  /** A reconnect that was due while hidden. */
+  private parked = false
+  private connectTimer: unknown
+  private consecutiveTimeouts = 0
+  private heartbeatTimer: unknown
+  private framesSinceBeat = false
+  private probe: Promise<LinkCheck> | undefined
+  /** Set when a caller of the running probe asked to notify `onLinkVerified` listeners. */
+  private probeNotifies = false
+  private readonly resumeListeners = new Set<() => void>()
 
   constructor(options: HubConnectionOptions) {
     this.options = options
@@ -341,22 +376,111 @@ export class HubConnection {
     void this.open()
   }
 
-  /** Drop the link now and reconnect immediately (used by "Retry"). */
+  /** Drop the link now and reconnect immediately, with the backoff reset (used by "Retry"). */
   reconnectNow(): void {
     if (this.revoked) return
     this.stopped = false
+    this.parked = false
     this.cancelReconnect()
+    this.cancelConnectTimer()
+    this.cancelHeartbeat()
+    this.generation += 1
     this.dropSocket(1000, 'client reconnect')
     this.failPending(new HubRequestError('disconnected', 'Connection restarted', true))
     this.attempt = 0
+    this.consecutiveTimeouts = 0
     this.setStatus({ state: 'connecting' })
     void this.open()
   }
 
+  /**
+   * Page visibility. While hidden no reconnect timer is kept (a suspended
+   * phone would only pile them up); a reconnect that falls due is parked
+   * until `resume`.
+   */
+  setVisible(visible: boolean): void {
+    this.visible = visible
+    if (visible) return
+    this.cancelHeartbeat()
+    if (this.reconnectTimer !== undefined) {
+      this.cancelReconnect()
+      this.parked = true
+    }
+  }
+
+  /**
+   * The app came back (foreground, page restored, network back). A broken
+   * link reconnects at once with the backoff reset; a link that looks live is
+   * probed, because a socket that died while the phone slept still reads live.
+   */
+  resume(): void {
+    this.visible = true
+    if (this.revoked || this.stopped) return
+    const state = this.current.state
+    if (state === 'reconnecting' || this.parked) { this.reconnectNow(); return }
+    if (state === 'live') void this.verifyLink(undefined, { notify: true })
+  }
+
+  /**
+   * Probe the live link with a cheap request and a short timeout. When it does
+   * not answer the socket is dropped and a new one opened, so a dead socket
+   * never keeps showing `live`. Concurrent calls share one probe.
+   *
+   * `notify: true` (a return to the foreground: `resume`, the controller's
+   * `resync`) tells `onLinkVerified` listeners when the link answered, so they
+   * re-read what may have changed meanwhile. The heartbeat's own probes stay
+   * silent: a quiet, visible app must not re-read everything every beat.
+   */
+  verifyLink(timeoutMs?: number, options: { readonly notify?: boolean } = {}): Promise<LinkCheck> {
+    if (this.revoked || this.stopped) return Promise.resolve('skipped')
+    if (this.current.state === 'reconnecting') { this.reconnectNow(); return Promise.resolve('reconnecting') }
+    if (this.current.state !== 'live') return Promise.resolve('skipped')
+    // A shared probe notifies when any of its callers asked for it.
+    if (options.notify === true) this.probeNotifies = true
+    if (this.probe) return this.probe
+    const generation = this.generation
+    const probe = this.rawRequest('hub.hello', { protocol: HUB_PROTOCOL_VERSION, client: 'xerxes-mobile' }, timeoutMs ?? this.options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS)
+      .then((): LinkCheck => 'live', (error: unknown): LinkCheck => {
+        const silent = !(error instanceof HubRequestError) || error.code === 'timeout' || error.code === 'disconnected' || error.code === 'offline'
+        // Any answer from the Hub, even a refusal, proves the socket carries frames.
+        if (!silent) return 'live'
+        if (this.stopped || this.revoked) return 'skipped'
+        // The dead-link rule may already have restarted the link for this very timeout.
+        if (generation !== this.generation) return 'reconnecting'
+        this.lastError = 'The connection stopped answering'
+        this.reconnectNow()
+        return 'reconnecting'
+      })
+      .then(result => {
+        const notify = this.probeNotifies
+        this.probeNotifies = false
+        if (result === 'live') {
+          if (this.heartbeatTimer === undefined) this.scheduleHeartbeat()
+          if (notify) for (const listener of [...this.resumeListeners]) listener()
+        }
+        return result
+      })
+      .finally(() => { if (this.probe === probe) this.probe = undefined })
+    this.probe = probe
+    return probe
+  }
+
+  /**
+   * Called after a foreground probe (`verifyLink(…, { notify: true })`, `resume`) confirmed the
+   * existing link (no reconnect, so no `live` transition). Heartbeat probes never call it.
+   */
+  onLinkVerified(listener: () => void): () => void {
+    this.resumeListeners.add(listener)
+    return () => { this.resumeListeners.delete(listener) }
+  }
+
   close(): void {
     this.stopped = true
+    this.parked = false
     this.generation += 1
     this.cancelReconnect()
+    this.cancelConnectTimer()
+    this.cancelHeartbeat()
     this.dropSocket(1000, 'client closed')
     this.failPending(new HubRequestError('disconnected', 'Connection closed', true))
     for (const sub of this.subs) this.detach(sub)
@@ -511,6 +635,18 @@ export class HubConnection {
       }
     }
     if (generation !== this.generation || this.stopped) return
+    this.cancelConnectTimer()
+    // A socket that never opens (a half-dead network, a captive portal) must not hold
+    // 'connecting' forever: the whole handshake has to reach 'live' within the deadline.
+    this.connectTimer = this.timers.setTimeout(() => {
+      this.connectTimer = undefined
+      if (generation !== this.generation || this.stopped || this.revoked || this.current.state === 'live') return
+      this.generation += 1
+      this.lastError = 'The Hub did not answer'
+      this.dropSocket(1000, 'connect timeout')
+      this.failPending(new HubRequestError('disconnected', 'Connection timed out', true))
+      this.scheduleReconnect()
+    }, this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS)
     this.socket = this.factory(this.options.url, {
       open: () => { if (generation === this.generation) void this.onOpen(generation) },
       message: data => { if (generation === this.generation) this.onMessage(data) },
@@ -518,6 +654,35 @@ export class HubConnection {
       close: (code, reason) => { if (generation === this.generation) this.onClose(code, reason) },
       error: () => { if (generation === this.generation) this.lastError = 'Connection error' },
     })
+  }
+
+  private cancelConnectTimer(): void {
+    if (this.connectTimer !== undefined) {
+      this.timers.clearTimeout(this.connectTimer)
+      this.connectTimer = undefined
+    }
+  }
+
+  /** While visible and live, probe the link whenever no frame arrived during one heartbeat period. */
+  private scheduleHeartbeat(): void {
+    const period = this.options.heartbeatMs
+    if (period === undefined || period <= 0) return
+    this.cancelHeartbeat()
+    this.framesSinceBeat = false
+    this.heartbeatTimer = this.timers.setTimeout(() => {
+      this.heartbeatTimer = undefined
+      if (this.stopped || this.revoked || this.current.state !== 'live' || !this.visible) return
+      // A quiet link is probed; a successful probe schedules the next beat.
+      if (!this.framesSinceBeat) void this.verifyLink()
+      else this.scheduleHeartbeat()
+    }, period)
+  }
+
+  private cancelHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) {
+      this.timers.clearTimeout(this.heartbeatTimer)
+      this.heartbeatTimer = undefined
+    }
   }
 
   private async onOpen(generation: number): Promise<void> {
@@ -558,13 +723,18 @@ export class HubConnection {
       await sub.resetPromise
     }))
     if (generation !== this.generation || this.stopped) return
+    this.cancelConnectTimer()
     this.attempt = 0
+    this.consecutiveTimeouts = 0
     this.helloRetried = false
     this.lastError = undefined
     this.setStatus({ state: 'live' })
+    this.scheduleHeartbeat()
   }
 
   private onClose(code: number, reason: string): void {
+    this.cancelConnectTimer()
+    this.cancelHeartbeat()
     this.socket = undefined
     this.byServerId.clear()
     for (const sub of this.subs) { sub.serverId = undefined }
@@ -581,10 +751,18 @@ export class HubConnection {
     if (this.stopped || this.revoked) return
     this.cancelReconnect()
     this.attempt += 1
+    this.cancelHeartbeat()
+    this.cancelConnectTimer()
     this.setStatus({ state: 'reconnecting', attempt: this.attempt, ...(this.lastError === undefined ? {} : { lastError: this.lastError }) })
+    if (!this.visible) {
+      // A hidden page keeps no timer: `resume` reconnects at once when the app comes back.
+      this.parked = true
+      return
+    }
     const delay = backoffDelay(this.attempt, this.options.backoff ?? DEFAULT_BACKOFF, this.random)
     this.reconnectTimer = this.timers.setTimeout(() => {
       this.reconnectTimer = undefined
+      if (!this.visible) { this.parked = true; return }
       void this.open()
     }, delay)
   }
@@ -600,7 +778,10 @@ export class HubConnection {
     this.revoked = true
     this.stopped = true
     this.generation += 1
+    this.parked = false
     this.cancelReconnect()
+    this.cancelConnectTimer()
+    this.cancelHeartbeat()
     this.dropSocket(1000, 'revoked')
     this.failPending(new HubRequestError('disconnected', 'Connection closed', true))
     for (const sub of this.subs) this.detach(sub)
@@ -657,9 +838,17 @@ export class HubConnection {
       return Promise.reject(new HubRequestError(code, error instanceof Error ? error.message : 'invalid frame'))
     }
     return new Promise((resolve, reject) => {
+      const generation = this.generation
       const timer = this.timers.setTimeout(() => {
         this.pending.delete(id)
         reject(new HubRequestError('timeout', `${method} timed out`, true))
+        // Two silent requests in a row on a link that reads live: the socket is dead.
+        if (generation !== this.generation || this.current.state !== 'live') return
+        this.consecutiveTimeouts += 1
+        if (this.consecutiveTimeouts >= DEAD_LINK_TIMEOUTS && !this.stopped && !this.revoked) {
+          this.lastError = 'The connection stopped answering'
+          this.reconnectNow()
+        }
       }, timeoutMs ?? this.options.requestTimeoutMs ?? 15_000)
       this.pending.set(id, { method, resolve, reject, timer })
       try {
@@ -691,6 +880,9 @@ export class HubConnection {
       this.report(error instanceof Error ? error : new Error('unreadable frame'))
       return
     }
+    // Any frame proves the link carries traffic.
+    this.framesSinceBeat = true
+    this.consecutiveTimeouts = 0
     if (frame.kind === 'response') {
       if (frame.id === null) {
         if (!frame.ok) this.report(new HubProtocolError(frame.error.code, frame.error.message))
@@ -804,8 +996,12 @@ export class HubConnection {
       if (error instanceof HubRequestError) sub.handlers.error?.(error)
       return
     }
-    if (sub.disposed) return
     const serverId = str(result.subscription_id)
+    if (sub.disposed) {
+      // Left while the subscribe was in flight: cancel it on the Hub so it does not leak there.
+      if (serverId) void this.rawRequest('hub.events.unsubscribe', { subscription_id: serverId }).catch(() => undefined)
+      return
+    }
     if (!serverId) {
       sub.handlers.error?.(new HubRequestError('internal', 'subscribe returned no subscription id'))
       return

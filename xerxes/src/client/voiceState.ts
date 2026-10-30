@@ -66,6 +66,8 @@ export type VoiceEvent =
   | { readonly type: 'audio_end'; readonly responseId: string; readonly generation: number; readonly interrupted: boolean }
   | { readonly type: 'playback_started'; readonly responseId: string; readonly generation: number }
   | { readonly type: 'playback_ended'; readonly responseId: string; readonly generation: number }
+  /** The response finished without any sound reaching the speaker (empty, or no output device). */
+  | { readonly type: 'playback_empty'; readonly responseId: string; readonly generation: number }
   | { readonly type: 'interrupt' }
   | { readonly type: 'live'; readonly active: boolean }
   | { readonly type: 'failed'; readonly code: string; readonly message: string }
@@ -148,10 +150,11 @@ export function voiceReducer(state: VoiceUiState, event: VoiceEvent): VoiceUiSta
     case 'audio_end':
       if (event.responseId !== state.responseId || event.generation !== state.generation) return state
       if (event.interrupted) return { ...state, ...noResponse, phase: state.live ? 'listening' : 'interrupted' }
-      // Never played anything (empty or blocked): nothing will end it later.
-      if (!state.playing) return { ...state, ...noResponse, phase: rest(state) }
+      // Queued audio may still be about to sound (its start is reported a moment later), so the orb
+      // rests only when playback reports it ended, or that nothing played (`playback_empty`).
       return { ...state, streamEnded: true }
     case 'playback_ended':
+    case 'playback_empty':
       if (event.responseId !== state.responseId || event.generation !== state.generation) return state
       return { ...state, ...noResponse, phase: rest(state) }
     case 'interrupt':

@@ -6,7 +6,9 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { createHubHttp, type FetchLike } from '../api.js'
+import { HUB_HTTP, HubHttpTimeout, createHubHttp, type FetchLike } from '../api.js'
+import { initialPairState, pairingAwait, readPairRoute, rememberPairingAwait, type PairStorage } from '../pairing.js'
+import { FakeTimers, settle } from './fakes.js'
 import { createPushService, urlBase64ToBytes, type PushEnv } from '../pwa/push.js'
 import { fetchDecision, installServiceWorker, pushDisplay, safeTaskPath, type SwClient, type SwScope } from '../pwa/swCore.js'
 
@@ -93,6 +95,38 @@ describe('service worker caching policy', () => {
     expect(await (await answer)?.text()).toBe('cached-js')
   })
 
+  it('serves the cached shell when a navigation is slower than the deadline, and the network when it is fast', async () => {
+    const slow = fakeScope()
+    slow.cached.set('/index.html', new Response('cached-shell'))
+    installServiceWorker({ ...slow.scope, fetch: () => new Promise<Response>(() => undefined) }, { version: 'v1', shell: SHELL, navigationTimeoutMs: 20 })
+    let answer: Promise<Response> | Response | undefined
+    ;(slow.listeners.get('fetch') as (event: unknown) => void)({ request: request(`${ORIGIN}/w/a/s/b`, 'navigate'), respondWith: (value: Promise<Response> | Response) => { answer = value } })
+    expect(await (await answer)?.text()).toBe('cached-shell')
+
+    const fast = fakeScope()
+    fast.cached.set('/index.html', new Response('cached-shell'))
+    installServiceWorker({ ...fast.scope, fetch: async () => new Response('fresh-page') }, { version: 'v1', shell: SHELL, navigationTimeoutMs: 1_000 })
+    ;(fast.listeners.get('fetch') as (event: unknown) => void)({ request: request(`${ORIGIN}/`, 'navigate'), respondWith: (value: Promise<Response> | Response) => { answer = value } })
+    expect(await (await answer)?.text()).toBe('fresh-page')
+
+    const down = fakeScope()
+    down.cached.set('/index.html', new Response('cached-shell'))
+    installServiceWorker({ ...down.scope, fetch: async () => { throw new Error('offline') } }, { version: 'v1', shell: SHELL, navigationTimeoutMs: 1_000 })
+    ;(down.listeners.get('fetch') as (event: unknown) => void)({ request: request(`${ORIGIN}/`, 'navigate'), respondWith: (value: Promise<Response> | Response) => { answer = value } })
+    expect(await (await answer)?.text()).toBe('cached-shell')
+  })
+
+  it('waits for a slow network when no shell is cached yet', async () => {
+    const { scope, listeners } = fakeScope()
+    let release: (response: Response) => void = () => undefined
+    installServiceWorker({ ...scope, fetch: () => new Promise<Response>(resolve => { release = resolve }) }, { version: 'v1', shell: SHELL, navigationTimeoutMs: 10 })
+    let answer: Promise<Response> | Response | undefined
+    ;(listeners.get('fetch') as (event: unknown) => void)({ request: request(`${ORIGIN}/`, 'navigate'), respondWith: (value: Promise<Response> | Response) => { answer = value } })
+    await new Promise(resolve => { setTimeout(resolve, 30) })
+    release(new Response('late-page'))
+    expect(await (await answer)?.text()).toBe('late-page')
+  })
+
   it('also ships a worker source with no /api/ cache entry', async () => {
     const source = await readFile(join(import.meta.dirname, '..', 'pwa', 'swCore.ts'), 'utf8')
     expect(source).not.toMatch(/cache\.(put|add|addAll)\([^)]*\/api\//)
@@ -124,6 +158,10 @@ describe('push notifications', () => {
     expect(safeTaskPath('/api/hub/v1/session/refresh', ORIGIN)).toBe('/')
     expect(safeTaskPath('/w/a/s/b/extra', ORIGIN)).toBe('/')
     expect(safeTaskPath(42, ORIGIN)).toBe('/')
+    // XERXES pushes open the XERXES tab, not the Inbox.
+    expect(safeTaskPath('/xerxes', ORIGIN)).toBe('/xerxes')
+    expect(safeTaskPath(`${ORIGIN}/xerxes?x=1`, ORIGIN)).toBe('/xerxes')
+    expect(safeTaskPath('/xerxes/other', ORIGIN)).toBe('/')
   })
 
   it('shows a notification on push and focuses an existing window on click', async () => {
@@ -204,6 +242,34 @@ describe('push opt-in', () => {
     expect(noKey.ok ? '' : noKey.message).toContain('not set up for push')
   })
 
+  it('refreshes the session before the VAPID request and reports an expired session plainly', async () => {
+    const order: string[] = []
+    const base = env(order)
+    const outcome = await createPushService({ ...base, http: { ...base.http, ensureFresh: async () => { order.push('ensureFresh'); return { status: 'ok' as const } } } }).enable()
+    expect(outcome).toEqual({ ok: true })
+    expect(order.slice(0, 3)).toEqual(['permission', 'ensureFresh', 'GET /api/hub/v1/push/vapid-key'])
+    const expired = await createPushService({ ...base, http: { ...base.http, ensureFresh: async () => ({ status: 'denied' as const }) } }).enable()
+    expect(expired.ok ? '' : expired.message).toContain('session with the Hub expired')
+  })
+
+  it('re-registers an existing browser subscription without prompting, and skips when there is none', async () => {
+    const order: string[] = []
+    const subscription = { toJSON: () => ({ endpoint: 'https://push.example/abc', keys: { p256dh: 'k', auth: 'a' } }) }
+    const granted = env(order, {
+      permission: () => 'granted',
+      ready: async () => ({ pushManager: { getSubscription: async () => subscription, subscribe: async () => subscription } }),
+    })
+    expect(await createPushService(granted).resync()).toEqual({ ok: true })
+    expect(order).toContain('POST /api/hub/v1/push/subscribe')
+    expect(order).not.toContain('permission')
+    expect(order.some(line => line.includes('push.example/abc'))).toBe(true)
+
+    const none: string[] = []
+    expect(await createPushService(env(none, { permission: () => 'granted' })).resync()).toEqual({ ok: 'skipped' })
+    expect(await createPushService(env(none, { permission: () => 'default' })).resync()).toEqual({ ok: 'skipped' })
+    expect(none).toEqual([])
+  })
+
   it('decodes a VAPID key', () => {
     expect([...urlBase64ToBytes('AQID')]).toEqual([1, 2, 3])
   })
@@ -245,6 +311,124 @@ describe('http helper', () => {
     expect((await createHubHttp(respond(503, {})).consumePairing({ pairing_id: 'p', code: 'c', device_label: 'iPhone' })).status).toBe('unavailable')
     const down: FetchLike = async () => { throw new Error('offline') }
     expect((await createHubHttp(down).consumePairing({ pairing_id: 'p', code: 'c', device_label: 'iPhone' })).status).toBe('unavailable')
+  })
+
+  it('times out a hung request instead of waiting forever', async () => {
+    const timers = new FakeTimers()
+    let aborted = false
+    const hang: FetchLike = (_path, init) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')) })
+    })
+    const http = createHubHttp(hang, { timers, timeoutMs: 8_000 })
+    const refreshing = http.refresh()
+    const consuming = http.consumePairing({ pairing_id: 'p', code: 'c', device_label: 'iPhone' })
+    const raw = http.json('GET', '/api/hub/v1/push/vapid-key').catch((error: unknown) => error)
+    await settle()
+    timers.advance(8_000)
+    expect(await refreshing).toMatchObject({ status: 'unavailable', message: expect.stringContaining('did not answer') })
+    expect((await consuming).status).toBe('unavailable')
+    expect(await raw).toBeInstanceOf(HubHttpTimeout)
+    expect(aborted).toBe(true)
+  })
+
+  it('refreshes once and retries once when a call meets a lapsed session', async () => {
+    const paths: string[] = []
+    let sessionOk = false
+    const fetchFn: FetchLike = async path => {
+      paths.push(path)
+      if (path === HUB_HTTP.refresh) { sessionOk = true; return new Response(JSON.stringify({ csrf_token: 't2', session_expires_at: new Date(Date.now() + 300_000).toISOString() }), { status: 200 }) }
+      return sessionOk ? new Response('{"ok":true}', { status: 200 }) : new Response('{}', { status: 401 })
+    }
+    const http = createHubHttp(fetchFn)
+    const result = await http.json('GET', HUB_HTTP.pushVapid)
+    expect(result.status).toBe(200)
+    expect(paths).toEqual([HUB_HTTP.pushVapid, HUB_HTTP.refresh, HUB_HTTP.pushVapid])
+    expect(http.csrf()).toBe('t2')
+  })
+
+  it('shares one refresh between concurrent callers so the token is rotated once', async () => {
+    let refreshes = 0
+    const fetchFn: FetchLike = async () => { refreshes += 1; await settle(); return new Response('{"csrf_token":"x"}', { status: 200 }) }
+    const http = createHubHttp(fetchFn)
+    const outcomes = await Promise.all([http.refresh(), http.refresh(), http.ensureFresh()])
+    expect(refreshes).toBe(1)
+    expect(outcomes.every(outcome => outcome.status === 'ok')).toBe(true)
+  })
+
+  it('retries a spent-token refusal once before concluding the device is signed out', async () => {
+    const timers = new FakeTimers()
+    let calls = 0
+    const fetchFn: FetchLike = async () => {
+      calls += 1
+      return calls === 1
+        ? new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'x', reason: 'spent_token' } }), { status: 401 })
+        : new Response('{"csrf_token":"won"}', { status: 200 })
+    }
+    const http = createHubHttp(fetchFn, { timers })
+    const pending = http.refresh()
+    await settle()
+    timers.advance(1_500)
+    expect(await pending).toEqual({ status: 'ok', csrfToken: 'won' })
+    expect(calls).toBe(2)
+    const denied: FetchLike = async () => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'x', reason: 'device_revoked' } }), { status: 401 })
+    expect(await createHubHttp(denied).refresh()).toEqual({ status: 'denied', reason: 'device_revoked' })
+  })
+
+  it('keeps the browser session alive at ~70% of its life while active, and not while hidden', async () => {
+    const timers = new FakeTimers()
+    let clock = 0
+    let refreshes = 0
+    const fetchFn: FetchLike = async () => {
+      refreshes += 1
+      return new Response(JSON.stringify({ csrf_token: `t${refreshes}`, session_expires_at: new Date(clock + 300_000).toISOString() }), { status: 200 })
+    }
+    const http = createHubHttp(fetchFn, { timers, now: () => clock })
+    let visible = true
+    const stop = http.keepAlive(() => visible)
+    await http.refresh()
+    expect(refreshes).toBe(1)
+    const step = async (ms: number): Promise<void> => { clock += ms; timers.advance(ms); await settle() }
+    await step(209_000)
+    expect(refreshes).toBe(1)
+    await step(2_000)
+    expect(refreshes).toBe(2)
+    visible = false
+    await step(300_000)
+    expect(refreshes).toBe(2)
+    // Back in the foreground with the session expired: ensureFresh refreshes and re-arms.
+    visible = true
+    await http.ensureFresh()
+    expect(refreshes).toBe(3)
+    stop()
+    await step(600_000)
+    expect(refreshes).toBe(3)
+  })
+
+  it('resumes waiting for desktop confirmation after a reload of the pair page, without storing a secret', () => {
+    const items = new Map<string, string>()
+    const storage: PairStorage = { getItem: key => items.get(key) ?? null, setItem: (key, value) => { items.set(key, value) }, removeItem: key => { items.delete(key) } }
+    let replaced = 0
+    const win = (hash: string) => ({ location: { hash, pathname: '/pair', search: '' }, history: { replaceState: () => { replaced += 1 } } })
+    // Nothing remembered: the plain "needs a pairing link" page.
+    expect(readPairRoute(win(''), storage, 0)).toEqual({ kind: 'missing' })
+    rememberPairingAwait(storage, 1_000, '4829')
+    expect([...items.values()].join('')).not.toMatch(/code|secret|token/i)
+    const resumed = readPairRoute(win(''), storage, 2_000)
+    expect(resumed).toEqual({ kind: 'resume', comparison: '4829' })
+    expect(initialPairState(resumed)).toEqual({ phase: 'waiting', comparison: '4829' })
+    // The remembered wait expires.
+    expect(pairingAwait(storage, 1_000 + 11 * 60_000)).toBeUndefined()
+    expect(items.size).toBe(0)
+    // A fresh fragment supersedes an older wait.
+    rememberPairingAwait(storage, 0, '1111')
+    const fresh = readPairRoute(win('#pairing_id=p1&code=c1'), storage, 10)
+    expect(fresh.kind).toBe('found')
+    expect(items.size).toBe(0)
+    expect(replaced).toBe(1)
+    // Storage that throws (Safari private mode) degrades to the plain page.
+    const broken: PairStorage = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') }, removeItem: () => { throw new Error('denied') } }
+    rememberPairingAwait(broken, 0)
+    expect(readPairRoute(win(''), broken, 0)).toEqual({ kind: 'missing' })
   })
 
   it('posts pairing with the documented body fields', async () => {

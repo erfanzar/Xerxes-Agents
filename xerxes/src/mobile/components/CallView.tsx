@@ -82,6 +82,7 @@ export function CallView(): ReactElement {
           {!current.heard && !current.spokenSentence ? <p className="voice-caption-hint">{active ? 'Go ahead. I’m listening.' : 'A conversation, without the keyboard.'}</p> : null}
         </div>
         {state.error || current.error ? <p role="alert" className="voice-error">{state.error ?? current.error}</p> : null}
+        {!active && current.endReason ? <p role="alert" className="voice-error voice-end-reason">{current.endReason}</p> : null}
         {current.notice ? <p role="status" className="voice-notice">{current.notice}</p> : null}
       </div>
       {!active ? <div className="voice-start">
@@ -91,7 +92,7 @@ export function CallView(): ReactElement {
             ? <p className="voice-notice">This call downloads ~{voiceMegabytes(missingBytes)} once{state.tier === 'standard' ? ` (Light needs ~${voiceMegabytes(tierDownloadBytes('light'))})` : ''}. Kept on this phone after that.</p>
             : null}
         {!ready ? <p className="voice-notice">Connect to the Hub and choose XERXES’s model to start.</p> : null}
-        <button type="button" className="voice-start-button" disabled={!ready || !state.models || state.checking} onClick={() => { void call.start() }}>Start voice</button>
+        <button type="button" className="voice-start-button" disabled={!ready || !state.models || state.checking} onClick={() => { void call.start() }}>{current.endReason || current.phase === 'error' ? 'Restart voice' : 'Start voice'}</button>
         {state.error ? <button type="button" className="voice-retry" onClick={() => { void call.loadStatus() }}>Retry voice models</button> : null}
       </div> : null}
       <footer className="voice-controls" aria-label="Voice controls">

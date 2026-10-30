@@ -263,12 +263,20 @@ const NEO_COLOUR_TOKENS = [
   '--x-accent', '--x-focus', '--x-working', '--x-accent-soft', '--x-on-accent', '--x-inverse',
 ] as const
 
-/** What the Background setting does under Neo, for the background now chosen (shown in Settings). */
-export function neoBackdropNote(kind: Backdrop['kind']): string {
-  if (kind === 'image') return 'Neo style: the picture is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see the image.'
-  if (kind === 'gradient') return 'Neo style: the gradient is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see it.'
-  if (kind === 'transparent') return 'Neo style: Neo has no see-through window, so Transparent has no effect. Pick an image or gradient to use its colours, or switch Style to Classic.'
-  return 'Neo style: Neo never shows a background. Pick an image or gradient and only its colours (accent, surface tint, light or dark) are used.'
+/**
+ * What the Background setting does under a solid style (Neo or Shading), for
+ * the background now chosen (shown in Settings). `label` names the style.
+ */
+export function neoBackdropNote(kind: Backdrop['kind'], label = 'Neo'): string {
+  if (kind === 'image') return `${label} style: the picture is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see the image.`
+  if (kind === 'gradient') return `${label} style: the gradient is not shown. Only its colours are used — the accent, the surface tint and light or dark. Switch Style to Classic to see it.`
+  if (kind === 'transparent') return `${label} style: ${label} has no see-through window, so Transparent has no effect. Pick an image or gradient to use its colours, or switch Style to Classic.`
+  return `${label} style: ${label} never shows a background. Pick an image or gradient and only its colours (accent, surface tint, light or dark) are used.`
+}
+
+/** Styles that are flat and solid: a background lends them only its colours. */
+export function isSolidStyle(style: string | null): boolean {
+  return style === 'neo' || style === 'shading'
 }
 
 export function neoColourTokens(tokens: Readonly<Record<string, string>>): Record<string, string> {
@@ -290,7 +298,8 @@ export function neoColourTokens(tokens: Readonly<Record<string, string>>): Recor
  * changed, so Classic shows the picture again.
  */
 export function applyBackdrop(backdrop: Backdrop, root: HTMLElement = document.documentElement, palette: Palette | undefined = loadPalette()): void {
-  const neo = root.getAttribute('data-style') === 'neo'
+  // Neo and Shading are both solid: the picture never shows, only its colours.
+  const neo = isSolidStyle(root.getAttribute('data-style'))
   for (const name of PAINTED) root.style.removeProperty(name)
   PAINTED.clear()
   root.style.removeProperty('--x-backdrop-paint')

@@ -16,9 +16,15 @@ export function AppCallHost(): ReactElement | null {
   useEffect(() => { call.setConnected(hub.connection.state === 'live') }, [call, hub.connection.state])
   useEffect(() => {
     const visibility = (): void => call.visibility(document.hidden)
+    // pageshow: iOS can restore the page from its back-forward cache without a visibilitychange.
+    const shown = (): void => call.visibility(false)
     document.addEventListener('visibilitychange', visibility)
+    window.addEventListener('pageshow', shown)
     visibility()
-    return () => document.removeEventListener('visibilitychange', visibility)
+    return () => {
+      document.removeEventListener('visibilitychange', visibility)
+      window.removeEventListener('pageshow', shown)
+    }
   }, [call])
   return state.view === 'voice' ? <CallView /> : null
 }

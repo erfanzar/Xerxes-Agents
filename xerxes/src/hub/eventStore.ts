@@ -224,7 +224,7 @@ export class HubEventStore {
         const originalBytes = utf8ByteLength(JSON.stringify(event))
         // A single event must never wedge replay or exceed either page or wire limits.
         if (originalBytes + 2 > maxBytes || originalBytes > HUB_LIMITS.maxFrameBytes) {
-          event = { ...event, payload: { truncated: true, original_bytes: originalBytes } }
+          event = { ...event, payload: truncatedPayload(event.type, event.payload, originalBytes) }
         }
         const eventBytes = utf8ByteLength(JSON.stringify(event))
         if (eventBytes + 2 > maxBytes) throw new HubProtocolError('frame_too_large', 'event metadata cannot fit the requested byte limit')
@@ -359,6 +359,39 @@ function prunedKey(runtimeId: string, streamId: string): string {
 
 function nonnegativeSequence(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new HubProtocolError('invalid_request', 'sequence must be a non-negative safe integer')
+}
+
+/** Ids that tie an event to its interaction or tool call; kept on an oversized stub. */
+const STUB_ID_FIELDS = ['id', 'request_id', 'tool_call_id', 'session_id', 'job_id', 'event_type'] as const
+const STUB_REQUEST_TYPES: ReadonlySet<string> = new Set(['approval_request', 'permission_request', 'question_request'])
+
+/** The short ids of one payload, plus the redaction marks when it is an interaction request. */
+function stubFields(type: string, payload: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const stub: Record<string, unknown> = {}
+  for (const field of STUB_ID_FIELDS) {
+    const value = payload[field]
+    if (typeof value === 'string' && value !== '' && value.length <= HUB_LIMITS.maxIdLength) stub[field] = value
+  }
+  if (STUB_REQUEST_TYPES.has(type)) {
+    stub.redacted = true
+    stub.details_hidden = true
+    if (type === 'question_request') stub.questions = []
+  }
+  return stub
+}
+
+/**
+ * The bounded stand-in for an event too large to read. It keeps the short ids so a big approval
+ * still becomes a pending card and a big resolution still clears one; an interaction request is
+ * marked redacted (details hidden) because its body is gone. A `cron_event` keeps its nested
+ * event's ids under `payload`, the shape readers unwrap.
+ */
+export function truncatedPayload(type: string, payload: Readonly<Record<string, unknown>>, originalBytes: number): Record<string, unknown> {
+  const stub: Record<string, unknown> = { ...stubFields(type, payload), truncated: true, original_bytes: originalBytes }
+  if (type === 'cron_event' && typeof payload.event_type === 'string' && isRecord(payload.payload)) {
+    stub.payload = { ...stubFields(payload.event_type, payload.payload), truncated: true }
+  }
+  return stub
 }
 
 function fromRow(row: EventRow): StoredHubEvent {

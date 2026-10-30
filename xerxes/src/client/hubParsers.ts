@@ -8,8 +8,8 @@ import type {
   SupervisorOptions, TaskSummary, WatchAnomaly, WatchAnomalyKind, WatchRow, WatchStats, WatchTests, WatchView, WorkspaceView,
 } from './hubTypes.js'
 import { arr, clip, isoOr, num, rec, str } from './parse.js'
-import { toolSummary, userInputOf, withoutTurnContext, type Block, type FoldInput } from './sessionFold.js'
-import { NO_ACTIVITY, activityAfter, taskStatusOf, type TaskActivity } from './taskTypes.js'
+import { todosOf, toolDetails, toolOutput, toolSummary, userInputOf, withoutTurnContext, type Block, type FoldInput } from './sessionFold.js'
+import { NO_ACTIVITY, activityAfter, taskStatusOf, type AgentRow, type AgentStep, type TaskActivity, type TodoItem } from './taskTypes.js'
 
 /**
  * Tolerant readers for Hub payloads. Every reader drops what it cannot
@@ -139,9 +139,16 @@ export function foldSummaryEvent(workspaceId: string, previous: TaskSummary | un
   }
   if (RESOLVING.has(event.type)) {
     const rid = str(p.request_id) ?? str(p.id)
-    if (!rid || !next.interactionIds.includes(rid)) return next
+    if (!rid) return next
+    if (!next.interactionIds.includes(rid)) {
+      // A snapshot gave only a count (no ids): the Hub's reducer decrements it the same way.
+      if (next.interactionIds.length > 0 || next.pendingCount <= 0) return next
+      const pendingCount = next.pendingCount - 1
+      return { ...next, pendingCount, status: pendingCount > 0 ? 'needs_you' : next.status === 'needs_you' ? 'working' : next.status }
+    }
     const ids = next.interactionIds.filter(i => i !== rid)
-    return { ...next, interactionIds: ids, pendingCount: ids.length, status: ids.length > 0 ? 'needs_you' : 'working' }
+    const pendingCount = Math.max(ids.length, next.pendingCount - 1)
+    return { ...next, interactionIds: ids, pendingCount, status: pendingCount > 0 ? 'needs_you' : 'working' }
   }
   return next
 }
@@ -162,7 +169,8 @@ export function parsePresence(payload: Readonly<Record<string, unknown>>): { rea
   const entries = arr(payload.entries ?? payload.participants).flatMap((raw): PresenceEntry[] => {
     const e = rec(raw)
     const userId = str(e.user_id) ?? str(e.principal_id)
-    if (!userId) return []
+    // Someone who left the task reports `idle`: they are no longer there.
+    if (!userId || e.state === 'idle') return []
     return [{ userId, name: str(e.display_name) ?? str(e.name) ?? 'Someone', deviceId: str(e.device_id) ?? '', state: e.state === 'typing' ? 'typing' : 'watching' }]
   })
   return { workspaceId, ...(sessionId ? { sessionId } : {}), entries }
@@ -221,6 +229,9 @@ export interface HistoryPage {
   readonly actionIds: readonly string[]
   readonly cursor?: string | number
   readonly hasMore: boolean
+  /** The newest todo list set by a TodoWriteTool / todo_write call on this page. */
+  readonly todos?: readonly TodoItem[]
+  readonly todosCallId?: string
 }
 
 export function parseHistoryPage(result: Readonly<Record<string, unknown>>): HistoryPage {
@@ -228,6 +239,7 @@ export function parseHistoryPage(result: Readonly<Record<string, unknown>>): His
   if (!Array.isArray(history.actions)) throw new Error('The Hub did not return a history page. Try opening this task again.')
   const blocks: Block[] = []
   const actionIds: string[] = []
+  let todos: { readonly items: readonly TodoItem[]; readonly callId: string } | undefined
   for (const raw of arr(history.actions)) {
     const action = rec(raw)
     const base = str(action.id)
@@ -274,19 +286,29 @@ export function parseHistoryPage(result: Readonly<Record<string, unknown>>): His
       const result = results.get(id)
       const out = exec.result ?? exec.output ?? exec.error ?? result?.content
       const failed = exec.is_error === true || result?.is_error === true || exec.error != null || exec.permitted === false || exec.status === 'error' || (typeof out === 'string' && out.startsWith('Tool execution failed:'))
-      const output = typeof out === 'string' ? clip(out, 600) : out === undefined ? undefined : clip(JSON.stringify(out) ?? '', 600)
+      const output = toolOutput(out)
+      const name = str(call.name) ?? str(exec.name) ?? str(exec.toolName) ?? str(exec.tool_name) ?? 'tool'
+      const rawArgs = call.arguments ?? exec.arguments ?? exec.args ?? exec.inputs ?? exec.input
+      const durationMs = num(exec.duration_ms) ?? num(exec.durationMs)
       blocks.push({
         kind: 'tool', ...identity(), callId: id,
-        name: str(call.name) ?? str(exec.name) ?? str(exec.toolName) ?? str(exec.tool_name) ?? 'tool',
-        summary: toolSummary(call.arguments ?? exec.arguments ?? exec.args ?? exec.inputs ?? exec.input),
+        name,
+        summary: toolSummary(rawArgs),
         state: failed ? 'error' : out !== undefined || executions.has(id) ? 'done' : 'working',
         ...(output ? { output } : {}),
+        ...toolDetails(name, rawArgs),
+        ...(durationMs === undefined ? {} : { durationMs }),
       })
+      const listed = todosOf(name, rawArgs)
+      if (listed) todos = { items: listed, callId: id }
     }
   }
   const before = history.before
   const cursor = typeof before === 'string' && before.length > 0 ? before : typeof before === 'number' && Number.isFinite(before) ? before : undefined
-  return { blocks, actionIds, ...(cursor === undefined ? {} : { cursor }), hasMore: history.has_more === true && cursor !== undefined }
+  return {
+    blocks, actionIds, ...(cursor === undefined ? {} : { cursor }), hasMore: history.has_more === true && cursor !== undefined,
+    ...(todos ? { todos: todos.items, todosCallId: todos.callId } : {}),
+  }
 }
 
 // ── supervisor ────────────────────────────────────────────────────────
@@ -657,6 +679,78 @@ export function parseSupervisorOptions(result: Readonly<Record<string, unknown>>
   const profile = str(result.profile)
   const model = str(result.model)
   return { machineId, profiles, models, efforts, defaultEffort: str(result.default_effort) ?? null, ...(profile ? { profile } : {}), ...(model ? { model } : {}) }
+}
+
+// ── subagents ─────────────────────────────────────────────────────────
+
+const AGENT_LIST_LIMIT = 200
+const AGENT_STEP_LIMIT = 200
+const STEP_KINDS: ReadonlySet<string> = new Set(['text', 'thinking', 'tool', 'notice'])
+const STEP_STATES: ReadonlySet<string> = new Set(['working', 'done', 'error'])
+
+/** One `agents.list` / `agents.inspect` row. A row without an id is dropped, never guessed at. */
+export function parseAgentRow(raw: unknown): AgentRow | undefined {
+  const row = rec(raw)
+  const id = str(row.id) ?? str(row.agent_id)
+  if (!id) return undefined
+  const name = str(row.name) ?? str(row.agent_name) ?? id
+  const model = str(row.model)
+  const startedAt = str(row.started_at)
+  const updatedAt = str(row.updated_at)
+  const toolCalls = num(row.tool_calls)
+  const summary = str(row.summary)
+  const error = str(row.error)
+  return {
+    id,
+    name: clip(name, 200),
+    title: clip(str(row.title) ?? name, 300),
+    status: str(row.status) ?? 'unknown',
+    ...(model ? { model } : {}),
+    ...(startedAt ? { startedAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(toolCalls === undefined ? {} : { toolCalls: Math.max(0, Math.floor(toolCalls)) }),
+    ...(summary ? { summary: clip(summary, 4000) } : {}),
+    ...(error ? { error: clip(error, 4000) } : {}),
+  }
+}
+
+/** The `agents.list` answer. A missing `agents` array is an unreadable answer, not an empty list. */
+export function parseAgentList(result: Readonly<Record<string, unknown>>): readonly AgentRow[] | undefined {
+  if (!Array.isArray(result.agents)) return undefined
+  return result.agents.slice(0, AGENT_LIST_LIMIT).flatMap(raw => {
+    const row = parseAgentRow(raw)
+    return row ? [row] : []
+  })
+}
+
+export function parseAgentStep(raw: unknown): AgentStep | undefined {
+  const step = rec(raw)
+  if (typeof step.kind !== 'string' || !STEP_KINDS.has(step.kind)) return undefined
+  const text = typeof step.text === 'string' ? step.text : undefined
+  const name = str(step.name)
+  const args = typeof step.args === 'string' ? step.args : step.args === undefined ? undefined : JSON.stringify(step.args, null, 2)
+  const output = typeof step.output === 'string' ? step.output : step.output === undefined ? undefined : JSON.stringify(step.output)
+  const state = typeof step.state === 'string' && STEP_STATES.has(step.state) ? (step.state as AgentStep['state']) : undefined
+  if (step.kind === 'tool' ? name === undefined && args === undefined : text === undefined || text === '') return undefined
+  return {
+    kind: step.kind as AgentStep['kind'],
+    ...(text !== undefined ? { text: clip(text, 8000) } : {}),
+    ...(name ? { name } : {}),
+    ...(args ? { args: clip(args, 8000) } : {}),
+    ...(output ? { output: clip(output, 16000) } : {}),
+    ...(state ? { state } : {}),
+  }
+}
+
+/** The `agents.inspect` answer, or undefined when it has no readable agent row. */
+export function parseAgentDetail(result: Readonly<Record<string, unknown>>): { readonly agent: AgentRow; readonly steps: readonly AgentStep[]; readonly truncated: boolean } | undefined {
+  const agent = parseAgentRow(result.agent)
+  if (!agent) return undefined
+  const steps = arr(result.steps).slice(0, AGENT_STEP_LIMIT).flatMap(raw => {
+    const step = parseAgentStep(raw)
+    return step ? [step] : []
+  })
+  return { agent, steps, truncated: result.truncated === true || arr(result.steps).length > AGENT_STEP_LIMIT }
 }
 
 export type { TaskActivity }

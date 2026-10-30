@@ -10,7 +10,7 @@ import {
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type PendingInteraction, type SessionTail } from './sessionFold.js'
-import type { TaskStatus } from './taskTypes.js'
+import type { AgentRow, AgentStep, TaskStatus, TodoItem } from './taskTypes.js'
 
 /**
  * Framework-agnostic observable state for the phone app. `reduceHub` is pure
@@ -54,9 +54,37 @@ export interface SendState {
   readonly commandId?: string
 }
 
+/** The open task's subagents (`agents.list`). `rows` stay visible while a refresh loads or fails. */
+export interface AgentsState {
+  readonly phase: LoadPhase
+  readonly rows: readonly AgentRow[]
+  readonly error?: string
+}
+
+/** One subagent opened for its steps (`agents.inspect`). */
+export interface AgentDetailState {
+  readonly phase: LoadPhase
+  readonly agentId?: string
+  readonly agent?: AgentRow
+  readonly steps: readonly AgentStep[]
+  readonly truncated: boolean
+  readonly error?: string
+}
+
+export const IDLE_AGENTS: AgentsState = Object.freeze({ phase: 'idle' as const, rows: [] })
+export const IDLE_AGENT_DETAIL: AgentDetailState = Object.freeze({ phase: 'idle' as const, steps: [], truncated: false })
+
 export interface SelectedSession {
   readonly workspaceId: string
   readonly sessionId: string
+  readonly agents: AgentsState
+  readonly agentDetail: AgentDetailState
+  /**
+   * True once the waiting interactions of this task were looked for (history
+   * page or journal recovery). With a pending count and nothing recovered the
+   * app says the details are unavailable instead of showing nothing to tap.
+   */
+  readonly pendingChecked?: boolean
   readonly phase: 'loading' | 'ready' | 'error'
   readonly error?: string
   readonly tail: SessionTail
@@ -326,22 +354,44 @@ export type HubAction =
   | { readonly type: 'select'; readonly workspaceId: string; readonly sessionId: string }
   | { readonly type: 'deselect' }
   | { readonly type: 'historyLoaded'; readonly workspaceId: string; readonly sessionId: string; readonly page: HistoryPage; readonly throughIds: readonly string[] }
-  | { readonly type: 'pendingRestored'; readonly workspaceId: string; readonly sessionId: string; readonly pending: readonly PendingInteraction[] }
+  /**
+   * `complete: true`: the Hub served its whole pending list (`pending_complete !== false`), which
+   * replaces the tail's. Otherwise the list is partial (or a journal replay) and only adds cards.
+   */
+  | {
+    readonly type: 'pendingRestored'; readonly workspaceId: string; readonly sessionId: string; readonly pending: readonly PendingInteraction[]
+    readonly complete?: boolean
+    /** With `complete`: ids pending on this phone when the read started; later live cards are kept. */
+    readonly throughIds?: readonly string[]
+  }
+  | { readonly type: 'agents'; readonly workspaceId: string; readonly sessionId: string; readonly state: AgentsState }
+  | { readonly type: 'agentDetail'; readonly workspaceId: string; readonly sessionId: string; readonly state: AgentDetailState }
   | { readonly type: 'sessionReady'; readonly workspaceId: string; readonly sessionId: string }
   /** The stream was reset (gap, expired cursor): refetch history, never replay the journal. */
   | { readonly type: 'sessionReset'; readonly workspaceId: string; readonly sessionId: string }
   | { readonly type: 'sessionError'; readonly workspaceId: string; readonly sessionId: string; readonly message: string }
   | { readonly type: 'olderLoading' }
-  | { readonly type: 'olderLoaded'; readonly blocks: readonly Block[]; readonly cursor?: string | number; readonly hasMore: boolean }
+  | { readonly type: 'olderLoaded'; readonly blocks: readonly Block[]; readonly cursor?: string | number; readonly hasMore: boolean; readonly todos?: readonly TodoItem[]; readonly todosCallId?: string }
   | { readonly type: 'olderFailed'; readonly message: string }
-  | { readonly type: 'decision'; readonly interactionId: string; readonly state: DecisionState | undefined }
-  | { readonly type: 'send'; readonly state: SendState }
-  | { readonly type: 'config'; readonly field: 'model' | 'effort' | 'goal'; readonly value: Partial<ConfigField> & { readonly revision?: number } }
+  /** With `workspaceId`/`sessionId` the answer is ignored unless that task is still the one open. */
+  | { readonly type: 'decision'; readonly interactionId: string; readonly state: DecisionState | undefined; readonly workspaceId?: string; readonly sessionId?: string }
+  | { readonly type: 'send'; readonly state: SendState; readonly workspaceId?: string; readonly sessionId?: string }
+  | { readonly type: 'config'; readonly field: 'model' | 'effort' | 'goal'; readonly value: Partial<ConfigField> & { readonly revision?: number }; readonly workspaceId?: string; readonly sessionId?: string }
   | { readonly type: 'usage'; readonly state: UsageState }
-  | { readonly type: 'supervisor'; readonly patch: Partial<SupervisorState> }
+  /** `error: undefined` explicitly clears the banner; an absent key leaves it alone. */
+  | { readonly type: 'supervisor'; readonly patch: Partial<Omit<SupervisorState, 'error'>> & { readonly error?: string | undefined } }
   | { readonly type: 'supervisorMessages'; readonly messages: readonly SupervisorMessage[] }
   | { readonly type: 'supervisorConfirmations'; readonly confirmations: readonly SupervisorConfirmation[] }
   | { readonly type: 'supervisorConfirmation'; readonly id: string; readonly patch: Partial<SupervisorConfirmation> }
+  /**
+   * A fresh `supervisor.thread.open` answer after a reconnect: messages merge
+   * by id (the Hub's copy wins) in time order, cards are replaced by id, and
+   * `working` is the Hub's `busy`.
+   */
+  | {
+    readonly type: 'threadRefreshed'; readonly thread: 'shared' | 'autopilot'; readonly threadId?: string
+    readonly messages: readonly SupervisorMessage[]; readonly confirmations: readonly SupervisorConfirmation[]; readonly working: boolean
+  }
   | { readonly type: 'machines'; readonly state: MachinesState }
   /** A fresh answer from `supervisor.config.get`/`.set` or a `supervisor.config_changed` event. */
   | { readonly type: 'supervisorConfigView'; readonly view: SupervisorConfigView }
@@ -378,6 +428,8 @@ function freshSelected(workspaceId: string, sessionId: string): SelectedSession 
   return {
     workspaceId,
     sessionId,
+    agents: IDLE_AGENTS,
+    agentDetail: IDLE_AGENT_DETAIL,
     phase: 'loading',
     tail: EMPTY_TAIL,
     older: [],
@@ -448,6 +500,31 @@ function applyEvents(state: HubState, events: readonly HubEvent[], foldTail: boo
   return tasks === state.tasks && selected === state.selected ? state : { ...state, tasks, ...(selected ? { selected } : {}) }
 }
 
+/** The live copy of a streamed text, without the clip marker. */
+function liveText(live: string): string {
+  return (live.endsWith('…') ? live.slice(0, -1) : live).trim()
+}
+
+/**
+ * A streamed live text is covered when history holds the same text. The live
+ * copy may be clipped (a prefix), or only a suffix when the phone joined in
+ * the middle of the reply: the newest stored message of that kind then
+ * contains it.
+ */
+function coveredBy(block: { readonly kind: 'assistant' | 'thinking'; readonly text: string }, history: readonly Block[], ended: boolean): boolean {
+  const text = liveText(block.text)
+  if (text === '') return false
+  const same = history.flatMap(item => (item.kind === 'assistant' || item.kind === 'thinking') && item.kind === block.kind ? [item.text] : [])
+  if (same.some(stored => stored.trim().startsWith(text))) return true
+  // A short fragment mid-turn could match the previous answer by chance; once the turn ended, or
+  // for a long fragment, containment in the newest stored message is the same reply.
+  const newest = same.at(-1)
+  return newest !== undefined && (ended || text.length >= SUFFIX_MATCH_MIN) && newest.includes(text)
+}
+
+/** Shortest streamed fragment matched by containment while the turn still works. */
+const SUFFIX_MATCH_MIN = 80
+
 /** History replaces its whole overlapping window, including blocks whose contents changed. */
 function reconcileHistory(selected: SelectedSession, page: HistoryPage, throughIds: readonly string[]): SelectedSession {
   const pageIds = new Set(page.actionIds)
@@ -457,12 +534,28 @@ function reconcileHistory(selected: SelectedSession, page: HistoryPage, throughI
   const history = [...prefix, ...page.blocks]
   const tools = new Set(history.flatMap(block => block.kind === 'tool' ? [block.callId] : []))
   const through = new Set(throughIds)
+  const ended = selected.tail.status === 'idle' || selected.tail.status === 'failed'
   let covered = -1
   selected.tail.blocks.forEach((block, index) => {
     if (block.kind === 'tool' && tools.has(block.callId)) covered = index
     else if (block.kind === 'user' && through.has(block.id) && page.blocks.some(item => item.kind === 'user' && item.text === block.text && item.images === block.images)) covered = index
+    // Streamed text (text_part / think_part) is replaced by the stored message once history has it.
+    else if ((block.kind === 'assistant' || block.kind === 'thinking') && through.has(block.id) && coveredBy(block, history, ended)) covered = index
   })
-  const live = selected.tail.blocks.slice(covered + 1).filter(block => block.kind !== 'tool' || !tools.has(block.callId))
+  const live = selected.tail.blocks.slice(covered + 1).flatMap((block): Block[] => {
+    if (block.kind === 'tool') return tools.has(block.callId) ? [] : [block]
+    // Once the turn ended, history is authoritative: a passing notice would otherwise sit after the final answer.
+    if (block.kind === 'notice') return !ended || block.error ? [block] : []
+    if (block.kind === 'assistant' || block.kind === 'thinking') {
+      // A streamed copy that existed when this read started is in history once the turn ended.
+      if (ended && through.has(block.id)) return []
+      // A missed turn_end must not leave a block streaming forever.
+      if (ended && block.streaming) return [{ ...block, streaming: false }]
+    }
+    return [block]
+  })
+  const historyTodos = page.todos !== undefined && page.todosCallId !== undefined
+    && (selected.tail.todosCallId === undefined || tools.has(selected.tail.todosCallId))
   const { error: _error, olderCursor: _cursor, ...rest } = selected
   const keepCursor = prefixIds.size > 0
   const cursor = keepCursor ? selected.olderCursor : page.cursor
@@ -470,10 +563,19 @@ function reconcileHistory(selected: SelectedSession, page: HistoryPage, throughI
     ...rest, phase: 'ready',
     older: bounded(history, OLDER_BLOCKS_LIMIT),
     historyActionIds: bounded([...prefixIds, ...page.actionIds], OLDER_BLOCKS_LIMIT),
-    tail: { ...selected.tail, blocks: live },
+    tail: { ...selected.tail, blocks: live, ...(historyTodos ? { todos: page.todos!, todosCallId: page.todosCallId! } : {}) },
     hasOlder: keepCursor ? selected.hasOlder : page.hasMore,
     ...(cursor === undefined ? {} : { olderCursor: cursor }),
   }
+}
+
+/** The open task, unless the action names a different one (its answer arrived after the person moved on). */
+function scopedSelected(state: HubState, action: { readonly workspaceId?: string; readonly sessionId?: string }): SelectedSession | undefined {
+  const selected = state.selected
+  if (!selected) return undefined
+  if (action.workspaceId !== undefined && action.workspaceId !== selected.workspaceId) return undefined
+  if (action.sessionId !== undefined && action.sessionId !== selected.sessionId) return undefined
+  return selected
 }
 
 export function reduceHub(state: HubState, action: HubAction): HubState {
@@ -529,10 +631,35 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
     case 'pendingRestored': {
       const selected = state.selected
       if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
+      const fresh = action.pending.filter(item => selected.tail.resolved[item.id] === undefined)
+      if (action.complete === true) {
+        // The Hub's list is complete: it is the truth. A card resolved while this phone was away
+        // (its resolution lost to a gap) goes; cards resolved here stay resolved. A card that
+        // arrived live while the read was in flight (not in `throughIds`) is newer than the list.
+        const served = new Set(fresh.map(item => item.id))
+        const before = new Set(action.throughIds ?? selected.tail.pending.map(item => item.id))
+        const newer = selected.tail.pending.filter(item => !served.has(item.id) && !before.has(item.id))
+        const pending = [...fresh, ...newer]
+        const same = pending.length === selected.tail.pending.length && pending.every((item, index) => selected.tail.pending[index]?.id === item.id)
+        if (same && selected.pendingChecked === true) return state
+        return { ...state, selected: { ...selected, pendingChecked: true, tail: same ? selected.tail : { ...selected.tail, pending } } }
+      }
       const known = new Set(selected.tail.pending.map(item => item.id))
-      const added = action.pending.filter(item => !known.has(item.id) && selected.tail.resolved[item.id] === undefined)
-      if (added.length === 0) return state
-      return { ...state, selected: { ...selected, tail: { ...selected.tail, pending: [...selected.tail.pending, ...added] } } }
+      const added = fresh.filter(item => !known.has(item.id))
+      if (added.length === 0) return selected.pendingChecked === true ? state : { ...state, selected: { ...selected, pendingChecked: true } }
+      return { ...state, selected: { ...selected, pendingChecked: true, tail: { ...selected.tail, pending: [...selected.tail.pending, ...added] } } }
+    }
+    case 'agents': {
+      const selected = state.selected
+      if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
+      return { ...state, selected: { ...selected, agents: action.state } }
+    }
+    case 'agentDetail': {
+      const selected = state.selected
+      if (!selected || selected.workspaceId !== action.workspaceId || selected.sessionId !== action.sessionId) return state
+      // An answer for an agent that is no longer the open one is dropped (the controller opens a new one with `loading`).
+      if (action.state.phase !== 'loading' && action.state.phase !== 'idle' && action.state.agentId !== selected.agentDetail.agentId) return state
+      return { ...state, selected: { ...selected, agentDetail: action.state } }
     }
     case 'historyLoaded': {
       const selected = state.selected
@@ -567,20 +694,26 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
       const combined = [...incoming, ...selected.older]
       const older = bounded(combined, OLDER_BLOCKS_LIMIT)
       const historyActionIds = [...new Set(older.flatMap(block => block.historyActionId === undefined ? [] : [block.historyActionId]))]
-      return { ...state, selected: { ...rest, older, historyActionIds, loadingOlder: false, hasOlder: action.hasMore && combined.length < OLDER_BLOCKS_LIMIT, ...(action.cursor === undefined ? {} : { olderCursor: action.cursor }) } }
+      // An older page only supplies the todo list when nothing newer has one.
+      const tail = selected.tail.todos === undefined && action.todos !== undefined && action.todosCallId !== undefined
+        ? { ...selected.tail, todos: action.todos, todosCallId: action.todosCallId } : selected.tail
+      return { ...state, selected: { ...rest, tail, older, historyActionIds, loadingOlder: false, hasOlder: action.hasMore && combined.length < OLDER_BLOCKS_LIMIT, ...(action.cursor === undefined ? {} : { olderCursor: action.cursor }) } }
     }
     case 'olderFailed': return state.selected ? { ...state, selected: { ...state.selected, loadingOlder: false, olderError: action.message } } : state
     case 'decision': {
-      const selected = state.selected
+      const selected = scopedSelected(state, action)
       if (!selected) return state
       const decisions = { ...selected.decisions }
       if (action.state === undefined) delete decisions[action.interactionId]
       else decisions[action.interactionId] = action.state
       return { ...state, selected: { ...selected, decisions } }
     }
-    case 'send': return state.selected ? { ...state, selected: { ...state.selected, send: action.state } } : state
+    case 'send': {
+      const selected = scopedSelected(state, action)
+      return selected ? { ...state, selected: { ...selected, send: action.state } } : state
+    }
     case 'config': {
-      const selected = state.selected
+      const selected = scopedSelected(state, action)
       if (!selected) return state
       const current = selected[action.field]
       const next = { ...current, ...action.value }
@@ -588,7 +721,31 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
       return { ...state, selected: { ...selected, [action.field]: next } }
     }
     case 'usage': return { ...state, usage: action.state }
-    case 'supervisor': return { ...state, supervisor: { ...state.supervisor, ...action.patch } }
+    case 'supervisor': {
+      const { error: patchError, ...patch } = action.patch
+      const next: SupervisorState = { ...state.supervisor, ...patch, ...(patchError === undefined ? {} : { error: patchError }) }
+      // A fresh phase, a new send, or a successful one without an error clears the old error banner.
+      const clears = 'error' in action.patch
+        ? patchError === undefined
+        : action.patch.phase !== undefined || action.patch.busy === true || action.patch.working === true
+      if (clears) delete (next as { error?: string }).error
+      return { ...state, supervisor: next }
+    }
+    case 'threadRefreshed': {
+      const target = action.thread === 'shared' ? state.supervisor : state.autopilotThread
+      const byId = new Map(target.messages.map(m => [m.id, m]))
+      for (const m of action.messages) byId.set(m.id, m)
+      const messages = bounded([...byId.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), SUPERVISOR_MESSAGE_LIMIT)
+      const cards = new Map(target.confirmations.map(c => [c.id, c]))
+      for (const c of action.confirmations) cards.set(c.id, c)
+      const confirmations = bounded([...cards.values()], 50)
+      if (action.thread === 'shared') {
+        const { error: _error, ...rest } = state.supervisor
+        return { ...state, supervisor: { ...rest, phase: 'ready', messages, confirmations, working: action.working, ...(action.threadId ? { threadId: action.threadId } : {}) } }
+      }
+      const { error: _error, ...rest } = state.autopilotThread
+      return { ...state, autopilotThread: { ...rest, phase: 'ready', messages, confirmations, working: action.working, ...(action.threadId ? { threadId: action.threadId } : {}) } }
+    }
     case 'supervisorMessages': {
       const known = new Set(state.supervisor.messages.map(m => m.id))
       const added = action.messages.filter(m => !known.has(m.id))

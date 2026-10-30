@@ -42,6 +42,8 @@ interface Run {
   failed: Error | undefined
 }
 
+const RELEASE_EVENTS = ['pointerup', 'touchend', 'click', 'keyup'] as const
+
 function randomId(): string {
   const crypto = globalThis.crypto
   if (crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
@@ -59,6 +61,22 @@ export function createPushToTalk(options: PushToTalkOptions): VoiceControl {
   const transcriptTimeoutMs = options.transcriptTimeoutMs ?? 45_000
   const levelIntervalMs = options.levelIntervalMs ?? 100
   let current: Run | undefined
+
+  /**
+   * WebKit may not accept a pointerdown as the gesture that lets audio play. The release (pointerup,
+   * touchend, click, keyup) is a qualifying gesture, so the unlock is repeated there, inside that event.
+   */
+  function unlockOnRelease(): void {
+    const target = globalThis as Partial<Pick<EventTarget, 'addEventListener' | 'removeEventListener'>>
+    if (core.audioReady || typeof target.addEventListener !== 'function' || typeof target.removeEventListener !== 'function') return
+    const add = target.addEventListener.bind(globalThis)
+    const remove = target.removeEventListener.bind(globalThis)
+    const unlock = (): void => {
+      for (const type of RELEASE_EVENTS) remove(type, unlock, true)
+      core.unlockAudio()
+    }
+    for (const type of RELEASE_EVENTS) add(type, unlock, { capture: true, once: true })
+  }
 
   function cleanup(run: Run): void {
     if (run.levelTimer !== undefined) clearInterval(run.levelTimer)
@@ -95,6 +113,7 @@ export function createPushToTalk(options: PushToTalkOptions): VoiceControl {
     current = run
     state.dispatch({ type: 'connecting' })
     core.unlockAudio()
+    unlockOnRelease()
     try {
       const link = await core.ensureLink()
       if (run.abort.signal.aborted) throw new MicrophoneError('cancelled', 'The recording was cancelled.')

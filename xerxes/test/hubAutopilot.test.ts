@@ -483,6 +483,12 @@ describe('Autopilot questions', () => {
     expect(scopes).toContain('permission.delegated')
     expect(scopes).not.toContain('permission.respond')
     expect(t.texts()).toContain('XERXES approved exec_command in “First task” for OWNER.')
+    // XT-8: the owner is pushed and the owner's Autopilot thread records what was approved.
+    expect(t.pushes.some(push => push.userId === 'owner' && push.body === 'XERXES approved a permission request for you.')).toBe(true)
+    expect(JSON.stringify(t.pushes)).not.toContain('bun test')
+    expect(t.supervisor.threads.messagesFor('autopilot-owner', 'owner').map(message => message.text))
+      .toContain('XERXES approved exec_command in “First task” on your behalf.')
+    expect(t.sent.some(row => row.to.includes('owner') && row.payload.thread_id === 'autopilot-owner')).toBe(true)
     expect(t.identity.audits.some(entry => entry.action === 'supervisor.dispatch:permission.answer')).toBe(true)
 
     // A non-owner requester, and an id that is not a waiting permission, are refused without a dispatch.

@@ -17,6 +17,12 @@ export type PushOutcome = { readonly ok: true } | { readonly ok: false; readonly
 export interface PushService {
   state(): Promise<PushState>
   enable(): Promise<PushOutcome>
+  /**
+   * Re-register this browser's existing subscription with the Hub. A re-pair or a device revoke
+   * deletes the Hub's copy while the browser still holds one, so the app would say notifications
+   * are on while nothing arrives. Idempotent; never prompts. `skipped` when there is nothing to send.
+   */
+  resync(): Promise<PushOutcome | { readonly ok: 'skipped' }>
 }
 
 export interface PushSubscriptionLike {
@@ -31,7 +37,7 @@ export interface PushRegistrationLike {
 }
 
 export interface PushEnv {
-  readonly http: Pick<HubHttp, 'json' | 'csrf' | 'refresh'>
+  readonly http: Pick<HubHttp, 'json' | 'csrf' | 'refresh'> & Partial<Pick<HubHttp, 'ensureFresh'>>
   /** Undefined when the browser has no service worker or Push API. */
   readonly ready?: (() => Promise<PushRegistrationLike>) | undefined
   readonly permission: () => NotificationPermission | 'unsupported'
@@ -51,8 +57,48 @@ function failure(message: string): PushOutcome {
   return { ok: false, message }
 }
 
+const EXPIRED = 'Your session with the Hub expired. Try again in a moment.'
+
+function errorMessage(body: Readonly<Record<string, unknown>>): string | undefined {
+  const nested = typeof body.error === 'object' && body.error !== null ? (body.error as { message?: unknown }).message : undefined
+  return typeof nested === 'string' && nested.length > 0 ? nested : undefined
+}
+
 export function createPushService(env: PushEnv): PushService {
+  /** A fresh browser session (and its CSRF token) before any authenticated push call. */
+  async function freshSession(): Promise<boolean> {
+    const outcome = env.http.ensureFresh ? await env.http.ensureFresh() : (env.http.csrf() === undefined ? await env.http.refresh() : { status: 'ok' as const })
+    return outcome.status === 'ok'
+  }
+
+  async function save(subscription: PushSubscriptionLike): Promise<PushOutcome> {
+    try {
+      // The Hub takes the bare PushSubscription JSON: {endpoint, keys:{p256dh, auth}}.
+      const json = subscription.toJSON()
+      const saved = await env.http.json('POST', HUB_HTTP.pushSubscribe, typeof json === 'object' && json !== null ? (json as Record<string, unknown>) : {})
+      if (saved.status === 401) return failure(EXPIRED)
+      if (saved.status < 200 || saved.status >= 300) {
+        return failure(errorMessage(saved.body) ?? `The Hub did not save the subscription (${saved.status}).`)
+      }
+    } catch (error) {
+      return failure(error instanceof Error ? error.message : 'Could not reach the Hub.')
+    }
+    return { ok: true }
+  }
+
   return {
+    async resync() {
+      if (env.ready === undefined || env.permission() !== 'granted') return { ok: 'skipped' }
+      let subscription: PushSubscriptionLike | null
+      try {
+        subscription = await (await env.ready()).pushManager.getSubscription()
+      } catch {
+        return { ok: 'skipped' }
+      }
+      if (subscription === null) return { ok: 'skipped' }
+      if (!await freshSession()) return failure(EXPIRED)
+      return save(subscription)
+    },
     async state() {
       if (env.ready === undefined || env.permission() === 'unsupported') return 'unsupported'
       if (env.permission() === 'denied') return 'blocked'
@@ -77,7 +123,10 @@ export function createPushService(env: PushEnv): PushService {
       }
       let key: string | undefined
       try {
+        // The 5-minute browser session may have lapsed while the socket stayed up.
+        if (!await freshSession()) return failure(EXPIRED)
         const vapid = await env.http.json('GET', HUB_HTTP.pushVapid)
+        if (vapid.status === 401) return failure(EXPIRED)
         const body = vapid.body
         const candidate = body.public_key ?? body.key ?? body.vapid_public_key
         key = typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
@@ -97,19 +146,8 @@ export function createPushService(env: PushEnv): PushService {
       } catch (error) {
         return failure(error instanceof Error ? error.message : 'The browser refused the push subscription.')
       }
-      try {
-        if (env.http.csrf() === undefined) await env.http.refresh()
-        // The Hub takes the bare PushSubscription JSON: {endpoint, keys:{p256dh, auth}}.
-        const json = subscription.toJSON()
-        const saved = await env.http.json('POST', HUB_HTTP.pushSubscribe, typeof json === 'object' && json !== null ? (json as Record<string, unknown>) : {})
-        if (saved.status < 200 || saved.status >= 300) {
-          const nested = typeof saved.body.error === 'object' && saved.body.error !== null ? (saved.body.error as { message?: unknown }).message : undefined
-          return failure(typeof nested === 'string' ? nested : `The Hub did not save the subscription (${saved.status}).`)
-        }
-      } catch (error) {
-        return failure(error instanceof Error ? error.message : 'Could not reach the Hub.')
-      }
-      return { ok: true }
+      if (env.http.csrf() === undefined) await env.http.refresh()
+      return save(subscription)
     },
   }
 }

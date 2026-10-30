@@ -20,10 +20,27 @@ export interface ComposerProps {
   readonly running: boolean
   readonly canSend: boolean
   readonly sendMessage?: string | undefined
+  /** The person changed the draft: a stale send error no longer applies. */
+  readonly onEdited?: (() => void) | undefined
+}
+
+/**
+ * What stays in the box after a send of `sent` was accepted: only what the
+ * person typed while it was in flight. If they rewrote the sent text, keep it all.
+ */
+export function remainingAfterSend(current: string, sent: string): string {
+  if (current === sent) return ''
+  if (current.startsWith(sent)) return current.slice(sent.length).replace(/^\s+/, '')
+  return current
+}
+
+/** Append a spoken transcript to whatever is in the box now. */
+export function withTranscript(current: string, spoken: string): string {
+  return current === '' ? spoken : `${current} ${spoken}`
 }
 
 /** Message box above the keyboard: Send or Steer (by task state), Stop, and image attachments. */
-export function Composer({ draftKey, mode, running, canSend, sendMessage }: ComposerProps): ReactElement {
+export function Composer({ draftKey, mode, running, canSend, sendMessage, onEdited }: ComposerProps): ReactElement {
   const services = useServices()
   const { controller, drafts } = services
   const [text, setText] = useState(() => drafts.get(draftKey))
@@ -34,10 +51,14 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage }: Comp
   const count = useRef(0)
   const attached = useRef<readonly PreparedImage[]>([])
   const typing = useRef(false)
+  const latest = useRef(text)
+  const sending = useRef(false)
 
   const update = (value: string): void => {
+    latest.current = value
     setText(value)
     drafts.set(draftKey, value)
+    onEdited?.()
     if (!typing.current && value !== '') {
       typing.current = true
       controller.setPresence('typing')
@@ -90,19 +111,30 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage }: Comp
   }
 
   const send = async (): Promise<void> => {
-    if (busy || !canSend || (text.trim() === '' && images.length === 0)) return
+    // The ref closes the gap between two taps before React re-renders `busy`.
+    if (sending.current || busy || !canSend) return
+    const sent = latest.current
+    const sentImages = attached.current
+    if (sent.trim() === '' && sentImages.length === 0) return
+    sending.current = true
     setBusy(true)
     try {
-      const ok = mode === 'steer' ? await controller.steer(text.trim(), images) : await controller.submit(text.trim(), images)
-      // The draft is cleared only once the Hub accepted it.
+      const ok = mode === 'steer' ? await controller.steer(sent.trim(), sentImages) : await controller.submit(sent.trim(), sentImages)
+      // The draft is cleared only once the Hub accepted it, and only what was sent:
+      // text typed and photos added while the send was in flight stay.
       if (ok) {
-        setText('')
-        drafts.clear(draftKey)
-        attached.current = []
-        setImages([])
-        stoppedTyping()
+        const rest = remainingAfterSend(latest.current, sent)
+        latest.current = rest
+        setText(rest)
+        if (rest === '') drafts.clear(draftKey)
+        else drafts.set(draftKey, rest)
+        const sentIds = new Set(sentImages.map(image => image.id))
+        attached.current = attached.current.filter(image => !sentIds.has(image.id))
+        setImages(attached.current)
+        if (rest === '') stoppedTyping()
       }
     } finally {
+      sending.current = false
       setBusy(false)
     }
   }
@@ -158,7 +190,7 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage }: Comp
           Photos
           <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="visually-hidden" disabled={!canSend || images.length + preparing.length >= IMAGE_LIMITS.maxImages} onChange={event => { void addFiles(event) }} />
         </label>
-        <TalkButton voice={services.voice} onTranscript={spoken => update(text === '' ? spoken : `${text} ${spoken}`)} />
+        <TalkButton voice={services.voice} onTranscript={spoken => update(withTranscript(latest.current, spoken))} />
         {running ? <button type="button" className="btn btn-danger" disabled={!canSend || busy} onClick={() => { void stop() }}>Stop</button> : null}
         <button type="submit" className="btn btn-primary" disabled={!canSend || busy || empty || preparing.length > 0}>{busy ? 'Sending…' : verb}</button>
       </div>

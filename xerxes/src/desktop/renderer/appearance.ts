@@ -10,11 +10,17 @@ export type ThemeChoice = 'system' | 'dark' | 'light'
  * `neo` is the terminal-console look (one mono face, square corners,
  * hairlines, one purple accent) that neo.css draws under
  * `:root[data-style='neo']`, and what a fresh install shows; `classic` is the
- * earlier Xerxes design, kept for anyone who picks it.
+ * earlier Xerxes design, kept for anyone who picks it. `shading` is the
+ * shadcn/ui look (neutral greys, a sans face, rounded cards with soft
+ * shadows) that shading.css draws under `:root[data-style='shading']`.
  */
-export const STYLES = ['classic', 'neo'] as const
+export const STYLES = ['classic', 'neo', 'shading'] as const
 export type StyleChoice = typeof STYLES[number]
-export const STYLE_LABELS: Record<StyleChoice, string> = { classic: 'Classic', neo: 'Neo' }
+export const STYLE_LABELS: Record<StyleChoice, string> = { classic: 'Classic', neo: 'Neo', shading: 'Shading' }
+/** Whether a value is one of the known styles. */
+export function isStyleChoice(value: unknown): value is StyleChoice {
+  return STYLES.some(style => style === value)
+}
 /** A fresh install's style, and the style of any stored record that never chose one. */
 export const DEFAULT_STYLE: StyleChoice = 'neo'
 export interface Appearance { readonly theme: ThemeChoice; readonly font: FontSize; readonly style: StyleChoice }
@@ -49,11 +55,11 @@ export function saveAppearance(change: Partial<Appearance>): void {
 
 /**
  * Classic carries no attribute at all, so every existing stylesheet rule sees
- * exactly the page it always did; only Neo stamps `data-style`.
+ * exactly the page it always did; only Neo and Shading stamp `data-style`.
  */
 export function applyStyle(style: StyleChoice, root: Pick<HTMLElement, 'setAttribute' | 'removeAttribute'> = document.documentElement): void {
-  if (style === 'neo') root.setAttribute('data-style', 'neo')
-  else root.removeAttribute('data-style')
+  if (style === 'classic') root.removeAttribute('data-style')
+  else root.setAttribute('data-style', style)
 }
 
 /** Put a choice on the page. 'system' hands light/dark back to the OS (and the background). */

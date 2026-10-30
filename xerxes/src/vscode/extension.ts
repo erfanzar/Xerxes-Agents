@@ -42,7 +42,8 @@ export function activate(extension: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('xerxes.palette', () => menu('palette')),
     vscode.commands.registerCommand('xerxes.exportTranscript', () => menu('export')),
     vscode.commands.registerCommand('xerxes.sendSelection', sendSelection),
-    vscode.commands.registerCommand('xerxes.toggleStyle', () => setStyle(currentStyle() === 'neo' ? 'classic' : 'neo')),
+    // Cycles Neo → Shading → Classic → Neo.
+    vscode.commands.registerCommand('xerxes.toggleStyle', () => setStyle(nextStyle(currentStyle()))),
     // Settings UI, settings.json, the palette or another window: every open view follows.
     vscode.workspace.onDidChangeConfiguration(event => {
       if (!event.affectsConfiguration('xerxes.style')) return
@@ -52,13 +53,20 @@ export function activate(extension: vscode.ExtensionContext): void {
   )
 }
 
-/** Xerxes: Style. Neo unless the person chose Classic. */
-function currentStyle(): 'neo' | 'classic' {
-  return vscode.workspace.getConfiguration('xerxes').get<string>('style') === 'classic' ? 'classic' : 'neo'
+type VscodeStyle = 'neo' | 'classic' | 'shading'
+
+/** Xerxes: Style. Neo unless the person chose Classic or Shading. */
+function currentStyle(): VscodeStyle {
+  const value = vscode.workspace.getConfiguration('xerxes').get<string>('style')
+  return value === 'classic' || value === 'shading' ? value : 'neo'
+}
+
+function nextStyle(style: VscodeStyle): VscodeStyle {
+  return style === 'neo' ? 'shading' : style === 'shading' ? 'classic' : 'neo'
 }
 
 /** Save the style in the user's settings; the configuration listener repaints every view. */
-async function setStyle(style: 'neo' | 'classic'): Promise<boolean> {
+async function setStyle(style: VscodeStyle): Promise<boolean> {
   await vscode.workspace.getConfiguration('xerxes').update('style', style, vscode.ConfigurationTarget.Global)
   return true
 }
@@ -175,7 +183,7 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
   // Stamped before first paint so a Neo view never flashes Classic.
   const style = currentStyle()
   return `<!doctype html>
-<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}" data-style-choice="${style}"${style === 'neo' ? ' data-style="neo"' : ''}>
+<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}" data-style-choice="${style}"${style === 'classic' ? '' : ` data-style="${style}"`}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -187,6 +195,8 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     <link rel="stylesheet" href="${asset('renderer/app.css')}" />
     <link rel="stylesheet" href="${asset('renderer/atelier.css')}" />
     <link rel="stylesheet" href="${asset('vscode.css')}" />
+    <!-- The Shading style; inert unless data-style="shading". -->
+    <link rel="stylesheet" href="${asset('renderer/shading.css')}" />
     <!-- Last: the Neo style; inert unless data-style="neo". -->
     <link rel="stylesheet" href="${asset('renderer/neo.css')}" />
     <!-- VS Code pads every webview body (0 20px); the view is edge to edge. -->

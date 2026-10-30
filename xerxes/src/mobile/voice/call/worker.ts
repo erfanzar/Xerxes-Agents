@@ -6,7 +6,7 @@ import { KokoroTTS } from 'kokoro-js'
 
 import { VOICE_CALL_TTS_VOICE, VOICE_MODELS, tierDownloadBytes, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
 import { padToSttFrames } from './logic.js'
-import type { CallWorkerRequest, CallWorkerResponse } from './protocol.js'
+import { workerFailureMessage, type CallWorkerRequest, type CallWorkerResponse } from './protocol.js'
 import { configureCallWorker, workerErrorDetail } from './workerEnvironment.js'
 
 const scope = configureCallWorker()
@@ -119,7 +119,7 @@ async function drain(): Promise<void> {
       try {
         if (!cancelled.has(request.id) && (!stopping || request.type === 'dispose')) await handle(request)
       } catch (error) {
-        emit({ id: request.id, type: 'error', message: `On-phone ${request.type} failed (${workerErrorDetail(error)}). Try Light mode or check that the Hub’s call models are available.` })
+        emit({ id: request.id, type: 'error', message: workerFailureMessage(request.type, workerErrorDetail(error)) })
       } finally { liveIds.delete(request.id); cancelled.delete(request.id) }
     }
   } finally { running = false }

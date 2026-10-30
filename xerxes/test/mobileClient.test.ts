@@ -5,7 +5,9 @@ import { describe, expect, it } from 'bun:test'
 
 import { statusView } from '../src/client/orbMapping.js'
 import { checkImageFile, fitWithin } from '../src/client/imagePrep.js'
+import { createDraftStore } from '../src/client/drafts.js'
 import { inboxTasks, initialHubState, reduceHub } from '../src/client/hubStore.js'
+import { EMPTY_TAIL, foldSessionEvent } from '../src/client/sessionFold.js'
 import { NO_ACTIVITY } from '../src/client/taskTypes.js'
 import { fetchDecision, safeTaskPath } from '../src/mobile/pwa/swCore.js'
 import { parsePairFragment } from '../src/mobile/pairing.js'
@@ -44,5 +46,22 @@ describe('mobile client modules under Bun', () => {
 
   it('reads a pairing fragment', () => {
     expect(parsePairFragment('#pairing_id=p&code=c')).toEqual({ pairingId: 'p', code: 'c' })
+  })
+
+  it('keeps a tool call’s exact command, diff, todo list and duration under Bun', () => {
+    let tail = foldSessionEvent(EMPTY_TAIL, { id: 'e1', type: 'tool_call', payload: { id: 'c1', name: 'exec_command', arguments: JSON.stringify({ cmd: 'bun', args: ['test'] }) } })
+    tail = foldSessionEvent(tail, { id: 'e2', type: 'tool_result', payload: { tool_call_id: 'c1', result: 'ok', permitted: true, duration_ms: 7 } })
+    tail = foldSessionEvent(tail, { id: 'e3', type: 'tool_call', payload: { id: 'c2', name: 'FileEditTool', arguments: { file_path: 'a.ts', old_string: 'x', new_string: 'y' } } })
+    tail = foldSessionEvent(tail, { id: 'e4', type: 'tool_call', payload: { id: 'c3', name: 'TodoWriteTool', arguments: { todos: [{ content: 'Ship it', status: 'in_progress' }] } } })
+    expect(tail.blocks[0]).toMatchObject({ kind: 'tool', args: 'bun test', output: 'ok', durationMs: 7, state: 'done' })
+    expect(tail.blocks[1]).toMatchObject({ kind: 'tool', diff: { path: 'a.ts', before: 'x', after: 'y' } })
+    expect(tail.todos).toEqual([{ content: 'Ship it', status: 'in_progress' }])
+  })
+
+  it('persists drafts through an injected storage', () => {
+    const data = new Map<string, string>()
+    const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v) }, removeItem: (k: string) => { data.delete(k) } }
+    createDraftStore(50, { storage }).set('w1\u001fs1', 'half-typed')
+    expect(createDraftStore(50, { storage }).get('w1\u001fs1')).toBe('half-typed')
   })
 })

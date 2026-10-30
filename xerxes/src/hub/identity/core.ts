@@ -135,6 +135,17 @@ export interface GraceEntry {
   /** The successor that was already issued for this retired refresh token. */
   readonly tokens: IssuedTokens
   readonly expiresAt: number
+  /** Until this time any racing retry gets the same tokens unconditionally (the original grace window). */
+  readonly raceUntil?: number
+  /**
+   * Set when the retired token started a new branch (a fork). After `raceUntil` and until
+   * `expiresAt` the same token may collect that branch again, but only while the branch was
+   * never used: an unused branch means its reply was lost (a suspended phone), a used one
+   * means the holder already has it and a second presentation is refused.
+   */
+  readonly forkFamilyId?: string
+  /** Set once the fork was collected again; a fork can be replayed at most once. */
+  replayed?: boolean
 }
 
 export interface IdentityContext {

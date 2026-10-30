@@ -16,11 +16,15 @@ import { resolveSessionKey, type CommandBackend, type HubCommandRouter } from '.
 import { HubEventStoreError, type HubEventStore } from './eventStore.js'
 import { originAllowed, type HubExposure } from './exposure.js'
 import type { AuthenticatedContext, HubHttpRequestInfo, HubIdentityPort } from './identityPort.js'
+import {
+  PendingInteractionIndex, fitPendingFrames, hubInteractionVisibility, interactionPayloadFor, isInteractionRequestEvent, redactEventsFor,
+  type HubInteractionVisibility, type PendingFrame,
+} from './interactions.js'
 import { aggregateUsage, type WorkspaceProjection } from './projections.js'
 import {
   HUB_LIMITS, HUB_PROTOCOL_VERSION, HubProtocolError, encodeHubFrame, hubError, hubEvent, hubResponse,
   isRecord, parseHubRequestFrame, readId, readIdList, utf8ByteLength,
-  type HubCommandResult, type HubEventType, type HubMethod, type HubRequestFrame, type HubResponseFrame, type HubServerFrame,
+  type HubCommandResult, type HubEvent, type HubEventFrame, type HubEventType, type HubMethod, type HubRequestFrame, type HubResponseFrame, type HubServerFrame,
 } from './protocol.js'
 import type { PoolHealth } from './runtimePool.js'
 import type { SubscriptionManager, SubscriptionSink } from './subscriptions.js'
@@ -136,9 +140,136 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...headers } })
 }
 
-/** Files whose name carries a content hash can be cached forever; nothing else can. */
-function isHashedAsset(name: string): boolean {
-  return /[-.][A-Za-z0-9_]{8,}\.(?:js|mjs|css|woff2?|png|jpe?g|svg|webp|ico|map)$/.test(name)
+/**
+ * Files whose name carries a content hash can be cached forever; nothing else can. Only the app
+ * bundle under `/assets/` is built with `[name]-[hash]` names: a name such as
+ * `voice-ort/ort-wasm-simd-threaded.mjs` merely looks hashed and must be revalidated.
+ */
+function isHashedAsset(path: string): boolean {
+  return path.startsWith('/assets/') && /[-.][A-Za-z0-9_]{8,}\.(?:js|mjs|css|woff2?|png|jpe?g|svg|webp|ico|map)$/.test(basename(path))
+}
+
+/** Budget of pending cards in one history page or one snapshot session. */
+const HISTORY_PENDING_BYTES = 64 * 1024
+const SNAPSHOT_PENDING_BYTES = 16 * 1024
+const SNAPSHOT_PENDING_FRAMES = 5
+/** Subagent inspection: journal window and clip sizes (see agents.inspect in docs/hub-protocol.md). */
+const AGENT_SCAN_EVENTS = 20_000
+const AGENT_SCAN_PAGES = 40
+const AGENT_ARGS_CHARS = 8000
+const AGENT_OUTPUT_CHARS = 16_000
+const AGENT_TEXT_CHARS = 8000
+
+type AgentStepKind = 'text' | 'thinking' | 'tool' | 'notice'
+interface AgentStep {
+  kind: AgentStepKind
+  text?: string
+  name?: string
+  args?: string
+  output?: string
+  state?: 'working' | 'done' | 'error'
+}
+
+function clipText(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`
+}
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+function numberField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** One daemon subagent snapshot as the phone's agent row. */
+export function agentRowFromSnapshot(row: Readonly<Record<string, unknown>>): Record<string, unknown> | undefined {
+  const id = stringField(row.id)
+  const status = stringField(row.status)
+  if (id === undefined || status === undefined) return undefined
+  const name = stringField(row.name) ?? stringField(row.agent_id) ?? 'agent'
+  const model = stringField(row.model)
+  const startedAt = stringField(row.created_at)
+  const updatedAt = stringField(row.updated_at)
+  const toolCalls = numberField(row.tool_count)
+  const summary = stringField(row.summary)
+  const error = stringField(row.error)
+  return {
+    id, name: clipText(name, 200), title: clipText(stringField(row.title) ?? name, 400), status: clipText(status, 40),
+    ...(model === undefined ? {} : { model: clipText(model, 200) }),
+    ...(startedAt === undefined ? {} : { started_at: startedAt }),
+    ...(updatedAt === undefined ? {} : { updated_at: updatedAt }),
+    ...(toolCalls === undefined ? {} : { tool_calls: toolCalls }),
+    ...(summary === undefined ? {} : { summary: clipText(summary, 2000) }),
+    ...(error === undefined ? {} : { error: clipText(error, 2000) }),
+  }
+}
+
+/** A failed tool result as the daemon reports it. */
+function toolFailed(payload: Readonly<Record<string, unknown>>, output: string): boolean {
+  return payload.permitted === false || output.startsWith('Tool execution failed:')
+}
+
+/**
+ * The steps of one subagent, rebuilt from its `subagent_event`s in the Hub journal (oldest first).
+ * Tool calls and their results become one step; consecutive text or thinking merges.
+ */
+export function agentStepsFromEvents(events: readonly { readonly type: string; readonly payload: Readonly<Record<string, unknown>> }[], agentId: string): AgentStep[] {
+  const steps: AgentStep[] = []
+  const tools = new Map<string, AgentStep>()
+  for (const event of events) {
+    if (event.type !== 'subagent_event' || event.payload.agent_id !== agentId || !isRecord(event.payload.event)) continue
+    const nested = event.payload.event
+    const inner = isRecord(nested.payload) ? nested.payload : {}
+    const last = steps.at(-1)
+    switch (nested.type) {
+      case 'text_part':
+      case 'think_part': {
+        const kind: AgentStepKind = nested.type === 'text_part' ? 'text' : 'thinking'
+        // A subagent text burst carries the whole burst in `text_full`; `text` is only its short tail.
+        const text = stringField(nested.type === 'text_part' ? inner.text_full ?? inner.text : inner.think)
+        if (text === undefined) break
+        // Consecutive bursts are contiguous text of one reply.
+        if (last?.kind === kind) last.text = clipText(`${last.text ?? ''}${text}`, AGENT_TEXT_CHARS)
+        else steps.push({ kind, text: clipText(text, AGENT_TEXT_CHARS) })
+        break
+      }
+      case 'tool_call': {
+        const step: AgentStep = { kind: 'tool', name: clipText(stringField(inner.name) ?? 'tool', 200), state: 'working' }
+        // Prefer the exact input (`arguments_full`, subagent events); `arguments` may be a preview.
+        const args = stringField(inner.arguments_full) ?? stringField(inner.arguments)
+        if (args !== undefined) step.args = clipText(args, AGENT_ARGS_CHARS)
+        steps.push(step)
+        const id = stringField(inner.id)
+        if (id !== undefined) tools.set(id, step)
+        break
+      }
+      case 'tool_result': {
+        // Prefer the exact result (`result_full`, subagent events); `return_value` may be a preview.
+        const output = stringField(inner.result_full) ?? stringField(inner.return_value) ?? stringField(inner.result) ?? ''
+        const id = stringField(inner.tool_call_id)
+        let step = id === undefined ? undefined : tools.get(id)
+        if (step === undefined) {
+          step = { kind: 'tool', name: clipText(stringField(inner.name) ?? 'tool', 200) }
+          steps.push(step)
+        }
+        if (output !== '') step.output = clipText(output, AGENT_OUTPUT_CHARS)
+        step.state = toolFailed(inner, output) ? 'error' : 'done'
+        break
+      }
+      case 'turn_begin':
+        steps.push({ kind: 'notice', text: 'started', state: 'working' })
+        break
+      case 'turn_end': {
+        const status = stringField(inner.status) ?? 'finished'
+        const summary = stringField(inner.summary)
+        const failed = status === 'failed' || status === 'error'
+        steps.push({ kind: 'notice', text: clipText(summary === undefined ? status : `${status}: ${summary}`, 2000), state: failed ? 'error' : 'done' })
+        // A tool still marked running when its agent ended never finished.
+        for (const step of tools.values()) if (step.state === 'working') step.state = failed ? 'error' : 'done'
+        break
+      }
+    }
+  }
+  return steps
 }
 
 export class HubServer {
@@ -148,6 +279,8 @@ export class HubServer {
   private readonly voiceSockets = new Set<ServerWebSocket<VoiceSocketData>>()
   private readonly presence = new Map<string, Map<string, PresenceEntry>>()
   private readonly limiter = new SlidingWindow()
+  /** Pending questions/permissions per task, rebuilt incrementally from the journal. */
+  private readonly pending: PendingInteractionIndex
   private readonly clock: () => number
   private readonly maxBufferedBytes: number
   private readonly presenceTtlMs: number
@@ -162,6 +295,7 @@ export class HubServer {
     this.presenceTtlMs = options.presenceTtlMs ?? 30_000
     if (!Number.isSafeInteger(this.maxBufferedBytes) || this.maxBufferedBytes < 1) throw new RangeError('maxBufferedBytes must be positive')
     if (!Number.isSafeInteger(this.presenceTtlMs) || this.presenceTtlMs < 1) throw new RangeError('presenceTtlMs must be positive')
+    this.pending = new PendingInteractionIndex(options.store)
   }
 
   get port(): number {
@@ -425,7 +559,9 @@ export class HubServer {
       if (file === undefined) return this.secure(json(404, { error: 'not_found', message: 'The phone bundle has no index.html.' }))
     }
     const name = basename(file)
-    const cache = name === 'index.html' ? 'no-store' : isHashedAsset(name) ? 'public, max-age=31536000, immutable' : 'no-cache'
+    // The served file's path below the bundle root, with '/' separators on every platform.
+    const servedPath = file.slice(realRoot.length).split(sep).join('/')
+    const cache = name === 'index.html' ? 'no-store' : isHashedAsset(servedPath) ? 'public, max-age=31536000, immutable' : 'no-cache'
     const bun = Bun.file(file)
     const headers: Record<string, string> = { 'content-type': bun.type, 'cache-control': cache }
     return this.secure(request.method === 'HEAD' ? new Response(null, { status: 200, headers }) : new Response(bun, { status: 200, headers }), cache)
@@ -578,6 +714,8 @@ export class HubServer {
         return { result: { ...this.options.router.status(conn.context, params) } }
       }
       case 'hub.presence.update': return this.updatePresence(conn, params)
+      case 'agents.list': return this.agentsList(conn, params).then(result => ({ result }))
+      case 'agents.inspect': return this.agentsInspect(conn, params).then(result => ({ result }))
       default:
         throw new HubProtocolError('unsupported', `${frame.method} is not available on this endpoint`)
     }
@@ -663,6 +801,21 @@ export class HubServer {
     }
     const visible = this.visibleWorkspaces(conn).filter(row => requested.length === 0 || requested.includes(row.id))
     if (requested.length > 0 && visible.length === 0) throw new HubProtocolError('forbidden', 'no readable workspaces in the request')
+    // Pending cards of tasks that need a person, looked up once per snapshot (redacted per recipient).
+    const pendingCache = new Map<string, PendingFrame[]>()
+    const pendingOf = (workspaceId: string, sessionId: string): PendingFrame[] => {
+      const key = `${workspaceId}\0${sessionId}`
+      let frames = pendingCache.get(key)
+      if (frames === undefined) {
+        try { frames = this.pendingFor(conn, workspaceId, sessionId, SNAPSHOT_PENDING_BYTES, SNAPSHOT_PENDING_FRAMES).frames } catch (error) {
+          if (!(error instanceof HubEventStoreError)) throw error
+          this.options.onError?.(error, 'pending interactions')
+          frames = []
+        }
+        pendingCache.set(key, frames)
+      }
+      return frames
+    }
     const build = (cap: number): { workspaces: unknown[]; truncated: boolean } => {
       let truncated = false
       const workspaces = visible.map(row => {
@@ -672,7 +825,12 @@ export class HubServer {
           .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
         if (all.length > cap) truncated = true
         const health = this.options.workspaces.health(row.id)
-        return { id: row.id, label: row.label, health: health?.state ?? 'offline', degraded: health?.degraded ?? false, sessions: all.slice(0, cap) }
+        const sessions = all.slice(0, cap).map(session => {
+          if (session.status !== 'needs_you' && session.pending_interaction_count === 0) return session
+          const frames = pendingOf(row.id, session.id)
+          return frames.length === 0 ? session : { ...session, pending_interactions: frames }
+        })
+        return { id: row.id, label: row.label, health: health?.state ?? 'offline', degraded: health?.degraded ?? false, sessions }
       })
       return { workspaces, truncated }
     }
@@ -713,7 +871,8 @@ export class HubServer {
     if (params.after_cursor !== undefined && typeof params.after_cursor !== 'string') throw new HubProtocolError('invalid_request', 'after_cursor must be a string')
     if (conn.subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) throw new HubProtocolError('rate_limited', `at most ${MAX_SUBSCRIPTIONS_PER_CONNECTION} subscriptions per connection`)
     const sink: SubscriptionSink = {
-      send: frame => { this.sendFrame(conn, frame) },
+      // Redaction never grows a frame, so the subscription's byte accounting stays an upper bound.
+      send: frame => { this.sendFrame(conn, this.redactFrame(conn, frame)) },
       close: (code, reason) => { try { conn.ws?.close(code, reason) } catch (error) { this.options.onError?.(error, 'close subscription') } },
     }
     const result = this.options.subscriptions.subscribe(conn.context.principal, this.grants(conn), {
@@ -756,7 +915,119 @@ export class HubServer {
     const events = page.events.filter(event => hasScope(conn.context.principal, grants, {
       workspaceId: event.workspace_id, ...(event.session_id === undefined ? {} : { sessionId: event.session_id }),
     }, 'session.read', now))
-    return { events, through_cursor: cursor(page.throughSequence), has_more: page.hasMore, watermark: cursor(page.watermark) }
+    return { events: redactEventsFor(events, this.visibility(conn)), through_cursor: cursor(page.throughSequence), has_more: page.hasMore, watermark: cursor(page.watermark) }
+  }
+
+  // ------------------------------------------------- interaction visibility
+
+  /** What this connection may see of a pending question or permission request, per task. */
+  private visibility(conn: Conn): (target: AccessTarget) => HubInteractionVisibility {
+    const grants = this.grants(conn)
+    const now = this.clock()
+    return target => hubInteractionVisibility(conn.context.principal, grants, target, now)
+  }
+
+  private redactFrame(conn: Conn, frame: HubEventFrame): HubEventFrame {
+    if (frame.type !== 'hub.event_batch' || !Array.isArray(frame.payload.events)) return frame
+    const events = frame.payload.events as readonly HubEvent[]
+    if (!events.some(event => isInteractionRequestEvent(event.type, event.payload))) return frame
+    return hubEvent('hub.event_batch', { ...frame.payload, events: redactEventsFor(events, this.visibility(conn)) })
+  }
+
+  /**
+   * The cards a task waits on, as this connection may see them, newest kept within the budget.
+   * `complete` is false when older cards may exist that the journal could not show.
+   */
+  private pendingFor(conn: Conn, workspaceId: string, sessionId: string, maxBytes: number, maxFrames: number): { readonly frames: PendingFrame[]; readonly complete: boolean } {
+    const found = this.pending.frames(workspaceId, sessionId)
+    const visibility = hubInteractionVisibility(conn.context.principal, this.grants(conn), { workspaceId, sessionId }, this.clock())
+    const shown = found.frames.map(frame => ({ type: frame.type, payload: interactionPayloadFor(frame.type, frame.payload, visibility) }))
+    const kept = fitPendingFrames(shown.slice(-maxFrames), maxBytes)
+    return { frames: kept, complete: found.complete && kept.length === shown.length }
+  }
+
+  // ------------------------------------------------------------- agents
+
+  /** The session's subagents from the daemon's live session list (one summary-only call). */
+  private async agentRows(workspaceId: string, sessionId: string): Promise<{ readonly key: string; readonly rows: Record<string, unknown>[] }> {
+    if (!this.options.workspaces.list().some(row => row.id === workspaceId)) throw new HubProtocolError('not_found', 'unknown workspace')
+    const listed = await this.options.backend.call(workspaceId, 'session.active_list', {})
+    if (listed.state !== 'accepted') throw new HubProtocolError('unavailable', 'workspace is not available; try again when it is online')
+    const sessions = Array.isArray(listed.result.sessions) ? listed.result.sessions : []
+    const session = sessions.find(row => isRecord(row) && row.id === sessionId)
+    if (!isRecord(session) || typeof session.key !== 'string' || session.key === '') throw new HubProtocolError('not_found', 'the session is not active in this workspace')
+    const snapshots = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : []
+    const rows = snapshots.flatMap(value => {
+      const row = isRecord(value) ? agentRowFromSnapshot(value) : undefined
+      return row === undefined ? [] : [row]
+    })
+    return { key: session.key, rows }
+  }
+
+  private async agentsList(conn: Conn, params: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
+    this.exactKeys(params, ['workspace_id', 'session_id'])
+    const workspaceId = readId(params.workspace_id, 'workspace_id')
+    const sessionId = readId(params.session_id, 'session_id')
+    this.require(conn, { workspaceId, sessionId }, 'session.read')
+    const { rows } = await this.agentRows(workspaceId, sessionId)
+    // Newest rows survive when a very large team does not fit one frame.
+    let agents = rows
+    while (agents.length > 1 && utf8ByteLength(JSON.stringify({ agents })) > HUB_LIMITS.normalFrameBytes) agents = agents.slice(Math.ceil(agents.length / 2))
+    return { agents, ...(agents.length < rows.length ? { truncated: true } : {}) }
+  }
+
+  private async agentsInspect(conn: Conn, params: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
+    this.exactKeys(params, ['workspace_id', 'session_id', 'agent_id', 'limit'])
+    const workspaceId = readId(params.workspace_id, 'workspace_id')
+    const sessionId = readId(params.session_id, 'session_id')
+    const agentId = readId(params.agent_id, 'agent_id')
+    let limit = 60
+    if (params.limit !== undefined) {
+      if (typeof params.limit !== 'number' || !Number.isInteger(params.limit) || params.limit < 1 || params.limit > 200) {
+        throw new HubProtocolError('invalid_request', 'limit must be an integer from 1 to 200')
+      }
+      limit = params.limit
+    }
+    this.require(conn, { workspaceId, sessionId }, 'session.read')
+    const { key, rows } = await this.agentRows(workspaceId, sessionId)
+    const agent = rows.find(row => row.id === agentId)
+    if (agent === undefined) throw new HubProtocolError('not_found', 'no such agent in this task')
+
+    // The agent's steps from the Hub journal (its subagent_events), bounded window and pages.
+    const store = this.options.store
+    const windowStart = Math.max(0, store.watermark() - AGENT_SCAN_EVENTS)
+    let after = Math.max(windowStart, store.oldestSequence() - 1)
+    let scanComplete = windowStart <= store.oldestSequence() - 1
+    const matching: { readonly type: string; readonly payload: Readonly<Record<string, unknown>> }[] = []
+    for (let page = 0; ; page += 1) {
+      if (page >= AGENT_SCAN_PAGES) { scanComplete = false; break }
+      const read = store.read(after, { workspaceIds: [workspaceId], sessionIds: [sessionId] }, HUB_LIMITS.maxBatchEvents, HUB_LIMITS.normalFrameBytes)
+      if (read.gap) { scanComplete = false; break }
+      for (const event of read.events) if (event.type === 'subagent_event' && event.payload.agent_id === agentId) matching.push(event)
+      after = read.throughSequence
+      if (!read.hasMore) break
+    }
+    const steps = agentStepsFromEvents(matching, agentId)
+
+    // The daemon keeps the agent's task and final output even when the journal no longer does.
+    const inspected = await this.options.backend.call(workspaceId, 'subagent.inspect', { session_key: key, task: agentId })
+    if (inspected.state === 'accepted' && inspected.result.ok === true && isRecord(inspected.result.agent)) {
+      const prompt = stringField(inspected.result.agent.prompt)
+      const output = stringField(inspected.result.agent.output)
+      if (prompt !== undefined) steps.unshift({ kind: 'notice', text: `Task: ${clipText(prompt, 2000)}` })
+      const status = typeof agent.status === 'string' ? agent.status : ''
+      const finished = status !== 'running' && status !== 'queued'
+      const last = steps.filter(step => step.kind === 'text').at(-1)
+      if (finished && output !== undefined && !(last?.text !== undefined && output.trim().endsWith(last.text.trim().slice(-200)))) {
+        steps.push({ kind: 'text', text: clipText(output, AGENT_OUTPUT_CHARS) })
+      }
+    }
+
+    let shown = steps.slice(-limit)
+    const build = (): Record<string, unknown> => ({ agent, steps: shown, truncated: !scanComplete || shown.length < steps.length })
+    // Shrink, never send an oversized frame: drop the oldest steps first.
+    while (shown.length > 1 && utf8ByteLength(JSON.stringify(build())) > HUB_LIMITS.normalFrameBytes) shown = shown.slice(Math.ceil(shown.length / 2))
+    return build()
   }
 
   private async history(conn: Conn, params: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
@@ -778,11 +1049,23 @@ export class HubServer {
     }
     const key = await resolveSessionKey(this.options.backend, workspaceId, sessionId)
     if (key === undefined) throw new HubProtocolError('not_found', 'the session is not active in this workspace')
+    // The latest page carries the cards the task waits on, so a task that needs a person always
+    // opens with something to tap (redacted per recipient like the live events).
+    let pending: { readonly frames: PendingFrame[]; readonly complete: boolean } | undefined
+    if (before === undefined) {
+      try { pending = this.pendingFor(conn, workspaceId, sessionId, HISTORY_PENDING_BYTES, 20) } catch (error) {
+        if (!(error instanceof HubEventStoreError)) throw error
+        this.options.onError?.(error, 'pending interactions')
+      }
+    }
     // Shrink the page rather than ever sending an oversized frame.
     for (;;) {
       const outcome = await this.options.backend.call(workspaceId, 'session.history', { session_key: key, history_limit: limit, ...(before === undefined ? {} : { before }) })
       if (outcome.state !== 'accepted') throw new HubProtocolError('unavailable', outcome.error.message)
-      const result = { history: outcome.result.history ?? null, session_id: sessionId }
+      const result = {
+        history: outcome.result.history ?? null, session_id: sessionId,
+        ...(pending === undefined ? {} : { pending_interactions: pending.frames, pending_complete: pending.complete }),
+      }
       if (utf8ByteLength(JSON.stringify(result)) <= HUB_LIMITS.normalFrameBytes) return result
       if (limit === 1) throw new HubProtocolError('frame_too_large', 'a single history page exceeds the Hub frame budget')
       limit = Math.max(1, Math.floor(limit / 2))

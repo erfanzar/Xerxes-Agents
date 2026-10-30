@@ -28,13 +28,29 @@ export interface NotificationClickLike extends ExtendableLike {
   readonly notification: { close(): void; readonly data: unknown }
 }
 
+/** The browser rotated or dropped this worker's push subscription (endpoint expiry, key change). */
+export interface PushSubscriptionChangeLike extends ExtendableLike {
+  readonly oldSubscription?: { readonly options?: { readonly applicationServerKey?: BufferSource | null } } | null
+  readonly newSubscription?: unknown
+}
+
 interface SwEventMap {
   install: ExtendableLike
   activate: ExtendableLike
   fetch: FetchEventLike
   push: PushEventLike
   notificationclick: NotificationClickLike
+  pushsubscriptionchange: PushSubscriptionChangeLike
 }
+
+/**
+ * Posted to every open window after `pushsubscriptionchange`. The worker cannot
+ * register a subscription with the Hub itself: `push/subscribe` needs the
+ * `x-xerxes-csrf` token, which only the page holds (getting one here would mean
+ * rotating the page's refresh token from the worker). The page answers by
+ * calling `push.resync()`; with no window open, the next boot's resync does it.
+ */
+export const PUSH_CHANGED_MESSAGE = 'xerxes.push.subscription_changed'
 
 export interface CacheLike {
   addAll(urls: readonly string[]): Promise<void>
@@ -52,17 +68,28 @@ export interface SwClient {
   readonly url: string
   focus(): Promise<unknown>
   navigate?(url: string): Promise<unknown>
+  postMessage?(message: unknown): void
+}
+
+export interface SwPushManager {
+  getSubscription(): Promise<unknown>
+  subscribe(options: { readonly userVisibleOnly: boolean; readonly applicationServerKey: BufferSource }): Promise<unknown>
 }
 
 export interface SwScope {
   readonly location: { readonly origin: string }
-  readonly registration: { showNotification(title: string, options: NotificationOptions): Promise<void> }
+  readonly registration: {
+    showNotification(title: string, options: NotificationOptions): Promise<void>
+    readonly pushManager?: SwPushManager | undefined
+  }
   readonly clients: {
     claim(): Promise<void>
     matchAll(options: { readonly type: 'window'; readonly includeUncontrolled: boolean }): Promise<readonly SwClient[]>
     openWindow(url: string): Promise<unknown>
   }
   readonly caches: CacheStorageLike
+  /** The worker's own fetch; tests inject a fake. Defaults to the global fetch. */
+  readonly fetch?: ((request: Request, init?: RequestInit) => Promise<Response>) | undefined
   skipWaiting(): Promise<void>
   addEventListener<K extends keyof SwEventMap>(type: K, listener: (event: SwEventMap[K]) => void): void
 }
@@ -71,7 +98,14 @@ export interface SwConfig {
   readonly version: string
   /** Absolute paths of the versioned shell: `/index.html` and hashed assets. */
   readonly shell: readonly string[]
+  /**
+   * How long a navigation waits for the network before the cached shell answers.
+   * Default 3.5 s: a slow launch shows the app, never a blank white screen.
+   */
+  readonly navigationTimeoutMs?: number
 }
+
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 3_500
 
 export const CACHE_PREFIX = 'xerxes-shell-'
 
@@ -101,12 +135,13 @@ export function fetchDecision(input: {
 
 const TASK_PATH = /^\/w\/[^/]+\/s\/[^/]+$/
 
-/** A notification target must be the Inbox or one exact task; anything else opens the Inbox. */
+/** A notification target must be the Inbox, the XERXES tab or one exact task; anything else opens the Inbox. */
 export function safeTaskPath(value: unknown, origin: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 600) return '/'
   let url: URL
   try { url = new URL(value, origin) } catch { return '/' }
   if (url.origin !== origin) return '/'
+  if (url.pathname === '/xerxes') return '/xerxes'
   return TASK_PATH.test(url.pathname) ? url.pathname : '/'
 }
 
@@ -141,6 +176,8 @@ export function installServiceWorker(scope: SwScope, config: SwConfig): void {
   const name = cacheName(config.version)
   const shell: ReadonlySet<string> = new Set(config.shell)
   const origin = scope.location.origin
+  const fetchFn = (request: Request, init?: RequestInit): Promise<Response> => (scope.fetch ? scope.fetch(request, init) : fetch(request, init))
+  const navigationTimeoutMs = config.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS
 
   scope.addEventListener('install', event => {
     event.waitUntil(scope.caches.open(name).then(cache => cache.addAll(config.shell)).then(() => scope.skipWaiting()))
@@ -163,21 +200,33 @@ export function installServiceWorker(scope: SwScope, config: SwConfig): void {
         const cache = await scope.caches.open(name)
         const hit = await cache.match(event.request)
         if (hit) return hit
-        const response = await fetch(event.request)
+        const response = await fetchFn(event.request)
         if (response.ok && response.type === 'basic') await cache.put(event.request, response.clone())
         return response
       })())
       return
     }
-    // Navigation: the network wins; the cached shell only answers when it is unreachable.
+    // Navigation: the network wins when it answers in time. When it fails, or is slower than
+    // the deadline, the cached shell answers (the app then connects on its own). With no cached
+    // shell the network is simply awaited: a late page beats an error page.
     event.respondWith((async () => {
+      const network = fetchFn(event.request)
+      // The race below may leave this promise unobserved; its failure is handled there.
+      network.catch(() => undefined)
+      const cachedShell = async (): Promise<Response | undefined> => (await scope.caches.open(name)).match('/index.html')
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timedOut = new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), navigationTimeoutMs) })
       try {
-        return await fetch(event.request)
+        const first = await Promise.race([network, timedOut])
+        if (first !== 'timeout') return first
+        const fallback = await cachedShell()
+        return fallback ?? await network
       } catch (error) {
-        const cache = await scope.caches.open(name)
-        const fallback = await cache.match('/index.html')
+        const fallback = await cachedShell()
         if (fallback) return fallback
         throw error
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
       }
     })())
   })
@@ -187,6 +236,26 @@ export function installServiceWorker(scope: SwScope, config: SwConfig): void {
     try { payload = event.data ? event.data.json() : undefined } catch { payload = undefined }
     const display = pushDisplay(payload, origin)
     event.waitUntil(scope.registration.showNotification(display.title, display.options))
+  })
+
+  scope.addEventListener('pushsubscriptionchange', event => {
+    event.waitUntil((async () => {
+      const manager = scope.registration.pushManager
+      const key = event.oldSubscription?.options?.applicationServerKey
+      // Re-subscribe in the browser with the same VAPID key when it gave no replacement.
+      // Subscribing is browser-local; telling the Hub needs the page (see PUSH_CHANGED_MESSAGE).
+      if (manager !== undefined && (event.newSubscription === undefined || event.newSubscription === null) && key) {
+        try {
+          if (await manager.getSubscription() === null) await manager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+        } catch {
+          // Refused (permission gone): the app's notification setting offers to turn it on again.
+        }
+      }
+      const windows = await scope.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      for (const client of windows) {
+        if (client.url.startsWith(origin)) client.postMessage?.({ type: PUSH_CHANGED_MESSAGE })
+      }
+    })())
   })
 
   scope.addEventListener('notificationclick', event => {

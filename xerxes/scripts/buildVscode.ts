@@ -90,7 +90,7 @@ function manifest(extensionVersion: string): Record<string, unknown> {
         { command: 'xerxes.search', title: 'Search Message History', category: 'Xerxes', icon: '$(search)' },
         { command: 'xerxes.palette', title: 'Command Palette', category: 'Xerxes' },
         { command: 'xerxes.exportTranscript', title: 'Export Transcript', category: 'Xerxes', icon: '$(export)' },
-        { command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Classic)', category: 'Xerxes', icon: '$(color-mode)' },
+        { command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Shading / Classic)', category: 'Xerxes', icon: '$(color-mode)' },
         ...SHEETS.map(([name, title]) => ({ command: `xerxes.panel.${name}`, title, category: 'Xerxes', icon: SHEET_ICONS[name] })),
       ],
       configuration: {
@@ -98,10 +98,11 @@ function manifest(extensionVersion: string): Record<string, unknown> {
         properties: {
           'xerxes.style': {
             type: 'string',
-            enum: ['neo', 'classic'],
+            enum: ['neo', 'classic', 'shading'],
             enumDescriptions: [
               'One monospace font, square corners, flat surfaces and a purple accent, in its own colours.',
               'Follows your VS Code theme: its colours and fonts.',
+              'The shadcn/ui look: neutral greys, a sans font, rounded cards with soft shadows.',
             ],
             default: 'neo',
             description: 'How the Xerxes view looks. High-contrast themes always keep VS Code\'s colours.',

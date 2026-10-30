@@ -59,6 +59,10 @@ export const HUB_METHODS = [
   'supervisor.autopilot.set',
   'supervisor.watch.list',
   'supervisor.watch.set',
+  /** A task's subagents (`session.read`). */
+  'agents.list',
+  /** One subagent's steps (`session.read`), bounded by the frame budget. */
+  'agents.inspect',
 ] as const
 export type HubMethod = (typeof HUB_METHODS)[number]
 

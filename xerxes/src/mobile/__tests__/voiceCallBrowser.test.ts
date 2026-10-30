@@ -343,8 +343,7 @@ describe('shared worklet microphone cancellation', () => {
     vi.stubGlobal('AudioWorkletNode', class {})
     const abort = new AbortController()
     const opening = browserLiveCaptureDeps()!.open(abort.signal)
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 10; i++) await Promise.resolve()
     abort.abort()
     expect(stop).toHaveBeenCalledOnce()
     expect(close).toHaveBeenCalledOnce()
@@ -352,13 +351,37 @@ describe('shared worklet microphone cancellation', () => {
     await expect(opening).rejects.toMatchObject({ kind: 'cancelled' })
     expect(stop).toHaveBeenCalledOnce()
   })
-  it('releases tracks if creating the audio context fails', async () => {
+  it('releases a microphone grant that arrives after hang-up during the permission prompt', async () => {
     const stop = vi.fn()
-    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop }] }) } })
+    const close = vi.fn(async () => undefined)
+    let grant = (): void => undefined
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: () => new Promise(resolve => { grant = () => resolve({ getTracks: () => [{ stop }] }) }) } })
+    vi.stubGlobal('AudioContext', class { resume = async () => undefined; close = close })
+    vi.stubGlobal('AudioWorkletNode', class {})
+    const abort = new AbortController()
+    const opening = browserLiveCaptureDeps()!.open(abort.signal)
+    abort.abort()
+    expect(close).toHaveBeenCalledOnce()
+    grant()
+    await expect(opening).rejects.toMatchObject({ kind: 'cancelled' })
+    expect(stop).toHaveBeenCalledOnce()
+  })
+  it('creates and resumes the capture AudioContext synchronously inside the tap, before the permission prompt', () => {
+    const order: string[] = []
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: () => { order.push('getUserMedia'); return new Promise(() => undefined) } } })
+    vi.stubGlobal('AudioContext', class { constructor() { order.push('context') } resume = () => { order.push('resume'); return Promise.resolve() }; close = async () => undefined })
+    vi.stubGlobal('AudioWorkletNode', class {})
+    void browserLiveCaptureDeps()!.open(new AbortController().signal)
+    // All three happened before open() yielded once.
+    expect(order).toEqual(['context', 'resume', 'getUserMedia'])
+  })
+  it('never asks for the microphone when the audio context cannot be created', async () => {
+    const getUserMedia = vi.fn(async () => ({ getTracks: () => [] }))
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
     vi.stubGlobal('AudioContext', class { constructor() { throw new Error('No audio device') } })
     vi.stubGlobal('AudioWorkletNode', class {})
     await expect(browserLiveCaptureDeps()!.open(new AbortController().signal)).rejects.toThrow('could not initialize')
-    expect(stop).toHaveBeenCalledOnce()
+    expect(getUserMedia).not.toHaveBeenCalled()
   })
 })
 

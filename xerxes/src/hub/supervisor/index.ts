@@ -440,6 +440,29 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     } catch (error) {
       report(error, 'supervisor permission notice')
     }
+    // The owner's own record: a system message in their private Autopilot thread, plus a push.
+    // The push text is minimal (no tool or command); the task link opens it.
+    try {
+      const own = threads.autopilotFor(owner.id)
+      if (own.id !== input.threadId) {
+        const { message: note } = threads.append({
+          threadId: own.id, role: 'system',
+          text: state === 'accepted'
+            ? `XERXES ${verb} ${tool} in “${title}” on your behalf.`
+            : `XERXES could not answer a permission request in “${title}”${message === undefined ? '' : ` (${message.slice(0, 200)})`}.`,
+        })
+        threads.emit(own.id, 'supervisor.thread_event', { message: messageToWire(note) })
+      }
+    } catch (error) {
+      report(error, 'supervisor permission autopilot notice')
+    }
+    void options.sendPush?.(owner.id, {
+      title: 'XERXES',
+      body: state === 'accepted'
+        ? (response === 'reject' ? 'XERXES rejected a permission request for you.' : 'XERXES approved a permission request for you.')
+        : 'XERXES could not answer a permission request. It needs you.',
+      url: `/w/${encodeURIComponent(workspaceId)}/s/${encodeURIComponent(sessionId)}`,
+    })?.catch(error => report(error, 'supervisor permission push'))
     return {
       state, request_id: requestId, response, on_behalf_of: owner.displayName,
       ...(message === undefined ? {} : { message }),

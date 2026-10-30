@@ -170,6 +170,32 @@ describe('HubEventStore', () => {
     expect(page.throughSequence).toBe(1)
   })
 
+  test('an oversized interaction stub keeps its ids and hides its details', () => {
+    const value = store()
+    const big = 'x'.repeat(HUB_LIMITS.maxFrameBytes + 1)
+    const event = (sequence: number, type: string, payload: Readonly<Record<string, unknown>>) => ({
+      event_id: `big-e${sequence}`, sequence, cursor: `up-${sequence}`, type, payload, session_id: 's1', occurred_at: new Date(now).toISOString(),
+    })
+    value.ingest('r1', 'w1', {
+      stream_id: 'upstream-1',
+      events: [
+        event(1, 'approval_request', { id: 'perm-1', request_id: 'perm-1', tool_call_id: 'call-1', session_id: 's1', inputs: { command: big } }),
+        event(2, 'question_request', { id: 'q-1', tool_call_id: 'call-2', questions: [{ question: big }] }),
+        event(3, 'approval_response', { request_id: 'perm-1', note: big }),
+        event(4, 'cron_event', { job_id: 'job-1', event_type: 'approval_request', payload: { id: 'perm-2', request_id: 'perm-2', inputs: { command: big } } }),
+      ],
+      through_cursor: 'up-4',
+    })
+    const page = value.read(0, scope, 10, HUB_LIMITS.normalFrameBytes)
+    const [approval, question, resolution, cron] = page.events.map(row => row.payload)
+    expect(approval).toEqual({ id: 'perm-1', request_id: 'perm-1', tool_call_id: 'call-1', session_id: 's1', redacted: true, details_hidden: true, truncated: true, original_bytes: expect.any(Number) })
+    expect(question).toMatchObject({ id: 'q-1', tool_call_id: 'call-2', redacted: true, details_hidden: true, questions: [], truncated: true })
+    expect(resolution).toMatchObject({ request_id: 'perm-1', truncated: true })
+    expect(resolution?.redacted).toBeUndefined()
+    expect(cron).toMatchObject({ job_id: 'job-1', event_type: 'approval_request', truncated: true, payload: { id: 'perm-2', request_id: 'perm-2', redacted: true, details_hidden: true, truncated: true } })
+    expect(page.bytes).toBeLessThanOrEqual(HUB_LIMITS.normalFrameBytes)
+  })
+
   test('byte retention raises the floor, returns a gap, and never reuses sequences', () => {
     const value = store(':memory:', { retention: { maxBytes: 1, maxAgeMs: 86_400_000 } })
     value.ingest('r1', 'w1', batch([1, 2]))

@@ -11,13 +11,14 @@
 
 import { createRoot } from 'react-dom/client'
 
-import { applyStyle, type StyleChoice } from '../../desktop/renderer/appearance.js'
+import { applyStyle, isStyleChoice, type StyleChoice } from '../../desktop/renderer/appearance.js'
 import { ErrorBoundary } from '../../desktop/renderer/ErrorBoundary.js'
 import { VscodeApp } from './VscodeApp.js'
 
 const root = document.documentElement
 /** The saved setting, stamped into the page by the extension and updated live. */
-let chosenStyle: StyleChoice = root.getAttribute('data-style-choice') === 'classic' ? 'classic' : 'neo'
+const stamped = root.getAttribute('data-style-choice')
+let chosenStyle: StyleChoice = isStyleChoice(stamped) ? stamped : 'neo'
 
 /** VS Code marks the body vscode-light / vscode-dark / vscode-high-contrast(-light); follow it live. */
 const followTheme = (): void => {

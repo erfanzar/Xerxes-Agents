@@ -119,7 +119,17 @@ export type RefreshOutcome =
   | { readonly kind: 'expired' }
   | { readonly kind: 'reuse' }
 
-type InternalOutcome = { readonly outcome: RefreshOutcome; readonly events: readonly RevocationEvent[]; readonly remember?: { readonly hash: string; readonly tokens: IssuedTokens } }
+type InternalOutcome = {
+  readonly outcome: RefreshOutcome
+  readonly events: readonly RevocationEvent[]
+  readonly remember?: { readonly hash: string; readonly tokens: IssuedTokens; readonly forkFamilyId?: string }
+}
+
+/**
+ * How long a lost fork reply can be collected again with the spent token (once, and only while
+ * the branch is unused, see refreshTokens). Memory only: a Hub restart ends it, which fails closed.
+ */
+export const FORK_REPLAY_MS = 3 * 60 * 1000
 
 export function refreshTokens(ctx: IdentityContext, refreshToken: string): RefreshOutcome {
   if (!refreshToken.startsWith(REFRESH_PREFIX) || refreshToken.length > MAX_TOKEN_LENGTH) return { kind: 'invalid', reason: 'malformed' }
@@ -154,9 +164,25 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
       return { outcome: { kind: 'expired' }, events }
     }
     if (token.generation === SPENT_GENERATION) {
-      // Already used once to start a branch: a racing retry inside the grace window gets that same branch.
+      // Already used once to start a branch. A racing retry gets that same branch, and so does a
+      // phone whose fork reply was lost (suspended twice in a row) as long as the branch was never
+      // used: its refresh token never rotated. A used branch means its holder has it; refuse.
       const grace = ctx.graceCache.get(hash)
-      if (grace && grace.expiresAt > now) return { outcome: { kind: 'ok', tokens: grace.tokens, user, device }, events: [] }
+      if (grace && grace.expiresAt > now && (grace.raceUntil ?? grace.expiresAt) > now) {
+        return { outcome: { kind: 'ok', tokens: grace.tokens, user, device }, events: [] }
+      }
+      if (grace && grace.expiresAt > now && grace.forkFamilyId !== undefined && grace.replayed !== true) {
+        const fork = ctx.store.one<FamilyRow>('SELECT * FROM hub_token_families WHERE id = ?', grace.forkFamilyId)
+        if (fork && fork.revoked_at === null && fork.device_id === device.id && fork.generation === 1 && fork.rotated_at === null) {
+          // One-shot: whoever holds the spent token can collect the unused branch once, never repeatedly.
+          grace.replayed = true
+          // The remembered browser session may have lapsed by now: hand out a fresh one on the same branch.
+          const reissued = grace.tokens.sessionExpiresAt > now ? grace.tokens : mintSession(ctx, fork.id, device, grace.tokens.refreshToken)
+          // The audit log only knows allowed/denied; the action name marks this as a replay worth a look.
+          auditAction(ctx, { actor: actorFor(user, device.id), action: `identity.family.fork_replay:${device.id}`, params: { family: fork.id } })
+          return { outcome: { kind: 'ok', tokens: reissued, user, device }, events: [] }
+        }
+      }
       return { outcome: { kind: 'invalid', reason: 'spent_token' }, events: [] }
     }
     if (token.generation !== family.generation) {
@@ -177,7 +203,15 @@ export function refreshTokens(ctx: IdentityContext, refreshToken: string): Refre
     return { outcome: { kind: 'ok', tokens, user, device }, events: [], remember: { hash, tokens } }
   })
   if (result.remember) {
-    ctx.graceCache.set(result.remember.hash, { tokens: result.remember.tokens, expiresAt: ctx.clock.now() + ctx.limits.refreshGraceMs })
+    const fork = result.remember.forkFamilyId
+    const window = fork === undefined ? ctx.limits.refreshGraceMs : Math.max(ctx.limits.refreshGraceMs, FORK_REPLAY_MS)
+    const issued = ctx.clock.now()
+    ctx.graceCache.set(result.remember.hash, {
+      tokens: result.remember.tokens,
+      expiresAt: issued + window,
+      raceUntil: issued + ctx.limits.refreshGraceMs,
+      ...(fork === undefined ? {} : { forkFamilyId: fork }),
+    })
   }
   pruneGrace(ctx)
   fireRevocations(ctx, result.events)
@@ -223,7 +257,8 @@ function forkFamily(
   const tokens = startFamily(ctx, device)
   ctx.store.run('UPDATE hub_devices SET last_seen_at = ? WHERE id = ?', now, device.id)
   auditAction(ctx, { actor, action: `identity.family.fork:${device.id}`, params: { from: family.id, generation } })
-  return { outcome: { kind: 'ok', tokens, user, device }, events, remember: { hash, tokens } }
+  const forkFamilyId = ctx.store.one<{ family_id: string }>('SELECT family_id FROM hub_refresh_tokens WHERE hash = ?', hashSecret(ctx, 'refresh', tokens.refreshToken))?.family_id
+  return { outcome: { kind: 'ok', tokens, user, device }, events, remember: { hash, tokens, ...(forkFamilyId === undefined ? {} : { forkFamilyId }) } }
 }
 
 function pruneGrace(ctx: IdentityContext): void {

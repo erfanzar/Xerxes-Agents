@@ -105,6 +105,15 @@ function ModelEditor({ onSaved }: { onSaved: (() => void) | undefined }): ReactE
     if (ok) onSaved?.()
   }
 
+  if (machines.phase === 'error' && candidates.length === 0) {
+    return (
+      <div role="alert" className="notice is-error">
+        <p>Could not load the machines: {machines.error ?? 'unknown error'}</p>
+        <button type="button" className="btn" disabled={!live} onClick={() => { void controller.machinesList() }}>Try again</button>
+      </div>
+    )
+  }
+
   if (machines.phase === 'ready' && candidates.length === 0 && current === undefined) {
     return <p>{NO_MACHINE_NOTE}</p>
   }

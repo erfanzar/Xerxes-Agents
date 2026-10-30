@@ -2,14 +2,29 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { resolveVoiceModelFile, voiceModelFileUrlPath, type VoiceModelTier } from '../../../client/voiceModelManifest.js'
+import { CallStepError } from './protocol.js'
 
 export const CALL_SAMPLE_RATE = 16_000
 export const VAD_FRAME_SAMPLES = 512
 export const REPLY_TIMEOUT_MS = 120_000
+/** Longest wait for the Hub to acknowledge a spoken message before the call says so and keeps listening. */
+export const REPLY_SEND_TIMEOUT_MS = 30_000
 
 /** Voice barge-in while XERXES speaks: Silero probability and how long it must last. */
 export const BARGE_IN_PROBABILITY = 0.85
-export const BARGE_IN_SECONDS = 0.7
+export const BARGE_IN_SECONDS = 0.5
+/** Shortest speech that starts an utterance while listening: short words ("yes", "no", "stop") must count. */
+export const VAD_MIN_SPEECH_SECONDS = 0.15
+/** Shortest speech that starts an utterance while XERXES speaks (its own echo must not). */
+export const VAD_MIN_SPEECH_WHILE_SPEAKING_SECONDS = 0.25
+/** Consecutive low frames that end a speech-start candidate; one or two dips inside a word do not. */
+export const VAD_START_HANGOVER_FRAMES = 3
+/** After XERXES's turn goes idle with no reply, wait this long for the reply event before concluding. */
+export const REPLY_IDLE_GRACE_MS = 3000
+export const CALL_SEND_REFUSED = 'The message was not accepted. Check the XERXES thread before trying again.'
+export const CALL_SEND_FAILED = 'The message could not be sent. Check the thread before trying again.'
+export const CALL_SEND_UNCONFIRMED = 'The Hub did not confirm your message in time. Check the XERXES thread before saying it again.'
+export const CALL_FINISHED_WITHOUT_REPLY = 'XERXES finished without a reply to that. Check the thread for details.'
 
 /** One Moonshine Streaming encoder frame: 5 ms at 16 kHz. */
 export const STT_FRAME_SAMPLES = 80
@@ -131,14 +146,16 @@ export class VadSegmenter {
   private length = 0
   private preRollSamples = 0
   private candidate = 0
+  private starting = false
+  private lowRun = 0
   private silence = 0
   private speakingRun = 0
   private active = false
   reset(): void {
     this.pre = new Float32Array(0)
     this.chunks = []
-    this.length = this.preRollSamples = this.candidate = this.silence = this.speakingRun = 0
-    this.active = false
+    this.length = this.preRollSamples = this.candidate = this.lowRun = this.silence = this.speakingRun = 0
+    this.active = this.starting = false
   }
   push(frame: Float32Array, probability: number, speaking: boolean): VadStep {
     if (frame.length !== VAD_FRAME_SAMPLES || !Number.isFinite(probability)) throw new Error('Invalid VAD frame.')
@@ -148,20 +165,30 @@ export class VadSegmenter {
     const bargeIn = this.speakingRun >= BARGE_IN_SECONDS * CALL_SAMPLE_RATE
     if (bargeIn) this.speakingRun = 0
     if (!this.active) {
-      if (probability >= 0.5) {
-        if (this.candidate === 0) {
-          this.chunks = [this.pre]
-          this.length = this.pre.length
-          this.preRollSamples = this.pre.length
+      if (probability >= 0.5 || this.starting) {
+        if (probability >= 0.5) {
+          if (!this.starting) {
+            this.starting = true
+            this.chunks = [this.pre]
+            this.length = this.pre.length
+            this.preRollSamples = this.pre.length
+          }
+          this.lowRun = 0
+          this.candidate += frame.length
+        } else {
+          // A dip inside a word ("y-e-s") does not reset the start; a few low frames in a row do.
+          this.lowRun += 1
         }
-        this.chunks.push(frame)
-        this.length += frame.length
-        this.candidate += frame.length
-        if (this.candidate >= 0.25 * CALL_SAMPLE_RATE) this.active = true
-      } else {
-        this.candidate = 0
-        this.chunks = []
-        this.length = 0
+        if (this.lowRun >= VAD_START_HANGOVER_FRAMES) {
+          this.starting = false
+          this.candidate = this.lowRun = this.length = 0
+          this.chunks = []
+        } else {
+          this.chunks.push(frame)
+          this.length += frame.length
+          const minimum = speaking ? VAD_MIN_SPEECH_WHILE_SPEAKING_SECONDS : VAD_MIN_SPEECH_SECONDS
+          if (this.candidate >= minimum * CALL_SAMPLE_RATE) this.active = true
+        }
       }
       const pre = new Float32Array(this.pre.length + frame.length)
       pre.set(this.pre)
@@ -200,10 +227,27 @@ export interface CallReply {
   readonly origin?: string
 }
 
+/** The Hub's notice for a XERXES turn that failed ("XERXES stopped: <why>"). */
+export const CALL_TURN_STOPPED_PREFIX = 'XERXES stopped'
+
+/**
+ * The reply to `messageId`: XERXES's answer, or the Hub's "XERXES stopped: …" notice when the turn failed
+ * (returned with role 'system', so the call speaks the failure instead of waiting 120 s in silence).
+ */
 export function matchCallReply(messages: readonly CallReply[], baseline: ReadonlySet<string>, messageId: string, threadId?: string): CallReply | undefined {
-  return messages.find(message => message.role === 'xerxes' && message.origin !== 'wake' && !baseline.has(message.id)
+  return messages.find(message => (
+    (message.role === 'xerxes' && message.origin !== 'wake') || (message.role === 'system' && message.text.startsWith(CALL_TURN_STOPPED_PREFIX))
+  ) && !baseline.has(message.id)
     && (threadId === undefined || message.threadId === undefined || message.threadId === threadId)
     && (message.causalMessageId === undefined || message.causalMessageId === messageId))
+}
+
+/** The message never reached XERXES (refused, or the request failed). The call keeps running. */
+export class CallSendError extends CallStepError {
+  constructor(message: string, readonly kind: 'refused' | 'failed' | 'unconfirmed') {
+    super(message)
+    this.name = 'CallSendError'
+  }
 }
 
 /** Observe before submit, so a reply delivered before the submit acknowledgement is not lost. */
@@ -217,16 +261,28 @@ export function waitForCallReply(input: {
   readonly timeoutMs?: number
   /** Keep observing late replies after this notice; the call aborts this wait when the person speaks again. */
   readonly onTimeout?: () => void
+  /**
+   * Whether XERXES is still running the turn (undefined when unknown). After the send is accepted, `false`
+   * for longer than `idleGraceMs` with no reply ends the wait with a visible error instead of silence.
+   */
+  readonly working?: () => boolean | undefined
+  readonly idleGraceMs?: number
+  /** Longest wait for the submit acknowledgement; a lost acknowledgement must not hang the call. */
+  readonly sendTimeoutMs?: number
 }): Promise<CallReply> {
   const baseline = new Set(input.messages().map(message => message.id))
   return new Promise((resolve, reject) => {
     let settled = false
     let accepted = false
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
     let unsubscribe = (): void => undefined
+    const stopIdle = (): void => { if (idleTimer !== undefined) clearTimeout(idleTimer); idleTimer = undefined }
     const finish = (error?: Error, reply?: CallReply): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(sendTimer)
+      stopIdle()
       unsubscribe()
       input.signal.removeEventListener('abort', abort)
       if (error) reject(error)
@@ -234,21 +290,32 @@ export function waitForCallReply(input: {
     }
     const abort = (): void => finish(new Error('Call cancelled.'))
     const check = (): void => {
-      if (!accepted) return
+      if (!accepted || settled) return
       const reply = matchCallReply(input.messages(), baseline, input.messageId, input.threadId)
-      if (reply) finish(undefined, reply)
+      if (reply) { finish(undefined, reply); return }
+      if (input.working?.() !== false) { stopIdle(); return }
+      // The turn ended; the reply event may still be on its way, so wait a moment before concluding.
+      idleTimer ??= setTimeout(() => {
+        idleTimer = undefined
+        const late = matchCallReply(input.messages(), baseline, input.messageId, input.threadId)
+        if (late) finish(undefined, late)
+        else if (input.working?.() === false) finish(new CallStepError(CALL_FINISHED_WITHOUT_REPLY))
+      }, input.idleGraceMs ?? REPLY_IDLE_GRACE_MS)
     }
     const timer = setTimeout(() => {
       if (input.onTimeout) input.onTimeout()
       else finish(new Error('XERXES did not reply within 120 seconds. The message remains in your thread.'))
     }, input.timeoutMs ?? REPLY_TIMEOUT_MS)
+    const sendTimer = setTimeout(() => {
+      if (!accepted) finish(new CallSendError(CALL_SEND_UNCONFIRMED, 'unconfirmed'))
+    }, input.sendTimeoutMs ?? REPLY_SEND_TIMEOUT_MS)
     input.signal.addEventListener('abort', abort, { once: true })
     if (input.signal.aborted) { abort(); return }
     unsubscribe = input.subscribe(check)
     void input.send().then(ok => {
-      if (!ok) finish(new Error('The message was not accepted. Check the XERXES thread before trying again.'))
-      else { accepted = true; check() }
-    }, () => finish(new Error('The message could not be sent. Check the thread before trying again.')))
+      if (!ok) finish(new CallSendError(CALL_SEND_REFUSED, 'refused'))
+      else { accepted = true; clearTimeout(sendTimer); check() }
+    }, () => finish(new CallSendError(CALL_SEND_FAILED, 'failed')))
   })
 }
 

@@ -5,6 +5,7 @@ import { useState, type ReactElement } from 'react'
 
 import type { DecisionKind, DecisionState } from '../../client/hubStore.js'
 import type { PendingInteraction } from '../../client/sessionFold.js'
+import { DecisionStatus, HIDDEN_DETAILS_NOTE, QuestionForm, decisionLocked } from './Interactions.js'
 import { Sheet } from './Sheet.js'
 
 export type ApprovalStep = 'choose' | 'confirm-session'
@@ -37,35 +38,10 @@ export interface ApprovalPanelProps {
   readonly initialStep?: ApprovalStep
 }
 
-function QuestionForm({ item, locked, onAnswer }: { item: PendingInteraction; locked: boolean; onAnswer: (answers: Readonly<Record<string, string>>) => void }): ReactElement {
-  const [answers, setAnswers] = useState<Readonly<Record<string, string>>>({})
-  const complete = item.questions.length > 0 && item.questions.every(question => (answers[question.id] ?? '').trim() !== '')
-  return (
-    <form className="approval-questions" onSubmit={event => { event.preventDefault(); if (complete && !locked) onAnswer(answers) }}>
-      {item.questions.map(question => (
-        <fieldset key={question.id} className="question" disabled={locked}>
-          <legend>{question.question}</legend>
-          {question.options.map(option => (
-            <button key={option} type="button" className="btn btn-segment" aria-pressed={answers[question.id] === option} onClick={() => setAnswers({ ...answers, [question.id]: option })}>{option}</button>
-          ))}
-          {question.allowFreeForm || question.options.length === 0 ? (
-            <label className="field">
-              <span>{question.options.length > 0 ? 'Something else' : 'Your answer'}</span>
-              <input type="text" value={question.options.includes(answers[question.id] ?? '') ? '' : answers[question.id] ?? ''} onChange={event => setAnswers({ ...answers, [question.id]: event.target.value })} />
-            </label>
-          ) : null}
-        </fieldset>
-      ))}
-      <button type="submit" className="btn btn-primary" disabled={!complete || locked}>Send answer</button>
-    </form>
-  )
-}
-
 /** The decision surface: real command, inputs, workspace and scope, with the safe choices first. */
 export function ApprovalPanel({ item, decision, canRespond, disabledReason, onDecide, onAnswer, initialStep = 'choose' }: ApprovalPanelProps): ReactElement {
   const [step, setStep] = useState<ApprovalStep>(initialStep)
-  const phase = decision?.phase
-  const locked = !canRespond || phase === 'sending' || phase === 'unknown' || phase === 'resolved'
+  const locked = decisionLocked(canRespond, decision)
   const act = (intent: ApprovalIntent): void => {
     const next = approvalStep(step, intent)
     setStep(next.step)
@@ -88,22 +64,20 @@ export function ApprovalPanel({ item, decision, canRespond, disabledReason, onDe
         </dl>
       )}
       {item.description === '' ? null : <p>{item.description}</p>}
-      {item.detailsHidden ? <p className="notice">The exact command and inputs are hidden for your role. Open this on the desktop to see them.</p> : null}
+      {item.detailsHidden ? <p className="notice">{HIDDEN_DETAILS_NOTE}</p> : null}
 
-      {phase === 'sending' ? <p role="status">Sending your decision…</p> : null}
-      {phase === 'failed' ? <p role="alert" className="field-error">Not applied: {decision?.message ?? 'The decision did not go through.'} You can try again.</p> : null}
-      {phase === 'unknown' ? <p role="alert" className="field-error">{decision?.message ?? 'Could not confirm whether this was applied.'} Check the task before deciding again.</p> : null}
-      {phase === 'resolved' ? <p role="status">{decision?.already === true ? (decision.by ? `Already resolved by ${decision.by}.` : decision.message ?? 'Already resolved by someone else.') : 'Decision sent.'}</p> : null}
+      <DecisionStatus decision={decision} />
       {!canRespond && disabledReason !== undefined ? <p className="notice">{disabledReason}</p> : null}
 
       {item.kind === 'question' ? (
         <QuestionForm item={item} locked={locked} onAnswer={onAnswer} />
       ) : step === 'choose' ? (
         <div className="approval-actions">
-          <p className="approval-scope">Allow once approves only this request. Deny refuses it.</p>
-          <button type="button" className="btn btn-primary" disabled={locked} onClick={() => act('once')}>Allow once</button>
+          {/* Nothing is approved blind: without the command and inputs only Deny is offered. */}
+          <p className="approval-scope">{item.detailsHidden ? 'Deny refuses this request.' : 'Allow once approves only this request. Deny refuses it.'}</p>
+          {item.detailsHidden ? null : <button type="button" className="btn btn-primary" disabled={locked} onClick={() => act('once')}>Allow once</button>}
           <button type="button" className="btn btn-danger" disabled={locked} onClick={() => act('deny')}>Deny</button>
-          <button type="button" className="btn btn-quiet" disabled={locked} onClick={() => act('session')}>Allow for this session…</button>
+          {item.detailsHidden ? null : <button type="button" className="btn btn-quiet" disabled={locked} onClick={() => act('session')}>Allow for this session…</button>}
         </div>
       ) : (
         <div className="approval-actions" role="group" aria-label="Confirm session-wide approval">

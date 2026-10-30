@@ -49,12 +49,14 @@ export class VoiceClientCore {
   private readonly transcripts = new Map<string, Waiter<string>>()
   private readonly closeListeners = new Set<(code: number, reason: string) => void>()
   private liveMode = false
+  private audioUnlocked = false
 
   constructor(private readonly deps: VoiceClientDeps) {
     const { state } = deps
     this.playback = new ResponsePlayback(deps.output ?? NULL_OUTPUT, {
       started: (responseId, generation) => state.dispatch({ type: 'playback_started', responseId, generation }),
       ended: (responseId, generation) => state.dispatch({ type: 'playback_ended', responseId, generation }),
+      empty: (responseId, generation) => state.dispatch({ type: 'playback_empty', responseId, generation }),
       failed: (responseId, _generation, error) => {
         this.link?.sendControl({ type: 'interrupt', response_id: responseId })
         state.dispatch({ type: 'failed', code: error.kind === 'blocked' ? 'VOICE_BLOCKED' : 'VOICE_FORMAT', message: error.message })
@@ -120,9 +122,22 @@ export class VoiceClientCore {
     this.deps.state.dispatch({ type: 'interrupt' })
   }
 
-  /** Call inside a user gesture so a later spoken reply is allowed to play. */
+  /**
+   * Call inside a user gesture so a later spoken reply is allowed to play. WebKit may not count a
+   * pointerdown as an audio gesture, so callers also call this on release; it is only done once the
+   * output reports it runs.
+   */
   unlockAudio(): void {
-    void this.deps.output?.unlock?.().catch(() => undefined)
+    if (this.audioUnlocked) return
+    const output = this.deps.output
+    if (output?.unlock === undefined) return
+    // Called as a method: class-based outputs read `this`.
+    void output.unlock().then(() => { this.audioUnlocked = true }, () => undefined)
+  }
+
+  /** Whether a gesture has already unlocked output audio. */
+  get audioReady(): boolean {
+    return this.audioUnlocked
   }
 
   private wait<T>(map: Map<string, Waiter<T>>, id: string, timeoutMs: number, timeoutMessage: string): Promise<T> {
@@ -193,8 +208,13 @@ export class VoiceClientCore {
         }
         return
       case 'audio_end':
-        this.playback.end({ responseId: message.response_id, generation: message.generation, interrupted: message.interrupted })
+        // The state learns the stream ended first; playback then reports ended/empty when the speaker is done.
         state.dispatch({ type: 'audio_end', responseId: message.response_id, generation: message.generation, interrupted: message.interrupted })
+        this.playback.end({ responseId: message.response_id, generation: message.generation, interrupted: message.interrupted })
+        // Without an output device nothing plays, so nothing would ever end the response.
+        if (this.deps.output === undefined && !message.interrupted) {
+          state.dispatch({ type: 'playback_empty', responseId: message.response_id, generation: message.generation })
+        }
         return
       case 'error': {
         this.rejectAll(new VoiceRemoteError(message.code, message.message), message.utterance_id)

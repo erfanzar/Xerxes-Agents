@@ -8,7 +8,7 @@ import { SHARED_LESSON_LIMITS } from '../memory/sharedLessonWire.js'
 import { HubDaemonClient, DaemonRpcError, DaemonTransportError } from './daemonClient.js'
 import type { DaemonCallOptions, DaemonHandshake, HubDaemonClientOptions } from './daemonClient.js'
 import { HubOperatorError, isPrivateProviderType, parseUpstreamEvent } from './ports.js'
-import type { HubEventSink, HubTunnel } from './ports.js'
+import type { HubEventSink, HubTunnel, UpstreamEvent } from './ports.js'
 import { HUB_LIMITS, isRecord } from './protocol.js'
 import type { WorkspaceHealth } from './protocol.js'
 import { emptyProjection, markProjectionInterrupted, markProjectionStale, reduceProjectionEvent, replaceSessionSummaries } from './projections.js'
@@ -148,6 +148,44 @@ export interface HubRuntimePoolOptions {
   readonly onInterrupted?: (notice: PoolInterruptedNotice) => void
   /** How often a machine on a fallback route checks whether a better route is back (default 30 s). */
   readonly betterRouteProbeMs?: number
+  /** Live text/thinking deltas of one session are merged for up to this long before they are stored (default 150 ms). */
+  readonly coalesceMs?: number
+}
+/**
+ * Delta event types merged by the Hub. Every spelling is normalized to the canonical
+ * `text_part {text}` / `think_part {think}` the phone renders; `sources` lists the payload
+ * fields a spelling may carry its text in, first match wins.
+ */
+interface DeltaKind { readonly type: 'text_part' | 'think_part'; readonly field: 'text' | 'think'; readonly sources: readonly string[] }
+const DELTA_KINDS: Readonly<Record<string, DeltaKind>> = {
+  text_part: { type: 'text_part', field: 'text', sources: ['text'] },
+  text_delta: { type: 'text_part', field: 'text', sources: ['text', 'delta'] },
+  think_part: { type: 'think_part', field: 'think', sources: ['think'] },
+  thinking_part: { type: 'think_part', field: 'think', sources: ['think', 'thinking', 'text'] },
+  thinking_delta: { type: 'think_part', field: 'think', sources: ['thinking', 'think', 'delta', 'text'] },
+}
+/** Text deltas change no projection field but the row's timestamps; refresh those at most this often per task. */
+const DELTA_PROJECTION_INTERVAL_MS = 5000
+/** The canonical delta an upstream event carries, or undefined when it is not a text/thinking delta. */
+export function normalizeDelta(event: UpstreamEvent): { readonly event: UpstreamEvent; readonly field: 'text' | 'think'; readonly text: string } | undefined {
+  const kind = DELTA_KINDS[event.type]
+  if (kind === undefined) return undefined
+  const source = kind.sources.find(name => typeof event.payload[name] === 'string')
+  if (source === undefined) return undefined
+  const text = event.payload[source] as string
+  const rest: Record<string, unknown> = {}
+  for (const [name, value] of Object.entries(event.payload)) if (!kind.sources.includes(name)) rest[name] = value
+  return { event: { ...event, type: kind.type, payload: { ...rest, [kind.field]: text } }, field: kind.field, text }
+}
+/** A merged delta is stored once it holds this many characters, whatever its age. */
+const COALESCE_MAX_CHARS = 16_000
+interface DeltaBuffer {
+  readonly key: string
+  readonly field: 'text' | 'think'
+  readonly first: UpstreamEvent
+  last: UpstreamEvent
+  text: string
+  readonly generation: number
 }
 interface SessionLane {
   readonly client: HubDaemonClient
@@ -184,6 +222,12 @@ interface Lane {
   tunnel: HubTunnel | undefined
   generation: number
   queuedEventBytes: number
+  /**
+   * Text/thinking deltas received but not stored yet. Their cursor is not committed, so a
+   * reconnect drops the buffer and the daemon replays them from the committed cursor.
+   */
+  deltas: DeltaBuffer | undefined
+  deltaTimer: ReturnType<typeof setTimeout> | undefined
   /** The entry this lane's client was opened for; its routes are the ones tried. */
   readonly entry: PoolWorkspace
   /** Index into `routesOf(entry)` of the route this lane last picked. */
@@ -233,6 +277,8 @@ export class HubRuntimePool {
   private readonly derived = new Map<string, Set<string>>()
   private readonly healthByWorkspace = new Map<string, PoolHealth>()
   private readonly projections = new Map<string, WorkspaceProjection>()
+  /** workspace + task -> when a text/thinking delta last reached its projection (bounded LRU). */
+  private readonly deltaProjectedAt = new Map<string, number>()
   private stopped = false
   constructor(private readonly options: HubRuntimePoolOptions) {}
   get runtimeCount(): number { return this.lanes.size }
@@ -323,6 +369,7 @@ export class HubRuntimePool {
       workspaces: new Map([[workspace.id, workspace]]), abort, endpointKeys: new Set([endpointKey]), active: true,
       everOnline: false, runtimeId: `unverified:${workspace.id}`, verified: false, signedCommands: false, modelsSupported: false, lessonsSupported: false, health: undefined, subscribedKey: undefined, instanceId: undefined, subscriptionId: undefined, streamId: undefined,
       degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0,
+      deltas: undefined, deltaTimer: undefined,
       entry: workspace, routeIndex: 0, routeConfirmed: true, badRoutes: new Map(), betterProbeAt: 0 }
     this.lanes.add(lane); this.endpoints.set(endpointKey, lane); this.owners.set(workspace.id, lane)
     client.onState((state, error) => {
@@ -330,6 +377,8 @@ export class HubRuntimePool {
       if (state === 'online') return // setup, journal resume and snapshot must finish before admission
       lane.generation++
       clearTimeout(lane.poll); lane.poll = undefined; lane.subscriptionId = undefined
+      // Uncommitted deltas come back from the committed cursor after the reconnect.
+      this.dropDeltas(lane)
       if (state === 'needs_operator') this.setLaneHealth(lane, 'needs_operator', error?.message)
       else if (state === 'disconnected') this.setLaneHealth(lane, lane.everOnline ? 'stale' : 'offline', error?.message)
       else if (state === 'connecting') this.setLaneHealth(lane, lane.everOnline ? 'stale' : 'connecting')
@@ -416,7 +465,7 @@ export class HubRuntimePool {
     if (this.stopped) return
     this.stopped = true
     const closing = [...this.lanes].map(async lane => {
-      lane.active = false; lane.abort.abort(); clearTimeout(lane.poll); lane.client.close()
+      lane.active = false; lane.abort.abort(); clearTimeout(lane.poll); this.dropDeltas(lane); lane.client.close()
       for (const control of lane.controls.values()) control.client.close()
       lane.controls.clear()
       await lane.tunnel?.close(); await lane.tail
@@ -543,6 +592,8 @@ export class HubRuntimePool {
   private async configure(lane: Lane): Promise<void> {
     if (!lane.active || !lane.client.online) return
     clearTimeout(lane.poll); lane.poll = undefined
+    // Resubscribing resumes from the committed cursor: store buffered deltas first so none is received twice.
+    await this.flushDeltas(lane)
     await this.summaries(lane)
     // Machine entries ('/') are never subscribed: the daemon matches project dirs exactly. With no
     // project known yet there is nothing to subscribe to; polling finds the first one.
@@ -553,7 +604,9 @@ export class HubRuntimePool {
       lane.subscriptionId = undefined
       const cursor = this.options.sink.upstreamCursor(lane.runtimeId)
       let subscribed: Record<string, unknown>
-      try { subscribed = await lane.client.call('events.subscribe', { project_dirs: dirs, detail: 'summary', max_batch_bytes: HUB_LIMITS.normalFrameBytes, ...(cursor === undefined ? {} : { after_cursor: cursor }) }) }
+      // Conversation detail: phones show assistant text and thinking live. The Hub merges the
+      // deltas (see ingest) so the journal and the phones receive a bounded number of events.
+      try { subscribed = await lane.client.call('events.subscribe', { project_dirs: dirs, detail: 'conversation', max_batch_bytes: HUB_LIMITS.normalFrameBytes, ...(cursor === undefined ? {} : { after_cursor: cursor }) }) }
       catch (error) { if (error instanceof DaemonRpcError && error.code === -32601) subscribed = { ok: false }; else throw error }
       if (subscribed.ok !== true || typeof subscribed.subscription_id !== 'string') {
         if (subscribed.ok === false && (subscribed.error === undefined || /unknown method|unsupported/i.test(String(subscribed.error)))) lane.degraded = true
@@ -783,16 +836,78 @@ export class HubRuntimePool {
       if (event.sequence <= previousSequence) throw new Error('Daemon journal batch is not ordered')
       previousSequence = event.sequence
       if (event.runtime_id !== lane.runtimeId) throw new Error('Daemon journal runtime identity changed without a new handshake')
-      // Preserve upstream order across workspace partitions: persisting all of A
-      // before B could checkpoint past an uncommitted B event on a sink failure.
-      for (const [id, workspace] of lane.workspaces) {
-        if (event.project_dir !== workspace.projectDir) continue
-        await this.options.sink.ingest(lane.runtimeId, id, [{ ...event, ...(lane.streamId === undefined ? {} : { stream_id: lane.streamId }) }])
-        this.publish(id, reduceProjectionEvent(this.projections.get(id)!, event, workspace.projectDir))
+      const normalized = normalizeDelta(event)
+      if (normalized !== undefined) {
+        const { field, text: delta, event: canonical } = normalized
+        const { [field]: _text, ...rest } = canonical.payload
+        const key = JSON.stringify([canonical.type, canonical.project_dir, canonical.session_id ?? null, rest])
+        if (lane.deltas !== undefined && lane.deltas.key !== key) await this.flushDeltas(lane)
+        if (lane.deltas === undefined) lane.deltas = { key, field, first: canonical, last: canonical, text: delta, generation: lane.generation }
+        else { lane.deltas.last = canonical; lane.deltas.text += delta }
+        if (lane.deltas.text.length >= COALESCE_MAX_CHARS) await this.flushDeltas(lane)
+        continue
       }
+      // Anything else keeps upstream order: buffered text is stored before it.
+      await this.flushDeltas(lane)
+      await this.store(lane, event)
+    }
+    this.scheduleDeltaFlush(lane)
+  }
+  /**
+   * Persist and project one event. Preserve upstream order across workspace partitions: persisting
+   * all of A before B could checkpoint past an uncommitted B event on a sink failure.
+   */
+  private async store(lane: Lane, event: UpstreamEvent): Promise<void> {
+    for (const [id, workspace] of lane.workspaces) {
+      if (event.project_dir !== workspace.projectDir) continue
+      await this.options.sink.ingest(lane.runtimeId, id, [{ ...event, ...(lane.streamId === undefined ? {} : { stream_id: lane.streamId }) }])
+      if (this.skipDeltaProjection(id, event)) continue
+      this.publish(id, reduceProjectionEvent(this.projections.get(id)!, event, workspace.projectDir))
     }
   }
+  /**
+   * A merged text/thinking delta only moves its task's timestamps in the projection, yet
+   * reducing it copies the whole projection (every ~150 ms per streaming task). Reduce one
+   * such event per task per interval; any other event of the task reduces as before.
+   * Watch's last activity is read from the stored events, not from here.
+   */
+  private skipDeltaProjection(workspaceId: string, event: UpstreamEvent): boolean {
+    const key = `${workspaceId}\0${event.session_id ?? ''}`
+    if (event.type !== 'text_part' && event.type !== 'think_part') { this.deltaProjectedAt.delete(key); return false }
+    const now = Date.now()
+    const last = this.deltaProjectedAt.get(key)
+    if (last !== undefined && now - last < DELTA_PROJECTION_INTERVAL_MS) return true
+    this.deltaProjectedAt.delete(key)
+    this.deltaProjectedAt.set(key, now)
+    if (this.deltaProjectedAt.size > 4096) this.deltaProjectedAt.delete(this.deltaProjectedAt.keys().next().value!)
+    return false
+  }
+  /**
+   * Store the buffered deltas as ONE event: the first delta's payload with the joined text, and the
+   * last delta's id, sequence and cursor, so committing it commits every delta it holds.
+   */
+  private async flushDeltas(lane: Lane): Promise<void> {
+    const buffer = lane.deltas
+    clearTimeout(lane.deltaTimer); lane.deltaTimer = undefined
+    if (buffer === undefined) return
+    lane.deltas = undefined
+    if (buffer.generation !== lane.generation) return
+    await this.store(lane, { ...buffer.last, payload: { ...buffer.first.payload, [buffer.field]: buffer.text } })
+  }
+  private scheduleDeltaFlush(lane: Lane): void {
+    if (lane.deltas === undefined || lane.deltaTimer !== undefined) return
+    const generation = lane.generation
+    lane.deltaTimer = setTimeout(() => {
+      lane.deltaTimer = undefined
+      this.enqueue(lane, async () => { if (generation === lane.generation) await this.flushDeltas(lane) })
+    }, this.options.coalesceMs ?? 150)
+    lane.deltaTimer.unref?.()
+  }
+  private dropDeltas(lane: Lane): void {
+    clearTimeout(lane.deltaTimer); lane.deltaTimer = undefined; lane.deltas = undefined
+  }
   private async gap(lane: Lane, payload: Record<string, unknown>): Promise<void> {
+    await this.flushDeltas(lane)
     await this.summaries(lane)
     this.options.onGap?.({ runtimeId: lane.runtimeId, workspaceIds: [...lane.workspaces.keys()], reason: typeof payload.reason === 'string' ? payload.reason : 'retention',
       ...(typeof payload.watermark === 'string' ? { watermark: payload.watermark } : {}) })

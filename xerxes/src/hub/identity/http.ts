@@ -152,8 +152,18 @@ function sessionResponse(
  * which on iPhone usually means Safari was paired but the Home Screen app was not). It names no secret.
  */
 function endedResponse(reason?: string): Response {
-  return jsonResponse(401, { error: { code: 'unauthorized', message: 'the session ended; pair this device again', ...(reason === undefined ? {} : { reason }) } }, [clearHostCookie(REFRESH_COOKIE), clearHostCookie(SESSION_COOKIE)])
+  // A spent token or a lost rotation race means a concurrent request of the same cookie jar
+  // (another tab, a retried reply) may have won and set newer cookies. Clearing the cookies here
+  // could land after that reply and erase the winner's tokens, so these refusals leave them alone.
+  const keep = reason !== undefined && KEEP_COOKIES_ON.has(reason)
+  return jsonResponse(
+    401,
+    { error: { code: 'unauthorized', message: 'the session ended; pair this device again', ...(reason === undefined ? {} : { reason }) } },
+    keep ? [] : [clearHostCookie(REFRESH_COOKIE), clearHostCookie(SESSION_COOKIE)],
+  )
 }
+
+const KEEP_COOKIES_ON: ReadonlySet<string> = new Set(['spent_token', 'race'])
 
 /** Record why a refresh was refused, so a phone that "signs out" leaves evidence. Never stores the token. */
 function auditRefusal(call: Call, reason: string, token?: string): void {

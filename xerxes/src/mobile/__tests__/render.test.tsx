@@ -129,9 +129,15 @@ describe('Task tab', () => {
       s => reduceHub(s, { type: 'decision', interactionId: 'r1', state: { phase: 'failed', decision: 'once', message: 'Hub unavailable' } }),
     )
     const html = plain(render(state, '/w/w1/s/s1'))
-    expect(html).toContain('Review and decide')
+    // Decided in place at the bottom of the chat, not behind a "Review" button.
+    expect(html).not.toContain('Review and decide')
+    expect(html).toContain('aria-label="Waiting for you"')
+    expect(html).toContain('rm -rf build')
+    expect(html).toContain('>Allow<')
+    expect(html).toContain('>Allow for session<')
+    expect(html).toContain('>Deny<')
     expect(html).toContain('Not applied: Hub unavailable')
-    expect(html).toContain('Needs you')
+    expect(html).toContain('Permission')
 
     const resolved = taskState([], s => reduceHub(s, { type: 'decision', interactionId: 'r9', state: { phase: 'resolved', decision: 'once', already: true, by: 'Bob' } }))
     expect(plain(render(resolved, '/w/w1/s/s1'))).toContain('Already resolved by Bob.')
@@ -194,9 +200,14 @@ describe('approval sheet', () => {
 
   it('says when the Hub withheld the details and disables deciding offline', () => {
     const hidden = plain(renderToStaticMarkup(<ApprovalPanel item={{ ...item, command: undefined as unknown as string, inputs: [], detailsHidden: true }} canRespond={false} disabledReason="Decisions need a live connection." onDecide={noop} onAnswer={noop} />))
-    expect(hidden).toContain('hidden for your role')
+    expect(hidden).toContain('cannot be approved blind')
     expect(hidden).toContain('Decisions need a live connection.')
     expect(hidden).toMatch(/<button[^>]*disabled[^>]*>Deny/)
+    // UI-03: no blind approval, even when the person could respond.
+    const blind = plain(renderToStaticMarkup(<ApprovalPanel item={{ ...item, command: undefined as unknown as string, inputs: [], detailsHidden: true }} canRespond onDecide={noop} onAnswer={noop} />))
+    expect(blind).not.toContain('Allow once')
+    expect(blind).not.toContain('Allow for this session')
+    expect(blind).toMatch(/<button type="button" class="btn btn-danger">Deny/)
   })
 })
 

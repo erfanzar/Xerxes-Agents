@@ -6,10 +6,10 @@ import { AUTOPILOT_THREAD_PREFIX, autopilotThreadId } from './autopilot.js'
 import { newCommandId } from './bridge.js'
 import { HubRequestError, type HubConnection, type SubscriptionHandle, type Timers } from './hubConnection.js'
 import {
-  parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
+  parseAgentDetail, parseAgentList, parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
   parseSupervisorOptions, parseWatchRow, parseWatchView, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
-import { canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
+import { IDLE_AGENT_DETAIL, canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
 import { taskKey, type WorkspaceView } from './hubTypes.js'
 import type { PreparedImage } from './imagePrep.js'
 import { arr, rec, str } from './parse.js'
@@ -33,8 +33,22 @@ export interface HubController {
   dispose(): void
   refreshInbox(): Promise<void>
   openSession(workspaceId: string, sessionId: string): void
+  /** Leave the open task: its subscription closes and presence becomes `idle`. */
   closeSession(): void
   loadOlder(): Promise<void>
+  /** Loads `agents.list` for the open task into `selected.agents`. */
+  loadAgents(): Promise<void>
+  /** Opens one subagent's steps (`agents.inspect`) into `selected.agentDetail`. */
+  inspectAgent(agentId: string): Promise<void>
+  closeAgent(): void
+  /**
+   * The app came back to the foreground (visibilitychange, pageshow, online):
+   * probe the link, reconnect at once when it is dead, otherwise re-read the
+   * Inbox, the open task and the XERXES threads.
+   */
+  resync(): Promise<void>
+  /** Drop the link and reconnect at once (the connection banner's Retry). */
+  reconnectNow(): void
   /** Resolves true only when the Hub accepted the message, so the caller clears the draft. */
   submit(text: string, images: readonly PreparedImage[]): Promise<boolean>
   steer(text: string, images: readonly PreparedImage[]): Promise<boolean>
@@ -124,7 +138,23 @@ export interface HubControllerOptions {
 }
 
 export const HISTORY_PAGE_SIZE = 30
+/** History is re-read this often while a task works, so replies show even when no tool runs. */
 export const HISTORY_REFRESH_MS = 4_000
+/** Agents refresh at most once per this long while `subagent_event`s arrive. */
+export const AGENTS_REFRESH_MS = 2_000
+/** The open agent's steps refresh at most once per this long, and only while its sheet is open. */
+export const AGENT_DETAIL_REFRESH_MS = 5_000
+export const AGENT_STEPS_LIMIT = 100
+/** A failed subscribe is retried after 1 s, 2 s, 4 s … up to 30 s. */
+export const SUBSCRIBE_RETRY_BASE_MS = 1_000
+export const SUBSCRIBE_RETRY_MAX_MS = 30_000
+/** `typing` falls back to `viewing` once nothing was typed for this long. */
+export const TYPING_IDLE_MS = 8_000
+/** How long a foreground probe may take before the link counts as dead. */
+export const RESYNC_PROBE_MS = 3_000
+export const AGENTS_UNSUPPORTED = "This Hub cannot list a task's agents yet. Update the Hub to see them."
+const RETRIABLE_SUBSCRIBE: ReadonlySet<string> = new Set(['timeout', 'unavailable', 'rate_limited', 'internal'])
+const TRANSIENT_CARD: ReadonlySet<string> = new Set(['offline', 'unavailable', 'busy', 'rate_limited'])
 
 const DECISION_RESPONSE: Readonly<Record<DecisionKind, string>> = { once: 'approve', deny: 'reject', session: 'approve_for_session' }
 const UNKNOWN_OUTCOME = 'Could not confirm whether this was applied. Check the task before trying again.'
@@ -162,6 +192,34 @@ export function createHubController(options: HubControllerOptions): HubControlle
   let supervisorThread: string | undefined
 
   let optionsToken = 0
+  // Subscribe retries (a failed subscribe is never left silently dead).
+  let inboxRetryTimer: unknown
+  let inboxRetries = 0
+  let sessionRetryTimer: unknown
+  let sessionRetries = 0
+  // Agents of the open task.
+  let agentsTimer: unknown
+  let agentsLastAt = Number.NEGATIVE_INFINITY
+  let agentsInFlight: Promise<void> | undefined
+  let detailToken = 0
+  let detailTimer: unknown
+  let detailLastAt = Number.NEGATIVE_INFINITY
+  // Presence of this device on the open task.
+  let presenceState: PresenceState = 'idle'
+  let typingTimer: unknown
+  // Supervisor messages whose outcome is unknown: a retry of the same text reuses the id, so the Hub dedupes it.
+  const pendingMessageIds = new Map<string, string>()
+  // Confirmation cards whose outcome could not be read yet; re-checked after a reconnect.
+  const uncheckedCards = new Map<string, 'shared' | 'autopilot'>()
+  let wasLive = false
+  // Set once the Hub answered `hub.history` with `pending_interactions`: no journal replay is needed.
+  let historyServesPending = false
+
+  const retryDelay = (attempt: number): number => Math.min(SUBSCRIBE_RETRY_MAX_MS, SUBSCRIBE_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1))
+  const clearTimer = (handle: unknown): undefined => {
+    if (handle !== undefined) timers.clearTimeout(handle)
+    return undefined
+  }
 
   const live = (): boolean => connection.status().state === 'live'
   const selected = () => store.getSnapshot().selected
@@ -213,6 +271,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
             if (found) store.dispatch({ type: 'workspaceHealth', workspaceId: found.id, health: found.health })
             return
           }
+          inboxRetries = 0
           store.dispatch({ type: 'events', events: [event], tail: false })
         },
         reset: async () => {
@@ -222,10 +281,30 @@ export function createHubController(options: HubControllerOptions): HubControlle
           await loadSummaries(fresh)
           return { cursor }
         },
-        error: error => store.dispatch({ type: 'inboxError', message: error.message }),
+        error: error => onInboxSubscribeFailed(error),
       },
       mark === undefined ? undefined : { cursor: mark },
     )
+  }
+
+  /**
+   * A failed Inbox subscribe never leaves the app silently without live
+   * updates: the person sees "Live updates paused", a retriable failure is
+   * retried with backoff, any other one on the next reconnect or resync.
+   */
+  function onInboxSubscribeFailed(error: HubRequestError): void {
+    // A lost socket restarts every subscription itself once it reconnects.
+    if (error.code === 'disconnected' || error.code === 'offline') return
+    store.dispatch({ type: 'inboxError', message: `Live updates paused: ${error.message}` })
+    inboxRetryTimer = clearTimer(inboxRetryTimer)
+    inboxSub?.dispose()
+    inboxSub = undefined
+    if (!RETRIABLE_SUBSCRIBE.has(error.code)) return
+    inboxRetries += 1
+    inboxRetryTimer = timers.setTimeout(() => {
+      inboxRetryTimer = undefined
+      if (live() && inboxSub === undefined) void refreshInbox()
+    }, retryDelay(inboxRetries))
   }
 
   // ── selected task ──────────────────────────────────────────────────
@@ -241,10 +320,25 @@ export function createHubController(options: HubControllerOptions): HubControlle
     const current = selected()
     if (!current || !currentToken(token)) return
     const throughIds = current.tail.blocks.map(block => block.id)
-    const page = parseHistoryPage(await connection.request('hub.history', {
+    const pendingThrough = current.tail.pending.map(item => item.id)
+    const result = await connection.request('hub.history', {
       workspace_id: current.workspaceId, session_id: current.sessionId, limit: HISTORY_PAGE_SIZE,
-    }))
-    if (currentToken(token)) store.dispatch({ type: 'historyLoaded', workspaceId: current.workspaceId, sessionId: current.sessionId, page, throughIds })
+    })
+    const page = parseHistoryPage(result)
+    if (!currentToken(token)) return
+    store.dispatch({ type: 'historyLoaded', workspaceId: current.workspaceId, sessionId: current.sessionId, page, throughIds })
+    // A Hub that serves the waiting interactions with history needs no journal replay to find them.
+    if (Array.isArray(result.pending_interactions)) {
+      // A partial list (`pending_complete: false`) still needs the journal replay to find the rest.
+      historyServesPending = result.pending_complete !== false
+      let folded = EMPTY_TAIL
+      result.pending_interactions.forEach((raw, index) => {
+        const frame = rec(raw)
+        const type = str(frame.type)
+        if (type) folded = foldSessionEvent(folded, { id: `pending:${index}`, type, payload: rec(frame.payload) })
+      })
+      store.dispatch({ type: 'pendingRestored', workspaceId: current.workspaceId, sessionId: current.sessionId, pending: folded.pending.slice(-50), complete: historyServesPending, throughIds: pendingThrough })
+    }
   }
 
   function refreshLatest(): Promise<void> {
@@ -265,6 +359,9 @@ export function createHubController(options: HubControllerOptions): HubControlle
       if (refreshAgain) {
         refreshAgain = false
         void refreshLatest()
+      } else if (selected()?.tail.status === 'working' && live()) {
+        // A working turn keeps being re-read, so a text-only reply shows even when no tool event arrives.
+        scheduleHistoryRefresh()
       }
     })
     historyRefresh = pending
@@ -284,7 +381,8 @@ export function createHubController(options: HubControllerOptions): HubControlle
     interactionReplay?.dispose()
     interactionReplay = undefined
     const task = store.getSnapshot().tasks[taskKey(workspaceId, sessionId)]
-    if (!task?.pendingCount) return
+    // A Hub that serves the waiting interactions with history already restored them.
+    if (!task?.pendingCount || historyServesPending) return
     // History has no pending-interaction snapshot. Only for a waiting task,
     // recover that metadata in the background; never put replayed conversation
     // or tool blocks into the visible list, nor delay the history-first view.
@@ -305,11 +403,28 @@ export function createHubController(options: HubControllerOptions): HubControlle
       },
       reset: () => { if (currentToken(token)) finish(); return undefined },
       error: error => {
-        if (!currentToken(token)) return
+        if (!currentToken(token) || error.code === 'disconnected' || error.code === 'offline') return
         finish()
+        // Looked for and not found: the app says the details are unavailable instead of showing nothing to tap.
+        store.dispatch({ type: 'pendingRestored', workspaceId, sessionId, pending: [] })
         store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: error.message })
       },
     })
+  }
+
+  /** A failed task subscribe is shown and retried with backoff; a lost socket restarts it on reconnect. */
+  function onSessionSubscribeFailed(workspaceId: string, sessionId: string, token: number, error: HubRequestError): void {
+    if (!currentToken(token) || error.code === 'disconnected' || error.code === 'offline') return
+    store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: `Live updates paused: ${error.message}` })
+    sessionSub?.dispose()
+    sessionSub = undefined
+    sessionRetryTimer = clearTimer(sessionRetryTimer)
+    if (!RETRIABLE_SUBSCRIBE.has(error.code)) return
+    sessionRetries += 1
+    sessionRetryTimer = timers.setTimeout(() => {
+      sessionRetryTimer = undefined
+      if (currentToken(token) && live() && sessionSub === undefined && !startingSelected) void startSelected(workspaceId, sessionId)
+    }, retryDelay(sessionRetries))
   }
 
   async function startSelected(workspaceId: string, sessionId: string): Promise<void> {
@@ -332,13 +447,15 @@ export function createHubController(options: HubControllerOptions): HubControlle
       sessionSub = connection.subscribe(scope, {
         apply: event => {
           if (!currentToken(token)) return
+          sessionRetries = 0
           store.dispatch({ type: 'events', events: [event] })
           if (event.type === 'turn_begin' || event.type === 'turn_end') {
             interactionReplay?.dispose()
             interactionReplay = undefined
           }
           if (event.type === 'turn_end') void refreshLatest()
-          else if (event.type === 'tool_call' || event.type === 'tool_result') scheduleHistoryRefresh()
+          else if (event.type === 'tool_call' || event.type === 'tool_result' || event.type === 'turn_begin') scheduleHistoryRefresh()
+          if (event.type === 'subagent_event') scheduleAgentsRefresh()
         },
         reset: async () => {
           if (!currentToken(token)) return undefined
@@ -367,13 +484,13 @@ export function createHubController(options: HubControllerOptions): HubControlle
             return undefined
           }
         },
-        error: error => {
-          if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: error.message })
-        },
+        error: error => onSessionSubscribeFailed(workspaceId, sessionId, token, error),
       }, { cursor })
       void refreshLatest()
       restorePending(workspaceId, sessionId, token)
-      void connection.request('hub.presence.update', { workspace_id: workspaceId, session_id: sessionId, state: 'viewing' }).catch(() => undefined)
+      if (presenceState !== 'typing') presenceState = 'viewing'
+      sendPresence(workspaceId, sessionId, presenceState)
+      void loadAgents()
     } catch (error) {
       if (currentToken(token)) store.dispatch({ type: 'sessionError', workspaceId, sessionId, message: failureMessage(error) })
     } finally {
@@ -381,32 +498,155 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
-  function openSession(workspaceId: string, sessionId: string): void {
-    const current = selected()
-    if (current && current.workspaceId === workspaceId && current.sessionId === sessionId && current.phase !== 'error' && current.error === undefined) return
+  /** Everything tied to the open task stops: subscriptions, timers, agent refreshes. */
+  function stopSelected(): void {
+    openToken += 1
+    cancelHistoryRefresh()
+    historyRefresh = undefined
+    refreshAgain = false
+    startingSelected = false
     interactionReplay?.dispose()
     interactionReplay = undefined
     sessionSub?.dispose()
     sessionSub = undefined
-    openToken += 1
+    sessionRetryTimer = clearTimer(sessionRetryTimer)
+    sessionRetries = 0
+    agentsTimer = clearTimer(agentsTimer)
+    agentsInFlight = undefined
+    agentsLastAt = Number.NEGATIVE_INFINITY
+    detailTimer = clearTimer(detailTimer)
+    detailLastAt = Number.NEGATIVE_INFINITY
+    detailToken += 1
+  }
+
+  /** Tell the Hub this device left the task, so nobody sees a stale "watching" or "typing". */
+  function leavePresence(): void {
+    typingTimer = clearTimer(typingTimer)
+    const current = selected()
+    if (current && presenceState !== 'idle') sendPresence(current.workspaceId, current.sessionId, 'idle')
+    presenceState = 'idle'
+  }
+
+  function openSession(workspaceId: string, sessionId: string): void {
+    const current = selected()
+    if (current && current.workspaceId === workspaceId && current.sessionId === sessionId && current.phase !== 'error' && current.error === undefined) return
+    if (current && (current.workspaceId !== workspaceId || current.sessionId !== sessionId)) leavePresence()
+    stopSelected()
     store.dispatch({ type: 'deselect' })
     store.dispatch({ type: 'select', workspaceId, sessionId })
-    cancelHistoryRefresh()
-    historyRefresh = undefined
-    startingSelected = false
     if (live()) void startSelected(workspaceId, sessionId)
   }
 
   function closeSession(): void {
-    openToken += 1
-    cancelHistoryRefresh()
-    historyRefresh = undefined
-    startingSelected = false
-    interactionReplay?.dispose()
-    interactionReplay = undefined
-    sessionSub?.dispose()
-    sessionSub = undefined
+    leavePresence()
+    stopSelected()
     store.dispatch({ type: 'deselect' })
+  }
+
+  // ── agents of the open task ────────────────────────────────────────
+
+  const agentsFailure = (error: unknown): string =>
+    error instanceof HubRequestError && (error.code === 'unsupported' || (error.code === 'invalid_request' && /unknown hub method/.test(error.message)))
+      ? AGENTS_UNSUPPORTED
+      : failureMessage(error)
+
+  function loadAgents(): Promise<void> {
+    if (agentsInFlight) return agentsInFlight
+    const current = selected()
+    if (!current || !live()) return Promise.resolve()
+    const { workspaceId, sessionId } = current
+    const token = openToken
+    agentsLastAt = now()
+    const rows = current.agents.rows
+    store.dispatch({ type: 'agents', workspaceId, sessionId, state: { phase: 'loading', rows } })
+    const run = (async () => {
+      try {
+        const listed = parseAgentList(await call('agents.list', { workspace_id: workspaceId, session_id: sessionId }))
+        if (token !== openToken) return
+        store.dispatch({
+          type: 'agents', workspaceId, sessionId,
+          state: listed === undefined ? { phase: 'error', rows, error: 'The Hub sent an agent list this app cannot read.' } : { phase: 'ready', rows: listed },
+        })
+      } catch (error) {
+        if (token !== openToken) return
+        store.dispatch({ type: 'agents', workspaceId, sessionId, state: { phase: 'error', rows: selected()?.agents.rows ?? rows, error: agentsFailure(error) } })
+      } finally {
+        if (token === openToken) agentsInFlight = undefined
+      }
+    })()
+    agentsInFlight = run
+    return run
+  }
+
+  /** At most one agents refresh (list and the open agent) per AGENTS_REFRESH_MS; the last event is never lost. */
+  function scheduleAgentsRefresh(): void {
+    if (agentsTimer !== undefined) return
+    const run = (): void => {
+      agentsTimer = undefined
+      void loadAgents()
+      scheduleDetailRefresh()
+    }
+    const wait = Math.max(0, agentsLastAt + AGENTS_REFRESH_MS - now())
+    if (wait === 0 && agentsInFlight === undefined) run()
+    else agentsTimer = timers.setTimeout(run, Math.max(wait, agentsInFlight === undefined ? 0 : AGENTS_REFRESH_MS))
+  }
+
+  /** The open agent's steps are re-read at most once per AGENT_DETAIL_REFRESH_MS, and only while its sheet is open. */
+  function openAgentId(): string | undefined {
+    const detail = selected()?.agentDetail
+    return detail?.agentId !== undefined && detail.phase !== 'idle' ? detail.agentId : undefined
+  }
+
+  function scheduleDetailRefresh(): void {
+    if (detailTimer !== undefined || openAgentId() === undefined) return
+    const wait = Math.max(0, detailLastAt + AGENT_DETAIL_REFRESH_MS - now())
+    const run = (): void => {
+      detailTimer = undefined
+      const agentId = openAgentId()
+      if (agentId !== undefined) void inspectAgent(agentId)
+    }
+    if (wait === 0) run()
+    else detailTimer = timers.setTimeout(run, wait)
+  }
+
+  async function inspectAgent(agentId: string): Promise<void> {
+    const current = selected()
+    if (!current) return
+    const { workspaceId, sessionId } = current
+    detailLastAt = now()
+    const token = (detailToken += 1)
+    const open = openToken
+    const previous = current.agentDetail.agentId === agentId ? current.agentDetail : undefined
+    const known = previous?.agent ?? current.agents.rows.find(row => row.id === agentId)
+    store.dispatch({
+      type: 'agentDetail', workspaceId, sessionId,
+      state: { phase: 'loading', agentId, steps: previous?.steps ?? [], truncated: previous?.truncated ?? false, ...(known ? { agent: known } : {}) },
+    })
+    if (!live()) {
+      store.dispatch({ type: 'agentDetail', workspaceId, sessionId, state: { phase: 'error', agentId, steps: previous?.steps ?? [], truncated: false, error: 'Offline. Reconnect to see this agent.', ...(known ? { agent: known } : {}) } })
+      return
+    }
+    try {
+      const detail = parseAgentDetail(await call('agents.inspect', { workspace_id: workspaceId, session_id: sessionId, agent_id: agentId, limit: AGENT_STEPS_LIMIT }))
+      if (token !== detailToken || open !== openToken) return
+      store.dispatch({
+        type: 'agentDetail', workspaceId, sessionId,
+        state: detail === undefined
+          ? { phase: 'error', agentId, steps: previous?.steps ?? [], truncated: false, error: 'The Hub sent agent details this app cannot read.', ...(known ? { agent: known } : {}) }
+          : { phase: 'ready', agentId, agent: detail.agent, steps: detail.steps, truncated: detail.truncated },
+      })
+    } catch (error) {
+      if (token !== detailToken || open !== openToken) return
+      const message = error instanceof HubRequestError && error.code === 'not_found' ? 'This agent is no longer known to the task.' : agentsFailure(error)
+      store.dispatch({ type: 'agentDetail', workspaceId, sessionId, state: { phase: 'error', agentId, steps: previous?.steps ?? [], truncated: false, error: message, ...(known ? { agent: known } : {}) } })
+    }
+  }
+
+  function closeAgent(): void {
+    detailTimer = clearTimer(detailTimer)
+    detailToken += 1
+    const current = selected()
+    if (current) store.dispatch({ type: 'agentDetail', workspaceId: current.workspaceId, sessionId: current.sessionId, state: IDLE_AGENT_DETAIL })
   }
 
   async function loadOlder(): Promise<void> {
@@ -427,7 +667,11 @@ export function createHubController(options: HubControllerOptions): HubControlle
         return
       }
       const page = parseHistoryPage(result)
-      store.dispatch({ type: 'olderLoaded', blocks: page.blocks, hasMore: page.hasMore && page.cursor !== current.olderCursor, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) })
+      store.dispatch({
+        type: 'olderLoaded', blocks: page.blocks, hasMore: page.hasMore && page.cursor !== current.olderCursor,
+        ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
+        ...(page.todos !== undefined && page.todosCallId !== undefined ? { todos: page.todos, todosCallId: page.todosCallId } : {}),
+      })
     } catch (error) {
       if (currentToken(token)) store.dispatch({ type: 'olderFailed', message: failureMessage(error) })
     }
@@ -438,16 +682,18 @@ export function createHubController(options: HubControllerOptions): HubControlle
   async function run(action: 'turn.submit' | 'turn.steer' | 'turn.cancel', args: Record<string, unknown>): Promise<HubCommandResult | undefined> {
     const current = selected()
     if (!current) return undefined
+    const scope = { workspaceId: current.workspaceId, sessionId: current.sessionId }
     const commandId = newCommandId()
-    store.dispatch({ type: 'send', state: { phase: 'sending', commandId } })
+    store.dispatch({ type: 'send', state: { phase: 'sending', commandId }, ...scope })
     if (!canMutate(store.getSnapshot(), current.workspaceId)) {
-      store.dispatch({ type: 'send', state: { phase: 'failed', message: 'Offline. Nothing was sent.' } })
+      store.dispatch({ type: 'send', state: { phase: 'failed', message: 'Offline. Nothing was sent.' }, ...scope })
       return undefined
     }
-    const result = await connection.command({ workspaceId: current.workspaceId, sessionId: current.sessionId, action, args, commandId })
-    if (result.state === 'accepted') store.dispatch({ type: 'send', state: { phase: 'idle' } })
-    else if (result.state === 'unknown') store.dispatch({ type: 'send', state: { phase: 'unknown', message: UNKNOWN_OUTCOME, commandId } })
-    else store.dispatch({ type: 'send', state: { phase: 'failed', message: result.error?.message ?? 'The Hub did not accept that.' } })
+    const result = await connection.command({ ...scope, action, args, commandId })
+    // The answer belongs to the task that sent it, even when the person opened another one meanwhile.
+    if (result.state === 'accepted') store.dispatch({ type: 'send', state: { phase: 'idle' }, ...scope })
+    else if (result.state === 'unknown') store.dispatch({ type: 'send', state: { phase: 'unknown', message: UNKNOWN_OUTCOME, commandId }, ...scope })
+    else store.dispatch({ type: 'send', state: { phase: 'failed', message: result.error?.message ?? 'The Hub did not accept that.' }, ...scope })
     return result
   }
 
@@ -462,12 +708,22 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   async function submit(text: string, images: readonly PreparedImage[]): Promise<boolean> {
     const args = textArgs(text, images)
-    return args !== undefined && (await run('turn.submit', args))?.state === 'accepted'
+    const ok = args !== undefined && (await run('turn.submit', args))?.state === 'accepted'
+    if (ok) afterSend()
+    return ok
   }
 
   async function steer(text: string, images: readonly PreparedImage[]): Promise<boolean> {
     const args = textArgs(text, images)
-    return args !== undefined && (await run('turn.steer', args))?.state === 'accepted'
+    const ok = args !== undefined && (await run('turn.steer', args))?.state === 'accepted'
+    if (ok) afterSend()
+    return ok
+  }
+
+  /** A message went out: the person stopped typing, and the reply is polled for even with no tool events. */
+  function afterSend(): void {
+    if (presenceState === 'typing') setPresence('viewing')
+    scheduleHistoryRefresh()
   }
 
   async function stopTurn(): Promise<boolean> {
@@ -477,17 +733,18 @@ export function createHubController(options: HubControllerOptions): HubControlle
   async function respond(interactionId: string, decision: DecisionKind, action: 'permission.respond' | 'question.respond', args: Record<string, unknown>): Promise<void> {
     const current = selected()
     if (!current) return
-    store.dispatch({ type: 'decision', interactionId, state: { phase: 'sending', decision } })
-    const result = await connection.command({ workspaceId: current.workspaceId, sessionId: current.sessionId, action, args })
+    const scope = { workspaceId: current.workspaceId, sessionId: current.sessionId }
+    store.dispatch({ type: 'decision', interactionId, state: { phase: 'sending', decision }, ...scope })
+    const result = await connection.command({ ...scope, action, args })
     if (result.state === 'accepted') {
-      store.dispatch({ type: 'decision', interactionId, state: { phase: 'resolved', decision } })
+      store.dispatch({ type: 'decision', interactionId, state: { phase: 'resolved', decision }, ...scope })
     } else if (result.error?.code === 'interaction_already_resolved') {
       // The Hub maps every refused interaction response to this code, so the message is shown as is.
-      store.dispatch({ type: 'decision', interactionId, state: { phase: 'resolved', decision, already: true, message: result.error.message } })
+      store.dispatch({ type: 'decision', interactionId, state: { phase: 'resolved', decision, already: true, message: result.error.message }, ...scope })
     } else if (result.state === 'unknown') {
-      store.dispatch({ type: 'decision', interactionId, state: { phase: 'unknown', decision, message: UNKNOWN_OUTCOME } })
+      store.dispatch({ type: 'decision', interactionId, state: { phase: 'unknown', decision, message: UNKNOWN_OUTCOME }, ...scope })
     } else {
-      store.dispatch({ type: 'decision', interactionId, state: { phase: 'failed', decision, message: result.error?.message ?? 'The decision was not applied.' } })
+      store.dispatch({ type: 'decision', interactionId, state: { phase: 'failed', decision, message: result.error?.message ?? 'The decision was not applied.' }, ...scope })
     }
   }
 
@@ -500,17 +757,17 @@ export function createHubController(options: HubControllerOptions): HubControlle
   async function configure(field: 'model' | 'goal', requested: string, action: 'model.set' | 'goal.set', args: Record<string, unknown>, expectedRevision?: number): Promise<void> {
     const current = selected()
     if (!current) return
-    store.dispatch({ type: 'config', field, value: { requested, phase: 'requested' } })
+    const scope = { workspaceId: current.workspaceId, sessionId: current.sessionId }
+    store.dispatch({ type: 'config', field, value: { requested, phase: 'requested' }, ...scope })
     const result = await connection.command({
-      workspaceId: current.workspaceId,
-      sessionId: current.sessionId,
+      ...scope,
       action,
       args,
       ...(expectedRevision === undefined ? {} : { expectedRevision }),
     })
-    if (result.state === 'accepted') store.dispatch({ type: 'config', field, value: { phase: 'accepted' } })
-    else if (result.state === 'unknown') store.dispatch({ type: 'config', field, value: { phase: 'unknown', message: UNKNOWN_OUTCOME } })
-    else store.dispatch({ type: 'config', field, value: { phase: 'rejected', message: result.error?.message ?? 'The change was not accepted.' } })
+    if (result.state === 'accepted') store.dispatch({ type: 'config', field, value: { phase: 'accepted' }, ...scope })
+    else if (result.state === 'unknown') store.dispatch({ type: 'config', field, value: { phase: 'unknown', message: UNKNOWN_OUTCOME }, ...scope })
+    else store.dispatch({ type: 'config', field, value: { phase: 'rejected', message: result.error?.message ?? 'The change was not accepted.' }, ...scope })
   }
 
   const setModel = (profile: string | undefined, model: string): Promise<void> =>
@@ -534,10 +791,30 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
+  function sendPresence(workspaceId: string, sessionId: string, state: PresenceState): void {
+    if (!live()) return
+    void connection.request('hub.presence.update', { workspace_id: workspaceId, session_id: sessionId, state }).catch(() => undefined)
+  }
+
+  /**
+   * Presence of this device on the open task. `typing` is re-armed by every
+   * call and falls back to `viewing` after TYPING_IDLE_MS without one, so it
+   * never sticks while the keyboard stays open. The latest state is
+   * re-announced after a reconnect.
+   */
   function setPresence(state: PresenceState): void {
     const current = selected()
-    if (!current || !live()) return
-    void connection.request('hub.presence.update', { workspace_id: current.workspaceId, session_id: current.sessionId, state }).catch(() => undefined)
+    if (!current) return
+    typingTimer = clearTimer(typingTimer)
+    if (state === 'typing') {
+      typingTimer = timers.setTimeout(() => {
+        typingTimer = undefined
+        if (presenceState === 'typing') setPresence('viewing')
+      }, TYPING_IDLE_MS)
+    }
+    if (state === presenceState) return
+    presenceState = state
+    sendPresence(current.workspaceId, current.sessionId, state)
   }
 
   // ── supervisor ─────────────────────────────────────────────────────
@@ -568,28 +845,94 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
-  async function supervisorSend(text: string, source: 'text' | 'voice' = 'text', messageId: string = newCommandId()): Promise<boolean> {
+  /**
+   * Send one message to XERXES. A retry of the same text after an uncertain
+   * failure reuses the first `message_id`, so the Hub stores it once and
+   * starts no second turn (it answers `duplicate: true`).
+   */
+  async function supervisorSend(text: string, source: 'text' | 'voice' = 'text', explicitId?: string): Promise<boolean> {
+    const key = text.trim()
+    const messageId = explicitId ?? pendingMessageIds.get(key) ?? newCommandId()
     store.dispatch({ type: 'supervisor', patch: { busy: true } })
     try {
       const result = await connection.request('supervisor.message.submit', { message_id: messageId, text, source, ...(supervisorThread ? { thread_id: supervisorThread } : {}) })
+      pendingMessageIds.delete(key)
       const messages = arr(result.messages).flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
       store.dispatch({ type: 'supervisorMessages', messages: messages.length > 0 ? messages : [{ id: messageId, role: 'user', text, at: iso(), source }] })
       store.dispatch({ type: 'supervisorConfirmations', confirmations: arr(result.confirmations).flatMap(raw => { const c = parseConfirmation(raw); return c ? [c] : [] }) })
       // A stored message always starts a turn on the Hub; show it as working
       // until the Hub says idle or the reply lands, so there is no gap
       // between this answer and the Hub's own `activity: working` event.
-      store.dispatch({ type: 'supervisor', patch: { busy: false, working: true } })
+      // A duplicate started nothing new: keep whatever the Hub reported.
+      store.dispatch({ type: 'supervisor', patch: result.duplicate === true ? { busy: false, error: undefined } : { busy: false, working: true } })
       return true
     } catch (error) {
       if (error instanceof HubRequestError && (error.code as string) === 'unconfigured') {
+        pendingMessageIds.delete(key)
         // XERXES has no model yet: show the chooser, not a generic failure.
         store.dispatch({ type: 'supervisorConfig', patch: { status: 'unconfigured' } })
         store.dispatch({ type: 'supervisor', patch: { busy: false, error: UNCONFIGURED_PROMPT } })
         return false
       }
-      store.dispatch({ type: 'supervisor', patch: { busy: false, error: error instanceof HubRequestError && error.uncertain ? UNKNOWN_OUTCOME : failureMessage(error) } })
+      const uncertain = error instanceof HubRequestError && error.uncertain
+      if (uncertain) {
+        // Remember the id: the next send of this text is the same message.
+        pendingMessageIds.set(key, messageId)
+        while (pendingMessageIds.size > 20) pendingMessageIds.delete(pendingMessageIds.keys().next().value as string)
+      } else pendingMessageIds.delete(key)
+      store.dispatch({ type: 'supervisor', patch: { busy: false, error: uncertain ? UNKNOWN_OUTCOME : failureMessage(error) } })
       return false
     }
+  }
+
+  const parseMessages = (value: unknown) => arr(value).flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
+  const parseCards = (value: unknown) => arr(value).flatMap(raw => { const c = parseConfirmation(raw); return c ? [c] : [] })
+
+  /**
+   * After a reconnect or a return to the foreground: re-read the shared XERXES
+   * thread and (when open) the Autopilot thread past the phase guards, so
+   * replies sent while the phone slept show and a stale `working` clears.
+   * `unsupported` and `hidden` stay as the Hub answered them.
+   */
+  async function refreshThreads(): Promise<void> {
+    const snapshot = store.getSnapshot()
+    const jobs: Promise<void>[] = []
+    if (snapshot.supervisor.phase === 'ready' || snapshot.supervisor.phase === 'error') {
+      jobs.push((async () => {
+        try {
+          const result = await connection.request('supervisor.thread.open', {})
+          supervisorThread = str(result.thread_id) ?? supervisorThread
+          store.dispatch({
+            type: 'threadRefreshed', thread: 'shared', messages: parseMessages(result.messages), confirmations: parseCards(result.confirmations),
+            working: result.busy === true, ...(supervisorThread ? { threadId: supervisorThread } : {}),
+          })
+        } catch (error) {
+          if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
+          // Otherwise keep what is shown; the next reconnect tries again.
+        }
+      })())
+    }
+    const self = snapshot.selfUserId
+    const apPhase = snapshot.autopilotThread.phase
+    if (self !== undefined && isHubOwner(snapshot) && (apPhase === 'ready' || apPhase === 'error')) {
+      const threadId = autopilotThreadId(self)
+      jobs.push((async () => {
+        try {
+          const result = await connection.request('supervisor.thread.open', { thread_id: threadId })
+          store.dispatch({
+            type: 'threadRefreshed', thread: 'autopilot', messages: parseMessages(result.messages), confirmations: parseCards(result.confirmations),
+            working: result.busy === true, threadId: str(result.thread_id) ?? threadId,
+          })
+        } catch (error) {
+          if (error instanceof HubRequestError && (error.code === 'not_found' || error.code === 'forbidden' || error.code === 'unsupported' || error.code === 'invalid_request')) {
+            store.dispatch({ type: 'autopilotThread', patch: { phase: 'hidden' } })
+          }
+        }
+      })())
+    }
+    await Promise.all(jobs)
+    // Cards whose outcome could not be read before are asked about again (a read: safe to repeat).
+    for (const [id, thread] of [...uncheckedCards]) void recheckCard(id, thread)
   }
 
   // ── machines and the supervisor's model ────────────────────────────
@@ -839,45 +1182,110 @@ export function createHubController(options: HubControllerOptions): HubControlle
     }
   }
 
+  const patchCardIn = (thread: 'shared' | 'autopilot') => (id: string, patch: Partial<SupervisorConfirmation>): void =>
+    store.dispatch(thread === 'shared' ? { type: 'supervisorConfirmation', id, patch } : { type: 'autopilotThreadConfirmation', id, patch })
+
   const autopilotThreadRespond = (confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> =>
     respondToCard(
       store.getSnapshot().selfUserId === undefined ? undefined : autopilotThreadId(store.getSnapshot().selfUserId!),
-      (id, patch) => store.dispatch({ type: 'autopilotThreadConfirmation', id, patch }),
+      'autopilot',
       confirmationId,
       decision,
     )
 
   const supervisorRespond = (confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> =>
-    respondToCard(supervisorThread, (id, patch) => store.dispatch({ type: 'supervisorConfirmation', id, patch }), confirmationId, decision)
+    respondToCard(supervisorThread, 'shared', confirmationId, decision)
+
+  /** Read what happened to a card (a read: safe to repeat). True once the outcome is known. */
+  async function readCardOutcome(confirmationId: string, thread: 'shared' | 'autopilot'): Promise<boolean> {
+    const status = await connection.request('supervisor.action.status', { confirmation_id: confirmationId })
+    const known = parseConfirmation({ id: confirmationId, ...rec(status.confirmation ?? status) })
+    if (!known || known.state === 'confirming') return false
+    uncheckedCards.delete(confirmationId)
+    patchCardIn(thread)(confirmationId, { state: known.state, ...(known.message ? { message: known.message } : {}) })
+    return true
+  }
+
+  async function recheckCard(confirmationId: string, thread: 'shared' | 'autopilot'): Promise<void> {
+    try { await readCardOutcome(confirmationId, thread) } catch { /* still unknown; asked again after the next reconnect */ }
+  }
 
   async function respondToCard(
     threadId: string | undefined,
-    patchCard: (id: string, patch: Partial<SupervisorConfirmation>) => void,
+    thread: 'shared' | 'autopilot',
     confirmationId: string,
     decision: 'confirm' | 'cancel',
   ): Promise<void> {
+    const patchCard = patchCardIn(thread)
+    const cards = thread === 'shared' ? store.getSnapshot().supervisor.confirmations : store.getSnapshot().autopilotThread.confirmations
+    const before = cards.find(card => card.id === confirmationId)?.state ?? 'pending'
     patchCard(confirmationId, { state: 'confirming' })
     const params = { confirmation_id: confirmationId, decision, response_id: newCommandId(), ...(threadId ? { thread_id: threadId } : {}) }
     try {
       const result = await connection.request('supervisor.confirmation.respond', params)
+      uncheckedCards.delete(confirmationId)
       const updated = parseConfirmation(result.confirmation ?? { id: confirmationId, state: decision === 'confirm' ? 'confirmed' : 'cancelled' })
       patchCard(confirmationId, updated ? { state: updated.state, ...(updated.message ? { message: updated.message } : {}) } : { state: decision === 'confirm' ? 'confirmed' : 'cancelled' })
     } catch (error) {
       if (error instanceof HubRequestError && error.uncertain) {
         // Ask what happened; never send the confirmation again.
         try {
-          const status = await connection.request('supervisor.action.status', { confirmation_id: confirmationId })
-          const known = parseConfirmation({ id: confirmationId, ...rec(status.confirmation ?? status) })
-          if (known && known.state !== 'confirming' && known.state !== 'pending') {
-            patchCard(confirmationId, { state: known.state })
-            return
-          }
-        } catch { /* fall through to the honest unknown */ }
-        patchCard(confirmationId, { state: 'failed', message: UNKNOWN_OUTCOME })
+          if (await readCardOutcome(confirmationId, thread)) return
+        } catch { /* the status read failed too */ }
+        // Not "failed": the outcome is unknown. Keep checking after the next reconnect.
+        uncheckedCards.set(confirmationId, thread)
+        patchCard(confirmationId, { state: 'confirming', message: 'Checking what happened…' })
+        return
+      }
+      if (error instanceof HubRequestError && TRANSIENT_CARD.has(error.code)) {
+        // Nothing was applied: the buttons come back.
+        patchCard(confirmationId, { state: before === 'confirming' ? 'pending' : before, message: `${failureMessage(error)} Try again.` })
         return
       }
       patchCard(confirmationId, { state: error instanceof HubRequestError && error.code === 'conflict' ? 'expired' : 'failed', message: failureMessage(error) })
     }
+  }
+
+  // ── foreground resync ──────────────────────────────────────────────
+
+  /**
+   * Re-read everything a person sees, after a reconnect (`reconnected`) or a
+   * foreground return whose probe confirmed the existing link.
+   */
+  function refreshAll(reconnected: boolean): void {
+    void refreshInbox()
+    if (store.getSnapshot().usage.phase !== 'idle') void loadUsage()
+    if (store.getSnapshot().machines.phase !== 'loading') void machinesList()
+    if (store.getSnapshot().supervisorConfig.phase !== 'idle') void supervisorConfigGet()
+    if (store.getSnapshot().autopilot.phase !== 'idle' && !store.getSnapshot().autopilot.unsupported) void loadAutopilot()
+    if (store.getSnapshot().watch.phase !== 'idle' && !store.getSnapshot().watch.unsupported) void loadWatches()
+    void refreshThreads()
+    const current = selected()
+    // A send that failed on the old link is not news once a new link exists (UI-15). A foreground
+    // probe of the same link changes nothing about it: the message stays until a retry.
+    if (reconnected && current && current.send.phase === 'failed') store.dispatch({ type: 'send', state: { phase: 'idle' }, workspaceId: current.workspaceId, sessionId: current.sessionId })
+    if (current && !sessionSub && !startingSelected) void startSelected(current.workspaceId, current.sessionId)
+    else if (current && sessionSub) {
+      void refreshLatest()
+      void loadAgents()
+      // The Hub forgot this device's presence with the old socket: say again where it is.
+      if (presenceState !== 'idle') sendPresence(current.workspaceId, current.sessionId, presenceState)
+    }
+  }
+
+  /**
+   * Foreground return. A broken link reconnects at once (its `live`
+   * transition resyncs); a link that reads live is probed, and a confirmed
+   * link resyncs through `onLinkVerified`. A dead socket is replaced.
+   */
+  async function resync(): Promise<void> {
+    const state = connection.status().state
+    if (state === 'revoked' || state === 'closed') return
+    if (state !== 'live') {
+      connection.resume()
+      return
+    }
+    await connection.verifyLink(RESYNC_PROBE_MS, { notify: true })
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────
@@ -885,19 +1293,23 @@ export function createHubController(options: HubControllerOptions): HubControlle
   function start(): void {
     disposers.push(connection.onStatus(status => {
       store.dispatch({ type: 'connection', status })
-      if (status.state !== 'live') return
+      if (status.state !== 'live') {
+        if (status.state !== 'replaying') wasLive = false
+        return
+      }
+      // Only a transition into `live` resyncs; a repeated `live` report is not a reconnect.
+      if (wasLive) return
+      wasLive = true
       const userId = connection.helloInfo().userId
       if (userId) store.dispatch({ type: 'self', userId })
-      void refreshInbox()
-      if (store.getSnapshot().usage.phase !== 'idle') void loadUsage()
-      void machinesList()
-      if (store.getSnapshot().supervisorConfig.phase !== 'idle') void supervisorConfigGet()
-      if (store.getSnapshot().autopilot.phase !== 'idle' && !store.getSnapshot().autopilot.unsupported) void loadAutopilot()
-      if (store.getSnapshot().watch.phase !== 'idle' && !store.getSnapshot().watch.unsupported) void loadWatches()
-      const current = selected()
-      if (current && !sessionSub && !startingSelected) void startSelected(current.workspaceId, current.sessionId)
-      else if (current && sessionSub) void refreshLatest()
+      inboxRetryTimer = clearTimer(inboxRetryTimer)
+      inboxRetries = 0
+      refreshAll(true)
     }))
+    // A foreground probe confirmed the existing link: no `live` transition, so re-read here.
+    // Heartbeat probes do not notify (a quiet visible phone must not re-read everything each beat).
+    const verified = connection.onLinkVerified?.(() => { if (live()) refreshAll(false) })
+    if (verified) disposers.push(verified)
     disposers.push(connection.onNotice((type, payload) => {
       if (type === 'hub.presence') {
         const presence = parsePresence(payload)
@@ -952,8 +1364,9 @@ export function createHubController(options: HubControllerOptions): HubControlle
   }
 
   function dispose(): void {
-    openToken += 1
-    cancelHistoryRefresh()
+    stopSelected()
+    typingTimer = clearTimer(typingTimer)
+    inboxRetryTimer = clearTimer(inboxRetryTimer)
     for (const stop of disposers.splice(0)) stop()
     if (relistTimer !== undefined) clearTimeout(relistTimer)
     relistTimer = undefined
@@ -968,7 +1381,9 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   return {
     imagesSupported,
-    start, dispose, refreshInbox, openSession, closeSession, loadOlder, submit, steer, stopTurn, decide, answerQuestion,
+    start, dispose, refreshInbox, openSession, closeSession, loadOlder, loadAgents, inspectAgent, closeAgent, resync,
+    reconnectNow: () => { connection.reconnectNow() },
+    submit, steer, stopTurn, decide, answerQuestion,
     setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond,
     machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet, loadAutopilot, setAutopilot,
     autopilotThreadOpen, autopilotThreadRespond, loadWatches, setWatch,

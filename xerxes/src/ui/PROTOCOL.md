@@ -2684,6 +2684,12 @@ pages, `event_batch` and `pending_interactions`) in a redacted form,
 (questions add `questions: []`): they can see something is pending but never the command,
 inputs or question text.
 
+The Hub's own metadata lane subscribes as a trusted local client (no `hub_auth`) with
+`detail: "conversation"`, so it receives these frames in full, plus `text_part` /
+`think_part` deltas and `subagent_event`s. The Hub then applies the same redaction per
+phone recipient and per task (see `docs/hub-protocol.md`, "Interaction visibility per
+recipient") and merges text/thinking deltas before journaling them.
+
 **Shared sessions.** The first hub participant of a session is its owner (or the local
 human when the session already had a conversation); any other participant marks the
 session `shared`, permanently. In a shared session the remembered `ALWAYS` approvals of

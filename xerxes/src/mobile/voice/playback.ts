@@ -44,6 +44,8 @@ export interface AudioOutput {
 export interface PlaybackEvents {
   started(responseId: string, generation: number): void
   ended(responseId: string, generation: number): void
+  /** The stream ended and nothing was ever heard (no clips, or all were empty). */
+  empty?(responseId: string, generation: number): void
   failed(responseId: string, generation: number, error: PlaybackError): void
 }
 
@@ -160,8 +162,8 @@ export class ResponsePlayback {
   private maybeFinish(current: Current): void {
     if (this.current !== current || current.failed || !current.streamEnded || current.pending > 0) return
     this.current = undefined
-    // A response that never produced sound has nothing to report as ended.
     if (current.started) this.events.ended(current.responseId, current.generation)
+    else this.events.empty?.(current.responseId, current.generation)
   }
 
   private fail(current: Current, error: PlaybackError): void {

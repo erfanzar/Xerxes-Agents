@@ -135,9 +135,85 @@ exclusive cursor for the next older page; stop when `has_more` is false.
 The phone opens with the latest 30 actions and follows only events after a
 scoped live watermark, not the journal's entire replay. Near-top scrolling
 prepends older pages with a visible-message scroll anchor and a fallback button.
-The Hub's summary journal deliberately excludes conversation text deltas. The
-phone therefore refetches latest history after `turn_end` and coalesces tool
-activity into a refresh every four seconds while work continues. History action
+The Hub subscribes to its daemons with `detail: "conversation"`, so the journal
+and live batches carry `text_part {text}` and `think_part {think}`. Other
+spellings (`thinking_part`, `text_delta`, `thinking_delta`) are normalized to
+those two types before storage. The Hub
+merges consecutive deltas of one session (same type and fields) for up to
+150 ms, or 16 000 characters, into ONE stored event that carries the last
+delta's sequence and cursor; any other event of the lane flushes the buffer
+first, so upstream order is kept. Buffered deltas are never committed: after a
+dropped connection the daemon replays them from the committed cursor. A merged
+delta refreshes its task's projection timestamps at most once every 5 s; every
+other event projects as before.
+`subagent_event {agent_id, agent_name, title, …, event:{type, payload}}` is
+forwarded as the daemon emits it. A subagent's nested `tool_call` also carries
+`arguments_full` (the exact JSON input, clipped to 8000 characters at the
+source), its `tool_result` carries `result_full` (clipped to 16 000), and its
+`text_part` carries `text_full` (the whole burst, clipped to 8000). The older
+`arguments`, `return_value` and `text` fields remain short previews.
+
+An event larger than the read budget is read as a stub
+`{truncated:true, original_bytes, id?, request_id?, tool_call_id?, session_id?, job_id?, event_type?}`.
+For a question or permission request the stub also has `redacted:true` and
+`details_hidden:true` (and `questions: []`), so it still becomes a pending card
+and a large resolution still clears one. A `cron_event` stub keeps its nested
+event's ids under `payload`. The phone still refetches latest history after
+`turn_end` and coalesces tool activity into a refresh every four seconds while
+work continues.
+
+The latest page (no `before`) also carries `pending_interactions: [{type,
+payload}]` (the questions and permission requests the task waits on, rebuilt
+from the Hub journal; at most 20, newest kept within 64 KiB) and
+`pending_complete: boolean`. It is true when the scan reached the journal
+watermark and covers everything that may still wait: it saw a `turn_begin` or
+`turn_end` of the task (both settle older cards), or it started at the
+beginning of the journal, and no card was dropped for size. If the scan runs out
+of page budget before reaching the watermark, no cards are returned
+(`pending_interactions: []`, `pending_complete: false`), because they may
+already be resolved; the next look continues the scan. Requests wrapped in a
+`cron_event` count as well. The index keeps at most 8 MiB of cards in total
+(one task at most a quarter of that), evicting the least recently viewed task
+first. A `hub.snapshot` session that needs a person carries the same
+`pending_interactions` (at most 5, 16 KiB).
+
+### Interaction visibility per recipient
+
+The Hub's daemon lane is a trusted local client, so the journal holds question
+and permission requests in full. The Hub redacts them per recipient and per
+task in live batches, `hub.events.read`, history and snapshot:
+
+| Recipient holds on the task | Sees |
+| --- | --- |
+| `permission.respond` (owner, operator) | everything: question text and options, permission tool name, description, command, inputs |
+| `question.respond` or `question.delegated` | questions in full; permission requests redacted |
+| neither (viewer, agent) | `{id, request_id?, tool_call_id?, session_id?, redacted:true, interaction_revision}`; questions as `questions: []` |
+
+A request wrapped in a `cron_event` (`{job_id, event_type, payload}`) is redacted
+the same way: the wrapper stays and its inner `payload` is redacted.
+
+## Agents
+
+Both methods require `session.read` on the task and refuse unknown keys.
+
+- `agents.list {workspace_id, session_id}` -> `{agents:[AgentRow], truncated?:true}`.
+  `AgentRow = {id, name, title, status, model?, started_at?, updated_at?, tool_calls?, summary?, error?}`,
+  built from the daemon's `subagent_snapshots` of the live session; `status` is
+  the daemon's string (`running`, `completed`, `failed`, `cancelled`,
+  `interrupted`, `queued`, …). An inactive or unknown session is `not_found`.
+- `agents.inspect {workspace_id, session_id, agent_id, limit?}` (`limit` 1–200,
+  default 60) -> `{agent: AgentRow, steps:[AgentStep], truncated}`.
+  `AgentStep = {kind:'text'|'thinking'|'tool'|'notice', text?, name?, args?, output?, state?:'working'|'done'|'error'}`.
+  Steps come from the agent's `subagent_event`s in the Hub journal (newest
+  20 000 events): a tool call and its result are one step (`args` clipped to
+  8000 characters, `output` to 16 000), consecutive text/thinking merges.
+  Steps use `arguments_full`, `result_full` and `text_full` when the daemon sends
+  them; older daemons only send previews, which are used as they are. The
+  daemon's `subagent.inspect` adds the task prompt as the first notice and the
+  agent's final output when the journal lacks it. The newest `limit` steps are
+  returned; the Hub drops older steps until the frame fits 256 KiB. `truncated`
+  is true when steps were dropped or the journal window did not reach the
+  agent's start. An agent the task does not have is `not_found`. History action
 IDs replace overlapping windows; tool call IDs reconcile covered live steps.
 Uncovered newer live steps remain after history, and the view keeps at most 400
 blocks, dropping oldest blocks. Consecutive tools share one collapsed group.
@@ -577,7 +653,10 @@ A retired token seen later (a second cookie jar of the same device, such as iOS
 Safari and the home-screen app, or a refresh reply the phone lost while
 suspended) starts a new token family once instead of revoking the device. The
 token is then spent: presenting it again outside the grace window gets 401
-without a revocation. Every fork is audited (`identity.family.fork:<device>`). A
+without a revocation. One exception: if the fork reply was lost, the spent token
+can collect that branch once more, within 3 minutes, while the branch is still
+unused and not revoked. That replay works only once and is audited as
+`identity.family.fork_replay:<device>`. Every fork is audited (`identity.family.fork:<device>`). A
 device keeps at most 4 live families, and the least recently used one is retired
 alone (`family_limit`). An idle family expires after the inactivity window without
 ending the device while another family of it is still in use. Revoking the device

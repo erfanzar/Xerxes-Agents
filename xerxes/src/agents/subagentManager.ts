@@ -1139,7 +1139,10 @@ export class SubAgentManager {
       timestamp: this.now().toISOString(),
       data: Object.freeze({ ...data }),
     })
-    this.mailbox.push(event)
+    // Full tool inputs/results and text ride only on the live event; the bounded mailbox keeps previews.
+    this.mailbox.push(LIVE_ONLY_EVENT_FIELDS.some(field => field in data)
+      ? Object.freeze({ ...event, data: Object.freeze(withoutLiveOnlyFields(data)) })
+      : event)
     if (this.mailbox.length > 512) this.mailbox.shift()
     task.lastActivityAt = this.now().valueOf()
     try {
@@ -1628,10 +1631,12 @@ export class SubAgentManager {
     runtime.toolInputs.set(event.toolCallId, event.inputs)
     this.flushTextBurst(task)
     this.recordToolFileAccess(task, event.name, event.inputs, { phase: 'start' })
+    const inputFull = fullToolInput(event.inputs)
     this.postEvent(task, 'tool_start', {
       tool: event.name,
       toolCallId: event.toolCallId,
       inputPreview: previewToolInput(event.inputs),
+      ...(inputFull === undefined ? {} : { inputFull }),
     })
   }
 
@@ -1652,6 +1657,7 @@ export class SubAgentManager {
       permitted: event.permitted,
       ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
       resultPreview: event.result.slice(0, 200),
+      resultFull: clipLive(event.result, LIVE_RESULT_CHARS),
     })
   }
 
@@ -1682,6 +1688,7 @@ export class SubAgentManager {
     this.postEvent(task, 'text_burst', {
       chars: text.length,
       preview: text.length > 400 ? `…${text.slice(-400)}` : text,
+      textFull: clipLive(text, LIVE_TEXT_CHARS),
     })
   }
 
@@ -1950,6 +1957,38 @@ function appendThinkingTail(burst: ThinkingBurst, text: string): void {
     return
   }
   burst.tail = combined
+}
+
+/**
+ * Event data fields carried only by the live event sink (daemon journal, Hub), never kept in
+ * the mailbox: the exact tool input (JSON, clipped), tool result and text burst.
+ */
+const LIVE_ONLY_EVENT_FIELDS = ['inputFull', 'resultFull', 'textFull'] as const
+const LIVE_ARGUMENT_CHARS = 8000
+const LIVE_RESULT_CHARS = 16_000
+const LIVE_TEXT_CHARS = 8000
+
+function withoutLiveOnlyFields(data: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const kept: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (!(LIVE_ONLY_EVENT_FIELDS as readonly string[]).includes(key)) kept[key] = value
+  }
+  return kept
+}
+
+function clipLive(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`
+}
+
+/** The tool input as the JSON the model sent, clipped; undefined when it cannot be serialized. */
+function fullToolInput(inputs: Readonly<Record<string, unknown>>): string | undefined {
+  try {
+    const json = JSON.stringify(inputs)
+    return typeof json === 'string' ? clipLive(json, LIVE_ARGUMENT_CHARS) : undefined
+  } catch {
+    // Circular or BigInt input: the preview still describes the call.
+    return undefined
+  }
 }
 
 function previewToolInput(inputs: Readonly<Record<string, unknown>>): string {

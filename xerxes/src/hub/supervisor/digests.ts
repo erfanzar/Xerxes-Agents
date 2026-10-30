@@ -182,16 +182,29 @@ function eventLine(event: HubEvent): string {
 
 /** Keep the newest events that fit; report how many older ones were left out. */
 export function renderEventsForSummary(events: readonly HubEvent[], maxBytes: number): { readonly text: string; readonly skipped: number } {
+  // Live text/thinking arrives as many small deltas: consecutive ones of a kind become one line,
+  // so streamed prose never crowds the task's tool and status events out of the summary.
+  const merged: HubEvent[] = []
+  for (const event of events) {
+    const field = event.type === 'text_part' ? 'text' : event.type === 'think_part' ? 'think' : undefined
+    const previous = merged.at(-1)
+    const value = field === undefined ? undefined : event.payload[field]
+    if (field !== undefined && typeof value === 'string' && previous?.type === event.type && typeof previous.payload[field] === 'string') {
+      merged[merged.length - 1] = { ...previous, payload: { ...previous.payload, [field]: `${String(previous.payload[field])}${value}`.slice(-4000) } }
+      continue
+    }
+    merged.push(event)
+  }
   const lines: string[] = []
   let bytes = 0
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const line = eventLine(events[index]!)
+  for (let index = merged.length - 1; index >= 0; index -= 1) {
+    const line = eventLine(merged[index]!)
     const size = Buffer.byteLength(line) + 1
     if (bytes + size > maxBytes) break
     lines.unshift(line)
     bytes += size
   }
-  return { text: lines.join('\n'), skipped: events.length - lines.length }
+  return { text: lines.join('\n'), skipped: merged.length - lines.length }
 }
 
 export class DigestService {

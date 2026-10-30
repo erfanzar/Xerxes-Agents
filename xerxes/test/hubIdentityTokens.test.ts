@@ -66,7 +66,7 @@ describe('refresh rotation', () => {
     expect(h.admin.listAudit().some(event => event.action === `identity.family.fork:${s0.deviceId}`)).toBe(true)
   })
 
-  test('a token that already started a branch is refused afterwards, without revoking the device', async () => {
+  test('a token that already started a branch is refused once that branch is in use, without revoking the device', async () => {
     const h = await makeHarness()
     const events: RevocationEvent[] = []
     h.identity.onRevoked(event => events.push(event))
@@ -79,11 +79,131 @@ describe('refresh rotation', () => {
     const retry = sessionOf(await refresh(h, s0.refresh))
     expect(retry.refresh).toBe(branch.refresh)
     h.clock.advance(11 * SECOND)
+    // The holder uses its branch: the spent token can no longer collect anything.
+    const used = await refresh(h, branch.refresh)
+    expect(used.status).toBe(200)
     const late = await refresh(h, s0.refresh)
     expect(late.status).toBe(401)
+    expect(errorOf(late)).toMatchObject({ code: 'unauthorized' })
+    // A spent-token refusal leaves the cookie jar alone: a concurrent winner may have just set newer cookies.
+    expect(late.setCookies).toHaveLength(0)
     expect(events).toHaveLength(0)
     expect(await authenticate(h, s1)).not.toBeNull()
-    expect((await refresh(h, branch.refresh)).status).toBe(200)
+    expect((await refresh(h, sessionOf(used).refresh)).status).toBe(200)
+  })
+
+  test('a fork reply lost while suspended can be collected again while its branch is unused, within three minutes', async () => {
+    // A short browser session so the replay has to mint a fresh one inside the replay window.
+    const h = await makeHarness({ limits: { sessionTtlMs: MINUTE } })
+    const events: RevocationEvent[] = []
+    h.identity.onRevoked(event => events.push(event))
+    const s0 = await pairDevice(h)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    // The fork reply never reaches the phone.
+    const lost = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(2 * MINUTE)
+    const again = await refresh(h, s0.refresh)
+    expect(again.status).toBe(200)
+    const recovered = sessionOf(again)
+    expect(recovered.refresh).toBe(lost.refresh)
+    // The remembered browser session lapsed meanwhile, so a fresh one is minted on the same branch.
+    expect(recovered.session).not.toBe(lost.session)
+    expect(await authenticate(h, recovered)).not.toBeNull()
+    expect(h.admin.listAudit().some(event => event.action === `identity.family.fork_replay:${s0.deviceId}`)).toBe(true)
+    expect((await refresh(h, recovered.refresh)).status).toBe(200)
+    expect(events).toHaveLength(0)
+  })
+
+  test('a lost fork reply is not collectable after three minutes', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(3 * MINUTE + SECOND)
+    const late = await refresh(h, s0.refresh)
+    expect(late.status).toBe(401)
+    expect(errorOf(late)).toMatchObject({ code: 'unauthorized' })
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
+  })
+
+  test('a lost fork reply can be collected only once; a second replay is refused', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    const lost = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(MINUTE)
+    const first = await refresh(h, s0.refresh)
+    expect(first.status).toBe(200)
+    expect(sessionOf(first).refresh).toBe(lost.refresh)
+    h.clock.advance(SECOND)
+    const second = await refresh(h, s0.refresh)
+    expect(second.status).toBe(401)
+    expect(errorOf(second)).toMatchObject({ code: 'unauthorized' })
+    expect(h.admin.listAudit().filter(event => event.action === `identity.family.fork_replay:${s0.deviceId}`)).toHaveLength(1)
+    // The branch itself still works for whoever collected it.
+    expect((await refresh(h, lost.refresh)).status).toBe(200)
+    expect(h.admin.listDevices().find(device => device.id === s0.deviceId)?.status).toBe('active')
+  })
+
+  test('a lost fork reply is not collectable once its branch was retired by the family limit', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    // Rotate so several older tokens exist that can each start a branch.
+    const retired: string[] = [s0.refresh]
+    let current = s0.refresh
+    for (let index = 0; index < 5; index += 1) {
+      h.clock.advance(SECOND)
+      current = sessionOf(await refresh(h, current)).refresh
+      retired.push(current)
+    }
+    retired.pop()
+    h.clock.advance(11 * SECOND)
+    // The first fork is the one whose reply is "lost".
+    sessionOf(await refresh(h, retired[0]!))
+    // The main family stays in use, so the unused lost branch becomes the least recently used one.
+    h.clock.advance(SECOND)
+    current = sessionOf(await refresh(h, current)).refresh
+    // Two more branches reach the four-family limit; a third retires the lost branch.
+    for (const token of retired.slice(1, 4)) {
+      h.clock.advance(SECOND)
+      expect((await refresh(h, token)).status).toBe(200)
+    }
+    expect((await refresh(h, current)).status).toBe(200)
+    h.clock.advance(15 * SECOND)
+    const replay = await refresh(h, retired[0]!)
+    expect(replay.status).toBe(401)
+    expect(h.admin.listAudit().some(event => event.action === `identity.family.fork_replay:${s0.deviceId}`)).toBe(false)
+  })
+
+  test('a lost fork reply is not collectable after logout', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    const s1 = sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(MINUTE)
+    const out = await http(h, 'POST', 'session/logout', undefined, { cookie: s1.cookie })
+    expect(out.status).toBe(200)
+    const replay = await refresh(h, s0.refresh)
+    expect(replay.status).toBe(401)
+    expect(h.admin.listAudit().some(event => event.action === `identity.family.fork_replay:${s0.deviceId}`)).toBe(false)
+  })
+
+  test('a lost fork reply is not collectable once the device is revoked', async () => {
+    const h = await makeHarness()
+    const s0 = await pairDevice(h)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(11 * SECOND)
+    sessionOf(await refresh(h, s0.refresh))
+    h.clock.advance(MINUTE)
+    h.admin.revokeDevice(s0.deviceId, 'lost phone')
+    const late = await refresh(h, s0.refresh)
+    expect(late.status).toBe(401)
+    // Revocation refusals still clear the cookies.
+    expect(late.setCookies.every(line => line.includes('Max-Age=0'))).toBe(true)
   })
 
   test('a device keeps at most four branches; the least recently used one is retired alone', async () => {

@@ -12,9 +12,26 @@
 import type { ReactElement } from 'react'
 import { Fragment, memo } from 'react'
 
-const INLINE_RE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\s][^*\n]*\*)|(\[[^\]\n]+\]\([^)\s]*\))/g
-const FENCE_OPEN = /^\s*(```+|~~~+)\s*([\w+#.-]*)\s*$/
+// Emphasis needs a boundary on both sides, so globs and paths (`src/**/*.ts`, `a*b*c`) stay literal.
+const INLINE_RE = /(`[^`\n]+`)|((?<![\w*/\\])\*\*(?=[^\s*])[^*\n]*[^\s*]\*\*(?![\w*]))|((?<![\w*/\\])\*(?=[^\s*])(?:[^*\n]*[^\s*])?\*(?![\w*/]))|(\[[^\]\n]+\]\([^)\s]*\))/g
+// The info string may hold anything after the language (`ts title="a b"`); a backtick fence's info has no backtick.
+const FENCE_OPEN = /^\s*(```+|~~~+)\s*([^\s`]*)(.*)$/
 const FENCE_CLOSE = /^\s*(```+|~~~+)\s*$/
+
+/** A fence opener, or undefined. Backtick fences may not carry a backtick in their info string. */
+function fenceOpen(line: string): { readonly marker: string; readonly language: string } | undefined {
+  const match = FENCE_OPEN.exec(line)
+  if (!match) return undefined
+  const marker = match[1]!
+  if (marker.startsWith('`') && `${match[2] ?? ''}${match[3] ?? ''}`.includes('`')) return undefined
+  return { marker, language: match[2] ?? '' }
+}
+
+/** Closes only with the same marker character, at least as long as the opener. */
+function closesFence(line: string, marker: string): boolean {
+  const match = FENCE_CLOSE.exec(line)
+  return match !== null && match[1]![0] === marker[0] && match[1]!.length >= marker.length
+}
 const HEADING = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/
 const HR = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/
 const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/
@@ -106,7 +123,7 @@ function isTableStart(line: string, next: string | undefined): boolean {
 }
 
 function startsBlock(line: string, next: string | undefined): boolean {
-  return FENCE_OPEN.test(line) || HEADING.test(line) || HR.test(line) || LIST.test(line) || QUOTE.test(line) || isTableStart(line, next)
+  return fenceOpen(line) !== undefined || HEADING.test(line) || HR.test(line) || LIST.test(line) || QUOTE.test(line) || isTableStart(line, next)
 }
 
 /** Fold markdown into display blocks: headings, lists, code, tables, quotes, paragraphs. */
@@ -119,12 +136,12 @@ export function markdownBlocks(markdown: string): ReactElement[] {
     const line = lines[i]!
     if (line.trim() === '') { i += 1; continue }
 
-    const fence = FENCE_OPEN.exec(line)
+    const fence = fenceOpen(line)
     if (fence) {
       const body: string[] = []
       let j = i + 1
-      while (j < lines.length && !FENCE_CLOSE.test(lines[j]!)) body.push(lines[j++]!)
-      const language = fence[2] ?? ''
+      while (j < lines.length && !closesFence(lines[j]!, fence.marker)) body.push(lines[j++]!)
+      const language = fence.language
       out.push(
         <pre key={key++} className="md-code" data-lang={language === '' ? undefined : language}>
           <code>{body.join('\n')}</code>
@@ -188,7 +205,7 @@ export function markdownBlocks(markdown: string): ReactElement[] {
           continue
         }
         const previous = items.at(-1)
-        if (previous && /^\s+\S/.test(current) && !FENCE_OPEN.test(current)) {
+        if (previous && /^\s+\S/.test(current) && fenceOpen(current) === undefined) {
           previous.text = `${previous.text} ${current.trim()}`
           j += 1
           continue

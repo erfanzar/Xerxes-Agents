@@ -15,31 +15,34 @@ import { render } from './renderHelpers.js'
 const tool = (id: string, state: 'working' | 'done' | 'error' = 'done', name = 'exec_command'): Block => ({ kind: 'tool', id, callId: id, name, summary: 'bun test', state, output: 'output' })
 const plain = (html: string): string => html.replaceAll('<!-- -->', '')
 
-describe('collapsed tool groups', () => {
-  it('puts four consecutive commands in one collapsed group with a failed count and collapsed children', () => {
+describe('tool rows and quiet groups', () => {
+  it('shows every command as its own collapsed row with its state, never folded into a group', () => {
     const html = plain(renderToStaticMarkup(<BlockList blocks={[tool('1'), tool('2', 'error'), tool('3'), tool('4', 'error')]} prefix="test" />))
-    expect(html).toContain('Ran 4 commands')
-    expect(html).toContain('2 failed')
-    expect(html.match(/class="fold tool-group"/g)).toHaveLength(1)
-    expect(html.match(/<details/g)).toHaveLength(5)
+    expect(html).not.toContain('tool-group')
+    expect(html.match(/class="fold tool-row"/g)).toHaveLength(4)
+    expect(html.match(/>Ran</g)).toHaveLength(4)
+    expect(html.match(/>failed</g)).toHaveLength(2)
+    expect(html.match(/<code class="tool-target">bun test<\/code>/g)).toHaveLength(4)
     expect(html).not.toMatch(/<details[^>]*\sopen[\s=>]/)
-    expect(html).toContain('aria-label="Tool steps"')
     expect(html.match(/>output<\/pre>/g)).toHaveLength(4)
   })
 
-  it('labels a running mixed-tool group and breaks groups around full assistant/user text', () => {
+  it('folds three or more reads/searches into one group whose steps still expand, and breaks it around other blocks', () => {
     const html = plain(renderToStaticMarkup(<BlockList blocks={[
-      tool('1'), tool('2', 'working', 'ReadFile'), tool('3', 'error', 'GrepTool'),
+      tool('1'), tool('2', 'working', 'ReadFile'), tool('3', 'error', 'GrepTool'), tool('5', 'done', 'GlobTool'),
       { kind: 'assistant', id: 'reply', text: 'The full reply', streaming: false },
       { kind: 'user', id: 'user', text: 'The full question', images: 0, steer: false },
+      tool('6', 'done', 'ReadFile'), tool('7', 'done', 'GrepTool'),
       tool('4'),
       { kind: 'thinking', id: 'thought', text: 'Reasoning', streaming: false },
     ]} prefix="test" />))
-    expect(html).toContain('Using 3 tools')
+    expect(html.match(/class="fold tool-group"/g)).toHaveLength(1)
+    expect(html).toContain('Exploring 1 file, 2 searches')
     expect(html).toContain(' · running')
     expect(html).toContain('1 failed')
-    expect(html).toContain('Ran 1 command')
-    expect(html.match(/class="fold tool-group"/g)).toHaveLength(2)
+    expect(html).toContain('aria-label="Tool steps"')
+    // Two quiet tools after the reply stay as plain rows; with the commands that makes 1 + 3 + 2 + 1 rows.
+    expect(html.match(/class="fold tool-row"/g)).toHaveLength(7)
     expect(html).toContain('<div class="md block-md"><p>The full reply</p></div>')
     expect(html).toContain('<p class="block-text">The full question</p>')
     expect(html).toContain('<summary>Thought it through</summary>')

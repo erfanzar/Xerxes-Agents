@@ -18,6 +18,7 @@ export function stubController(overrides: Partial<HubController> = {}): HubContr
   return {
     imagesSupported: false,
     start() {}, dispose() {}, refreshInbox: noop, openSession() {}, closeSession() {}, loadOlder: noop,
+    loadAgents: noop, inspectAgent: noop, closeAgent() {}, resync: noop, reconnectNow() {},
     submit: async () => true, steer: async () => true, stopTurn: async () => true,
     decide: noop, answerQuestion: noop, setModel: noop, setGoal: noop, loadUsage: noop, setPresence() {},
     supervisorOpen: noop, supervisorSend: async () => true, supervisorRespond: noop,

@@ -17,9 +17,9 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 25; i++) await P
 afterEach(() => vi.useRealTimers())
 
 describe('on-phone audio logic', () => {
-  it('starts only after 250 ms above 0.5, and ends after 700 ms strictly below 0.35', () => {
+  it('starts after 150 ms above 0.5 (short words count), and ends after 700 ms strictly below 0.35', () => {
     const vad = new VadSegmenter()
-    for (let i = 0; i < 7; i++) expect(vad.push(frame(), 0.5, false).hearing).toBe(false)
+    for (let i = 0; i < 4; i++) expect(vad.push(frame(), 0.5, false).hearing).toBe(false)
     expect(vad.push(frame(), 0.5, false).hearing).toBe(true)
     for (let i = 0; i < 40; i++) expect(vad.push(frame(), 0.35, false).utterance).toBeUndefined()
     for (let i = 0; i < 21; i++) expect(vad.push(frame(), 0.34, false).utterance).toBeUndefined()
@@ -48,9 +48,27 @@ describe('on-phone audio logic', () => {
       if (next.utterance) expect(next.offsets).toEqual({ startSample: 0, endSample: 30 * CALL_SAMPLE_RATE, preRollSamples: 0 })
     }
   })
-  it('does not treat short noise or threshold flapping as a speech start', () => {
+  it('does not treat short noise bursts as a speech start, but one dip inside a word does not reset it', () => {
     const vad = new VadSegmenter()
-    for (let i = 0; i < 100; i++) expect(vad.push(frame(), i % 8 === 7 ? 0.49 : 0.8, false).hearing).toBe(false)
+    // 4 loud frames (128 ms), then 3 quiet ones: every burst resets before it reaches 150 ms.
+    for (let i = 0; i < 100; i++) expect(vad.push(frame(), i % 7 < 4 ? 0.8 : 0.1, false).hearing).toBe(false)
+    vad.reset()
+    // "y-e-s": 3 loud frames, a 2-frame dip, 2 loud frames → 5 loud frames in total starts the utterance.
+    for (const p of [0.8, 0.8, 0.8, 0.2, 0.2, 0.8]) expect(vad.push(frame(), p, false).hearing).toBe(false)
+    expect(vad.push(frame(), 0.8, false).hearing).toBe(true)
+  })
+  it('a short word ("yes") becomes a whole utterance including its pre-roll', () => {
+    const vad = new VadSegmenter()
+    for (let i = 0; i < 10; i++) vad.push(frame(0.1), 0.1, false)
+    for (let i = 0; i < 5; i++) vad.push(frame(0.8), 0.8, false)
+    let ended: ReturnType<VadSegmenter['push']> | undefined
+    for (let i = 0; i < 22; i++) { const step = vad.push(frame(), 0, false); if (step.utterance) ended = step }
+    expect(ended?.offsets).toEqual({ startSample: 3200, endSample: 3200 + 5 * 512, preRollSamples: 3200 })
+  })
+  it('needs 250 ms to start an utterance while XERXES speaks, so its own echo blips do not', () => {
+    const vad = new VadSegmenter()
+    for (let i = 0; i < 7; i++) expect(vad.push(frame(), 0.6, true).hearing).toBe(false)
+    expect(vad.push(frame(), 0.6, true).hearing).toBe(true)
   })
   it('caps an utterance at exactly 30 seconds and resets', () => {
     const vad = new VadSegmenter()
@@ -59,12 +77,12 @@ describe('on-phone audio logic', () => {
     expect(utterance?.length).toBe(30 * CALL_SAMPLE_RATE)
     expect(vad.push(frame(), 0, false).hearing).toBe(false)
   })
-  it('barges in only after about 700 ms of clear, consecutive speech while speaking', () => {
+  it('barges in only after about 500 ms of clear, consecutive speech while speaking', () => {
     const vad = new VadSegmenter()
     // XERXES's own voice leaking into the mic scores lower; it never interrupts.
     for (let i = 0; i < 40; i++) expect(vad.push(frame(), 0.8, true).bargeIn).toBe(false)
     vad.reset()
-    for (let i = 0; i < 21; i++) expect(vad.push(frame(), 0.9, true).bargeIn).toBe(false)
+    for (let i = 0; i < 15; i++) expect(vad.push(frame(), 0.9, true).bargeIn).toBe(false)
     expect(vad.push(frame(), 0.9, true).bargeIn).toBe(true)
     vad.reset()
     for (let i = 0; i < 20; i++) expect(vad.push(frame(), 0.9, false).bargeIn).toBe(false)
@@ -229,7 +247,7 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     await f.engine.start('standard')
     expect(f.engine.getSnapshot().phase).toBe('listening')
     await f.utterance()
-    expect(f.reply).toHaveBeenCalledWith('What needs me?', expect.any(AbortSignal), expect.any(Function))
+    expect(f.reply).toHaveBeenCalledWith('What needs me?', expect.any(AbortSignal), expect.any(Function), expect.any(String))
     expect(f.engine.getSnapshot()).toMatchObject({ phase: 'speaking', heard: 'What needs me?', reply: 'First sentence. Second sentence.' })
     // Streaming: sentence two is synthesized while sentence one plays; only one is playing.
     expect(f.model.synthesize).toHaveBeenCalledTimes(2)
@@ -363,7 +381,7 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     expect(first.vad).toEqual({ startSample: 3200, endSample: 3200 + 10 * 512, preRollSamples: 3200 })
     expect(first.samples[3199]).toBeCloseTo(0.1)
     expect(first.samples[3200]).toBeCloseTo(0.8)
-    expect(f.reply).toHaveBeenCalledWith('What needs me?', expect.any(AbortSignal), expect.any(Function))
+    expect(f.reply).toHaveBeenCalledWith('What needs me?', expect.any(AbortSignal), expect.any(Function), expect.any(String))
     await f.utterance()
     expect(f.engine.getSnapshot().debugCapture?.samples).not.toBe(first.samples)
     expect(f.engine.getSnapshot().debugCapture?.vad.preRollSamples).toBe(0)
@@ -434,7 +452,7 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     await f.engine.start('standard')
     await f.utterance()
     const before = vi.mocked(f.output.flush).mock.calls.length
-    await f.feed(21, 0.9)
+    await f.feed(15, 0.9)
     expect(f.playbackSignal()?.aborted).toBe(false)
     await f.feed(1, 0.9)
     expect(f.playbackSignal()?.aborted).toBe(true)
@@ -486,7 +504,7 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     f.reply.mockRejectedValue(new Error('The message was refused.'))
     await f.engine.start('standard')
     await f.utterance()
-    f.engine.connectionLost()
+    f.engine.setConnected(false)
     expect(f.engine.getSnapshot()).toMatchObject({ phase: 'error', error: 'The message was refused.' })
     expect(f.close).toHaveBeenCalledOnce()
     expect(f.model.dispose).toHaveBeenCalledOnce()
@@ -570,17 +588,19 @@ describe('call lifecycle with injected fake models (no downloads)', () => {
     expect(f.close).toHaveBeenCalledOnce()
     expect(f.model.dispose).toHaveBeenCalledOnce()
   })
-  it('does not acquire the microphone after a loading call was hung up', async () => {
+  it('opens the microphone inside the tap, before the download, and releases it when a loading call is hung up', async () => {
     const f = callFixture()
     let ready: (() => void) | undefined
     vi.mocked(f.model.load).mockImplementation(async tier => { await new Promise<void>(resolve => { ready = resolve }); return { tier } })
     const start = f.engine.start('standard')
     await settle()
+    expect(f.engine.getSnapshot().phase).toBe('loading')
     f.engine.hangup()
+    expect(f.close).toHaveBeenCalledOnce()
     ready?.()
     await start
     expect(f.engine.getSnapshot().phase).toBe('idle')
     expect(f.model.dispose).toHaveBeenCalledOnce()
-    expect(f.close).not.toHaveBeenCalled()
+    expect(f.close).toHaveBeenCalledOnce()
   })
 })

@@ -35,15 +35,53 @@ const FAMILIES: ReadonlyArray<readonly [ToolFamily, RegExp]> = [
   ['plan', /^(todo_?write|plan|enter_?plan_?mode|exit_?plan_?mode)$/],
 ]
 
-/** `FileEditTool` / `exec_command` / `mcp.server:GrepTool` → a family. */
-export function toolFamily(name: string): ToolFamily {
-  const tail = (name.split(/[.:]/).pop() ?? name)
+/** `FileEditTool` → `file_edit`, `mcp.server:TodoWrite` → `todo_write`: the comparable base of a tool name. */
+export function toolBaseName(name: string): string {
+  return (name.split(/[.:]/).pop() ?? name)
     .replace(/Tool$/, '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
     .replace(/[\s-]+/g, '_')
     .toLowerCase()
+}
+
+/** `FileEditTool` / `exec_command` / `mcp.server:GrepTool` → a family. */
+export function toolFamily(name: string): ToolFamily {
+  const tail = toolBaseName(name)
   for (const [family, pattern] of FAMILIES) if (pattern.test(tail)) return family
   return 'other'
+}
+
+/** One entry of the task's todo list (the latest TodoWriteTool / todo_write call). */
+export interface TodoItem {
+  readonly content: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+}
+
+/**
+ * One subagent of a task (`agents.list` / `agents.inspect` row, camel-cased).
+ * `status` is the daemon's own string (running, completed, failed, cancelled, interrupted, queued …).
+ */
+export interface AgentRow {
+  readonly id: string
+  readonly name: string
+  readonly title: string
+  readonly status: string
+  readonly model?: string
+  readonly startedAt?: string
+  readonly updatedAt?: string
+  readonly toolCalls?: number
+  readonly summary?: string
+  readonly error?: string
+}
+
+/** One step of a subagent (`agents.inspect`). Text came from the run: plain text only. */
+export interface AgentStep {
+  readonly kind: 'text' | 'thinking' | 'tool' | 'notice'
+  readonly text?: string
+  readonly name?: string
+  readonly args?: string
+  readonly output?: string
+  readonly state?: 'working' | 'done' | 'error'
 }
 
 export type ToolOrbState = 'working' | 'searching' | 'shaping' | 'connecting' | 'solving'

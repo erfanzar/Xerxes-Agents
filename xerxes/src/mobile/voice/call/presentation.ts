@@ -10,7 +10,7 @@ export function voiceStateLine(state: VoiceCallSnapshot): string {
   if (state.call.phase === 'error') return 'Voice ended'
   if (!state.connected) return 'Connecting'
   switch (state.call.phase) {
-    case 'idle': return state.checking ? 'Connecting' : 'Ready for voice'
+    case 'idle': return state.checking ? 'Connecting' : state.call.endReason ? 'Voice ended' : 'Ready for voice'
     case 'loading': return loadingLine(state)
     case 'listening': case 'hearing': return state.call.muted ? 'Microphone muted' : 'Listening'
     case 'thinking': case 'transcribing': return 'Thinking'

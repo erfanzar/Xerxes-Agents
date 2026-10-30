@@ -1,9 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { HubActor } from '../hub/protocol.js'
-import { arr, clip, rec, str } from './parse.js'
-import { NO_ACTIVITY, activityAfter, taskStatusOf, type TaskActivity, type TaskStatus } from './taskTypes.js'
+import { isRecord, type HubActor } from '../hub/protocol.js'
+import { arr, clip, num, rec, str } from './parse.js'
+import { NO_ACTIVITY, activityAfter, taskStatusOf, toolBaseName, toolFamily, type TaskActivity, type TaskStatus, type TodoItem } from './taskTypes.js'
 
 /**
  * Folds daemon-vocabulary events (as relayed by the Hub) into the bounded block
@@ -13,18 +13,37 @@ import { NO_ACTIVITY, activityAfter, taskStatusOf, type TaskActivity, type TaskS
 
 export const TAIL_BLOCK_LIMIT = 40
 export const OLDER_BLOCK_LIMIT = 400
-const TEXT_LIMIT = 8_000
-const OUTPUT_LIMIT = 600
+export const TEXT_LIMIT = 8_000
+/** Tool arguments as shown: the shell command verbatim, otherwise pretty JSON. */
+export const TOOL_ARGS_LIMIT = 8_000
+export const TOOL_OUTPUT_LIMIT = 16_000
+/** Each side of an edit diff. */
+export const TOOL_DIFF_LIMIT = 8_000
+const TODO_LIMIT = 100
 const RESOLVED_LIMIT = 50
 
 /** Stable daemon action identity for authoritative history-window reconciliation. */
 interface HistoryIdentity { readonly historyActionId?: string }
 
+/** What an edit/write tool call changes in one file. `before` is empty for a whole-file write. */
+export interface ToolDiff {
+  readonly path: string
+  readonly before: string
+  readonly after: string
+}
+
 export type Block = HistoryIdentity & (
   | { readonly kind: 'user'; readonly id: string; readonly text: string; readonly images: number; readonly author?: string; readonly steer: boolean }
   | { readonly kind: 'assistant'; readonly id: string; readonly text: string; readonly streaming: boolean }
   | { readonly kind: 'thinking'; readonly id: string; readonly text: string; readonly streaming: boolean }
-  | { readonly kind: 'tool'; readonly id: string; readonly callId: string; readonly name: string; readonly summary: string; readonly state: 'working' | 'done' | 'error'; readonly output?: string }
+  | {
+    readonly kind: 'tool'; readonly id: string; readonly callId: string; readonly name: string; readonly summary: string; readonly state: 'working' | 'done' | 'error'
+    readonly output?: string
+    /** The full command for shell tools, otherwise pretty JSON of the arguments (diff fields left out when `diff` is set). */
+    readonly args?: string
+    readonly diff?: ToolDiff
+    readonly durationMs?: number
+  }
   | { readonly kind: 'notice'; readonly id: string; readonly text: string; readonly error: boolean }
 )
 
@@ -68,6 +87,10 @@ export interface SessionTail {
   readonly title?: string
   readonly queuedSteers: number
   readonly effective: { readonly model?: string; readonly effort?: string; readonly goal?: string; readonly mode?: string }
+  /** The latest TodoWriteTool / todo_write call's list, live or from history. */
+  readonly todos?: readonly TodoItem[]
+  /** The tool call that produced `todos`, so a newer live list is not replaced by an older history one. */
+  readonly todosCallId?: string
 }
 
 export const EMPTY_TAIL: SessionTail = Object.freeze({
@@ -129,6 +152,110 @@ export function toolSummary(rawArguments: unknown): string {
   return ''
 }
 
+function argumentsOf(raw: unknown): { readonly record?: Readonly<Record<string, unknown>>; readonly text?: string } {
+  if (typeof raw === 'string') {
+    if (raw.trim() === '') return {}
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return isRecord(parsed) ? { record: parsed } : { text: raw }
+    } catch { return { text: raw } }
+  }
+  if (isRecord(raw)) return { record: raw }
+  if (raw === undefined || raw === null) return {}
+  return { text: JSON.stringify(raw) ?? '' }
+}
+
+function shellWord(word: string): string {
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
+}
+
+/** The command line of a shell tool: `command` verbatim, or `cmd` plus its argv (`exec_command`). */
+function commandLine(args: Readonly<Record<string, unknown>>): string | undefined {
+  const argv = arr(args.args).filter((item): item is string => typeof item === 'string')
+  if (typeof args.command === 'string' && args.command.trim()) return args.command
+  if (typeof args.cmd === 'string' && args.cmd.trim()) return [args.cmd, ...argv.map(shellWord)].join(' ')
+  const list = Array.isArray(args.command) ? args.command : Array.isArray(args.cmd) ? args.cmd : undefined
+  if (list && list.length > 0 && list.every(item => typeof item === 'string')) return (list as string[]).map(shellWord).join(' ')
+  return undefined
+}
+
+const DIFF_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  edit: ['old_string', 'new_string'],
+  file_edit: ['old_string', 'new_string'],
+  multi_edit: ['edits'],
+  write: ['content'],
+  write_file: ['content'],
+}
+
+function diffOf(base: string, args: Readonly<Record<string, unknown>>): ToolDiff | undefined {
+  const path = str(args.file_path) ?? str(args.path) ?? str(args.notebook_path)
+  if (!path) return undefined
+  const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
+  if (base === 'write' || base === 'write_file') {
+    const content = text(args.content)
+    return content === undefined ? undefined : { path, before: '', after: clip(content, TOOL_DIFF_LIMIT) }
+  }
+  if (base === 'multi_edit') {
+    const edits = arr(args.edits).map(rec).filter(edit => text(edit.old_string) !== undefined || text(edit.new_string) !== undefined)
+    if (edits.length === 0) return undefined
+    return {
+      path,
+      before: clip(edits.map(edit => text(edit.old_string) ?? '').join('\n⋯\n'), TOOL_DIFF_LIMIT),
+      after: clip(edits.map(edit => text(edit.new_string) ?? '').join('\n⋯\n'), TOOL_DIFF_LIMIT),
+    }
+  }
+  const before = text(args.old_string)
+  const after = text(args.new_string)
+  if (before === undefined && after === undefined) return undefined
+  return { path, before: clip(before ?? '', TOOL_DIFF_LIMIT), after: clip(after ?? '', TOOL_DIFF_LIMIT) }
+}
+
+export interface ToolDetails {
+  readonly args?: string
+  readonly diff?: ToolDiff
+}
+
+/**
+ * What a tool call did, for the expandable row: the shell command verbatim,
+ * an edit as a diff, otherwise the arguments as pretty JSON. Bounded.
+ */
+export function toolDetails(name: string, rawArguments: unknown): ToolDetails {
+  const { record, text } = argumentsOf(rawArguments)
+  if (record === undefined) return text === undefined ? {} : { args: clip(text, TOOL_ARGS_LIMIT) }
+  if (toolFamily(name) === 'command') {
+    const command = commandLine(record)
+    if (command !== undefined) return { args: clip(command, TOOL_ARGS_LIMIT) }
+  }
+  const base = toolBaseName(name)
+  const fields = DIFF_FIELDS[base]
+  const diff = fields ? diffOf(base, record) : undefined
+  const shown = diff && fields ? Object.fromEntries(Object.entries(record).filter(([key]) => !fields.includes(key))) : record
+  const json = Object.keys(shown).length === 0 ? undefined : JSON.stringify(shown, null, 2)
+  return { ...(json ? { args: clip(json, TOOL_ARGS_LIMIT) } : {}), ...(diff ? { diff } : {}) }
+}
+
+const TODO_STATUSES: ReadonlySet<string> = new Set(['pending', 'in_progress', 'completed'])
+
+/** The todo list a TodoWriteTool / todo_write call sets, or undefined for any other call or unreadable arguments. */
+export function todosOf(name: string, rawArguments: unknown): readonly TodoItem[] | undefined {
+  if (!/^todo_?write$/.test(toolBaseName(name))) return undefined
+  const { record } = argumentsOf(rawArguments)
+  if (record === undefined || !Array.isArray(record.todos)) return undefined
+  return record.todos.slice(0, TODO_LIMIT).flatMap((raw): TodoItem[] => {
+    const item = rec(raw)
+    const content = str(item.content) ?? str(item.text) ?? str(item.title)
+    if (!content) return []
+    const status = typeof item.status === 'string' && TODO_STATUSES.has(item.status) ? (item.status as TodoItem['status']) : 'pending'
+    return [{ content: clip(content, 500), status }]
+  })
+}
+
+/** Tool output as shown: strings verbatim, anything else as JSON. Bounded. */
+export function toolOutput(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined
+  return typeof raw === 'string' ? clip(raw, TOOL_OUTPUT_LIMIT) : clip(JSON.stringify(raw) ?? '', TOOL_OUTPUT_LIMIT)
+}
+
 function inputRows(args: Readonly<Record<string, unknown>>): (readonly [string, string])[] {
   const rows: (readonly [string, string])[] = []
   for (const [key, value] of Object.entries(args)) {
@@ -172,7 +299,9 @@ function permissionOf(input: FoldInput): PendingInteraction | undefined {
     ...(command ? { command: clip(command, 2000) } : {}),
     inputs,
     ...(workspace ? { workspace } : {}),
-    detailsHidden: command === undefined && inputs.length === 0 && p.details_hidden !== false && (p.details_hidden === true || description === ''),
+    // Only the Hub's own flags mean "hidden for your role". A real request may have `{}` inputs and
+    // no description; guessing from missing fields hid Allow from the person who must answer it.
+    detailsHidden: p.redacted === true || p.details_hidden === true,
     questions: [],
     ...(requestedBy ? { requestedBy } : {}),
   }
@@ -220,7 +349,8 @@ function appendStreaming(tail: SessionTail, kind: 'assistant' | 'thinking', id: 
     const text = clip(last.text + delta, TEXT_LIMIT)
     return { ...tail, blocks: [...tail.blocks.slice(0, -1), { ...last, text }] }
   }
-  const added = pushBlock(tail.blocks, { kind, id, text: clip(delta, TEXT_LIMIT), streaming: true })
+  // A new block of the other kind (thinking then text, or back) ends the one streaming before it.
+  const added = pushBlock(settleStreaming(tail.blocks), { kind, id, text: clip(delta, TEXT_LIMIT), streaming: true })
   return { ...tail, blocks: added.blocks, truncated: tail.truncated || added.dropped }
 }
 
@@ -265,19 +395,23 @@ export function foldSessionEvent(tail: SessionTail, input: FoldInput): SessionTa
       const callId = str(payload.tool_call_id) ?? str(payload.id) ?? input.id
       if (base.blocks.some(block => block.kind === 'tool' && block.callId === callId)) return base
       const name = str(payload.name) ?? 'tool'
-      const added = pushBlock(settleStreaming(base.blocks), { kind: 'tool', id: input.id, callId, name, summary: toolSummary(payload.arguments), state: 'working' })
-      return { ...base, blocks: added.blocks, truncated: base.truncated || added.dropped }
+      const rawArgs = payload.arguments ?? payload.inputs ?? payload.input
+      const details = toolDetails(name, rawArgs)
+      const added = pushBlock(settleStreaming(base.blocks), { kind: 'tool', id: input.id, callId, name, summary: toolSummary(rawArgs), state: 'working', ...details })
+      const todos = todosOf(name, rawArgs)
+      return { ...base, blocks: added.blocks, truncated: base.truncated || added.dropped, ...(todos ? { todos, todosCallId: callId } : {}) }
     }
     case 'tool_result': {
       const callId = str(payload.tool_call_id)
       const raw = payload.return_value ?? payload.result ?? payload.output ?? payload.error
       const failed = payload.is_error === true || payload.error != null || payload.permitted === false || (typeof raw === 'string' && raw.startsWith('Tool execution failed:'))
-      const output = typeof raw === 'string' ? clip(raw, OUTPUT_LIMIT) : raw === undefined ? undefined : clip(JSON.stringify(raw) ?? '', OUTPUT_LIMIT)
+      const output = toolOutput(raw)
+      const durationMs = num(payload.duration_ms)
       let changed = false
       const blocks = base.blocks.map(block => {
         if (changed || block.kind !== 'tool' || block.callId !== callId || block.state !== 'working') return block
         changed = true
-        return { ...block, state: failed ? ('error' as const) : ('done' as const), ...(output ? { output } : {}) }
+        return { ...block, state: failed ? ('error' as const) : ('done' as const), ...(output ? { output } : {}), ...(durationMs === undefined ? {} : { durationMs }) }
       })
       return changed ? { ...base, blocks } : base
     }
@@ -336,7 +470,9 @@ export function foldSessionEvent(tail: SessionTail, input: FoldInput): SessionTa
     if (!id) return base
     const resolvedBy = rec(payload.resolved_by)
     const by = actorName(input.actor) ?? str(resolvedBy.display_name) ?? (typeof payload.resolved_by === 'string' ? payload.resolved_by : undefined)
-    return resolve(base, id, str(payload.response) ?? str(payload.decision), by)
+    const next = resolve(base, id, str(payload.response) ?? str(payload.decision), by)
+    // The turn goes on once nothing waits on a person any more.
+    return next.pending.length === 0 && next.status === 'needs_you' ? { ...next, status: 'working' } : next
   }
   return base
 }

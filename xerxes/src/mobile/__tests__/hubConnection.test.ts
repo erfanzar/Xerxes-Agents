@@ -90,6 +90,195 @@ describe('HubConnection lifecycle', () => {
   })
 })
 
+describe('HubConnection liveness and resume', () => {
+  it('a foreground probe that is answered keeps the link and notifies verified listeners', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    let verified = 0
+    h.conn.onLinkVerified(() => { verified += 1 })
+    expect(await h.conn.verifyLink()).toBe('live')
+    // A probe nobody asked to announce (the heartbeat's kind) stays silent.
+    expect(verified).toBe(0)
+    const result = await h.conn.verifyLink(undefined, { notify: true })
+    expect(result).toBe('live')
+    expect(verified).toBe(1)
+    expect(h.conn.status().state).toBe('live')
+    expect(socket.framesFor('hub.hello')).toHaveLength(3)
+    expect(h.hub.sockets).toHaveLength(1)
+  })
+
+  it('heartbeat probes never notify verified listeners; resume does (P2-1)', async () => {
+    const h = harness({ heartbeatMs: 25_000 })
+    const socket = await goLive(h)
+    let verified = 0
+    h.conn.onLinkVerified(() => { verified += 1 })
+    for (let beat = 0; beat < 3; beat += 1) {
+      h.timers.advance(25_000)
+      await settle()
+    }
+    expect(socket.framesFor('hub.hello').length).toBeGreaterThanOrEqual(4)
+    expect(verified).toBe(0)
+    h.conn.resume()
+    await settle()
+    expect(verified).toBe(1)
+  })
+
+  it('a silent probe on a socket that reads live drops it and reconnects within the probe timeout', async () => {
+    const h = harness()
+    const first = await goLive(h)
+    h.hub.handlers.set('hub.hello', () => undefined)
+    const pending = h.conn.verifyLink()
+    await settle()
+    h.timers.advance(4_000)
+    expect(await pending).toBe('reconnecting')
+    expect(first.closedWith).toBe(1000)
+    expect(h.conn.status().state).toBe('connecting')
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+    h.hub.handlers.set('hub.hello', () => ({ principal: { id: 'u1', display_name: 'Ann' } }))
+    h.hub.socket(1).open()
+    await settle()
+    expect(h.conn.status().state).toBe('live')
+  })
+
+  it('a refusal still proves the socket carries frames', async () => {
+    const h = harness()
+    await goLive(h)
+    h.hub.handlers.set('hub.hello', () => ({ __error: { code: 'rate_limited', message: 'slow down' } }))
+    expect(await h.conn.verifyLink()).toBe('live')
+    expect(h.hub.sockets).toHaveLength(1)
+  })
+
+  it('two consecutive request timeouts on a live link restart it', async () => {
+    const h = harness()
+    await goLive(h)
+    h.hub.handlers.set('hub.usage', () => undefined)
+    const a = h.conn.request('hub.usage').catch((error: unknown) => error)
+    const b = h.conn.request('hub.usage').catch((error: unknown) => error)
+    h.timers.advance(16_000)
+    expect(await a).toMatchObject({ code: 'timeout' })
+    expect(await b).toMatchObject({ code: 'timeout' })
+    expect(h.conn.status().state).toBe('connecting')
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+  })
+
+  it('a single timeout followed by any frame does not restart the link', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    h.hub.handlers.set('hub.usage', () => undefined)
+    const a = h.conn.request('hub.usage').catch((error: unknown) => error)
+    h.timers.advance(16_000)
+    await a
+    socket.event('hub.presence', { workspace_id: 'w1', entries: [] })
+    const b = h.conn.request('hub.usage').catch((error: unknown) => error)
+    h.timers.advance(16_000)
+    await b
+    expect(h.conn.status().state).toBe('live')
+    expect(h.hub.sockets).toHaveLength(1)
+  })
+
+  it('resume on a reconnecting link reconnects at once with the backoff reset', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    socket.drop(1006)
+    expect(h.conn.status()).toMatchObject({ state: 'reconnecting', attempt: 1 })
+    h.conn.resume()
+    expect(h.conn.status().state).toBe('connecting')
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+    h.hub.socket(1).open()
+    await settle()
+    expect(h.conn.status().state).toBe('live')
+  })
+
+  it('keeps no reconnect timer while hidden and reconnects on resume', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    h.conn.setVisible(false)
+    socket.drop(1006)
+    expect(h.conn.status().state).toBe('reconnecting')
+    h.timers.advance(10 * 60_000)
+    await settle()
+    // Hidden: nothing was retried in the background.
+    expect(h.hub.sockets).toHaveLength(1)
+    h.conn.resume()
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+  })
+
+  it('parks a reconnect that was already scheduled when the page hides', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    socket.drop(1006)
+    h.conn.setVisible(false)
+    h.timers.advance(60_000)
+    await settle()
+    expect(h.hub.sockets).toHaveLength(1)
+    h.conn.resume()
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+  })
+
+  it('resume on a live link probes it rather than reconnecting', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    h.conn.resume()
+    await settle()
+    expect(socket.framesFor('hub.hello')).toHaveLength(2)
+    expect(h.hub.sockets).toHaveLength(1)
+  })
+
+  it('an attempt that never opens is dropped after the connect deadline and retried', async () => {
+    const h = harness({ connectTimeoutMs: 5_000 })
+    h.conn.connect()
+    await settle()
+    expect(h.hub.sockets).toHaveLength(1)
+    h.timers.advance(5_000)
+    expect(h.conn.status()).toMatchObject({ state: 'reconnecting', lastError: 'The Hub did not answer' })
+    expect(h.hub.socket(0).closedWith).toBe(1000)
+    // First retry after ~375 ms (attempt 1, jitter 0.5); that attempt gets its own deadline.
+    h.timers.advance(1_000)
+    await settle()
+    expect(h.hub.sockets).toHaveLength(2)
+    h.hub.socket(1).open()
+    await settle()
+    expect(h.conn.status().state).toBe('live')
+    // Once live, the deadline no longer applies.
+    h.timers.advance(10_000)
+    await settle()
+    expect(h.conn.status().state).toBe('live')
+    expect(h.hub.sockets).toHaveLength(2)
+  })
+
+  it('a quiet live link is probed on the heartbeat; a busy one is not', async () => {
+    const h = harness({ heartbeatMs: 25_000 })
+    const socket = await goLive(h)
+    h.timers.advance(25_000)
+    await settle()
+    expect(socket.framesFor('hub.hello')).toHaveLength(2)
+    h.timers.advance(10_000)
+    socket.event('hub.presence', { workspace_id: 'w1', entries: [] })
+    h.timers.advance(15_000)
+    await settle()
+    expect(socket.framesFor('hub.hello')).toHaveLength(2)
+  })
+
+  it('caps the default backoff at 8 seconds', () => {
+    expect(backoffDelay(30, undefined, () => 1)).toBe(8_000)
+  })
+
+  it('does nothing on resume after revocation', async () => {
+    const h = harness()
+    const socket = await goLive(h)
+    socket.event('hub.revoked', { reason: 'revoked' })
+    h.conn.resume()
+    expect(await h.conn.verifyLink()).toBe('skipped')
+    await settle()
+    expect(h.hub.sockets).toHaveLength(1)
+  })
+})
+
 describe('HubConnection frames', () => {
   it('refuses inbound frames over the limit', async () => {
     const h = harness()

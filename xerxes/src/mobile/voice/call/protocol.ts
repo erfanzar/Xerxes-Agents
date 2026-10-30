@@ -26,6 +26,27 @@ export type CallWorkerResponse =
   | { readonly id: number; readonly type: 'done' }
   | { readonly id: number; readonly type: 'error'; readonly message: string }
 
+/**
+ * One step of a call failed (a stalled playback, a speech job that timed out, a phone voice error) but the
+ * call itself can continue: the engine drops that step, shows the message and keeps listening.
+ * Any other error ends the call.
+ */
+export class CallStepError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CallStepError'
+  }
+}
+
+/**
+ * Advice for a failed worker job. Light still runs the same VAD and Moonshine workers, so it is offered only
+ * when Kokoro (synthesis) failed; anything else points at reloading the app or updating the Hub.
+ */
+export function workerFailureMessage(job: string, detail: string): string {
+  if (job === 'synthesize') return `On-phone speech output failed (${detail}). Choose Light in voice settings to use the phone’s own voice.`
+  return `On-phone ${job} failed (${detail}). Reload the app; if it keeps happening, update the Hub so its call models are available.`
+}
+
 export interface CallTranscriptionRecovery {
   restarting(): void
   progress(value: CallProgress): void

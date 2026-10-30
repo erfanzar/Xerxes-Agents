@@ -116,12 +116,18 @@ describe('voice reducer transitions', () => {
     expect(run([{ type: 'playback_ended', responseId: 'r2', generation: 5 }], interrupted)).toBe(interrupted)
   })
 
-  it('a response that never produced sound ends the orb at audio_end', () => {
+  it('audio_end before the first sound keeps the orb until playback reports started/ended or empty', () => {
     const state = run([
       { type: 'audio_start', responseId: 'r', generation: 1 },
       { type: 'audio_end', responseId: 'r', generation: 1, interrupted: false },
     ])
-    expect(state.phase).toBe('idle')
+    // A short clip is still queued: its start is reported a moment after the stream ended.
+    expect(state).toMatchObject({ phase: 'buffering', streamEnded: true, responseId: 'r' })
+    const speaking = run([{ type: 'playback_started', responseId: 'r', generation: 1 }], state)
+    expect(speaking.phase).toBe('speaking')
+    expect(run([{ type: 'playback_ended', responseId: 'r', generation: 1 }], speaking).phase).toBe('idle')
+    expect(run([{ type: 'playback_empty', responseId: 'r', generation: 1 }], state).phase).toBe('idle')
+    expect(run([{ type: 'playback_empty', responseId: 'old', generation: 1 }], state)).toBe(state)
     const cut = run([{ type: 'audio_start', responseId: 'r', generation: 1 }, { type: 'audio_end', responseId: 'r', generation: 1, interrupted: true }])
     expect(cut.phase).toBe('interrupted')
   })

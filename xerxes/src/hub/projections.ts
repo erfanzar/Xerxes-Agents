@@ -114,12 +114,13 @@ export function reduceProjectionEvent(state: WorkspaceProjection, event: Upstrea
   if (event.type === 'turn_begin') updated = { ...updated, status: 'working', interrupted: false }
   if (event.type === 'turn_end') updated = { ...updated, status: payload.error || payload.failed === true ? 'failed' : 'idle', pending_interaction_count: 0 }
   if (event.type === 'error' || event.type === 'turn_error') updated = { ...updated, status: 'failed' }
-  if (event.type === 'permission_request' || event.type === 'question_request') {
+  // The daemon raises `approval_request` (turnRunner); `permission_request` is the older name.
+  if (event.type === 'approval_request' || event.type === 'permission_request' || event.type === 'question_request') {
     const requestId = text(payload.request_id ?? payload.id, event.event_id)
     if (!interactions.includes(requestId)) interactions = [...interactions, requestId]
     updated = { ...updated, status: 'needs_you', pending_interaction_count: Math.max(row.pending_interaction_count, interactions.length) }
   }
-  if (['permission_resolved', 'question_resolved', 'interaction_resolved', 'permission_response', 'question_response'].includes(event.type)) {
+  if (['approval_response', 'permission_resolved', 'question_resolved', 'interaction_resolved', 'permission_response', 'question_response'].includes(event.type)) {
     const id = text(payload.request_id ?? payload.id)
     if (interactions.includes(id) || (interactions.length === 0 && row.pending_interaction_count > 0)) {
       interactions = interactions.filter(item => item !== id)
