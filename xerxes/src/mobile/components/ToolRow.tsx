@@ -6,7 +6,7 @@ import { useState, type ReactElement } from 'react'
 import { plural } from '../../client/format.js'
 import { toolFamily } from '../../client/taskTypes.js'
 import { diffCounts, diffLines, diffRows } from './diffLines.js'
-import { formatDuration, OUTPUT_PREVIEW_LINES, outputPreview, toolIcon, toolTarget, toolVerb, type ToolDiff, type ToolView } from './toolView.js'
+import { argsObject, formatDuration, OUTPUT_PREVIEW_LINES, outputPreview, toolIcon, toolTarget, toolVerb, type ToolDiff, type ToolView } from './toolView.js'
 
 /** A unified diff: `+` added and `-` removed lines with a tint, long unchanged runs folded. */
 export function DiffView({ diff }: { diff: ToolDiff }): ReactElement {
@@ -42,7 +42,7 @@ export function DiffView({ diff }: { diff: ToolDiff }): ReactElement {
 export function ToolRow({ tool }: { tool: ToolView }): ReactElement {
   const [all, setAll] = useState(false)
   const target = toolTarget(tool)
-  const command = toolFamily(tool.name) === 'command'
+  const command = toolFamily(tool.name) === 'command' && argsObject(tool.args) === undefined
   const duration = formatDuration(tool.durationMs)
   const output = tool.output === undefined || tool.output === '' ? undefined : outputPreview(tool.output, all)
   // An edit's arguments repeat its diff; show them only when there is no diff.

@@ -5,15 +5,15 @@ import type { ReactElement } from 'react'
 
 import { plural } from '../../client/format.js'
 import type { Block } from '../../client/sessionFold.js'
-import { toolFamily } from '../../client/taskTypes.js'
+import { toolBaseName, toolFamily } from '../../client/taskTypes.js'
 import { Markdown } from './Markdown.js'
 import { ToolRow } from './ToolRow.js'
 import type { ToolView } from './toolView.js'
 
 type ToolBlock = Extract<Block, { kind: 'tool' }>
 
-/** Runs of this many consecutive reads/searches fold into one group; each step stays its own row. */
-export const QUIET_GROUP_MIN = 3
+/** Runs of this many consecutive tool calls fold into one collapsed group; each step stays its own row inside. */
+export const TOOL_GROUP_MIN = 2
 
 export function toolViewOf(block: ToolBlock): ToolView {
   return {
@@ -64,38 +64,66 @@ export function blockKey(block: Block): string {
   return block.kind === 'tool' ? `tool:${block.callId}` : block.id
 }
 
-function quiet(block: Block): block is ToolBlock {
-  if (block.kind !== 'tool') return false
-  const family = toolFamily(block.name)
-  return family === 'read' || family === 'search'
+function isTool(block: Block): block is ToolBlock {
+  return block.kind === 'tool'
 }
 
-function groupLabel(tools: readonly ToolBlock[]): string {
-  const reads = tools.filter(tool => toolFamily(tool.name) === 'read').length
-  const searches = tools.length - reads
-  const running = tools.some(tool => tool.state === 'working')
-  const parts: string[] = []
-  if (reads > 0) parts.push(plural(reads, 'file'))
-  if (searches > 0) parts.push(plural(searches, 'search', 'searches'))
-  return `${running ? 'Exploring' : 'Explored'} ${parts.join(', ')}`
+type GroupKind = 'run' | 'check' | 'read' | 'edit' | 'search' | 'web' | 'agents' | 'plan' | 'other'
+
+const GROUP_ORDER: readonly GroupKind[] = ['run', 'check', 'edit', 'read', 'search', 'web', 'agents', 'plan', 'other']
+
+/** Polling, stopping or typing into a command is not running one: count it apart. */
+const COMMAND_HELPERS = new Set(['check_command', 'kill_command', 'pty_open', 'pty_write', 'pty_close', 'pty_list'])
+
+function groupKind(name: string): GroupKind {
+  const family = toolFamily(name)
+  if (family === 'command') return COMMAND_HELPERS.has(toolBaseName(name)) ? 'check' : 'run'
+  if (family === 'wait') return 'agents'
+  return family
+}
+
+function groupPart(kind: GroupKind, count: number): string {
+  switch (kind) {
+    case 'run': return `ran ${plural(count, 'command')}`
+    case 'check': return plural(count, 'command check')
+    case 'edit': return `edited ${plural(count, 'file')}`
+    case 'read': return `read ${plural(count, 'file')}`
+    case 'search': return plural(count, 'search', 'searches')
+    case 'web': return plural(count, 'web fetch', 'web fetches')
+    case 'agents': return plural(count, 'agent step')
+    case 'plan': return plural(count, 'plan update')
+    case 'other': return plural(count, 'other tool')
+  }
+}
+
+/** "Ran 3 commands, 2 command checks, read 1 file". */
+export function groupLabel(tools: readonly ToolBlock[]): string {
+  const counts = new Map<GroupKind, number>()
+  for (const tool of tools) {
+    const kind = groupKind(tool.name)
+    counts.set(kind, (counts.get(kind) ?? 0) + 1)
+  }
+  const text = GROUP_ORDER.filter(kind => counts.has(kind)).map(kind => groupPart(kind, counts.get(kind)!)).join(', ')
+  return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
 /**
- * The transcript: every tool call is its own expandable row (verb, target,
- * state, duration). Only runs of reads and searches fold together, and each
- * step inside that group still expands on its own.
+ * The transcript. Consecutive tool calls fold into one collapsed group
+ * ("Ran 3 commands, read 2 files") between the replies; opening it lists
+ * every call as its own expandable row (verb, target, state, duration, and
+ * inside it the full command, diff and output).
  */
 export function BlockList({ blocks, prefix }: { blocks: readonly Block[]; prefix: string }): ReactElement | null {
   if (blocks.length === 0) return null
   const rows: (Block | ToolBlock[])[] = []
   let run: ToolBlock[] = []
   const flush = (): void => {
-    if (run.length >= QUIET_GROUP_MIN) rows.push(run)
+    if (run.length >= TOOL_GROUP_MIN) rows.push(run)
     else rows.push(...run)
     run = []
   }
   for (const block of blocks) {
-    if (quiet(block)) { run.push(block); continue }
+    if (isTool(block)) { run.push(block); continue }
     flush()
     rows.push(block)
   }

@@ -15,38 +15,49 @@ import { render } from './renderHelpers.js'
 const tool = (id: string, state: 'working' | 'done' | 'error' = 'done', name = 'exec_command'): Block => ({ kind: 'tool', id, callId: id, name, summary: 'bun test', state, output: 'output' })
 const plain = (html: string): string => html.replaceAll('<!-- -->', '')
 
-describe('tool rows and quiet groups', () => {
-  it('shows every command as its own collapsed row with its state, never folded into a group', () => {
+describe('tool rows and tool groups', () => {
+  it('folds consecutive commands into one collapsed group whose every call still expands on its own', () => {
     const html = plain(renderToStaticMarkup(<BlockList blocks={[tool('1'), tool('2', 'error'), tool('3'), tool('4', 'error')]} prefix="test" />))
-    expect(html).not.toContain('tool-group')
+    expect(html.match(/class="fold tool-group"/g)).toHaveLength(1)
+    expect(html).toContain('<summary>Ran 4 commands<span class="tool-state tool-error"> · 2 failed</span></summary>')
     expect(html.match(/class="fold tool-row"/g)).toHaveLength(4)
     expect(html.match(/>Ran</g)).toHaveLength(4)
-    expect(html.match(/>failed</g)).toHaveLength(2)
     expect(html.match(/<code class="tool-target">bun test<\/code>/g)).toHaveLength(4)
     expect(html).not.toMatch(/<details[^>]*\sopen[\s=>]/)
     expect(html.match(/>output<\/pre>/g)).toHaveLength(4)
   })
 
-  it('folds three or more reads/searches into one group whose steps still expand, and breaks it around other blocks', () => {
+  it('groups every run of two or more tools of any kind, breaks it around other blocks, and leaves a lone call as a row', () => {
     const html = plain(renderToStaticMarkup(<BlockList blocks={[
       tool('1'), tool('2', 'working', 'ReadFile'), tool('3', 'error', 'GrepTool'), tool('5', 'done', 'GlobTool'),
       { kind: 'assistant', id: 'reply', text: 'The full reply', streaming: false },
       { kind: 'user', id: 'user', text: 'The full question', images: 0, steer: false },
       tool('6', 'done', 'ReadFile'), tool('7', 'done', 'GrepTool'),
-      tool('4'),
       { kind: 'thinking', id: 'thought', text: 'Reasoning', streaming: false },
+      tool('4'),
     ]} prefix="test" />))
-    expect(html.match(/class="fold tool-group"/g)).toHaveLength(1)
-    expect(html).toContain('Exploring 1 file, 2 searches')
+    expect(html.match(/class="fold tool-group"/g)).toHaveLength(2)
+    expect(html).toContain('Ran 1 command, read 1 file, 2 searches')
+    expect(html).toContain('Read 1 file, 1 search')
     expect(html).toContain(' · running')
     expect(html).toContain('1 failed')
     expect(html).toContain('aria-label="Tool steps"')
-    // Two quiet tools after the reply stay as plain rows; with the commands that makes 1 + 3 + 2 + 1 rows.
+    // 4 + 2 grouped rows, and the lone command after the thought stays a plain row.
     expect(html.match(/class="fold tool-row"/g)).toHaveLength(7)
     expect(html).toContain('<div class="md block-md"><p>The full reply</p></div>')
     expect(html).toContain('<p class="block-text">The full question</p>')
     expect(html).toContain('<summary>Thought it through</summary>')
     expect(html).not.toMatch(/<details[^>]*\sopen[\s=>]/)
+  })
+
+  it('names command checks apart from commands and never shows a bare JSON brace as the target', () => {
+    const check: Block = { kind: 'tool', id: 'c', callId: 'c', name: 'check_command', summary: '', state: 'working', args: '{\n  "proc_id": "p3",\n  "wait_ms": 60000\n}' }
+    const html = plain(renderToStaticMarkup(<BlockList blocks={[check, tool('1')]} prefix="test" />))
+    expect(html).toContain('Ran 1 command, 1 command check')
+    expect(html).toContain('>Checking a command<')
+    expect(html).toContain('<code class="tool-target">proc_id=p3 wait_ms=60000</code>')
+    expect(html).not.toContain('<code class="tool-target">{</code>')
+    expect(html).not.toContain('tool-args is-command">{')
   })
 
   it('renders exhausted older history instead of hiding it, newest last, and offers fallback while more exists', () => {

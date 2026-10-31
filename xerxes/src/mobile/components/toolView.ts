@@ -7,7 +7,7 @@
  * call it directly.
  */
 
-import { toolFamily, type ToolFamily } from '../../client/taskTypes.js'
+import { toolBaseName, toolFamily, type ToolFamily } from '../../client/taskTypes.js'
 
 export type ToolRunState = 'working' | 'done' | 'error'
 
@@ -60,9 +60,19 @@ export function toolIcon(name: string): string {
   return ICONS[toolFamily(name)]
 }
 
+/** Command-family tools that do not run a command themselves (they poll, stop or type into one). */
+const BASE_VERBS: Readonly<Record<string, readonly [running: string, finished: string]>> = {
+  check_command: ['Checking a command', 'Checked a command'],
+  kill_command: ['Stopping a command', 'Stopped a command'],
+  pty_open: ['Opening a terminal', 'Opened a terminal'],
+  pty_write: ['Typing in a terminal', 'Typed in a terminal'],
+  pty_close: ['Closing a terminal', 'Closed a terminal'],
+  pty_list: ['Listing terminals', 'Listed terminals'],
+}
+
 /** "Ran", "Editing", or the tool's own name for tools without a verb. */
 export function toolVerb(name: string, state: ToolRunState): string {
-  const verbs = VERBS[toolFamily(name)]
+  const verbs = BASE_VERBS[toolBaseName(name)] ?? VERBS[toolFamily(name)]
   if (verbs === undefined) return humanToolName(name)
   return state === 'working' ? verbs[0] : verbs[1]
 }
@@ -71,11 +81,41 @@ function firstLine(text: string): string {
   return (text.split('\n').find(line => line.trim() !== '') ?? '').trim()
 }
 
-/** What the call acted on: the command, the edited path, else the Hub's one-line summary. */
+/** The arguments as an object when they are the pretty-printed JSON the Hub sends for non-shell calls. */
+export function argsObject(args: string | undefined): Readonly<Record<string, unknown>> | undefined {
+  if (args === undefined) return undefined
+  const text = args.trim()
+  if (!text.startsWith('{')) return undefined
+  try {
+    const parsed = JSON.parse(text) as unknown
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+  } catch { return undefined }
+}
+
+/** `{ "proc_id": "p3", "wait_ms": 60000 }` → `proc_id=p3 wait_ms=60000` (scalar values only, clipped). */
+function compactArgs(record: Readonly<Record<string, unknown>>): string {
+  const parts: string[] = []
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue
+    const text = String(value).replace(/\s+/g, ' ').trim()
+    if (text === '') continue
+    parts.push(`${key}=${text.length > 40 ? `${text.slice(0, 39)}…` : text}`)
+    if (parts.length === 3) break
+  }
+  const line = parts.join(' ')
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line
+}
+
+/**
+ * What the call acted on: the command, the edited path, else the Hub's one-line
+ * summary, else the scalar arguments. Never the opening brace of a JSON object.
+ */
 export function toolTarget(tool: ToolView): string {
   if (tool.diff !== undefined && tool.diff.path !== '') return tool.diff.path
-  if (toolFamily(tool.name) === 'command' && tool.args !== undefined && tool.args.trim() !== '') return firstLine(tool.args)
-  return tool.summary
+  const record = argsObject(tool.args)
+  if (toolFamily(tool.name) === 'command' && record === undefined && tool.args !== undefined && tool.args.trim() !== '') return firstLine(tool.args)
+  if (tool.summary !== '') return tool.summary
+  return record === undefined ? '' : compactArgs(record)
 }
 
 /** "350ms", "4.2s", "38s", "2m 05s". Undefined or negative durations render nothing. */
@@ -121,6 +161,8 @@ export function agentStatus(status: string): { readonly tone: AgentTone; readonl
 /** One-line summary of an agent step's arguments, for the row target. */
 export function argsSummary(args: string | undefined): string {
   if (args === undefined) return ''
+  const record = argsObject(args)
+  if (record !== undefined) return compactArgs(record)
   const line = firstLine(args)
   return line.length > 120 ? `${line.slice(0, 119)}…` : line
 }
