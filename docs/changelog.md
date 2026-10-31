@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.21 — 2026-10-31
+
+- **Fix: a remote chat could vanish and show as an empty "New task".** When the Hub read a task, its per-task connection opened the session by key without asking to resume it. For a chat bound under its own id, the runtime then dropped the loaded chat and put an empty session with the same id in its place, so every client showed it blank. The transcript on disk was never touched. The Hub and the desktop app now attach to such a chat by id, and the runtime loads the saved chat instead of replacing it. The runtime part takes effect on a host after its runtime is updated.
+- **Fix: Claude Code turns failed with "a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block".** When Claude Code puts a 5-minute cache marker earlier in the request, Xerxes now retries the step once with a 5-minute mark on its transcript and keeps using it for that chat.
+- **Desktop: two folders on one SSH host are two workspaces.** Each saved folder gets its own sidebar entry labelled with the host and folder (for example `v5p-128-dev · easydel-src` and `v5p-128-prismcore · prismcore`), lists only its own tasks, and stays reachable from the other's view. Opening a folder resumes its newest task instead of a blank chat.
+- **Phone: tool calls fold into one row.** Two or more tool calls in a row collapse into one group between replies ("Ran 3 commands, 2 command checks, read 1 file"), and each call still expands to its command, diff and output. Polling a background command shows as "Checking a command" with its arguments instead of "Running {".
+
 ## 0.8.20 — 2026-10-30
 
 - **Fix: `/xerxes-sync` reported most lessons as "skipped".** Lessons recorded before 0.8.14 got their repository key only in memory during export, never on disk, so the next import could not rebuild them and counted the machine's own files as conflicts (28 of 37 on one TPU host). The key is now saved, and the report groups skipped lessons by reason.
