@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { contextScope, contextSessions, sameRemote, type WorkspaceContext } from './contextNavigation.js'
+import { cleanFolder, contextKey, contextLabel, contextSessions, latestSessionIn, sameRemote, sessionsFor, type ContextSession, type WorkspaceContext } from './contextNavigation.js'
 import { probeRemote, remoteTarget, type RemoteRunner, type RemoteTarget } from './remote.js'
 import { remoteAttachAddress, remoteAttachProgram } from './remoteAttach.js'
 
@@ -51,18 +51,21 @@ export class SavedHostContexts {
         if (this.disposed) return
         const retained = new Set<string>()
         for (const machine of machines) {
-          const key = contextScope(machine)
+          // One context per host AND folder: two saved folders on one host
+          // (EasyDeL and prismcore on v5p-128-dev) are two projects.
+          const key = contextKey(machine)
           if (retained.has(key)) continue
           retained.add(key)
           const previous = this.entries.get(key)
+          const label = contextLabel(machine.alias, machine.workspacePath)
           if (previous && sameRemote(previous.machine, machine)) {
             previous.machine = machine
-            previous.context.label = `${machine.alias} · SSH`
+            previous.context.label = label
             previous.context.alias = machine.alias
           } else {
             previous?.controller?.abort()
             this.entries.set(key, { machine, lastAttempt: -Infinity,
-              context: { id: previous?.context.id ?? this.nextId--, label: `${machine.alias} · SSH`,
+              context: { id: previous?.context.id ?? this.nextId--, label,
                 workspace: machine.workspacePath, workspacePath: machine.workspacePath, alias: machine.alias,
                 remote: true, saved: true, availability: 'offline', reason: 'Checking connection…', sessions: [] },
             })
@@ -81,21 +84,39 @@ export class SavedHostContexts {
 
   /** Synchronous cached snapshot; a stale host refresh never delays IPC rendering. */
   contexts(open: readonly RemoteTarget[] = []): WorkspaceContext[] {
-    const scopes = new Set(open.map(contextScope))
+    const keys = new Set(open.map(contextKey))
     const contexts: WorkspaceContext[] = []
     for (const entry of this.entries.values()) {
-      if (scopes.has(contextScope(entry.machine))) continue
+      if (keys.has(contextKey(entry.machine))) continue
       this.schedule(entry)
-      contexts.push({ ...entry.context, sessions: [...entry.context.sessions] })
+      contexts.push({ ...entry.context, sessions: this.sessionsOf(entry, open) })
     }
     return contexts
+  }
+
+  /** Every project folder known on `target`: saved ones plus folders open in views. */
+  folders(target: string, open: readonly RemoteTarget[] = []): string[] {
+    const folders = [...this.entries.values(), ...open.map(machine => ({ machine }))]
+      .filter(entry => entry.machine.target === target)
+      .map(entry => cleanFolder(entry.machine.workspacePath))
+    return [...new Set(folders)]
+  }
+
+  /** The host lists every project's tasks; keep the ones of this entry's folder. */
+  private sessionsOf(entry: HostEntry, open: readonly RemoteTarget[] = []): ContextSession[] {
+    return sessionsFor(entry.context.sessions, entry.machine.workspacePath, this.folders(entry.machine.target, open))
   }
 
   /** Resolve clicks against our validated cache, never a renderer-supplied SSH target/path. */
   selection(id: number, sessionId?: unknown): { machine: RemoteTarget; sessionId?: string } {
     const entry = [...this.entries.values()].find(entry => entry.context.id === id)
     if (!entry) throw new Error('Saved SSH host is unavailable')
-    if (sessionId === undefined) return { machine: { ...entry.machine } }
+    if (sessionId === undefined) {
+      // Opening the folder itself resumes its newest task; a blank chat made
+      // a project with history look empty.
+      const latest = latestSessionIn(this.sessionsOf(entry), entry.machine.workspacePath)
+      return latest === undefined ? { machine: { ...entry.machine } } : { machine: { ...entry.machine }, sessionId: latest }
+    }
     if (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId)) throw new Error('Invalid remote session id')
     const row = entry.context.sessions.find(row => row.id === sessionId)
     if (!row) throw new Error('Session is no longer available on this host')

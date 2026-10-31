@@ -37,7 +37,7 @@ test('saved hosts refresh in background, cache instantly, coalesce per-host prob
   try {
     await hosts.refresh()
     const cached = hosts.contexts()
-    expect(cached[0]).toMatchObject({ alias: 'v5p-128', label: 'v5p-128 · SSH', workspacePath: machine.workspacePath, availability: 'offline', saved: true, sessions: [] })
+    expect(cached[0]).toMatchObject({ alias: 'v5p-128', label: 'v5p-128 · project', workspacePath: machine.workspacePath, availability: 'offline', saved: true, sessions: [] })
     expect(probes).toBe(1)
     now = 60000
     await Promise.all([hosts.refresh(), hosts.refresh()])
@@ -56,15 +56,15 @@ test('saved hosts refresh in background, cache instantly, coalesce per-host prob
     expect(lists).toBe(3)
   } finally { hosts.dispose() }
 })
-test('saved host contexts dedupe target aliases and open views regardless of project directory; chat clicks use their own cwd', async () => {
+test('saved host contexts dedupe the same folder under another alias and hide only the open folder; chat clicks use their own cwd', async () => {
   let probes = 0
   const hosts = new SavedHostContexts({
-    list: async () => ({ ok: true, machines: [machine, { ...machine, alias: 'another-alias', workspacePath: '/elsewhere' }] }),
+    list: async () => ({ ok: true, machines: [machine, { ...machine, alias: 'another-alias' }] }),
     run: async () => { probes++; return output },
   })
   try {
-    await hosts.refresh([{ ...machine, workspacePath: '/already-open' }])
-    expect(hosts.contexts([{ ...machine, workspacePath: '/already-open' }])).toEqual([])
+    await hosts.refresh([machine])
+    expect(hosts.contexts([{ ...machine, workspacePath: '/srv/project/' }])).toEqual([])
     expect(probes).toBe(0)
     hosts.contexts(); await flush()
     const rows = hosts.contexts()
@@ -76,6 +76,34 @@ test('saved host contexts dedupe target aliases and open views regardless of pro
     expect(() => hosts.selection(id, 'missing-chat')).toThrow()
     expect(() => hosts.selection(id, 'bad\nchat')).toThrow()
     expect(() => hosts.selection(12345)).toThrow()
+  } finally { hosts.dispose() }
+})
+test('two saved folders on one host are two named contexts, each listing only its own tasks and opening its newest one', async () => {
+  const easydel = { alias: 'v5p-128-dev', target: 'v5p-128-dev', workspacePath: '/home/erfan/easydel-src' }
+  const prismcore = { alias: 'v5p-128-prismcore', target: 'v5p-128-dev', workspacePath: '/home/erfan/prismcore' }
+  const both = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: easydel.workspacePath, version: '0.8.20', buildId: 'a'.repeat(16) })
+    + '\nXERXES_REMOTE_SESSIONS ' + JSON.stringify({
+      saved: [
+        { id: 'prism-new', cwd: '/home/erfan/prismcore', title: 'Prism newest' },
+        { id: 'easy-new', cwd: '/home/erfan/easydel-src/tests', title: 'EasyDeL newest' },
+        { id: 'prism-old', cwd: '/home/erfan/prismcore', title: 'Prism older' },
+        { id: 'stray', cwd: '/tmp/scratch', title: 'Elsewhere' },
+      ],
+      live: [],
+    })
+  const hosts = new SavedHostContexts({ list: async () => ({ ok: true, machines: [easydel, prismcore] }), run: async () => both })
+  try {
+    await hosts.refresh(); await flush()
+    const rows = hosts.contexts()
+    expect(rows.map(row => row.label)).toEqual(['v5p-128-dev · easydel-src', 'v5p-128-prismcore · prismcore'])
+    expect(rows[0]!.sessions.map(row => row.id)).toEqual(['easy-new', 'stray'])
+    expect(rows[1]!.sessions.map(row => row.id)).toEqual(['prism-new', 'prism-old'])
+    expect(hosts.selection(rows[1]!.id)).toEqual({ machine: prismcore, sessionId: 'prism-new' })
+    expect(hosts.selection(rows[0]!.id)).toEqual({ machine: easydel, sessionId: 'easy-new' })
+    // With prismcore open in a view, only the easydel context is listed, still filtered.
+    const open = hosts.contexts([prismcore])
+    expect(open.map(row => row.label)).toEqual(['v5p-128-dev · easydel-src'])
+    expect(open[0]!.sessions.map(row => row.id)).toEqual(['easy-new', 'stray'])
   } finally { hosts.dispose() }
 })
 test('a failed host becomes offline without blocking a healthy host or leaking stderr; missing runtime is distinct', async () => {

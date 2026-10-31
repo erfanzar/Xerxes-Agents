@@ -16,7 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url'
 
 import { activateWorkspaceView } from './main/workspaceNavigation.js'
-import { contextScope, contextSessions, sameRemote, type WorkspaceContext } from './main/contextNavigation.js'
+import { contextKey, contextLabel, contextScope, contextSessions, latestSessionIn, sameRemote, sessionsFor, type WorkspaceContext } from './main/contextNavigation.js'
 import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, WindowLayoutRecorder, type SavedWindow } from './main/windowState.js'
 import { SurfaceSession } from './main/surfaceSession.js'
 import { WindowRoutes } from './main/windowRoutes.js'
@@ -516,7 +516,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f]/.test(dir)) throw new TypeError('Invalid workspace directory')
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid resume session id')
     if (remoteMachine) {
-      openRemoteView(window, { ...remoteMachine, workspacePath: dir }, typeof sessionId === 'string' ? sessionId : undefined)
+      // Entering another folder of this host resumes its newest task; a blank
+      // chat made a project with history look empty.
+      // A view already open on that folder is brought forward as it is.
+      const target = { ...remoteMachine, workspacePath: dir }
+      if (typeof sessionId !== 'string') {
+        const existing = remoteViewOf(window, target)
+        if (existing !== undefined) { activateSurface(existing); return dir }
+      }
+      const resume = typeof sessionId === 'string' ? sessionId : latestSessionIn(cachedSessions, dir)
+      openRemoteView(window, target, resume)
       return dir
     }
     if (selectedWorkspace || remote) {
@@ -527,12 +536,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : loadDesktopWorkspaces(workspaceFile()))
   handle('desktop:context-scope', () => contextScope(remoteMachine ?? saved?.remote))
   handle('desktop:contexts', async () => {
-    const currentScope = contextScope(remoteMachine ?? saved?.remote)
+    // Keyed by host AND folder: two projects on one SSH host are two contexts.
+    const currentScope = contextKey(remoteMachine ?? saved?.remote)
     const scopes = new Set([currentScope])
     const readers: Array<Promise<WorkspaceContext>> = []
     for (const [otherId, surface] of workspaceSurfaces) {
       if (surface.host !== window) continue
-      const scope = contextScope(windowStates.get(otherId)?.().remote)
+      const scope = contextKey(windowStates.get(otherId)?.().remote)
       const read = contextReaders.get(otherId)
       if (scopes.has(scope) || !read) continue
       scopes.add(scope)
@@ -895,8 +905,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       })()
     }
     const machine = remoteMachine ?? saved?.remote
-    return { id, label: machine ? `${machine.alias} · SSH` : 'This Mac',
-      workspace: selectedWorkspace ?? machine?.workspacePath ?? '', remote: Boolean(machine), sessions: cachedSessions }
+    if (!machine) return { id, label: 'This Mac', workspace: selectedWorkspace ?? '', remote: false, sessions: cachedSessions }
+    // The host's daemon lists every project on it; keep this folder's tasks
+    // when another folder of the same host is saved or open.
+    const folders = savedHostContexts.folders(machine.target, openContextRemotes())
+    return { id, label: contextLabel(machine.alias, machine.workspacePath),
+      workspace: selectedWorkspace ?? machine.workspacePath, workspacePath: machine.workspacePath, alias: machine.alias, remote: true,
+      sessions: sessionsFor(cachedSessions, machine.workspacePath, folders) }
   })
   for (const event of layoutEvents) window.on(event as 'move', scheduleWindowSave)
   scheduleWindowSave()
