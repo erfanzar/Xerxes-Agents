@@ -1303,6 +1303,27 @@ describe('Store workspace folds', () => {
     expect(snap.currentId).not.toBe('fresh-new-task')
   })
 
+  test('reattaching a running chat bound under its own id resumes it by id, never with a bare initialize on that key', async () => {
+    // A bare initialize whose key is the chat id made the daemon replace the
+    // chat with an empty session under the same id.
+    await Bun.sleep(0)
+    const running = "Error invoking remote method 'daemon:call': Error: rpc -32000: Validation error for session_id: is still running a turn under another connection; wait for it to finish before resuming it here"
+    let resumes = 0
+    bridge.respondWith((method, params) => {
+      if (method === 'session.active_list') return { ok: true, sessions: [{ id: 'c26fc8decd8f', key: 'c26fc8decd8f' }] }
+      if (method !== 'initialize') return { ok: true }
+      if (params.resume_session_id === 'c26fc8decd8f' && resumes++ === 0) return Promise.reject(new Error(running))
+      if (params.resume_session_id === 'c26fc8decd8f') return { ...initializeResult, session_id: 'c26fc8decd8f', session: { id: 'c26fc8decd8f', key: 'c26fc8decd8f' } }
+      return { ...initializeResult, session_id: 'fresh-new-task' }
+    })
+    await store.openSession('c26fc8decd8f')
+    const snap = store.getSnapshot()
+    expect(snap.currentId).toBe('c26fc8decd8f')
+    const inits = bridge.calls.filter(call => call.method === 'initialize')
+    expect(inits.some(call => call.params.session_key === 'c26fc8decd8f' && !call.params.resume_session_id)).toBe(false)
+    expect(resumes).toBe(2)
+  })
+
   test('on an SSH workspace, a chat running in another view is brought forward there, not pulled into this view', async () => {
     // Pulling it in made this view the busy one, so every next click handed
     // off again and the window rebuilt an SSH view (new connection, reload).

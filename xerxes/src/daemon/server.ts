@@ -11022,7 +11022,13 @@ export class DaemonServer {
     if (Object.keys(runtimeOverrides).length) {
       this.runtime.reload(runtimeOverrides);
     }
-    if (!resumeId) {
+    // A key that is itself a conversation id (a resumed chat is bound under its
+    // id) names that conversation. A bare initialize on it is an attach: the
+    // reset below would evict the live chat and open an empty session under
+    // the same id, shadowing its saved history (a Hub per-task connection did
+    // exactly that to a 32-turn chat). It loads the saved transcript instead.
+    const adoptsById = !resumeId && looksLikeSessionId(key);
+    if (!resumeId && !adoptsById) {
       // Evicting a session with an active turn would hijack work another
       // connection may still own; adopt the live session instead of
       // resetting it.
@@ -11061,12 +11067,15 @@ export class DaemonServer {
     const openOptions = {
       cwd,
       preserveProject: true,
-      resume: Boolean(resumeId),
+      // By-id attach: no explicit flag, so the runtime loads the saved
+      // conversation when there is one and starts it fresh only when there
+      // is none.
+      ...(adoptsById ? {} : { resume: Boolean(resumeId) }),
       ...(modelOverride ? { model: modelOverride } : {}),
     };
     let requestedAgent = optionalString(params.agent_id)
       ?? this.runtime.sessionStatus(key)?.agentId
-      ?? (resumeId ? undefined : this.agentPresetRoster.defaultId);
+      ?? (resumeId || adoptsById ? undefined : this.agentPresetRoster.defaultId);
     if (requestedAgent) {
       let preset: AgentPresetEntry;
       try {

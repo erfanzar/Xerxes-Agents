@@ -1611,7 +1611,9 @@ export class Store {
     const rows = Array.isArray(listed.sessions) ? listed.sessions as Record<string, unknown>[] : []
     const key = str(rows.find(row => str(row.id) === id)?.key)
     if (!key) return null
-    return this.initialize({ session_key: key })
+    // A chat bound under its own id is attached by id: a bare initialize on
+    // that key makes the daemon replace it with an empty session.
+    return this.initialize(key === id ? { resume_session_id: id } : { session_key: key })
   }
 
   /**

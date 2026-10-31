@@ -5,6 +5,11 @@ import { HubOperatorError, isPrivateProviderType } from './ports.js'
 import { isRecord } from './protocol.js'
 
 export const DAEMON_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+/** A daemon conversation id (the form a resumed chat is bound under), as the daemon's own `looksLikeSessionId`. */
+function looksLikeSessionId(value: string): boolean {
+  return /^[0-9a-fA-F]{8,32}$/.test(value)
+}
 export type DaemonConnectionState = 'connecting' | 'online' | 'disconnected' | 'needs_operator' | 'closed'
 export interface DaemonHandshake {
   readonly initialized: Readonly<Record<string, unknown>>
@@ -151,7 +156,12 @@ export class HubDaemonClient {
         if (reclaimed.ok !== true) this.leaseToken = undefined
       } catch (error) { if (error instanceof DaemonRpcError) this.leaseToken = undefined; else throw error }
     }
-    const initialized = await this.send('initialize', { session_key: this.sessionKey, project_dir: this.options.projectDir, session_owned_turns: true, history_limit: 0 })
+    // A per-task lane's key is often the conversation id itself (a resumed chat
+    // is bound under its id). A bare initialize on that key makes a daemon evict
+    // the chat and open an empty session under the same id, so the task's
+    // history vanished from every client. Attach by id instead.
+    const byId = looksLikeSessionId(this.sessionKey) ? { resume_session_id: this.sessionKey } : {}
+    const initialized = await this.send('initialize', { session_key: this.sessionKey, ...byId, project_dir: this.options.projectDir, session_owned_turns: true, history_limit: 0 })
     if (initialized.ok !== true || initialized.daemon_protocol !== 35) throw new HubOperatorError('The remote socket is not a compatible Xerxes daemon (protocol v35 required). Inspect or update the runtime on its host.')
     if (initialized.connection_lease_supported === true && !this.leaseToken) {
       const lease = await this.send('connection.lease', {})
