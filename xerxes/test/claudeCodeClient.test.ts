@@ -18,6 +18,7 @@ import {
   claudeCodeThinkingOff,
   claudeCodeTranscript,
   FunctionCallExtractor,
+  isCacheTtlOrderRejection,
   requestToolName,
   withTranscriptCacheMark,
   toolParameterTypes,
@@ -339,6 +340,33 @@ test('a system reminder the model writes itself is dropped from the reply and ca
   expect(cut.push('Done. <system-reminder>half') + cut.finish(true)).toBe('Done. <system-reminder>half')
   const [block] = claudeCodeTranscript([{ role: 'assistant', content: 'quoted <system-reminder>x</system-reminder>' }])
   expect((block as { text: string }).text).toBe('<assistant>\nquoted &lt;system-reminder>x&lt;/system-reminder>\n</assistant>')
+})
+
+test('a 1h-after-5m cache_control 400 retries the step with a 5m mark and keeps 5m for later steps', async () => {
+  const rejection = "API Error: 400 messages.0.content.660.cache_control.ttl: a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block. Note that blocks are processed in the following order: `tools`, `system`, `messages`."
+  expect(isCacheTtlOrderRejection(new ProviderError('claude-code', rejection))).toBe(true)
+  expect(isCacheTtlOrderRejection(new ProviderError('claude-code', 'API Error: 400 something else'))).toBe(false)
+  const failing = fakeLauncher([result({ is_error: true, result: rejection, api_error_status: 400 })])
+  const working = fakeLauncher([textDelta('Done.'), result()])
+  const inputs: string[] = []
+  let launches = 0
+  const launch: ClaudeCodeLauncher = (argv, spawn) => {
+    inputs.push(spawn.input)
+    return (launches++ === 0 ? failing : working).launch(argv, spawn)
+  }
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp', environment: { PATH: '/bin' } })
+  const first = await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] }))
+  expect(first.text).toBe('Done.')
+  const ttls = () => inputs.map(input => (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).at(-1)?.cache_control?.ttl)
+  expect(ttls()).toEqual(['1h', '5m'])
+  await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'again' }] }))
+  expect(ttls()).toEqual(['1h', '5m', '5m'])
+  // A request still refused with a 5m mark is not retried forever.
+  const always = fakeLauncher([result({ is_error: true, result: rejection, api_error_status: 400 })])
+  const stuck = new ClaudeCodeClient({ executable: '/bin/claude', launch: always.launch, workingDirectory: '/tmp', environment: { PATH: '/bin' } })
+  const failure = await collect(stuck.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] })).catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(always.calls).toHaveLength(2)
 })
 
 test('only the last transcript block carries the cache mark, so each step extends the previous entry', () => {

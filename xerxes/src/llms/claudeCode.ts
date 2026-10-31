@@ -155,7 +155,9 @@ function neutralizeReminderTags(text: string): string {
 type InputBlock = (
   | { type: 'text'; text: string }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
-) & { cache_control?: { type: 'ephemeral'; ttl: '1h' } }
+) & { cache_control?: { type: 'ephemeral'; ttl: TranscriptCacheTtl } }
+
+export type TranscriptCacheTtl = '1h' | '5m'
 
 /**
  * Mark the end of our transcript as a cache entry. Claude Code adds its own
@@ -164,10 +166,22 @@ type InputBlock = (
  * entry never matched again and every step re-wrote the whole conversation
  * (measured on Opus: cache reads stuck at the system prompt). A marker on
  * our own last block is a prefix the next step extends. 1h matches the TTL
- * Claude Code sets on its markers; a longer TTL may not follow a shorter one.
+ * Claude Code usually sets on its markers; a longer TTL may not follow a
+ * shorter one, so a request whose earlier markers are 5m uses 5m here too
+ * (see isCacheTtlOrderRejection).
  */
-export function withTranscriptCacheMark(blocks: readonly InputBlock[]): InputBlock[] {
-  return blocks.map((block, index) => index === blocks.length - 1 ? { ...block, cache_control: { type: 'ephemeral', ttl: '1h' } } : block)
+export function withTranscriptCacheMark(blocks: readonly InputBlock[], ttl: TranscriptCacheTtl = '1h'): InputBlock[] {
+  return blocks.map((block, index) => index === blocks.length - 1 ? { ...block, cache_control: { type: 'ephemeral', ttl } } : block)
+}
+
+/**
+ * The API refused our 1h transcript mark because Claude Code put a 5m marker
+ * before it ("a ttl='1h' cache_control block must not come after a
+ * ttl='5m' cache_control block"). Claude Code 2.1.316 did this on a long
+ * goal-driven session and every step of the turn failed with a 400.
+ */
+export function isCacheTtlOrderRejection(error: unknown): boolean {
+  return error instanceof Error && /cache_control\.ttl[\s\S]*ttl='1h'[\s\S]*must not come after[\s\S]*ttl='5m'/i.test(error.message)
 }
 
 function imageBlock(part: Extract<ContentPart, { type: 'image_url' }>): InputBlock | undefined {
@@ -1045,6 +1059,13 @@ export class ClaudeCodeClient implements LlmClient {
         }
         return
       } catch (error) {
+        // A 400 before any reply: Claude Code's own markers are 5m on this
+        // request, so ours must be too. Kept for this client's later steps.
+        if (isCacheTtlOrderRejection(error) && this.transcriptCacheTtl === '1h' && !signal?.aborted) {
+          this.transcriptCacheTtl = '5m'
+          attempt -= 1
+          continue
+        }
         // Reported at Claude Code's init, before any reply: retry as text.
         if (error instanceof NativeToolsUnavailable && this.nativeTools && !signal?.aborted) {
           this.nativeTools = false
@@ -1058,6 +1079,8 @@ export class ClaudeCodeClient implements LlmClient {
 
   /** Native tool calls through the MCP declaration; false once Claude Code could not reach it. */
   private nativeTools = true
+  /** TTL of the transcript cache mark; 5m once the API refused 1h after Claude Code's 5m markers. */
+  private transcriptCacheTtl: TranscriptCacheTtl = '1h'
 
   private async *attempt(request: CompletionRequest, signal: AbortSignal | undefined, correction: string | undefined): AsyncIterable<LlmDelta> {
     signal?.throwIfAborted()
@@ -1069,7 +1092,7 @@ export class ClaudeCodeClient implements LlmClient {
     ].filter(Boolean).join('\n\n')
     const transcript = claudeCodeTranscript(request.messages)
     if (correction) transcript.push({ type: 'text', text: correction })
-    const input = JSON.stringify({ type: 'user', message: { role: 'user', content: withTranscriptCacheMark(transcript) } }) + '\n'
+    const input = JSON.stringify({ type: 'user', message: { role: 'user', content: withTranscriptCacheMark(transcript, this.transcriptCacheTtl) } }) + '\n'
     const known = claudeCodeCatalog.find(request.model)
     // Owner-only, one per call, removed when the call ends.
     const systemPromptFile = join(tmpdir(), `xerxes-claude-code-system-${randomUUID()}.md`)
