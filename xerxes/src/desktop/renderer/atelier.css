@@ -956,6 +956,13 @@ html,body,#root,.app.atelier{background:transparent}
 .activity-notice[open]>summary>svg:last-child{transform:rotate(90deg)}
 .agent-inspector{padding:20px}
 .output-viewer__actions{display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:nowrap}
+/* Compact output (inside a tool step): the text alone; copy and expand appear on hover. */
+.atelier .output-viewer--compact{position:relative;margin:0;border:0;border-radius:0;background:none;overflow:visible}
+.atelier .output-viewer--compact .output-viewer__text{margin:0;padding:0;max-height:320px;overflow:auto;font:12px/1.65 var(--mono);color:var(--x-secondary);white-space:pre-wrap;overflow-wrap:anywhere;background:none}
+.atelier .output-viewer--compact>.output-viewer__actions{position:absolute;top:0;right:0;gap:2px;margin:0;opacity:0;transition:opacity 120ms}
+.atelier .output-viewer--compact:is(:hover,:focus-within)>.output-viewer__actions{opacity:1}
+.atelier .output-viewer--compact>.output-viewer__actions button{width:24px;height:24px;padding:0;justify-content:center;border-radius:6px;background:var(--x-card);color:var(--x-meta)}
+.atelier .output-viewer--compact>.output-viewer__actions button:hover{color:var(--x-title)}
 .fleetpop__row{width:100%;border:0;background:none;text-align:left;color:var(--x-secondary);cursor:pointer;font:inherit}
 .fleetpop__row:hover{background:var(--mac-control)}
 
