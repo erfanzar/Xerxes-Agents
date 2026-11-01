@@ -386,7 +386,7 @@ function BackdropField(): ReactElement {
 const STYLE_NOTES: Record<StyleChoice, string> = {
   classic: 'The standard Xerxes design',
   neo: 'Terminal console: one mono font, square corners, flat surfaces',
-  shading: 'shadcn/ui: neutral greys, a sans font, rounded cards with soft shadows',
+  shading: "Claude Code's layout in black, white and grey: flat panes, a sans font",
 }
 
 /**
@@ -416,7 +416,7 @@ function StyleField(): ReactElement {
           <button key={value} role="radio" aria-checked={style === value} className={style === value ? 'is-on' : ''} onClick={() => pick(value)}>{STYLE_LABELS[value]}</button>
         ))}
       </div>
-      <p className="field__note">Neo uses its own colours and a monospace font; Shading is the shadcn/ui look; Classic follows your VS Code theme. Saved as Xerxes: Style in VS Code settings.</p>
+      <p className="field__note">Neo uses its own colours and a monospace font; Shading is Claude Code's layout in black, white and grey; Classic follows your VS Code theme. Saved as Xerxes: Style in VS Code settings.</p>
     </div>
   )
   return (

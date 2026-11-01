@@ -4,7 +4,7 @@
 /** Isolated desktop stress fixture. Never imported by the production entry. */
 import { createRoot } from 'react-dom/client'
 import { useSyncExternalStore } from 'react'
-import { restoreAppearance } from '../../../src/desktop/renderer/appearance.js'
+import { isStyleChoice, restoreAppearance, saveAppearance } from '../../../src/desktop/renderer/appearance.js'
 import { Shell } from '../../../src/desktop/renderer/App.js'
 import { BlockBuilder, blocksFromStoredMessages } from '../../../src/desktop/renderer/blocks.js'
 import { foldAgentEvent } from '../../../src/desktop/renderer/agentEvents.js'
@@ -205,6 +205,9 @@ const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,param
 Object.defineProperty(window,'xerxes',{value:bridge})
 ;(store as unknown as {bridge:XerxesBridge}).bridge=bridge
 localStorage.setItem('xerxes.desktop.setup.v1','done')
+// `previewDesktop.ts --style=shading` opens the fixture in that style.
+const requestedStyle=new URLSearchParams(location.search).get('style')
+if(isStyleChoice(requestedStyle))saveAppearance({style:requestedStyle})
 restoreAppearance()
 base.fleet=base.fleet?.map((row,i)=>({...row,status:i===3?"failed":row.status,agentDetails:{model:"fixture/reviewer",toolCount:12+i,summary:i<3?"Reviewing session persistence and cancellation boundaries.":"Checked the workspace behavior and recorded the findings.",error:i===3?"Permission denied while reading the protected workspace file.":"",inputTokens:4200+i*100,outputTokens:800,filesRead:["src/runtime/transport/connections/recovery/session-reconnect-controller.ts"],filesWritten:i<3?[]:["src/desktop/layout.ts"]}}));
 patch({...base,blocks})
