@@ -1,18 +1,22 @@
 /* ═══════════════════════════════════════════════════════════════════════
    Xerxes Desktop: the Shading style (Settings ▸ General ▸ Style).
 
-   The shadcn/ui visual language (ui.shadcn.com, neutral base), built from
-   the patterns that make it recognisable rather than from the rounded,
-   sans look the Claude layout already has:
-   - the "inset" sidebar: the sidebar is the window, and the conversation
-     and the inspector float on it as bordered, rounded, shadowed cards;
-   - pure neutral (zinc/neutral) greys with no blue tint, and a primary
-     that is near-black in light mode and near-white in dark mode;
-   - filled primary buttons ("New task", Send, your own messages, as in
-     shadcn's chat example), outline buttons with a hairline shadow;
-   - a muted tabs track with a raised trigger, and a 3px focus ring.
+   Claude Code's desktop layout, in pure black, white and grey:
+   - flat panes: the sidebar, the conversation and the inspector sit edge
+     to edge, split by 1px hairlines, with no floating cards or shadows;
+   - one 44px top row; the conversation and inspector headers carry a
+     hairline under them, the sidebar's row does not;
+   - a plain sidebar: quiet nav rows, muted folder labels, one line per
+     task, the open task on a soft grey fill, a dot only while a task works
+     or failed;
+   - your own turn in a grey bubble with normal text, tool activity as
+     muted "Ran 2 commands ▸" lines, and one bordered composer with plain
+     text controls under it;
+   - neutral greys with no blue tint, a primary that is near-white in dark
+     mode and near-black in light mode.
    Semantic colours (done / failed / needs input / working) stay, so state
-   still reads at a glance.
+   still reads at a glance. The welcome wordmark and the inspector's
+   bordered status cards are kept.
 
    Rules for this sheet, enforced by test/desktopShadingStyle.test.ts:
    - every selector starts with `:root[data-style='shading']` and carries
@@ -31,7 +35,7 @@
    and popover; the test measures them. */
 :root[data-style='shading']:not(#shading){
   color-scheme:dark;
-  --x-backdrop:#0a0a0a;--x-screen:#0a0a0a;--x-chrome:#171717;--x-card:#171717;
+  --x-backdrop:#0a0a0a;--x-screen:#0a0a0a;--x-chrome:#0f0f0f;--x-card:#171717;
   --x-selected:#262626;--x-chip:#262626;--x-sunken:#111111;
   --x-popover:#171717;--x-dialog:#171717;
   --x-hairline:#ffffff1a;--x-divider:#ffffff10;--x-separator:#ffffff26;--x-seam:#ffffff1a;
@@ -44,19 +48,19 @@
   --x-failed:#ff6467;--x-danger:#ff6467;--x-failed-text:#ff8a8c;--x-failed-bg:#ff646714;--x-failed-border:#ff646740;
   --x-needs:#fbbf24;--x-needs-text:#fcd34d;--x-needs-bg:#fbbf2414;--x-needs-border:#fbbf2440;
   --x-diff-add:#4ade8014;--x-diff-del:#ff646714;
-  --x-user-bubble:#e5e5e5;
-  --x-menubar:#171717;--x-menubar-edge:#ffffff1a;--x-menubar-fg:#a1a1a1;--x-menubar-strong:#fafafa;--x-menubar-meta:#a1a1a1;
-  --x-lit:transparent;--x-elev:0 1px 2px #00000066;
-  --mac-control:#ffffff0d;--mac-toolbar:#171717;
-  --glass-navigation:#171717;--glass-overlay:#171717;--glass-edge:#ffffff1a;--glass-highlight:transparent;
+  --x-user-bubble:#212121;
+  --x-menubar:#0f0f0f;--x-menubar-edge:#ffffff1a;--x-menubar-fg:#a1a1a1;--x-menubar-strong:#fafafa;--x-menubar-meta:#a1a1a1;
+  --x-lit:transparent;--x-elev:none;
+  --mac-control:#ffffff0d;--mac-toolbar:#0f0f0f;
+  --glass-navigation:#0f0f0f;--glass-overlay:#171717;--glass-edge:#ffffff1a;--glass-highlight:transparent;
   --glass-blur:none;--glass-control:none;--glass-shadow:none;
   --mac-shadow:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
   --grad:none;--accent-soft:#ffffff0d;
   --sh-ring:color-mix(in srgb,#737373 55%,transparent);
   --sh-input:#ffffff26;
-  --sh-input-bg:color-mix(in srgb,#ffffff26 30%,transparent);
-  --sh-shadow-xs:0 1px 2px 0 #0000004d;
-  --sh-shadow-sm:0 1px 3px 0 #00000066,0 1px 2px -1px #00000066;
+  --sh-input-bg:transparent;
+  --sh-shadow-xs:none;
+  --sh-shadow-sm:none;
   --sh-shadow-lg:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
   --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Geist','Inter','SF Pro Text','Segoe UI',system-ui,sans-serif;
   --prose:var(--sans);
@@ -67,7 +71,7 @@
 /* ── Tokens: light ─────────────────────────────────────────────────── */
 :root[data-style='shading'][data-theme='light']:not(#shading){
   color-scheme:light;
-  --x-backdrop:#fafafa;--x-screen:#ffffff;--x-chrome:#fafafa;--x-card:#ffffff;
+  --x-backdrop:#ffffff;--x-screen:#ffffff;--x-chrome:#fafafa;--x-card:#ffffff;
   --x-selected:#f0f0f0;--x-chip:#f5f5f5;--x-sunken:#fafafa;
   --x-popover:#ffffff;--x-dialog:#ffffff;
   --x-hairline:#e5e5e5;--x-divider:#f0f0f0;--x-separator:#d4d4d4;--x-seam:#e5e5e5;
@@ -80,18 +84,18 @@
   --x-failed:#b91c1c;--x-danger:#b91c1c;--x-failed-text:#991b1b;--x-failed-bg:#dc26260d;--x-failed-border:#dc262633;
   --x-needs:#92400e;--x-needs-text:#7c2d12;--x-needs-bg:#d977060f;--x-needs-border:#d9770633;
   --x-diff-add:#16a34a14;--x-diff-del:#dc262612;
-  --x-user-bubble:#171717;
+  --x-user-bubble:#f0f0f0;
   --x-menubar:#fafafa;--x-menubar-edge:#e5e5e5;--x-menubar-fg:#525252;--x-menubar-strong:#0a0a0a;--x-menubar-meta:#6b6b6b;
-  --x-elev:0 1px 2px #0000000d;
+  --x-elev:none;
   --mac-control:#0000000a;--mac-toolbar:#fafafa;
   --glass-navigation:#fafafa;--glass-overlay:#ffffff;--glass-edge:#e5e5e5;
   --mac-shadow:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
   --accent-soft:#0000000a;
   --sh-ring:color-mix(in srgb,#a1a1a1 50%,transparent);
-  --sh-input:#e5e5e5;
-  --sh-input-bg:#ffffff;
-  --sh-shadow-xs:0 1px 2px 0 #0000000d;
-  --sh-shadow-sm:0 1px 3px 0 #0000001a,0 1px 2px -1px #0000001a;
+  --sh-input:#d4d4d4;
+  --sh-input-bg:transparent;
+  --sh-shadow-xs:none;
+  --sh-shadow-sm:none;
   --sh-shadow-lg:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
 }
 
@@ -103,93 +107,113 @@
   --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Geist','Inter','SF Pro Text','Segoe UI',system-ui,sans-serif;
   --prose:var(--sans);
   --mono:'Geist Mono',ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
-  --t-caption:500 calc(var(--ui-small) + .5px)/1.45 var(--sans);
+  --t-caption:400 calc(var(--ui-small) + .5px)/1.45 var(--sans);
   --t-body:400 calc(var(--ui-font) + 1px)/1.5 var(--sans);
-  --t-title:600 calc(var(--ui-font) + 1px)/1.35 var(--sans);
+  --t-title:500 calc(var(--ui-font) + 1px)/1.35 var(--sans);
   --t-hero:600 calc(var(--ui-large) + 6px)/1.15 var(--sans);
-  --t-num:500 var(--ui-font)/1.4 var(--sans);
-  --t-prose:400 calc(var(--ui-font) + 2px)/1.65 var(--sans);
+  --t-num:400 var(--ui-font)/1.4 var(--sans);
+  --t-prose:400 calc(var(--ui-font) + 2px)/1.6 var(--sans);
   --card-radius:12px;
   font-variant-numeric:tabular-nums;
 }
 :root[data-style='shading']:not(#shading) .atelier :is(code,pre,kbd,.mono){font-family:var(--mono)}
-:root[data-style='shading']:not(#shading) .atelier :is(.md h1,.md h2,.md h3,.modal__title){font-weight:600;letter-spacing:-.025em}
+:root[data-style='shading']:not(#shading) .atelier :is(.md h1,.md h2,.md h3,.modal__title){font-weight:600;letter-spacing:-.02em}
 :root[data-style='shading']:not(#shading) ::selection{background:color-mix(in srgb,var(--x-working) 30%,transparent)}
 
-/* ── Geometry: one radius, hairline borders, soft shadows ─────────── */
+/* ── Geometry: thin scrollbars, a plain focus outline ─────────────── */
 :root[data-style='shading']:not(#shading) ::-webkit-scrollbar-thumb{border-radius:999px;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 16%,transparent)}
-:root[data-style='shading']:not(#shading) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:none;box-shadow:0 0 0 3px var(--sh-ring)}
+:root[data-style='shading']:not(#shading) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:2px solid var(--x-focus);outline-offset:1px;box-shadow:none}
 
-/* ── Layout: shadcn's inset sidebar ───────────────────────────────────
-   The sidebar colour is the window; the conversation and the inspector
-   float on it as bordered, rounded cards with a soft shadow. */
-:root[data-style='shading']:not(#shading) .atelier .app__body{background:var(--x-chrome)}
+/* ── Layout: Claude Code's flat panes ─────────────────────────────────
+   Sidebar, conversation and inspector sit edge to edge; the resize
+   handles are the 1px hairlines between them. */
+:root[data-style='shading']:not(#shading) .atelier .app__body{background:var(--x-screen)}
 :root[data-style='shading']:not(#shading) .atelier .side{background:var(--x-chrome);backdrop-filter:none;border-right:0}
 :root[data-style='shading']:not(#shading) .atelier .top{background:var(--x-chrome);backdrop-filter:none;border-bottom:0}
-:root[data-style='shading']:not(#shading) .atelier .chat{margin:8px 8px 8px 0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-screen);box-shadow:var(--sh-shadow-sm);overflow:hidden}
-:root[data-style='shading']:not(#shading) .atelier:is(.atelier--focus,.app--narrow) .chat{margin-left:8px}
-:root[data-style='shading']:not(#shading) .atelier .desktop-rail{margin:8px 8px 8px 0;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-screen);box-shadow:var(--sh-shadow-sm);backdrop-filter:none;overflow:hidden}
-:root[data-style='shading']:not(#shading) .atelier .chat__head{background:transparent;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .chat{margin:0;border:0;border-radius:0;background:var(--x-screen);box-shadow:none;overflow:hidden}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail{margin:0;border:0;border-radius:0;background:var(--x-screen);box-shadow:none;backdrop-filter:none;overflow:hidden}
+:root[data-style='shading']:not(#shading) .atelier .chat__head{height:44px;min-height:44px;background:transparent;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .chat__title{font:400 14px/1 var(--sans);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail>header{height:44px;min-height:44px;background:transparent;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail>header button{font:400 13px/1 var(--sans);border-radius:7px;color:var(--x-secondary);box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail>header button:hover{background:var(--x-selected);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail>header button:is([aria-selected='true'],[aria-pressed='true'],.is-on,.is-selected){background:var(--x-selected);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail>header nav>button:has(>svg){width:30px;height:28px;padding:0}
+:root[data-style='shading']:not(#shading) .atelier .wgroup__more{color:var(--x-meta)}
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap{background:transparent}
-:root[data-style='shading']:not(#shading) .panel-divider{background:transparent}
+:root[data-style='shading']:not(#shading) .panel-divider{background:var(--x-hairline)}
 :root[data-style='shading']:not(#shading) .panel-divider:hover,
-:root[data-style='shading']:not(#shading) .panel-divider:focus-visible{background:var(--x-separator)}
+:root[data-style='shading']:not(#shading) .panel-divider:focus-visible{background:var(--x-separator);outline:none}
 
-/* ── Sidebar: a filled primary "New task" and quiet menu items ───── */
-:root[data-style='shading']:not(#shading) .atelier .newchat{justify-content:flex-start;background:var(--x-accent);color:var(--x-on-accent);border:0;border-radius:8px;font-weight:500;box-shadow:var(--sh-shadow-xs)}
-:root[data-style='shading']:not(#shading) .atelier .newchat:hover{background:color-mix(in srgb,var(--x-accent) 88%,transparent);color:var(--x-on-accent)}
-:root[data-style='shading']:not(#shading) .atelier .newchat svg{color:currentColor}
-:root[data-style='shading']:not(#shading) .atelier .newchat kbd{background:transparent;border:0;color:currentColor;opacity:.6}
-:root[data-style='shading']:not(#shading) .atelier :is(.studio-nav,.studio-side-bottom>button){border-radius:6px}
-:root[data-style='shading']:not(#shading) .atelier :is(.studio-nav,.studio-side-bottom>button):hover{background:var(--x-selected)}
-:root[data-style='shading']:not(#shading) .atelier .studio-nav.is-selected{background:var(--x-selected);color:var(--x-title);font-weight:500;box-shadow:none}
-:root[data-style='shading']:not(#shading) .atelier .side__search{background:var(--sh-input-bg);border:1px solid var(--sh-input);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
-:root[data-style='shading']:not(#shading) .atelier .sess{border-radius:6px}
-:root[data-style='shading']:not(#shading) .atelier .sess.is-current{background:var(--x-selected);box-shadow:none;font-weight:500}
+/* ── Sidebar: quiet nav rows, muted folder labels, one line per task ── */
+:root[data-style='shading']:not(#shading) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button){height:34px;min-height:34px;padding:0 10px;gap:10px;border:0;border-radius:8px;background:transparent;font:400 14px/1 var(--sans);color:var(--x-title);box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .newchat{justify-content:flex-start;background:transparent;color:var(--x-title);box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button):hover{background:var(--x-selected);color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button) svg{width:16px;height:16px;color:var(--x-secondary)}
+:root[data-style='shading']:not(#shading) .atelier .newchat kbd{background:transparent;border:0;color:var(--x-meta);opacity:.8}
+:root[data-style='shading']:not(#shading) .atelier .studio-nav.is-selected{background:var(--x-selected);color:var(--x-title);font-weight:400;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .side__search{height:34px;background:transparent;border:1px solid transparent;border-radius:8px;box-shadow:none;font:400 14px/1 var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier .side__search:hover{background:var(--x-selected)}
+:root[data-style='shading']:not(#shading) .atelier .side__search:focus{background:transparent;border-color:var(--x-separator);box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .wgroup{margin-top:18px}
+:root[data-style='shading']:not(#shading) .atelier .wgroup__cap{height:28px;min-height:28px;padding:0 10px;font:400 13px/1 var(--sans);letter-spacing:0;text-transform:none;color:var(--x-meta);background:transparent}
+:root[data-style='shading']:not(#shading) .atelier .wgroup__cap:hover{color:var(--x-secondary);background:transparent}
+:root[data-style='shading']:not(#shading) .atelier .sess{min-height:34px;padding:0 10px;gap:10px;border-radius:8px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .sess:hover:not(.is-current){background:color-mix(in srgb,var(--x-selected) 70%,transparent)}
+:root[data-style='shading']:not(#shading) .atelier .sess.is-current{background:var(--x-selected);box-shadow:none;font-weight:400}
+:root[data-style='shading']:not(#shading) .atelier .sess__t{font:400 14px/1.3 var(--sans);color:var(--x-prose)}
+:root[data-style='shading']:not(#shading) .atelier .sess.is-current .sess__t{color:var(--x-title)}
+/* No dot on an idle task; one while it works or failed. */
+:root[data-style='shading']:not(#shading) .atelier .sess__dot{display:none}
+:root[data-style='shading']:not(#shading) .atelier .sess__dot:is([data-status='working'],[data-status='failed']){display:block;flex:none;width:7px;height:7px;border:0;border-radius:50%}
+:root[data-style='shading']:not(#shading) .atelier .sess__dot[data-status='working']{background:var(--x-working)!important}
+:root[data-style='shading']:not(#shading) .atelier .sess__dot[data-status='failed']{background:var(--x-failed)!important}
+:root[data-style='shading']:not(#shading) .atelier .studio-side-bottom{border-top:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .addws{color:var(--x-meta)}
 
 /* ── Overlays: a popover card with one large soft shadow ──────────── */
 :root[data-style='shading']:not(#shading) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop),
 :root[data-style='shading']:not(#shading) .runtime-popover{background:var(--x-popover);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-lg);-webkit-backdrop-filter:none;backdrop-filter:none}
 :root[data-style='shading']:not(#shading) .atelier .modal__side{background:var(--x-chrome);border-right:1px solid var(--x-hairline)}
-:root[data-style='shading']:not(#shading) .atelier .modal__side :is(button[aria-pressed='true'],button.is-selected){background:var(--x-selected);color:var(--x-title);font-weight:500;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .modal__side :is(button[aria-pressed='true'],button.is-selected){background:var(--x-selected);color:var(--x-title);font-weight:400;box-shadow:none}
 
-/* ── Labels: small, medium weight, muted (shadcn's group labels) ──── */
-:root[data-style='shading']:not(#shading) .atelier :is(.field>label,.studio-label,.wgroup__cap,.railcard__title,.modal__side .cap,.composer-task-summary__label,.composer-queue__heading){font:500 calc(var(--ui-small) + .5px)/1.4 var(--sans);letter-spacing:0;text-transform:none;color:var(--x-meta)}
-:root[data-style='shading']:not(#shading) .atelier .railcard__title{color:var(--x-title);font-weight:600}
+/* ── Labels: small and muted ──────────────────────────────────────── */
+:root[data-style='shading']:not(#shading) .atelier :is(.field>label,.studio-label,.wgroup__cap,.railcard__title,.modal__side .cap,.composer-task-summary__label,.composer-queue__heading){letter-spacing:0;text-transform:none;color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .railcard__title{color:var(--x-title);font-weight:500}
 :root[data-style='shading']:not(#shading) .atelier .railcard__meta{font:var(--t-num);color:var(--x-meta)}
 :root[data-style='shading']:not(#shading) .atelier kbd{border:1px solid var(--x-hairline);border-radius:4px;background:var(--x-chip);color:var(--x-meta);font:500 11px/1.5 var(--sans);padding:0 5px}
 
-/* ── Tabs and segmented controls: a muted track, a raised trigger ─── */
-:root[data-style='shading']:not(#shading) .atelier .studio-segment{background:var(--x-selected);border:0;border-radius:10px;padding:3px}
-:root[data-style='shading']:not(#shading) .atelier .studio-segment>button{border-radius:7px;border-bottom:0;color:var(--x-meta);font-weight:500}
-:root[data-style='shading']:not(#shading) .atelier .studio-segment>.is-selected{background:var(--x-screen);color:var(--x-title);box-shadow:var(--sh-shadow-sm),0 0 0 1px var(--x-hairline)}
-:root[data-style='shading']:not(#shading) .atelier .seg{background:var(--x-selected);border:0;border-radius:10px;padding:3px}
-:root[data-style='shading']:not(#shading) .atelier .seg button{border-radius:7px;color:var(--x-meta);font-weight:500;box-shadow:none}
-:root[data-style='shading']:not(#shading) .atelier .seg button.is-on{background:var(--x-screen);color:var(--x-title);box-shadow:var(--sh-shadow-sm),0 0 0 1px var(--x-hairline)}
+/* ── Tabs and segmented controls: a muted track, a raised pill ────── */
+:root[data-style='shading']:not(#shading) .atelier .studio-segment{background:var(--x-selected);border:0;border-radius:9px;padding:2px}
+:root[data-style='shading']:not(#shading) .atelier .studio-segment>button{border-radius:7px;border-bottom:0;color:var(--x-meta);font-weight:400}
+:root[data-style='shading']:not(#shading) .atelier .studio-segment>.is-selected{background:var(--x-screen);color:var(--x-title);box-shadow:0 0 0 1px var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .seg{background:var(--x-selected);border:0;border-radius:9px;padding:2px}
+:root[data-style='shading']:not(#shading) .atelier .seg button{border-radius:7px;color:var(--x-meta);font-weight:400;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .seg button.is-on{background:var(--x-screen);color:var(--x-title);box-shadow:0 0 0 1px var(--x-hairline)}
 :root[data-style='shading']:not(#shading) .atelier .tab.is-on{color:var(--x-title);border-bottom-color:var(--x-title)}
 
-/* ── Cards ─────────────────────────────────────────────────────────── */
-:root[data-style='shading']:not(#shading) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard,.appupdate__card){background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-sm)}
-:root[data-style='shading']:not(#shading) .atelier .palette-card{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:var(--sh-shadow-xs)}
+/* ── Cards: hairline boxes, no shadow ─────────────────────────────── */
+:root[data-style='shading']:not(#shading) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard,.appupdate__card){background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .palette-card{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .palette-card:hover{background:var(--x-chip)}
 :root[data-style='shading']:not(#shading) .atelier .palette-card.is-on{border-color:var(--x-title);box-shadow:0 0 0 1px var(--x-title)}
 :root[data-style='shading']:not(#shading) .atelier :is(pre,.md pre){background:var(--x-sunken);border:1px solid var(--x-hairline);border-radius:8px}
-:root[data-style='shading']:not(#shading) .atelier :not(pre)>code{background:var(--x-chip);border:1px solid var(--x-hairline);border-radius:5px;padding:.05em .35em;font-size:.88em}
+/* Inline code is a grey chip, as in Claude Code. */
+:root[data-style='shading']:not(#shading) .atelier :not(pre)>code{background:var(--x-chip);border:0;border-radius:5px;padding:.1em .4em;font-size:.88em;color:var(--x-title)}
 /* Permission requests are an Alert: an amber edge on a plain card. */
-:root[data-style='shading']:not(#shading) .atelier .approval{border-color:var(--x-needs-border);box-shadow:var(--sh-shadow-sm),inset 3px 0 0 var(--x-needs)}
+:root[data-style='shading']:not(#shading) .atelier .approval{border-color:var(--x-needs-border);box-shadow:inset 3px 0 0 var(--x-needs)}
 
-/* ── Controls: Button variants ────────────────────────────────────────
-   .btn is shadcn's "outline", .btn--solid its "default" (primary). */
-:root[data-style='shading']:not(#shading) .atelier .btn{border:1px solid var(--sh-input);background:var(--sh-input-bg);color:var(--x-title);border-radius:8px;font-weight:500;box-shadow:var(--sh-shadow-xs);transition:background-color 150ms ease,color 150ms ease,box-shadow 150ms ease}
-:root[data-style='shading']:not(#shading) .atelier .btn:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
-:root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary,.approval .btn--solid){background:var(--x-accent);color:var(--x-on-accent);border-color:var(--x-accent);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
+/* ── Controls ─────────────────────────────────────────────────────────
+   .btn is Claude Code's grey button, .btn--solid the primary. */
+:root[data-style='shading']:not(#shading) .atelier .btn{border:1px solid transparent;background:var(--x-chip);color:var(--x-title);border-radius:8px;font-weight:400;box-shadow:none;transition:background-color 150ms ease,color 150ms ease}
+:root[data-style='shading']:not(#shading) .atelier .btn:hover:not(:disabled){background:color-mix(in srgb,var(--x-title) 14%,var(--x-chip));color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary,.approval .btn--solid){background:var(--x-accent);color:var(--x-on-accent);border-color:var(--x-accent);border-radius:8px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:color-mix(in srgb,var(--x-accent) 88%,transparent);color:var(--x-on-accent)}
-:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){background:var(--sh-input-bg);border:1px solid var(--sh-input);border-radius:8px;box-shadow:var(--sh-shadow-xs);font-family:var(--sans)}
-:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']):focus{border-color:var(--x-focus);box-shadow:0 0 0 3px var(--sh-ring);outline:none}
+:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){background:var(--sh-input-bg);border:1px solid var(--sh-input);border-radius:8px;box-shadow:none;font-family:var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']):focus{border-color:var(--x-focus);box-shadow:none;outline:none}
 :root[data-style='shading']:not(#shading) .atelier .switch{background:var(--sh-input);border-radius:999px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .switch.is-on{background:var(--x-accent)}
-:root[data-style='shading']:not(#shading) .atelier .switch::after{border-radius:50%;background:var(--x-screen);box-shadow:var(--sh-shadow-xs)}
+:root[data-style='shading']:not(#shading) .atelier .switch::after{border-radius:50%;background:var(--x-screen);box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .switch.is-on::after{background:var(--x-on-accent)}
 :root[data-style='shading']:not(#shading) .atelier .cchip{border-radius:8px}
 :root[data-style='shading']:not(#shading) .atelier .cchip:hover{background:var(--x-selected);color:var(--x-title)}
@@ -197,29 +221,85 @@
 
 /* ── Conversation ─────────────────────────────────────────────────── */
 :root[data-style='shading']:not(#shading) .atelier :is(.msg,.agent-msg){font:var(--t-prose)}
-/* Tool activity is a collapsible card with a hover row. */
-:root[data-style='shading']:not(#shading) .atelier .activity-group{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:10px;box-shadow:var(--sh-shadow-xs);margin:6px 0}
-:root[data-style='shading']:not(#shading) .atelier .activity-group>summary{padding:8px 12px;border-radius:9px}
-:root[data-style='shading']:not(#shading) .atelier .activity-group>summary:hover{background:var(--x-chip)}
-:root[data-style='shading']:not(#shading) .atelier .activity-group__body{margin:0;padding:6px 12px 10px;border:0;border-top:1px solid var(--x-hairline);border-radius:0;background:transparent}
-/* Your own turn is filled with the primary colour, as in shadcn's chat example. */
-:root[data-style='shading']:not(#shading) .atelier .msg--user{background:var(--x-user-bubble);border:0;border-radius:14px;box-shadow:var(--sh-shadow-xs);padding:9px 15px}
-:root[data-style='shading']:not(#shading) .atelier .msg--user :is(.msg__text,.msg__text *){color:var(--x-on-accent)}
-:root[data-style='shading']:not(#shading) .atelier .msg--user :not(pre)>code{background:color-mix(in srgb,var(--x-on-accent) 16%,transparent);border-color:transparent;color:var(--x-on-accent)}
+/* Tool activity is a muted line ("Ran 2 commands ▸"); it opens into a hairline box. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group{background:none;border:0;border-radius:0;box-shadow:none;padding:0;margin:2px 0}
+:root[data-style='shading']:not(#shading) .atelier .activity-group>summary{padding:3px 0;border-radius:0;background:transparent;color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group>summary:hover{background:transparent;color:var(--x-secondary)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body{margin:6px 0 10px;padding:0;border:1px solid var(--x-hairline);border-radius:12px;background:color-mix(in srgb,var(--x-title) 2.5%,transparent);overflow:hidden}
+/* Each step: one muted line ("Grep  pattern ▸"), steps split by hairlines,
+   no icon, no "Done" badge; running and failed steps still say so. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body>*:not(:first-child),
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body :is(.execution-row,.filetool)+:is(.execution-row,.filetool){border-top:1px solid var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row{padding:0}
+/* One line: name, command (ellipsis), diff, state, caret; a collapsed failure's error under it. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row>summary{display:grid;grid-template-columns:auto minmax(0,max-content) auto auto auto minmax(0,1fr);align-items:center;gap:4px 8px;padding:10px 14px;border-radius:0;background:transparent}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__label{grid-column:1;grid-row:1}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__target{grid-column:2;grid-row:1}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__diff{grid-column:3;grid-row:1}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__state{grid-column:4;grid-row:1}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__disclosure{grid-column:5;grid-row:1}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__error{grid-column:1/-1;grid-row:2}
+/* Opened, the command lives in the "$" box and the error under the output: say each once. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row[open][data-command] .execution-row__target,
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row[open] .execution-row__error{display:none}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row>summary:hover{background:transparent}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__label{flex:none;gap:0;font:400 13.5px/1.4 var(--sans);color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row>summary:hover .execution-row__label{color:var(--x-secondary)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__label>svg{display:none}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__target{display:block;flex:0 1 auto;min-width:0;padding:0;border:0;border-radius:0;background:transparent;font:400 12.5px/1.4 var(--mono);color:var(--x-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-line-clamp:unset}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row[open] .execution-row__target{white-space:pre-wrap;overflow-wrap:anywhere}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__state{font:400 12px/1 var(--sans)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row[data-state='done'] .execution-row__state{display:none}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__disclosure{color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution-row__error{padding-left:0;font:400 12.5px/1.5 var(--mono);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* Opened: a "$ command" box, then the output as plain mono text. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution{display:grid;gap:10px;margin:0;padding:0 14px 12px}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__command{margin:0;padding:10px 12px 10px 28px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-screen);font:400 12.5px/1.6 var(--mono);color:var(--x-title);white-space:pre-wrap;overflow-wrap:anywhere}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__status{margin:0;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__status[data-failed]>span:first-child{color:var(--x-failed-text)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__status>span+span{color:var(--x-meta)}
+/* Output and stderr are plain mono text inside the step, never boxed. */
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body :is(.output-viewer__text,.execution__error pre){margin:0;padding:0;border:0;border-radius:0;background:none;font:400 12px/1.65 var(--mono)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__error{display:grid;gap:4px}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__error strong{font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body .execution__error pre{color:var(--x-failed-text)}
+:root[data-style='shading']:not(#shading) .atelier .activity-group__body :is(.execution__actions,.execution__raw){font:400 12px/1.4 var(--sans)}
+/* Your own turn: a grey bubble with normal text. */
+:root[data-style='shading']:not(#shading) .atelier .msg--user{background:var(--x-user-bubble);border:0;border-radius:12px;box-shadow:none;padding:10px 16px}
+:root[data-style='shading']:not(#shading) .atelier .msg--user :is(.msg__text,.msg__text *){color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .msg--user :not(pre)>code{background:color-mix(in srgb,var(--x-title) 10%,transparent);border-color:transparent;color:var(--x-title)}
 
-/* The composer is a textarea card with a focus ring; the toolbar chips are outline buttons. */
-:root[data-style='shading']:not(#shading) .atelier .composer-dock{background:var(--x-card);border:1px solid var(--sh-input);border-radius:12px;box-shadow:var(--sh-shadow-xs);transition:border-color 150ms ease,box-shadow 150ms ease}
-:root[data-style='shading']:not(#shading) .atelier .composer-dock:focus-within{border-color:var(--x-focus);box-shadow:0 0 0 3px var(--sh-ring)}
+/* The composer is one bordered box; the controls under it are plain text. */
+:root[data-style='shading']:not(#shading) .atelier .composer-dock{background:var(--x-card);border:1px solid var(--sh-input);border-radius:12px;box-shadow:none;transition:border-color 150ms ease}
+:root[data-style='shading']:not(#shading) .atelier .composer-dock:focus-within{border-color:color-mix(in srgb,var(--x-title) 32%,transparent);box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .composer__input{font:400 calc(var(--ui-font) + 1px)/1.5 var(--sans)}
 :root[data-style='shading']:not(#shading) .atelier .composer__input:focus-visible{outline:none;box-shadow:none}
-:root[data-style='shading']:not(#shading) .atelier .composer__send{background:var(--x-accent);color:var(--x-on-accent);border-radius:8px;box-shadow:var(--sh-shadow-xs)}
-:root[data-style='shading']:not(#shading) .atelier .composer__send:disabled{background:var(--x-selected);color:var(--x-meta);opacity:1;box-shadow:none}
-:root[data-style='shading']:not(#shading) .atelier .composer__send--stop{background:var(--x-screen);color:var(--x-title);box-shadow:inset 0 0 0 1px var(--sh-input)}
-:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip{height:28px;border:1px solid var(--sh-input);background:var(--sh-input-bg);border-radius:7px;box-shadow:var(--sh-shadow-xs);color:var(--x-title);font-weight:500}
-:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip:hover{background:var(--x-selected)}
+:root[data-style='shading']:not(#shading) .atelier .composer__send{background:var(--x-accent);color:var(--x-on-accent);border-radius:8px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .composer__send:disabled{background:transparent;color:var(--x-meta);opacity:1;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .composer__send--stop{background:transparent;color:var(--x-title);box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .composer__send--stop:hover{background:var(--x-selected)}
+:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip{height:28px;border:0;background:transparent;border-radius:7px;box-shadow:none;color:var(--x-secondary);font-weight:400}
+:root[data-style='shading']:not(#shading) .atelier .composer__toolbar .cchip:hover{background:var(--x-selected);color:var(--x-title)}
 :root[data-style='shading']:not(#shading) .atelier .composer__toolbar .composer__icon{border-color:transparent;background:transparent;box-shadow:none}
 
-/* ── Welcome: a tight semibold wordmark with a soft fade-in ───────── */
+/* Code inside a block is plain text: no inline chip, no tint, on every line. */
+:root[data-style='shading']:not(#shading) .atelier pre code{background:transparent;border:0;border-radius:0;padding:0;font:inherit;color:inherit}
+:root[data-style='shading']:not(#shading) .atelier .md__codewrap{background:var(--x-sunken);border:1px solid var(--x-hairline);border-radius:10px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .md__codewrap .md__code{background:transparent;border:0;border-radius:0;color:var(--x-prose)}
+:root[data-style='shading']:not(#shading) .atelier .md__codebar{background:transparent;border-bottom:1px solid var(--x-hairline);color:var(--x-meta)}
+
+/* Your own turn sits on the right, narrower than the reply column. */
+:root[data-style='shading']:not(#shading) .atelier .msg-turn--user{align-self:flex-end;margin-left:auto;max-width:min(82%,680px)}
+
+/* The strips above the composer (goal, folder) are quiet hairline rows, not filled bars. */
+:root[data-style='shading']:not(#shading) .atelier :is(.composer-task-summary,.repobar){background:transparent!important;border:1px solid var(--x-hairline)!important;border-radius:10px;box-shadow:none}
+
+/* ── Inspector: flat sections split by hairlines, as in Claude Code ── */
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail .railcard{background:transparent;border:0;border-bottom:1px solid var(--x-hairline);border-radius:0;box-shadow:none;margin:0;padding:14px 4px}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail .railcard+.railcard{margin-top:0}
+:root[data-style='shading']:not(#shading) .atelier .desktop-rail .railcard:last-child{border-bottom:0}
+
+/* ── Welcome: a tight bold wordmark with a soft fade-in ───────────── */
 :root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark,
 :root[data-style='shading']:not(#shading) .atelier .sidebar-wordmark{font-family:var(--sans);font-weight:700;letter-spacing:-.045em}
 :root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark{animation:shading-rise 420ms cubic-bezier(.16,1,.3,1) both}

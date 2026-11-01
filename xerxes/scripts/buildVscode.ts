@@ -102,7 +102,7 @@ function manifest(extensionVersion: string): Record<string, unknown> {
             enumDescriptions: [
               'One monospace font, square corners, flat surfaces and a purple accent, in its own colours.',
               'Follows your VS Code theme: its colours and fonts.',
-              'The shadcn/ui look: neutral greys, a sans font, rounded cards with soft shadows.',
+              "Claude Code's layout in black, white and grey: flat panes split by hairlines, a sans font.",
             ],
             default: 'neo',
             description: 'How the Xerxes view looks. High-contrast themes always keep VS Code\'s colours.',

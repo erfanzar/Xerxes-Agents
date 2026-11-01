@@ -10,9 +10,10 @@ export type ThemeChoice = 'system' | 'dark' | 'light'
  * `neo` is the terminal-console look (one mono face, square corners,
  * hairlines, one purple accent) that neo.css draws under
  * `:root[data-style='neo']`, and what a fresh install shows; `classic` is the
- * earlier Xerxes design, kept for anyone who picks it. `shading` is the
- * shadcn/ui look (neutral greys, a sans face, rounded cards with soft
- * shadows) that shading.css draws under `:root[data-style='shading']`.
+ * earlier Xerxes design, kept for anyone who picks it. `shading` is Claude
+ * Code's desktop layout in black, white and grey (flat panes split by
+ * hairlines, a sans face) that shading.css draws under
+ * `:root[data-style='shading']`.
  */
 export const STYLES = ['classic', 'neo', 'shading'] as const
 export type StyleChoice = typeof STYLES[number]

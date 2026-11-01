@@ -72,7 +72,7 @@ test('Shading ships in the app, the desktop build, the layout preview and the VS
   expect(extension).toContain("renderer/shading.css")
 })
 
-test('Shading has its own shape, not the Classic layout recoloured: inset cards, filled primary actions, outline chips', async () => {
+test("Shading is Claude Code's layout: flat panes, a quiet sidebar, a grey bubble, one bordered composer", async () => {
   const css = await Bun.file(SHADING).text()
   const rule = (selector: string) => {
     const head = `:root[data-style='shading']:not(#shading) .atelier ${selector}{`
@@ -80,18 +80,26 @@ test('Shading has its own shape, not the Classic layout recoloured: inset cards,
     if (start < 0) throw new Error(`missing Shading rule for ${selector}`)
     return css.slice(start + head.length, css.indexOf('}', start))
   }
-  // The inset sidebar: the conversation and the inspector float as bordered, rounded cards.
+  // Flat panes: the conversation and the inspector sit edge to edge, no floating cards.
   for (const surface of ['.chat', '.desktop-rail']) {
-    expect(rule(surface)).toContain('margin:8px')
-    expect(rule(surface)).toContain('border-radius:12px')
-    expect(rule(surface)).toContain('box-shadow:var(--sh-shadow-sm)')
+    expect(rule(surface)).toContain('margin:0')
+    expect(rule(surface)).toContain('border-radius:0')
+    expect(rule(surface)).toContain('box-shadow:none')
   }
-  // Primary actions and your own turn are filled with the primary colour.
-  expect(rule('.newchat')).toContain('background:var(--x-accent)')
+  expect(rule('.chat__head')).toContain('border-bottom:1px solid var(--x-hairline)')
+  // "New" is a quiet nav row, not a filled button.
+  expect(rule('.newchat')).toContain('background:transparent')
+  // Your own turn: a grey bubble with normal text.
   expect(rule('.msg--user')).toContain('background:var(--x-user-bubble)')
-  expect(rule('.msg--user :is(.msg__text,.msg__text *)')).toContain('color:var(--x-on-accent)')
-  // Toolbar chips are shadcn outline buttons.
-  expect(rule('.composer__toolbar .cchip')).toContain('border:1px solid var(--sh-input)')
+  expect(rule('.msg--user :is(.msg__text,.msg__text *)')).toContain('color:var(--x-title)')
+  // Tool activity is a muted line, not a card.
+  expect(rule('.activity-group')).toContain('border:0')
+  // One bordered composer; the controls under it are plain text.
+  expect(rule('.composer-dock')).toContain('border:1px solid var(--sh-input)')
+  expect(rule('.composer__toolbar .cchip')).toContain('border:0')
+  expect(rule('.composer__toolbar .cchip')).toContain('background:transparent')
+  // No soft shadows anywhere but popovers.
+  expect(css).not.toContain('var(--sh-shadow-sm)')
 })
 
 test('Shading text clears WCAG AA on every surface, in dark and light', async () => {
