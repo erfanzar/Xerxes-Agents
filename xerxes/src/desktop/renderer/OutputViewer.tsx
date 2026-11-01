@@ -42,7 +42,11 @@ export function readableOutput(raw: string): string {
 }
 
 /** Shared log surface. Polling updates never move the user's reading position. */
-export function OutputViewer({ text, label = 'Output', empty = 'No output recorded yet.' }: {text: string; label?: string; empty?: string}): ReactElement {
+export function OutputViewer({ text, label = 'Output', empty = 'No output recorded yet.', compact = false }: {
+  text: string; label?: string; empty?: string
+  /** Inside a tool step (Claude Code's): the text alone, with copy and expand as hover icons. */
+  compact?: boolean
+}): ReactElement {
   const [wrap, setWrap] = useState(true)
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState('')
@@ -59,12 +63,21 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
     <button disabled={!text} onClick={copy}>{copied || 'Copy output'}</button>
   </>
   const body = <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{text || empty}</pre>
+  const fullscreen = expanded && createPortal(<dialog ref={dialog} className="output-dialog" aria-label={`${label} expanded`} onCancel={() => setExpanded(false)} onClose={() => setExpanded(false)}>
+    <header><h2>{label}</h2>{controls}<button autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
+    {body}
+  </dialog>, document.body)
+  if (compact) return <section className="output-viewer output-viewer--compact" aria-label={`${label} viewer`}>
+    {body}
+    <div className="output-viewer__actions">
+      <button disabled={!text} onClick={copy} aria-label={copied || 'Copy output'} title={copied || 'Copy output'}><Icon name={copied === 'Copied' ? 'check' : 'copy'} size={13}/></button>
+      <button ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} title={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={13}/></button>
+    </div>
+    {fullscreen}
+  </section>
   return <section className="output-viewer" aria-label={`${label} viewer`}>
     <header><strong>{label}</strong><span className="output-viewer__count">{text ? `${text.split('\n').length.toLocaleString()} lines` : ''}</span><div className="output-viewer__actions">{controls}<button ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={14}/></button></div></header>
     {body}
-    {expanded && createPortal(<dialog ref={dialog} className="output-dialog" aria-label={`${label} expanded`} onCancel={() => setExpanded(false)} onClose={() => setExpanded(false)}>
-      <header><h2>{label}</h2>{controls}<button autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
-      {body}
-    </dialog>, document.body)}
+    {fullscreen}
   </section>
 }

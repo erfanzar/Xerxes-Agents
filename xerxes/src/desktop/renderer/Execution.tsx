@@ -93,13 +93,15 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
   const failed = toolHasFailed(item)
   const output = view.stdout ?? readableOutput(item.output)
   const structured = view.stdout === null && output === item.output ? structuredOutput(item.output) : null
+  // A finished step says nothing about itself (Claude Code's): only running
+  // or failed steps carry a status line.
   return <div className="execution">
-    <div className="execution__status" data-failed={failed || undefined}>
-      <span>{item.state === 'working' ? 'Running' : failed ? 'Failed' : 'Completed'}{view.exitCode !== null ? ` · Exit ${view.exitCode}` : ''}</span>
+    {(item.state === 'working' || failed) && <div className="execution__status" data-failed={failed || undefined}>
+      <span>{item.state === 'working' ? 'Running' : 'Failed'}{view.exitCode !== null ? ` · Exit ${view.exitCode}` : ''}</span>
       {view.cwd && <span title={view.cwd}>{view.cwd}</span>}
-    </div>
-    {view.command && <pre className="execution__command">{view.command}</pre>}
-    {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured}/></div></> : <OutputViewer text={output} />)}
+    </div>}
+    {view.command && <pre className="execution__command" title={view.cwd ?? undefined}>{view.command}</pre>}
+    {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured}/></div></> : <OutputViewer text={output} compact />)}
     {view.stderr && <div className="execution__error"><strong>Standard error</strong><pre>{view.stderr}</pre></div>}
     {item.error && item.error !== output && item.error !== view.stderr && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
     {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
