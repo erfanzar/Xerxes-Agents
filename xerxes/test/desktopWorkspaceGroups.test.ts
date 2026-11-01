@@ -3,7 +3,8 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { groupByWorkspace, sidebarOrder, workspaceName } from '../src/desktop/renderer/workspaceGroups.js'
+import type { WorkspaceContext } from '../src/desktop/main/contextNavigation.js'
+import { COLLAPSED_SECTIONS_KEY, groupByWorkspace, hostOfScope, limitRows, loadCollapsedSections, saveCollapsedSections, sidebarOrder, sidebarSections, workspaceName } from '../src/desktop/renderer/workspaceGroups.js'
 
 describe('workspace grouping', () => {
   test('workspace display name is the folder basename', () => {
@@ -82,5 +83,65 @@ describe('sidebar order', () => {
 
   test('a chat that has not spoken yet leads the list', () => {
     expect(sidebarOrder([...rows, { id: 'fresh', cwd: '/p/eyvan' }]).map(row => row.id)[0]).toBe('fresh')
+  })
+})
+
+describe('sidebar sections', () => {
+  const local: WorkspaceContext = { id: 1, label: 'This Mac', workspace: '/p/Xerxes-Agents', remote: false, sessions: [
+    { id: 'x1', cwd: '/p/Xerxes-Agents', title: 'X one', status: 'idle' },
+    { id: 'y1', cwd: '/p/eyvan', title: 'Y one', status: 'working' },
+    { id: 'x2', cwd: '/p/Xerxes-Agents', title: 'X two', status: 'idle' },
+  ] }
+  const tpu: WorkspaceContext = { id: -1, label: 'v5p · prismcore', alias: 'v5p', workspace: '/home/e/prismcore', workspacePath: '/home/e/prismcore', remote: true, saved: true, sessions: [
+    { id: 'r1', cwd: '/home/e/prismcore', title: 'Remote', status: 'idle' },
+  ] }
+
+  test('the host of a view comes from its storage scope', () => {
+    expect(hostOfScope('')).toBe('This Mac')
+    expect(hostOfScope(undefined)).toBe('This Mac')
+    expect(hostOfScope('ssh:v5p:')).toBe('v5p')
+  })
+
+  test('a local context seen from an SSH view is split per folder, never one "This Mac" heap', () => {
+    const here = groupByWorkspace([{ id: 'r1', cwd: '/home/e/prismcore' }], '')
+    const sections = sidebarSections(here, [local], 'v5p')
+    expect(sections.map(section => section.label)).toEqual(['This Mac · eyvan', 'This Mac · Xerxes-Agents', 'v5p · prismcore'])
+    expect(sections.map(section => section.rows.map(row => row.id).join(','))).toEqual(['y1', 'x1,x2', 'r1'])
+  })
+
+  test('the order is the same whichever view is open', () => {
+    const fromLocal = sidebarSections(groupByWorkspace([
+      { id: 'x1', cwd: '/p/Xerxes-Agents' }, { id: 'y1', cwd: '/p/eyvan' }, { id: 'x2', cwd: '/p/Xerxes-Agents' },
+    ], ''), [tpu], 'This Mac')
+    const fromRemote = sidebarSections(groupByWorkspace([{ id: 'r1', cwd: '/home/e/prismcore' }], ''), [local], 'v5p')
+    expect(fromLocal.map(section => section.label)).toEqual(fromRemote.map(section => section.label))
+    expect(fromLocal.map(section => section.kind)).toEqual(['here', 'here', 'context'])
+  })
+
+  test('a section lists its last five tasks; expanding lists all; the open task is never hidden', () => {
+    const rows = Array.from({ length: 8 }, (_, i) => ({ id: `t${i}`, cwd: '/p' }))
+    expect(limitRows(rows, 5, false)).toEqual({ shown: rows.slice(0, 5), hidden: 3 })
+    expect(limitRows(rows, 5, true)).toEqual({ shown: rows, hidden: 0 })
+    const withOpen = limitRows(rows, 5, false, 't7')
+    expect(withOpen.shown.map(row => row.id)).toEqual(['t0', 't1', 't2', 't3', 't4', 't7'])
+    expect(withOpen.hidden).toBe(2)
+    expect(limitRows(rows.slice(0, 3), 5, false)).toEqual({ shown: rows.slice(0, 3), hidden: 0 })
+  })
+
+  test('folded sections are remembered, and bad stored data is ignored', () => {
+    const values = new Map<string, string>()
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value) } }
+    saveCollapsedSections(new Set(['This Mac\u0000/p/eyvan']), storage)
+    expect([...loadCollapsedSections(storage)]).toEqual(['This Mac\u0000/p/eyvan'])
+    values.set(COLLAPSED_SECTIONS_KEY, '{"not":"a list"}')
+    expect(loadCollapsedSections(storage).size).toBe(0)
+    values.set(COLLAPSED_SECTIONS_KEY, 'not json')
+    expect(loadCollapsedSections(storage).size).toBe(0)
+  })
+
+  test('a task listed by this view is not repeated under a context', () => {
+    const here = groupByWorkspace([{ id: 'x1', cwd: '/p/Xerxes-Agents' }], '')
+    const sections = sidebarSections(here, [local], 'This Mac')
+    expect(sections.flatMap(section => section.rows.map(row => row.id)).sort()).toEqual(['x1', 'x2', 'y1'])
   })
 })

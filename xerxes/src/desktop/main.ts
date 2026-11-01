@@ -535,6 +535,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   })
   handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : loadDesktopWorkspaces(workspaceFile()))
   handle('desktop:context-scope', () => contextScope(remoteMachine ?? saved?.remote))
+  // The name the sidebar gives this view's host: the SSH alias, or null for this Mac.
+  handle('desktop:context-host', () => (remoteMachine ?? saved?.remote)?.alias ?? null)
   handle('desktop:contexts', async () => {
     // Keyed by host AND folder: two projects on one SSH host are two contexts.
     const currentScope = contextKey(remoteMachine ?? saved?.remote)
