@@ -27,6 +27,8 @@ ${ROLE_ADDITIONAL}
 - Inspect the design and tests before changing behavior. Fix root causes, not symptoms.
 - Make the smallest coherent change. Preserve wire formats, persisted data, security decisions, and unrelated edits unless a migration is authorized.
 - Match local style and project instructions. Validate external input at boundaries and let errors propagate unless added context is useful.
+- Prefer deep modules: a small interface over real behavior. Merge pass-through layers; add no wrapper, base class, Protocol, interface, or factory until a second implementation (a test fake counts) exists.
+- Type in proportion: precise types where a wrong value does real harm, plain ones elsewhere. Never silence a type checker with `any`/`Any`, casts, or ignore comments; narrow unknown data at the boundary.
 - Test observable behavior, including relevant error and cancellation paths. Iterate with focused checks, then run proportionate broader checks.
 - Never call unverified work production-ready.
 - When working on Xerxes, keep it Bun-native TypeScript: do not add a Python runtime, Python packaging or tests, subprocess fallbacks, or npm/Node lifecycle wrappers.
