@@ -18,7 +18,12 @@ test('default agent prompt uses only current conditional tool names and stays bo
   // Raised for the result-durability rule: the runtime prunes, off-loads and summarizes tool
   // results, and nothing else in the prompt tells the model that, so it plans to scroll back
   // to a value that is no longer there.
-  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_000)
+  // Raised again for the module-depth and proportional-typing rules: without them agents
+  // defaulted to pass-through layers and checker-silencing casts, and the matching skills
+  // (codebase-design, python-types) are only one index line each, so they cannot carry it alone.
+  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_500)
+  expect(prompt).toContain('Prefer deep modules')
+  expect(prompt).toContain('Type in proportion')
   expect(prompt).toContain('${ROLE_ADDITIONAL}')
   expect(prompt).toContain('provider-supplied tool list')
   expect(prompt).toContain('`exec_command`')
