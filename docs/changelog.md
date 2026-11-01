@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.22 — 2026-11-01
+
+- **Desktop: the Shading style is now Claude Code's layout in black, white and grey.** The sidebar, conversation and inspector sit edge to edge with 1px lines between them, with no floating cards or soft shadows. "New task" is a quiet row, each task is one line, and your own messages sit on the right in a grey bubble. The composer is one bordered box with plain text controls under it. Code blocks no longer show a grey chip behind every line. Choose it under Settings ▸ General ▸ Style ▸ Shading.
+- **Desktop: the sidebar no longer reorders when you click, and no longer lumps tasks under "This Mac".** Every host and folder gets its own section (`This Mac · Xerxes-Agents`, `This Mac · eyvan`, `v5p · prismcore`), in a fixed order: this Mac first, then other hosts, folders by name. The order no longer depends on which view is open. An SSH view labels its own folders with the host's alias.
+- **Desktop: sidebar sections show the last five tasks and fold.** Each section lists its five most recent tasks plus the open one, then "Show N more". Clicking a section's name folds it to just the name, and folded sections are remembered. The task filter still searches every task.
+- **Desktop: the right panel's tabs are icons.** Files, Git, Terminal, Activity and Usage are a row of icons, like Claude Code's. Hovering shows the name, and screen readers still read it.
+- **Desktop: tool steps read like Claude Code's.** Inside "Ran N commands", each step is one muted line with no icon or "Done" badge. Opened, it shows a `$ command` box and the output as plain monospace text, with copy and full-screen on hover. The command and the error each show once, and finished steps no longer say "Completed".
+- **Agents: two new default rules and three bundled skills.** The default prompt now prefers deep modules over pass-through layers and asks for typing in proportion, without checker-silencing casts. New bundled skills: `codebase-design` (adapted from Matt Pocock's, MIT), `codebase-rescue` and `python-types`.
+
 ## 0.8.21 — 2026-10-31
 
 - **Fix: a remote chat could vanish and show as an empty "New task".** When the Hub read a task, its per-task connection opened the session by key without asking to resume it. For a chat bound under its own id, the runtime then dropped the loaded chat and put an empty session with the same id in its place, so every client showed it blank. The transcript on disk was never touched. The Hub and the desktop app now attach to such a chat by id, and the runtime loads the saved chat instead of replacing it. The runtime part takes effect on a host after its runtime is updated.
