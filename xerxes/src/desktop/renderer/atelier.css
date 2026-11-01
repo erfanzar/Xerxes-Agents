@@ -2465,6 +2465,14 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .wgroup:hover .wgroup__add,.atelier .wgroup__add:focus-visible{opacity:1}
 .atelier .wgroup__add:hover{background:var(--x-selected);color:var(--x-title)}
 .atelier .wgroup__head:has(>.wgroup__cap) .wgroup__add{align-self:flex-end}
+/* A section folds to its name: a small caret after the label turns while folded. */
+.atelier .wgroup__caret{display:inline-flex;align-items:center;margin-left:6px;color:var(--x-meta);opacity:.8;transition:transform 140ms ease;vertical-align:middle}
+.atelier .wgroup[data-collapsed] .wgroup__caret{transform:rotate(-90deg)}
+.atelier .wgroup__more{display:block;width:100%;height:28px;padding:0 10px;border:0;border-radius:8px;background:transparent;text-align:left;font:400 12.5px/1 var(--sans);color:var(--x-meta);cursor:pointer}
+.atelier .wgroup__more:hover{background:var(--x-selected);color:var(--x-title)}
+@media (prefers-reduced-motion:reduce){.atelier .wgroup__caret{transition:none}}
+/* Rail tabs are icons (Claude Code's top-right row): square hit areas. */
+.atelier .desktop-rail>header nav>button:has(>svg){width:30px;height:28px;padding:0;justify-content:center}
 
 /* Claude's session list: folder names in muted text, one line per task
    behind a small ring; the open task on a soft rounded fill. */

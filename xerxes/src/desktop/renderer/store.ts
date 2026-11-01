@@ -477,6 +477,8 @@ export interface Snapshot {
   readonly sessionActivity?: Readonly<Record<string, number>>
   readonly contexts?: readonly WorkspaceContext[]
   readonly storageScope?: string
+  /** The sidebar name of this view's host: its SSH alias; absent for this Mac. */
+  readonly contextHost?: string
   readonly workspaceBusy: boolean
   readonly workspaceError: string | null
   readonly sessionMenu: SessionMenuState | null
@@ -1121,6 +1123,9 @@ export class Store {
       }
       this.initializeLive(typeof saved === 'string' ? saved : '')
     }).catch(error => this.wentOffline(error))
+    void this.bridge.getContextHost?.().then(host => {
+      if (typeof host === 'string' && host.trim()) this.patch({ contextHost: host.trim().slice(0, 128) })
+    }).catch(() => undefined)
     void this.refreshContexts()
     this.heartbeat = setInterval(() => void this.beat(), HEARTBEAT_MS)
     this.heartbeat.unref?.()
@@ -3172,6 +3177,7 @@ export class Store {
   private bridge: XerxesLike = {
     call: (method, params) => window.xerxes.call(method, params),
     getContextScope: () => window.xerxes.getContextScope?.() ?? Promise.resolve('local'),
+    getContextHost: () => window.xerxes.getContextHost?.() ?? Promise.resolve(null),
     getContexts: () => window.xerxes.getContexts?.() ?? Promise.resolve([]),
     activateContext: (id, sessionId) => window.xerxes.activateContext?.(id, sessionId) ?? Promise.reject(new Error('Update the desktop app to switch contexts.')),
     // Passthrough — the wrapper must forward EVERY preload method or the
@@ -4593,6 +4599,7 @@ export interface XerxesLike {
   appUpdate?(action: 'state' | 'check' | 'install' | 'skip' | 'dismiss' | 'open-release'): Promise<unknown>
   onAppUpdate?(handler: (state: unknown) => void): () => void
   getContextScope?(): Promise<string>
+  getContextHost?(): Promise<string | null>
   getContexts?(): Promise<WorkspaceContext[]>
   activateContext?(id: number, sessionId?: string): Promise<void>
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>

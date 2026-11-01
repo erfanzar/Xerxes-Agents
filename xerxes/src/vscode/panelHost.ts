@@ -115,6 +115,7 @@ export class PanelHost {
       // The window's folder is the workspace; a remote one runs under Remote-SSH,
       // so to the renderer this is always the local scope of that host.
       case 'desktop:context-scope': return 'local'
+      case 'desktop:context-host': return null
       case 'desktop:contexts': return []
       case 'desktop:activate-context': throw new Error('Switch folders with File → Open Folder in VS Code.')
       case 'desktop:choose-workspace': {

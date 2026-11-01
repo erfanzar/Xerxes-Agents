@@ -13,7 +13,7 @@ import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
 import type { AgentMember, Block } from './types.js'
 import { applyCompletion, wantsHints, type HintItem } from './hints.js'
-import { groupByWorkspace, sidebarOrder } from './workspaceGroups.js'
+import { SIDEBAR_SECTION_ROWS, groupByWorkspace, hostOfScope, limitRows, loadCollapsedSections, saveCollapsedSections, sidebarOrder, sidebarSections } from './workspaceGroups.js'
 import { CopyButton } from './CopyButton.js'
 import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
@@ -699,6 +699,20 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
   const chrome = useContext(WindowChrome)
   const [filter, setFilter] = useState('')
   const needle = filter.trim().toLowerCase()
+  // Folded sections show only their name (remembered); expanded ones list every task, not just the last five.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(loadCollapsedSections)
+  const [showAll, setShowAll] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleCollapsed = (key: string): void => setCollapsed(previous => {
+    const next = new Set(previous)
+    if (!next.delete(key)) next.add(key)
+    saveCollapsedSections(next)
+    return next
+  })
+  const toggleShowAll = (key: string): void => setShowAll(previous => {
+    const next = new Set(previous)
+    if (!next.delete(key)) next.add(key)
+    return next
+  })
   // Match what the row DISPLAYS: enriched snippets replace raw titles, and
   // filtering on the hidden '#shortid' would drop the row the eye found.
   const shownTitle = (row: { id: string }): string =>
@@ -739,6 +753,8 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
     ...(currentRow ? [currentRow] : []),
   ], snap.sessionActivity ?? {}).filter(match)
   const groups = groupByWorkspace(rows, '', snap.workspaceDirectories)
+  // One list for every host and folder, in an order no click changes.
+  const sections = sidebarSections(groups, snap.contexts ?? [], snap.contextHost ?? hostOfScope(snap.storageScope))
   const online = snap.connection === 'online'
 
   return (
@@ -775,43 +791,71 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
         >Search message history <Icon name="arrow" size={12} /></button>
       </div>
       <nav className="side__list">
-        {snap.contexts?.map(context => (
-          <div className="wgroup" key={`context-${context.id}`}>
-            <button className="wgroup__cap" title={[context.workspace, context.reason].filter(Boolean).join(' · ')} onClick={() => void store.activateContext(context.id)}>
-              <Icon name="folder" size={14} /> {context.label}
-              {context.availability && <span className="sess__s"> · {context.availability === 'no-runtime' ? 'no runtime' : context.availability}</span>}
-            </button>
-            {context.reason && <div className="sess__s">{context.reason}</div>}
-            {context.sessions.filter(row => !filter || row.title.toLowerCase().includes(filter.toLowerCase())).map(row => (
-              <button className="sess" key={row.id} title={`${context.label} · ${row.cwd}`} onClick={() => void store.activateContext(context.id, row.id)}>
-                <span className="sess__dot" style={{ background: statusColor(row.status) }} />
-                <span className="sess__body"><span className="sess__t">{row.title}</span><span className="sess__s">{workspaceLabel(row.cwd)}{row.status === 'working' ? ' · working' : ''}</span></span>
-              </button>
-            ))}
-          </div>
-        ))}
-        {groups.map(group => (
-          <div key={group.cwd} className={`wgroup${group.cwd === snap.cwd ? ' is-home' : ''}`}>
+        {sections.map(section => {
+          // A filter searches every task, folded or not.
+          const folded = !needle && collapsed.has(section.key)
+          const all = Boolean(needle) || showAll.has(section.key)
+          const availability = section.kind === 'context' && section.context.availability && section.context.availability !== 'online'
+            ? section.context.availability === 'no-runtime' ? 'no runtime' : section.context.availability
+            : ''
+          const reason = section.kind === 'context' ? section.context.reason ?? '' : ''
+          const head = (
             <div className="wgroup__head">
               <button
                 className="wgroup__cap"
-                title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
-                onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
+                aria-expanded={!folded}
+                title={`${[section.cwd, reason].filter(Boolean).join(' · ')} — ${folded ? 'show' : 'hide'} its tasks`}
+                onClick={() => toggleCollapsed(section.key)}
               >
-                <span className="wgroup__mark" data-here={group.cwd === snap.cwd || undefined} aria-hidden="true" />
-                {group.name}
-                {group.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
+                {section.kind === 'here' && <span className="wgroup__mark" data-here={section.cwd === snap.cwd || undefined} aria-hidden="true" />}
+                {section.label}
+                {availability && <span className="sess__s"> · {availability}</span>}
+                {section.kind === 'here' && section.cwd === snap.cwd && <span className="wgroup__cur">current</span>}
+                <span className="wgroup__caret" aria-hidden="true"><Icon name="caretDown" size={11} /></span>
               </button>
-              <button className="wgroup__add" disabled={!online} title={`New task in ${group.name}`} aria-label={`New task in ${group.name}`} onClick={() => store.newChatIn(group.cwd)}><Icon name="plus" size={14} /></button>
+              {section.kind === 'context'
+                ? <button className="wgroup__add" title={`Open ${section.label}`} aria-label={`Open ${section.label}`} onClick={() => void store.activateContext(section.context.id)}><Icon name="arrow" size={14} /></button>
+                : <button className="wgroup__add" disabled={!online} title={`New task in ${section.label}`} aria-label={`New task in ${section.label}`} onClick={() => store.newChatIn(section.cwd)}><Icon name="plus" size={14} /></button>}
             </div>
-            {group.rows.map(row => {
-              const snippet = snap.snippets[row.id]
-              return snippet === undefined
-                ? <SessionCell key={row.id} row={row} opensWindow={snap.turnActive && row.id !== snap.currentId} />
-                : <SessionCell key={row.id} row={row} snippet={snippet} opensWindow={snap.turnActive && row.id !== snap.currentId} />
-            })}
-          </div>
-        ))}
+          )
+          const more = (hidden: number, total: number): ReactElement | null => !needle && (hidden > 0 || all && total > SIDEBAR_SECTION_ROWS)
+            ? <button className="wgroup__more" onClick={() => toggleShowAll(section.key)}>{hidden > 0 ? `Show ${hidden} more` : 'Show less'}</button>
+            : null
+          if (section.kind === 'context') {
+            const listed = section.rows.filter(row => !needle || row.title.toLowerCase().includes(needle))
+            const { shown, hidden } = limitRows(listed, SIDEBAR_SECTION_ROWS, all)
+            return (
+              <div className="wgroup" key={section.key} data-collapsed={folded || undefined}>
+                {head}
+                {!folded && <>
+                  {reason && <div className="sess__s">{reason}</div>}
+                  {shown.map(row => (
+                    <button className="sess" key={row.id} title={`${section.label} · ${row.cwd}`} onClick={() => void store.activateContext(section.context.id, row.id)}>
+                      <span className="sess__dot" data-status={row.status} style={{ background: statusColor(row.status) }} />
+                      <span className="sess__body"><span className="sess__t">{row.title}</span><span className="sess__s">{workspaceLabel(row.cwd)}{row.status === 'working' ? ' · working' : ''}</span></span>
+                    </button>
+                  ))}
+                  {more(hidden, listed.length)}
+                </>}
+              </div>
+            )
+          }
+          const { shown, hidden } = limitRows(section.rows, SIDEBAR_SECTION_ROWS, all, snap.currentId)
+          return (
+            <div key={section.key} className={`wgroup${section.cwd === snap.cwd ? ' is-home' : ''}`} data-collapsed={folded || undefined}>
+              {head}
+              {!folded && <>
+                {shown.map(row => {
+                  const snippet = snap.snippets[row.id]
+                  return snippet === undefined
+                    ? <SessionCell key={row.id} row={row} opensWindow={snap.turnActive && row.id !== snap.currentId} />
+                    : <SessionCell key={row.id} row={row} snippet={snippet} opensWindow={snap.turnActive && row.id !== snap.currentId} />
+                })}
+                {more(hidden, section.rows.length)}
+              </>}
+            </div>
+          )
+        })}
         {/* A zero-match filter used to fall through to "No tasks yet",
             which reads as "this workspace is empty" rather than "your
             query matched nothing". */}

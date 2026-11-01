@@ -36,7 +36,7 @@ import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
 import { TerminalsCard } from './TerminalsPanel.js'
-import { Icon } from './Icon.js'
+import { Icon, type IconName } from './Icon.js'
 import { GitPanel } from './GitPanel.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
@@ -72,6 +72,8 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
 /** Views that open in the task-context rail beside the conversation. */
 export type RailPanel = 'files' | 'review' | 'terminal' | 'activity' | 'usage'
 export const RAIL_PANELS: readonly RailPanel[] = ['files', 'review', 'terminal', 'activity', 'usage']
+/** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
+const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
   panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
@@ -186,7 +188,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     return () => observer.disconnect()
   }, [panel])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} onClick={() => open(value)}>{railTabName(value)}</button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}

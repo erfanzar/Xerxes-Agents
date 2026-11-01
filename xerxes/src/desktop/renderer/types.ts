@@ -27,6 +27,7 @@ export interface XerxesBridge {
   /** Menu items the main process routes to the focused shell. */
   onMenuCommand?(handler: (command: string) => void): () => void
   getContextScope?(): Promise<string>
+  getContextHost?(): Promise<string | null>
   getContexts?(): Promise<WorkspaceContext[]>
   activateContext?(id: number, sessionId?: string): Promise<void>
   getResumeSession?(): Promise<string | null>

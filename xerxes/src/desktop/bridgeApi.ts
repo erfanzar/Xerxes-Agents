@@ -92,6 +92,7 @@ export function createBridge(transport: BridgeTransport) {
     return transport.invoke('desktop:resume') as Promise<string | null>
   },
   getContextScope(): Promise<string> { return transport.invoke('desktop:context-scope') as Promise<string> },
+  getContextHost(): Promise<string | null> { return transport.invoke('desktop:context-host') as Promise<string | null> },
   getContexts(): Promise<unknown[]> { return transport.invoke('desktop:contexts') as Promise<unknown[]> },
   activateContext(id: number, sessionId?: string): Promise<void> {
     if (!Number.isSafeInteger(id) || sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId))) return Promise.reject(new Error('Invalid workspace context'))
