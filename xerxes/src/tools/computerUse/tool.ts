@@ -159,7 +159,7 @@ export async function computerUse(
         captureAfter(inputs),
       )
     case 'wait':
-      return formatActionResult(await session.wait(boundedInteger(inputs, 'ms', DEFAULT_WAIT_MS, 0, MAX_WAIT_MS), signal))
+      return formatActionResult(await wakeableWait(session, boundedInteger(inputs, 'ms', DEFAULT_WAIT_MS, 0, MAX_WAIT_MS), signal, context.wakeSignal))
     case 'list_apps':
       return formatActionResult(await session.listApps(signal))
     case 'focus_app':
@@ -231,6 +231,43 @@ export function formatActionResult(result: ActionResult, captureAfter = false): 
     action: result.action,
     message: result.message ?? '',
     meta: result.meta ?? {},
+  }
+}
+
+/**
+ * A plain wait that ends early when the user steers the turn. Only the wait
+ * itself is stopped (nothing on the desktop is in flight), and the result
+ * says how long it actually waited rather than claiming the full duration.
+ */
+async function wakeableWait(
+  session: ComputerUseSession,
+  ms: number,
+  signal: AbortSignal | undefined,
+  wake: AbortSignal | undefined,
+): Promise<ActionResult> {
+  if (!wake) return session.wait(ms, signal)
+  const started = Date.now()
+  const early = (): ActionResult => ({
+    action: 'wait',
+    ok: true,
+    message: `wait ended after ${Date.now() - started}ms of ${ms}ms: the user sent a message`,
+  })
+  if (wake.aborted) return early()
+  const stopWait = new AbortController()
+  const onWake = () => stopWait.abort(new Error('Steer received'))
+  wake.addEventListener('abort', onWake, { once: true })
+  try {
+    const waited = session.wait(ms, signal ? AbortSignal.any([signal, stopWait.signal]) : stopWait.signal)
+    try {
+      const result = await waited
+      return wake.aborted && !signal?.aborted ? early() : result
+    } catch (error) {
+      // A backend that rejects an aborted wait: a steer is not a failure.
+      if (wake.aborted && !signal?.aborted) return early()
+      throw error
+    }
+  } finally {
+    wake.removeEventListener('abort', onWake)
   }
 }
 

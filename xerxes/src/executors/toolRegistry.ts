@@ -11,6 +11,13 @@ export interface ToolExecutionContext {
   readonly agentId?: string
   readonly metadata: Record<string, unknown>
   readonly sessionId?: string
+  /**
+   * Fires when the user steered the running turn. A tool that only blocks to
+   * wait (AwaitAgents, check_command wait_ms, computer_use wait) returns its
+   * current state early so the loop can hand the steer to the model at the
+   * next round. It is never a cancellation: work in flight keeps running.
+   */
+  readonly wakeSignal?: AbortSignal
 }
 
 /**

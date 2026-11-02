@@ -20,6 +20,8 @@ import { useDesktopNavigation } from './DesktopPanels.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { pageIsBackground } from './pageVisibility.js'
+import { desktopError } from './desktopRpc.js'
+import { store } from './store.js'
 import type { AgentMember } from './types.js'
 
 type Tone = 'working' | 'done' | 'failed' | 'stopped'
@@ -247,9 +249,34 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
       />)}
       <footer className="acard__foot">
         <button onClick={() => navigate('activity')}>Open in Activity</button>
+        {tally.working > 0 && <StopAllAgents />}
       </footer>
     </section>
   )
+}
+
+/**
+ * Stopping the turn leaves its agents running, so the card offers the
+ * explicit way to end them: every live agent of this session, after a
+ * second click to confirm.
+ */
+function StopAllAgents(): ReactElement {
+  const [armed, setArmed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const stop = async () => {
+    if (!armed) { setArmed(true); return }
+    setBusy(true)
+    try { setNotice(await store.stopAllAgents()) }
+    catch (error) { setNotice(desktopError(error)) }
+    finally { setBusy(false); setArmed(false) }
+  }
+  return <>
+    <button className="acard__stopall" disabled={busy} onClick={() => void stop()} onBlur={() => setArmed(false)}>
+      {armed ? 'Confirm: stop all agents' : 'Stop all agents'}
+    </button>
+    {notice && <span className="acard__notice" role="status">{notice}</span>}
+  </>
 }
 
 /** `claude-code/sonnet` → `sonnet`; vendor prefixes are noise at card size. */

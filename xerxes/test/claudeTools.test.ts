@@ -662,7 +662,7 @@ test('stale subagent targets receive non-retry guidance after runtime attachment
   )
 })
 
-test('foreground agent waits stop promptly when the parent turn is cancelled', async () => {
+test('foreground agent waits stop promptly when the parent turn is cancelled, and the agent keeps running', async () => {
   const waitStarted = Promise.withResolvers<void>()
   const snapshot = agentSnapshot('interruptible')
   const closed: string[] = []
@@ -694,10 +694,11 @@ test('foreground agent waits stop promptly when the parent turn is cancelled', a
   controller.abort(new Error('parent turn cancelled'))
   await expect(pending).rejects.toThrow('parent turn cancelled')
   expect(performance.now() - started).toBeLessThan(100)
-  expect(closed).toEqual(['interruptible'])
+  // Stopping the turn stops only the turn: the awaited agent becomes a background agent.
+  expect(closed).toEqual([])
 })
 
-test('foreground SpawnAgents cancellation closes only children spawned by that call', async () => {
+test('foreground SpawnAgents cancellation stops the wait but closes none of its children', async () => {
   const waitStarted = Promise.withResolvers<void>()
   const snapshots = [agentSnapshot('preexisting')]
   const closed: string[] = []
@@ -732,7 +733,8 @@ test('foreground SpawnAgents cancellation closes only children spawned by that c
   controller.abort(new Error('parent turn cancelled'))
 
   await expect(pending).rejects.toThrow('parent turn cancelled')
-  expect(closed).toEqual(['batch-a', 'batch-b'])
+  // The batch keeps running and reports to the next turn; the preexisting agent is untouched too.
+  expect(closed).toEqual([])
 })
 
 test('already-aborted delegation registers no single agents or swarm agents', async () => {

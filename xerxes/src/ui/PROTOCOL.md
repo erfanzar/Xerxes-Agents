@@ -88,7 +88,8 @@ an `initialize` that never arrives within the grace period, drops only the
 replay, so the reply carries no `reconnect_events` and the client rebuilds from
 its history snapshot. Journaling ends in the same step as the `initialize`
 reply, so `reconnect_events` always precede newer live frames.
-Explicit `turn.cancel`, session eviction and daemon shutdown still stop work.
+Explicit `turn.cancel`, session eviction and daemon shutdown still stop work
+(`turn.cancel` stops the turn; eviction and shutdown also stop its agents).
 Slash `/new` therefore refuses while the session it leaves is still working (a
 turn, agents, or an armed goal), and leaves a session another client still
 shows in place.
@@ -201,7 +202,7 @@ params fall back to per-connection defaults.
 | `turn.submit`                        | `{ session_key?, text, mode?, plan_mode?, images? }` | `{ ok }`                                              | Lower-level submit; `prompt` wraps this. Optional `images`: `[{ media_type, data(base64) }]` — validated (strict base64, png/jpeg/gif/webp magic-byte sniff, 10MB/image, 20MB/turn) and sent to the provider as `image_url` data-URL content parts. |
 | `turn.background`                    | `{ session_key?, text }`                       | `{ ok, task_id, session_key }`                               | Dispatch a new independent live session without changing the connection's attached session. Agent View uses this for its bottom prompt; `/background` itself is a local detach action. |
 | `turn.steer` / `steer`               | `{ session_key?, content, images? }`           | `{ ok }`                                                       | Inject a steer into the active turn. Optional `images` use the `turn.submit` contract (same validation and limits); the steer then reaches the model as a text part plus `image_url` parts, and `content` may be empty when images are present. `steer_input` adds `image_count` when images were attached. |
-| `turn.cancel` / `cancel`             | `{ session_key? }`                             | `{ ok }`                                                       | Cancel this connection's turn.                                                    |
+| `turn.cancel` / `cancel`             | `{ session_key? }`                             | `{ ok }`                                                       | Cancel this connection's turn. Only the turn stops: delegated agents (background, or awaited inside the cancelled tool call) keep running and deliver their results to the next turn. When any are still running the turn ends with an info `notification` `Stopped the turn. N agent(s) is/are still running.` carrying additive `running_agents: N`. Stop agents with `subagent.interrupt`. |
 | `cancel_all`                         | `{}`                                           | `{ ok, cancelled }`                                            | Cancel every session.                                                             |
 | `session.open`                       | `{ session_key?, agent_id?, project_dir? }`    | `{ ok, session, pending_interactions }`                                              | Open/attach a session within the active or explicit project boundary. `agent_id` is the DSH-style agent preset; changing it is rejected after the first transcript message. Mid-turn, `session.inflight` additively carries `started_at` (epoch seconds), `thinking`, and `tools: [{ id?, name, arguments?, ok?, duration_ms?, error? }]` — the turn's work so far, since the transcript only covers completed turns. The session payload also carries cumulative `llm_duration_ms`, `llm_steps`, `tool_duration_ms`, `tool_steps`, `ttft_total_ms`, `ttft_samples`, and `ttft_avg_ms` when observed. Attaching also drains that session's pending background-completion notices as `notification` events (at-most-once; they accumulate while no client is attached). `pending_interactions` (`[{ type, payload }]`, same shape as `initialize`) re-offers the approvals and questions this session's turn raised while the connection was in front of another session, which were routed only to that session's observers. |
 | `agentPreset.list`                   | `{}`                                           | `{ ok, presets, default_id, authorable, has_document }`         | Uncached roster of built-in, user, and project agent compositions; broken presets remain visible with a reason. |
@@ -920,7 +921,19 @@ task narrows the cancel to that child (same ownership rules as
 `subagent.retry`); unnamed, every live child of the session. Interrupted
 handles stay inspectable and retryable. The response carries `ok`, `found`
 (whether a stoppable child was targeted — clients gate the stop UI on it) and
-`interrupted` (how many children were cancelled).
+`interrupted` (how many children were cancelled). Interrupting the parent
+turn (`turn.cancel`) no longer cancels children; the unnamed form of this
+method is the explicit "stop all agents" action (the desktop agents card
+offers it while agents are working). Session eviction and daemon shutdown
+still cancel a session's children.
+
+Steering wakes blocking waits. A `turn.steer` that lands while the turn is
+blocked in a wait-only tool (`AwaitAgents`, `check_command` with `wait_ms`,
+`computer_use` `wait`) or in the end-of-turn wait for background agents ends
+that wait early. The steer is applied (`steer_applied`) at the next model round
+of the same turn. Running commands and agents are not stopped. `AwaitAgents`
+reports the additive `wake_reason: "steer"`. A steer is saved for the next turn
+only when the turn has really ended.
 Model-tool `SendMessageTool` queues input for running native children and continues
 finished or interrupted open children under the same identity and saved history.
 Recovered children follow the same path with existing workspace, provider-route,
