@@ -48,6 +48,8 @@ import { createNodeShareDeps, createShareRegistry, shareRemoteWorkspace, type Hu
 import { createMacPermissions, registerMacPermissionsIpc } from './main/macPermissions.js'
 import { electronMacPermissionsPort } from './main/macPermissionsPort.js'
 import { MAC_PERMISSIONS_STATE_EVENT } from './macPermissionsShared.js'
+import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from './chatMediaShared.js'
+import { readLocalChatImage, readRemoteChatImage } from './main/chatMedia.js'
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -137,10 +139,10 @@ const workspaceFile = (): string => join(xerxesHome(), 'desktop.json')
 // Shares connected SSH workspaces with the linked Hub as a last-resort route. Created on first use.
 let hubShareDeps: HubShareDeps | null = null
 const hubShareDepsOf = (): HubShareDeps => (hubShareDeps ??= createNodeShareDeps({ home: xerxesHome(), cli: createCliRunner(process.env, homedir()) }))
-
-function loadWorkspace(): string | null {
 // One relay per host label across every window and view (see createShareRegistry).
 const shareWithHub = createShareRegistry(input => shareRemoteWorkspace(hubShareDepsOf(), input))
+
+function loadWorkspace(): string | null {
   // Legacy fallback for installations without a saved window layout.
   try {
     const raw = readFileSync(workspaceFile(), 'utf8')
@@ -817,6 +819,25 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       throw new Error('preset path must be a child of the Xerxes user agent directory')
     }
     return (await shell.openPath(candidate)) === ''
+  })
+  // Chat links: only http, https and mailto reach the system browser.
+  handle(OPEN_EXTERNAL_CHANNEL, async (_event, value: unknown) => {
+    const url = externalUrlOf(value)
+    if (!url) throw new TypeError('Only http, https and mailto links can be opened')
+    await shell.openExternal(url)
+    return true
+  })
+  // Chat images as data URLs (the page's CSP has no file: or web origin).
+  // An SSH workspace's files are read by its runtime, never from this disk.
+  handle(IMAGE_DATA_CHANNEL, async (_event, value: unknown) => {
+    const request = chatImageRequestOf(value)
+    if ('error' in request) return { ok: false, error: request.error }
+    if (remoteMachine) {
+      const rpc = daemon
+      if (!rpc) return { ok: false, error: 'the SSH workspace is not connected' }
+      return readRemoteChatImage(request, (method, params) => rpc.call(method, params))
+    }
+    return readLocalChatImage(request.path, request.cwd ?? selectedWorkspace)
   })
   handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown, existingOnly?: unknown) => {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')

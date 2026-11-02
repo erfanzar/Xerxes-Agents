@@ -241,6 +241,7 @@ import type { ReactionMailbox, ReactionClaim, ReactionUsage } from "../runtime/r
 import type { RunHistory, RunRecord } from "../runtime/runHistory.js";
 import type { TerminalMonitors, MonitorSummary, MonitorEvent } from "../runtime/terminalMonitors.js";
 import { looksLikeSessionId, transcriptHasHistory } from "../session/daemonTranscript.js";
+import { subagentHistoryPayload } from "./subagentHistory.js";
 import {
   describeTranscriptRepair,
   summarizeTranscriptRepair,
@@ -3594,13 +3595,28 @@ export class DaemonServer {
       if (!saved) return { ok: false, error: "Agent is not available in this session. Refresh its activity or reconnect to its parent task." };
       const panel = subagentSnapshotPanelPayloads(session.metadata).find(row => row.id === task)!;
       // Inspect only this parent's retained child evidence, never arbitrary metadata or provider config.
-      return { ok: true, agent: { ...panel,
+      const agent = { ...panel,
         prompt: typeof saved.last_input === 'string' ? saved.last_input.slice(0, 16_000) : '',
         output: typeof saved.last_output === 'string' ? saved.last_output.slice(0, 16_000) : '',
         // The saved text is an excerpt: the agent's output ran past what is kept.
         ...(saved.last_output_truncated === true || (typeof saved.last_output === 'string' && saved.last_output.length > 16_000) ? { output_truncated: true } : {}),
         retained: true,
-      } };
+      };
+      // Opt-in, additive: a page of the child's own saved conversation. Older
+      // clients never send `history_limit` and receive the response unchanged.
+      const requestedHistory = historyLimit(params.history_limit);
+      if (requestedHistory === undefined) return { ok: true, agent };
+      if (!requestedHistory) throw new ValidationError('history_limit', 'history pages need at least one action', requestedHistory);
+      return { ok: true, agent, ...(await subagentHistoryPayload({
+        directory: this.sessionArchiveDirectory,
+        projectDirectory: session.cwd,
+        parentSessionId: session.id,
+        task,
+        saved,
+        limit: requestedHistory,
+        before: params.before,
+        project: messages => projectTranscriptForPayload(messages).messages,
+      })) };
     }
     if (method === "subagent.retry") {
       const task =

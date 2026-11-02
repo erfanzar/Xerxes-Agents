@@ -9,7 +9,37 @@ import { Shell } from '../../../src/desktop/renderer/App.js'
 import { BlockBuilder, blocksFromStoredMessages } from '../../../src/desktop/renderer/blocks.js'
 import { foldAgentEvent } from '../../../src/desktop/renderer/agentEvents.js'
 import { store, type Snapshot } from '../../../src/desktop/renderer/store.js'
-import type { TerminalDetail, XerxesBridge } from '../../../src/desktop/renderer/types.js'
+import type { DaemonEvent, TerminalDetail, XerxesBridge } from '../../../src/desktop/renderer/types.js'
+
+// A running sub-agent with a whole saved conversation (agent-0, first in the
+// Activity rail): replies, reasoning, commands, an edit and a failed test.
+// Opening it subscribes to live events; a few more steps then stream in.
+const fixtureListeners=new Set<(event:DaemonEvent)=>void>()
+const fixtureAgentId='agent-0'
+let fixtureAgentStep=0
+const agentSay=(content:string,thinking?:string)=>({id:`${fixtureAgentStep++}:message`,messages:[{role:'assistant',content}],executions:[],thinking:thinking?[thinking]:[]})
+const agentCall=(id:string,name:string,args:unknown,result?:string,ms=400)=>({id:`${fixtureAgentStep++}:tool:0`,messages:[{role:'assistant',content:'',tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]},...(result===undefined?[]:[{role:'tool',tool_call_id:id,content:result}])],executions:[{toolCallId:id,name,durationMs:ms}],thinking:[]})
+const fixtureAgentActions:Array<{id:string;messages:unknown[];executions:unknown[];thinking:unknown[]}>=[
+  {id:`${fixtureAgentStep++}:message`,messages:[{role:'user',content:'Inspect transport cancellation and reconnect behavior. Fix the reconnect path if it drops the saved session.'}],executions:[],thinking:[]},
+  agentSay('I’ll start by reading the reconnect controller and its tests.','The task is about cancellation dropping the saved session. First find where reconnect resolves the session id.'),
+  agentCall('ag-grep','exec_command',{cmd:'rg',args:['-n','resumeSession','src/runtime/transport']},JSON.stringify({command:['rg','-n','resumeSession','src/runtime/transport'],stdout:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts:14:  if (retry.ready) resumeSession(session.id)\n',stderr:'',exitCode:0,cwd})),
+  agentCall('ag-read','ReadFile',{file_path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts'},'export async function reconnect(signal: AbortSignal) {\n  const connection = await connect({ signal });\n  return connection;\n}\n',120),
+  agentSay('`reconnect` returns before the session is restored, so a cancelled retry loses it. I’ll keep the session id across the retry.','Edit the controller so the session id is passed through, then run the recovery tests.'),
+  agentCall('ag-edit','FileEditTool',{file_path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts',old_string:'  const connection = await connect({ signal });\n  return connection;',new_string:'  const connection = await connect({ signal, sessionId });\n  if (connection.ready) await resumeSession(sessionId);\n  return connection;'},'Applied 1 replacement(s) to src/runtime/transport/connections/recovery/session-reconnect-controller.ts.',80),
+  agentCall('ag-test','exec_command',{cmd:'bun',args:['test','src/runtime/transport/connections/recovery']},JSON.stringify({command:['bun','test','src/runtime/transport/connections/recovery'],stdout:'(fail) reconnect > keeps the saved session after cancel\n\n 7 pass\n 1 fail\n',stderr:'error: expect(received).toBe(expected)\nExpected: "session-0"\nReceived: undefined\n',exitCode:1,cwd}),2300),
+  agentSay('One test still fails: `sessionId` is not in scope inside `reconnect`. I’ll add it as a parameter and run the suite again.'),
+]
+const fixtureAgentHistory=()=>({actions:[...fixtureAgentActions],has_more:false,before:null,total_actions:fixtureAgentActions.length})
+const emitAgentEvent=(type:string,payload:Record<string,unknown>)=>{for(const listener of fixtureListeners)listener({type:'subagent_event',payload:{agent_id:fixtureAgentId,title:'Inspect transport cancellation and reconnect behavior',event:{type,payload}}})}
+let fixtureAgentLive=false
+const startFixtureAgentLive=()=>{
+  if(fixtureAgentLive)return
+  fixtureAgentLive=true
+  const think='The parameter is missing; thread it from the caller.', reply='Adding `sessionId` to `reconnect` and re-running the recovery suite.'
+  const args={cmd:'bun',args:['test','src/runtime/transport/connections/recovery']}
+  setTimeout(()=>{emitAgentEvent('think_part',{think});emitAgentEvent('text_part',{text:reply,text_full:reply});fixtureAgentActions.push(agentSay(reply,think))},900)
+  setTimeout(()=>{emitAgentEvent('tool_call',{id:'ag-rerun',name:'exec_command',arguments:'bun test …',arguments_full:JSON.stringify(args)});fixtureAgentActions.push(agentCall('ag-rerun','exec_command',args))},1800)
+}
 
 const patch = (value: Partial<Snapshot>) => { const port = store as unknown as { patch(value: Partial<Snapshot>): void; builder: { reset(blocks: Snapshot['blocks']): void }; turnCount: number }; if(value.blocks) port.builder.reset(value.blocks); if(value.turnCount !== undefined) port.turnCount=value.turnCount; port.patch(value) }
 let fixtureFolderAttempts=0
@@ -23,7 +53,7 @@ const skills=Array.from({length:167},(_,i)=>({name:`workspace-review-${String(i+
 let schedules=Array.from({length:12},(_,i)=>({id:`schedule-${i}`,prompt:`Review workspace ${i+1}: ${long}`,schedule:'0 8 * * 1-5',timezone:'UTC',paused:i%3===0,execution_state:'idle',next_run_at:'2026-09-14T08:00:00Z',revision:1}))
 const scheduledRuns=Array.from({length:8},(_,i)=>({id:`run-${i}`,ownerSessionId:'session-0',sourceId:'schedule-0',workspace:cwd,kind:i%2===0?'schedule':'terminal',revision:1,unread:true,title:'Review workspace '+(i+1),state:i===0?'running':i%3===0?'failed':'succeeded',startedAt:Date.UTC(2026,8,12-i,8),error:i%3===0?'Provider configuration is missing a model.':null,output:Array.from({length:120},(_,line)=>`  Step ${line+1}: checked workspace state`).join('\n'),outputTruncated:false,exitCode:i%3===0?1:0}))
 const base: Partial<Snapshot>={connection:'online',cwd,model:'fixture/model-long-context',currentId:'session-0',sessionKey:'session-0',currentTitle:'Review the desktop workspace',sessions:Array.from({length:40},(_,i)=>session(i)),models:Array.from({length:60},(_,i)=>({id:`fixture/model-${String(i).padStart(2,'0')}-long-context`,provider:'Fixture'})),reasoningEffort:'high',reasoningLevels:['low','medium','high','xhigh'].map(effort=>({effort,label:effort})),permissionMode:'ask',goal:`Objective: ${long.repeat(5)}\nStatus: active\nRounds: 4`,fleet:Array.from({length:8},(_,i)=>({...session(i),id:`agent-${i}`,title:['Inspect transport cancellation and reconnect behavior','Review session persistence across workspace changes','Audit file navigation and deeply nested project paths','Verify model selection and effort menu keyboard access','Check the composer with a long multiline draft','Inspect streaming and recoverable provider errors','Review settings and onboarding affordances','Check the large diff and code review gutters'][i]!,kind:'subagent',turns:0,status:i<3?'working':'done',age:''})),commands:[{name:'help',description:'Show available commands'},{name:'goal',description:'Manage the task objective'},{name:'skill',description:'Run a workspace skill'}],turnCount:4,contextTokens:62100,contextMax:262144,llmSteps:24,toolSteps:48,llmDurationMs:465000,toolDurationMs:170000,ttftMs:5900,tokensPerSecond:99.6,cacheHitRate:0.5,inputTokens:123000,daemonWarning:null,noWorkspace:false}
-const blocks: Snapshot['blocks']=[{kind:'user',id:1,text:long+'\n\n'+long+'\n\nConfirm the result with populated states.'},{kind:'agent',id:2,text:'The layout keeps navigation independent of the conversation.\n\nI am checking the following behaviors:\n\n- Persistent sidebar widths\n- Full-width multiline composer\n- File selection and code review\n\n```ts\nconst retry = await transport.reconnect({ signal });\nif (retry.ready) resumeSession(session.id);\n```\n\nAuthentication and certificate errors remain visible.',streaming:false}]
+const blocks: Snapshot['blocks']=[{kind:'user',id:1,text:long+'\n\n'+long+'\n\nConfirm the result with populated states.'},{kind:'agent',id:2,text:'The layout keeps navigation independent of the conversation.\n\nI am checking the following behaviors:\n\n- Persistent sidebar widths\n- Full-width multiline composer\n- File selection and code review\n\n```ts\nconst retry = await transport.reconnect({ signal });\nif (retry.ready) resumeSession(session.id);\n```\n\nAuthentication and certificate errors remain visible.',streaming:false},{kind:'agent',id:3,text:'Chat media check (synthetic): the capture below opens larger when clicked.\n\n![Gradient capture](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAQCAAAAABSayKFAAAAMElEQVR42mOQU9E2tLBz9Q6KiE/NLqqob+2ZNHP+0jWbdu4/dubyzQfPGEYVjCQFAOTZBBBEiOEqAAAAAElFTkSuQmCC)\n\nRead [the Bun docs](https://bun.sh/docs) or https://example.com/guide, and open [the runner](src/streaming/loop.ts:42) in Files.\n\n![Missing file](out/missing.png)',streaming:false}]
 blocks.push(
   {kind:'thinking',id:3,text:'Inspecting deeply nested transport code before changing reconnect behavior.',streaming:false},
   {kind:'tools',id:4,running:false,items:[{id:'fixture-exec',verb:'exec_command',name:'exec_command',arg:'sed -n 10,30p src/runtime/transport/connections/recovery/session-reconnect-controller.ts',state:'done',dur:'0.0s',input:JSON.stringify({cmd:'sed',args:['-n','10,30p','src/runtime/transport/connections/recovery/session-reconnect-controller.ts']}),output:JSON.stringify({command:['sed','-n','10,30p','src/runtime/transport/connections/recovery/session-reconnect-controller.ts'],stdout:'export async function reconnect(signal: AbortSignal) {\n  const connection = await connect({ signal });\n  return connection;\n}\n',stderr:'',exitCode:0,cwd})}]},
@@ -46,7 +76,7 @@ let contextRevision=1
 const contextControls=new Map<string,{pinned:boolean;excluded:boolean}>()
 let lspRevision=1
 let lspServers=[{name:'typescript',enabled:true,languageId:'typescript',extensions:['.ts','.tsx'],timeoutMs:30000,configuredFields:['command','args']}]
-const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,params:Record<string,unknown>={}) {
+const bridge: XerxesBridge={onEvent:handler=>{fixtureListeners.add(handler);return()=>{fixtureListeners.delete(handler)}},async call<T>(method:string,params:Record<string,unknown>={}) {
   let result:unknown={ok:false,error:`Fixture does not implement ${method}`}
   if(method==='complete') {const query=String(params.text||'');result={completions:query.startsWith('./') ? [{label:'src/',value:'./src/',meta:'dir'},{label:'session-reconnect-controller.ts',value:'./src/runtime/transport/connections/recovery/session-reconnect-controller.ts',meta:'file'},{label:'unavailable.txt',value:'./unavailable.txt',meta:'file'}] : skills.filter(s=>s.name.includes(query.replace('/skill ','').replace('/',''))).map(s=>({label:s.name,value:`/skill ${s.name}`,meta:s.description}))}}
   else if(method==='monitor.list')result={ok:true,monitors:monitorRows}
@@ -190,6 +220,11 @@ const bridge: XerxesBridge={onEvent:()=>()=>{},async call<T>(method:string,param
   else if(method==='subagent.inspect'){
     await new Promise(resolve=>setTimeout(resolve,params.task==='live-0'?180:30))
     result=fixtureAgentError?{ok:false,error:'Agent detail read failed. Retry.'}:{ok:true,agent:{id:params.task,agent_id:'reviewer',model:'fixture/model',provider_profile:'work-profile',reasoning_effort:'high',prompt:'Review cancellation, session persistence and reconnect handling without changing unrelated work.',output:'Review started.\nInspected src/runtime/session.ts\nCancellation retains the saved transcript.\n'+Array.from({length:80},(_,i)=>'Evidence '+(i+1)+': verified boundary').join('\n')}}
+    // Only agent-0 reports its own conversation; the others keep the retained-summary view.
+    if(!fixtureAgentError&&params.task===fixtureAgentId&&params.history_limit!==undefined){
+      result={...(result as Record<string,unknown>),history_session_id:'abcdef0123456789',history:fixtureAgentHistory()}
+      startFixtureAgentLive()
+    }
   }
   else if(method==='terminal.inspect')result=fixtureCommandError?{ok:false,error:'Command output is temporarily unavailable. Retry.'}:{ok:true,terminal:fixtureTerminal}
   else if(method==='terminal.control'){

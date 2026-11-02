@@ -14,6 +14,7 @@ import type { WorkspaceContext } from '../main/contextNavigation.js'
 import type { ReflectionNotice } from './learning.js'
 import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
 import type { MacPermissionAction, MacPermissionsState } from '../macPermissionsShared.js'
+import type { ChatImageRequestWire, ChatImageResult } from '../chatMediaShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -81,6 +82,10 @@ export interface XerxesBridge {
   setLoginItem?(on: boolean): Promise<boolean>
   /** Reveal a daemon-resolved local preset directory in the OS file browser. */
   openPath?(path: string): Promise<boolean>
+  /** Open an http, https or mailto link in the system browser or mail app (see chatMediaShared.ts). */
+  openExternal?(url: string): Promise<boolean>
+  /** An image file the chat shows, read by the host and returned as a data URL, or the reason it cannot be. */
+  imageData?(request: ChatImageRequestWire): Promise<ChatImageResult>
 }
 
 declare global {

@@ -960,9 +960,26 @@ callers must report that rather than implying the message landed.
 the selected parent's retained manifest. It returns `{ok, agent}` with the same
 identity/status/configuration fields as `subagent_snapshots`, plus bounded
 `prompt` and `output` strings (at most 16,000 characters each) and `retained: true`.
-This is saved evidence, not a complete live child transcript. Missing or foreign
-children return `{ok:false,error}`; inspection does not start, resume, or cancel
-work. Provider configuration and arbitrary manifest metadata are excluded. The
+Without `history_limit` the response is exactly that and is saved evidence, not
+a transcript. Missing or foreign children return `{ok:false,error}`; inspection
+does not start, resume, or cancel work.
+
+Additive and opt-in: `subagent.inspect {task, history_limit, before?}` (limit
+1–100, cursor as for `session.history`) also returns one page of the child's own
+saved conversation, read without writing from its `history_session_id`
+transcript: `{ok, agent, history_session_id, history: {actions, has_more, before,
+total_actions, clipped?}}`. `actions` have the `session.history` shape, so a
+client renders them with its main-transcript fold. The page is bounded: every
+text (reply, reasoning, call arguments, tool result) is clipped to 32,000
+characters (`clipped: true` marks it) and the action count halves until the page
+serializes within 512 KiB. Execution records omit `result` (the tool message
+carries it). Tool calls still in flight at the end of a running child's
+checkpoint stay unanswered rather than showing a resume sentinel. When the child
+saved no conversation, the file is unreadable, or it names a different child or
+parent, the reply is `{ok:true, agent, history:null, history_note}` so the rest
+of the inspection still renders. A daemon that predates this field omits
+`history`; clients fall back to the retained summary view. Live progress keeps
+arriving as `subagent_event`. Provider configuration and arbitrary manifest metadata are excluded. The
 ordinary parent snapshot continues to omit child prompt and output bodies.
 Desktop agent rows open this inspector, preserve reported base-agent and explicit
 provider/effort assignments, and keep pending spawn requests distinguishable from

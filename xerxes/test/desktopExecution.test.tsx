@@ -6,7 +6,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ExecutionDetails, executionView, ToolCallRow } from '../src/desktop/renderer/Execution.js'
 import { activityFleetRows, AgentRoster } from '../src/desktop/renderer/AgentRoster.js'
-import { AgentInspector } from '../src/desktop/renderer/AgentInspector.js'
+import { AgentDetailsCard, AgentInspector } from '../src/desktop/renderer/AgentInspector.js'
 import { CommandActivity } from '../src/desktop/renderer/CommandActivity.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
@@ -22,8 +22,11 @@ test('rejected spawn evidence replaces stale pending status without mislabelling
   expect(rows[0]).toMatchObject({status:'failed',agentDetails:{error:failure,model:member.model,providerProfile:'zai'}})
   expect(rows[1]?.status).toBe('starting')
   const html=renderToStaticMarkup(createElement(AgentInspector,{row:rows[0]!,rows,sessionKey:'parent',online:true}))
-  expect(html).toContain('Requested model')
-  expect(html).toContain('glm-5.3-flash')
+  // The requested settings live in the rail's agent card; the pane is the chat and says why nothing ran.
+  const card=renderToStaticMarkup(createElement(AgentDetailsCard,{row:rows[0]!,rows,sessionKey:'parent'}))
+  expect(card).toContain('Requested model')
+  expect(card).toContain('glm-5.3-flash')
+  expect(card).not.toContain('Not assigned yet')
   expect(html).toContain('spawn request failed')
   expect(html).not.toContain('Waiting for the runtime')
   expect(html).not.toContain('Not assigned yet')
@@ -94,10 +97,12 @@ test('an agent\'s tool calls are folded behind one closed header and not rendere
   expect(html).toContain('>100<')
   expect(html).toContain('1 running')
   expect(html).not.toContain('unique-target-0')
-  // The inspector and roster both use the folded section.
+  // The inspector draws retained calls as the chat's closed work group, rows unbuilt until opened.
+  // Offline, so no first read is pending (while one is, the pane shows only the task).
   const row: SessionRow = { id: 'a', key: 'a', title: 'Busy agent', status: 'running', age: '', current: false, kind: 'subagent', turns: 0, messages: 0, cwd: '', untitled: false, agentDetails: { toolCalls: calls } }
-  const inspector = renderToStaticMarkup(createElement(AgentInspector, { row, rows: [row], sessionKey: 'parent', online: true }))
-  expect(inspector).toContain('class="toolcalls"')
+  const inspector = renderToStaticMarkup(createElement(AgentInspector, { row, rows: [row], sessionKey: 'parent', online: false }))
+  expect(inspector).toContain('class="activity-group')
+  expect(inspector).not.toContain('<details class="activity-group is-running" open')
   expect(inspector).not.toContain('unique-target-0')
 })
 test('execution decodes output line breaks and safely displays argument boundaries', () => {

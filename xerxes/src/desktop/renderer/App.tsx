@@ -28,7 +28,8 @@ import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPh
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
-import { AgentInspector } from './AgentInspector.js'
+import { AgentDetailsCard, AgentInspector } from './AgentInspector.js'
+import { AgentMenu } from './AgentSwitcher.js'
 import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { RelayBadge } from './RelayBadge.js'
@@ -190,7 +191,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // dock below and the CSS cannot disagree about when .chat is gone.
   // Git sits in the rail like the others; only its expanded diff view takes the window.
   const contextFull = Boolean(rail && (filesExpanded || contextRequiresFullWidth))
-  const chatHidden = { contextFull, any: contextFull }
+  // An open sub-agent takes the conversation's place, composer and cards included.
+  const agentOpen = page === null && Boolean(selectedAgent)
+  const chatHidden = { contextFull, any: contextFull || agentOpen }
   // The divider must never be draggable past the width that hides the
   // divider itself — the old max let a persisted value strand the rail
   // over the whole window with no control able to shrink it again.
@@ -201,11 +204,13 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'files' && filePath) setFilesTarget(target => ({ path: filePath, count: target.count + 1 }))
     // A link to one file's changes opens straight into the diff view.
     if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
-    if (next === 'activity') setSelectedAgent(filePath ?? '')
+    // An agent opens in the conversation's place (DeepSeek Harness's layout);
+    // the rail stays as it was.
+    if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
-    else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null) }
-    else if (next === null) { setPage(null); setPanel(null); store.closeLearning() }
+    else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
+    else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
   }
   useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
@@ -220,9 +225,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         <Sidebar snap={snap} page={page} />
         {narrow && narrowNavigation && <div className="side-scrim" aria-hidden="true" onClick={() => setNarrowNavigation(false)} />}
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
-        {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} /></ErrorBoundary>}
+        {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail activityFocused={Boolean(selectedAgent)} panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={selectedAgent} />} /></ErrorBoundary>}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which
@@ -928,9 +933,15 @@ function SessionCell({
 
 
 
-function Chat({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
+function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot; page: DesktopPageName | null; agent?: string; openAgent?: (id: string) => void }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
+  // DeepSeek Harness's layout: the header counts the task's sub-agents and
+  // switches between them; an open one replaces the conversation below.
+  const fleet = useMemo(() => activityFleetRows(snap.fleet, snap.blocks), [snap.fleet, snap.blocks])
+  const agentRow = agent ? fleet.find(row => row.id === agent || row.agentDetails?.requestKey === agent) : undefined
+  const working = fleet.filter(row => agentState(row.status).priority < 2).length
+  const taskTitle = snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')
   const changes = snap.changes
   const totals = useMemo(() => ({
     adds: changes.reduce((sum, file) => sum + file.adds, 0),
@@ -946,11 +957,16 @@ function Chat({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }):
     <main className="chat">
       <header className="chat__head chat__head--minimal">
         {!chrome.sidebarVisible && <SidebarToggle />}
-        <span className="chat__title">{page ? PAGE_TITLES[page] : (snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected'))}</span>
-        {!onPage && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
+        {agent && !onPage ? <nav className="agent-crumb" aria-label="Sub-agent">
+          <button className="agent-crumb__parent" title="Back to the task's conversation" onClick={() => openAgent('')}>{taskTitle}</button>
+          <span className="agent-crumb__sep" aria-hidden="true">/</span>
+          <AgentMenu rows={fleet} {...(agentRow ? { currentId: agentRow.id } : {})} label={agentRow?.title ?? 'Agent'} title="Switch agent" onPick={openAgent} />
+        </nav> : <span className="chat__title">{page ? PAGE_TITLES[page] : taskTitle}</span>}
+        {!onPage && !agent && fleet.length > 0 && <AgentMenu variant="count" rows={fleet} label={<>{fleet.length} agent{fleet.length === 1 ? '' : 's'}{working > 0 && <span className="agent-menu__live">{working} working</span>}</>} title="Open a sub-agent" onPick={openAgent} />}
+        {!onPage && !agent && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
-        {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null) }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
+        {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null); if (agent) openAgent('') }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
         {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
         {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
           Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
@@ -961,7 +977,13 @@ function Chat({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }):
 
       {page === 'xerxes' && <SupervisorPage />}
       {page && page !== 'xerxes' && <DesktopPage panel={page} snap={snap} />}
-      <div className="conversation-surface" hidden={page !== null}>
+      {agent && !onPage && (agentRow
+        ? <AgentInspector key={snap.sessionKey + ':' + agentRow.id} row={agentRow} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} />
+        : <section className="agent-inspector agent-pane" aria-label="Agent inspector"><div className="stream"><div className="stream__col">
+            <p role="status">This agent is no longer available in this session.</p>
+            <button className="btn" onClick={() => openAgent('')}>Back to the conversation</button>
+          </div></div></section>)}
+      <div className="conversation-surface" hidden={page !== null || Boolean(agent)}>
       {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
       {snap.tab === 'activity' && <Stream snap={snap} />}
       {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
@@ -970,7 +992,7 @@ function Chat({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }):
 
       </div>
       {/* Hidden, not unmounted, so a half-typed task message survives a visit to a page. */}
-      <div className="chat__composer-host" hidden={onPage}><Composer snap={snap} /></div>
+      <div className="chat__composer-host" hidden={onPage || Boolean(agent)}><Composer snap={snap} /></div>
     </main>
   )
 }
@@ -1225,7 +1247,7 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
   )
 }
 
-function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['blocks']; active: boolean; turnActive: boolean }): ReactElement {
+export function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['blocks']; active: boolean; turnActive: boolean }): ReactElement {
   const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
   const failures = tools.filter(toolHasFailed).length + blocks.filter(block => block.kind === 'notice' && block.error).length + blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'failed').length : 0), 0)
   const liveAgents = blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'working' || member.status === 'running').length : 0), 0)
@@ -1331,7 +1353,7 @@ function RunnableReply({ text, streaming }: { text: string; streaming: boolean }
 
 // Memoized: the turn clock re-renders the conversation every second, and an
 // unchanged block (same object) has nothing new to draw.
-const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
+export const BlockView = memo(function BlockView({ block }: { block: Snapshot['blocks'][number] }): ReactElement {
   if (block.kind === 'reflection') return <ConnectedReflectionCard reflection={block.reflection} />
   if (block.kind === 'agents') {
     return <AgentsCard members={block.members} />
@@ -2217,13 +2239,12 @@ function GoalObjective({ text }: { text: string }): ReactElement {
 export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; selectedAgent?: string }): ReactElement | null {
   const navigate = useDesktopNavigation()
   const fleet = activityFleetRows(snap.fleet, snap.blocks)
-  if (selectedAgent) {
-    const row = fleet.find(agent => agent.id === selectedAgent || agent.agentDetails?.requestKey === selectedAgent)
-    return <section className="agent-inspector"><button className="agent-inspector__back" onClick={() => navigate('activity')}><Icon name="arrow" size={12} /> All activity</button>{row ? <AgentInspector key={snap.sessionKey + ':' + row.id} row={row} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> : <p role="status">This agent is no longer available in this session. Return to activity to refresh its status.</p>}</section>
-  }
   const goal = parseGoal(snap.goal)
+  // The agent open in the conversation's place: its details live here, not in its chat.
+  const openAgent = selectedAgent ? fleet.find(row => row.id === selectedAgent || row.agentDetails?.requestKey === selectedAgent) : undefined
   return (
     <aside className="activity-details">
+      {openAgent && <AgentDetailsCard key={openAgent.id} row={openAgent} rows={fleet} sessionKey={snap.sessionKey} />}
       {/* Zone 1 — always populated, always first. The rail used to open on
           ten collapsed sections, so it looked identical whether the agent
           was idle, running three subagents, or had failed. */}

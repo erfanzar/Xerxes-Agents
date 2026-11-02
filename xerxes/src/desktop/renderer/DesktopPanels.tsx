@@ -152,14 +152,13 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget, activityFocused = false }: {
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget }: {
   /** A file to open in Files; a new `count` opens it again. */
   filesTarget?: { readonly path: string; readonly count: number }
   panel: RailPanel; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
   /** Present when the window is wide enough to choose between rail and full width. */
   setExpanded?: (value: boolean) => void
   reviewPath?: string
-  activityFocused?: boolean
 }): ReactElement {
   const open = useDesktopNavigation()
   // Without the toggle the window is too narrow for a side rail: it is already full width.
@@ -194,7 +193,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
-      {panel === 'activity' && <>{activityDetails}{!activityFocused && <ActivityPanel snap={snap} />}</>}
+      {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
     </div>
   </aside>
 }

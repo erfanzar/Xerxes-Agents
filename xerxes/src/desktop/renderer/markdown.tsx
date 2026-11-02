@@ -6,18 +6,22 @@
  *
  * The renderer is sandboxed-renderer friendly: it produces React elements
  * only — no HTML parsing, no dangerouslySetInnerHTML — so agent-authored
- * markdown can never inject markup into the desktop shell. Links render as
- * anchors that never navigate (the shell has no external opener; a click
- * would point the whole window at a URL), and fenced code renders as a
- * bordered pre block in the shell's flat mono style.
+ * markdown can never inject markup into the desktop shell. Links never
+ * navigate the window: http, https and mailto open in the system browser
+ * through the host, file paths open in the Files panel, anything else is
+ * inert text (chatLinks.tsx). Images load as data URLs through the host's
+ * validated read (ImageView.tsx). Fenced code renders as a bordered pre
+ * block in the shell's flat mono style.
  */
 
 import type { ReactElement, ReactNode } from 'react'
 import { Fragment, memo, useContext, useEffect, useRef, useState } from 'react'
 
+import { ChatLink, autolinked } from './chatLinks.js'
 import { CodeRunContext, commandOf, isRunnableBlock } from './codeRun.js'
 import { CopyButton } from './CopyButton.js'
 import { Icon } from './Icon.js'
+import { ChatImage } from './ImageView.js'
 
 /** Run beside Copy: types the command into an idle shell of the Terminal tab, or a new one. */
 function RunButton({ code }: { code: string }): ReactElement | null {
@@ -67,46 +71,42 @@ function CodeBlock({ code, language }: { code: string; language: string }): Reac
   )
 }
 
-const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*\))/g
+// code | image `![alt](src "title")` | bold | italic | link `[label](href "title")`
+const INLINE_RE = /(`[^`]+`)|(!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*(?:\s+"[^"]*")?\))/g
+const IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/
+const LINK_RE = /^\[([^\]]+)\]\(([^)\s]*)(?:\s+"[^"]*")?\)$/
 
-/** Never-navigating link: the shell cannot open external targets, so a
- * click is a no-op; the URL stays visible as the title tooltip. */
-function InlineLink({ label, href }: { label: string; href: string }): ReactElement {
-  return (
-    <a
-      className="md__link"
-      href={href}
-      title={href}
-      onClick={event => {
-        event.preventDefault()
-        event.stopPropagation()
-      }}
-    >
-      {label}
-    </a>
-  )
-}
-
-/** Split one line into code / bold / italic / link / plain spans. */
+/**
+ * Split one line into code / image / bold / italic / link / plain spans.
+ * Links open through the host (chatLinks.tsx); bare URLs in plain text
+ * become links too, never inside code.
+ */
 function inlinePieces(line: string): ReactElement[] {
   const pieces: ReactElement[] = []
   let last = 0
   let key = 0
+  const nextKey = (): number => key++
+  const plain = (text: string): void => { pieces.push(<Fragment key={key++}>{autolinked(text, nextKey)}</Fragment>) }
   for (const match of line.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
-    if (start > last) pieces.push(<Fragment key={key++}>{line.slice(last, start)}</Fragment>)
-    const [raw, code, bold, italic, link] = match
+    if (start > last) plain(line.slice(last, start))
+    const [raw, code, image, bold, italic, link] = match
     if (code) pieces.push(<code key={key++}>{code.slice(1, -1)}</code>)
+    else if (image) {
+      const parsed = IMAGE_RE.exec(image)
+      if (parsed) pieces.push(<ChatImage key={key++} alt={parsed[1] ?? ''} src={parsed[2] ?? ''} />)
+      else plain(raw)
+    }
     else if (bold) pieces.push(<strong key={key++}>{bold.slice(2, -2)}</strong>)
     else if (italic) pieces.push(<em key={key++}>{italic.slice(1, -1)}</em>)
     else if (link) {
-      const parsed = /^\[([^\]]+)\]\(([^)\s]*)\)$/.exec(link)
-      if (parsed) pieces.push(<InlineLink key={key++} label={parsed[1] ?? ''} href={parsed[2] ?? ''} />)
-      else pieces.push(<Fragment key={key++}>{raw}</Fragment>)
+      const parsed = LINK_RE.exec(link)
+      if (parsed) pieces.push(<ChatLink key={key++} label={parsed[1] ?? ''} href={parsed[2] ?? ''} />)
+      else plain(raw)
     }
     last = start + raw.length
   }
-  if (last < line.length) pieces.push(<Fragment key={key++}>{line.slice(last)}</Fragment>)
+  if (last < line.length) plain(line.slice(last))
   return pieces
 }
 
