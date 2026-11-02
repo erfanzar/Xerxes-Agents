@@ -104,7 +104,55 @@ export function createNodeShareDeps(options: { readonly home: string; readonly c
   }
 }
 
-export function shareRemoteWorkspace(deps: HubShareDeps, input: { readonly label: string; readonly localSocket: string }): HubShareHandle {
+export interface ShareInput { readonly label: string; readonly localSocket: string }
+
+/**
+ * One relay per Hub socket name across the whole app. Two windows or views on the same host
+ * used to start two shares of `mac-relay-<label>.sock`; each reconnect loop removed the socket
+ * before binding, so they kept taking it from each other and the Hub reconnected over and over.
+ * The first connection owns the relay. Later ones wait; when the owner closes, the oldest
+ * waiting connection takes over, after the owner's cleanup has removed its socket.
+ */
+export function createShareRegistry(start: (input: ShareInput) => HubShareHandle): (input: ShareInput) => HubShareHandle {
+  interface Entry { readonly input: ShareInput; handle: HubShareHandle | undefined; closed: boolean }
+  const queues = new Map<string, Entry[]>()
+  const handoffs = new Map<string, Promise<void>>()
+  const promote = (slug: string): void => {
+    const next = queues.get(slug)?.find(entry => !entry.closed)
+    if (next && next.handle === undefined) next.handle = start(next.input)
+  }
+  return input => {
+    const slug = shareSlug(input.label)
+    const queue = queues.get(slug) ?? []
+    queues.set(slug, queue)
+    const entry: Entry = { input, handle: undefined, closed: false }
+    const owner = queue.find(row => !row.closed)
+    queue.push(entry)
+    // A takeover in progress finishes its cleanup before anyone else starts.
+    if (owner === undefined && !handoffs.has(slug)) entry.handle = start(input)
+    const ready: Promise<HubShareOutcome> = entry.handle?.ready
+      ?? Promise.resolve({ state: 'skipped', reason: `${input.label} is already relayed to the Hub by another window` })
+    return {
+      ready,
+      async close() {
+        if (entry.closed) return
+        entry.closed = true
+        queue.splice(queue.indexOf(entry), 1)
+        if (queue.length === 0) queues.delete(slug)
+        if (entry.handle === undefined) return
+        const previous = handoffs.get(slug) ?? Promise.resolve()
+        const handoff = previous.then(() => entry.handle!.close()).finally(() => {
+          if (handoffs.get(slug) === handoff) handoffs.delete(slug)
+          promote(slug)
+        })
+        handoffs.set(slug, handoff)
+        await handoff
+      },
+    }
+  }
+}
+
+export function shareRemoteWorkspace(deps: HubShareDeps, input: ShareInput): HubShareHandle {
   const sleep = deps.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
   let closed = false
   let child: ShareProcess | undefined
