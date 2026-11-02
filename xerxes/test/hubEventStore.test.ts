@@ -207,6 +207,24 @@ describe('HubEventStore', () => {
     expect(value.ingest('r1', 'w1', batch([1])).duplicates).toBe(1)
   })
 
+  test('byte retention frees a block below the quota instead of one row per insert', () => {
+    const pad = { pad: 'x'.repeat(1000) }
+    const probePath = path()
+    store(probePath).ingest('r1', 'w1', batch([1], 'upstream-1', pad))
+    const one = new Database(probePath, { readonly: true }).query<{ bytes: number }, []>('SELECT bytes FROM events').get()!.bytes
+    const value = store(':memory:', { retention: { maxBytes: Math.floor(one * 10.5), maxAgeMs: 86_400_000 } })
+    for (let sequence = 1; sequence <= 10; sequence++) value.ingest('r1', 'w1', batch([sequence], 'upstream-1', pad))
+    expect(value.oldestSequence()).toBe(1)
+    // Crossing the quota frees down to 90% of it: two rows, not one.
+    value.ingest('r1', 'w1', batch([11], 'upstream-1', pad))
+    expect(value.oldestSequence()).toBe(3)
+    // The next insert stays under the quota and prunes nothing.
+    value.ingest('r1', 'w1', batch([12], 'upstream-1', pad))
+    expect(value.oldestSequence()).toBe(3)
+    expect(value.read(2, scope).gap).toBeUndefined()
+    expect(value.read(0, scope).gap).toBe('retention')
+  })
+
   test('age retention is driven by the injected clock and persisted floor', () => {
     let time = now
     const filename = path()
