@@ -44,7 +44,7 @@ import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
 import { nodeHubHttp } from './main/hubHttp.js'
 import { connectHubSocket } from './main/hubSocket.js'
 import { createHubStorage } from './main/hubStorage.js'
-import { createNodeShareDeps, shareRemoteWorkspace, type HubShareDeps, type HubShareHandle } from './main/hubShare.js'
+import { createNodeShareDeps, createShareRegistry, shareRemoteWorkspace, type HubShareDeps, type HubShareHandle } from './main/hubShare.js'
 import { createMacPermissions, registerMacPermissionsIpc } from './main/macPermissions.js'
 import { electronMacPermissionsPort } from './main/macPermissionsPort.js'
 import { MAC_PERMISSIONS_STATE_EVENT } from './macPermissionsShared.js'
@@ -139,6 +139,8 @@ let hubShareDeps: HubShareDeps | null = null
 const hubShareDepsOf = (): HubShareDeps => (hubShareDeps ??= createNodeShareDeps({ home: xerxesHome(), cli: createCliRunner(process.env, homedir()) }))
 
 function loadWorkspace(): string | null {
+// One relay per host label across every window and view (see createShareRegistry).
+const shareWithHub = createShareRegistry(input => shareRemoteWorkspace(hubShareDepsOf(), input))
   // Legacy fallback for installations without a saved window layout.
   try {
     const raw = readFileSync(workspaceFile(), 'utf8')
@@ -352,7 +354,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   const stopHubShare = () => { void hubShare?.close(); hubShare = null }
   const startHubShare = (label: string, socketPath: string) => {
     stopHubShare()
-    hubShare = shareRemoteWorkspace(hubShareDepsOf(), { label, localSocket: socketPath })
+    hubShare = shareWithHub({ label, localSocket: socketPath })
   }
   let providerForwarding: DesktopProviderForwarding | null = null
   let localProviderDaemon: DaemonRpc | null = null

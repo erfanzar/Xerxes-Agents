@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { shareRemoteWorkspace, shareSlug, shareTunnelArgs, type HubShareDeps, type ShareProcess } from '../src/desktop/main/hubShare.js'
+import { createShareRegistry, shareRemoteWorkspace, shareSlug, shareTunnelArgs, type HubShareDeps, type ShareProcess } from '../src/desktop/main/hubShare.js'
 import type { CliOutcome, CliRunner } from '../src/desktop/main/hubCli.js'
 
 interface Fake {
@@ -106,6 +106,33 @@ test('a forward that never appears on the Hub host fails without attaching', asy
   expect((await handle.ready).state).toBe('failed')
   expect(f.cli).toEqual([])
   await handle.close()
+})
+
+test('two connections to one host share one relay; the second takes over only after the first closes', async () => {
+  const started: string[] = []
+  const closes: string[] = []
+  const shares = createShareRegistry(input => {
+    started.push(input.localSocket)
+    return { ready: Promise.resolve({ state: 'shared', machineId: 'm', attached: 'route', trusted: true }), close: async () => { closes.push(input.localSocket) } }
+  })
+  const first = shares({ label: 'alham', localSocket: '/tmp/a/rpc.sock' })
+  const second = shares({ label: 'alham', localSocket: '/tmp/b/rpc.sock' })
+  const other = shares({ label: 'v5p', localSocket: '/tmp/c/rpc.sock' })
+  expect(started).toEqual(['/tmp/a/rpc.sock', '/tmp/c/rpc.sock'])
+  expect((await second.ready).state).toBe('skipped')
+  await first.close()
+  // The owner's cleanup (which removes the Hub socket) finishes before the takeover starts.
+  expect(closes).toEqual(['/tmp/a/rpc.sock'])
+  expect(started).toEqual(['/tmp/a/rpc.sock', '/tmp/c/rpc.sock', '/tmp/b/rpc.sock'])
+  // Closing a waiting connection never starts or stops anything.
+  const third = shares({ label: 'alham', localSocket: '/tmp/d/rpc.sock' })
+  await third.close()
+  expect(started.length).toBe(3)
+  await second.close(); await other.close()
+  expect(closes).toEqual(['/tmp/a/rpc.sock', '/tmp/b/rpc.sock', '/tmp/c/rpc.sock'])
+  // With every connection gone, the next one starts at once.
+  shares({ label: 'alham', localSocket: '/tmp/e/rpc.sock' })
+  expect(started.at(-1)).toBe('/tmp/e/rpc.sock')
 })
 
 test('labels become safe socket names', () => {
