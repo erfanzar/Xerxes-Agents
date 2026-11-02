@@ -258,6 +258,8 @@ export function registerProcessTools(
       requireRange(optionalInteger(inputs, 'max_output_chars', DEFAULT_MAX_OUTPUT_CHARS), 'max_output_chars', 1, 1_000_000),
       requireRange(optionalInteger(inputs, 'wait_ms', 0), 'wait_ms', 0, MAX_CHECK_WAIT_MS),
       signal,
+      // A steer ends the wait with the progress so far; the command keeps running.
+      context.wakeSignal,
     ),
     'default',
     { concurrencySafe: true, defer: false, destructive: false, openWorld: false, readOnly: true },

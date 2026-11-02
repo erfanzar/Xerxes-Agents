@@ -281,6 +281,11 @@ export interface TurnRunControls {
    * consumed there (they run in a continuation instead).
    */
   drainSteer?(boundary?: 'start' | 'final'): readonly SteerInput[];
+  /**
+   * Aborted once the user steers; reset when the steer is drained. Blocking
+   * waits return early on it so the steer reaches this turn's next round.
+   */
+  steerWake?(): AbortSignal;
   /** Text authored by the user before hidden attachment expansion. */
   readonly displayText?: string;
   /** Validated image attachments carried into the user message as content parts. */
@@ -521,11 +526,13 @@ export interface InMemoryDaemonRuntimeOptions {
   /** Refresh the owning session's manifest when children run outside its turn. */
   readonly refreshSubagents?: (session: DaemonSession) => void;
   /**
-   * Stop the delegated work a session started, because the user interrupted
-   * its turn. Unlike eviction this is a pause, not a reclaim: implementations
-   * must leave the cancelled handles inspectable and retryable.
+   * How many delegated agents of a session are still pending or running.
+   * Interrupting a turn stops only the turn: background agents keep working
+   * and deliver their results to the next turn, and the interrupt notice says
+   * how many are still running. Agents stop through `subagent.interrupt`,
+   * TaskStopTool, session eviction, or daemon shutdown.
    */
-  readonly onTurnCancel?: (sessionId: string) => number | void;
+  readonly runningSubagents?: (sessionId: string) => number;
   /** Host-owned subagent retry port wired to the daemon's subagent host. */
   readonly subagentRetry?: (
     request: SubagentRetryRequest,
@@ -579,8 +586,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly inFlightTurnRunners = new Map<string, TurnRunner>();
   /** Serializes owner cleanup before a reused persisted id can own new commands. */
   private readonly backgroundOwnerCleanups = new Map<string, Promise<void>>();
-  /** Children stopped by the last interrupt, reported once on the turn's settle edge. */
-  private readonly cancelledSubagents = new Map<string, number>();
+  /** Per-session wake for blocking waits; aborted by a steer, replaced once drained. */
+  private readonly steerWakes = new Map<string, AbortController>();
   private readonly directSubagentClaims = new Map<string, () => void>();
   private readonly currentProjectDirectory: string;
   private readonly options: InMemoryDaemonRuntimeOptions;
@@ -715,23 +722,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       // this process's authority to open another round on its own.
       disarmGoal(session.id);
     }
-    // Delegated children run on their own execution boundary: aborting the
-    // parent's signal alone leaves a detached subagent burning tokens and
-    // writing files while every surface already reports the turn stopped.
-    // Cancel them first so the turn's own teardown observes honest child
-    // state, and never let a host-side failure block the parent abort.
-    if (session) {
-      try {
-        const stopped = this.options.onTurnCancel?.(session.id);
-        if (typeof stopped === "number" && stopped > 0) {
-          this.cancelledSubagents.set(sessionKey, stopped);
-        }
-      } catch (error) {
-        console.error(
-          `Cancelling delegated children of session '${session.id}' failed: ${errorMessage(error)}`,
-        );
-      }
-    }
+    // An interrupt stops this turn only. Delegated agents run on their own
+    // execution boundary and keep working; their results reach the next turn
+    // through the session's cohort. They stop through subagent.interrupt,
+    // TaskStopTool, session eviction or daemon shutdown.
     controller.abort(new Error("Turn cancelled"));
     return true;
   }
@@ -785,8 +779,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const inFlightRunner = this.inFlightTurnRunners.get(sessionId);
     if (inFlightRunner && inFlightRunner !== this.turnRunner) inFlightRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
+    this.steerWakes.delete(sessionKey);
     this.pendingDefaultSessions.delete(sessionKey);
-    this.cancelledSubagents.delete(sessionKey);
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
     this.sessions.delete(sessionKey);
@@ -1610,6 +1604,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       }
       queue.push(steer);
       this.steerQueues.set(sessionKey, queue);
+      // Wake any blocking wait so the steer reaches this turn's next round.
+      this.steerWakeController(sessionKey).abort(new Error("Steer received"));
       return true;
     }
     session.messages.push({ ...steerMessage("[steer from user]", steer)! });
@@ -1765,9 +1761,6 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
     session.status = "working";
     session.cancelRequested = false;
-    // A cancel that lands during the previous turn's teardown must not have
-    // its child count reported against this turn.
-    this.cancelledSubagents.delete(sessionKey);
     session.activeTurnId = newSessionId();
     session.lastActive = Date.now();
     const turnRunner = this.turnRunner;
@@ -1876,6 +1869,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: drained.map(steerText), count: drained.length } });
             return drained;
           },
+          steerWake: () => this.steerWakeController(sessionKey).signal,
           displayText,
           afterTurn: start => { afterTurn.push(start); },
           journal: this.messageJournal(session.id, session.cwd),
@@ -1946,20 +1940,26 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           },
         });
       }
-      // Say out loud what the interrupt reached. Delegated work stops on a
-      // boundary the transcript never shows, so without this the user only
-      // sees the parent turn end and has to guess what happened to its
-      // children.
-      const stoppedChildren = this.cancelledSubagents.get(sessionKey) ?? 0;
-      this.cancelledSubagents.delete(sessionKey);
-      if (stoppedChildren > 0) {
-        emitSessionEvent({
-          type: "notification",
-          payload: {
-            level: "info",
-            message: `Interrupt stopped ${stoppedChildren} delegated agent${stoppedChildren === 1 ? "" : "s"}.`,
-          },
-        });
+      // Say out loud what the interrupt reached. It stops the turn only:
+      // delegated agents keep running and report to the next turn, so the
+      // user is told how many are still at work rather than guessing.
+      if (outcome === 'aborted') {
+        let running = 0;
+        try {
+          running = this.options.runningSubagents?.(session.id) ?? 0;
+        } catch (error) {
+          console.error(`Counting delegated agents of session '${session.id}' failed: ${errorMessage(error)}`);
+        }
+        if (running > 0) {
+          emitSessionEvent({
+            type: "notification",
+            payload: {
+              level: "info",
+              message: `Stopped the turn. ${running} agent${running === 1 ? " is" : "s are"} still running.`,
+              running_agents: running,
+            },
+          });
+        }
       }
       // Conversation recency is distinct from file-save recency. Compaction,
       // title changes, and shutdown flushes rewrite the transcript without a
@@ -2044,7 +2044,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private drainSteers(sessionKey: string): readonly SteerInput[] {
     const queued = this.steerQueues.get(sessionKey) ?? [];
     this.steerQueues.delete(sessionKey);
+    // Everything queued is now handed over: later waits block normally again.
+    if (this.steerWakes.get(sessionKey)?.signal.aborted) this.steerWakes.delete(sessionKey);
     return queued;
+  }
+
+  /** The current wake for one session, created on demand; aborted by a steer. */
+  private steerWakeController(sessionKey: string): AbortController {
+    let wake = this.steerWakes.get(sessionKey);
+    if (!wake) {
+      wake = new AbortController();
+      this.steerWakes.set(sessionKey, wake);
+    }
+    return wake;
   }
 
   private model(): string {

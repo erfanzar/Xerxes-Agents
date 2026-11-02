@@ -29,7 +29,7 @@ const readSource = (relative: string) => readFile(join(SOURCE_ROOT, relative), '
  */
 const RUNTIME_HOOKS: ReadonlyArray<{ readonly name: string; readonly wired: boolean; readonly why: string }> = [
   { name: 'onSessionEvict', wired: true, why: 'reclaims a session\'s delegated children and memory' },
-  { name: 'onTurnCancel', wired: true, why: 'Esc stops the whole delegation tree, not just the parent stream' },
+  { name: 'runningSubagents', wired: true, why: 'Esc stops only the turn; the notice counts agents still running' },
   { name: 'onSessionModeChange', wired: true, why: 'a model-driven mode change must reach attached clients' },
   { name: 'subagentRetry', wired: true, why: 'retry of a dead subagent under its stable identity' },
 ]
@@ -42,7 +42,7 @@ test('every declared runtime hook is either wired at the composition root or jus
 
   // The list above must stay in step with the interface it describes; a new
   // optional hook has to make a wiring decision, not inherit one by omission.
-  const declared = [...runtime.matchAll(/readonly (on[A-Z]\w+|subagentRetry)\?:/g)].map(match => match[1])
+  const declared = [...runtime.matchAll(/readonly (on[A-Z]\w+|subagentRetry|runningSubagents)\?:/g)].map(match => match[1])
   expect(new Set(declared)).toEqual(new Set(RUNTIME_HOOKS.map(hook => hook.name)))
 
   // Scoped to the runtime constructor call, not the whole file. A hook that

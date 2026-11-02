@@ -755,6 +755,7 @@ export class AgentTurnRunner implements TurnRunner {
           },
         } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
+        ...(controls.steerWake ? { steerWake: () => controls.steerWake!() } : {}),
         // Retry patience is owned by the routed provider, not a global default.
         retryDelays: retryPolicy.delaysMs,
         maxSuggestedRetryDelayMs: retryPolicy.maxSuggestedDelayMs,

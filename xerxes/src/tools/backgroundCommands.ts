@@ -285,13 +285,20 @@ export class BackgroundCommandManager {
     waitMs = 0,
     /** Ends the wait early: a stopped turn must not sit out a minute-long poll. */
     signal?: AbortSignal,
+    /**
+     * Also ends the wait early, but is not a cancellation: the user steered
+     * the turn, so the current progress is reported and the process keeps
+     * running.
+     */
+    wake?: AbortSignal,
   ): Promise<BackgroundCheckResult> {
     const entry = this.require(procId, owner)
-    if (waitMs > 0 && !signal?.aborted) {
+    if (waitMs > 0 && !signal?.aborted && !wake?.aborted) {
       let release: (() => void) | undefined
       const aborted = new Promise<void>(resolve => {
         release = () => resolve()
         signal?.addEventListener('abort', release, { once: true })
+        wake?.addEventListener('abort', release, { once: true })
       })
       try {
         await raceBounded(
@@ -299,7 +306,10 @@ export class BackgroundCommandManager {
           Math.min(waitMs, MAX_CHECK_WAIT_MS),
         )
       } finally {
-        if (release) signal?.removeEventListener('abort', release)
+        if (release) {
+          signal?.removeEventListener('abort', release)
+          wake?.removeEventListener('abort', release)
+        }
       }
     }
     signal?.throwIfAborted()

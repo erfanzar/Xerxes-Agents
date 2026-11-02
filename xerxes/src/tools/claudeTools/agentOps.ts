@@ -342,7 +342,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     task_id: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Update message.'),
   }, ['task_id', 'message']),
-  definition('AwaitAgents', 'Block until attached subagents finish; use this instead of polling TaskListTool or PeekAgent. Omit agent_ids to wait on the tracked cohort; explicit targets must come from the current TaskListTool result. wake_reason=timeout means still working, not failed: call again with a larger timeout_seconds instead of respawning. Finished is not succeeded: check each status (completed vs error, cancelled, interrupted) before relying on its output.', {
+  definition('AwaitAgents', 'Block until attached subagents finish; use this instead of polling TaskListTool or PeekAgent. Omit agent_ids to wait on the tracked cohort; explicit targets must come from the current TaskListTool result. wake_reason=timeout means still working, not failed: call again with a larger timeout_seconds instead of respawning. wake_reason=steer means the user just sent you a message: read it, then wait again if the agents are still needed. Finished is not succeeded: check each status (completed vs error, cancelled, interrupted) before relying on its output.', {
     agent_ids: {
       description: 'Optional array of exact subagent ids or names returned by the current TaskListTool result. Do not retry stale targets.',
       type: 'array',
@@ -560,7 +560,7 @@ export class ClaudeAgentTools {
         this.observeBackgroundState([final])
         return agentSnapshotWire(final)
       } catch (error) {
-        if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
+        if (signal?.aborted) this.keepAfterAbort([snapshot.id], context)
         throw error
       }
     }
@@ -593,7 +593,7 @@ export class ClaudeAgentTools {
       this.observeBackgroundState([final])
       return agentSnapshotWire(final)
     } catch (error) {
-      if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
+      if (signal?.aborted) this.keepAfterAbort([snapshot.id], context)
       throw error
     }
   }
@@ -701,7 +701,7 @@ export class ClaudeAgentTools {
       this.observeSpawnBatchState(combined)
       return spawnBatchWire(combined)
     } catch (error) {
-      if (signal?.aborted) this.closeAfterAbort(snapshots.map(snapshot => snapshot.id), error)
+      if (signal?.aborted) this.keepAfterAbort(snapshots.map(snapshot => snapshot.id), context)
       throw error
     }
   }
@@ -786,7 +786,7 @@ export class ClaudeAgentTools {
     const wakeOn = normalizeWakeOn(optionalString(inputs, 'wake_on'))
     const timeout = timeoutMilliseconds(inputs, 'timeout_seconds', 30)
     const started = this.now()
-    let wakeReason: 'agents_done' | 'cancelled' | 'timeout' = 'timeout'
+    let wakeReason: AwaitWakeReason = 'timeout'
     if (!targets.length) {
       return this.observedAwaitResult(
         wakeOn === 'none' ? 'timeout' : 'agents_done',
@@ -805,6 +805,12 @@ export class ClaudeAgentTools {
       }
       if (agentsSatisfied(snapshots, wakeOn)) {
         wakeReason = 'agents_done'
+        return this.observedAwaitResult(wakeReason, wakeOn, started, snapshots, tracked)
+      }
+      // The user steered: hand back control so the loop delivers the message
+      // in this turn. The agents keep running and stay tracked.
+      if (context.wakeSignal?.aborted) {
+        wakeReason = 'steer'
         return this.observedAwaitResult(wakeReason, wakeOn, started, snapshots, tracked)
       }
       const elapsed = this.now() - started
@@ -837,7 +843,7 @@ export class ClaudeAgentTools {
   }
 
   private observedAwaitResult(
-    wakeReason: 'agents_done' | 'cancelled' | 'timeout',
+    wakeReason: AwaitWakeReason,
     wakeOn: 'all' | 'any' | 'none',
     started: number,
     snapshots: readonly SpawnedAgentSnapshot[],
@@ -897,7 +903,7 @@ export class ClaudeAgentTools {
       this.observeBackgroundState([final])
       return final.lastOutput === undefined ? agentSnapshotWire(final) : boundedOutput(final.lastOutput)
     } catch (error) {
-      if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
+      if (signal?.aborted) this.keepAfterAbort([snapshot.id], context)
       throw error
     }
   }
@@ -1006,6 +1012,14 @@ export class ClaudeAgentTools {
         return settle(snapshot.id, request.timeoutMs ?? WORKFLOW_AGENT_TIMEOUT_MS, runSignal)
       },
       closeAll: () => {
+        // The parent turn was interrupted: the run's orchestration ends, but
+        // its agents keep running as background agents and report to the next
+        // turn. A timeout, budget stop or failed script still closes them.
+        if (signal?.aborted) {
+          this.keepAfterAbort([...live], context)
+          live.clear()
+          return
+        }
         for (const id of live) {
           try { this.options.manager.close(id) } catch { /* already terminal */ }
         }
@@ -1142,9 +1156,11 @@ export class ClaudeAgentTools {
       // authoritative persist after it, still report failures normally.
       : setInterval(() => { try { this.persistContext(context) } catch { /* best-effort */ } },
         this.manifestHeartbeatMs)
-    let result
+    let result: Awaited<ReturnType<SpawnedAgentManagerPort['wait']>>
     try {
-      result = await abortable(this.options.manager.wait(ids, timeout), signal)
+      // A steer ends a foreground wait early with the agents' current state;
+      // still-running agents stay tracked and report to the parent later.
+      result = await abortable(wakeable(this.options.manager.wait(ids, timeout), context?.wakeSignal, () => this.currentWaitResult(ids)), signal)
     } finally {
       if (heartbeat !== undefined) clearInterval(heartbeat)
     }
@@ -1156,6 +1172,27 @@ export class ClaudeAgentTools {
     return ids
       .map(id => snapshots.get(id))
       .filter((snapshot): snapshot is SpawnedAgentSnapshot => snapshot !== undefined)
+  }
+
+  /** The agents' state right now, in the shape of a manager wait result. */
+  private currentWaitResult(ids: readonly string[]): Awaited<ReturnType<SpawnedAgentManagerPort['wait']>> {
+    const wanted = new Set(ids)
+    const snapshots = this.options.manager.listHandles().filter(snapshot => wanted.has(snapshot.id))
+    return { completed: snapshots.filter(isTerminal), pending: snapshots.filter(snapshot => !isTerminal(snapshot)) }
+  }
+
+  /**
+   * The turn that was waiting on these agents was interrupted. The interrupt
+   * stops the turn only: the agents keep running as background agents, and
+   * every one whose result the parent has not seen is tracked so the next
+   * turn receives it. Nothing is consumed here.
+   */
+  private keepAfterAbort(ids: readonly string[], context: ToolExecutionContext): void {
+    this.capture()
+    const wanted = new Set(ids)
+    const kept = this.options.manager.listHandles().filter(snapshot => wanted.has(snapshot.id))
+    if (kept.length) this.options.backgroundAgents?.track(kept)
+    try { this.persistContext(context) } catch { /* the turn is already stopping; the next persist records them */ }
   }
 
   private closeAfterAbort(ids: readonly string[], cause: unknown): void {
@@ -1469,8 +1506,11 @@ function agentsSatisfied(snapshots: readonly SpawnedAgentSnapshot[], wakeOn: 'al
   return wakeOn === 'all' ? snapshots.every(isTerminal) : snapshots.some(isTerminal)
 }
 
+/** Why AwaitAgents returned. `steer`: the user sent a message; the agents are still running. */
+type AwaitWakeReason = 'agents_done' | 'cancelled' | 'steer' | 'timeout'
+
 function awaitResult(
-  wakeReason: 'agents_done' | 'cancelled' | 'timeout',
+  wakeReason: AwaitWakeReason,
   wakeOn: 'all' | 'any' | 'none',
   started: number,
   ended: number,
@@ -1759,6 +1799,26 @@ function contextPermissionMode(context: ToolExecutionContext): PermissionMode | 
   return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan'
     ? value
     : undefined
+}
+
+/** Resolve with `current()` as soon as `wake` fires; otherwise with `promise`. */
+function wakeable<T>(promise: Promise<T>, wake: AbortSignal | undefined, current: () => T): Promise<T> {
+  if (!wake) return promise
+  if (wake.aborted) {
+    promise.catch(() => undefined)
+    return Promise.resolve().then(current)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const woke = () => {
+      promise.catch(() => undefined)
+      try { resolve(current()) } catch (error) { reject(error) }
+    }
+    wake.addEventListener('abort', woke, { once: true })
+    promise.then(
+      value => { wake.removeEventListener('abort', woke); resolve(value) },
+      error => { wake.removeEventListener('abort', woke); reject(error) },
+    )
+  })
 }
 
 function sleep(milliseconds: number): Promise<void> {

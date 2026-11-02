@@ -9,11 +9,15 @@ import { join } from 'node:path'
 import { type AgentDefinition } from '../src/agents/definitions.js'
 import { DaemonSubagentEventBus } from '../src/daemon/subagentEvents.js'
 import { createNativeSubagentHost } from '../src/daemon/subagentHost.js'
-import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession } from '../src/daemon/runtime.js'
+import { InMemoryDaemonRuntime, type DaemonEvent } from '../src/daemon/runtime.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { BackgroundCommandManager } from '../src/tools/backgroundCommands.js'
 import { registerClaudeAgentTools } from '../src/tools/claudeTools/agentOps.js'
+import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
+import { registerProcessTools } from '../src/tools/processTools.js'
+import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 
 function agentDefinition(name: string): AgentDefinition {
   return {
@@ -40,7 +44,7 @@ function creatorDefinition(...children: readonly string[]): AgentDefinition {
   }
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`)
@@ -48,87 +52,90 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
   }
 }
 
+const CHILD_PROMPT = 'long running child task'
+
+function toolCall(id: string, name: string, args: JsonObject): ToolCall {
+  return { id, type: 'function', function: { name, arguments: args } }
+}
+
+function lastToolName(request: CompletionRequest): string | undefined {
+  return request.messages.findLast(message => message.role === 'tool')?.name
+}
+
+function lastToolContent(request: CompletionRequest): string {
+  const content = request.messages.findLast(message => message.role === 'tool')?.content
+  return typeof content === 'string' ? content : JSON.stringify(content ?? '')
+}
+
+/** What the parent model does next, given the request it was sent. */
+type ParentScript = (request: CompletionRequest) => LlmDelta
+
+/** Spawn one child (in the background or awaited), then answer in text. */
+function spawnThenAnswer(wait: boolean): ParentScript {
+  return request => {
+    if (lastToolName(request) === 'SpawnAgents') return { content: 'The delegated review is under way.' }
+    return {
+      toolCalls: [toolCall(`spawn-${crypto.randomUUID()}`, 'SpawnAgents', {
+        agents: [{ name: 'child', prompt: CHILD_PROMPT, subagent_type: 'researcher', title: 'Child review' }],
+        wait,
+        ...(wait ? { timeout: 60 } : {}),
+      })],
+    }
+  }
+}
+
 interface Harness {
-  /** Resolves true when the child's provider stream observed an abort within the window. */
-  readonly childAbortedWithin: (timeoutMs: number) => Promise<boolean>
   readonly childRelease: PromiseWithResolvers<void>
-  /** Resolves only after the child provider has installed its abort listener. */
   readonly childStarted: PromiseWithResolvers<void>
   readonly cleanup: () => Promise<void>
-  readonly events: DaemonEvent[]
   readonly host: ReturnType<typeof createNativeSubagentHost>
-  readonly parentWaiting: PromiseWithResolvers<void>
+  readonly parentRequests: CompletionRequest[]
+  /** Resolves with each parent request as it is made. */
+  readonly onParentRequest: (predicate: (request: CompletionRequest) => boolean) => Promise<CompletionRequest>
   readonly runtime: InMemoryDaemonRuntime
+  readonly background: BackgroundCommandManager
 }
 
 /**
- * Parent turn spawns one detached (`wait: false`) child, then parks in the
- * cohort join while the child keeps working. This is the exact shape the user
- * interrupt has to reason about: no in-flight blocking wait owns the child, so
- * only an explicit cancellation port can reach it.
+ * The production wiring (cli.ts) in miniature: a native subagent host, the
+ * Claude agent tools and the process tools, behind the daemon runtime.
  */
-async function harness(sessionKey: string): Promise<Harness> {
+async function harness(sessionKey: string, script: ParentScript): Promise<Harness> {
   const sessionDirectory = await mkdtemp(join(tmpdir(), `xerxes-${sessionKey}-`))
   const childRelease = Promise.withResolvers<void>()
   const childStarted = Promise.withResolvers<void>()
-  const parentWaiting = Promise.withResolvers<void>()
-  const childAborted = Promise.withResolvers<boolean>()
   const parentRequests: CompletionRequest[] = []
+  const watchers: Array<{ readonly predicate: (request: CompletionRequest) => boolean; readonly resolve: (request: CompletionRequest) => void }> = []
   const definitions = new Map<string, AgentDefinition>([
     ['default', creatorDefinition('researcher')],
     ['researcher', agentDefinition('researcher')],
   ])
   const client: LlmClient = {
     async *stream(request, signal): AsyncGenerator<LlmDelta> {
-      const userText = request.messages
-        .filter(message => message.role === 'user')
-        .map(message => String(message.content))
-        .join('\n')
-      if (userText.includes('long running child task')) {
-        const abortObserved = new Promise<boolean>(resolve => {
-          if (signal?.aborted) return resolve(true)
-          signal?.addEventListener('abort', () => resolve(true), { once: true })
-        })
+      const first = request.messages.find(message => message.role === 'user')?.content
+      if (typeof first === 'string' && first.includes(CHILD_PROMPT)) {
         childStarted.resolve()
-        const released = childRelease.promise.then(() => false)
-        childAborted.resolve(await Promise.race([abortObserved, released]))
-        if (signal?.aborted) throw signal.reason ?? new Error('child cancelled')
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) return reject(signal.reason)
+          signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('child cancelled')), { once: true })
+          void childRelease.promise.then(resolve)
+        })
         yield { content: 'child final report' }
-
         return
       }
-
       parentRequests.push(request)
-      if (request.messages.some(message => message.role === 'tool' && message.name === 'SpawnAgents')) {
-        parentWaiting.resolve()
-        yield { content: 'The delegated review is still running.' }
-
-        return
+      for (const watcher of [...watchers]) {
+        if (!watcher.predicate(request)) continue
+        watchers.splice(watchers.indexOf(watcher), 1)
+        watcher.resolve(request)
       }
-      yield {
-        toolCalls: [{
-          id: 'spawn-detached-child',
-          type: 'function',
-          function: {
-            name: 'SpawnAgents',
-            arguments: {
-              agents: [
-                {
-                  name: 'child',
-                  prompt: 'long running child task',
-                  subagent_type: 'researcher',
-                  title: 'Child review',
-                },
-              ],
-              wait: false,
-            },
-          },
-        }],
-      }
+      yield script(request)
     },
   }
   const eventBus = new DaemonSubagentEventBus()
   const registry = new ToolRegistry()
+  const background = new BackgroundCommandManager()
+  registerProcessTools(registry, new WorkspacePathResolver(sessionDirectory), background)
   const host = createNativeSubagentHost({
     agentDefinitions: definitions,
     cwd: process.cwd(),
@@ -153,126 +160,218 @@ async function harness(sessionKey: string): Promise<Harness> {
     toolExecutor: registry,
     tools: registry.definitions(),
   })
-  // Mirrors the production cli.ts wiring.
   const runtime = new InMemoryDaemonRuntime(runner, {
     currentProjectDirectory: process.cwd(),
     model: 'test-model',
     onSessionEvict: sessionId => {
       host.cancelSource(sessionId)
     },
-    onTurnCancel: sessionId => host.interruptSource(sessionId),
+    runningSubagents: sessionId => host.managerPort.listHandles()
+      .filter(snapshot => snapshot.sourceAgentId === sessionId && snapshot.status === 'running').length,
+    shutdown: () => host.manager.shutdown(),
     sessionDirectory,
   })
 
   return {
-    childAbortedWithin: timeoutMs => Promise.race([
-      childAborted.promise,
-      Bun.sleep(timeoutMs).then(() => false),
-    ]),
+    background,
     childRelease,
     childStarted,
     cleanup: async () => {
       childRelease.resolve()
+      background.disposeAll()
       await host.manager.shutdown()
       await rm(sessionDirectory, { force: true, recursive: true })
     },
-    events: [],
     host,
-    parentWaiting,
+    onParentRequest: predicate => new Promise(resolve => {
+      const seen = parentRequests.find(predicate)
+      if (seen) resolve(seen)
+      else watchers.push({ predicate, resolve })
+    }),
+    parentRequests,
     runtime,
   }
 }
 
-function nestedEvent(event: DaemonEvent): { payload?: Record<string, unknown>; type?: string } {
-  const nested = event.payload.event
-
-  return typeof nested === 'object' && nested !== null ? nested as { payload?: Record<string, unknown>; type?: string } : {}
+function childStatus(kit: Harness): string | undefined {
+  return kit.host.managerPort.listHandles()[0]?.status
 }
 
-function runningChildId(host: Harness['host']): string {
-  const task = host.manager.listTasks().find(candidate => candidate.status === 'running')
-  if (!task) throw new Error('expected a running background child')
-
-  return task.id
+function notices(events: readonly DaemonEvent[]): unknown[] {
+  return events.filter(event => event.type === 'notification').map(event => event.payload.message)
 }
 
-test('interrupting a turn cancels its detached background subagents', async () => {
-  const kit = await harness('interrupt-detached')
+function mentions(request: CompletionRequest, text: string): boolean {
+  return JSON.stringify(request.messages).includes(text)
+}
+
+test('interrupting a turn leaves its background agents running and their results reach the next turn', async () => {
+  const kit = await harness('interrupt-detached', spawnThenAnswer(false))
   const events: DaemonEvent[] = []
 
   try {
     const turn = kit.runtime.submitTurn('interrupt-detached', 'delegate the review', event => events.push(event))
-    await kit.parentWaiting.promise
+    await kit.onParentRequest(request => lastToolName(request) === 'SpawnAgents')
     await kit.childStarted.promise
-    const childId = runningChildId(kit.host)
 
     expect(kit.runtime.cancelTurn('interrupt-detached')).toBe(true)
     await turn
+    expect(events.at(-1)).toMatchObject({ type: 'turn_end', payload: { cancelled: true } })
+    expect(notices(events)).toContain('Stopped the turn. 1 agent is still running.')
+    expect(notices(events).some(message => String(message).startsWith('Interrupt stopped'))).toBe(false)
+    await Bun.sleep(50)
+    expect(childStatus(kit)).toBe('running')
 
-    expect(await kit.childAbortedWithin(3_000)).toBe(true)
-    expect(kit.host.manager.listTasks().find(task => task.id === childId)?.status).toBe('cancelled')
-    expect(events.filter(event => event.type === 'turn_end')).toHaveLength(1)
-    expect(events.at(-1)?.payload.cancelled).toBe(true)
-    // The daemon, not the TUI's own turn-boundary guess, is what declares the
-    // child stopped: the terminal transition must reach the parent's stream
-    // while it is still subscribed.
-    expect(events.filter(event => event.type === 'notification').map(event => event.payload.message))
-      .toContain('Interrupt stopped 1 delegated agent.')
-    const childTerminal = events.filter(event => (
-      event.type === 'subagent_event'
-      && event.payload.agent_id === childId
-      && nestedEvent(event).type === 'turn_end'
-    ))
-    expect(childTerminal.length).toBeGreaterThan(0)
-    expect(childTerminal.at(-1) && nestedEvent(childTerminal.at(-1)!).payload?.status).toBe('cancelled')
-  } finally {
-    await kit.cleanup()
-  }
-}, 20_000)
-
-test('a cancelled child stays retryable rather than permanently invalidated', async () => {
-  const kit = await harness('interrupt-retryable')
-  const events: DaemonEvent[] = []
-
-  try {
-    const turn = kit.runtime.submitTurn('interrupt-retryable', 'delegate the review', event => events.push(event))
-    await kit.parentWaiting.promise
-    await waitFor(() => kit.host.manager.listTasks().some(task => task.status === 'running'))
-    const childId = runningChildId(kit.host)
-
-    kit.runtime.cancelTurn('interrupt-retryable')
-    await turn
-    await waitFor(() => kit.host.manager.listTasks().find(task => task.id === childId)?.status === 'cancelled')
-
-    const handle = kit.host.managerPort.listHandles().find(candidate => candidate.id === childId)
-    expect(handle).toMatchObject({ closed: false, status: 'cancelled' })
-    // Interruption is a user pause, not a policy revocation: the handle must
-    // still accept an explicit retry.
     kit.childRelease.resolve()
-    const retried = await kit.host.retry(childId)
-    expect(retried.id).toBe(childId)
+    await waitFor(() => childStatus(kit) === 'completed')
+    const next: DaemonEvent[] = []
+    await kit.runtime.submitTurn('interrupt-detached', 'what did it find?', event => next.push(event))
+    expect(next.at(-1)).toMatchObject({ type: 'turn_end', payload: { cancelled: false } })
+    expect(kit.parentRequests.at(-1) && mentions(kit.parentRequests.at(-1)!, 'child final report')).toBe(true)
   } finally {
     await kit.cleanup()
   }
 }, 20_000)
 
-test('steering a live turn never cancels its background subagents', async () => {
-  const kit = await harness('steer-keeps-children')
+test('an agent awaited inside the interrupted tool call keeps running as a background agent', async () => {
+  const kit = await harness('interrupt-awaited', spawnThenAnswer(true))
   const events: DaemonEvent[] = []
 
   try {
-    const turn = kit.runtime.submitTurn('steer-keeps-children', 'delegate the review', event => events.push(event))
-    await kit.parentWaiting.promise
-    await waitFor(() => kit.host.manager.listTasks().some(task => task.status === 'running'))
-    const childId = runningChildId(kit.host)
-
-    expect(kit.runtime.steerTurn('steer-keeps-children', 'focus on the summary')).toBe(true)
+    const turn = kit.runtime.submitTurn('interrupt-awaited', 'delegate the review', event => events.push(event))
+    await kit.childStarted.promise
     await Bun.sleep(30)
-    expect(kit.host.manager.listTasks().find(task => task.id === childId)?.status).toBe('running')
+
+    kit.runtime.cancelTurn('interrupt-awaited')
+    await turn
+    await Bun.sleep(50)
+    expect(kit.host.managerPort.listHandles()[0]).toMatchObject({ status: 'running', closed: false })
+
+    kit.childRelease.resolve()
+    await waitFor(() => childStatus(kit) === 'completed')
+    await kit.runtime.submitTurn('interrupt-awaited', 'what did it find?', () => {})
+    expect(kit.parentRequests.at(-1) && mentions(kit.parentRequests.at(-1)!, 'child final report')).toBe(true)
+  } finally {
+    await kit.cleanup()
+  }
+}, 20_000)
+
+test('closing the session still stops its agents', async () => {
+  const kit = await harness('evict-stops', spawnThenAnswer(false))
+
+  try {
+    const turn = kit.runtime.submitTurn('evict-stops', 'delegate the review', () => {})
+    await kit.childStarted.promise
+    kit.runtime.cancelTurn('evict-stops')
+    await turn
+    expect(childStatus(kit)).toBe('running')
+
+    kit.runtime.evictSession('evict-stops')
+    await waitFor(() => kit.host.manager.listTasks()[0]?.status === 'cancelled')
+  } finally {
+    await kit.cleanup()
+  }
+}, 20_000)
+
+test('stopping the daemon still stops its agents', async () => {
+  const kit = await harness('shutdown-stops', spawnThenAnswer(false))
+
+  try {
+    const turn = kit.runtime.submitTurn('shutdown-stops', 'delegate the review', () => {})
+    await kit.childStarted.promise
+    kit.runtime.cancelTurn('shutdown-stops')
+    await turn
+    expect(childStatus(kit)).toBe('running')
+
+    await kit.runtime.shutdown()
+    expect(kit.host.manager.listTasks()[0]?.status).toBe('cancelled')
+  } finally {
+    await kit.cleanup()
+  }
+}, 20_000)
+
+test('a steer sent while AwaitAgents blocks reaches the next model round of the same turn', async () => {
+  const kit = await harness('steer-await', request => {
+    const last = lastToolName(request)
+    if (last === 'SpawnAgents') return { toolCalls: [toolCall('await-1', 'AwaitAgents', { timeout_seconds: 60 })] }
+    if (last === 'AwaitAgents') return { content: 'Noted, focusing on the summary.' }
+    return spawnThenAnswer(false)(request)
+  })
+  const events: DaemonEvent[] = []
+
+  try {
+    const turn = kit.runtime.submitTurn('steer-await', 'delegate the review', event => events.push(event))
+    await kit.onParentRequest(request => lastToolName(request) === 'SpawnAgents')
+    await Bun.sleep(100)
+    const steeredAt = Date.now()
+    expect(kit.runtime.steerTurn('steer-await', 'focus on the summary')).toBe(true)
+
+    const after = await kit.onParentRequest(request => lastToolName(request) === 'AwaitAgents')
+    // Woke on the steer, well before the 60 s timeout, and the agent kept going.
+    expect(Date.now() - steeredAt).toBeLessThan(2_000)
+    expect(lastToolContent(after)).toMatch(/"wake_reason":\s*"steer"/)
+    expect(after.messages).toContainEqual({ role: 'user', content: '[steer from user]\nfocus on the summary' })
+    expect(childStatus(kit)).toBe('running')
+    expect(events.some(event => event.type === 'steer_applied')).toBe(true)
+    expect(events.some(event => event.type === 'turn_end')).toBe(false)
 
     kit.childRelease.resolve()
     await turn
-    expect(kit.host.manager.listTasks().find(task => task.id === childId)?.status).toBe('completed')
+    expect(notices(events).some(message => String(message).includes('for the next turn'))).toBe(false)
+  } finally {
+    await kit.cleanup()
+  }
+}, 20_000)
+
+test('a steer sent while check_command waits reaches the next model round and the command keeps running', async () => {
+  const kit = await harness('steer-check', request => {
+    const last = lastToolName(request)
+    if (last === 'exec_command') {
+      const procId = /"procId":\s*"([^"]+)"/.exec(lastToolContent(request))?.[1] ?? 'missing'
+      return { toolCalls: [toolCall('check-1', 'check_command', { proc_id: procId, wait_ms: 60_000 })] }
+    }
+    if (last === 'check_command') return { content: 'Adjusted to the new instruction.' }
+    return { toolCalls: [toolCall('exec-1', 'exec_command', { cmd: 'sleep', args: ['30'], run_in_background: true })] }
+  })
+  const events: DaemonEvent[] = []
+
+  try {
+    const turn = kit.runtime.submitTurn('steer-check', 'start the server', event => events.push(event))
+    await kit.onParentRequest(request => lastToolName(request) === 'exec_command')
+    await Bun.sleep(100)
+    const steeredAt = Date.now()
+    expect(kit.runtime.steerTurn('steer-check', 'use port 8080 instead')).toBe(true)
+
+    const after = await kit.onParentRequest(request => lastToolName(request) === 'check_command')
+    expect(Date.now() - steeredAt).toBeLessThan(2_000)
+    expect(lastToolContent(after)).toMatch(/"running":\s*true/)
+    expect(after.messages).toContainEqual({ role: 'user', content: '[steer from user]\nuse port 8080 instead' })
+    await turn
+    expect(events.at(-1)).toMatchObject({ type: 'turn_end', payload: { cancelled: false } })
+    expect(notices(events).some(message => String(message).includes('for the next turn'))).toBe(false)
+  } finally {
+    await kit.cleanup()
+  }
+}, 20_000)
+
+test('a steer sent while the turn waits on background agents runs one more round in that turn', async () => {
+  const kit = await harness('steer-cohort', spawnThenAnswer(false))
+  const events: DaemonEvent[] = []
+
+  try {
+    const turn = kit.runtime.submitTurn('steer-cohort', 'delegate the review', event => events.push(event))
+    await kit.onParentRequest(request => lastToolName(request) === 'SpawnAgents')
+    await Bun.sleep(100)
+    const before = kit.parentRequests.length
+    expect(kit.runtime.steerTurn('steer-cohort', 'also check the tests')).toBe(true)
+
+    await waitFor(() => kit.parentRequests.length > before)
+    expect(kit.parentRequests.at(-1)?.messages).toContainEqual({ role: 'user', content: '[steer from user]\nalso check the tests' })
+    expect(events.some(event => event.type === 'turn_end')).toBe(false)
+
+    kit.childRelease.resolve()
+    await turn
+    expect(notices(events).some(message => String(message).includes('for the next turn'))).toBe(false)
   } finally {
     await kit.cleanup()
   }

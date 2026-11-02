@@ -2486,10 +2486,11 @@ function daemonRuntime(
       for (const host of subagentHosts.values()) host.cancelSource(sessionId);
       memoryToolContext.prune(sessionId);
     },
-    // Esc/Ctrl+C stops the whole delegation tree the turn started, not just
-    // the parent's provider stream. Children stay retryable because the user
-    // asked to pause, not to discard the work.
-    onTurnCancel: sessionId => [...subagentHosts.values()].reduce((total, host) => total + host.interruptSource(sessionId), 0),
+    // Esc/Ctrl+C stops the parent turn only. Delegated agents keep running
+    // and report to the next turn; the interrupt notice counts them. They
+    // stop through subagent.interrupt, TaskStopTool, eviction or shutdown.
+    runningSubagents: sessionId => [...subagentHosts.values()].reduce((total, host) => total + host.managerPort.listHandles()
+      .filter(snapshot => snapshot.sourceAgentId === sessionId && snapshot.status === 'running').length, 0),
     // A mode change the MODEL made has to reach the clients too. Without this
     // the session left plan mode while every TUI kept rendering — and gating
     // on — the old mode, which is indistinguishable from the switch failing.

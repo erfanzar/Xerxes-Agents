@@ -309,6 +309,13 @@ export interface TurnDependencies {
   readonly drainAgentEvents?: () => readonly string[]
   /** Supplies steering (text, optionally with images) at safe provider/tool boundaries for daemon turns. */
   readonly drainSteer?: (boundary?: 'start' | 'final') => readonly SteerInput[]
+  /**
+   * A signal that is aborted once the user steers and stays aborted until the
+   * next non-final `drainSteer`. Blocking waits (tools that only wait, and the
+   * end-of-turn wait for background agents) return early on it so the steer
+   * reaches the model in this turn. Never a cancellation of work in flight.
+   */
+  readonly steerWake?: () => AbortSignal
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
@@ -1066,7 +1073,13 @@ export async function* runTurn(
       }
 
       if (!roundToolCalls.length) {
-        const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+        // A steer wakes the wait for background agents: the turn is still
+        // running, so the steer belongs to this turn, not the next one.
+        const steerWakeSignal = dependencies.steerWake?.()
+        const agentWaitSignal = steerWakeSignal && signal
+          ? AbortSignal.any([signal, steerWakeSignal])
+          : steerWakeSignal ?? signal
+        const agentEvents = await dependencies.awaitAgentEvents?.(agentWaitSignal) ?? []
         const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
         // A coordinator can acknowledge returned snapshots before cancellation
         // becomes observable here. Persist the delivered results first so an
@@ -1078,6 +1091,14 @@ export async function* runTurn(
         }
         if (appendedAgentEvents) {
           dependencies.acknowledgeAgentEvents?.()
+          if (toolTurn + 1 >= turnLimit) turnLimit += 1
+          continue
+        }
+        // The user steered while the model wrote its answer or while the turn
+        // waited on agents: run one more round so the model reads it now.
+        // The next round's drain resets the wake, so this cannot repeat
+        // without a new steer.
+        if (steerWakeSignal?.aborted) {
           if (toolTurn + 1 >= turnLimit) turnLimit += 1
           continue
         }
@@ -1251,6 +1272,13 @@ export async function* runTurn(
             yield { type: 'tool_start', call: decision.effectiveCall, ...(reasoning ? { reasoning } : {}) }
           }
         }
+        // Blocking waits return early once the user steers (see `steerWake`).
+        // The metadata object stays the same reference, so a lone call still
+        // writes straight into the turn's shared record.
+        const steerWakeSignal = dependencies.steerWake?.()
+        const roundContext: ToolExecutionContext = steerWakeSignal
+          ? { ...toolContext, wakeSignal: steerWakeSignal }
+          : toolContext
         const outcomes = await Promise.all(group.map(async (decision, member) => {
           if (decision.kind !== 'allowed') return undefined
           const effectiveCall = decision.effectiveCall
@@ -1260,8 +1288,8 @@ export async function* runTurn(
           // execution was serial. A lone call keeps the shared object so a
           // single-tool round behaves exactly as it always has.
           let memberContext = group.length === 1
-            ? toolContext
-            : { ...toolContext, metadata: { ...toolContext.metadata } }
+            ? roundContext
+            : { ...roundContext, metadata: { ...toolContext.metadata } }
           const metadataWrites = new Set<PropertyKey>()
           if (group.length > 1) {
             memberContext = { ...memberContext, metadata: new Proxy(memberContext.metadata, {

@@ -3617,6 +3617,20 @@ export class Store {
     }
   }
 
+  /**
+   * Stop every live agent of this session (`subagent.interrupt` without a
+   * task). Interrupting the turn no longer does this: agents outlive a
+   * stopped turn, so this is the explicit way to end them all.
+   */
+  async stopAllAgents(): Promise<string> {
+    const key = this.sessionKey
+    const result = await desktopCall(this.bridge, key, 'subagent.interrupt', {})
+    const stopped = typeof result.interrupted === 'number' ? result.interrupted : 0
+    if (key === this.sessionKey) this.refreshFleet()
+    if (result.found !== true || stopped === 0) return 'No agents were running.'
+    return `Stopping ${stopped} agent${stopped === 1 ? '' : 's'}.`
+  }
+
   /** Mid-turn fleet refresh: snapshots only move while a turn runs. */
   async controlAgent(id: string, action: 'stop' | 'retry', message = ''): Promise<string> {
     if (!this.frame.fleet.some(row => row.id === id)) throw new Error('This agent is no longer in the current session')
