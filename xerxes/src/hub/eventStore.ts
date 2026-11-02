@@ -85,6 +85,8 @@ interface EventRow {
 }
 
 const DEFAULT_RETENTION = { maxBytes: 256 * 1024 * 1024, maxAgeMs: 7 * 24 * 60 * 60 * 1000 }
+/** Byte pruning frees down to this share of the quota, so the next prune is many inserts away. */
+const RETENTION_LOW_WATER = 0.9
 
 /** Single synchronous SQLite writer. Notifications happen only after COMMIT. */
 export class HubEventStore {
@@ -309,10 +311,11 @@ export class HubEventStore {
     const age = this.db.query<{ sequence: number | null }, [string]>('SELECT MAX(sequence) AS sequence FROM events WHERE occurred_at < ?')
       .get(new Date(this.clock() - this.retention.maxAgeMs).toISOString())?.sequence ?? 0
     const retainedBytes = this.sequenceMeta('retained_bytes')
-    // Avoid a full window scan on every token when the journal is below quota.
-    const size = retainedBytes <= this.retention.maxBytes ? 0 : this.db.query<{ sequence: number | null }, [number]>(`SELECT MAX(sequence) AS sequence FROM
-      (SELECT sequence, SUM(bytes) OVER (ORDER BY sequence DESC) AS retained_bytes FROM events)
-      WHERE retained_bytes > ?`).get(this.retention.maxBytes)?.sequence ?? 0
+    // Over quota, free a block down to the low-water mark. Trimming to exactly the quota left
+    // the journal a few bytes under it, so every insert crossed it again and pruned one row with
+    // a window scan over the whole table (~0.5 s at 300k events), pinning the Hub's only thread.
+    const size = retainedBytes <= this.retention.maxBytes ? 0
+      : this.sizeFloor(retainedBytes - Math.floor(this.retention.maxBytes * RETENTION_LOW_WATER))
     const through = Math.max(age, size)
     if (through === 0) return
     const retired = this.db.query<{ runtime_id: string; upstream_stream_id: string; sequence: number }, [number]>(`SELECT runtime_id, upstream_stream_id,
@@ -327,6 +330,21 @@ export class HubEventStore {
     this.db.query('DELETE FROM events WHERE sequence <= ?').run(through)
     this.db.query("UPDATE meta SET value = ? WHERE key = 'retained_after'").run(String(Math.max(through, this.sequenceMeta('retained_after'))))
     this.db.query("UPDATE meta SET value = ? WHERE key = 'retained_bytes'").run(String(retainedBytes - removedBytes))
+  }
+
+  /** The last sequence to drop so at least `excess` bytes are freed, oldest rows first, by primary key. */
+  private sizeFloor(excess: number): number {
+    const page = this.db.query<{ sequence: number; bytes: number }, [number, number]>('SELECT sequence, bytes FROM events WHERE sequence > ? ORDER BY sequence LIMIT ?')
+    let through = 0, freed = 0
+    for (;;) {
+      const rows = page.all(through, 1024)
+      if (rows.length === 0) return through
+      for (const row of rows) {
+        freed += row.bytes
+        through = row.sequence
+        if (freed >= excess) return through
+      }
+    }
   }
 
   private persist<T>(operation: string, run: () => T): T {
