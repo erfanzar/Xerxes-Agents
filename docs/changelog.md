@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.23 — 2026-11-02
+
+- **Desktop: a sub-agent opens in the conversation pane, like DeepSeek Harness.** The chat header shows `N agents ⌄`, a list of every sub-agent with its state, model and tool count. Picking one replaces the conversation with that agent's own chat: its task as the opening message, then its replies, reasoning and "Ran N commands" groups, updated live. The header becomes `Task / Agent ⌄`; the arrow switches between sibling agents and the task name goes back. Where the composer was, a box messages the running agent (it reads it at its next step), stops only that agent, or retries a finished one. The agent's model, profile, effort, assigned task, result, files and runtime details sit in a card at the top of the Activity rail. Your half-typed message in the main composer is kept.
+- **Runtime: `subagent.inspect` can return the sub-agent's full conversation.** An opt-in `history_limit` (with a `before` cursor) returns a bounded page of the child's saved transcript in the `session.history` shape. Clients that don't ask get the old response unchanged. Older runtimes still show the agent as a chat built from its summary, notes and tool calls.
+- **Agents: stopping a turn no longer cancels its sub-agents.** Esc and Stop end the turn only; running agents keep working and report to the next turn. The desktop agents card has a two-click "Stop all agents" button, and closing the session or shutting down the runtime still stops them.
+- **Agents: steering wakes a turn that is waiting.** A steer that arrives while the turn is blocked in `AwaitAgents`, `check_command` with `wait_ms`, `computer_use` `wait` or the end-of-turn wait for background agents now ends that wait, and the steer is applied at the next model round of the same turn. Running commands and agents are not stopped.
+- **Desktop: images and clickable links in chat.** Markdown images and image files read by tools render inline and open larger when clicked. Files are read through the workspace's own runtime, so SSH workspaces work too. Links open in your browser (http, https and mailto only). The VS Code panel gets the same.
+- **Remote sessions: much less lag.** The Hub's event store no longer runs a slow retention scan on every insert once it is near its quota; it frees a block down to 90% of the quota instead. The desktop app now runs one Hub relay per host across all its windows instead of one per window, which halves the traffic through the SSH tunnel.
+
 ## 0.8.22 — 2026-11-01
 
 - **Desktop: the Shading style is now Claude Code's layout in black, white and grey.** The sidebar, conversation and inspector sit edge to edge with 1px lines between them, with no floating cards or soft shadows. "New task" is a quiet row, each task is one line, and your own messages sit on the right in a grey bubble. The composer is one bordered box with plain text controls under it. Code blocks no longer show a grey chip behind every line. Choose it under Settings ▸ General ▸ Style ▸ Shading.
