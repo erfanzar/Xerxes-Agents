@@ -49,10 +49,11 @@ test('inline code, links, and tables render without any raw HTML passing through
 
 test('link markup can never inject attributes or elements', () => {
   const html = render('[x](javascript:alert(1)) <img src=x onerror=alert(1)> **bold**')
-  // React neutralizes javascript: URLs by rewriting the href to a throwing
-  // placeholder; the img tag is plain text because only recognized markdown
-  // shapes become elements.
-  expect(html).toContain('React has blocked a javascript: URL')
+  // A javascript: link is never an anchor at all: it renders as inert text
+  // with its target as the tooltip. The img tag is plain text because only
+  // recognized markdown shapes become elements.
+  expect(html).not.toContain('href=')
+  expect(html).toContain('md__link--inert')
   expect(html).not.toContain('<img')
   expect(html).toContain('&lt;img')
 })

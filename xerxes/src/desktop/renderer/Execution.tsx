@@ -8,6 +8,8 @@ import { Icon } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
 import { CopyButton } from './CopyButton.js'
 import { FileToolRow, fileToolOf } from './FileToolRow.js'
+import { ToolImages } from './ImageView.js'
+import { chatImageTypeOf } from '../chatMediaShared.js'
 
 function record(text: string): Record<string, unknown> | null {
   try {
@@ -67,6 +69,8 @@ export function ToolCallsSection({ items, label = 'Tool calls' }: { items: reado
 
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
   const file = fileToolOf(item)
+  // A read of an image file shows the picture (ToolImages), not its bytes as text lines.
+  if (file?.kind === 'read' && chatImageTypeOf(file.path)) return <GenericToolRow item={item} label={label} />
   return file ? <FileToolRow item={item} tool={file} failed={toolHasFailed(item)} /> : <GenericToolRow item={item} label={label} />
 })
 
@@ -102,6 +106,7 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
     </div>}
     {view.command && <pre className="execution__command" title={view.cwd ?? undefined}>{view.command}</pre>}
     {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button onClick={()=>setExpanded(value=>!value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured}/></div></> : <OutputViewer text={output} compact />)}
+    {!failed && <ToolImages item={item} />}
     {view.stderr && <div className="execution__error"><strong>Standard error</strong><pre>{view.stderr}</pre></div>}
     {item.error && item.error !== output && item.error !== view.stderr && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
     {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}

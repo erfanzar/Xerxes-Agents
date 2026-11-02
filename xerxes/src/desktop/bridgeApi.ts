@@ -16,6 +16,10 @@ import {
   MAC_PERMISSIONS_CHANNEL_PREFIX, MAC_PERMISSIONS_STATE_EVENT, asMacPermissionsState, isMacPermissionAction,
   type MacPermissionsState,
 } from './macPermissionsShared.js'
+import {
+  IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, asChatImageResult, chatImageRequestOf, chatImageWire, externalUrlOf,
+  type ChatImageResult,
+} from './chatMediaShared.js'
 
 /** How the bridge reaches its host: request/response by channel, and pushed events. */
 export interface BridgeTransport {
@@ -313,6 +317,24 @@ export function createBridge(transport: BridgeTransport) {
   /** VS Code: the Style setting changed (Settings, the palette, or another view). */
   onStyle(handler: (style: 'neo' | 'classic' | 'shading') => void): () => void {
     return transport.on('desktop:style', value => { if (value === 'neo' || value === 'classic' || value === 'shading') handler(value) })
+  },
+
+  /** Open an http, https or mailto link outside the app. The host checks the scheme again. */
+  openExternal(url: unknown): Promise<boolean> {
+    const clean = externalUrlOf(url)
+    if (!clean) return Promise.reject(new TypeError('Only http, https and mailto links can be opened'))
+    return transport.invoke(OPEN_EXTERNAL_CHANNEL, clean) as Promise<boolean>
+  },
+  /** An image file the chat shows, as a data URL; the host validates and reads it. Never rejects. */
+  async imageData(request: unknown): Promise<ChatImageResult> {
+    const checked = chatImageRequestOf(request)
+    if ('error' in checked) return { ok: false, error: checked.error }
+    try {
+      return asChatImageResult(await transport.invoke(IMAGE_DATA_CHANNEL, chatImageWire(checked)))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '').slice(0, 300) || 'the image could not be read' }
+    }
   },
 
   /** Reveal one daemon-resolved user preset directory. Main re-checks containment. */

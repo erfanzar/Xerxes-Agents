@@ -156,6 +156,8 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
       return (picked ?? []).map(item => item.label)
     },
     async showSourceControl() { await vscode.commands.executeCommand('workbench.view.scm'); return true },
+    // PanelHost has already limited the link to http, https and mailto.
+    async openExternal(url) { return vscode.env.openExternal(vscode.Uri.parse(url, true)) },
     setStyle,
   }
   const post = (frame: ResultFrame | PushFrame): void => { void webview.postMessage(frame) }

@@ -1379,6 +1379,24 @@ test('the Claude layout header is the task title and agent kind, with Session ed
   for (const gone of ['Plan &amp; todos', '>Log<', 'Session log', 'subagent', 'Standard mode']) expect(head).not.toContain(gone)
 })
 
+test('the header counts the task’s sub-agents in a switcher, as DeepSeek Harness does', () => {
+  const fleet = [
+    { id: 'f1', key: 'f1', title: 'Analyze libs/eyvan', status: 'working', age: '', current: false, kind: 'subagent' as const, turns: 0, messages: 0, cwd: '', untitled: false },
+    { id: 'f2', key: 'f2', title: 'Analyze the OCI pipeline', status: 'completed', age: '', current: false, kind: 'subagent' as const, turns: 0, messages: 0, cwd: '', untitled: false },
+  ]
+  const html = render(snapshot({ currentTitle: 'Review vnext', fleet }))
+  const head = html.slice(html.indexOf('chat__head--minimal'), html.indexOf('</header>', html.indexOf('chat__head--minimal')))
+  expect(head).toContain('agent-menu--count')
+  expect(head).toContain('2 agents')
+  expect(head).toContain('1 working')
+  expect(head).toContain('title="Open a sub-agent"')
+  // No agent is open: the conversation and composer are shown, no breadcrumb.
+  expect(head).not.toContain('agent-crumb')
+  expect(html).not.toContain('class="agent-inspector agent-pane"')
+  const empty = render(snapshot({ currentTitle: 'Review vnext', fleet: [] }))
+  expect(empty).not.toContain('agent-menu--count')
+})
+
 test('to-dos live in the Activity rail in the Claude layout', () => {
   const html = render(snapshot({ todos: [
     { id: '1', content: 'Read the diff', status: 'completed' },

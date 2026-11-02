@@ -38,7 +38,8 @@ assert.equal(await run('document.querySelector(".agent-inspector fieldset").disa
 wc.send('fixture','Command reconnect');
 await until('!document.querySelector(".agent-inspector [role=status]")');
 win.setSize(720,700);await delay(300);await capture('agent-inspector-narrow');
-await run('document.querySelector(".agent-inspector__back").click()');
+await run('document.querySelector(".agent-crumb__parent").click()');
+await until('!document.querySelector(".agent-inspector")');
 await until('Boolean(document.querySelector(".command-activity"))');
 await run('document.querySelector(".command-activity summary").click()');
 await until('document.querySelector(".command-activity .output-viewer__text")?.textContent.includes("Ready for input")');

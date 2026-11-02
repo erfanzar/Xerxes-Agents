@@ -9,6 +9,8 @@
  */
 
 import { notificationFor } from '../desktop/main/notify.js'
+import { readLocalChatImage } from '../desktop/main/chatMedia.js'
+import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from '../desktop/chatMediaShared.js'
 import { invokeFrame, type PushFrame, type ResultFrame } from './messages.js'
 
 /** The runtime connection (desktop/main/daemon.ts DaemonRpc satisfies it). */
@@ -50,6 +52,8 @@ export interface PanelPorts {
   setStyle(style: 'classic' | 'neo' | 'shading'): Promise<boolean>
   /** Whether the panel is visible now (notifications only fire while it is not). */
   visible(): boolean
+  /** Open an already validated http, https or mailto link (`vscode.env.openExternal`). */
+  openExternal?(url: string): Promise<boolean>
 }
 
 export interface PanelOptions {
@@ -162,6 +166,18 @@ export class PanelHost {
       case 'host:open-diff': return this.ports.openDiff(String(args[0]))
       case 'host:pick-files': return this.ports.pickFiles()
       case 'host:source-control': return this.ports.showSourceControl()
+      case OPEN_EXTERNAL_CHANNEL: {
+        const url = externalUrlOf(args[0])
+        if (!url) throw new Error('Only http, https and mailto links can be opened')
+        if (!this.ports.openExternal) throw new Error('This VS Code host cannot open links.')
+        return this.ports.openExternal(url)
+      }
+      case IMAGE_DATA_CHANNEL: {
+        // The extension host runs where the folder is (Remote-SSH included), so its disk is the workspace's.
+        const request = chatImageRequestOf(args[0])
+        if ('error' in request) return { ok: false, error: request.error }
+        return readLocalChatImage(request.path, request.cwd ?? this.ports.workspace)
+      }
       case 'host:set-style': {
         const style = args[0]
         if (style !== 'neo' && style !== 'classic' && style !== 'shading') throw new Error('Unknown style: choose neo, classic or shading.')

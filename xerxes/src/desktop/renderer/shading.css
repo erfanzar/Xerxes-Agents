@@ -307,3 +307,13 @@
   :root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark{animation:none}
 }
 @keyframes shading-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ── Chat media: flat image frames and a plain lightbox (ImageView.tsx) ── */
+:root[data-style='shading']:not(#shading) .atelier .chatimg__open{background:transparent;border-color:var(--x-hairline);border-radius:4px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier.chatimg-layer{background:rgba(0,0,0,.82)}
+:root[data-style='shading']:not(#shading) .atelier .chatimg-dialog{border-radius:4px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier .md__link{color:var(--x-title);text-decoration-color:var(--x-meta)}
+
+/* ── Agent pane: a sub-agent's conversation, flat like the main feed (AgentInspector.tsx) ── */
+:root[data-style='shading']:not(#shading) .atelier .agent-inspector .stream.agent-transcript{background:transparent;border-color:var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .agent-card__facts dd{font-family:var(--mono);font-size:11.5px}

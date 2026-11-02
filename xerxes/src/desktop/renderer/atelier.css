@@ -917,16 +917,16 @@ html,body,#root,.app.atelier{background:transparent}
 .agent-inspector__heading h2{font-size:18px;line-height:1.4;font-weight:500;color:var(--x-title);margin:0;overflow-wrap:anywhere}
 .agent-inspector__heading>span{font-size:12px;color:var(--x-meta)}
 .agent-inspector [data-state=working] .agent-inspector__heading>span{color:var(--x-working)}
-.agent-inspector dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 18px;font-size:12px;line-height:1.5}
-.agent-inspector dt{color:var(--x-meta)}
-.agent-inspector dd{margin:0;color:var(--x-title);overflow-wrap:anywhere}
+.agent-inspector dl:where(:not(.agent-transcript *)){display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 18px;font-size:12px;line-height:1.5}
+.agent-inspector dt:where(:not(.agent-transcript *)){color:var(--x-meta)}
+.agent-inspector dd:where(:not(.agent-transcript *)){margin:0;color:var(--x-title);overflow-wrap:anywhere}
 .agent-inspector__identity{padding-bottom:20px;border-bottom:1px solid var(--x-hairline)}
-.agent-inspector h3{font-size:13px;font-weight:500;color:var(--x-title);margin:24px 0 8px}
-.agent-inspector h3 span{color:var(--x-meta);font-weight:400;margin-left:8px}
-.agent-inspector p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
-.agent-inspector ul{padding-left:18px;overflow-wrap:anywhere}
+.agent-inspector h3:where(:not(.agent-transcript *)){font-size:13px;font-weight:500;color:var(--x-title);margin:24px 0 8px}
+.agent-inspector h3 span:where(:not(.agent-transcript *)){color:var(--x-meta);font-weight:400;margin-left:8px}
+.agent-inspector p:where(:not(.agent-transcript *)){white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.agent-inspector ul:where(:not(.agent-transcript *)){padding-left:18px;overflow-wrap:anywhere}
 .agent-inspector__prompt{max-height:240px;overflow:auto}
-.agent-inspector summary{cursor:pointer;padding:8px 0}
+.agent-inspector summary:where(:not(.agent-transcript *)){cursor:pointer;padding:8px 0}
 .agent-inspector__metadata{margin:20px 0;color:var(--x-meta);font-size:12px}
 .agent-inspector__controls{border:0;padding:12px 0;margin:0;border-top:1px solid var(--x-hairline);min-width:0}
 .output-viewer{min-width:0;margin:12px 0 8px;border:1px solid var(--x-hairline);border-radius:8px;overflow:hidden;background:var(--x-screen)}
@@ -3215,3 +3215,91 @@ html,body,#root,.app.atelier{background:transparent}
 .hubphone__pair{display:flex;flex-direction:column;gap:var(--s-2);align-items:flex-start}
 .hubphone__pair .field{align-self:stretch}
 .modelchooser{display:flex;flex-direction:column;gap:var(--s-2);border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-4)}
+
+/* ── Chat media: inline images, the image lightbox, chat links ──────
+   ImageView.tsx and chatLinks.tsx. Images are bounded thumbnails that
+   open in a lightbox; a refused image is one quiet line with its reason. */
+.chatimg{display:inline-block;max-width:100%;vertical-align:top;margin:4px 0}
+.chatimg__open{display:block;padding:0;border:1px solid var(--x-hairline);border-radius:var(--r-sm,6px);background:var(--x-card);cursor:zoom-in;overflow:hidden;max-width:100%}
+.chatimg__open:focus-visible{outline:2px solid var(--x-focus,var(--x-accent));outline-offset:2px}
+.chatimg__img{display:block;max-width:min(100%,520px);max-height:360px;width:auto;height:auto;object-fit:contain}
+.chatimg__error,.chatimg__loading,.chatimg__web{display:inline-block;font:var(--t-caption);color:var(--x-meta);margin:2px 0}
+.chatimg__error{color:var(--x-failed-text)}
+.toolimages{display:flex;flex-wrap:wrap;gap:var(--s-2);margin:var(--s-2) 0}
+.toolimages .chatimg__img{max-height:240px}
+.chatimg-layer{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72);padding:32px}
+.chatimg-dialog{display:flex;flex-direction:column;max-width:100%;max-height:100%;background:var(--x-card);border:1px solid var(--x-hairline);border-radius:var(--r-sm,6px);overflow:hidden;outline:none}
+.chatimg-dialog img{display:block;max-width:calc(100vw - 64px);max-height:calc(100vh - 112px);object-fit:contain;margin:auto}
+.chatimg-dialog__bar{display:flex;align-items:center;gap:var(--s-2);padding:6px 8px 6px 12px;border-top:1px solid var(--x-hairline);font:var(--t-caption);color:var(--x-secondary)}
+.chatimg-dialog__bar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chatimg-dialog__bar button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:0;border-radius:var(--r-sm,6px);background:transparent;color:var(--x-title);cursor:pointer}
+.chatimg-dialog__bar button:hover{background:var(--x-selected)}
+.md__link:focus-visible{outline:2px solid var(--x-focus,var(--x-accent));outline-offset:1px;border-radius:2px}
+.md__link--file{text-decoration-style:dotted}
+.md__link--inert{color:inherit;text-decoration:none;cursor:default}
+.md__link-error{font:var(--t-caption);color:var(--x-failed-text)}
+
+/* ── Agent pane: a sub-agent opened in the conversation's place (AgentInspector.tsx) ──
+   DeepSeek Harness's layout. The child's conversation scrolls exactly like
+   the main feed; the composer's place holds its message/stop dock. */
+.atelier .agent-pane{display:flex;flex:1;flex-direction:column;min-height:0;padding:0;overflow:hidden}
+.atelier .agent-pane>.stream{flex:1;min-height:0;position:relative}
+
+/* The open agent's card at the top of the Activity rail: everything that is not its chat. */
+.atelier .agent-card{margin-bottom:10px}
+.atelier .agent-card .railcard__title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .agent-card .railcard__meta[data-tone='working']{color:var(--x-working)}
+.atelier .agent-card .railcard__meta[data-tone='failed']{color:var(--x-failed-text)}
+.atelier .agent-card .railcard__meta[data-tone='done']{color:var(--x-done)}
+.atelier .agent-card__facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 12px;margin:0;font:400 12px/1.45 var(--sans)}
+.atelier .agent-card__facts dt{color:var(--x-meta)}
+.atelier .agent-card__facts dd{margin:0;color:var(--x-title);overflow-wrap:anywhere;text-align:right}
+.atelier .agent-card__fold{margin-top:8px;border-top:1px solid var(--x-hairline);padding-top:6px;font:400 12px/1.5 var(--sans);color:var(--x-secondary)}
+.atelier .agent-card__fold>summary{cursor:pointer;padding:2px 0;color:var(--x-meta)}
+.atelier .agent-card__fold>summary>span{margin-left:6px;font:var(--t-num)}
+.atelier .agent-card__fold ul{margin:6px 0 0;padding-left:16px;overflow-wrap:anywhere}
+.atelier .agent-card__fold .agent-card__facts{margin-top:6px}
+.atelier .agent-card__prompt{margin:6px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--x-secondary)}
+.atelier .agent-card__note{margin:4px 0 0;color:var(--x-meta)}
+.agent-inspector .agent-transcript__note{margin:8px 0;font-size:12px;color:var(--x-meta)}
+.agent-inspector .agent-inspector__fallback{margin:12px 0;font-size:12px}
+.agent-inspector .agent-inspector__result-fold{margin:12px 0 0;font-size:12px;color:var(--x-meta)}
+
+/* The dock: the composer's frame, holding this agent's controls. */
+.atelier .agent-dock{border:0;margin:0;min-width:0}
+.atelier .agent-dock .composer{flex-direction:row;align-items:flex-end}
+.atelier .agent-dock__actions{display:flex;flex:none;align-items:center;gap:4px}
+.atelier .agent-dock__retry{width:auto;padding:0 12px;gap:6px;border-radius:8px;font:500 13px/1 var(--sans)}
+.atelier .agent-dock__foot{width:100%;max-width:var(--conversation-width);margin:0 auto;padding:0 6px;font:400 12px/1.5 var(--sans);color:var(--x-meta)}
+.atelier .agent-dock__foot p{margin:0;color:var(--x-secondary)}
+.atelier .agent-dock__foot p[data-error]{color:var(--x-failed-text)}
+.atelier .agent-dock--readonly .composer-dock{padding:14px 16px;text-align:center;font:400 13px/1.5 var(--sans);color:var(--x-meta)}
+.atelier .agent-dock--readonly p{margin:0}
+.atelier .agent-dock--readonly strong{color:var(--x-title);font-weight:600}
+
+/* Header: `Task / agent ⌄` while one is open, `N agents ⌄` otherwise. */
+.atelier .agent-crumb{display:flex;align-items:center;gap:6px;min-width:0;flex:0 1 auto}
+.atelier .agent-crumb__parent{min-width:0;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;padding:3px 6px;border-radius:6px;font:400 13px/1.2 var(--sans);color:var(--x-meta);cursor:pointer;-webkit-app-region:no-drag}
+.atelier .agent-crumb__parent:hover{background:var(--x-selected);color:var(--x-title)}
+.atelier .agent-crumb__sep{color:var(--x-meta);flex:none}
+.atelier .agent-menu{position:relative;min-width:0;-webkit-app-region:no-drag}
+.atelier .agent-menu__trigger{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;height:28px;padding:0 8px;border:0;border-radius:7px;background:transparent;font:500 13px/1.4 var(--sans);color:var(--x-title);cursor:pointer}
+.atelier .agent-menu--count .agent-menu__trigger{font-weight:400;color:var(--x-secondary)}
+.atelier .agent-menu__trigger:hover,.atelier .agent-menu__trigger[aria-expanded='true']{background:var(--x-selected);color:var(--x-title)}
+/* line-height and block padding keep descenders (the g of "agents") inside the clipped box. */
+.atelier .agent-menu__label{display:inline-flex;align-items:center;gap:8px;min-width:0;padding-block:2px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.atelier .agent-menu__live{color:var(--x-working);font-size:12px}
+.atelier .agent-menu__pop{position:absolute;top:calc(100% + 6px);left:0;z-index:140;width:min(440px,calc(100vw - 48px));max-height:min(60vh,520px);display:flex;flex-direction:column;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);box-shadow:0 18px 48px #00000073;overflow:hidden}
+.atelier .agent-menu__filter{margin:8px;padding:7px 10px;border:1px solid var(--x-hairline);border-radius:7px;background:var(--x-screen);color:var(--x-title);font:400 13px/1.3 var(--sans)}
+.atelier .agent-menu__list{overflow:auto;padding:4px}
+.atelier .agent-menu__row{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:0;border-radius:7px;background:transparent;text-align:left;color:var(--x-secondary);cursor:pointer}
+.atelier .agent-menu__row:hover,.atelier .agent-menu__row:focus-visible,.atelier .agent-menu__row[aria-current='true']{background:var(--x-selected);color:var(--x-title);outline:none}
+.atelier .agent-menu__dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--x-meta)}
+.atelier .agent-menu__row[data-tone='working'] .agent-menu__dot{background:var(--x-working)}
+.atelier .agent-menu__row[data-tone='done'] .agent-menu__dot{background:var(--x-done)}
+.atelier .agent-menu__row[data-tone='failed'] .agent-menu__dot{background:var(--x-failed)}
+.atelier .agent-menu__row[data-tone='waiting'] .agent-menu__dot{background:var(--x-needs)}
+.atelier .agent-menu__text{display:grid;gap:2px;flex:1;min-width:0}
+.atelier .agent-menu__title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px/1.3 var(--sans);color:var(--x-title)}
+.atelier .agent-menu__sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11.5px/1.3 var(--sans);color:var(--x-meta)}
+.atelier .agent-menu__more{margin:6px 10px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
