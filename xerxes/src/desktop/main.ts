@@ -48,6 +48,8 @@ import { createNodeShareDeps, createShareRegistry, shareRemoteWorkspace, type Hu
 import { createMacPermissions, registerMacPermissionsIpc } from './main/macPermissions.js'
 import { electronMacPermissionsPort } from './main/macPermissionsPort.js'
 import { MAC_PERMISSIONS_STATE_EVENT } from './macPermissionsShared.js'
+import { createHubHealth, createNodeHubHealthPort, registerHubHealthIpc } from './main/hubHealth.js'
+import { HUB_HEALTH_STATE_EVENT } from './hubHealthShared.js'
 import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from './chatMediaShared.js'
 import { readLocalChatImage, readRemoteChatImage } from './main/chatMedia.js'
 
@@ -991,6 +993,17 @@ void app.whenReady().then(async () => {
     macPermissions.check()
     app.on('browser-window-focus', () => { macPermissions.recheckOnFocus() })
   }
+  // Hub health: a notice when no Hub is set up or the saved one does not
+  // answer its /healthz. Checked at start and again when a window regains focus.
+  const hubHealth = createHubHealth(createNodeHubHealthPort({ home: xerxesHome() }))
+  registerHubHealthIpc(ipcMain, hubHealth)
+  hubHealth.onChange(state => {
+    for (const contents of webContents.getAllWebContents()) {
+      if (!contents.isDestroyed()) contents.send(HUB_HEALTH_STATE_EVENT, state)
+    }
+  })
+  void hubHealth.check()
+  app.on('browser-window-focus', () => { hubHealth.recheckOnFocus() })
   // The dock/taskbar icon is the phoenix mark; on macOS the running app's
   // dock tile only changes through app.dock.
   const icon = appIcon()

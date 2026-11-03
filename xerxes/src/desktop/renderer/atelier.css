@@ -3124,6 +3124,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .macperm-notice__text{display:grid;gap:4px;color:var(--x-secondary);overflow-wrap:anywhere}
 .atelier .macperm-notice__text strong{color:var(--x-title)}
 .atelier .macperm-notice__actions{display:flex;flex-wrap:wrap;gap:6px}
+/* The startup notices (Hub, macOS permissions) stack in one corner. */
+.atelier .notice-stack{position:fixed;z-index:70;right:16px;bottom:16px;display:grid;gap:10px;width:min(460px,calc(100vw - 32px));pointer-events:none}
+.atelier .notice-stack:empty{display:none}
+.atelier .notice-stack>.macperm-notice{position:static;width:auto;pointer-events:auto}
+.atelier .hub-notice__target{font-size:12px;color:var(--x-meta)}
+.atelier .hub-notice__target code{font:var(--t-num)}
 .atelier .action-card__error{color:var(--x-failed-text);font:var(--t-caption);margin:var(--s-2) 0}
 /* XERXES is a page of its own inside .chat: toolbar, scrolling reading
    column, docked composer. The task's composer host is hidden meanwhile. */

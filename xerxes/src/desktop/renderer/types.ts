@@ -14,6 +14,7 @@ import type { WorkspaceContext } from '../main/contextNavigation.js'
 import type { ReflectionNotice } from './learning.js'
 import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
 import type { MacPermissionAction, MacPermissionsState } from '../macPermissionsShared.js'
+import type { HubHealthAction, HubHealthState } from '../hubHealthShared.js'
 import type { ChatImageRequestWire, ChatImageResult } from '../chatMediaShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
@@ -45,6 +46,9 @@ export interface XerxesBridge {
   /** macOS privacy permissions in the main process (see main/macPermissions.ts); desktop app only. */
   macPermissions?(action: MacPermissionAction, params?: Record<string, unknown>): Promise<unknown>
   onMacPermissions?(handler: (state: MacPermissionsState) => void): () => void
+  /** Hub health in the main process (see main/hubHealth.ts); desktop app only. */
+  hubHealth?(action: HubHealthAction, params?: Record<string, unknown>): Promise<unknown>
+  onHubHealth?(handler: (state: HubHealthState) => void): () => void
   /** VS Code host only. */
   openInEditor?(path: string, line?: number): Promise<boolean>
   openDiff?(path: string): Promise<boolean>

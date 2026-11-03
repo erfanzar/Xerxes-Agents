@@ -41,6 +41,7 @@ import { SupervisorPage } from './SupervisorPage.js'
 import { parseGoal } from './goalText.js'
 import { AppUpdatePrompt } from './AppUpdatePrompt.js'
 import { MacPermissionsNotice } from './MacPermissionsPanel.js'
+import { HubHealthNotice } from './HubHealthNotice.js'
 // Re-exported: it moved into its own module so the rail's diagnostics
 // drawer (DesktopPanels) can import it without a cycle through App.
 export { SessionDiagnostics } from './SessionDiagnostics.js'
@@ -250,7 +251,8 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       <Announcer snap={snap} />
       <SettingsModal snap={snap} />
       <AppUpdatePrompt update={snap.appUpdate} />
-      <MacPermissionsNotice />
+      {/* Startup notices share one corner and stack instead of overlapping. */}
+      <div className="notice-stack"><HubHealthNotice /><MacPermissionsNotice /></div>
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
           focus effect) must never share a fiber with a closed render. */}
