@@ -17,6 +17,10 @@ import {
   type MacPermissionsState,
 } from './macPermissionsShared.js'
 import {
+  HUB_HEALTH_CHANNEL_PREFIX, HUB_HEALTH_STATE_EVENT, asHubHealthState, isHubHealthAction,
+  type HubHealthState,
+} from './hubHealthShared.js'
+import {
   IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, asChatImageResult, chatImageRequestOf, chatImageWire, externalUrlOf,
   type ChatImageResult,
 } from './chatMediaShared.js'
@@ -172,6 +176,27 @@ export function createBridge(transport: BridgeTransport) {
       try { (handler as (state: MacPermissionsState) => void)(state) } catch { /* a renderer fault must not break the bridge */ }
     }
     return transport.on(MAC_PERMISSIONS_STATE_EVENT, listener)
+  },
+  /** Hub health for the "Hub unreachable / not set up" notice. Only an action name and a notice kind cross. */
+  hubHealth(action: unknown, params: unknown = {}): Promise<unknown> {
+    if (!isHubHealthAction(action)) return Promise.reject(new TypeError('Unknown Hub health action'))
+    let clean: Record<string, unknown>
+    try {
+      clean = cleanParams(params)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    return transport.invoke(HUB_HEALTH_CHANNEL_PREFIX + action, clean)
+  },
+  /** The Hub health state after each check (start, focus, re-check, reminder change). */
+  onHubHealth(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    const listener = (value: unknown): void => {
+      const state = asHubHealthState(value)
+      if (state === undefined) return
+      try { (handler as (state: HubHealthState) => void)(state) } catch { /* a renderer fault must not break the bridge */ }
+    }
+    return transport.on(HUB_HEALTH_STATE_EVENT, listener)
   },
   /** Frames and state changes of the Hub socket that main bridges for this page. */
   onHubSocket(handler: unknown): () => void {
