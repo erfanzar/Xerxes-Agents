@@ -239,6 +239,27 @@ describe('HubEventStore', () => {
     expect(reopened.watermark()).toBe(1)
   })
 
+  test('age retention drops exactly the expired rows and nothing while none has expired', () => {
+    let time = now
+    // The batch fixture stamps every event with `now`; these carry the time they were written.
+    const at = (sequences: readonly number[], when: number): UpstreamEventBatch => {
+      const base = batch(sequences)
+      return { ...base, events: base.events.map(event => ({ ...event, occurred_at: new Date(when).toISOString() })) }
+    }
+    const value = store(':memory:', { clock: () => time, retention: { maxBytes: 1_000_000, maxAgeMs: 1000 } })
+    value.ingest('r1', 'w1', at([1, 2], time))
+    time += 600
+    value.ingest('r1', 'w1', at([3], time))
+    // Nothing is older than the cutoff yet: every row stays.
+    value.prune()
+    expect(value.oldestSequence()).toBe(1)
+    time += 500
+    // Rows 1 and 2 are now 1100 ms old, row 3 only 500 ms.
+    value.prune()
+    expect(value.oldestSequence()).toBe(3)
+    expect(value.read(2, scope).events.map(event => event.sequence)).toEqual([3])
+  })
+
   test('appends durable Hub events, rejects ephemeral presence, and notifies only after commit', () => {
     const value = store()
     const observed: number[] = []
