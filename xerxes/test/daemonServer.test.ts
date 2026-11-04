@@ -11187,6 +11187,25 @@ test('subagent.inspect scopes retained evidence to the parent across reconnect a
     const status=await rpc('session.status');
     expect(JSON.stringify(status)).not.toContain('Review the change');
     expect(JSON.stringify(status)).not.toContain('Reading files');
+    // The polled summary list drops each agent's file and tool lists; session.status keeps them.
+    parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'running',agent_id:'reviewer',summary:'Checked the parser',tool_count:4,files_read:['src/a.ts'],files_written:['src/b.ts'],toolsets:['ReadFile'],rules:['permission:accept-all']}];
+    const listed=await rpc('session.active_list',{history_limit:0});
+    const listedRow=((listed.result?.sessions as Array<Record<string,unknown>>).find(row=>row.id===parent.id)?.subagent_snapshots as Array<Record<string,unknown>>)[0]!;
+    expect(listedRow).toMatchObject({id:'child',status:'running',agent_id:'reviewer',summary:'Checked the parser',tool_count:4});
+    for(const key of ['files_read','files_written','toolsets','rules'])expect(listedRow).not.toHaveProperty(key);
+    const detailed=((await rpc('session.status')).result?.session as Record<string,unknown>).subagent_snapshots as Array<Record<string,unknown>>;
+    expect(detailed[0]).toMatchObject({files_read:['src/a.ts'],files_written:['src/b.ts'],toolsets:['ReadFile'],rules:['permission:accept-all']});
+    // A caller holding the current subagent_revision gets a few bytes instead of every row.
+    const stamped=(await rpc('session.status',{history_limit:0})).result?.session as Record<string,unknown>;
+    expect(typeof stamped.subagent_revision).toBe('string');
+    const same=(await rpc('session.status',{history_limit:0,subagent_revision:stamped.subagent_revision})).result?.session as Record<string,unknown>;
+    expect(same).toMatchObject({subagent_revision:stamped.subagent_revision,subagent_snapshots_unchanged:true});
+    expect(same).not.toHaveProperty('subagent_snapshots');
+    parent.metadata.xerxes_subagent_snapshots_v1=[{id:'child',status:'completed',agent_id:'reviewer',summary:'Done'}];
+    const moved=(await rpc('session.status',{history_limit:0,subagent_revision:stamped.subagent_revision})).result?.session as Record<string,unknown>;
+    expect(moved).not.toHaveProperty('subagent_snapshots_unchanged');
+    expect(moved.subagent_revision).not.toBe(stamped.subagent_revision);
+    expect((moved.subagent_snapshots as Array<Record<string,unknown>>)[0]).toMatchObject({id:'child',status:'completed'});
     await rpc('initialize',{session_key:'foreign'});
     expect((await rpc('subagent.inspect',{task:'child'})).result?.ok).toBe(false);
     expect((await rpc('subagent.inspect',{})).result?.ok).toBe(false);
