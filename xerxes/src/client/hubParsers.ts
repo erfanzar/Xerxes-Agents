@@ -412,6 +412,8 @@ export function parseAutopilotRow(raw: unknown): AutopilotRow | undefined {
   const updatedAt = isoOrNull(r.updated_at)
   const enabledBy = parseAutopilotPerson(r.enabled_by)
   if (expiresAt === undefined || updatedAt === undefined || enabledBy === undefined) return undefined
+  // A Hub from before watch-only mode sends no `mode`: it always acted. Any other value is malformed.
+  if (r.mode !== undefined && r.mode !== 'auto' && r.mode !== 'observe') return undefined
   return {
     workspaceId,
     label: r.label === '' ? workspaceId : r.label,
@@ -421,6 +423,7 @@ export function parseAutopilotRow(raw: unknown): AutopilotRow | undefined {
     enabledBy,
     updatedAt,
     active: r.active,
+    mode: r.mode === 'observe' ? 'observe' : 'auto',
   }
 }
 

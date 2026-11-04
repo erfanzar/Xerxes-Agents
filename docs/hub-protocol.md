@@ -406,11 +406,16 @@ Per workspace, the Hub owner can let XERXES act for them. Rows live in
 | Method | Params | Result |
 |---|---|---|
 | `supervisor.autopilot.get` | none | `{can_edit, workspaces:[row]}` for every workspace the caller can see (unconfigured ones as `enabled:false, instruction:'', nulls`) |
-| `supervisor.autopilot.set` (owner) | `{workspace_id, enabled, instruction? (≤2000 chars), expires_at? (ISO, future, ≤30 days, or null)}` | `{workspace: row}` |
+| `supervisor.autopilot.set` (owner) | `{workspace_id, enabled, instruction? (≤2000 chars), expires_at? (ISO, future, ≤30 days, or null), mode? ('auto'|'observe')}` | `{workspace: row}` |
 
 Row: `{workspace_id, label, enabled, instruction, expires_at, enabled_by:{id,name}|null,
-updated_at, active}`; `active` = enabled, not expired, and the enabler is still the
-Hub owner. In `set`, an omitted `expires_at` keeps the stored expiry and only an
+updated_at, active, mode}`; `active` = enabled, not expired, and the enabler is still the
+Hub owner. `mode` (additive, 0.8.25) is `auto` (wake-ups act without a Confirm) or
+`observe` (watch only: wake-ups still run, but every action becomes a normal Confirm
+card, and an `answer_question` / `answer_permission` call only posts
+`Autopilot (watch only) would answer …` to the shared thread and returns
+`state: 'recorded'`; nothing reaches the task). An omitted `mode` keeps the stored one; a
+new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`. In `set`, an omitted `expires_at` keeps the stored expiry and only an
 explicit `null` clears it; `enabled:true` with a kept expiry that has already
 passed is refused (`invalid_request`, choose a new expiry). `set` refuses agents and non-owners (`forbidden`, audited), unknown keys
 and bad values (`invalid_request`), unknown workspaces (`not_found`), and an

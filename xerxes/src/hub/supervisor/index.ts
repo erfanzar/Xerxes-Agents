@@ -198,6 +198,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     if (!input.requester.hubOwner || !isOwner(input.requester.id)) return undefined
     const owner: UserPrincipal = { ...input.requester, hubOwner: true }
     if (input.trigger) {
+      // Watch-only Autopilot: a wake-up never acts by itself; its actions become Confirm cards.
+      if (autopilot.active(input.workspaceId)?.mode === 'observe') return undefined
       // A wake turn counts only in the owner's own Autopilot thread.
       return input.threadId === autopilotThreadId(owner.id) ? { owner, wake: true } : undefined
     }
@@ -205,6 +207,33 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     return { owner, wake: false }
   }
   void autopilotOwnerPrincipal
+
+  /**
+   * Watch-only Autopilot: a wake-up's answer to a question or permission request is
+   * recorded in the shared thread as what XERXES would have answered, and nothing is sent.
+   * Undefined when the turn is not a watch-only wake-up, so the normal path applies.
+   */
+  const observedAnswer = (input: {
+    readonly workspaceId: string; readonly sessionId: string; readonly requestId: string
+    readonly requester: UserPrincipal; readonly trigger: boolean
+  }, kind: 'question' | 'permission request', answer: string): Record<string, unknown> | undefined => {
+    if (!input.trigger) return undefined
+    const active = autopilot.active(input.workspaceId)
+    if (active?.mode !== 'observe') return undefined
+    const rawTitle = workspaces.projection(input.workspaceId)?.sessions[input.sessionId]?.title ?? input.sessionId
+    const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
+    const text = answer.replace(/\s+/g, ' ').trim()
+    const shown = text.length <= 300 ? text : `${text.slice(0, 299)}…`
+    try {
+      postShared(input.workspaceId, input.sessionId, active.ownerId, `Autopilot (watch only) would answer the ${kind} in “${title}”: ${shown}`)
+    } catch (error) {
+      report(error, 'autopilot observe notice')
+    }
+    return {
+      state: 'recorded', request_id: input.requestId, mode: 'observe',
+      note: `Watch-only mode: nothing was sent. The ${kind} still waits for a person.`,
+    }
+  }
 
   const digests = new DigestService({
     workspaces,
@@ -283,6 +312,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   }): Promise<Record<string, unknown>> => {
     const { workspaceId, sessionId, requestId } = input
+    const watched = observedAnswer(input, 'question', Object.values(input.answers).join('; '))
+    if (watched !== undefined) return watched
     const grant = autopilotGrant(input)
     if (grant === undefined) {
       throw new SupervisorDenied('XERXES answers a task\'s question only for the Hub owner, in a conversation with nobody else in it. Ask the owner to answer it.')
@@ -378,6 +409,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     readonly reader: ScopeReader; readonly trigger: boolean; readonly othersInContext: boolean
   }): Promise<Record<string, unknown>> => {
     const { workspaceId, sessionId, requestId, response } = input
+    const watched = observedAnswer(input, 'permission request', response)
+    if (watched !== undefined) return watched
     const grant = autopilotGrant(input)
     if (grant === undefined) {
       throw new SupervisorDenied('XERXES answers a permission request only for the Hub owner, in a conversation with nobody else in it. Ask the owner to answer it.')

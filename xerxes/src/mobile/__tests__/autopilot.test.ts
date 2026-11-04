@@ -30,11 +30,15 @@ describe('autopilot parsers', () => {
   it('reads a full row and a never-configured row', () => {
     expect(parseAutopilotRow(ROW)).toEqual({
       workspaceId: 'w1', label: 'Mac · app', enabled: true, instruction: 'Keep going', expiresAt: '2026-10-25T00:00:00.000Z',
-      enabledBy: { id: 'u1', name: 'Ann' }, updatedAt: '2026-10-24T10:00:00.000Z', active: true,
+      enabledBy: { id: 'u1', name: 'Ann' }, updatedAt: '2026-10-24T10:00:00.000Z', active: true, mode: 'auto',
     })
     expect(parseAutopilotRow(IDLE_ROW)).toEqual({
-      workspaceId: 'w2', label: 'Server · api', enabled: false, instruction: '', expiresAt: null, enabledBy: null, updatedAt: null, active: false,
+      workspaceId: 'w2', label: 'Server · api', enabled: false, instruction: '', expiresAt: null, enabledBy: null, updatedAt: null, active: false, mode: 'auto',
     })
+    // A Hub that sends no mode always acted; watch only is read as such; anything else is malformed.
+    expect(parseAutopilotRow({ ...ROW, mode: 'observe' })?.mode).toBe('observe')
+    expect(parseAutopilotRow({ ...ROW, mode: 'auto' })?.mode).toBe('auto')
+    expect(parseAutopilotRow({ ...ROW, mode: 'yolo' })).toBeUndefined()
   })
 
   it('rejects a row with a missing or wrongly typed field instead of guessing', () => {

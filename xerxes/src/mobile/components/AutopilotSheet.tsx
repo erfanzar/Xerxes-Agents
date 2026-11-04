@@ -4,8 +4,8 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
 import {
-  AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_READ_ONLY_NOTE, autopilotExpiresAt,
-  autopilotExpiryOptions, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed, type AutopilotExpiryChoice,
+  AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_MODE_OPTIONS, AUTOPILOT_READ_ONLY_NOTE, autopilotExpiresAt,
+  autopilotExpiryOptions, autopilotStateText, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed, type AutopilotExpiryChoice, type AutopilotMode,
 } from '../../client/autopilot.js'
 import { AUTOPILOT_INSTRUCTION_LIMIT } from '../../client/hubController.js'
 import type { AutopilotRow } from '../../client/hubTypes.js'
@@ -18,10 +18,7 @@ import { Sheet } from './Sheet.js'
  * rows read-only. `active` is the Hub's verdict and is shown as is.
  */
 
-function stateText(row: AutopilotRow): string {
-  if (row.active) return 'On'
-  return row.enabled ? 'Off (expired or the owner changed)' : 'Off'
-}
+const stateText = autopilotStateText
 
 function ReadOnlyRow({ row }: { row: AutopilotRow }): ReactElement {
   return (
@@ -39,6 +36,7 @@ function EditableRow({ row }: { row: AutopilotRow }): ReactElement {
   const { controller } = useServices()
   const [enabled, setEnabled] = useState(row.enabled)
   const [instruction, setInstruction] = useState(row.instruction)
+  const [mode, setMode] = useState<AutopilotMode>(row.mode)
   const [expiry, setExpiry] = useState<AutopilotExpiryChoice>(() => defaultAutopilotExpiry(row, Date.now()))
   const live = state.connection.state === 'live'
   const saving = state.autopilot.savingId === row.workspaceId
@@ -54,6 +52,7 @@ function EditableRow({ row }: { row: AutopilotRow }): ReactElement {
       workspaceId: row.workspaceId,
       enabled,
       instruction,
+      mode,
       ...(expiresAt === undefined ? {} : { expiresAt }),
     })
     if (ok) setExpiry(defaultAutopilotExpiry({ expiresAt: expiresAt === undefined ? row.expiresAt : expiresAt }, Date.now()))
@@ -75,6 +74,12 @@ function EditableRow({ row }: { row: AutopilotRow }): ReactElement {
             onChange={event => setInstruction(event.target.value)}
           />
           <span className="block-meta">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
+        </label>
+        <label className="field">
+          <span>What it may do</span>
+          <select value={mode} onChange={event => setMode(event.target.value === 'observe' ? 'observe' : 'auto')}>
+            {AUTOPILOT_MODE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
         </label>
         <label className="field">
           <span>Stop automatically</span>

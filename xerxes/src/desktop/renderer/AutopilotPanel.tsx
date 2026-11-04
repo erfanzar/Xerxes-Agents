@@ -4,8 +4,8 @@
 import { useState, type ReactElement } from 'react'
 
 import {
-  AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_READ_ONLY_NOTE, autopilotExpiresAt,
-  autopilotExpiryOptions, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed, type AutopilotExpiryChoice,
+  AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_MODE_OPTIONS, AUTOPILOT_READ_ONLY_NOTE, autopilotExpiresAt,
+  autopilotExpiryOptions, autopilotStateText, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed, type AutopilotExpiryChoice, type AutopilotMode,
 } from '../../client/autopilot.js'
 import { AUTOPILOT_INSTRUCTION_LIMIT, type AutopilotInput } from '../../client/hubController.js'
 import type { AutopilotState } from '../../client/hubStore.js'
@@ -27,10 +27,7 @@ export interface AutopilotPanelProps {
   readonly onClose: () => void
 }
 
-function stateText(row: AutopilotRow): string {
-  if (row.active) return 'On'
-  return row.enabled ? 'Off (expired or the owner changed)' : 'Off'
-}
+const stateText = autopilotStateText
 
 function ReadOnlyRow({ row }: { readonly row: AutopilotRow }): ReactElement {
   return (
@@ -54,6 +51,7 @@ function EditableRow({ row, live, saving, onSave }: {
 }): ReactElement {
   const [enabled, setEnabled] = useState(row.enabled)
   const [instruction, setInstruction] = useState(row.instruction)
+  const [mode, setMode] = useState<AutopilotMode>(row.mode)
   const [expiry, setExpiry] = useState<AutopilotExpiryChoice>(() => defaultAutopilotExpiry(row, Date.now()))
   const id = `autopilot-${row.workspaceId}`
   const tooLong = instruction.length > AUTOPILOT_INSTRUCTION_LIMIT
@@ -68,6 +66,7 @@ function EditableRow({ row, live, saving, onSave }: {
       workspaceId: row.workspaceId,
       enabled,
       instruction,
+      mode,
       ...(expiresAt === undefined ? {} : { expiresAt }),
     })
     // The saved row now carries the expiry, so the select goes back to "keep" (or "no expiry").
@@ -93,6 +92,12 @@ function EditableRow({ row, live, saving, onSave }: {
             onChange={event => setInstruction(event.target.value)}
           />
           <span className="studio-muted">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
+        </div>
+        <div className="field">
+          <label htmlFor={`${id}-mode`}>What it may do</label>
+          <select id={`${id}-mode`} value={mode} onChange={event => setMode(event.target.value === 'observe' ? 'observe' : 'auto')}>
+            {AUTOPILOT_MODE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
         </div>
         <div className="field">
           <label htmlFor={`${id}-expiry`}>Stop automatically</label>
