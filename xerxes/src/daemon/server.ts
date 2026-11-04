@@ -2529,9 +2529,10 @@ export class DaemonServer {
         ok: true,
         sessions: await Promise.all(this.runtime
           .listSessions()
-          .map(async (session) =>
-            this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
-          )),
+          .map(async (session) => {
+            const payload = this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session));
+            return requestedHistory === 0 ? withSummarySubagentRows(payload) : payload;
+          })),
       };
     }
     if (method === "session.list") {
@@ -2619,7 +2620,10 @@ export class DaemonServer {
         } : {}),
         session: session
           ? {
-              ...this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+              ...withSubagentRevision(
+                this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+                optionalString(params.subagent_revision),
+              ),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -12966,6 +12970,48 @@ function sessionHierarchyPayload(
     ...(parentSessionId ? { parent_session_id: parentSessionId } : {}),
     ...(rootSessionId ? { root_session_id: rootSessionId } : {}),
     ...(subagentId ? { subagent_id: subagentId } : {}),
+  };
+}
+
+/**
+ * Stamp a session payload with `subagent_revision`, a hash of its agent rows. When the
+ * caller already holds that revision, the rows are left out and
+ * `subagent_snapshots_unchanged: true` says so: a client polling agent state over a slow
+ * link then receives a few bytes instead of every agent's record each time. Additive: a
+ * caller that sends no revision gets the full rows, as before.
+ */
+export function withSubagentRevision(payload: JsonRpcPayload, known: string | undefined): JsonRpcPayload {
+  const rows = Array.isArray(payload.subagent_snapshots) ? payload.subagent_snapshots : [];
+  const revision = Bun.hash(JSON.stringify(rows)).toString(16);
+  if (known !== undefined && known === revision) {
+    const { subagent_snapshots: _rows, ...rest } = payload;
+    void _rows;
+    return { ...rest, subagent_revision: revision, subagent_snapshots_unchanged: true };
+  }
+  return { ...payload, subagent_revision: revision };
+}
+
+/** Per-agent lists that only an inspector needs; `session.status` and `subagent.inspect` still carry them. */
+const SUBAGENT_DETAIL_LISTS = ["files_read", "files_written", "toolsets", "rules"] as const;
+
+/**
+ * A `session.active_list {history_limit: 0}` row with its subagent rows cut to
+ * their summary fields. Every client polls this list every second or two, and
+ * none reads the per-agent file and tool lists from it. One parent with 63
+ * agents made each row 266 KB, 200 KB of it those lists, and over a slow SSH
+ * link to a remote host the polls queued up behind each other.
+ */
+export function withSummarySubagentRows(payload: JsonRpcPayload): JsonRpcPayload {
+  const rows = payload.subagent_snapshots;
+  if (!Array.isArray(rows)) return payload;
+  return {
+    ...payload,
+    subagent_snapshots: rows.map((row: unknown) => {
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+      const summary: JsonRpcPayload = { ...(row as JsonRpcPayload) };
+      for (const key of SUBAGENT_DETAIL_LISTS) delete summary[key];
+      return summary;
+    }),
   };
 }
 

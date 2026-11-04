@@ -3465,7 +3465,14 @@ export class Store {
     }
   }
 
+  /** The daemon's `subagent_revision` of the fleet last adopted, per session key. */
+  private fleetRevision: { readonly key: string; readonly revision: string } | null = null
+
   private adoptFleet(session: Readonly<Record<string, unknown>>, requestedAt = Date.now()): void {
+    // The daemon left the rows out because they match the revision we sent: keep what we have.
+    if (session.subagent_snapshots_unchanged === true) return
+    const revision = str(session.subagent_revision)
+    this.fleetRevision = revision ? { key: this.sessionKey, revision } : null
     const raw = Array.isArray(session.subagent_snapshots) ? session.subagent_snapshots : []
     const previousById = new Map(this.frame.fleet.map(agent => [agent.id, agent] as const))
     const fleet = raw
@@ -3674,18 +3681,37 @@ export class Store {
     return 'Sent. The agent reads it at its next step.'
   }
 
+  /** One fleet read in flight at a time; calls meanwhile ask for exactly one read after it. */
+  private fleetRead: { again: boolean } | null = null
+
+  /**
+   * Re-read the parent's agent rows. Single-flight: on a slow link (an SSH
+   * workspace behind a lossy tunnel) a reply can take longer than the poll
+   * interval, and starting a new read every tick queued replies behind each
+   * other until every RPC on the link took seconds. Calls made while a read is
+   * pending collapse into one follow-up read.
+   */
   private refreshFleet(): void {
+    if (this.fleetRead) { this.fleetRead.again = true; return }
+    const read = { again: false }
+    this.fleetRead = read
     const key = this.sessionKey
     const requestedAt = Date.now()
     const revision = this.frame.sessionOpenRevision
+    // Send the revision we hold so an unchanged fleet comes back as a few bytes, not every row.
+    const known = this.fleetRevision?.key === key ? this.fleetRevision.revision : undefined
     void this.bridge
-      .call('session.status', { session_key: key, history_limit: 0 })
+      .call('session.status', { session_key: key, history_limit: 0, ...(known ? { subagent_revision: known } : {}) })
       .then(result => {
         if (key !== this.sessionKey || revision !== this.frame.sessionOpenRevision) return
         const session = this.sessionOf(result)
         this.adoptFleet(Object.keys(session).length ? session : result, requestedAt)
       })
       .catch(() => {})
+      .finally(() => {
+        if (this.fleetRead === read) this.fleetRead = null
+        if (read.again) this.refreshFleet()
+      })
   }
 
   /**
@@ -3753,8 +3779,13 @@ export class Store {
   }
 
   private sessionsRefresh = 0
+  /** One sidebar read in flight at a time (see refreshFleet); calls meanwhile ask for one read after it. */
+  private sessionsRead: { again: boolean } | null = null
 
   private refreshSessions(): void {
+    if (this.sessionsRead) { this.sessionsRead.again = true; return }
+    const read = { again: false }
+    this.sessionsRead = read
     const revision = ++this.sessionsRefresh
     void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
     const saved = this.bridge
@@ -3792,6 +3823,9 @@ export class Store {
       }
       this.patch({ live, sessions: history, sessionActivity })
       this.enrichUntitled(history)
+    }).finally(() => {
+      if (this.sessionsRead === read) this.sessionsRead = null
+      if (read.again) this.refreshSessions()
     })
   }
 
