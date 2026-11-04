@@ -22,9 +22,11 @@ export interface ModelChooserProps {
   readonly onOpen?: () => void
   /** Absent while XERXES has no model yet: there is nothing to go back to. */
   readonly onClose?: () => void
+  /** Inside the XERXES controls dialog: the dialog has the title and Close. */
+  readonly embedded?: boolean
 }
 
-export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onClose }: ModelChooserProps): ReactElement {
+export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onClose, embedded }: ModelChooserProps): ReactElement {
   const only = machines.list.length === 1 ? machines.list[0]!.id : ''
   const [machineId, setMachineId] = useState(config.config?.machineId ?? only)
   const [profile, setProfile] = useState(config.config?.profile ?? '')
@@ -78,10 +80,12 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
 
   return (
     <form className="modelchooser" aria-label="XERXES model" aria-busy={loading} onSubmit={event => { event.preventDefault(); void save() }}>
-      <div className="hubphone__row">
-        <strong>XERXES model</strong>
-        {onClose ? <button type="button" className="btn" onClick={onClose}>Close</button> : null}
-      </div>
+      {embedded === true ? null : (
+        <div className="hubphone__row">
+          <strong>XERXES model</strong>
+          {onClose ? <button type="button" className="btn" onClick={onClose}>Close</button> : null}
+        </div>
+      )}
       {config.status === 'unconfigured' ? <p className="studio-muted">XERXES has no model yet. Choose a machine, a provider profile and a model.</p> : null}
       {!editable ? <p role="status" className="studio-muted">Only the Hub owner can change XERXES&apos;s model. This is what it uses now.</p> : null}
       {machines.error ? <p role="alert" className="action-card__error">{machines.error}</p> : null}
