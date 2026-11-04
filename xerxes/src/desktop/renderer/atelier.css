@@ -190,7 +190,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
    composer: a right-aligned 320px card overhangs into the sidebar column,
    and .side's backdrop-filter creates a stacking context that paints over
    any z-index inside .chat. Anchor left and clamp to the composer instead. */
-.dictation-error{position:absolute;bottom:40px;left:0;width:300px;background:var(--x-card);border:1px solid var(--x-hairline);padding:14px;border-radius:8px;box-shadow:0 4px 20px #0004;color:var(--x-title);font-size:var(--ui-font);z-index:20}
+.dictation-error{position:absolute;bottom:40px;left:0;width:300px;background:var(--x-popover,var(--x-dialog));border:1px solid var(--x-hairline);padding:14px;border-radius:8px;box-shadow:0 4px 20px #0004;color:var(--x-title);font-size:var(--ui-font);z-index:20}
 
 .setup-backdrop{position:fixed;inset:0;z-index:150;background:#0008;display:grid;place-items:center;padding:24px}
 .setup-card{width:min(520px,100%);box-sizing:border-box;padding:24px;border:1px solid var(--x-hairline);border-radius:6px;background:var(--x-card);max-height:calc(100dvh - 48px);overflow:auto;box-shadow:0 8px 32px #0003;outline:none}
@@ -3326,7 +3326,7 @@ html,body,#root,.app.atelier{background:transparent}
 /* line-height and block padding keep descenders (the g of "agents") inside the clipped box. */
 .atelier .agent-menu__label{display:inline-flex;align-items:center;gap:8px;min-width:0;padding-block:2px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .atelier .agent-menu__live{color:var(--x-working);font-size:12px}
-.atelier .agent-menu__pop{position:absolute;top:calc(100% + 6px);left:0;z-index:140;width:min(440px,calc(100vw - 48px));max-height:min(60vh,520px);display:flex;flex-direction:column;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);box-shadow:0 18px 48px #00000073;overflow:hidden}
+.atelier .agent-menu__pop{position:absolute;top:calc(100% + 6px);left:0;z-index:140;width:min(440px,calc(100vw - 48px));max-height:min(60vh,520px);display:flex;flex-direction:column;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-dialog));box-shadow:0 18px 48px #00000073;overflow:hidden}
 .atelier .agent-menu__filter{margin:8px;padding:7px 10px;border:1px solid var(--x-hairline);border-radius:7px;background:var(--x-screen);color:var(--x-title);font:400 13px/1.3 var(--sans)}
 .atelier .agent-menu__list{overflow:auto;padding:4px}
 .atelier .agent-menu__row{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:0;border-radius:7px;background:transparent;text-align:left;color:var(--x-secondary);cursor:pointer}
