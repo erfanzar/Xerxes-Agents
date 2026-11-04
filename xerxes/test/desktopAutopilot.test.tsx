@@ -71,7 +71,11 @@ test('the owner gets a toggle, a 2000-character instruction box and the expiry c
   expect(html).toContain('aria-label="Autopilot"')
   expect(html).toContain(AUTOPILOT_EXPLANATION)
   expect(html).toContain('questions and permission requests')
-  expect(html.match(/type="checkbox"/g)).toHaveLength(2)
+  // One switch per line, saved on flip; the settings sit behind a disclosure.
+  expect(html.match(/role="switch"/g)).toHaveLength(2)
+  expect(html).toContain('aria-label="Turn off Autopilot for One · app"')
+  expect(html).toContain('aria-label="Turn on Autopilot for Two · api"')
+  expect(html.match(/<details class="autopilot__settings"/g)).toHaveLength(2)
   expect(html.match(/<textarea[^>]*maxLength="2000"/g)).toHaveLength(2)
   expect(html).toContain('placeholder="Keep going until the goal is done; take the recommended option"')
   for (const label of ['No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(html).toContain(`>${label}<`)
@@ -91,9 +95,19 @@ test('a non-owner sees the rows and the reason, with no inputs and no Save', () 
   const panel = /<section class="autopilot"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
   expect(panel).toContain('Turned on by Ann.')
   expect(panel).not.toContain('<textarea')
-  expect(panel).not.toContain('type="checkbox"')
+  expect(panel).not.toContain('role="switch"')
   expect(panel).not.toContain('<select')
   expect(panel).not.toContain('>Save<')
+})
+
+test('All workspaces sits on top with its own switch, and a row on only through it says so', () => {
+  const all = row({ workspace_id: '*', label: 'All workspaces', instruction: '', expires_at: null })
+  const html = view(state({ all, rows: [row({ enabled: false, instruction: '', expires_at: null, enabled_by: null, via_all: true })] }), { autopilotOpen: true })
+  expect(html).toContain('aria-label="Turn off Autopilot for All workspaces"')
+  expect(html).toContain('including ones you link later')
+  expect(html).toContain('On · all workspaces')
+  expect(html.indexOf('All workspaces')).toBeLessThan(html.indexOf('One · app'))
+  expect(html).toContain('Autopilot on · all workspaces')
 })
 
 test('a row that is enabled but not active reads as Off, never On', () => {

@@ -6,7 +6,7 @@ import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
 import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
 import {
-  taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
+  AUTOPILOT_ALL_ID, taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type PendingInteraction, type SessionTail } from './sessionFold.js'
@@ -177,6 +177,8 @@ export interface AutopilotState {
   readonly phase: LoadPhase
   readonly canEdit: boolean
   readonly rows: readonly AutopilotRow[]
+  /** The "All workspaces" row (id `*`); absent until a Hub that has it answers. */
+  readonly all?: AutopilotRow
   readonly error?: string
   /** A save is in flight for this workspace id. */
   readonly savingId?: string
@@ -289,7 +291,7 @@ export function isHubOwner(state: Pick<HubState, 'autopilot' | 'watch'>): boolea
  */
 export function autopilotThreadAvailable(state: Pick<HubState, 'autopilot' | 'autopilotThread' | 'selfUserId' | 'watch'>): boolean {
   if (!isHubOwner(state) || state.selfUserId === undefined || state.autopilotThread.phase === 'hidden') return false
-  return state.autopilot.rows.some(row => row.active) || state.watch.rows.some(row => row.active) || autopilotPendingCount(state) > 0
+  return state.autopilot.all?.active === true || state.autopilot.rows.some(row => row.active) || state.watch.rows.some(row => row.active) || autopilotPendingCount(state) > 0
 }
 
 /** Rows that are on right now (the Hub's verdict). */
@@ -789,10 +791,18 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
     }
     case 'supervisorConfigOptions': return { ...state, supervisorConfig: { ...state.supervisorConfig, options: action.state } }
     case 'autopilotView': {
-      const { error: _error, saveError: _saveError, savingId: _savingId, ...rest } = state.autopilot
-      return { ...state, autopilot: { ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.workspaces, unsupported: false } }
+      const { error: _error, saveError: _saveError, savingId: _savingId, all: _all, ...rest } = state.autopilot
+      return {
+        ...state,
+        autopilot: {
+          ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.workspaces, unsupported: false,
+          ...(action.view.all === undefined ? {} : { all: action.view.all }),
+        },
+      }
     }
     case 'autopilotRow': {
+      // The Hub-wide row is kept apart: it is not a workspace.
+      if (action.row.workspaceId === AUTOPILOT_ALL_ID) return { ...state, autopilot: { ...state.autopilot, all: action.row } }
       const rows = state.autopilot.rows
       const index = rows.findIndex(row => row.workspaceId === action.row.workspaceId)
       const next = index === -1 ? [...rows, action.row] : rows.map((row, i) => (i === index ? action.row : row))

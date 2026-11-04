@@ -151,7 +151,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const supervisor = state.supervisor
   const config = state.supervisorConfig
   const autopilot = state.autopilot
-  const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const autopilotChip = autopilotChipText(activeAutopilotRows(state), state.autopilot.all)
   const autopilotAvailable = props.onAutopilotChange !== undefined && !autopilot.unsupported
   const showAutopilot = autopilotAvailable && props.autopilotOpen === true && supervisor.phase !== 'unsupported'
   const threadAvailable = props.onAutopilotThreadChange !== undefined && autopilotThreadAvailable(state)

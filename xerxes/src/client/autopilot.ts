@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import type { AutopilotRow } from './hubTypes.js'
+import { AUTOPILOT_ALL_ID, type AutopilotRow } from './hubTypes.js'
 
 /**
  * Shared Autopilot wording and choices for the desktop and the phone, so both
@@ -73,15 +73,35 @@ export function autopilotExpiresAt(choice: AutopilotExpiryChoice, nowMs: number)
   return new Date(nowMs + DURATIONS[choice]).toISOString()
 }
 
-/** "Autopilot on · 2 workspaces", or undefined when no workspace is active. */
-export function autopilotChipText(rows: readonly AutopilotRow[]): string | undefined {
+/** "Autopilot on · all workspaces", "Autopilot on · 2 workspaces", or undefined when nothing is active. */
+export function autopilotChipText(rows: readonly AutopilotRow[], all?: AutopilotRow): string | undefined {
+  if (all?.active === true) return all.mode === 'observe' ? 'Autopilot on · all workspaces · watch only' : 'Autopilot on · all workspaces'
   const active = rows.filter(row => row.active).length
   if (active === 0) return undefined
   return `Autopilot on · ${active} workspace${active === 1 ? '' : 's'}`
 }
 
 export const AUTOPILOT_EXPLANATION =
-  'XERXES watches these workspaces and wakes by itself: it answers a task\u2019s questions and permission requests, and starts, steers, stops or messages tasks for you without a Confirm. Everything it does is posted to the thread.'
+  'Where it is on, XERXES wakes by itself, answers questions and permission requests and steers tasks for you. Everything it does is posted to the thread.'
+
+/** What the "All workspaces" row means. */
+export const AUTOPILOT_ALL_NOTE = 'Every workspace, including ones you link later. Stays on until you turn it off.'
+
+/**
+ * The input a switch flip sends: on or off from what the person sees (`active`). Turning on
+ * a row whose expiry has passed clears the expiry, because the Hub refuses a kept, lapsed one.
+ */
+export function autopilotToggleInput(row: Pick<AutopilotRow, 'workspaceId' | 'active' | 'expiresAt'>, nowMs: number): { readonly workspaceId: string; readonly enabled: boolean; readonly expiresAt?: null } {
+  const enabled = !row.active
+  // All workspaces is the 24/7 switch: turning it on never keeps an expiry.
+  const clear = enabled && (row.workspaceId === AUTOPILOT_ALL_ID || isExpiryLapsed(row.expiresAt, nowMs))
+  return { workspaceId: row.workspaceId, enabled, ...(clear ? { expiresAt: null } : {}) }
+}
+
+/** Saving a row's settings keeps it on; a row that is on only through All workspaces gets its own (which then wins). */
+export function autopilotSettingsEnabled(row: Pick<AutopilotRow, 'enabled' | 'viaAll'>): boolean {
+  return row.enabled || row.viaAll === true
+}
 
 export const AUTOPILOT_READ_ONLY_NOTE = 'Only the Hub owner can change Autopilot. This is how it is set now.'
 
@@ -101,7 +121,8 @@ export const AUTOPILOT_MODE_OPTIONS: readonly { readonly value: AutopilotMode; r
 ]
 
 /** "On", "On · watch only", or why it is off. */
-export function autopilotStateText(row: Pick<AutopilotRow, 'active' | 'enabled' | 'mode'>): string {
+export function autopilotStateText(row: Pick<AutopilotRow, 'active' | 'enabled' | 'mode' | 'viaAll'>): string {
+  if (row.active && row.viaAll === true) return 'On · all workspaces'
   if (row.active) return row.mode === 'observe' ? 'On · watch only' : 'On'
   return row.enabled ? 'Off (expired or the owner changed)' : 'Off'
 }

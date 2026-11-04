@@ -415,7 +415,14 @@ Hub owner. `mode` (additive, 0.8.25) is `auto` (wake-ups act without a Confirm) 
 card, and an `answer_question` / `answer_permission` call only posts
 `Autopilot (watch only) would answer …` to the shared thread and returns
 `state: 'recorded'`; nothing reaches the task). An omitted `mode` keeps the stored one; a
-new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`. In `set`, an omitted `expires_at` keeps the stored expiry and only an
+new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`.
+
+All workspaces (additive, 0.8.26): `workspace_id: '*'` is the Hub-wide row. While it is
+active, Autopilot applies to every workspace, including ones linked later; a workspace's
+own active row still wins (its instruction and mode). `get` returns it as `all` (label
+`All workspaces`). A workspace row that is active only through it carries `via_all: true`
+(omitted otherwise). Setting `*` broadcasts its row and then every workspace's row. Only
+the Hub owner can set it, like any row. In `set`, an omitted `expires_at` keeps the stored expiry and only an
 explicit `null` clears it; `enabled:true` with a kept expiry that has already
 passed is refused (`invalid_request`, choose a new expiry). `set` refuses agents and non-owners (`forbidden`, audited), unknown keys
 and bad values (`invalid_request`), unknown workspaces (`not_found`), and an

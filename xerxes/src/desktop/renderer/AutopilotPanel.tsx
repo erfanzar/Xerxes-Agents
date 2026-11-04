@@ -4,52 +4,55 @@
 import { useState, type ReactElement } from 'react'
 
 import {
-  AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_MODE_OPTIONS, AUTOPILOT_READ_ONLY_NOTE, autopilotExpiresAt,
-  autopilotExpiryOptions, autopilotStateText, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed, type AutopilotExpiryChoice, type AutopilotMode,
+  AUTOPILOT_ALL_NOTE, AUTOPILOT_EXPIRY_LAPSED_NOTE, AUTOPILOT_EXPLANATION, AUTOPILOT_INSTRUCTION_PLACEHOLDER, AUTOPILOT_MODE_OPTIONS, AUTOPILOT_READ_ONLY_NOTE,
+  autopilotExpiresAt, autopilotExpiryOptions, autopilotSettingsEnabled, autopilotStateText, autopilotToggleInput, defaultAutopilotExpiry, effectiveExpiryChoice,
+  isExpiryLapsed, type AutopilotExpiryChoice, type AutopilotMode,
 } from '../../client/autopilot.js'
 import { AUTOPILOT_INSTRUCTION_LIMIT, type AutopilotInput } from '../../client/hubController.js'
 import type { AutopilotState } from '../../client/hubStore.js'
 import type { AutopilotRow } from '../../client/hubTypes.js'
 
 /**
- * Autopilot, per workspace. The Hub owner turns it on; XERXES then answers a
- * task's questions and runs its own actions without a Confirm tap. Permission
- * requests (commands, edits) always stay with a person. Everyone else sees
- * the same rows read-only. `active` is the Hub's verdict and is shown as is.
+ * Autopilot: one line per workspace with a switch that saves at once, and an
+ * "All workspaces" switch on top for 24/7 everywhere. A row's instruction, mode
+ * and expiry sit behind its Settings disclosure. Everyone but the Hub owner sees
+ * the same lines read-only. `active` is the Hub's verdict and is shown as is.
  */
 
 export interface AutopilotPanelProps {
   readonly autopilot: AutopilotState
-  /** False while the Hub link is down: saving is disabled. */
+  /** False while the Hub link is down: switches and Save are disabled. */
   readonly live: boolean
   readonly onSave: (input: AutopilotInput) => Promise<boolean>
   readonly onRetry: () => void
   readonly onClose: () => void
 }
 
-const stateText = autopilotStateText
-
-function ReadOnlyRow({ row }: { readonly row: AutopilotRow }): ReactElement {
+function Switch({ row, label, disabled, onSave }: {
+  readonly row: AutopilotRow
+  readonly label: string
+  readonly disabled: boolean
+  readonly onSave: (input: AutopilotInput) => Promise<boolean>
+}): ReactElement {
   return (
-    <li className="autopilot__row" aria-label={`Autopilot for ${row.label}`}>
-      <div className="hubphone__row">
-        <strong>{row.label}</strong>
-        <span className={`autopilot__state${row.active ? ' is-on' : ''}`}>{stateText(row)}</span>
-      </div>
-      {row.enabledBy === null ? null : <p className="studio-muted">Turned on by {row.enabledBy.name}.</p>}
-      {row.expiresAt === null ? null : <p className="studio-muted">Until <time dateTime={row.expiresAt}>{new Date(row.expiresAt).toLocaleString()}</time>.</p>}
-      {row.instruction === '' ? null : <p className="autopilot__instruction">{row.instruction}</p>}
-    </li>
+    <button
+      type="button"
+      className={`switch${row.active ? ' is-on' : ''}`}
+      role="switch"
+      aria-checked={row.active}
+      aria-label={`${row.active ? 'Turn off' : 'Turn on'} Autopilot for ${label}`}
+      disabled={disabled}
+      onClick={() => { void onSave(autopilotToggleInput(row, Date.now())) }}
+    />
   )
 }
 
-function EditableRow({ row, live, saving, onSave }: {
+function Settings({ row, live, saving, onSave }: {
   readonly row: AutopilotRow
   readonly live: boolean
   readonly saving: boolean
   readonly onSave: (input: AutopilotInput) => Promise<boolean>
 }): ReactElement {
-  const [enabled, setEnabled] = useState(row.enabled)
   const [instruction, setInstruction] = useState(row.instruction)
   const [mode, setMode] = useState<AutopilotMode>(row.mode)
   const [expiry, setExpiry] = useState<AutopilotExpiryChoice>(() => defaultAutopilotExpiry(row, Date.now()))
@@ -64,60 +67,78 @@ function EditableRow({ row, live, saving, onSave }: {
     const expiresAt = autopilotExpiresAt(choice, Date.now())
     const ok = await onSave({
       workspaceId: row.workspaceId,
-      enabled,
+      enabled: autopilotSettingsEnabled(row),
       instruction,
       mode,
       ...(expiresAt === undefined ? {} : { expiresAt }),
     })
-    // The saved row now carries the expiry, so the select goes back to "keep" (or "no expiry").
     if (ok) setExpiry(defaultAutopilotExpiry({ expiresAt: expiresAt === undefined ? row.expiresAt : expiresAt }, Date.now()))
   }
   return (
-    <li className="autopilot__row" aria-label={`Autopilot for ${row.label}`}>
+    <details className="autopilot__settings">
+      <summary>Settings</summary>
       <form onSubmit={event => { event.preventDefault(); void save() }}>
-        <div className="hubphone__row">
-          <label htmlFor={`${id}-on`}>
-            <input id={`${id}-on`} type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} /> <strong>{row.label}</strong>
-          </label>
-          <span className={`autopilot__state${row.active ? ' is-on' : ''}`}>{stateText(row)}</span>
-        </div>
-        <div className="field">
-          <label htmlFor={`${id}-instruction`}>Standing instruction</label>
-          <textarea
-            id={`${id}-instruction`}
-            rows={2}
-            maxLength={AUTOPILOT_INSTRUCTION_LIMIT}
-            value={instruction}
-            placeholder={AUTOPILOT_INSTRUCTION_PLACEHOLDER}
-            onChange={event => setInstruction(event.target.value)}
-          />
-          <span className="studio-muted">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
-        </div>
-        <div className="field">
-          <label htmlFor={`${id}-mode`}>What it may do</label>
+        <div className="autopilot__grid">
+          <label htmlFor={`${id}-mode`}>Mode</label>
           <select id={`${id}-mode`} value={mode} onChange={event => setMode(event.target.value === 'observe' ? 'observe' : 'auto')}>
             {AUTOPILOT_MODE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
-        </div>
-        <div className="field">
-          <label htmlFor={`${id}-expiry`}>Stop automatically</label>
+          <label htmlFor={`${id}-expiry`}>Stop</label>
           <select id={`${id}-expiry`} value={choice} onChange={event => setExpiry(event.target.value as AutopilotExpiryChoice)}>
             {autopilotExpiryOptions(row, nowMs).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </div>
-        {row.expiresAt === null ? null : lapsed
-          ? <p role="status" className="studio-muted">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p>
-          : <p className="studio-muted">Currently until <time dateTime={row.expiresAt}>{new Date(row.expiresAt).toLocaleString()}</time>.</p>}
-        {row.enabledBy === null ? null : <p className="studio-muted">Turned on by {row.enabledBy.name}.</p>}
-        <div className="hubphone__row">
-          <button type="submit" className="btn btn--solid" disabled={!live || saving || tooLong}>{saving ? 'Saving…' : 'Save'}</button>
+        <label htmlFor={`${id}-instruction`} className="studio-muted">Standing instruction</label>
+        <textarea
+          id={`${id}-instruction`}
+          rows={2}
+          maxLength={AUTOPILOT_INSTRUCTION_LIMIT}
+          value={instruction}
+          placeholder={AUTOPILOT_INSTRUCTION_PLACEHOLDER}
+          onChange={event => setInstruction(event.target.value)}
+        />
+        {lapsed ? <p role="status" className="studio-muted">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p> : null}
+        <div className="autopilot__actions">
+          <span className="studio-muted">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
+          <button type="submit" className="btn" disabled={!live || saving || tooLong}>{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
+    </details>
+  )
+}
+
+function Line({ row, label, note, canEdit, live, saving, onSave }: {
+  readonly row: AutopilotRow
+  readonly label: string
+  readonly note?: string
+  readonly canEdit: boolean
+  readonly live: boolean
+  readonly saving: boolean
+  readonly onSave: (input: AutopilotInput) => Promise<boolean>
+}): ReactElement {
+  const meta = [
+    autopilotStateText(row),
+    row.active && row.expiresAt !== null && row.viaAll !== true ? `until ${new Date(row.expiresAt).toLocaleString()}` : undefined,
+    row.enabledBy === null || row.viaAll === true ? undefined : `Turned on by ${row.enabledBy.name}.`,
+  ].filter((part): part is string => part !== undefined)
+  return (
+    <li className={`autopilot__line${row.active ? ' is-on' : ''}`} aria-label={`Autopilot for ${label}`}>
+      <div className="autopilot__head">
+        <div className="autopilot__text">
+          <strong>{label}</strong>
+          <span className={`autopilot__state${row.active ? ' is-on' : ''}`}>{meta.join(' · ')}</span>
+          {note === undefined ? null : <span className="studio-muted">{note}</span>}
+          {row.instruction === '' ? null : <span className="autopilot__instruction">{row.instruction}</span>}
+        </div>
+        {canEdit ? <Switch row={row} label={label} disabled={!live || saving} onSave={onSave} /> : null}
+      </div>
+      {canEdit ? <Settings row={row} live={live} saving={saving} onSave={onSave} /> : null}
     </li>
   )
 }
 
 export function AutopilotPanel({ autopilot, live, onSave, onRetry, onClose }: AutopilotPanelProps): ReactElement {
+  const all = autopilot.all
   return (
     <section className="autopilot" aria-label="Autopilot">
       <div className="hubphone__row">
@@ -135,13 +156,17 @@ export function AutopilotPanel({ autopilot, live, onSave, onRetry, onClose }: Au
       {autopilot.phase === 'ready' || autopilot.rows.length > 0 ? (
         <>
           {!autopilot.canEdit ? <p role="status" className="studio-muted">{AUTOPILOT_READ_ONLY_NOTE}</p> : null}
-          {autopilot.rows.length === 0 ? <p role="status" className="notice">No workspace is linked to this Hub yet.</p> : (
-            <ul className="autopilot__rows" aria-label="Workspaces">
-              {autopilot.rows.map(row => autopilot.canEdit
-                ? <EditableRow key={row.workspaceId} row={row} live={live} saving={autopilot.savingId === row.workspaceId} onSave={onSave} />
-                : <ReadOnlyRow key={row.workspaceId} row={row} />)}
-            </ul>
-          )}
+          <ul className="autopilot__rows" aria-label="Workspaces">
+            {all === undefined ? null : (
+              <Line key="*" row={all} label="All workspaces" note={AUTOPILOT_ALL_NOTE} canEdit={autopilot.canEdit} live={live}
+                saving={autopilot.savingId === all.workspaceId} onSave={onSave} />
+            )}
+            {autopilot.rows.map(row => (
+              <Line key={row.workspaceId} row={row} label={row.label} canEdit={autopilot.canEdit} live={live}
+                saving={autopilot.savingId === row.workspaceId} onSave={onSave} />
+            ))}
+          </ul>
+          {autopilot.rows.length === 0 ? <p role="status" className="notice">No workspace is linked to this Hub yet.</p> : null}
         </>
       ) : null}
       {autopilot.saveError === undefined ? null : <p role="alert" className="action-card__error">{autopilot.saveError}</p>}

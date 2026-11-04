@@ -1160,7 +1160,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
   async function maybeOpenAutopilotThread(): Promise<void> {
     const snapshot = store.getSnapshot()
     if (!isHubOwner(snapshot) || snapshot.selfUserId === undefined) return
-    if (!snapshot.autopilot.rows.some(row => row.active) && !snapshot.watch.rows.some(row => row.active)) return
+    if (snapshot.autopilot.all?.active !== true && !snapshot.autopilot.rows.some(row => row.active) && !snapshot.watch.rows.some(row => row.active)) return
     await autopilotThreadOpen()
   }
 

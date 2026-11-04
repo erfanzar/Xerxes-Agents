@@ -424,6 +424,7 @@ export function parseAutopilotRow(raw: unknown): AutopilotRow | undefined {
     updatedAt,
     active: r.active,
     mode: r.mode === 'observe' ? 'observe' : 'auto',
+    ...(r.via_all === true ? { viaAll: true as const } : {}),
   }
 }
 
@@ -438,7 +439,10 @@ export function parseAutopilotView(raw: unknown): AutopilotView | undefined {
     if (!row || rows.some(known => known.workspaceId === row.workspaceId)) return undefined
     rows.push(row)
   }
-  return { canEdit: r.can_edit, workspaces: rows }
+  if (r.all === undefined) return { canEdit: r.can_edit, workspaces: rows }
+  const all = parseAutopilotRow(r.all)
+  if (all === undefined) return undefined
+  return { canEdit: r.can_edit, workspaces: rows, all }
 }
 
 // ── watch ─────────────────────────────────────────────────────────────
