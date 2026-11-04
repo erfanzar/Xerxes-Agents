@@ -9,7 +9,7 @@
  */
 
 /** Tools whose presence turns the learning policy on. */
-export const LEARNING_POLICY_TOOLS: ReadonlySet<string> = new Set(['lesson_record', 'lesson_recall', 'session_search'])
+export const LEARNING_POLICY_TOOLS: ReadonlySet<string> = new Set(['lesson_record', 'lesson_recall', 'lesson_list', 'session_search'])
 
 export interface LearningPolicyInput {
   /** Tool names visible to the model this session. */
@@ -22,9 +22,15 @@ export interface LearningPolicyInput {
 export function learningPolicyPrompt(input: LearningPolicyInput): string {
   const lessons = input.tools.has('lesson_record')
   const recall = input.tools.has('lesson_recall')
+  const list = input.tools.has('lesson_list')
   const search = input.tools.has('session_search')
-  if (!lessons && !recall && !search) return ''
+  if (!lessons && !recall && !list && !search) return ''
   const lines = ['[Learning policy]', 'You improve across sessions only through what you record now. Treat learning as part of finishing work, not an extra.']
+  if (list) {
+    lines.push('Read: at the start of non-trivial work, call lesson_list once to scan every lesson title for this workspace (one',
+      'short row each), then read the ones that match what you are about to touch with lesson_recall and follow them.',
+      'Approved lessons are reviewed guidance; pending ones are unreviewed hints worth checking.')
+  }
   if (recall) {
     lines.push('Before: when a task touches an area that went wrong before (a flaky test, a build or deploy step, a tool quirk, a',
       'command that needs special flags), call lesson_recall with a few words for the situation first. Approved lessons for',

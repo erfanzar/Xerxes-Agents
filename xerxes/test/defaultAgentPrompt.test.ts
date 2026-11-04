@@ -21,8 +21,12 @@ test('default agent prompt uses only current conditional tool names and stays bo
   // Raised again for the module-depth and proportional-typing rules: without them agents
   // defaulted to pass-through layers and checker-silencing casts, and the matching skills
   // (codebase-design, python-types) are only one index line each, so they cannot carry it alone.
-  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_500)
+  // Raised for the user-requested one-path and explicit-configuration rules: agents added a
+  // second code path beside the old one and read ad-hoc environment variables instead of inputs.
+  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_700)
   expect(prompt).toContain('Prefer deep modules')
+  expect(prompt).toContain('One job, one path')
+  expect(prompt).toContain('read environment variables only when the user asks')
   expect(prompt).toContain('Type in proportion')
   expect(prompt).toContain('${ROLE_ADDITIONAL}')
   expect(prompt).toContain('provider-supplied tool list')

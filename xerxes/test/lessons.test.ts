@@ -213,7 +213,7 @@ async function invoke(registry: ToolRegistry, name: string, args: JsonObject): P
 
 test('model tools resolve latest verified evidence, recall by active workspace, and approve or roll back', async () => {
   const registry = tools(successfulCall)
-  expect(registry.definitions().map(definition => definition.function.name)).toEqual(['lesson_record', 'lesson_recall', 'lesson_review'])
+  expect(registry.definitions().map(definition => definition.function.name)).toEqual(['lesson_record', 'lesson_recall', 'lesson_list', 'lesson_review'])
   const result = await invoke(registry, 'lesson_record', { cue: 'Bun fixtures', lesson: 'Use a temporary directory.', confidence: 0.9 })
   expect(result.ok).toBe(true)
   const saved = result.lesson as JsonObject
@@ -224,6 +224,30 @@ test('model tools resolve latest verified evidence, recall by active workspace, 
   expect((await store.get(String(saved.id), workspace))?.reviewStatus).toBe('approved')
   expect((await invoke(registry, 'lesson_review', { id: saved.id!, action: 'rollback', reason: 'No longer applies.' })).ok).toBe(true)
   expect(await store.recall('fixtures', workspace)).toEqual([])
+})
+
+test('lesson_list returns one short row per active lesson, filters by status and pages', async () => {
+  const approved = await store.record(input({ cue: 'Approved cue', lesson: 'A long lesson body that the list never returns.' }))
+  await store.review(approved.id, 'approved', 'Checked the cited output.', workspace)
+  const pending = await store.record(input({ cue: 'Pending cue' }))
+  const rejected = await store.record(input({ cue: 'Rejected cue' }))
+  await store.review(rejected.id, 'rejected', 'Wrong.', workspace)
+  await store.record(input({ cue: 'Foreign cue', workspace: otherWorkspace }))
+  const registry = tools()
+  const all = await invoke(registry, 'lesson_list', {})
+  expect(all).toMatchObject({ ok: true, total: 2, offset: 0 })
+  expect(all.lessons).toEqual([
+    { id: approved.id, cue: 'Approved cue', status: 'approved', confidence: 0.8 },
+    { id: pending.id, cue: 'Pending cue', status: 'pending', confidence: 0.8 },
+  ])
+  expect(JSON.stringify(all)).not.toContain('A long lesson body')
+  expect(all).not.toHaveProperty('next_offset')
+  expect(((await invoke(registry, 'lesson_list', { status: 'pending' })).lessons as JsonObject[]).map(row => row.cue)).toEqual(['Pending cue'])
+  const first = await invoke(registry, 'lesson_list', { limit: 1 })
+  expect(first).toMatchObject({ total: 2, next_offset: 1 })
+  expect(((await invoke(registry, 'lesson_list', { limit: 1, offset: 1 })).lessons as JsonObject[])[0]?.cue).toBe('Pending cue')
+  expect(await invoke(registry, 'lesson_list', { status: 'rejected' })).toMatchObject({ ok: false, code: 'LESSON_INVALID_INPUT' })
+  expect(await invoke(registry, 'lesson_list', { limit: 0 })).toMatchObject({ ok: false, code: 'LESSON_INVALID_INPUT' })
 })
 
 test('automatic turns cannot approve lessons for future automatic injection', async () => {

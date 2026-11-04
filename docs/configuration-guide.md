@@ -312,7 +312,7 @@ Reflection uses the owning session's auxiliary provider path, with a 90-second r
 ### Shared review and lesson stores
 
 - Proposals: `<XERXES_HOME>/reflection/reflection-proposals.jsonl`; append-only review history, filtered by active workspace.
-- Lessons: the shared governed-memory store under `<XERXES_HOME>/governed-memory`, keyed by canonical workspace and retrieval cue. `lesson_record` needs successful host-resolved tool-call evidence or explicitly reported test evidence, plus confidence. `lesson_recall` excludes rejected/expired lessons and ranks approved before pending. `lesson_review` approves/rejects/rolls back with a reason through the normal permission gate; automatic turns cannot approve lessons for future injection. Rendered Markdown is a view, not the store.
+- Lessons: the shared governed-memory store under `<XERXES_HOME>/governed-memory`, keyed by canonical workspace and retrieval cue. `lesson_record` needs successful host-resolved tool-call evidence or explicitly reported test evidence, plus confidence. `lesson_recall` excludes rejected/expired lessons and ranks approved before pending. `lesson_list` returns one short row per active lesson (id, cue, status, confidence) with `status`, `limit` and `offset` paging, so the model can scan every lesson title before work. `lesson_review` approves/rejects/rolls back with a reason through the normal permission gate; automatic turns cannot approve lessons for future injection. Rendered Markdown is a view, not the store.
 - `reflection_list` / `reflection_review` share the same proposal store and applier as human slash review. Automatic goal rounds cannot approve their own proposals. Nothing is automatically applied.
 
 ```text

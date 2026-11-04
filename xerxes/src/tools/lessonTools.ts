@@ -57,6 +57,20 @@ export const LESSON_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'lesson_list',
+      description: 'List the active lessons of this workspace (and of other clones of the same repository) as one short row each: id, cue (its title), review status and confidence. Approved lessons come first, then newest. Rejected, expired and superseded lessons are excluded. Scan it before non-trivial work, then lesson_recall the cues that apply.',
+      parameters: {
+        type: 'object', additionalProperties: false, properties: {
+          status: { type: 'string', enum: ['all', 'approved', 'pending'], description: 'Which lessons to list; defaults to all.' },
+          limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Maximum rows; defaults to 50.' },
+          offset: { type: 'integer', minimum: 0, description: 'Rows to skip; pass next_offset from the previous page.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'lesson_review',
       description: 'Approve, reject, or roll back a lesson from the active workspace with human review and the normal permission gate. Automatic turns cannot approve their own lessons. Review uses governed memory; rollback expires the lesson while retaining the evidence and reason in the append-only audit log. Copy an exact id from lesson_recall and explain the decision.',
       parameters: {
@@ -77,10 +91,13 @@ export const LESSON_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 export const LESSON_TOOL_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
   lesson_record: 'Record a lesson when you learn something reusable about this workspace that a future session would otherwise rediscover the hard way: a non-obvious root cause you just fixed, a command or flag that works where the obvious one fails, a test or environment quirk, or a correction the user gave you. Call it right after the tool call or test that proved it, so the host can cite that call as evidence. Keep the cue a few searchable words and the lesson general and actionable. Do not record task-specific answers or anything unverified. Lessons stay pending until a person approves them; approved ones are added to future turns automatically.',
   lesson_recall: 'Before starting non-trivial work in an area where something went wrong before (a flaky test, a build step, a tool, a deployment), call lesson_recall with a few words describing the situation. It also returns lessons still pending review, which are not injected automatically.',
+  lesson_list: 'At the start of non-trivial work, call lesson_list once to see every lesson title for this workspace; it costs one short row per lesson. Then lesson_recall the cues that match what you are about to touch and follow what applies.',
 })
 
 /** Built-in agents that should see the model-facing learning tools. */
-export const MODEL_FACING_LEARNING_TOOLS = ['session_search', 'lesson_record', 'lesson_recall'] as const
+export const MODEL_FACING_LEARNING_TOOLS = ['session_search', 'lesson_record', 'lesson_recall', 'lesson_list'] as const
+
+const LIST_STATUSES = ['all', 'approved', 'pending'] as const
 
 export function registerLessonTools(registry: ToolRegistry, options: LessonToolsOptions, agentId = 'default'): void {
   for (const definition of LESSON_TOOL_DEFINITIONS) {
@@ -97,7 +114,23 @@ export function registerLessonTools(registry: ToolRegistry, options: LessonTools
             ...(sessionId === undefined ? {} : { sessionId }),
           }, options.resolveToolCall) }
         case 'lesson_recall':
-          return { ok: true, lessons: await store.recall(text(inputs.cue, 'cue'), workspace, inputs.limit === undefined ? {} : { limit: limit(inputs.limit) }) }
+          return { ok: true, lessons: await store.recall(text(inputs.cue, 'cue'), workspace, { limit: integer(inputs.limit, 'recall limit', 1, 100, 10) }) }
+        case 'lesson_list': {
+          const status = inputs.status ?? 'all'
+          if (typeof status !== 'string' || !(LIST_STATUSES as readonly string[]).includes(status)) {
+            throw new LessonError('Lesson list status must be all, approved or pending.', 'LESSON_INVALID_INPUT')
+          }
+          const start = integer(inputs.offset, 'list offset', 0, Number.MAX_SAFE_INTEGER, 0)
+          const count = integer(inputs.limit, 'list limit', 1, 200, 50)
+          const rows = (await store.list(workspace)).filter(lesson => status === 'all' || lesson.reviewStatus === status)
+          const page = rows.slice(start, start + count)
+          const next = start + page.length
+          return {
+            ok: true, total: rows.length, offset: start,
+            lessons: page.map(lesson => ({ id: lesson.id, cue: lesson.cue, status: lesson.reviewStatus, confidence: lesson.confidence })),
+            ...(next < rows.length ? { next_offset: next } : {}),
+          }
+        }
         case 'lesson_review': {
           const id = text(inputs.id, 'id')
           const reason = text(inputs.reason, 'reason')
@@ -118,9 +151,9 @@ export function registerLessonTools(registry: ToolRegistry, options: LessonTools
           throw new Error(`Unknown lesson tool: ${name}`)
       }
     }), agentId, {
-      // Record and recall are model-facing and stay loaded; review is a human step.
-      concurrencySafe: name === 'lesson_recall', defer: name === 'lesson_review', destructive: name === 'lesson_review', openWorld: false,
-      readOnly: name === 'lesson_recall', interruptBehavior: name === 'lesson_recall' ? 'cancel' : 'block',
+      // Record, recall and list are model-facing and stay loaded; review is a human step.
+      concurrencySafe: READS.has(name), defer: name === 'lesson_review', destructive: name === 'lesson_review', openWorld: false,
+      readOnly: READS.has(name), interruptBehavior: READS.has(name) ? 'cancel' : 'block',
     }, LESSON_TOOL_GUIDANCE[name])
   }
 }
@@ -164,9 +197,14 @@ function confidence(value: unknown): number {
   return value
 }
 
-function limit(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 100) {
-    throw new LessonError('Lesson recall limit must be an integer between 1 and 100.', 'LESSON_INVALID_INPUT')
+/** The lesson tools that only read. */
+const READS: ReadonlySet<string> = new Set(['lesson_recall', 'lesson_list'])
+
+/** One bounded integer input; `fallback` when omitted. */
+function integer(value: unknown, field: string, min: number, max: number, fallback: number): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new LessonError(`Lesson ${field} must be an integer between ${min} and ${max}.`, 'LESSON_INVALID_INPUT')
   }
   return value
 }
