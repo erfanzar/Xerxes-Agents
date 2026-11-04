@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.27 — 2026-11-05
+
+- **Desktop: Autopilot, Watch and Model open in one popup, like Settings.** The header buttons now open a dialog with a tab per control (each tab shows its state, such as "on · all workspaces" or "Watching · 1 task") instead of stacking forms above the conversation. Escape, Close or a click outside closes it, and the conversation stays where it was.
+- **Autopilot tab redesigned.** An **All workspaces** card on top with its switch and a *Watch only | Act* toggle, then one line per workspace with a status dot, its state, an **Edit** button and a switch that saves on flip. Edit opens that workspace's mode, stop time and instruction in place with Save and Cancel.
+- **Watch tab redesigned.** One row to start a watch (task, review interval, **Start watching**), then one line per watched task with **Edit** and **Stop watching**.
+- **Fixed: the agent switcher menu was see-through.** With a background image on, the "N agents" menu let the conversation show through its rows. It (and the dictation error card) now use the solid popover surface.
+- **Model tab.** The machine, profile, model and effort chooser, inside the popup. While XERXES has no model yet, the chooser stays on the page, because the chat cannot work without one.
+
 ## 0.8.26 — 2026-11-04
 
 - **XERXES Autopilot: one switch for all workspaces, 24/7.** A new **All workspaces** row turns Autopilot on for every workspace, including ones you link later, and stays on until you turn it off (no expiry). A workspace's own settings (standing instruction, watch-only mode) still win where you set them. The header chip says "Autopilot on · all workspaces". On the wire this is additive: `workspace_id: '*'` in `supervisor.autopilot.set`, an `all` row in `supervisor.autopilot.get`, and `via_all: true` on a workspace row that is on only through it. The Hub server needs this build for the switch to appear.
