@@ -92,6 +92,20 @@ export const AUTOPILOT_COMPOSER_HINT = 'XERXES acts for you at once. If another 
 
 export const AUTOPILOT_EXPIRY_LAPSED_NOTE = 'The previous expiry has passed. Choose a new one before you save.'
 
+export type AutopilotMode = AutopilotRow['mode']
+
+/** The two Autopilot modes, as the editors offer them. Watch only comes first: start there, then let it act. */
+export const AUTOPILOT_MODE_OPTIONS: readonly { readonly value: AutopilotMode; readonly label: string }[] = [
+  { value: 'observe', label: 'Watch only: propose actions as cards, record answers' },
+  { value: 'auto', label: 'Act: run actions and answer without a Confirm' },
+]
+
+/** "On", "On · watch only", or why it is off. */
+export function autopilotStateText(row: Pick<AutopilotRow, 'active' | 'enabled' | 'mode'>): string {
+  if (row.active) return row.mode === 'observe' ? 'On · watch only' : 'On'
+  return row.enabled ? 'Off (expired or the owner changed)' : 'Off'
+}
+
 /** "Done automatically on behalf of Ann" for a card Autopilot created. */
 export function autoCardNote(confirmedBy: string | undefined): string {
   return confirmedBy === undefined ? 'Done automatically by Autopilot.' : `Done automatically on behalf of ${confirmedBy}.`

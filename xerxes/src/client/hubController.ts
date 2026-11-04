@@ -109,6 +109,8 @@ export interface AutopilotInput {
   readonly instruction?: string
   /** Omitted: keep the saved expiry. null: no expiry. Otherwise an ISO time in the future. */
   readonly expiresAt?: string | null
+  /** Omitted: keep the saved mode. `observe` is watch only: actions become cards, answers are recorded. */
+  readonly mode?: 'auto' | 'observe'
 }
 
 export const AUTOPILOT_INSTRUCTION_LIMIT = 2000
@@ -1039,6 +1041,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
         enabled: input.enabled,
         ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
         ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
+        ...(input.mode === undefined ? {} : { mode: input.mode }),
       })
       const row = parseAutopilotRow(result.workspace)
       if (row === undefined) {

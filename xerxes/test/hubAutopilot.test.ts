@@ -147,7 +147,7 @@ describe('Autopilot settings', () => {
     const t = await setup()
     expect(await t.get('alice')).toEqual({
       can_edit: false,
-      workspaces: [{ workspace_id: 'w1', label: 'One', enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false }],
+      workspaces: [{ workspace_id: 'w1', label: 'One', enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false, mode: 'auto' }],
     })
     // A session-only guest cannot see the workspace, so it gets no row.
     expect(await t.get('guest')).toMatchObject({ can_edit: false, workspaces: [] })
@@ -159,7 +159,7 @@ describe('Autopilot settings', () => {
     expect(result).toEqual({
       workspace: {
         workspace_id: 'w1', label: 'One', enabled: true, instruction: 'Prefer release builds.', expires_at: expires,
-        enabled_by: { id: 'owner', name: 'OWNER' }, updated_at: new Date(T0).toISOString(), active: true,
+        enabled_by: { id: 'owner', name: 'OWNER' }, updated_at: new Date(T0).toISOString(), active: true, mode: 'auto',
       },
     })
     expect(t.broadcasts.at(-1)).toEqual({ workspaceId: 'w1', payload: result })
@@ -509,6 +509,42 @@ describe('Autopilot questions', () => {
   })
 })
 
+describe('Autopilot watch-only mode', () => {
+  const steerOne = { workspace_id: 'w1', task_id: 's1', text: 'focus on the tests' }
+  const question = { id: 'q1', tool_call_id: 't1', questions: [{ id: 'answer', question: 'Which build?', options: ['nightly', 'release (Recommended)'], allow_free_form: false }] }
+
+  test('the mode is stored, kept when omitted, and only auto or observe is accepted', async () => {
+    const t = await setup()
+    expect(await t.enable({ mode: 'observe' })).toMatchObject({ workspace: { active: true, mode: 'observe' } })
+    expect(await t.set({ workspace_id: 'w1', enabled: true, instruction: 'x' })).toMatchObject({ workspace: { mode: 'observe' } })
+    expect(await code(t.set({ workspace_id: 'w1', enabled: true, mode: 'yolo' }))).toBe('invalid_request')
+    expect(await t.set({ workspace_id: 'w1', enabled: true, mode: 'auto' })).toMatchObject({ workspace: { mode: 'auto' } })
+  })
+
+  test('a watch-only wake-up proposes a Confirm card instead of acting', async () => {
+    const t = await setup({ responses: [calls(['task_steer', steerOne]), reply('Proposed.')] })
+    await t.enable({ mode: 'observe' })
+    expect(t.supervisor.waker.wake('w1', 's1', 'failed')).toBe(true)
+    await t.idle()
+    expect(JSON.stringify(t.scripted.requests[0]!.messages)).toContain('WATCH-ONLY mode')
+    expect(t.execCalls).toHaveLength(0)
+    expect(t.supervisor.actions.cardsFor('autopilot-owner')[0]).toMatchObject({ state: 'pending', auto: false })
+  })
+
+  test('a watch-only wake-up records the answer it would give and sends nothing', async () => {
+    const answer = { workspace_id: 'w1', task_id: 's1', request_id: 'q1', answers: { answer: 'release (Recommended)' } }
+    const t = await setup({ responses: [calls(['answer_question', answer]), reply('Recorded.')] })
+    t.events.push('question_request', question)
+    await t.enable({ mode: 'observe' })
+    expect(t.supervisor.waker.wake('w1', 's1', 'question', { requestIds: ['q1'] })).toBe(true)
+    await t.idle()
+    expect(t.execCalls).toHaveLength(0)
+    expect(t.texts()).toContain('Autopilot (watch only) would answer the question in “First task”: release (Recommended)')
+    expect(t.toolResults()).toContain('\\"state\\":\\"recorded\\"')
+    expect(t.pushes.some(push => push.body === 'Autopilot answered a question for you.')).toBe(false)
+  })
+})
+
 describe('Autopilot review fixes', () => {
   const steerS = (task: string, text = 'focus on the tests') => ({ workspace_id: 'w1', task_id: task, text })
   const qPayload = (id: string, options: string[] = ['nightly', 'release (Recommended)']) =>
@@ -665,7 +701,7 @@ describe('Autopilot review fixes', () => {
     const enqueued: string[] = []
     const waker = new AutopilotWaker({
       settings: {
-        active: () => ({ workspaceId: 'w1', ownerId: 'owner', ownerName: 'OWNER', instruction: '' }),
+        active: () => ({ workspaceId: 'w1', ownerId: 'owner', ownerName: 'OWNER', instruction: '', mode: 'auto' }),
         activeWorkspaces: () => [],
       },
       workspaces: { list: () => [{ id: 'w1', label: 'One' }], projection: () => undefined },

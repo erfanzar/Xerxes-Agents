@@ -127,6 +127,8 @@ export interface AutopilotRow {
   readonly enabledBy: AutopilotPerson | null
   readonly updatedAt: string | null
   readonly active: boolean
+  /** `auto` acts without a Confirm; `observe` (watch only) proposes cards and records answers. */
+  readonly mode: 'auto' | 'observe'
 }
 
 /** The shape of `supervisor.autopilot.get`. */
