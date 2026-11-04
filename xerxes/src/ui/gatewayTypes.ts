@@ -885,6 +885,12 @@ export type GatewayEvent =
       type: 'clarify.request'
     }
   | {
+      /** The daemon request id (without the `:question` suffix), and whether the daemon answered on its timeout. */
+      payload: { request_id: string; answer?: string; auto: boolean }
+      session_id?: string
+      type: 'clarify.resolved'
+    }
+  | {
       payload: { allow_permanent?: boolean; command: string; description: string; request_id: string }
       session_id?: string
       type: 'approval.request'

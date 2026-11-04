@@ -99,6 +99,12 @@ export interface TurnReflectionInput {
 }
 
 export interface AgentTurnRunnerOptions {
+  /**
+   * How long a model question (AskUserQuestionTool, ask_user) waits for a person before it
+   * continues with the recommended option, or the first option when none is marked.
+   * 0 waits forever. Defaults to 60 s. Open questions without options still wait.
+   */
+  readonly questionAutoAnswerMs?: number
   /** Reviewed workspace guidance for this user message; injected into turn context only. */
   readonly lessonsForTurn?: (session: DaemonSession, userText: string, signal: AbortSignal) => Promise<string>
   /** Host owns provider authority, lifetime tracking, storage and session notification. */
@@ -621,7 +627,7 @@ export class AgentTurnRunner implements TurnRunner {
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(tools ? { toolSchemas: tools.map(tool => tool as unknown as Readonly<Record<string, unknown>>) } : {}),
     }
-    const baseToolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id)
+    const baseToolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id, this.options.questionAutoAnswerMs ?? DEFAULT_QUESTION_AUTO_ANSWER_MS)
     const toolExecutor = baseToolExecutor && editFeedback ? editFeedback.wrap(baseToolExecutor) : baseToolExecutor
     const auditContext = {
       sessionId: session.id,
@@ -1340,10 +1346,20 @@ async function* multiplexTurnEvents(
   }
 }
 
+/** A model question with choices continues with the recommended one after this long unanswered. */
+export const DEFAULT_QUESTION_AUTO_ANSWER_MS = 60_000
+
+/** The option marked "(Recommended)", else the first; undefined for an open question. */
+export function recommendedOption(options: readonly string[] | undefined): string | undefined {
+  const choices = (options ?? []).map(option => option.trim()).filter(Boolean)
+  return choices.find(option => /\(recommended\)/i.test(option)) ?? choices[0]
+}
+
 function interactiveToolExecutor(
   delegate: ToolExecutor | undefined,
   interactions: DaemonInteractionBoard | undefined,
   sessionId: string,
+  autoAnswerMs: number,
 ): ToolExecutor | undefined {
   if (!interactions) {
     return delegate
@@ -1352,8 +1368,18 @@ function interactiveToolExecutor(
     async execute(call, context, signal) {
       const question = questionFromToolCall(call)
       if (question) {
-        const answer = await interactions.ask(sessionId, { ...question, toolCallId: call.id }, signal)
-        return JSON.stringify({ answer, question: question.question })
+        const recommended = autoAnswerMs > 0 ? recommendedOption(question.options) : undefined
+        const result = await interactions.askDetailed(sessionId, {
+          ...question, toolCallId: call.id,
+          ...(recommended === undefined ? {} : { autoAnswer: { afterMs: autoAnswerMs, answer: recommended } }),
+        }, signal)
+        return JSON.stringify({
+          answer: result.answer, question: question.question,
+          ...(result.auto ? {
+            auto_answered: true,
+            note: `The user did not answer within ${Math.round(autoAnswerMs / 1000)} s, so the recommended option was chosen. Continue with it and say so; the user may still redirect you.`,
+          } : {}),
+        })
       }
       if (!delegate) {
         return `Tool ${call.function.name} is unavailable.`

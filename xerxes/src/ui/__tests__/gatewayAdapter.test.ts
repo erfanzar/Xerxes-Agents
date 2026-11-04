@@ -527,6 +527,15 @@ describe('gatewayAdapter', () => {
     ])
   })
 
+  it('maps a question_response (another client, or the daemon timeout) to clarify.resolved', () => {
+    expect(adaptDaemonEvent('question_response', { id: 'req_1', answers: { q1: 'yes (Recommended)' }, auto: true })).toEqual([
+      { type: 'clarify.resolved', payload: { request_id: 'req_1', answer: 'yes (Recommended)', auto: true } }
+    ])
+    expect(adaptDaemonEvent('question_response', { id: 'req_2', answers: { answer: 'no' } })).toEqual([
+      { type: 'clarify.resolved', payload: { request_id: 'req_2', answer: 'no', auto: false } }
+    ])
+  })
+
   it('keeps approval responses addressable by their daemon request id', () => {
     expect(
       adaptDaemonEvent('approval_request', {
