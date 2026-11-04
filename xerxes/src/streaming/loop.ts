@@ -26,6 +26,7 @@ import {
   renderOutputLimitResumeDirective,
 } from '../runtime/interventions.js'
 import { classifyError, ErrorKind, isRecoverableNetworkError } from '../runtime/errorClassifier.js'
+import { defaultMaxNetworkRetries } from '../llms/providerRegistry.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -52,6 +53,7 @@ import {
   permissionDisposition,
   permissionDescription,
   type PermissionBroker,
+  type PermissionDisposition,
   type PermissionMode,
   type ToolPolicy,
 } from './permissions.js'
@@ -376,6 +378,15 @@ export interface TurnDependencies {
   readonly persistToolResult?: (toolName: string, content: string) => string
   readonly policy?: ToolPolicy
   /**
+   * The local/cloud data boundary (`security/dataBoundary.ts`). Absent, or a
+   * boundary whose mode is `off`, leaves every permission decision as it is
+   * today. `reason` explains a boundary denial to the model.
+   */
+  readonly dataBoundary?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
+    reason?(call: Pick<ToolCall, 'function'>, agentId?: string): string | undefined
+  }
+  /**
    * Relieve a context overflow once per overflowing round. Absent it the loop can only
    * report the overflow, because it has no compaction policy of its own.
    */
@@ -395,6 +406,13 @@ export interface TurnDependencies {
    */
   readonly roundOutputRoom?: () => number | undefined
   readonly retryDelays?: readonly number[]
+  /**
+   * How many times a refused, reset or unreachable connection is retried
+   * before the turn fails with an actionable error. Hosts pass
+   * `defaultMaxNetworkRetries(baseUrl)` (3 for a loopback endpoint, 6
+   * otherwise); absent, the remote default (6) applies.
+   */
+  readonly maxNetworkRetries?: number
   /**
    * Ceiling for provider-suggested Retry-After waits (ms). Route-owned via the
    * provider registry; defaults to {@link MAX_SUGGESTED_RETRY_DELAY_MS}.
@@ -800,8 +818,14 @@ export async function* runTurn(
           }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
+          // A refused or unreachable endpoint waits on its own backoff, but only
+          // `maxNetworkRetries` times: a dead local server used to retry until
+          // the user aborted the turn.
           const networkRetry = isRecoverableNetworkError(error)
+          const maxNetworkRetries = dependencies.maxNetworkRetries ?? defaultMaxNetworkRetries()
+          const networkRetriesExhausted = networkRetry && attempt >= maxNetworkRetries
           const final = (!networkRetry && attempt >= retryDelays.length)
+            || networkRetriesExhausted
             || error instanceof ModelCallBudgetError
             || error instanceof ModelTokenBudgetError
             || error instanceof ModelUsageCheckpointError
@@ -841,7 +865,12 @@ export async function* runTurn(
             const overflow = classified.kind === ErrorKind.CONTEXT_OVERFLOW
             yield {
               type: 'text',
-              text: overflow ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined)) : `[Error: ${errorMessage(error)}]`,
+              text: overflow
+                ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined))
+                : networkRetriesExhausted
+                  ? `[Error: ${errorMessage(error)} — gave up after ${maxNetworkRetries} network ${maxNetworkRetries === 1 ? 'retry' : 'retries'}. `
+                    + 'Check that the provider endpoint is running and reachable, then retry the prompt.]'
+                  : `[Error: ${errorMessage(error)}]`,
             }
             terminalProviderFailure = true
             stopReason = overflow ? 'context_overflow' : 'provider_failed'
@@ -1202,9 +1231,16 @@ export async function* runTurn(
           permissionMode,
           dependencies.policy,
           request.agentId,
+          dependencies.dataBoundary === undefined ? undefined : { boundary: dependencies.dataBoundary },
         )
         if (permission === 'deny') {
-          decisions.push({ call, kind: 'denied', reason: 'policy_denied' })
+          const boundaryReason = dependencies.dataBoundary?.reason?.(effectiveCall, request.agentId)
+          decisions.push({
+            call,
+            kind: 'denied',
+            reason: 'policy_denied',
+            ...(boundaryReason === undefined ? {} : { detail: boundaryReason }),
+          })
           continue
         }
         if (permission === 'prompt') {

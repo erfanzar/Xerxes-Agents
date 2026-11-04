@@ -308,8 +308,15 @@ export class HubEventStore {
   }
 
   private pruneRows(): void {
-    const age = this.db.query<{ sequence: number | null }, [string]>('SELECT MAX(sequence) AS sequence FROM events WHERE occurred_at < ?')
-      .get(new Date(this.clock() - this.retention.maxAgeMs).toISOString())?.sequence ?? 0
+    const cutoff = new Date(this.clock() - this.retention.maxAgeMs).toISOString()
+    // Runs on every insert. SQLite plans `MAX(sequence) WHERE occurred_at < ?` as a walk down the
+    // primary key, which reads the whole table when no row is old enough (~130 ms at 190k events,
+    // ~700 MB/s of reads on the live Hub). The index-only probe answers "none" in microseconds;
+    // only when old rows exist does the MAX run, forced onto the same index.
+    const expired = this.db.query<{ hit: number }, [string]>('SELECT 1 AS hit FROM events INDEXED BY events_occurred_at WHERE occurred_at < ? LIMIT 1').get(cutoff) !== null
+    const age = expired
+      ? this.db.query<{ sequence: number | null }, [string]>('SELECT MAX(sequence) AS sequence FROM events INDEXED BY events_occurred_at WHERE occurred_at < ?').get(cutoff)?.sequence ?? 0
+      : 0
     const retainedBytes = this.sequenceMeta('retained_bytes')
     // Over quota, free a block down to the low-water mark. Trimming to exactly the quota left
     // the journal a few bytes under it, so every insert crossed it again and pruned one row with

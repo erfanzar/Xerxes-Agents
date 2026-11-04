@@ -244,6 +244,9 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
     const agent = Object.freeze({
       id,
       ...(options.agent?.model === undefined ? {} : { model: options.agent.model }),
+      // Kept so a pinned route (a hybrid plan's local step) reaches the runner.
+      ...(options.agent?.providerProfile === undefined ? {} : { providerProfile: options.agent.providerProfile }),
+      ...(options.agent?.reasoningEffort === undefined ? {} : { reasoningEffort: options.agent.reasoningEffort }),
       name: options.nickname?.trim() || options.agent?.name || id,
       title,
       ...(options.agent?.systemPrompt === undefined ? {} : { systemPrompt: options.agent.systemPrompt }),

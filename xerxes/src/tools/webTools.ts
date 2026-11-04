@@ -6,6 +6,7 @@ import { ToolRegistry } from '../executors/toolRegistry.js'
 import { checkUrl, checkUrlDns, type UrlSafetyDecision, type UrlSafetyOptions } from '../security/urlSafety.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from './inputs.js'
+import { DEFAULT_SOURCE_SESSION, getSourceLog } from './sourceLog.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_TIMEOUT_MS = 300_000
@@ -33,6 +34,12 @@ export interface PublicWebClientOptions {
 }
 
 export interface PublicFetchOptions {
+  /**
+   * Optional research allowlist: when non-empty, the request URL and every redirect hop must be on
+   * one of these domains (or a subdomain). Empty or absent means unrestricted. The private-network
+   * checks still apply on top of it.
+   */
+  readonly allowedDomains?: readonly string[]
   readonly signal?: AbortSignal
   readonly timeoutMs?: number
 }
@@ -81,6 +88,7 @@ export class PublicWebClient {
   }
 
   async fetch(url: string, init: RequestInit = {}, options: PublicFetchOptions = {}): Promise<PublicFetchResponse> {
+    enforceDomainAllowlist(url, options.allowedDomains)
     let currentUrl = await assertPublicHttpUrl(url, this.urlSafety)
     const { signal: initSignal, ...requestBase } = init
     const signal = options.signal ?? initSignal ?? undefined
@@ -123,7 +131,9 @@ export class PublicWebClient {
       // Leaving it un-consumed pins the connection until GC notices; cancel it
       // so the socket is released before the next hop.
       void response.body?.cancel().catch(() => {})
-      currentUrl = await assertPublicHttpUrl(new URL(location, currentUrl).toString(), this.urlSafety)
+      const nextUrl = new URL(location, currentUrl).toString()
+      enforceDomainAllowlist(nextUrl, options.allowedDomains)
+      currentUrl = await assertPublicHttpUrl(nextUrl, this.urlSafety)
       if (previousProtocol === 'https:' && new URL(currentUrl).protocol === 'http:') {
         throw new ClientError('web', 'refusing to follow an HTTPS to HTTP redirect downgrade')
       }
@@ -220,10 +230,14 @@ export async function apiRequest(
 }
 
 export interface WebScrapeRequest {
+  /** Research domain allowlist; empty or absent means unrestricted. */
+  readonly allowedDomains?: readonly string[]
   readonly cleanText?: boolean
   readonly extractImages?: boolean
   readonly extractLinks?: boolean
   readonly selector?: string
+  /** Session the fetched URL is recorded under in the source log. */
+  readonly sessionId?: string
   readonly timeoutMs?: number
   readonly url: string
 }
@@ -255,12 +269,22 @@ export async function scrapeWebPage(
   client: PublicWebClient = new PublicWebClient(),
   signal?: AbortSignal,
 ): Promise<ScrapedWebPage> {
-  const fetched = await client.fetch(request.url, { method: 'GET' }, fetchOptions(signal, request.timeoutMs))
+  const fetched = await client.fetch(
+    request.url,
+    { method: 'GET' },
+    fetchOptions(signal, request.timeoutMs, request.allowedDomains),
+  )
   if (!fetched.response.ok) {
     throw new ClientError('web', `GET ${fetched.url} returned HTTP ${fetched.response.status}`)
   }
   const html = await client.text(fetched.response, { signal })
   const extracted = await extractHtml(html, fetched.url, request.selector)
+  getSourceLog().record({
+    sessionId: request.sessionId ?? DEFAULT_SOURCE_SESSION,
+    title: extracted.title ?? undefined,
+    tool: 'WebScraper',
+    url: fetched.url,
+  })
   const result: {
     content?: string
     images?: readonly ScrapedImage[]
@@ -351,8 +375,12 @@ export interface UrlAnalysis {
 }
 
 export interface UrlAnalysisRequest {
+  /** Research domain allowlist; empty or absent means unrestricted. */
+  readonly allowedDomains?: readonly string[]
   readonly checkAvailability?: boolean
   readonly extractMetadata?: boolean
+  /** Session the fetched URL is recorded under in the source log. */
+  readonly sessionId?: string
   readonly timeoutMs?: number
   readonly url: string
 }
@@ -363,15 +391,27 @@ export async function analyzeUrl(
   client: PublicWebClient = new PublicWebClient(),
   signal?: AbortSignal,
 ): Promise<UrlAnalysis> {
-  const local = localUrlAnalysis(request.url, client)
+  const parsedLocal = localUrlAnalysis(request.url, client)
+  const allowlistReason = domainAllowlistViolation(request.url, request.allowedDomains)
+  const local: UrlAnalysis = allowlistReason === undefined
+    ? parsedLocal
+    : { ...parsedLocal, isFetchable: false, safetyReason: allowlistReason }
   if (!(request.checkAvailability ?? false) || !local.isValid || !local.isFetchable) return local
 
   try {
-    let fetched = await client.fetch(request.url, { method: 'HEAD' }, fetchOptions(signal, request.timeoutMs))
+    const options = fetchOptions(signal, request.timeoutMs, request.allowedDomains)
+    let fetched = await client.fetch(request.url, { method: 'HEAD' }, options)
     if (fetched.response.status === 405 || fetched.response.status === 501) {
-      fetched = await client.fetch(request.url, { method: 'GET' }, fetchOptions(signal, request.timeoutMs))
+      fetched = await client.fetch(request.url, { method: 'GET' }, options)
     }
     const available = fetched.response.status < 400
+    if (available) {
+      getSourceLog().record({
+        sessionId: request.sessionId ?? DEFAULT_SOURCE_SESSION,
+        tool: 'URLAnalyzer',
+        url: fetched.url,
+      })
+    }
     const result: {
       availabilityError?: string
       description?: string
@@ -402,6 +442,8 @@ export async function analyzeUrl(
     if ((request.extractMetadata ?? true) && available) {
       const page = await scrapeWebPage({
         url: request.url,
+        ...(request.allowedDomains === undefined ? {} : { allowedDomains: request.allowedDomains }),
+        ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
         ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       }, client, signal)
       result.title = page.title
@@ -549,8 +591,20 @@ export const WEB_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ]
 
 /** Register safe HTTP-only web tools. Search providers are registered separately and require explicit configuration. */
-export function registerWebTools(registry: ToolRegistry, client: PublicWebClient = new PublicWebClient(), agentId = 'default'): void {
-  registry.register(WEB_SCRAPER_DEFINITION, (inputs, _context, signal) => scrapeWebPage(webScrapeRequestFromInputs(inputs), client, signal), agentId)
+export function registerWebTools(
+  registry: ToolRegistry,
+  client: PublicWebClient = new PublicWebClient(),
+  agentId = 'default',
+  options: RegisterWebToolsOptions = {},
+): void {
+  // Resolved per call so a changed XERXES_RESEARCH_ALLOWED_DOMAINS takes effect without re-registering.
+  const allowed = (): readonly string[] =>
+    options.allowedDomains ?? parseAllowedDomains(process.env.XERXES_RESEARCH_ALLOWED_DOMAINS)
+  registry.register(WEB_SCRAPER_DEFINITION, (inputs, context, signal) => scrapeWebPage({
+    ...webScrapeRequestFromInputs(inputs),
+    allowedDomains: allowed(),
+    ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+  }, client, signal), agentId)
   registry.register(API_CLIENT_DEFINITION, (inputs, _context, signal) => apiRequest(apiRequestFromInputs(inputs), client, signal), agentId)
   registry.register(RSS_READER_DEFINITION, (inputs, _context, signal) => readRssFeed({
     feedUrl: requiredString(inputs, 'feed_url'),
@@ -558,12 +612,55 @@ export function registerWebTools(registry: ToolRegistry, client: PublicWebClient
     maxItems: optionalInteger(inputs, 'max_items', 10),
     timeoutMs: timeoutMilliseconds(inputs),
   }, client, signal), agentId)
-  registry.register(URL_ANALYZER_DEFINITION, (inputs, _context, signal) => analyzeUrl({
+  registry.register(URL_ANALYZER_DEFINITION, (inputs, context, signal) => analyzeUrl({
+    allowedDomains: allowed(),
     checkAvailability: optionalBoolean(inputs, 'check_availability', false),
     extractMetadata: optionalBoolean(inputs, 'extract_metadata', true),
+    ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
     timeoutMs: timeoutMilliseconds(inputs),
     url: requiredString(inputs, 'url'),
   }, client, signal), agentId)
+}
+
+export interface RegisterWebToolsOptions {
+  /**
+   * Domains WebScraper and URLAnalyzer may fetch (subdomains included). Absent means read
+   * `XERXES_RESEARCH_ALLOWED_DOMAINS`; an empty list means unrestricted.
+   */
+  readonly allowedDomains?: readonly string[]
+}
+
+/** Parse a comma-separated domain list: lowercased, scheme/path/leading-dot stripped, empties dropped. */
+export function parseAllowedDomains(value: string | undefined): readonly string[] {
+  if (value === undefined) return []
+  const domains: string[] = []
+  for (const part of value.split(',')) {
+    let entry = part.trim().toLowerCase()
+    if (!entry) continue
+    entry = entry.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/[/?#].*$/, '').replace(/^\*?\./, '').replace(/\.$/, '')
+    if (entry && !domains.includes(entry)) domains.push(entry)
+  }
+  return domains
+}
+
+/** Why `url` is outside the allowlist, or `undefined` when it is allowed (or no allowlist is set). */
+function domainAllowlistViolation(url: string, allowed: readonly string[] | undefined): string | undefined {
+  if (allowed === undefined || allowed.length === 0) return undefined
+  let hostname: string
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
+  } catch {
+    return undefined // not a URL: the normal URL validation reports it
+  }
+  const permitted = allowed.some(domain => hostname === domain || hostname.endsWith(`.${domain}`))
+  return permitted
+    ? undefined
+    : `${hostname} is outside the research domain allowlist (${allowed.join(', ')}); set XERXES_RESEARCH_ALLOWED_DOMAINS to change it`
+}
+
+function enforceDomainAllowlist(url: string, allowed: readonly string[] | undefined): void {
+  const reason = domainAllowlistViolation(url, allowed)
+  if (reason !== undefined) throw new ValidationError('url', `is not allowed: ${reason}`, url)
 }
 
 async function assertPublicHttpUrl(value: string, safetyOptions: UrlSafetyOptions): Promise<string> {
@@ -1113,10 +1210,15 @@ function timeoutMilliseconds(inputs: JsonObject): number {
   return boundedInteger(seconds, 'timeout', 1, Math.floor(MAX_TIMEOUT_MS / 1000)) * 1000
 }
 
-function fetchOptions(signal: AbortSignal | undefined, timeoutMs: number | undefined): PublicFetchOptions {
-  const options: { signal?: AbortSignal; timeoutMs?: number } = {}
+function fetchOptions(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+  allowedDomains?: readonly string[],
+): PublicFetchOptions {
+  const options: { allowedDomains?: readonly string[]; signal?: AbortSignal; timeoutMs?: number } = {}
   if (signal !== undefined) options.signal = signal
   if (timeoutMs !== undefined) options.timeoutMs = timeoutMs
+  if (allowedDomains !== undefined) options.allowedDomains = allowedDomains
   return options
 }
 

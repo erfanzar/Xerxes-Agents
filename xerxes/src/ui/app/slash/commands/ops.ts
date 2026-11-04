@@ -330,6 +330,36 @@ export const opsCommands: SlashCommand[] = [
   },
 
   {
+    help: 'data boundary: show, switch off|private|hybrid|cloud, or `log` what left the machine',
+    name: 'boundary',
+    run: (arg, ctx) => runNativeSlash(ctx, `boundary ${arg.trim()}`.trim(), 'Data boundary')
+  },
+
+  {
+    help: 'list or clear the research sources this session recorded',
+    name: 'sources',
+    run: (arg, ctx) => runNativeSlash(ctx, `sources ${arg.trim()}`.trim(), 'Sources')
+  },
+
+  {
+    help: 'routing status, or `explain [kind] [--private]` which route a step would take',
+    name: 'route',
+    run: (arg, ctx) => runNativeSlash(ctx, `route ${arg.trim()}`.trim(), 'Routing')
+  },
+
+  {
+    help: 'list, show or remove saved hybrid plans',
+    name: 'plans',
+    run: (arg, ctx) => runNativeSlash(ctx, `plans ${arg.trim()}`.trim(), 'Plans')
+  },
+
+  {
+    help: 'measured outcomes per strategy for a workload on this hardware',
+    name: 'calibration',
+    run: (arg, ctx) => runNativeSlash(ctx, `calibration ${arg.trim()}`.trim(), 'Calibration')
+  },
+
+  {
     help: 'inspect loaded, deferred and filtered native tools',
     name: 'tools',
     run: (arg, ctx) => {

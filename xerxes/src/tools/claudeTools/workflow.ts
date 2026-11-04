@@ -226,9 +226,29 @@ export function createLlmPlanGenerator(
 /** Anything that can spawn subagents and wait for them — the class or a host port. */
 type PlanSubagentManager = SpawnedAgentManager | SpawnedAgentManagerPort
 
+/** Where one PlanTool step runs, as decided by the host's hybrid planner. */
+export interface WorkflowStepPlacement {
+  readonly placement: 'local' | 'cloud' | 'either'
+  readonly kind: string
+}
+
+export interface WorkflowHybridPlacement {
+  readonly placements: ReadonlyMap<string, WorkflowStepPlacement>
+  readonly notes: readonly string[]
+  /** The model `local` steps are pinned to. */
+  readonly localAgent?: { readonly providerProfile: string; readonly model: string }
+  /** Set when the plan must not run; execution is refused with this reason. */
+  readonly refusal?: string
+}
+
 export interface ClaudeWorkflowToolsOptions {
   readonly agentDefinitions?: readonly AgentDefinition[]
   readonly agentResolver?: (name: string) => SpawnedAgentDescriptor | undefined
+  /**
+   * Hybrid placement of generated steps (M3.1). Absent, or returning
+   * undefined (hybrid plans off), keeps PlanTool exactly as it was.
+   */
+  readonly hybridPlacement?: (objective: string, steps: readonly WorkflowPlanStep[]) => WorkflowHybridPlacement | undefined
   readonly planGenerator?: WorkflowPlanGenerator
   readonly skillRegistry?: SkillRegistry
   readonly state?: WorkflowState
@@ -594,19 +614,30 @@ export class ClaudeWorkflowTools {
     }, signal)
     const steps = typeof generated === 'string' ? parsePlanXml(generated) : normalizePlanSteps(generated)
     if (!steps.length) throw new ValidationError('plan', 'planner generated no usable steps')
-    const summary = { objective, steps: steps.map(planStepWire) }
+    const hybrid = this.options.hybridPlacement?.(objective, steps)
+    const wireStep = (step: WorkflowPlanStep): Record<string, unknown> => {
+      const placed = hybrid?.placements.get(step.id)
+      return placed ? { ...planStepWire(step), placement: placed.placement, kind: placed.kind } : planStepWire(step)
+    }
+    const summary = {
+      objective,
+      steps: steps.map(wireStep),
+      ...(hybrid ? { hybrid: { notes: [...hybrid.notes], ...(hybrid.refusal ? { refusal: hybrid.refusal } : {}) } } : {}),
+    }
     if (!optionalBoolean(inputs, 'execute', true)) return { ...summary, executed: false }
+    if (hybrid?.refusal) throw new ValidationError('plan', `hybrid plan refused: ${hybrid.refusal}`)
     const manager = this.options.subagentManager
     if (manager === undefined) {
       throw new ClientError('subagents', 'PlanTool execution requires an attached SpawnedAgentManager')
     }
-    return { ...summary, executed: true, results: await this.executePlan(manager, steps, signal) }
+    return { ...summary, executed: true, results: await this.executePlan(manager, steps, signal, hybrid) }
   }
 
   private async executePlan(
     manager: PlanSubagentManager,
     steps: readonly WorkflowPlanStep[],
     signal?: AbortSignal,
+    hybrid?: WorkflowHybridPlacement,
   ): Promise<readonly Record<string, unknown>[]> {
     const remaining = new Map(steps.map(step => [step.id, step]))
     const completed = new Map<string, string>()
@@ -620,8 +651,11 @@ export class ClaudeWorkflowTools {
       const spawned = await Promise.all(ready.map(async step => {
         const agent = this.options.agentResolver?.(step.agent)
         const prompt = planStepPrompt(step, completed)
+        const resolved: SpawnedAgentDescriptor = agent ?? { id: step.agent, name: step.agent }
+        // A step the hybrid planner placed `local` is pinned to the local model.
+        const localAgent = hybrid !== undefined && hybrid.placements.get(step.id)?.placement === 'local' ? hybrid.localAgent : undefined
         const snapshot = await manager.spawn({
-          agent: agent ?? { id: step.agent, name: step.agent },
+          agent: localAgent ? { ...resolved, providerProfile: localAgent.providerProfile, model: localAgent.model } : resolved,
           message: prompt,
           nickname: `plan-${step.id}-${crypto.randomUUID().replaceAll('-', '').slice(0, 6)}`,
         })

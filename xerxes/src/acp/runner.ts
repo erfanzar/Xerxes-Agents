@@ -8,6 +8,7 @@ import { formatSubagentResults } from '../daemon/turnRunner.js'
 import type { LlmClient } from '../llms/client.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import { createAgentState, type AgentState, type PermissionRequest, type StreamEvent } from '../streaming/events.js'
+import type { HookRunner } from '../extensions/hooks.js'
 import { EditFeedback } from '../runtime/editFeedback.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
 import { runTurn } from '../streaming/loop.js'
@@ -22,7 +23,14 @@ export interface AcpAgentRunnerOptions {
   readonly createEditFeedback?: (cwd: string) => EditFeedback
   readonly agentId?: string
   readonly defaultPermissionMode?: PermissionMode
+  /**
+   * The user's configured hooks for one session working directory, the same
+   * loader the daemon uses (`workspaceShellHooks`). Absent, no hooks run.
+   */
+  readonly hookRunnerForCwd?: (cwd: string) => HookRunner | undefined
   readonly llm: LlmClient
+  /** Network retries before a turn fails; see `defaultMaxNetworkRetries`. */
+  readonly maxNetworkRetries?: number
   readonly maxTokens?: number
   readonly model: string
   readonly modelListProvider?: () => readonly AcpModelInfo[]
@@ -152,6 +160,7 @@ export class AcpAgentRunner {
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     const feedback = this.options.createEditFeedback?.(session.cwd)
     const executor = this.options.toolExecutor && feedback ? feedback.wrap(this.options.toolExecutor) : this.options.toolExecutor
+    const hookRunner = this.options.hookRunnerForCwd?.(session.cwd)
 
     try {
       const permissionBroker: PermissionBroker = {
@@ -184,6 +193,8 @@ export class AcpAgentRunner {
           },
         } : {}),
         llm: this.options.llm,
+        ...(hookRunner ? { hookRunner } : {}),
+        ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         permissionBroker,
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(executor ? { toolExecutor: executor } : {}),

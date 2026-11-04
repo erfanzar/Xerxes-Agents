@@ -18,6 +18,12 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
+import { buildLeanSystemPrompt, selectLeanTools } from '../runtime/leanPrompt.js'
+import { renderFindings, runResultChecks, type CheckFinding, type ToolRunSummary } from '../runtime/resultChecks.js'
+import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
+import type { TurnRoute } from './turnRouting.js'
+import type { EscalationNotice } from './turnEscalation.js'
+import { DataBoundaryError } from '../security/boundaryTypes.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { isScreenshotToolResult } from '../context/screenshotSuperseder.js'
 import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
@@ -76,6 +82,7 @@ import {
   type PermissionMode,
   type ToolPolicy,
 } from '../streaming/permissions.js'
+import type { BoundaryPermissionPort } from '../security/dataBoundary.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { COLLAB_KEY } from './collaboration.js'
 import { isHarnessOrigin, isXerxesActor, messageText, type HarnessOrigin, type XerxesInteractionRecord } from '../types/messages.js'
@@ -99,6 +106,12 @@ export interface TurnReflectionInput {
 }
 
 export interface AgentTurnRunnerOptions {
+  /**
+   * How long a model question (AskUserQuestionTool, ask_user) waits for a person before it
+   * continues with the recommended option, or the first option when none is marked.
+   * 0 waits forever. Defaults to 60 s. Open questions without options still wait.
+   */
+  readonly questionAutoAnswerMs?: number
   /** Reviewed workspace guidance for this user message; injected into turn context only. */
   readonly lessonsForTurn?: (session: DaemonSession, userText: string, signal: AbortSignal) => Promise<string>
   /** Host owns provider authority, lifetime tracking, storage and session notification. */
@@ -162,6 +175,42 @@ export interface AgentTurnRunnerOptions {
   readonly providerOverrides?: ProviderOverrides
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
+  /**
+   * The session's local/cloud data boundary port (`security/dataBoundary.ts`).
+   * Returning undefined, or a boundary in mode `off`, keeps today's behavior.
+   */
+  readonly dataBoundaryForSession?: (session: DaemonSession) => BoundaryPermissionPort | undefined
+  /**
+   * Network retries before a turn gives up on an unreachable provider. Absent:
+   * the loop's default for a remote route.
+   */
+  readonly maxNetworkRetries?: number
+  /**
+   * The session's prompt profile. `lean` (a small local model) sends a terse
+   * system prompt and only the core tools; absent or `full` keeps today's
+   * prompt exactly. Throwing fails the turn with the validation error.
+   */
+  readonly promptProfileForSession?: (session: DaemonSession) => 'lean' | 'full'
+  /**
+   * Result checks after a finished turn (xlsx/csv validity, a claimed check
+   * that never ran). Absent or `off`: none run. `warn` only notifies the user.
+   */
+  readonly resultChecksForSession?: (session: DaemonSession) => 'off' | 'warn' | 'enforce'
+  /**
+   * The data boundary's outbound gate for this session and model. Absent, or
+   * returning undefined (boundary off), leaves every model call unchanged.
+   */
+  readonly outboundGateForSession?: (session: DaemonSession, model: string) => OutboundGateContext | undefined
+  /**
+   * Per-turn policy routing. Absent, or returning undefined (routing off),
+   * keeps the configured model. `ok: false` refuses the turn with its reason.
+   */
+  readonly routeForSession?: (session: DaemonSession, model: string, text: string) => TurnRoute | undefined
+  /**
+   * Feedback-driven escalation after result checks. Absent, or returning
+   * undefined (escalation off or nothing failed), keeps today's behavior.
+   */
+  readonly escalationForSession?: (session: DaemonSession, findings: readonly CheckFinding[]) => EscalationNotice | undefined
   /**
    * Relieve a mid-turn context overflow. The loop detects the overflow and can
    * retry the round, but owns no compaction policy — without this the turn can
@@ -365,11 +414,16 @@ export class AgentTurnRunner implements TurnRunner {
       try { await this.options.beforeTurn(session) } catch { /* bounded host preparation; never fails the turn */ }
       signal.throwIfAborted()
     }
-    const selectedModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
+    const configuredModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
     const requiresLocal = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)
+    // Policy routing (off by default). A local provider binding is never
+    // rerouted. No allowed route refuses the turn instead of falling back.
+    const route = requiresLocal ? undefined : this.options.routeForSession?.(session, configuredModel, text)
+    if (route && !route.ok) throw new DataBoundaryError('DATA_BOUNDARY_NO_LOCAL_ROUTE', `Routing refused this turn: ${route.reason}`)
+    const selectedModel = route?.ok ? route.model : configuredModel
     const localClient = this.options.remoteProviderBindings?.client(session, selectedModel)
     if (requiresLocal && !localClient) throw new LocalProviderRelayError('grant_unavailable')
-    const routedProvider = localClient ? { llm: localClient } : this.options.resolveSessionProvider?.(session, selectedModel)
+    const routedProvider = route?.ok ? route.provider : localClient ? { llm: localClient } : this.options.resolveSessionProvider?.(session, selectedModel)
     // A local binding owns its provider settings on the local machine. This
     // host still owns tool/permission policy, but its provider defaults must
     // not enter local requests or pretend to describe the local context window.
@@ -409,6 +463,8 @@ export class AgentTurnRunner implements TurnRunner {
     this.states.set(session.id, state)
     this.liveStates.set(session.id, state)
     installMessageJournal(state, controls.journal)
+    // Result checks look only at what this turn ran, not the whole history.
+    const executionsBefore = state.toolExecutions.length
     const projectRoot = sessionProjectRoot(session)
     // Anchor the pre-mutation baseline before any tool runs. Non-blocking:
     // a whole-project typecheck costs seconds and read-only turns must not pay it.
@@ -431,7 +487,7 @@ export class AgentTurnRunner implements TurnRunner {
     if (this.options.agentDefinitions && !agent) {
       throw new ValidationError('agent_id', 'is not a registered agent profile', session.agentId)
     }
-    const model = agent?.model || session.model || this.options.model
+    const model = route?.ok ? route.model : agent?.model || session.model || this.options.model
     const modeAgent = interactionModeAgent(this.options.agentDefinitions, session.interactionMode)
     if (modeAgent === null) {
       throw new ValidationError(
@@ -453,7 +509,10 @@ export class AgentTurnRunner implements TurnRunner {
     const modeTools = toolsForAgent(selectedTools, modeAgent)
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'
-    const tools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
+    const surfaceTools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
+    // Lean prompt profile (off by default): core tools only, short descriptions.
+    const lean = this.options.promptProfileForSession?.(session) === 'lean'
+    const tools = lean && surfaceTools ? selectLeanTools(surfaceTools) : surfaceTools
     // The session's own mode wins over the runner default, so the pin reaches
     // the permission broker rather than only the status line.
     const sessionPermissionMode = permissionModeValue(session.permissionMode) ?? this.options.permissionMode
@@ -469,12 +528,19 @@ export class AgentTurnRunner implements TurnRunner {
       ? new Set(this.options.toolRegistry.deferredCatalog(session.agentId).map(entry => entry.name))
       : new Set<string>()
     const coreTools = tools?.filter(tool => !deferrable.has(tool.function.name))
-    const bootstrapPrompt = await this.bootstrapSystemPrompt(
-      session,
-      model,
-      coreTools,
-      promptAgent?.name ?? session.agentId,
-    )
+    const bootstrapPrompt = lean
+      ? buildLeanSystemPrompt({
+        cwd: session.cwd,
+        model,
+        date: localDay(new Date()),
+        toolNames: (tools ?? []).map(tool => tool.function.name),
+      })
+      : await this.bootstrapSystemPrompt(
+        session,
+        model,
+        coreTools,
+        promptAgent?.name ?? session.agentId,
+      )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
     await captureUserWorkflowMemory(displayText, memory, { projectRoot })
     const contextControls = readContextControls(session.metadata)
@@ -550,7 +616,10 @@ export class AgentTurnRunner implements TurnRunner {
       reflection: this.options.reflectionMode?.() ?? 'all',
     })
     this.snapshots.learningPolicy.set(session.id, learningPolicy)
-    const systemSegments = assembleContextLayers({
+    // Lean: the terse prompt is the whole system prompt (about 3K tokens with
+    // the core tool schemas). Turn context, goals and lessons still ride with
+    // the user message.
+    const systemSegments = lean ? [{ name: 'bootstrap', text: bootstrapPrompt }] : assembleContextLayers({
       learningPolicy,
       addendum: systemPromptAddendum(session),
       ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
@@ -621,7 +690,7 @@ export class AgentTurnRunner implements TurnRunner {
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(tools ? { toolSchemas: tools.map(tool => tool as unknown as Readonly<Record<string, unknown>>) } : {}),
     }
-    const baseToolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id)
+    const baseToolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id, this.options.questionAutoAnswerMs ?? DEFAULT_QUESTION_AUTO_ANSWER_MS)
     const toolExecutor = baseToolExecutor && editFeedback ? editFeedback.wrap(baseToolExecutor) : baseToolExecutor
     const auditContext = {
       sessionId: session.id,
@@ -703,7 +772,13 @@ export class AgentTurnRunner implements TurnRunner {
       const fallbackModel = requiresLocal ? undefined : this.options.fallbackModel
       const fallbackFactory = routedProvider?.providerOverrides ? routedProvider.createLlmForModel : this.options.createLlmForModel
       let attemptModel = model
-      let attemptLlm = routedProvider?.llm ?? this.options.llm
+      // Data boundary outbound gate (off by default): every model call of this
+      // turn is checked, approved when asked, and logged before it leaves.
+      const gateFor = (candidate: string): OutboundGateContext | undefined => {
+        const context = this.options.outboundGateForSession?.(session, candidate)
+        return context && route?.ok ? { ...context, trust: route.trust, provider: route.profile } : context
+      }
+      let attemptLlm = gateLlmClient(routedProvider?.llm ?? this.options.llm, gateFor(model))
       let fallbackAttempted = false
       for (;;) {
         const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
@@ -781,6 +856,8 @@ export class AgentTurnRunner implements TurnRunner {
         ...((this.options.hookRunnerForSession || this.options.hookRunner) ? { hookRunner: this.options.hookRunnerForSession?.(session) ?? this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
+        ...dataBoundaryDependency(this.options.dataBoundaryForSession?.(session)),
+        ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         ...(toolExecutor ? { toolExecutor } : {}),
         ...(this.options.reduceContext ? { reduceContext: async (messages, signal) => {
           try {
@@ -918,6 +995,43 @@ export class AgentTurnRunner implements TurnRunner {
               payload: { level: 'info', message: pluginSuggestionMessage(repeated), plugin_suggestion: { ...repeated } },
             }
           }
+          // Result checks: `warn` tells the user only; `enforce` also hands
+          // error findings to the model (as edit diagnostics are). A check
+          // that cannot run never fails a finished turn.
+          if (!signal.aborted && this.options.resultChecksForSession) {
+            let checksMode: 'off' | 'warn' | 'enforce' = 'off'
+            let findings: readonly CheckFinding[] = []
+            try {
+              checksMode = this.options.resultChecksForSession(session)
+              if (checksMode !== 'off') findings = await turnResultFindings(state, executionsBefore, projectRoot)
+            } catch (error) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Result checks did not run: ${error instanceof Error ? error.message : String(error)}` } }
+            }
+            // Escalation (off by default) decides the next step by rule from
+            // these findings; a clean check resets the session's ladder.
+            let escalation: EscalationNotice | undefined
+            if (checksMode !== 'off' && this.options.escalationForSession) {
+              try {
+                escalation = this.options.escalationForSession(session, findings)
+              } catch (error) {
+                yield { type: 'notification', payload: { level: 'warning', message: `Escalation did not run: ${error instanceof Error ? error.message : String(error)}` } }
+              }
+            }
+            if (findings.length) {
+              yield {
+                type: 'notification',
+                payload: { level: 'warning', message: renderFindings(findings), result_checks: findings.map(finding => ({ ...finding })) },
+              }
+              if (escalation?.feedback) {
+                state.messages.push({ role: 'user', content: escalation.feedback, origin: 'harness' })
+              } else if (checksMode === 'enforce' && escalation === undefined && findings.some(finding => finding.severity === 'error')) {
+                state.messages.push({ role: 'user', content: `${renderFindings(findings)}\nFix these before you report the task as done.`, origin: 'harness' })
+              }
+            }
+            if (escalation) {
+              yield { type: 'notification', payload: { level: escalation.level, message: escalation.message, escalation: { action: escalation.action } } }
+            }
+          }
           break
         }
         fallbackAttempted = true
@@ -939,7 +1053,7 @@ export class AgentTurnRunner implements TurnRunner {
         const nextModel = fallbackModel as string
         const nextFactory = fallbackFactory as (model: string) => LlmClient
         attemptModel = nextModel
-        attemptLlm = nextFactory(nextModel)
+        attemptLlm = gateLlmClient(nextFactory(nextModel), gateFor(nextModel))
         yield {
           type: 'notification',
           payload: {
@@ -1200,6 +1314,40 @@ const MUTATING_TOOL_NAMES = new Set([
   'append_file', 'edit_file', 'write_file',
 ])
 
+/** Tools whose output file the result checks inspect, on top of {@link MUTATING_TOOL_NAMES}. */
+const CHECKED_OUTPUT_TOOL_NAMES = new Set(['XlsxWriter'])
+
+/**
+ * Run the result checks over the executions this turn added: files it wrote,
+ * the commands it ran, and what its final reply claims.
+ */
+async function turnResultFindings(state: AgentState, executionsBefore: number, projectRoot: string): Promise<CheckFinding[]> {
+  const executions = state.toolExecutions.slice(executionsBefore)
+  const changedFiles: string[] = []
+  const toolRuns: ToolRunSummary[] = []
+  for (const execution of executions) {
+    const failed = !execution.permitted || execution.result.startsWith('Tool execution failed')
+    if (!failed && (MUTATING_TOOL_NAMES.has(execution.name) || CHECKED_OUTPUT_TOOL_NAMES.has(execution.name))) {
+      const path = execution.inputs.file_path ?? execution.inputs.path
+      if (typeof path === 'string' && path) changedFiles.push(path)
+    }
+    let ok = !failed
+    let command: string | undefined
+    if (execution.name === 'exec_command') {
+      const cmd = typeof execution.inputs.cmd === 'string' ? execution.inputs.cmd : ''
+      const args = Array.isArray(execution.inputs.args) ? execution.inputs.args.filter(arg => typeof arg === 'string') : []
+      command = [cmd, ...args].join(' ').trim()
+      try {
+        const parsed: unknown = JSON.parse(execution.result)
+        if (typeof parsed === 'object' && parsed !== null && 'exitCode' in parsed) ok = ok && parsed.exitCode === 0
+      } catch { /* A non-JSON result keeps the permitted/failed verdict. */ }
+    }
+    toolRuns.push({ name: execution.name, ok, ...(command ? { command } : {}) })
+  }
+  if (!changedFiles.length && !toolRuns.length) return []
+  return runResultChecks({ workspaceRoot: projectRoot, changedFiles, finalText: latestAssistantContent(state), toolRuns })
+}
+
 /** True when this turn wrote to the workspace, so a diagnostics pass can earn its latency. */
 function turnMutatedFiles(state: AgentState): boolean {
   return state.toolExecutions.some(execution => {
@@ -1340,10 +1488,20 @@ async function* multiplexTurnEvents(
   }
 }
 
+/** A model question with choices continues with the recommended one after this long unanswered. */
+export const DEFAULT_QUESTION_AUTO_ANSWER_MS = 60_000
+
+/** The option marked "(Recommended)", else the first; undefined for an open question. */
+export function recommendedOption(options: readonly string[] | undefined): string | undefined {
+  const choices = (options ?? []).map(option => option.trim()).filter(Boolean)
+  return choices.find(option => /\(recommended\)/i.test(option)) ?? choices[0]
+}
+
 function interactiveToolExecutor(
   delegate: ToolExecutor | undefined,
   interactions: DaemonInteractionBoard | undefined,
   sessionId: string,
+  autoAnswerMs: number,
 ): ToolExecutor | undefined {
   if (!interactions) {
     return delegate
@@ -1352,8 +1510,18 @@ function interactiveToolExecutor(
     async execute(call, context, signal) {
       const question = questionFromToolCall(call)
       if (question) {
-        const answer = await interactions.ask(sessionId, { ...question, toolCallId: call.id }, signal)
-        return JSON.stringify({ answer, question: question.question })
+        const recommended = autoAnswerMs > 0 ? recommendedOption(question.options) : undefined
+        const result = await interactions.askDetailed(sessionId, {
+          ...question, toolCallId: call.id,
+          ...(recommended === undefined ? {} : { autoAnswer: { afterMs: autoAnswerMs, answer: recommended } }),
+        }, signal)
+        return JSON.stringify({
+          answer: result.answer, question: question.question,
+          ...(result.auto ? {
+            auto_answered: true,
+            note: `The user did not answer within ${Math.round(autoAnswerMs / 1000)} s, so the recommended option was chosen. Continue with it and say so; the user may still redirect you.`,
+          } : {}),
+        })
       }
       if (!delegate) {
         return `Tool ${call.function.name} is unavailable.`
@@ -1630,6 +1798,11 @@ function permissionModeValue(value: unknown): PermissionMode | undefined {
 }
 
 /** Match the effective delegated-policy ordering used by the native host. */
+/** The loop dependency for a session's data boundary; nothing when the host supplied none. */
+function dataBoundaryDependency(port: BoundaryPermissionPort | undefined): { readonly dataBoundary?: BoundaryPermissionPort } {
+  return port === undefined ? {} : { dataBoundary: port }
+}
+
 function permissionModeExceeds(candidate: PermissionMode, ceiling: PermissionMode): boolean {
   if (candidate === ceiling || ceiling === 'accept-all') return false
   if (ceiling === 'manual') return candidate !== 'manual'

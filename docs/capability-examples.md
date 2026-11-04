@@ -89,7 +89,7 @@ Commit `.xerxes/lessons`, `.xerxes/memory` and `.xerxes/skills`; the report list
 
 ### Evidence-backed lessons
 
-Ask: “Use `lesson_record` to retain the reusable lesson from that successful tool call, with a short cue and confidence.” The host resolves the latest successful call, or verifies an explicit `evidence_tool_call_id`. Alternatively, `test_evidence` records a reported command, exit code and summary; it is not labelled host-verified. Missing/failed tool-call evidence is refused. `lesson_recall` matches cues within the active workspace, and `lesson_review` requests approval, rejection or rollback of an exact id with a reason through the normal permission gate; automatic turns cannot approve their own lessons. Corrections and rollback retain governed history; rendered INSIGHTS-style Markdown is only a view.
+Ask: “Use `lesson_record` to retain the reusable lesson from that successful tool call, with a short cue and confidence.” The host resolves the latest successful call, or verifies an explicit `evidence_tool_call_id`. Alternatively, `test_evidence` records a reported command, exit code and summary; it is not labelled host-verified. Missing/failed tool-call evidence is refused. `lesson_list` lists every lesson title of the workspace in one short row each, `lesson_recall` matches cues within the active workspace, and `lesson_review` requests approval, rejection or rollback of an exact id with a reason through the normal permission gate; automatic turns cannot approve their own lessons. Corrections and rollback retain governed history; rendered INSIGHTS-style Markdown is only a view.
 
 ```text
 /xerxes lessons

@@ -650,6 +650,8 @@ for (const failure of ['unknown certificate verification error', 'Unable to conn
       yield { content: 'back online' }
     } } as LlmClient,
     retryDelays: [0],
+    // Network retries are capped (default 6); this run needs seven.
+    maxNetworkRetries: 7,
     delay: async ms => { delays.push(ms) },
   }))
   expect(calls).toBe(8)

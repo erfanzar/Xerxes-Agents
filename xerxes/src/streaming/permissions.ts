@@ -43,6 +43,15 @@ export interface PermissionGateOptions {
    * Defaults to false; hosts must opt in consciously.
    */
   readonly bypassAlwaysApprove?: boolean
+  /**
+   * The data boundary's opinion on a call (see `security/dataBoundary.ts`).
+   * Consulted after a policy denial and before every mode shortcut, so it
+   * holds under `accept-all` too: `deny` wins, `prompt` beats an allow.
+   * `undefined` from the port means "no opinion". Absent = today's behavior.
+   */
+  readonly boundary?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
+  }
 }
 
 export interface ToolPolicy {
@@ -103,6 +112,9 @@ export function permissionDisposition(
   if (policy?.check(name, agentId) === 'deny') {
     return 'deny'
   }
+  const boundary = options?.boundary?.toolDisposition(call, agentId)
+  if (boundary === 'deny') return 'deny'
+  if (boundary === 'prompt') return 'prompt'
   // The always-approval tier is consulted before the mode shortcut, so these
   // tools prompt even under `accept-all`. See ALWAYS_APPROVAL_TOOLS.
   if (ALWAYS_APPROVAL_TOOLS.has(name) && options?.bypassAlwaysApprove !== true) {

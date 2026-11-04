@@ -51,6 +51,15 @@ import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
+import { createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
+import { outboundApprovalPort } from './daemon/outboundGate.js';
+import { createTurnRouter } from './daemon/turnRouting.js';
+import { createEscalationFactory } from './daemon/turnEscalation.js';
+import { createHybridPlacement } from './daemon/hybridPlanTool.js';
+import { parsePromptProfileConfig } from './runtime/leanPrompt.js';
+import { parseChecksConfig } from './runtime/resultChecks.js';
+import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
+import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
 import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
 import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
@@ -122,6 +131,20 @@ import { archiveSessionSearchPort } from './daemon/archiveSearch.js';
 import { registerClaudeNotebookTools } from './tools/claudeTools/notebook.js';
 import type { TurnReflectionInput } from './daemon/turnRunner.js';
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
+import {
+  extractNoSaveOption,
+  newOneShotSessionId,
+  OneShotSessionRecorder,
+  oneShotTranscriptStore,
+  parseOneShotSaveConfig,
+  userHookRunnerForCwd,
+} from "./runtime/oneShotSession.js";
+import {
+  defaultMaxNetworkRetries,
+  getProviderConfig as providerConfigFor,
+  parseProviderNetworkConfig,
+  resolveProvider as resolveProviderName,
+} from "./llms/providerRegistry.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
 import { formatBytes, hostMemoryGuardPorts, MemoryGuard, memoryGuardSupported, readMemoryGuardSettings, resolveMemoryLimitBytes } from "./runtime/memoryGuard.js";
@@ -295,7 +318,8 @@ const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 const { agent: cliAgentReference, rest: agentlessArguments } = extractAgentOption(
   Bun.argv.slice(2),
 );
-const { format: cliOutputFormat, rest: cliArguments } = extractOutputFormatOption(agentlessArguments);
+const { format: cliOutputFormat, rest: formatlessArguments } = extractOutputFormatOption(agentlessArguments);
+const { noSave: cliNoSave, rest: cliArguments } = extractNoSaveOption(formatlessArguments);
 const [argument, ...argumentsAfterCommand] = cliArguments;
 
 /**
@@ -311,6 +335,7 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "install",
   "update",
   "export",
+  "local",
   "setup",
   "workspace",
   "schedule",
@@ -816,6 +841,10 @@ if (argument === "--help" || argument === "-h") {
   process.exit(0)
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
+} else if (argument === "local") {
+  // Managed llama.cpp runtime (off until the user runs a subcommand).
+  const { runLocalCli } = await import("./local/cliEntry.js");
+  process.exit(await runLocalCli(argumentsAfterCommand));
 } else if (argument === "daemon") {
   const options = parseValueOptions(argumentsAfterCommand, "daemon", [
     "--pid-file",
@@ -2131,12 +2160,16 @@ function daemonRuntime(
     // Installed plugin tools (plugin_*) reach the shipped full-access agents;
     // the main-session profiles may also manage plugins, with approval.
     addPluginToolsToBuiltinAgents(agentDefinitions, { manage: host.managedPlugins !== undefined });
+    // Fail fast on a dead endpoint: runtime.provider_network (or env) sets the
+    // connect timeout and retry cap; loopback routes default to 3 retries.
+    const daemonProviderNetwork = parseProviderNetworkConfig({ ...config.runtime, ...settings });
+    const daemonMaxNetworkRetries = daemonProviderNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(connection.baseUrl);
     const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),
       ...(connection.responsesApi ? { responses_api: true } : {}),
-    }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
+    }, { connectTimeoutMs: daemonProviderNetwork.connectTimeoutMs }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
     // Fallback model chain (Claude Code fallback-model parity): configured via
     // XERXES_FALLBACK_MODEL or runtime.fallback_model; the fallback client
     // reuses the primary connection's credentials and routing.
@@ -2229,6 +2262,14 @@ function daemonRuntime(
         });
       },
     });
+    // AskAdvisor (off by default): registered only when advisor.profile or
+    // XERXES_ADVISOR_PROFILE names a provider profile.
+    const advisorRegistered = registerConfiguredAdvisor(tools, {
+      runtime: { ...config.runtime, ...settings },
+      profiles: profileStore,
+      workspaceRoot,
+      reportError: message => console.error(message),
+    });
     // Deterministic multi-agent orchestration: PlanTool decomposes an explicit
     // objective into dependency-ordered steps and executes them through the
     // same managed subagent pool (depth caps, cohort join, persistence).
@@ -2245,6 +2286,12 @@ function daemonRuntime(
           return createLlmPlanGenerator(planner, { model }).generate(request, signal);
         },
       },
+      // Hybrid placement (off unless runtime.hybrid_plans / XERXES_HYBRID_PLANS is on).
+      hybridPlacement: createHybridPlacement({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        cwd: () => getActiveSession<DaemonSession>()?.cwd ?? workspaceRoot,
+        profiles: profileStore,
+      }),
       subagentManager: subagentHost.managerPort,
     });
     // Report what a request actually carries, not what is registered. With
@@ -2326,6 +2373,66 @@ function daemonRuntime(
         }).then((result) => result.systemPrompt),
       llm,
       hookRunnerForSession: session => hooksForWorkspace(session.cwd),
+      // Data boundary (off by default): a mode in runtime.data_boundary or
+      // XERXES_DATA_BOUNDARY gates file reads, shell and writes per session.
+      dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        trustOf: session => {
+          const model = session.model || connection.model;
+          const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+          const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
+          return deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
+        },
+      }),
+      maxNetworkRetries: daemonMaxNetworkRetries,
+      // Lean prompt (off by default): the session's profile field wins, then
+      // XERXES_PROMPT_PROFILE, then runtime.prompt_profile.
+      promptProfileForSession: session => {
+        const model = session.model || connection.model;
+        const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+        let profile: ReturnType<typeof sessionProvider>;
+        try { profile = pinned ? sessionProvider(profileStore, session, model) : undefined; } catch { profile = undefined; }
+        return parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, profile?.prompt_profile);
+      },
+      // Result checks after a turn: runtime.checks / XERXES_RESULT_CHECKS.
+      // `warn` (the default) only notifies the user; `enforce` tells the model.
+      resultChecksForSession: () => parseChecksConfig({ ...config.runtime, ...settings }, process.env),
+      // Outbound gate (off unless a data_boundary mode is set): private mode
+      // refuses cloud requests, approve_outbound asks with Send/Deny, and every
+      // decision is logged by size and hash. No UI board means fail closed.
+      outboundGateForSession: createOutboundGateFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        routeOf: (session, model) => {
+          const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+          const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
+          return {
+            trust: deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)),
+            provider: profile?.name ?? connection.provider ?? 'provider',
+          };
+        },
+        ...(interactions ? { approve: outboundApprovalPort((sessionId, question, signal) => interactions.ask(sessionId, question, signal)) } : {}),
+      }),
+      // Policy routing (off unless runtime.routing / XERXES_ROUTING is set):
+      // the data boundary decides which routes are allowed, the router picks.
+      routeForSession: createTurnRouter<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        profiles: profileStore,
+        boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
+        buildProvider: (profile, model) => ({
+          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          providerOverrides: { provider: profile.provider, base_url: profile.base_url },
+          contextLimit: resolvedProfileContextLimit(profile, model),
+          maxOutputTokens: candidate => resolvedProfileMaxOutputTokens(profile, candidate),
+        }),
+      }),
+      // Escalation (off unless runtime.escalation.mode / XERXES_ESCALATION is on):
+      // failed result checks step from a local retry to the advisor to a stop.
+      escalationForSession: createEscalationFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
+        advisorAvailable: () => advisorRegistered,
+      }),
       ...(fallbackModel === undefined ? {} : {
         fallbackModel,
         createLlmForModel: (candidate: string) => createLlmClient(candidate, {
@@ -2738,12 +2845,13 @@ async function acpServer(
   const maxOutputTokens = (candidate: string): number | undefined =>
     resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
   const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
+  const acpProviderNetwork = parseProviderNetworkConfig(config.runtime);
   const llm = createLlmClient(connection.model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  });
+  }, { connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
@@ -2799,6 +2907,12 @@ async function acpServer(
     ...(systemPrompt ? { systemPrompt } : {}),
     ...(effectiveMaxTokens === undefined ? {} : { maxTokens: effectiveMaxTokens }),
     defaultPermissionMode,
+    // The same user hooks the daemon runs, per ACP session working directory.
+    hookRunnerForCwd: userHookRunnerForCwd({ home: xerxesHome() }),
+    maxNetworkRetries: acpProviderNetwork.maxNetworkRetries
+      ?? defaultMaxNetworkRetries(connection.baseUrl ?? providerConfigFor(resolveProviderName(connection.model, {
+        ...(connection.provider ? { provider: connection.provider } : {}),
+      })).baseUrl),
     subagentCoordinator: subagentHost.turnCoordinator,
     ...(connection.temperature !== undefined
       ? { temperature: connection.temperature }
@@ -2868,7 +2982,7 @@ async function runOneShotOrUsageError(
   agentReference?: string,
 ): Promise<void> {
   try {
-    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat });
+    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat, noSave: cliNoSave });
   } catch (error) {
     if (error instanceof RuntimeConnectionRequiredError) {
       reportCommandUsageError(error, "xerxes --help");
@@ -2880,7 +2994,7 @@ async function runOneShotOrUsageError(
 async function runOneShot(
   prompt: string,
   agentReference?: string,
-  options: { readonly outputFormat?: OutputFormat } = {},
+  options: { readonly outputFormat?: OutputFormat; readonly noSave?: boolean } = {},
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
   const profileStore = new ProfileStore();
@@ -2890,6 +3004,9 @@ async function runOneShot(
       "One-shot execution requires a configured runtime connection or active provider profile",
     );
   }
+  // Parsed before any work starts so an invalid setting fails fast.
+  const saveRun = options.noSave !== true && parseOneShotSaveConfig(config.runtime);
+  const providerNetwork = parseProviderNetworkConfig(config.runtime);
   const workspaceRoot = config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -2945,7 +3062,14 @@ async function runOneShot(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  });
+  }, { connectTimeoutMs: providerNetwork.connectTimeoutMs });
+  // A refused or hung endpoint gives up after a bounded number of retries:
+  // fewer for a local server, which either answers or is down.
+  const oneShotBaseUrl = connection.baseUrl
+    ?? providerConfigFor(resolveProviderName(model, {
+      ...(connection.provider ? { provider: connection.provider } : {}),
+    })).baseUrl;
+  const maxNetworkRetries = providerNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(oneShotBaseUrl);
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
@@ -2995,8 +3119,35 @@ async function runOneShot(
     await selfMemory.systemPromptAddendum(),
   );
   const feedback = process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? undefined : new EditFeedback(workspaceRoot, undefined, lspManager.configured ? lspManager.forWorkspace(workspaceRoot) : undefined);
-  const sessionId = `oneshot-${crypto.randomUUID()}`;
+  // A saved run is a normal daemon session (same store and format), so
+  // `xerxes --resume <id> "prompt"` continues it after an interruption.
+  const sessionId = saveRun ? newOneShotSessionId() : `oneshot-${crypto.randomUUID()}`;
   const state = createAgentState();
+  const recorder = saveRun
+    ? new OneShotSessionRecorder({
+        store: oneShotTranscriptStore(xerxesHome(), workspaceRoot),
+        sessionId,
+        cwd: workspaceRoot,
+        agentId: agent?.name ?? "default",
+        model,
+        agentsRoot: join(xerxesHome(), "agents"),
+        permissionMode: "accept-all",
+        ...(systemPrompt ? { systemPrompt } : {}),
+      })
+    : undefined;
+  // Only on a terminal: scripts read stderr for errors, and --output-format
+  // json already reports session_id.
+  if (recorder && process.stderr.isTTY) process.stderr.write(`session: ${sessionId}\n`);
+  // The same user hooks the daemon runs (before_tool_call, PreToolUse, …).
+  const hookRunner = userHookRunnerForCwd({ home: xerxesHome() })(workspaceRoot);
+  // Ctrl-C ends the turn through its signal, so the partial run is saved
+  // before the process exits; a second Ctrl-C exits at once.
+  const interrupt = new AbortController();
+  const onSigint = () => {
+    if (interrupt.signal.aborted) process.exit(130);
+    interrupt.abort(new DOMException("Interrupted", "AbortError"));
+  };
+  process.on("SIGINT", onSigint);
   const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
   const outputFormat: OutputFormat = options.outputFormat ?? "text";
   let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = [];
@@ -3038,9 +3189,14 @@ async function runOneShot(
           pendingAgentEventSnapshots = [];
         },
         llm,
+        hookRunner,
+        maxNetworkRetries,
         toolExecutor: feedback ? feedback.wrap(tools) : tools,
       },
+      interrupt.signal,
     )) {
+      // Save at every completed step so an interrupted run can be resumed.
+      if (recorder && (event.type === "tool_end" || event.type === "turn_done")) recorder.schedule(state);
       if (event.type === "text") {
         wroteText = true;
         if (outputFormat === "stream-json") {
@@ -3063,8 +3219,21 @@ async function runOneShot(
       }
     }
   } finally {
+    process.off("SIGINT", onSigint);
     subagentCohort.close();
-    await subagentHost.manager.shutdown();
+    try {
+      // Also on an interruption or failure: the partial run stays resumable.
+      if (recorder) {
+        try { await recorder.flush(state); }
+        catch (error) { console.error(`Could not save session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    } finally {
+      await subagentHost.manager.shutdown();
+    }
+  }
+  if (interrupt.signal.aborted) {
+    if (recorder) process.stderr.write(`interrupted; resume with: xerxes --resume ${sessionId} "<prompt>"\n`);
+    process.exitCode = 130;
   }
   const diagnosticReport = await feedback?.report();
   if (diagnosticReport) {

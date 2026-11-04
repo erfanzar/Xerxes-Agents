@@ -297,7 +297,15 @@ const BARE_FUNCTION_BODY = /^\s*([A-Za-z_][\w.-]{0,63})\s*(\{[\s\S]*\})\s*$/
  */
 const CALL_BLOCK_OPEN = '<tool_calls>'
 const CALL_BLOCK_CLOSE = '</tool_calls>'
-const OPENERS = [CALL_BLOCK_OPEN, CALL_BLOCK_CLOSE, '<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
+/**
+ * An empty wrapper the model sometimes writes before its call block. It is not
+ * part of the protocol and carries nothing; shown as text it leaked
+ * `<pre_tool_calls> </pre_tool_calls>` into the transcript. Its close does not
+ * end the reply: the calls come after it.
+ */
+const PRE_CALLS_OPEN = '<pre_tool_calls>'
+const PRE_CALLS_CLOSE = '</pre_tool_calls>'
+const OPENERS = [CALL_BLOCK_OPEN, CALL_BLOCK_CLOSE, PRE_CALLS_OPEN, PRE_CALLS_CLOSE, '<function=', BARE_FUNCTION, '<invoke name="', `<${NS}invoke name="`, '<function_calls>', `<${NS}function_calls>`, '</function_calls>', `</${NS}function_calls>`, REMINDER_OPEN, ...ORPHAN_PARAMETER, ...ORPHAN_CLOSE] as const
 const INVOKE = /^<(antml:)?invoke name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?invoke>$/
 /** What the model writes when it runs on past its calls and imagines their results. */
 /** Held at a chunk's end until complete: call openers, and the start of an imagined result. */
@@ -594,6 +602,11 @@ export class FunctionCallExtractor {
       const mentioned = () => {
         visible += this.prose(opener)
         this.advance(at + opener.length)
+      }
+      if (opener === PRE_CALLS_OPEN || opener === PRE_CALLS_CLOSE) {
+        if (before === '`') { mentioned(); continue }
+        this.advance(at + opener.length)
+        continue
       }
       if (opener.startsWith('</')) {
         // The call block closed: this is where the API would have stopped.

@@ -13,6 +13,7 @@ import { registerClarifyTool, type ClarifyToolOptions } from './clarify.js'
 import { registerComputerUseTool, type ComputerUseToolsOptions } from './computerUse/index.js'
 import { registerCodingTools } from './codingTools.js'
 import { registerDataTools } from './dataTools.js'
+import { registerXlsxTools } from './xlsxTools.js'
 import { registerFileTools } from './fileTools.js'
 import { registerProjectSetupTool } from './projectSetup.js'
 import { registerHomeAssistantTools, type HomeAssistantToolsOptions } from './homeAssistantTools.js'
@@ -177,6 +178,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   }
   if (options.includeDataTools ?? true) {
     registerDataTools(registry, paths)
+    registerXlsxTools(registry, { resolvePath: candidate => paths.resolve(candidate) })
   }
   if (options.includeCodingTools ?? false) {
     registerCodingTools(registry, paths)

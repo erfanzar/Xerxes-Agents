@@ -1,0 +1,3 @@
+{"task_id": 1, "question": "What is the total of the amount column in context/payments.csv?", "answer": "1,234.50", "level": "easy"}
+{"task_id": 2, "question": "Which merchants appear in context/payments.csv? Comma separated.", "answer": "Alpha, Beta", "guidelines": "Alphabetical."}
+{"task_id": 3, "question": "Hidden-answer task", "answer": ""}

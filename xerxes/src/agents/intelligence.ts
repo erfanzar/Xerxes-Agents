@@ -60,6 +60,20 @@ export function resolveAgentIntelligenceModel(config: AgentIntelligenceConfig, i
   return resolveAgentIntelligenceSettings(config, intelligence, model)?.model
 }
 
+/**
+ * The tier a request falls under, ignoring any explicit model: the named tier,
+ * else the configured default. Undefined for `inherit` or an unmapped tier.
+ * The data boundary uses it to stop an explicit cloud model from overriding a
+ * local tier; routing itself still lets an explicit model win.
+ */
+export function resolveAgentIntelligenceTier(config: AgentIntelligenceConfig, intelligence?: AgentIntelligence): AgentTierSettings | undefined {
+  const level = intelligence ?? config.default
+  if (!level || level === 'inherit') return undefined
+  const selected = config[level]
+  if (!selected) return undefined
+  return typeof selected === 'string' ? { model: selected } : selected
+}
+
 export function resolveAgentIntelligenceSettings(config: AgentIntelligenceConfig, intelligence?: AgentIntelligence, model?: string): AgentTierSettings | undefined {
   if (model?.trim()) return { model: model.trim() }
   const level = intelligence ?? config.default

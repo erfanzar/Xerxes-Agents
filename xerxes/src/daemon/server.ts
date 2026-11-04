@@ -11,6 +11,12 @@ import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
 import { xerxesCommand, xerxesSyncCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
+import { boundaryCommand, sourcesCommand } from './boundaryCommand.js';
+import { calibrationCommand, plansCommand, routeCommand } from './hybridCommands.js';
+import { PlanStore } from '../cortex/planStore.js';
+import { CalibrationStore, hardwareKey as calibrationHardwareKey } from '../runtime/calibration.js';
+import { probeHardware, systemHardwarePorts } from '../local/hardware.js';
+import { deriveDataTrust } from '../security/dataBoundary.js';
 import { sharedLessonsRpc } from './lessonSync.js';
 import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
@@ -605,6 +611,11 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "delegate",
   "platforms",
   "plugins",
+  "boundary",
+  "sources",
+  "route",
+  "plans",
+  "calibration",
   "provider",
   "queue",
   "runs",
@@ -2529,9 +2540,10 @@ export class DaemonServer {
         ok: true,
         sessions: await Promise.all(this.runtime
           .listSessions()
-          .map(async (session) =>
-            this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
-          )),
+          .map(async (session) => {
+            const payload = this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session));
+            return requestedHistory === 0 ? withSummarySubagentRows(payload) : payload;
+          })),
       };
     }
     if (method === "session.list") {
@@ -2619,7 +2631,10 @@ export class DaemonServer {
         } : {}),
         session: session
           ? {
-              ...this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+              ...withSubagentRevision(
+                this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, requestedHistory === 0 ? session : await this.historySession(session)),
+                optionalString(params.subagent_revision),
+              ),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -6026,6 +6041,47 @@ export class DaemonServer {
         return this.listPlatforms(connection);
       case "plugins":
         return this.listPlugins(connection, args, session);
+      case "boundary": {
+        const result = boundaryCommand(args, {
+          cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
+          ...(session?.id ? { sessionId: session.id } : {}),
+          runtime: { ...this.runtime.status() },
+          setMode: mode => { this.runtime.reload({ data_boundary: mode }); },
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "sources": {
+        const result = sourcesCommand(args, session?.id);
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "route": {
+        const result = routeCommand(args, {
+          cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
+          runtime: { ...this.runtime.status() },
+          trustOf: name => {
+            const profile = this.profileStore.get(name);
+            return profile ? deriveDataTrust(profile) : undefined;
+          },
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "plans": {
+        const result = await plansCommand(args, { runtime: { ...this.runtime.status() }, store: new PlanStore() });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "calibration": {
+        const result = await calibrationCommand(args, {
+          runtime: { ...this.runtime.status() },
+          store: new CalibrationStore(),
+          hardwareKey: async () => calibrationHardwareKey(await probeHardware(systemHardwarePorts())),
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
       case "xerxes": {
         const result = await xerxesCommand(args, session?.cwd ?? this.projectDirectory ?? process.cwd(), this.learning, session);
         this.emitSlash(connection, String(result.report ?? result.error ?? ''), result.ok === true ? 'info' : 'error');
@@ -12966,6 +13022,48 @@ function sessionHierarchyPayload(
     ...(parentSessionId ? { parent_session_id: parentSessionId } : {}),
     ...(rootSessionId ? { root_session_id: rootSessionId } : {}),
     ...(subagentId ? { subagent_id: subagentId } : {}),
+  };
+}
+
+/**
+ * Stamp a session payload with `subagent_revision`, a hash of its agent rows. When the
+ * caller already holds that revision, the rows are left out and
+ * `subagent_snapshots_unchanged: true` says so: a client polling agent state over a slow
+ * link then receives a few bytes instead of every agent's record each time. Additive: a
+ * caller that sends no revision gets the full rows, as before.
+ */
+export function withSubagentRevision(payload: JsonRpcPayload, known: string | undefined): JsonRpcPayload {
+  const rows = Array.isArray(payload.subagent_snapshots) ? payload.subagent_snapshots : [];
+  const revision = Bun.hash(JSON.stringify(rows)).toString(16);
+  if (known !== undefined && known === revision) {
+    const { subagent_snapshots: _rows, ...rest } = payload;
+    void _rows;
+    return { ...rest, subagent_revision: revision, subagent_snapshots_unchanged: true };
+  }
+  return { ...payload, subagent_revision: revision };
+}
+
+/** Per-agent lists that only an inspector needs; `session.status` and `subagent.inspect` still carry them. */
+const SUBAGENT_DETAIL_LISTS = ["files_read", "files_written", "toolsets", "rules"] as const;
+
+/**
+ * A `session.active_list {history_limit: 0}` row with its subagent rows cut to
+ * their summary fields. Every client polls this list every second or two, and
+ * none reads the per-agent file and tool lists from it. One parent with 63
+ * agents made each row 266 KB, 200 KB of it those lists, and over a slow SSH
+ * link to a remote host the polls queued up behind each other.
+ */
+export function withSummarySubagentRows(payload: JsonRpcPayload): JsonRpcPayload {
+  const rows = payload.subagent_snapshots;
+  if (!Array.isArray(rows)) return payload;
+  return {
+    ...payload,
+    subagent_snapshots: rows.map((row: unknown) => {
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+      const summary: JsonRpcPayload = { ...(row as JsonRpcPayload) };
+      for (const key of SUBAGENT_DETAIL_LISTS) delete summary[key];
+      return summary;
+    }),
   };
 }
 

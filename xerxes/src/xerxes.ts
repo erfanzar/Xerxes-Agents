@@ -11,6 +11,7 @@ import type { AgentDefinition } from './agents/definitions.js'
 import { toolListAdmits } from './agents/toolPatterns.js'
 import type { AuditEmitter } from './audit/emitter.js'
 import { ConfigurationError } from './core/errors.js'
+import type { HookRunner } from './extensions/hooks.js'
 import { ToolRegistry } from './executors/toolRegistry.js'
 import { createLlmClient, requireConfiguredModel, type LlmClient } from './llms/client.js'
 import { ShortTermMemory, type Memory } from './memory/index.js'
@@ -58,7 +59,17 @@ export interface XerxesOptions {
    */
   readonly coreTools?: CoreToolsOptions | false
   readonly enableMemory?: boolean
+  /**
+   * Hooks dispatched by every turn (before_tool_call, tool_permission_check,
+   * …). The facade never loads the user's `~/.xerxes` hook configuration on
+   * its own: an embedding host decides whether its process should run shell
+   * hooks, and passes e.g. `workspaceShellHooks({...})(cwd)` here. Absent,
+   * no hooks run.
+   */
+  readonly hookRunner?: HookRunner
   readonly llm?: LlmClient
+  /** Network retries before a turn fails; defaults to `defaultMaxNetworkRetries()`. */
+  readonly maxNetworkRetries?: number
   readonly memory?: Memory
   readonly memoryMinChars?: number
   readonly model?: string
@@ -99,6 +110,8 @@ export class Xerxes {
   private readonly defaultPermissionMode: PermissionMode
   private readonly defaultSystemPrompt: string
   private readonly engines = new Map<string, QueryEngine>()
+  private readonly hookRunner: HookRunner | undefined
+  private readonly maxNetworkRetries: number | undefined
   private readonly memoryMinChars: number
   private readonly permissionBroker: PermissionBroker | undefined
   private readonly policy: ToolPolicy | undefined
@@ -117,6 +130,8 @@ export class Xerxes {
     this.policy = options.policy
     this.sandboxRouter = options.sandboxRouter
     this.auditEmitter = options.auditEmitter
+    this.hookRunner = options.hookRunner
+    this.maxNetworkRetries = options.maxNetworkRetries
 
     if (options.coreTools !== false) {
       const coreOptions = options.coreTools ?? {}
@@ -220,6 +235,8 @@ export class Xerxes {
         : this.toolRegistry,
       ...(this.permissionBroker ? { permissionBroker: this.permissionBroker } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
+      ...(this.hookRunner ? { hookRunner: this.hookRunner } : {}),
+      ...(this.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.maxNetworkRetries }),
     }, {
       config: queryConfig,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),

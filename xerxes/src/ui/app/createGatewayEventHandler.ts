@@ -919,6 +919,19 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus('waiting for input…')
 
         return
+      case 'clarify.resolved': {
+        // TUI prompt ids are `<daemon request id>:<question id>`.
+        const { clarify } = getOverlayState()
+        if (!clarify || !ev.payload.request_id || !clarify.requestId.startsWith(`${ev.payload.request_id}:`)) return
+        patchOverlayState({ clarify: null })
+        if (ev.payload.auto) {
+          appendMessage({ role: 'system', text: `No answer within a minute; continued with the recommended option: ${ev.payload.answer ?? ''}`.trim() })
+        }
+        // Same as a typed answer: the turn carries on.
+        setStatus('running…')
+
+        return
+      }
       case 'approval.request': {
         const description = String(ev.payload.description ?? 'dangerous command')
         // Only an explicit false (tirith warning) drops the permanent-allow option.

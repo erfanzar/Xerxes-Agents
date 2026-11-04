@@ -375,7 +375,7 @@ terminal turn events by that identity instead of the currently selected tab.
 | `ApprovalRequest`  | `approval_request`    | `id, tool_call_id, action, description`                                                 |
 | `ApprovalResponse` | `approval_response`   | `request_id, response, feedback?`                                                       |
 | `QuestionRequest`  | `question_request`    | `id, tool_call_id, questions: QuestionItem[]`                                           |
-| `QuestionResponse` | `question_response`   | `id, answers: {string: string}`                                                         |
+| `QuestionResponse` | `question_response`   | `id, answers: {string: string}, auto?: true` — `auto` when the daemon answered a model question with its recommended option after nobody answered within the turn runner's `questionAutoAnswerMs` (default 60 s). Clients drop the card on any `question_response`. |
 | `StatusUpdate`     | `status_update`       | `context_tokens, max_context, mcp_status, plan_mode, mode, reasoning_effort, llm_duration_ms?, ttft_ms?, tokens_per_second?, cache_hit_rate?` |
 | `AgentPresetSelected` | `agent_preset_selected` | `session_id, agent_preset`                                                           |
 | `Notification`     | `notification`        | `id, category, type, severity, title, body, payload`                                    |
@@ -1912,6 +1912,15 @@ transcripts, executions and thinking. Counts, active-turn state, telemetry, goal
 todos, agent state and a bounded first-user-message `preview` remain available.
 Metadata reads do not change a connection's session selection. Explicit export
 requests may still retrieve the full transcript.
+
+Additive (0.8.24): with `history_limit: 0`, `session.active_list` rows carry
+`subagent_snapshots` cut to summary fields. The per-agent `files_read`,
+`files_written`, `toolsets` and `rules` lists are left out; `session.status` and
+`subagent.inspect` still return them. Every `session.status` session carries
+`subagent_revision`, a hash of its agent rows. A caller that sends
+`subagent_revision` equal to the current one gets `subagent_snapshots_unchanged:
+true` and no `subagent_snapshots`; a caller that sends none gets the full rows.
+Clients polling agent state should keep one read in flight at a time.
 
 ### Local provider relay authority (additive v35)
 

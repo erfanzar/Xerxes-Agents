@@ -6,6 +6,8 @@ export const PromptProfile = {
   FULL: 'full',
   COMPACT: 'compact',
   MINIMAL: 'minimal',
+  /** Terse prefix for small local models; see `leanPrompt.ts`, which builds the actual prompt. */
+  LEAN: 'lean',
   NONE: 'none',
 } as const
 
@@ -40,6 +42,8 @@ export function getPromptProfileConfig(profile: PromptProfile | string): PromptP
       return compactConfig()
     case PromptProfile.MINIMAL:
       return minimalConfig()
+    case PromptProfile.LEAN:
+      return leanConfig()
     case PromptProfile.NONE:
       return noneConfig()
   }
@@ -108,6 +112,28 @@ function minimalConfig(): PromptProfileConfig {
     includeUserProfile: false,
     includeRepoMap: false,
     maxToolsListed: 10,
+  })
+}
+
+/** Only runtime info survives; the lean prompt carries its own rules and tool list. */
+function leanConfig(): PromptProfileConfig {
+  return freezeConfig({
+    ...fullConfig(),
+    profile: PromptProfile.LEAN,
+    includeWorkspaceInfo: false,
+    includeSandboxInfo: false,
+    includeSkillsIndex: false,
+    includeEnabledSkills: false,
+    includeToolsList: false,
+    includeGuardrails: false,
+    includeBootstrap: false,
+    includeRelevantMemories: false,
+    includeUserProfile: false,
+    includeRepoMap: false,
+    includeGitInfo: false,
+    maxMemoriesInjected: 0,
+    maxSkillInstructionsLength: 0,
+    maxToolsListed: 0,
   })
 }
 
