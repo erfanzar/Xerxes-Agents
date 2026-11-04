@@ -151,7 +151,7 @@ export function XerxesTab(): ReactElement {
   const [autopilotSheet, setAutopilotSheet] = useState(false)
   const [threadView, setThreadView] = useState(false)
   const [watchSheet, setWatchSheet] = useState(false)
-  const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const autopilotChip = autopilotChipText(activeAutopilotRows(state), state.autopilot.all)
   const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
   const showThread = threadAvailable && threadView

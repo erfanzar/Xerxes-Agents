@@ -3146,12 +3146,25 @@ html,body,#root,.app.atelier{background:transparent}
 .supervisor__model{font:var(--t-caption);color:var(--x-title);background:var(--x-accent-soft);border-radius:999px;padding:2px 10px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .supervisor__autopilot{font:var(--t-caption);color:var(--x-title);background:var(--x-accent-soft);border-radius:999px;padding:2px 10px;white-space:nowrap}
 .autopilot{display:flex;flex-direction:column;gap:var(--s-2);border:1px solid var(--x-hairline);border-radius:var(--r-sm);padding:var(--s-4);margin-top:var(--s-2)}
-.autopilot__rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-3)}
-.autopilot__row{border-top:1px solid var(--x-hairline);padding-top:var(--s-3)}
-.autopilot__row textarea{width:100%;box-sizing:border-box}
+.autopilot__rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;border:1px solid var(--x-hairline);border-radius:var(--r-sm)}
+.autopilot__line{padding:var(--s-2) var(--s-3)}
+.autopilot__line + .autopilot__line{border-top:1px solid var(--x-hairline)}
+.autopilot__line:first-child:not(:only-child){background:var(--x-accent-soft)}
+.autopilot__head{display:flex;align-items:center;gap:var(--s-3)}
+.autopilot__text{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.autopilot__text strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .autopilot__state{font:var(--t-caption);color:var(--x-meta)}
-.autopilot__state.is-on{color:var(--x-done)}
-.autopilot__instruction{margin:var(--s-1) 0 0;white-space:pre-wrap;font:var(--t-caption);color:var(--x-secondary)}
+.autopilot__state.is-on{color:var(--x-working)}
+.autopilot__instruction{white-space:pre-wrap;font:var(--t-caption);color:var(--x-secondary)}
+.autopilot__settings{margin-top:var(--s-1)}
+.autopilot__settings>summary{cursor:pointer;font:var(--t-caption);color:var(--x-meta);list-style:none;width:fit-content}
+.autopilot__settings>summary::-webkit-details-marker{display:none}
+.autopilot__settings>summary::before{content:'▸ '}
+.autopilot__settings[open]>summary::before{content:'▾ '}
+.autopilot__settings form{display:flex;flex-direction:column;gap:var(--s-2);padding:var(--s-2) 0 var(--s-1)}
+.autopilot__settings textarea{width:100%;box-sizing:border-box}
+.autopilot__grid{display:grid;grid-template-columns:auto 1fr;gap:var(--s-2) var(--s-3);align-items:center;font:var(--t-caption)}
+.autopilot__actions{display:flex;justify-content:space-between;align-items:center}
 .action-card--auto{opacity:.9}
 .supervisor__badge{display:inline-block;margin-left:6px;min-width:16px;padding:0 5px;border-radius:999px;background:var(--x-needs-text);color:var(--x-bg,#fff);font:var(--t-caption);text-align:center}
 .autopilot-thread{display:flex;flex-direction:column;gap:var(--s-3)}

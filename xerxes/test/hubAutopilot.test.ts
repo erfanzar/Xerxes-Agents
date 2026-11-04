@@ -148,6 +148,7 @@ describe('Autopilot settings', () => {
     expect(await t.get('alice')).toEqual({
       can_edit: false,
       workspaces: [{ workspace_id: 'w1', label: 'One', enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false, mode: 'auto' }],
+      all: { workspace_id: '*', label: 'All workspaces', enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false, mode: 'auto' },
     })
     // A session-only guest cannot see the workspace, so it gets no row.
     expect(await t.get('guest')).toMatchObject({ can_edit: false, workspaces: [] })
@@ -542,6 +543,38 @@ describe('Autopilot watch-only mode', () => {
     expect(t.texts()).toContain('Autopilot (watch only) would answer the question in “First task”: release (Recommended)')
     expect(t.toolResults()).toContain('\\"state\\":\\"recorded\\"')
     expect(t.pushes.some(push => push.body === 'Autopilot answered a question for you.')).toBe(false)
+  })
+})
+
+describe('Autopilot for all workspaces', () => {
+  test('the * row turns Autopilot on for every workspace with no expiry, and says so on each row', async () => {
+    const t = await setup()
+    expect(t.supervisor.waker.wake('w1', 's1', 'failed')).toBe(false)
+    const result = await t.set({ workspace_id: '*', enabled: true, expires_at: null })
+    expect(result).toMatchObject({ workspace: { workspace_id: '*', label: 'All workspaces', enabled: true, active: true, expires_at: null } })
+    // Every workspace's row is broadcast with its new verdict.
+    expect(t.broadcasts.some(b => b.workspaceId === 'w1' && (b.payload.workspace as Record<string, unknown>).via_all === true)).toBe(true)
+    const view = await t.get('owner') as { workspaces: Record<string, unknown>[]; all: Record<string, unknown> }
+    expect(view.all).toMatchObject({ active: true })
+    expect(view.workspaces[0]).toMatchObject({ workspace_id: 'w1', enabled: false, active: true, via_all: true })
+    expect(t.supervisor.waker.wake('w1', 's1', 'failed')).toBe(true)
+    // A workspace's own active row wins: its mode applies, and it is no longer marked via_all.
+    await t.enable({ mode: 'observe' })
+    const own = await t.get('owner') as { workspaces: Record<string, unknown>[] }
+    expect(own.workspaces[0]).toMatchObject({ active: true, mode: 'observe' })
+    expect(own.workspaces[0]).not.toHaveProperty('via_all')
+    // Turning All workspaces off leaves only workspaces that are on themselves.
+    await t.set({ workspace_id: 'w1', enabled: false })
+    await t.set({ workspace_id: '*', enabled: false })
+    const off = await t.get('owner') as { workspaces: Record<string, unknown>[] }
+    expect(off.workspaces[0]).toMatchObject({ active: false })
+    expect(off.workspaces[0]).not.toHaveProperty('via_all')
+  })
+
+  test('only the Hub owner can switch All workspaces', async () => {
+    const t = await setup()
+    expect(await code(t.set({ workspace_id: '*', enabled: true }, 'alice'))).toBe('forbidden')
+    expect(await code(t.set({ workspace_id: '*', enabled: true }, 'robot'))).toBe('forbidden')
   })
 })
 

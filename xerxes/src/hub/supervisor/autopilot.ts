@@ -64,6 +64,13 @@ function rowMode(value: unknown): AutopilotMode {
   return value === 'observe' ? 'observe' : 'auto'
 }
 
+/**
+ * The Hub-wide row: while it is active, Autopilot applies to every workspace, including
+ * ones linked later. A workspace's own active row still wins (its instruction and mode).
+ */
+export const AUTOPILOT_ALL_WORKSPACES = '*'
+export const AUTOPILOT_ALL_LABEL = 'All workspaces'
+
 interface AutopilotRow {
   workspace_id: string
   enabled: number
@@ -160,10 +167,20 @@ export class AutopilotSettings {
     return this.ownerNow(row.enabled_by_id)
   }
 
+  /** The row that makes Autopilot apply to this workspace now: its own, else the all-workspaces row. */
+  private effective(workspaceId: string): (AutopilotRow & { enabled_by_id: string }) | undefined {
+    const own = this.load(workspaceId)
+    if (this.isActive(own)) return own
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return undefined
+    const all = this.load(AUTOPILOT_ALL_WORKSPACES)
+    return this.isActive(all) ? all : undefined
+  }
+
   /** Autopilot for this workspace if it applies right now. */
   active(workspaceId: string): AutopilotActive | undefined {
-    const row = this.load(workspaceId)
-    if (!this.isActive(row)) return undefined
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return undefined
+    const row = this.effective(workspaceId)
+    if (row === undefined) return undefined
     if (!this.options.workspaces.list().some(workspace => workspace.id === workspaceId)) return undefined
     return { workspaceId, ownerId: row.enabled_by_id, ownerName: row.enabled_by_name ?? row.enabled_by_id, instruction: row.instruction, mode: rowMode(row.mode) }
   }
@@ -179,8 +196,12 @@ export class AutopilotSettings {
   /** The wire row of the contract. */
   wire(workspaceId: string, label: string): Record<string, unknown> {
     const row = this.load(workspaceId)
+    const own = this.isActive(row)
+    // On only because All workspaces is on: `via_all` says so (additive; omitted otherwise).
+    const viaAll = !own && workspaceId !== AUTOPILOT_ALL_WORKSPACES && this.isActive(this.load(AUTOPILOT_ALL_WORKSPACES))
+    const tail = viaAll ? { via_all: true } : {}
     if (row === undefined) {
-      return { workspace_id: workspaceId, label, enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false, mode: 'auto' }
+      return { workspace_id: workspaceId, label, enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: viaAll, mode: 'auto', ...tail }
     }
     return {
       workspace_id: workspaceId,
@@ -190,12 +211,14 @@ export class AutopilotSettings {
       expires_at: iso(row.expires_at),
       enabled_by: row.enabled_by_id === null ? null : { id: row.enabled_by_id, name: row.enabled_by_name ?? row.enabled_by_id },
       updated_at: iso(row.updated_at),
-      active: this.isActive(row),
+      active: own || viaAll,
       mode: rowMode(row.mode),
+      ...tail,
     }
   }
 
   private label(workspaceId: string): string | undefined {
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return AUTOPILOT_ALL_LABEL
     return this.options.workspaces.list().find(workspace => workspace.id === workspaceId)?.label
   }
 
@@ -204,6 +227,10 @@ export class AutopilotSettings {
     const row = this.wire(workspaceId, label)
     try {
       this.options.broadcast?.(workspaceId, { workspace: row })
+      // All workspaces changed every workspace's verdict: send each its row too.
+      if (workspaceId === AUTOPILOT_ALL_WORKSPACES) {
+        for (const workspace of this.options.workspaces.list()) this.options.broadcast?.(workspace.id, { workspace: this.wire(workspace.id, workspace.label) })
+      }
     } catch (error) {
       this.options.onError?.(error, 'autopilot broadcast')
     }
@@ -252,7 +279,7 @@ export class AutopilotSettings {
     const workspaces = this.options.workspaces.list()
       .filter(workspace => canSeeWorkspace(principal, grants, workspace.id, now))
       .map(workspace => this.wire(workspace.id, workspace.label))
-    return { can_edit: principal.hubOwner, workspaces }
+    return { can_edit: principal.hubOwner, workspaces, all: this.wire(AUTOPILOT_ALL_WORKSPACES, AUTOPILOT_ALL_LABEL) }
   }
 
   private async setHandler(context: AuthenticatedContext, params: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
