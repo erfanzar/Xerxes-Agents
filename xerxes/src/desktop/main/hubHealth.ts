@@ -166,10 +166,8 @@ function nodeGet(url: string, timeoutMs: number): Promise<{ status: number; body
   })
 }
 
-/** Real files and HTTP for the Electron main process. `XERXES_HUB_NOTICE=off` hides both notices. */
-export function createNodeHubHealthPort(options: { readonly home: string; readonly env?: Readonly<Record<string, string | undefined>> }): HubHealthPort {
-  const env = options.env ?? process.env
-  const off = env.XERXES_HUB_NOTICE?.trim().toLowerCase() === 'off'
+/** Real files and HTTP for the Electron main process. Each notice is turned off by its own "Don't remind me". */
+export function createNodeHubHealthPort(options: { readonly home: string }): HubHealthPort {
   const noticeFile = join(options.home, HUB_NOTICE_FILE)
   return {
     readHub() {
@@ -182,7 +180,6 @@ export function createNodeHubHealthPort(options: { readonly home: string; readon
     },
     get: nodeGet,
     readDismissed() {
-      if (off) return { not_configured: true, unreachable: true }
       try {
         const raw = bodyOf(readFileSync(noticeFile, 'utf8'))
         return { not_configured: raw.not_configured === true, unreachable: raw.unreachable === true }
