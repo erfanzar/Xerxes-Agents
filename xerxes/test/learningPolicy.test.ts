@@ -7,12 +7,13 @@ import { assembleContextLayers } from '../src/context/assembly.js'
 import { evaluateBudget, measureLayers } from '../src/context/promptBudget.js'
 import { learningPolicyPrompt } from '../src/runtime/learningPolicy.js'
 
-const ALL = new Set(['lesson_record', 'lesson_recall', 'session_search'])
+const ALL = new Set(['lesson_record', 'lesson_recall', 'lesson_list', 'session_search'])
 
 test('the learning policy says when to recall, record and search, and separates lessons from memory', () => {
   const text = learningPolicyPrompt({ tools: ALL, reflection: 'all' })
   expect(text.startsWith('[Learning policy]')).toBe(true)
   expect(text).toContain('call lesson_recall')
+  expect(text).toContain('call lesson_list once')
   expect(text).toContain('call lesson_record')
   expect(text).toContain('call session_search')
   expect(text).toContain('Lessons versus memory')
@@ -25,6 +26,7 @@ test('the policy covers exactly the visible tools and the reflection setting', (
   const searchOnly = learningPolicyPrompt({ tools: new Set(['session_search']), reflection: 'off' })
   expect(searchOnly).toContain('session_search')
   expect(searchOnly).not.toContain('lesson_record')
+  expect(searchOnly).not.toContain('lesson_list')
   expect(searchOnly).not.toContain('Reflection:')
   const goals = learningPolicyPrompt({ tools: ALL, reflection: 'goals' })
   expect(goals).toContain('Reflection: after a goal completes or is blocked, the host')
