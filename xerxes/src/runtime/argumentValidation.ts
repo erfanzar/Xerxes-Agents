@@ -171,6 +171,28 @@ export function coerceDeclared(value: unknown, expectedType: string): unknown {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : value
   }
+  if (expectedType === 'array' || expectedType === 'object') return decodedContainer(value, expectedType)
+  return value
+}
+
+/**
+ * A JSON-encoded array or object where the schema declares that type. Models emit
+ * `"args": "[\"-c\", \"...\"]"` instead of the array itself, mostly on long, heavily
+ * escaped commands; the call was refused and retried, often more than once a session.
+ * No plain string is a valid array or object, so decoding cannot change what a
+ * correct call means. Only a decode to exactly the declared container is accepted;
+ * anything else (a bare word, a number, the other container, invalid JSON) stays the
+ * string and is rejected by the type check as before.
+ */
+function decodedContainer(value: string, expectedType: 'array' | 'object'): unknown {
+  const text = value.trim()
+  if (!text.startsWith(expectedType === 'array' ? '[' : '{')) return value
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (expectedType === 'array' ? Array.isArray(parsed) : isRecord(parsed)) return parsed
+  } catch {
+    // Not JSON: keep the rejection, which tells the model the declared type.
+  }
   return value
 }
 
