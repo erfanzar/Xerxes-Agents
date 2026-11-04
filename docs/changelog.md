@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.26 — 2026-11-04
+
+- **XERXES Autopilot: one switch for all workspaces, 24/7.** A new **All workspaces** row turns Autopilot on for every workspace, including ones you link later, and stays on until you turn it off (no expiry). A workspace's own settings (standing instruction, watch-only mode) still win where you set them. The header chip says "Autopilot on · all workspaces". On the wire this is additive: `workspace_id: '*'` in `supervisor.autopilot.set`, an `all` row in `supervisor.autopilot.get`, and `via_all: true` on a workspace row that is on only through it. The Hub server needs this build for the switch to appear.
+- **Autopilot panel rebuilt (desktop and phone).** Instead of a full form and a Save button per workspace, each workspace is one line with its name, its state ("On", "On · watch only", "On · all workspaces", "Off") and a switch that saves the moment you flip it. Mode, expiry and the standing instruction sit behind a per-line "Settings" disclosure.
+
 ## 0.8.25 — 2026-11-04
 
 - **Claude Code: a cache-order 400 no longer fails the step.** When the API refused our transcript cache mark ("a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block"), the client retried once with a 5m mark. On long sessions Claude Code can put its own 1h marker after ours, so the 5m retry was refused too and the step, or a sub-agent before it did any work, failed. The client now steps the mark down 1h → 5m → no mark of its own; with only Claude Code's markers left the request goes through. It keeps that choice for the client's later steps. Remote hosts need this runtime to benefit.
