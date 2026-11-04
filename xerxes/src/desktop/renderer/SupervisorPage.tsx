@@ -19,6 +19,7 @@ import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
 import { ModelChooser } from './ModelChooser.js'
+import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
 import {
   HUB_CHANGED_EVENT, cockpitCall, cockpitEnsureSession, createCockpitSockets, windowCockpitApi,
   type CockpitApi,
@@ -166,7 +167,28 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
   const unconfigured = config.status === 'unconfigured'
-  const showChooser = (props.chooserOpen || unconfigured) && supervisor.phase !== 'unsupported'
+  // An unconfigured XERXES keeps its chooser in the page; everything else opens the controls dialog.
+  const inlineChooser = unconfigured && supervisor.phase !== 'unsupported'
+  const controlsTab: ControlsTab | undefined = showAutopilot ? 'autopilot' : showWatch ? 'watch'
+    : props.chooserOpen && !inlineChooser && supervisor.phase !== 'unsupported' ? 'model' : undefined
+  const controlTabs: ControlsTabEntry[] = [
+    ...(autopilotAvailable ? [{ id: 'autopilot' as const, label: 'Autopilot', hint: autopilotChip?.replace(/^Autopilot /, '') ?? 'Off' }] : []),
+    ...(watchAvailable ? [{ id: 'watch' as const, label: 'Watch', hint: watchChip ?? 'Nothing watched' }] : []),
+    { id: 'model', label: 'Model', hint: modelChipText(config) },
+  ]
+  const openTab = (tab: ControlsTab): void => {
+    if (tab !== 'autopilot' && props.autopilotOpen) props.onAutopilotChange?.(false)
+    if (tab !== 'watch' && props.watchOpen) props.onWatchChange?.(false)
+    if (tab !== 'model' && props.chooserOpen) props.onChooserChange(false)
+    if (tab === 'autopilot' && !props.autopilotOpen) props.onAutopilotChange?.(true)
+    if (tab === 'watch' && !props.watchOpen) props.onWatchChange?.(true)
+    if (tab === 'model' && !props.chooserOpen) props.onChooserChange(true)
+  }
+  const closeControls = (): void => {
+    if (props.autopilotOpen) props.onAutopilotChange?.(false)
+    if (props.watchOpen) props.onWatchChange?.(false)
+    if (props.chooserOpen) props.onChooserChange(false)
+  }
   const ready = supervisor.phase === 'ready'
   const conversing = supervisor.phase !== 'unsupported' && supervisor.phase !== 'error'
   const canType = ready && !unconfigured
@@ -227,16 +249,26 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           </button>
         ) : null}
         {watchChip === undefined ? null : <span className="supervisor__autopilot" role="status" aria-label="Watch status">{watchChip}</span>}
-        {autopilotAvailable ? <button type="button" className="btn" aria-expanded={showAutopilot} onClick={() => props.onAutopilotChange?.(!props.autopilotOpen)}>Autopilot</button> : null}
-        {watchAvailable ? <button type="button" className="btn" aria-expanded={showWatch} onClick={() => props.onWatchChange?.(!props.watchOpen)}>Watch</button> : null}
-        <button type="button" className="btn" aria-expanded={showChooser} onClick={() => props.onChooserChange(!props.chooserOpen)}>Model</button>
+        {autopilotAvailable ? <button type="button" className="btn" aria-haspopup="dialog" aria-expanded={controlsTab === 'autopilot'} onClick={() => openTab('autopilot')}>Autopilot</button> : null}
+        {watchAvailable ? <button type="button" className="btn" aria-haspopup="dialog" aria-expanded={controlsTab === 'watch'} onClick={() => openTab('watch')}>Watch</button> : null}
+        <button type="button" className="btn" aria-haspopup="dialog" aria-expanded={controlsTab === 'model' || inlineChooser} onClick={() => openTab('model')}>Model</button>
         <button type="button" className="btn" onClick={onOpenSettings}>Hub settings</button>
       </header>
-      {note || showChooser || showAutopilot || showWatch || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
-        <div className="supervisor__panel">
-          {note ? <p role="status" className="notice">{note}</p> : null}
-          {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
-          {showWatch ? (
+      {controlsTab === undefined ? null : (
+        <SupervisorControls
+          tab={controlsTab}
+          tabs={controlTabs}
+          onTab={openTab}
+          onClose={closeControls}
+        >
+          {controlsTab === 'autopilot' ? (
+            <AutopilotPanel
+              autopilot={autopilot}
+              live={live}
+              onSave={props.onSaveAutopilot ?? (async () => false)}
+              onRetry={props.onRetryAutopilot ?? (() => undefined)}
+            />
+          ) : controlsTab === 'watch' ? (
             <WatchPanel
               watch={watch}
               tasks={watchTasks}
@@ -244,26 +276,32 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               live={live}
               onSave={props.onSaveWatch ?? (async () => false)}
               onRetry={props.onRetryWatch ?? (() => undefined)}
-              onClose={() => props.onWatchChange?.(false)}
             />
-          ) : null}
-          {showAutopilot ? (
-            <AutopilotPanel
-              autopilot={autopilot}
-              live={live}
-              onSave={props.onSaveAutopilot ?? (async () => false)}
-              onRetry={props.onRetryAutopilot ?? (() => undefined)}
-              onClose={() => props.onAutopilotChange?.(false)}
-            />
-          ) : null}
-          {showChooser ? (
+          ) : (
             <ModelChooser
               machines={state.machines}
               config={config}
               onOptions={props.onOptions}
               onSave={props.onSaveModel}
               onOpen={props.onChooserShown}
-              {...(props.chooserOpen && !unconfigured ? { onClose: () => props.onChooserChange(false) } : {})}
+              onClose={closeControls}
+              embedded
+            />
+          )}
+        </SupervisorControls>
+      )}
+      {note || inlineChooser || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
+        <div className="supervisor__panel">
+          {note ? <p role="status" className="notice">{note}</p> : null}
+          {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
+          {inlineChooser ? (
+            // No model yet: the chat cannot work without one, so the chooser stays in the page.
+            <ModelChooser
+              machines={state.machines}
+              config={config}
+              onOptions={props.onOptions}
+              onSave={props.onSaveModel}
+              onOpen={props.onChooserShown}
             />
           ) : null}
         </div>

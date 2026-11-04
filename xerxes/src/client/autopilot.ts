@@ -115,9 +115,9 @@ export const AUTOPILOT_EXPIRY_LAPSED_NOTE = 'The previous expiry has passed. Cho
 export type AutopilotMode = AutopilotRow['mode']
 
 /** The two Autopilot modes, as the editors offer them. Watch only comes first: start there, then let it act. */
-export const AUTOPILOT_MODE_OPTIONS: readonly { readonly value: AutopilotMode; readonly label: string }[] = [
-  { value: 'observe', label: 'Watch only: propose actions as cards, record answers' },
-  { value: 'auto', label: 'Act: run actions and answer without a Confirm' },
+export const AUTOPILOT_MODE_OPTIONS: readonly { readonly value: AutopilotMode; readonly label: string; readonly short: string }[] = [
+  { value: 'observe', label: 'Watch only: propose actions as cards, record answers', short: 'Watch only' },
+  { value: 'auto', label: 'Act: run actions and answer without a Confirm', short: 'Act' },
 ]
 
 /** "On", "On · watch only", or why it is off. */

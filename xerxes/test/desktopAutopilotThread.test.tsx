@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { parseAutopilotRow } from '../src/client/hubParsers.js'
 import { autopilotPendingCount, autopilotThreadAvailable, initialHubState, initialSupervisorConfig, type AutopilotState, type AutopilotThreadState, type HubState } from '../src/client/hubStore.js'
 import type { AutopilotRow } from '../src/client/hubTypes.js'
+import { AutopilotEditor } from '../src/desktop/renderer/AutopilotPanel.js'
 import { SupervisorView, type SupervisorViewProps } from '../src/desktop/renderer/SupervisorPage.js'
 
 const noop = (): void => {}
@@ -87,12 +88,14 @@ test('no view without a known signed-in user, without an active workspace, or af
 })
 
 test('an expiry that has passed is not offered as "Keep current expiry" and says so', () => {
+  // The expiry lives in the editor a line's Edit opens.
+  const editor = (item: AutopilotRow): string => renderToStaticMarkup(createElement(AutopilotEditor, { row: item, live: true, saving: false, onSave: async () => true, onDone: noop }))
   const lapsed = row({ expires_at: '2020-01-01T00:00:00.000Z', active: false })
-  const html = view(hub({ rows: [lapsed] }), { autopilotOpen: true })
+  const html = editor(lapsed)
   expect(html).not.toContain('>Keep current expiry<')
   expect(html).toContain('The previous expiry has passed')
   for (const label of ['No expiry', '1 hour', '7 days']) expect(html).toContain(`>${label}<`)
-  const live = view(hub({ rows: [row()] }), { autopilotOpen: true })
+  const live = editor(row())
   expect(live).toContain('>Keep current expiry<')
   expect(live).not.toContain('The previous expiry has passed')
 })
