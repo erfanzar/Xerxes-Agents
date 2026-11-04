@@ -533,6 +533,13 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'question_request':
       return [clarifyRequest(payload)]
 
+    // Answered elsewhere (another client, or the daemon on its timeout): the prompt is dead.
+    case 'question_response': {
+      const answers = asRecord(payload.answers)
+      const answer = Object.values(answers).find((value): value is string => typeof value === 'string')
+      return [{ type: 'clarify.resolved', payload: { request_id: str(payload.id), ...(answer === undefined ? {} : { answer }), auto: payload.auto === true } }]
+    }
+
     case 'learning_changed': {
       const counts = asRecord(payload.counts)
       return [{ type: 'learning.changed', payload: {

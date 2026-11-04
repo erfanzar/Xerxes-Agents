@@ -18,6 +18,18 @@ export interface DaemonQuestion {
   readonly question: string
   readonly questionId?: string
   readonly toolCallId?: string
+  /**
+   * Answer this way when nobody answers within `afterMs`. The board then emits
+   * `question_response` with `auto: true`, so every client drops the card.
+   * Omitted for questions only a person may answer (approvals, setup).
+   */
+  readonly autoAnswer?: { readonly afterMs: number; readonly answer: string }
+}
+
+/** A question's outcome: what was answered, and whether the board answered it on the timeout. */
+export interface DaemonAnswer {
+  readonly answer: string
+  readonly auto: boolean
 }
 
 interface PendingPermission {
@@ -37,9 +49,10 @@ interface PendingQuestion {
   readonly abort: () => void
   readonly options: readonly string[]
   readonly questionId: string
-  readonly resolve: (answer: string) => void
+  readonly resolve: (answer: DaemonAnswer) => void
   readonly sessionId: string
   readonly signal: AbortSignal | undefined
+  readonly timer: ReturnType<typeof setTimeout> | undefined
   readonly toolCallId: string
 }
 
@@ -121,6 +134,11 @@ export class DaemonInteractionBoard {
   }
 
   async ask(sessionId: string, request: DaemonQuestion, signal?: AbortSignal): Promise<string> {
+    return (await this.askDetailed(sessionId, request, signal)).answer
+  }
+
+  /** `ask`, also saying whether the answer came from `autoAnswer` rather than a person. */
+  async askDetailed(sessionId: string, request: DaemonQuestion, signal?: AbortSignal): Promise<DaemonAnswer> {
     const binding = this.bindings.get(sessionId)
     if (!binding) {
       throw new Error('User question requested outside an active daemon turn')
@@ -130,13 +148,22 @@ export class DaemonInteractionBoard {
       throw new TypeError('Question must not be empty')
     }
     if (signal?.aborted) {
-      return ''
+      return { answer: '', auto: false }
     }
 
     const requestId = crypto.randomUUID().replaceAll('-', '')
     const questionId = request.questionId?.trim() || 'answer'
+    const auto = request.autoAnswer
     return new Promise(resolve => {
       const abort = () => this.finishQuestion(requestId, '')
+      const timer = auto && auto.afterMs > 0
+        ? setTimeout(() => {
+          if (!this.questions.has(requestId)) return
+          this.finishQuestion(requestId, auto.answer, true)
+          // The session may have been rebound to a new connection while it waited.
+          ;(this.bindings.get(sessionId) ?? binding).emit({ type: 'question_response', payload: { id: requestId, answers: { [questionId]: auto.answer }, auto: true } })
+        }, auto.afterMs)
+        : undefined
       this.questions.set(requestId, {
         question,
         abort,
@@ -146,6 +173,7 @@ export class DaemonInteractionBoard {
         resolve,
         sessionId,
         signal,
+        timer,
         toolCallId: request.toolCallId ?? '',
       })
       signal?.addEventListener('abort', abort, { once: true })
@@ -326,14 +354,15 @@ export class DaemonInteractionBoard {
     pending.resolve(decision)
   }
 
-  private finishQuestion(requestId: string, answer: string): void {
+  private finishQuestion(requestId: string, answer: string, auto = false): void {
     const pending = this.questions.get(requestId)
     if (!pending) {
       return
     }
     this.questions.delete(requestId)
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
     pending.signal?.removeEventListener('abort', pending.abort)
-    pending.resolve(answer)
+    pending.resolve({ answer, auto })
   }
 }
 

@@ -4,8 +4,48 @@
 import { expect, test } from 'bun:test'
 
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
+import { recommendedOption } from '../src/daemon/turnRunner.js'
 import { ApprovalScope, ApprovalStore } from '../src/security/approvals.js'
 import type { PermissionRequest } from '../src/streaming/events.js'
+
+test('an unanswered question with autoAnswer resolves on its timeout and tells every client', async () => {
+  const board = new DaemonInteractionBoard()
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+  const release = board.bind('session-auto', event => events.push(event))
+  try {
+    const pending = board.askDetailed('session-auto', { question: 'Which build?', options: ['release (Recommended)', 'nightly'], allowFreeform: false, autoAnswer: { afterMs: 20, answer: 'release (Recommended)' } })
+    const requestId = String(events[0]?.payload.id)
+    await expect(pending).resolves.toEqual({ answer: 'release (Recommended)', auto: true })
+    expect(events[1]).toEqual({ type: 'question_response', payload: { id: requestId, answers: { answer: 'release (Recommended)' }, auto: true } })
+    expect(board.pendingQuestionIds()).toEqual([])
+    // A late human answer finds nothing to answer.
+    expect(board.respondQuestion(requestId, { answer: 'nightly' })).toBe(false)
+  } finally {
+    release()
+  }
+})
+
+test('the auto answer is the option marked (Recommended), else the first; open questions get none', () => {
+  expect(recommendedOption(['nightly', 'release (Recommended)'])).toBe('release (Recommended)')
+  expect(recommendedOption(['  ', 'nightly', 'release'])).toBe('nightly')
+  expect(recommendedOption([])).toBeUndefined()
+  expect(recommendedOption(undefined)).toBeUndefined()
+})
+
+test('a human answer before the timeout wins and cancels the auto answer', async () => {
+  const board = new DaemonInteractionBoard()
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+  const release = board.bind('session-human', event => events.push(event))
+  try {
+    const pending = board.askDetailed('session-human', { question: 'Which build?', options: ['release', 'nightly'], autoAnswer: { afterMs: 30, answer: 'release' } })
+    expect(board.respondQuestion(String(events[0]?.payload.id), { answer: 'nightly' })).toBe(true)
+    await expect(pending).resolves.toEqual({ answer: 'nightly', auto: false })
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(events.filter(event => event.type === 'question_response')).toEqual([])
+  } finally {
+    release()
+  }
+})
 
 test('daemon interaction board persists approve-for-session only until the session is discarded', async () => {
   const board = new DaemonInteractionBoard()
