@@ -14,6 +14,7 @@ import {
   WATCH_EXPLANATION, WATCH_NO_TASKS_NOTE, WATCH_READ_ONLY_NOTE, WATCH_STRIP_NOTE, activityAgo, anomalyLabel, reviewMinutesOf, reviewText, reviewValueOf,
   watchCardRows, watchFacts, watchReviewOptions, watchStateText,
 } from '../../client/watch.js'
+import { Icon } from './Icon.js'
 
 /**
  * Watch, on the XERXES tab. The strip shows one live card per watched task;
@@ -31,21 +32,29 @@ const slug = (text: string): string => text.replace(/[^\w-]/g, '_')
 export function WatchCard({ row, now }: { readonly row: WatchRow; readonly now: number }): ReactElement {
   const stats = row.stats
   const anomalies = stats?.anomalies ?? []
+  const first = anomalies[0]
+  // One line per watched run; the counters, failing tests and problems open under it.
   return (
     <li className={`watchcard${anomalies.length > 0 ? ' has-anomaly' : ''}`} aria-label={`Watching ${row.title}`} data-task={row.taskId}>
-      <div className="watchcard__head">
-        <strong className="watchcard__title">{row.title}</strong>
-        <span className="watchcard__ws">{row.workspaceLabel}</span>
-        <span className={`autopilot__state${row.active ? ' is-on' : ''}`}>{watchStateText(row)}</span>
-      </div>
-      {stats === null ? (
-        <p className="studio-muted">Waiting for the first step of the run…</p>
-      ) : (
+      <details className="watchcard__fold">
+        <summary>
+          <span className={`xdot${anomalies.length > 0 ? ' is-warn' : ''}`} aria-hidden="true" />
+          <strong className="watchcard__title">{row.title}</strong>
+          <span className="watchcard__ws">{row.workspaceLabel}</span>
+          {first === undefined ? null : <span className="watchcard__flag">{anomalyLabel(first.kind)}{anomalies.length > 1 ? ` +${anomalies.length - 1}` : ''}</span>}
+          <span className="watchcard__status">
+            {stats === null ? 'Waiting for the first step of the run…' : (
+              <>
+                <span className="watchcard__run">{stats.status}</span> · last activity{' '}
+                {stats.lastActivityAt === null ? <span>{activityAgo(null, now)}</span> : <time dateTime={stats.lastActivityAt}>{activityAgo(stats.lastActivityAt, now)}</time>}
+              </>
+            )}
+          </span>
+          <span className="watchcard__caret" aria-hidden="true"><Icon name="chevron" size={12} /></span>
+        </summary>
+        <div className="watchcard__body">
+      {stats === null ? null : (
         <>
-          <p className="watchcard__status">
-            <span className="watchcard__run">{stats.status}</span> · last activity{' '}
-            {stats.lastActivityAt === null ? <span>{activityAgo(null, now)}</span> : <time dateTime={stats.lastActivityAt}>{activityAgo(stats.lastActivityAt, now)}</time>}
-          </p>
           {stats.summaryLine === '' ? null : <p className="watchcard__summary">{stats.summaryLine}</p>}
           <ul className="watchcard__facts" aria-label="Counters">
             {watchFacts(stats).map(fact => <li key={fact.key} className={fact.tone === 'bad' ? 'is-bad' : undefined}>{fact.text}</li>)}
@@ -65,10 +74,12 @@ export function WatchCard({ row, now }: { readonly row: WatchRow; readonly now: 
           )}
         </>
       )}
-      <p className="studio-muted watchcard__review">
+      <p className="watchcard__review">
         {reviewText(row.reviewIntervalMinutes)}
         {row.expiresAt === null ? '' : <> · until <time dateTime={row.expiresAt}>{new Date(row.expiresAt).toLocaleString()}</time></>}
       </p>
+        </div>
+      </details>
     </li>
   )
 }
@@ -86,11 +97,8 @@ export function WatchStrip({ rows, now }: { readonly rows: readonly WatchRow[]; 
   if (!any) return null
   return (
     <section className="watchstrip" aria-label="Watching">
-      <div className="hubphone__row">
-        <strong>Watching</strong>
-        <span className="studio-muted">{WATCH_STRIP_NOTE}</span>
-      </div>
-      <ul className="watchstrip__cards">{cards.map(row => <WatchCard key={watchKey(row.workspaceId, row.taskId)} row={row} now={tick} />)}</ul>
+      <p className="watchstrip__head" title={WATCH_STRIP_NOTE}>Watching</p>
+      <ul className="watchstrip__rows">{cards.map(row => <WatchCard key={watchKey(row.workspaceId, row.taskId)} row={row} now={tick} />)}</ul>
     </section>
   )
 }

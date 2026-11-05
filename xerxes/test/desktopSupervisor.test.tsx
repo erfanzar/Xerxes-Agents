@@ -83,7 +83,8 @@ test('the old env-var instructions are gone; an old Hub gets a plain update noti
 
 test('the header shows the model chip with model and effort, and a Model button', () => {
   const html = view(ready())
-  expect(html).toMatch(/class="supervisor__model"[^>]*>model-a · high</)
+  expect(html).toContain('title="Model: model-a · high"')
+  expect(html).toContain('<span class="xpill__value">model-a · high</span>')
   expect(html).toContain('>Model<')
   expect(html).toContain('aria-expanded="false"')
   expect(html).not.toContain('aria-label="XERXES model" aria-busy')
