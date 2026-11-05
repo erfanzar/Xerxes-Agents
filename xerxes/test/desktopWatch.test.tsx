@@ -110,7 +110,9 @@ test('a watched task shows as a live card: title, workspace, status, summary, co
   expect(html).toContain('repeated exec_command ×4')
   expect(html).toContain('Failing: test_autoscale, test_scale_down')
   expect(html).toContain('Review every 15 min')
-  expect(html).toContain('Watching · 1 task<')
+  expect(html).toContain('title="Watch: 1 task"')
+  // The anomaly turns the Watch pill amber.
+  expect(html).toMatch(/class="xpill" data-tone="warn"[^>]*title="Watch: /)
 })
 
 test('anomalies are highlighted chips with their kind and detail', () => {
@@ -168,7 +170,7 @@ test('an enabled watch that is no longer active reads as Off, not Watching', () 
 test('the owner gets a Watch button and a panel with review, expiry, save, stop and a task picker', () => {
   const state = hub({ rows: [watchRow()], tasks: [task('t1', 'Fix tests'), task('t2', 'Write docs'), task('t3', 'Refactor')] })
   const closed = view(state)
-  expect(closed).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Watch</)
+  expect(closed).toMatch(/<button[^>]*class="xpill"[^>]*aria-expanded="false"[^>]*title="Watch: /)
   const html = view(state, { watchOpen: true })
   expect(html).toContain('role="dialog"')
   expect(html).toMatch(/class="mtab xcontrols__tab is-on"[^>]*aria-current="page"><span>Watch</)
@@ -240,11 +242,11 @@ test('a Hub without Watch has no Watch control, strip or chip', () => {
 test('the owner gets the Autopilot thread switch when only a watch is active', () => {
   const onlyWatch = hub({ rows: [watchRow()] })
   expect(autopilotThreadAvailable(onlyWatch)).toBe(true)
-  expect(view(onlyWatch)).toContain('Autopilot thread')
+  expect(view(onlyWatch)).toContain('aria-label="XERXES view"')
   // Neither Autopilot nor a watch is active: no switch.
   expect(autopilotThreadAvailable(hub({ rows: [watchRow({ active: false })] }))).toBe(false)
-  expect(view(hub({ rows: [watchRow({ active: false })] }))).not.toContain('Autopilot thread')
+  expect(view(hub({ rows: [watchRow({ active: false })] }))).not.toContain('aria-label="XERXES view"')
   // A non-owner never gets it.
   expect(autopilotThreadAvailable(hub({ canEdit: false, rows: [watchRow()] }))).toBe(false)
-  expect(view(hub({ canEdit: false, rows: [watchRow()] }))).not.toContain('Autopilot thread')
+  expect(view(hub({ canEdit: false, rows: [watchRow()] }))).not.toContain('aria-label="XERXES view"')
 })

@@ -50,7 +50,9 @@ function view(hub: HubState, extra: Partial<SupervisorViewProps> = {}): string {
 
 test('the header has an Autopilot button beside Model, and no chip while nothing is active', () => {
   const html = view(state({ rows: [row({ active: false })] }))
-  expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Autopilot</)
+  // One pill per control: its name and live state; it opens the controls dialog.
+  expect(html).toMatch(/<button[^>]*class="xpill"[^>]*aria-haspopup="dialog"[^>]*aria-expanded="false"[^>]*title="Autopilot: Off"/)
+  expect(html).toContain('<span class="xpill__name">Autopilot</span>')
   expect(html).toContain('>Model<')
   expect(html).not.toContain('Autopilot on ·')
   expect(html).toContain('XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.')
@@ -59,9 +61,10 @@ test('the header has an Autopilot button beside Model, and no chip while nothing
 
 test('the chip counts only workspaces the Hub reports as active', () => {
   const one = view(state({ rows: [row(), row({ workspace_id: 'w2', active: false })] }))
-  expect(one).toMatch(/class="supervisor__autopilot"[^>]*>Autopilot on · 1 workspace</)
+  expect(one).toContain('title="Autopilot: 1 workspace"')
+  expect(one).toMatch(/class="xpill" data-tone="on"[^>]*title="Autopilot: /)
   const two = view(state({ rows: [row(), row({ workspace_id: 'w2' })] }))
-  expect(two).toContain('Autopilot on · 2 workspaces')
+  expect(two).toContain('title="Autopilot: 2 workspaces"')
 })
 
 test('while Autopilot is on the composer hint says XERXES acts at once, except while another person is in the thread', () => {
@@ -130,7 +133,7 @@ test('All workspaces sits on top with its own switch, and a row on only through 
   expect(html).toContain('including ones you link later')
   expect(html).toContain('On · all workspaces')
   expect(html.indexOf('All workspaces')).toBeLessThan(html.indexOf('One · app'))
-  expect(html).toContain('Autopilot on · all workspaces')
+  expect(html).toContain('title="Autopilot: all workspaces"')
 })
 
 test('a row that is enabled but not active reads as Off, never On', () => {

@@ -4,13 +4,14 @@
 import type { ReactElement } from 'react'
 
 import { AUTOPILOT_THREAD_NOTE } from '../../client/autopilot.js'
-import { relativeTime } from '../../client/format.js'
 import type { AutopilotThreadState } from '../../client/hubStore.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
-import { Markdown } from './markdown.js'
+import { AgentOrb } from './AgentOrb.js'
+import { Icon } from './Icon.js'
+import { ThreadMessages } from './SupervisorThread.js'
 
 /**
- * The owner's private Autopilot thread: the Hub's wake-up messages, XERXES's
+ * Activity: the owner's private Autopilot thread. The Hub's wake-ups, XERXES's
  * replies to them, the cards waiting for the owner's Confirm and the cards for
  * what XERXES did on its own. It is read-only here; its events never mix with
  * the shared thread.
@@ -24,29 +25,19 @@ export interface AutopilotThreadViewProps {
 }
 
 export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotThreadViewProps): ReactElement {
+  const empty = thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0
   return (
-    <section className="autopilot-thread" aria-label="Autopilot thread">
-      <p className="studio-muted">{AUTOPILOT_THREAD_NOTE}</p>
-      {thread.phase === 'loading' || thread.phase === 'idle' ? <p role="status" aria-busy="true" className="studio-muted">Opening the Autopilot thread…</p> : null}
-      {thread.phase === 'error' ? <p role="alert" className="action-card__error">Could not open the Autopilot thread: {thread.error ?? 'unknown error'}</p> : null}
-      {thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0
-        ? <p role="status" className="studio-muted">Nothing yet. Autopilot&apos;s wake-ups and the actions waiting for you will show up here.</p>
-        : null}
-      {thread.messages.length === 0 ? null : (
-        <ol className="supervisor__messages" aria-label="Autopilot conversation">
-          {thread.messages.map(message => (
-            <li key={message.id} className={`supervisor__message supervisor__message--${message.role}`}>
-              <p className="supervisor__who">
-                {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Autopilot' : message.author ?? 'You'}
-                <span> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
-              </p>
-              {message.role === 'xerxes'
-                ? <div className="msg msg--agent"><Markdown text={message.text} className="msg__text" /></div>
-                : <p className="supervisor__notice">{message.text}</p>}
-            </li>
-          ))}
-        </ol>
-      )}
+    <section className="autopilot-thread" aria-label="Autopilot activity">
+      <p className="xthread-note"><Icon name="eye" size={13} />{AUTOPILOT_THREAD_NOTE}</p>
+      {thread.phase === 'loading' || thread.phase === 'idle' ? <p role="status" aria-busy="true" className="xempty xempty--wait">Opening Activity…</p> : null}
+      {thread.phase === 'error' ? <p role="alert" className="xevent" data-tone="error">Could not open Activity: {thread.error ?? 'unknown error'}</p> : null}
+      {empty ? (
+        <div className="xempty" role="status">
+          <strong>Nothing yet</strong>
+          <p>Autopilot&apos;s wake-ups and the actions waiting for you will show up here.</p>
+        </div>
+      ) : null}
+      <ThreadMessages messages={thread.messages} now={now} label="Autopilot conversation" />
       {thread.confirmations.length === 0 ? null : (
         <ul className="supervisor__cards" aria-label="Autopilot actions">
           {thread.confirmations.map(item => (
@@ -54,7 +45,12 @@ export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotT
           ))}
         </ul>
       )}
-      {thread.working === true ? <p role="status" aria-live="polite" className="studio-muted">Autopilot is working…</p> : null}
+      {thread.working === true ? (
+        <div className="streamstatus supervisor__thinking" role="status" aria-live="polite">
+          <AgentOrb size={20} state="working" />
+          <span className="streamstatus__phrase">Autopilot is working…</span>
+        </div>
+      ) : null}
     </section>
   )
 }
