@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.28 — 2026-11-05
+
+- **Desktop: the XERXES page is redesigned.**
+  - **One-row header.** A **Chat | Activity** switch on the left (Activity replaces "Autopilot thread" / "Back to chat" and carries a badge when something waits for you). On the right, one pill each for **Autopilot**, **Watch** and **Model** showing its live state with a dot (green on, amber problem, grey off); each opens the controls popup on its tab. Then the Hub with its connection dot and a gear for Hub settings. The duplicate status chips and buttons are gone, and narrow windows shrink the pills to their names.
+  - **Quiet events.** Hub notices are one-line rows with an icon and a time instead of tall yellow "Notice" boxes. Identical notices in a row merge into one line with ×N, long runs fold their older lines under "N earlier events", and only real failures (such as "XERXES stopped: it could not reach its model") show in red.
+  - **Slim Watching bar.** One row per watched run (task, workspace, problem flag, last activity); click it for the counters, failing tests and problems.
+  - **Empty chat** with three one-tap questions, XERXES replies with a small avatar, a one-line composer hint, and action cards with an amber edge while they wait for Confirm.
+
 ## 0.8.27 — 2026-11-05
 
 - **Desktop: Autopilot, Watch and Model open in one popup, like Settings.** The header buttons now open a dialog with a tab per control (each tab shows its state, such as "on · all workspaces" or "Watching · 1 task") instead of stacking forms above the conversation. Escape, Close or a click outside closes it, and the conversation stays where it was.
