@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.29 — 2026-11-06
+
+- **XERXES works out loud.** While XERXES runs a turn, the Hub streams every step to the person who asked: a status line with a clock ("Searching every task for “shader”… 4s"), XERXES's own short lines about what it is about to check, and every tool it runs with a spinner, a check mark or a red error. When the answer lands, the steps fold into "Ran N steps" above it. This shows in Chat and in Activity (Autopilot wake-ups), on desktop and on the phone. Steps go only to the requester, are not stored, and need the updated Hub; an older Hub keeps showing "Thinking…".
+- **No more native dropdowns in the XERXES popup.** Watch a task is a filterable list of your tasks with their workspace; review intervals and stop times are choice chips; the Model tab's machine, profile and model are clickable lists and thinking effort is chips.
+
 ## 0.8.28 — 2026-11-05
 
 - **Desktop: the XERXES page is redesigned.**
