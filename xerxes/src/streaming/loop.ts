@@ -12,6 +12,7 @@ import {
   type ToolExecutor,
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
+import { providerErrorText } from './providerErrorText.js'
 import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
 import { resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
@@ -202,6 +203,17 @@ export type ContextReducer = (
   messages: readonly ChatMessage[],
   signal?: AbortSignal,
 ) => Promise<ContextReduction>
+
+/**
+ * Rough size of a request in tokens (characters ÷ 4), for telling the user how
+ * much the model must read before its first token. Not for budgeting.
+ */
+export function roughPromptTokens(messages: readonly ChatMessage[], tools: readonly unknown[] | undefined): number {
+  let chars = 0
+  for (const message of messages) chars += JSON.stringify(message).length
+  if (tools?.length) chars += JSON.stringify(tools).length
+  return Math.ceil(chars / 4)
+}
 
 /**
  * True when a tool result carries nothing a provider will accept as content.
@@ -656,7 +668,7 @@ export async function* runTurn(
           roundFirstOutputAt = undefined
           roundFirstStreamTokenAt = undefined
           roundCompletedAt = 0
-          yield { type: 'provider_wait', active: true }
+          yield { type: 'provider_wait', active: true, promptTokens: roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools) }
           let awaitingOutput = true
           try {
             for await (const delta of watchProviderStream(
@@ -868,9 +880,9 @@ export async function* runTurn(
               text: overflow
                 ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined))
                 : networkRetriesExhausted
-                  ? `[Error: ${errorMessage(error)} — gave up after ${maxNetworkRetries} network ${maxNetworkRetries === 1 ? 'retry' : 'retries'}. `
+                  ? `[Error: ${providerErrorText(error)} — gave up after ${maxNetworkRetries} network ${maxNetworkRetries === 1 ? 'retry' : 'retries'}. `
                     + 'Check that the provider endpoint is running and reachable, then retry the prompt.]'
-                  : `[Error: ${errorMessage(error)}]`,
+                  : `[Error: ${providerErrorText(error)}]`,
             }
             terminalProviderFailure = true
             stopReason = overflow ? 'context_overflow' : 'provider_failed'

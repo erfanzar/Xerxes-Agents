@@ -2120,7 +2120,14 @@ function daemonEventFromStream(
 ): DaemonEvent {
   switch (event.type) {
     case 'provider_wait':
-      return { type: 'status_update', payload: { kind: event.active ? 'provider_wait' : 'provider_ready', text: event.active ? 'Waiting for model response…' : '' } }
+      return {
+        type: 'status_update',
+        payload: {
+          kind: event.active ? 'provider_wait' : 'provider_ready',
+          text: event.active ? 'Waiting for model response…' : '',
+          ...(event.active && event.promptTokens ? { prompt_tokens: event.promptTokens } : {}),
+        },
+      }
     case 'compaction':
       return { type: 'status_update', payload: { kind: event.active ? 'compressing' : 'compaction', text: event.active ? 'Compacting conversation…' : 'Compaction ended.' } }
     case 'text':

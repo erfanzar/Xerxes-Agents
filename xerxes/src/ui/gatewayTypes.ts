@@ -803,11 +803,17 @@ export type GatewayEvent =
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
   | { payload?: undefined; session_id?: string; type: 'message.start' }
   | { payload: GatewayTranscriptMessage; session_id?: string; type: 'transcript.append' }
+  /** A provider attempt failed and is retried (`final: false`) or given up (`final: true`). */
+  | { payload: { final: boolean; note: string }; session_id?: string; type: 'turn.retry' }
+  /** Result checks ran after a round: a transcript row, and how many problems remain. */
+  | { payload: { failing?: number; text: string }; session_id?: string; type: 'turn.checks' }
   | {
       payload?: {
         kind?: string
         mode?: string
         permission_mode?: SessionInfo['permission_mode']
+        /** `provider_wait` only: the daemon's estimate of the prompt the model is reading. */
+        prompt_tokens?: number
         reasoning_effort?: string
         telemetry_delta?: { llm_ms?: number; ttft_ms?: number }
         text?: string

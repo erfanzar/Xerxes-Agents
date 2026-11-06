@@ -10,6 +10,8 @@ import { $uiState } from './uiStore.js'
 const buildTurnState = (): TurnState => ({
   activity: [],
   compacting: false,
+  providerPromptTokens: 0,
+  providerStarted: false,
   providerWaiting: false,
   networkRetrying: false,
   outcome: '',
@@ -127,6 +129,10 @@ export interface TurnState {
   activity: ActivityItem[]
   /** True while the daemon is compacting this session's transcript. */
   compacting: boolean
+  /** The daemon's estimate of the prompt the model is reading (0 = unknown). */
+  providerPromptTokens: number
+  /** A model request has started this turn; before that the harness is still preparing. */
+  providerStarted: boolean
   providerWaiting: boolean
   networkRetrying: boolean
   outcome: string

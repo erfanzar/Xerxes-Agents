@@ -266,8 +266,17 @@ export function LiveProgressPill() {
           return
         }
 
+        // Name the wait. Before the first request the harness is still
+        // preparing (the first turn in a big workspace snapshots it first);
+        // after it, nothing arrives until the model has read the whole
+        // prompt, which on a local model is the longest wait of the turn.
+        const phase = turn.providerWaiting
+          ? `Model is reading the prompt${turn.providerPromptTokens > 0 ? ` (${compactStatusNumber(turn.providerPromptTokens)} tokens)` : ''}…`
+          : !turn.providerStarted && toolCount === 0
+            ? 'Preparing the turn…'
+            : liveness.phase === 'stalled' ? 'Waiting for activity…' : livenessVerb(verbs, liveness.elapsedMs)
         const parts = [
-          `${turn.providerWaiting ? 'Waiting for model response…' : liveness.phase === 'stalled' ? 'Waiting for activity…' : livenessVerb(verbs, liveness.elapsedMs)} ${formatStatusDuration(liveness.elapsedMs / 1000)}`,
+          `${phase} ${formatStatusDuration(liveness.elapsedMs / 1000)}`,
           `${toolCount} tool${toolCount === 1 ? '' : 's'}`
         ]
 

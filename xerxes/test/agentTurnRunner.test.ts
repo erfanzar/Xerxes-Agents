@@ -456,7 +456,7 @@ test('agent turn runner maps portable loop events and supplied live capacity to 
   }
 
   expect(events).toEqual([
-    { type: 'status_update', payload: { kind: 'provider_wait', text: 'Waiting for model response…' } },
+    { type: 'status_update', payload: { kind: 'provider_wait', text: 'Waiting for model response…', prompt_tokens: expect.any(Number) } },
     { type: 'status_update', payload: { kind: 'provider_ready', text: '' } },
     // Text streams inline while the provider is still emitting; the round's
     // live token/context status_update lands once per provider round, right
