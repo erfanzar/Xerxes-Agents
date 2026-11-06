@@ -18,7 +18,8 @@ import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { ModelChooser } from './ModelChooser.js'
 import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
-import { ThreadMessages } from './SupervisorThread.js'
+import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
+import { liveSteps } from '../../client/supervisorSteps.js'
 import {
   HUB_CHANGED_EVENT, cockpitCall, cockpitEnsureSession, createCockpitSockets, windowCockpitApi,
   type CockpitApi,
@@ -227,6 +228,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   // XERXES has answered, so without this nothing moved for the whole wait.
   const [pending, setPending] = useState<{ readonly text: string; readonly at: string } | null>(null)
   const thinking = supervisor.busy || supervisor.working === true || pending !== null
+  // The running turn's steps; a finished turn's steps fold above its reply instead.
+  const runningSteps = liveSteps(supervisor.steps, supervisor.messages)
   const canSend = canType && live && !thinking && text.trim() !== ''
   // The task view's "Thinking… 3s" clock.
   const [startedAt, setStartedAt] = useState<number | null>(null)
@@ -377,7 +380,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                   </div>
                 </div>
               ) : null}
-              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" />
+              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
               {supervisor.confirmations.length === 0 ? null : (
                 <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
                   {supervisor.confirmations.map(item => (
@@ -385,13 +388,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                   ))}
                 </ul>
               )}
-              {thinking ? (
-                <div className="streamstatus supervisor__thinking" role="status" aria-live="polite">
-                  <AgentOrb size={20} state="working" />
-                  <span className="streamstatus__phrase">Thinking…</span>
-                  <span className="streamstatus__clock">{elapsedOf(thinkingSeconds)}</span>
-                </div>
-              ) : null}
+              {thinking || runningSteps.length > 0 ? <LiveSteps steps={runningSteps} seconds={thinkingSeconds} /> : null}
               {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="xevent" data-tone="error"><Icon name="error" size={13} /><span className="xevent__text">{supervisor.error}</span></p> : null}
             </>
           )}

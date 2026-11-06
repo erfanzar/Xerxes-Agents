@@ -466,6 +466,16 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; }
 .stream-caret { display: inline-block; width: 0.5em; height: 1em; margin-top: 0.2rem; background: var(--x-activity); animation: stream-caret 1s steps(2) infinite; }
 @keyframes stream-caret { 50% { opacity: 0; } }
 .working-line { color: var(--x-activity); font-size: 14px; font-style: italic; }
+/* Live steps of a running XERXES turn: one line per narration and tool. */
+.live-steps { display: flex; flex-direction: column; gap: 4px; }
+.live-steps .working-line { margin: 0; }
+.live-steps__list { list-style: none; margin: 0; padding: 0 0 0 10px; border-left: 1px solid var(--x-hairline); display: flex; flex-direction: column; gap: 3px; }
+.live-step { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--x-meta); overflow-wrap: anywhere; }
+.live-step--say { color: var(--x-secondary); font-style: italic; }
+.live-step__mark { flex: none; width: 1em; text-align: center; }
+.live-step[data-state='running'] { color: var(--x-title); }
+.live-step[data-state='done'] .live-step__mark { color: var(--x-done); }
+.live-step[data-state='error'] { color: var(--x-failed-text); }
 .block-system .block-who { color: var(--x-meta); }
 .block-system .md { color: var(--x-secondary); font-size: 14.5px; }
 .block-system { border-left: 2px solid var(--x-hairline-hi); padding-left: 0.75rem !important; }

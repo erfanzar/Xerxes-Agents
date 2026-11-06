@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import type { SupervisorConfigInput, SupervisorOptionsInput } from '../../client/hubController.js'
 import type { MachinesState, SupervisorConfigState } from '../../client/hubStore.js'
+import { ChipChoice, ListChoice } from './XChoice.js'
 
 /**
  * Which model XERXES the supervisor runs on: machine, then provider profile,
@@ -91,37 +92,58 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
       {machines.error ? <p role="alert" className="action-card__error">{machines.error}</p> : null}
       {machines.phase === 'ready' && machines.list.length === 0 ? <p role="status" className="notice">No machine is linked to this Hub yet. Use “Link this Mac” in Settings → Hub &amp; phone.</p> : null}
 
-      <div className="field">
-        <label htmlFor="xerxes-model-machine">Machine</label>
-        <select id="xerxes-model-machine" value={machineId} disabled={!editable} onChange={event => chooseMachine(event.target.value)}>
-          <option value="">Choose a machine…</option>
-          {machines.list.map(machine => (
-            <option key={machine.id} value={machine.id} disabled={!machine.modelsSupported && machine.id !== machineId}>
-              {`${machine.label}${machine.health === 'online' ? '' : ` (${machine.health})`}${machine.modelsSupported ? '' : ' — cannot run models'}`}
-            </option>
-          ))}
-        </select>
+      <div className="xfield">
+        <span className="xfield__label">Machine</span>
+        <ListChoice
+          label="Machine"
+          value={machineId}
+          options={machines.list.map(machine => ({
+            value: machine.id,
+            label: machine.label,
+            hint: [machine.health === 'online' ? '' : machine.health, machine.modelsSupported ? '' : 'cannot run models'].filter(Boolean).join(' · '),
+            disabled: !machine.modelsSupported && machine.id !== machineId,
+          }))}
+          disabled={!editable}
+          empty="No machine is linked yet."
+          onChange={chooseMachine}
+        />
       </div>
-      <div className="field">
-        <label htmlFor="xerxes-model-profile">Provider profile</label>
-        <select id="xerxes-model-profile" value={profile} disabled={!editable || machineId === ''} onChange={event => chooseProfile(event.target.value)}>
-          <option value="">Choose a profile…</option>
-          {(forMachine?.profiles ?? []).map(item => <option key={item.name} value={item.name}>{`${item.label} · ${item.provider}`}</option>)}
-        </select>
+      <div className="xfield">
+        <span className="xfield__label">Provider profile</span>
+        <ListChoice
+          label="Provider profile"
+          value={profile}
+          options={(forMachine?.profiles ?? []).map(item => ({ value: item.name, label: item.label, hint: item.provider }))}
+          disabled={!editable || machineId === ''}
+          empty={machineId === '' ? 'Choose a machine first.' : loading ? 'Asking the machine…' : 'This machine has no provider profile.'}
+          onChange={chooseProfile}
+        />
       </div>
-      <div className="field">
-        <label htmlFor="xerxes-model-model">Model</label>
-        <select id="xerxes-model-model" value={model} disabled={!editable || profile === ''} onChange={event => chooseModel(event.target.value)}>
-          <option value="">Choose a model…</option>
-          {(forProfile?.models ?? []).map(item => <option key={item.id} value={item.id}>{item.label === '' ? item.id : item.label}</option>)}
-        </select>
+      <div className="xfield">
+        <span className="xfield__label">Model</span>
+        <ListChoice
+          label="Model"
+          value={model}
+          options={(forProfile?.models ?? []).map(item => ({ value: item.id, label: item.label === '' ? item.id : item.label, hint: item.label === '' || item.label === item.id ? '' : item.id }))}
+          disabled={!editable || profile === ''}
+          empty={profile === '' ? 'Choose a profile first.' : loading ? 'Asking the machine…' : 'This profile lists no models.'}
+          onChange={chooseModel}
+        />
       </div>
-      <div className="field">
-        <label htmlFor="xerxes-model-effort">Thinking effort</label>
-        <select id="xerxes-model-effort" value={effort} disabled={!editable || model === ''} onChange={event => setEffort(event.target.value)}>
-          <option value="">{forModel?.defaultEffort ? `Provider default (${forModel.defaultEffort})` : 'Provider default'}</option>
-          {(forModel?.efforts ?? []).map(item => <option key={item.effort} value={item.effort}>{item.description ? `${item.effort} — ${item.description}` : item.effort}</option>)}
-        </select>
+      <div className="xfield">
+        <span className="xfield__label">Thinking effort</span>
+        {model === '' ? <p className="xlist__empty">Choose a model first.</p> : (
+          <ChipChoice
+            label="Thinking effort"
+            value={effort}
+            options={[
+              { value: '', label: forModel?.defaultEffort ? `Default (${forModel.defaultEffort})` : 'Default' },
+              ...(forModel?.efforts ?? []).map(item => ({ value: item.effort, label: item.effort, ...(item.description ? { hint: item.description } : {}) })),
+            ]}
+            disabled={!editable}
+            onChange={setEffort}
+          />
+        )}
       </div>
 
       {loading ? <p role="status" className="studio-muted">Asking the machine what it offers…</p> : null}

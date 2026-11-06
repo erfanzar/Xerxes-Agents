@@ -11,6 +11,7 @@ import {
 import { AUTOPILOT_INSTRUCTION_LIMIT, type AutopilotInput } from '../../client/hubController.js'
 import type { AutopilotState } from '../../client/hubStore.js'
 import type { AutopilotRow } from '../../client/hubTypes.js'
+import { ChipChoice } from './XChoice.js'
 
 /**
  * The Autopilot tab of the XERXES controls dialog. On top, one card for "All
@@ -114,10 +115,8 @@ export function AutopilotEditor({ row, live, saving, onSave, onDone }: {
       <div className="xap__grid">
         <span className="xap__label">When it wakes</span>
         <ModeSeg value={mode} disabled={!live || saving} label={`Mode for ${row.label}`} onChange={setMode} />
-        <label className="xap__label" htmlFor={`${id}-expiry`}>Stop</label>
-        <select id={`${id}-expiry`} value={choice} onChange={event => setExpiry(event.target.value as AutopilotExpiryChoice)}>
-          {autopilotExpiryOptions(row, nowMs).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
+        <span className="xap__label">Stop</span>
+        <ChipChoice label={`When Autopilot stops for ${row.label}`} value={choice} options={autopilotExpiryOptions(row, nowMs)} disabled={!live || saving} onChange={setExpiry} />
         <label className="xap__label" htmlFor={`${id}-instruction`}>Instruction</label>
         <textarea
           id={`${id}-instruction`}

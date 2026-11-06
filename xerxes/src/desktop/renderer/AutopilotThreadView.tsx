@@ -5,10 +5,10 @@ import type { ReactElement } from 'react'
 
 import { AUTOPILOT_THREAD_NOTE } from '../../client/autopilot.js'
 import type { AutopilotThreadState } from '../../client/hubStore.js'
+import { liveSteps } from '../../client/supervisorSteps.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
-import { AgentOrb } from './AgentOrb.js'
 import { Icon } from './Icon.js'
-import { ThreadMessages } from './SupervisorThread.js'
+import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
 
 /**
  * Activity: the owner's private Autopilot thread. The Hub's wake-ups, XERXES's
@@ -26,6 +26,7 @@ export interface AutopilotThreadViewProps {
 
 export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotThreadViewProps): ReactElement {
   const empty = thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0
+  const running = liveSteps(thread.steps, thread.messages)
   return (
     <section className="autopilot-thread" aria-label="Autopilot activity">
       <p className="xthread-note"><Icon name="eye" size={13} />{AUTOPILOT_THREAD_NOTE}</p>
@@ -37,7 +38,7 @@ export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotT
           <p>Autopilot&apos;s wake-ups and the actions waiting for you will show up here.</p>
         </div>
       ) : null}
-      <ThreadMessages messages={thread.messages} now={now} label="Autopilot conversation" />
+      <ThreadMessages messages={thread.messages} now={now} label="Autopilot conversation" {...(thread.steps ? { steps: thread.steps } : {})} />
       {thread.confirmations.length === 0 ? null : (
         <ul className="supervisor__cards" aria-label="Autopilot actions">
           {thread.confirmations.map(item => (
@@ -45,12 +46,7 @@ export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotT
           ))}
         </ul>
       )}
-      {thread.working === true ? (
-        <div className="streamstatus supervisor__thinking" role="status" aria-live="polite">
-          <AgentOrb size={20} state="working" />
-          <span className="streamstatus__phrase">Autopilot is working…</span>
-        </div>
-      ) : null}
+      {thread.working === true || running.length > 0 ? <LiveSteps steps={running} idle="Autopilot is working…" /> : null}
     </section>
   )
 }
