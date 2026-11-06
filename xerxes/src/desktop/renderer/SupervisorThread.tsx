@@ -4,7 +4,8 @@
 import { Fragment, type ReactElement } from 'react'
 
 import { relativeTime } from '../../client/format.js'
-import type { SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
+import type { SupervisorConfirmation, SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
+import { withRecords } from '../../client/supervisorRecords.js'
 import { endsTurn, stepPhrase, stepsFinished } from '../../client/supervisorSteps.js'
 import { AgentOrb } from './AgentOrb.js'
 import { elapsedOf } from './duration.js'
@@ -22,9 +23,9 @@ import { Markdown } from './markdown.js'
 export type NoticeTone = 'info' | 'autopilot' | 'attention' | 'error'
 
 export function noticeTone(text: string): NoticeTone {
-  if (/^XERXES stopped\b|\bcould not\b|^error\b/i.test(text)) return 'error'
+  if (/^XERXES (stopped|failed)\b|\bcould not\b|^error\b/i.test(text)) return 'error'
   if (/^Needs attention\b|\bneeds you\b|^Watch:/i.test(text)) return 'attention'
-  if (/^Autopilot\b/i.test(text)) return 'autopilot'
+  if (/^Autopilot\b|^XERXES did\b/i.test(text)) return 'autopilot'
   return 'info'
 }
 
@@ -189,12 +190,15 @@ export interface ThreadMessagesProps {
   readonly label: string
   /** The latest turn's steps: folded above the reply that finished them. */
   readonly steps?: readonly SupervisorStep[]
+  /** Settled action cards: shown as event lines at the time they were made. */
+  readonly records?: readonly SupervisorConfirmation[]
 }
 
-export function ThreadMessages({ messages, pending, now, label, steps }: ThreadMessagesProps): ReactElement | null {
-  const items = threadItems(messages)
+export function ThreadMessages({ messages, pending, now, label, steps, records }: ThreadMessagesProps): ReactElement | null {
+  const all = withRecords(messages, records ?? [])
+  const items = threadItems(all)
   if (items.length === 0 && pending === undefined) return null
-  const finished = steps === undefined ? -1 : finishIndex(items, steps, messages)
+  const finished = steps === undefined ? -1 : finishIndex(items, steps, all)
   return (
     <ol className="xthread" aria-label={label}>
       {items.map((item, index) => (

@@ -340,6 +340,8 @@ export interface SupervisorConfirmation {
   readonly auto?: boolean
   /** The person Autopilot acted for (`confirmed_by` on the wire). */
   readonly confirmedBy?: string
+  /** When XERXES proposed or ran it; places a settled card in the timeline. Absent from older Hubs. */
+  readonly createdAt?: string
 }
 
 export function parseSupervisorMessage(raw: unknown): SupervisorMessage | undefined {
@@ -396,8 +398,10 @@ export function parseConfirmation(raw: unknown): SupervisorConfirmation | undefi
   const expiresAt = str(c.expires_at)
   const message = str(c.message)
   const confirmedBy = str(c.confirmed_by) ?? str(rec(c.actor).confirmed_by)
+  const createdAt = str(c.created_at)
   return {
     id,
+    ...(createdAt && Number.isFinite(Date.parse(createdAt)) ? { createdAt } : {}),
     ...(c.auto === true ? { auto: true } : {}),
     ...(confirmedBy ? { confirmedBy } : {}),
     tool: str(c.tool) ?? str(c.action) ?? 'action',

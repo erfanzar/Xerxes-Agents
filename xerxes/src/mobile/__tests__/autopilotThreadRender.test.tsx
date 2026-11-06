@@ -61,8 +61,9 @@ describe('Xerxes tab Autopilot thread', () => {
     expect(html).toContain('XERXES proposes: task.start')
     expect(html).toContain('>Confirm<')
     expect(html).toContain('>Cancel<')
+    // The settled auto card is an event line in the timeline, not a card.
     expect(html).toContain('XERXES did: task.steer')
-    expect(html).toContain('Done automatically on behalf of Ann.')
+    expect(html).not.toContain('Done automatically on behalf of Ann.')
     // Only the pending card asks.
     expect(html.match(/>Confirm</g)).toHaveLength(1)
   })

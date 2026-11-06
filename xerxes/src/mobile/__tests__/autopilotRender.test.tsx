@@ -59,9 +59,9 @@ describe('Xerxes tab Autopilot', () => {
       supervisor: { ...state.supervisor, confirmations: [{ id: 'a1', tool: 'task.steer', summary: 'Steer the task: focus on tests', targets: ['One / First task'], state: 'confirmed', auto: true, confirmedBy: 'Ann' }] },
     }
     const html = plain(render(withCard, '/xerxes'))
-    expect(html).toContain('XERXES did: task.steer')
-    expect(html).toContain('Steer the task: focus on tests')
-    expect(html).toContain('Done automatically on behalf of Ann.')
+    // A settled auto card is one event line in the timeline.
+    expect(html).toContain('XERXES did: task.steer: Steer the task: focus on tests')
+    expect(html).not.toContain('Done automatically on behalf of Ann.')
     expect(html).not.toContain('>Confirm<')
     expect(html).not.toContain('>Cancel<')
     expect(html).not.toContain('Nothing runs until you confirm')
@@ -74,8 +74,8 @@ describe('Xerxes tab Autopilot', () => {
     const state = withAutopilot({ rows: [row()] })
     const failed: HubState = { ...state, supervisor: { ...state.supervisor, confirmations: [{ id: 'a2', tool: 'task.stop', summary: 'Stop it', targets: [], state: 'failed', auto: true, confirmedBy: 'Ann', message: 'The task was already gone.' }] } }
     const html = plain(render(failed, '/xerxes'))
-    expect(html).toContain('role="alert"')
-    expect(html).toContain('The task was already gone.')
+    expect(html).toContain('XERXES failed: task.stop: Stop it (The task was already gone.)')
+    expect(html).not.toContain('XERXES did:')
     expect(html).not.toContain('Done automatically')
   })
 })

@@ -10,6 +10,7 @@ import { watchChipText } from '../../client/watch.js'
 import type { ConfirmationState, SupervisorConfirmation, SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
 import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
 import { liveSteps, stepPhrase } from '../../client/supervisorSteps.js'
+import { splitCards, withRecords } from '../../client/supervisorRecords.js'
 import { useHubState, useNow, useServices } from '../context.js'
 import { supervisorHeading } from '../viewModel.js'
 import { remainingAfterSend, withTranscript } from './Composer.js'
@@ -134,7 +135,9 @@ export function AutopilotThreadBody(): ReactElement {
   const thread = state.autopilotThread
   const live = state.connection.state === 'live'
   const list = useRef<HTMLDivElement>(null)
-  const follow = useFollowScroll(list, thread.phase === 'ready', [thread.messages, thread.confirmations, thread.working])
+  const follow = useFollowScroll(list, thread.phase === 'ready', [thread.messages, thread.confirmations, thread.working, thread.steps])
+  // Cards waiting for the owner stay cards; settled ones are event lines at their own time.
+  const threadCards = splitCards(thread.confirmations)
   return (
     <div ref={list} aria-label="Autopilot thread" role="region">
       <p className="summary">{AUTOPILOT_THREAD_NOTE}</p>
@@ -147,11 +150,11 @@ export function AutopilotThreadBody(): ReactElement {
       ) : null}
       {thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0 ? <p className="empty">Nothing yet.</p> : null}
       <ol className="blocks" aria-label="Autopilot conversation">
-        {thread.messages.map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
+        {withRecords(thread.messages, threadCards.records).map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
       </ol>
-      {thread.confirmations.length === 0 ? null : (
+      {threadCards.open.length === 0 ? null : (
         <ul className="pending" aria-label="Autopilot actions">
-          {thread.confirmations.map(item => (
+          {threadCards.open.map(item => (
             <ConfirmationCard key={item.id} item={item} canAct={live} onRespond={decision => { void controller.autopilotThreadRespond(item.id, decision) }} />
           ))}
         </ul>
@@ -190,7 +193,8 @@ export function XerxesTab(): ReactElement {
   // Open on the newest message and keep following it while the reader is at the bottom,
   // exactly like the task transcript; reading older messages is never yanked away.
   const conversation = useRef<HTMLDivElement>(null)
-  const follow = useFollowScroll(conversation, supervisor.phase === 'ready' && !showThread, [supervisor.messages, supervisor.confirmations, supervisor.working, showThread])
+  const follow = useFollowScroll(conversation, supervisor.phase === 'ready' && !showThread, [supervisor.messages, supervisor.confirmations, supervisor.working, supervisor.steps, showThread])
+  const sharedCards = splitCards(supervisor.confirmations)
 
   const live = state.connection.state === 'live'
   const latest = useRef(text)
@@ -289,11 +293,11 @@ export function XerxesTab(): ReactElement {
           {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? <p className="empty">No messages yet. Try “What needs me right now?”</p> : null}
           <div ref={conversation}>
             <ol className="blocks" aria-label="Conversation">
-              {supervisor.messages.map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
+              {withRecords(supervisor.messages, sharedCards.records).map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
             </ol>
-            {supervisor.confirmations.length === 0 ? null : (
+            {sharedCards.open.length === 0 ? null : (
               <ul className="pending" aria-label="Waiting for your confirmation">
-                {supervisor.confirmations.map(item => (
+                {sharedCards.open.map(item => (
                   <ConfirmationCard key={item.id} item={item} canAct={live} onRespond={decision => { void controller.supervisorRespond(item.id, decision) }} />
                 ))}
               </ul>

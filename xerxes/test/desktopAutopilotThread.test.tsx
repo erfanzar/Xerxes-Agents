@@ -66,7 +66,10 @@ test('open, the thread shows pending cards with Confirm/Cancel and auto cards as
   expect(html).toContain('Autopilot: woke for a question')
   expect(html).toContain('>Confirm<')
   expect(html).toContain('>Cancel<')
-  expect(html).toContain('Done automatically on behalf of Ann.')
+  // A settled auto card is a one-line event in the timeline, not a card that piles up below.
+  expect(html).toContain('XERXES did: task.steer: Steer it')
+  expect(html).not.toContain('Done automatically on behalf of Ann.')
+  expect(html.match(/<article class="action-card/g)).toHaveLength(1)
   // Chat | Activity: Activity is pressed, Chat takes you back.
   expect(html).toContain('<button type="button" aria-pressed="false">Chat</button>')
   expect(html).toMatch(/<button type="button" aria-pressed="true">Activity/)
