@@ -9,6 +9,7 @@ import { liveSteps } from '../../client/supervisorSteps.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
 import { Icon } from './Icon.js'
 import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
+import { isOpenCard } from '../../client/supervisorRecords.js'
 
 /**
  * Activity: the owner's private Autopilot thread. The Hub's wake-ups, XERXES's
@@ -27,6 +28,9 @@ export interface AutopilotThreadViewProps {
 export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotThreadViewProps): ReactElement {
   const empty = thread.phase === 'ready' && thread.messages.length === 0 && thread.confirmations.length === 0
   const running = liveSteps(thread.steps, thread.messages)
+  // Cards waiting for the owner stay cards; settled ones are event lines in the timeline.
+  const openCards = thread.confirmations.filter(isOpenCard)
+  const records = thread.confirmations.filter(card => !isOpenCard(card))
   return (
     <section className="autopilot-thread" aria-label="Autopilot activity">
       <p className="xthread-note"><Icon name="eye" size={13} />{AUTOPILOT_THREAD_NOTE}</p>
@@ -38,10 +42,10 @@ export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotT
           <p>Autopilot&apos;s wake-ups and the actions waiting for you will show up here.</p>
         </div>
       ) : null}
-      <ThreadMessages messages={thread.messages} now={now} label="Autopilot conversation" {...(thread.steps ? { steps: thread.steps } : {})} />
-      {thread.confirmations.length === 0 ? null : (
+      <ThreadMessages messages={thread.messages} now={now} label="Autopilot conversation" records={records} {...(thread.steps ? { steps: thread.steps } : {})} />
+      {openCards.length === 0 ? null : (
         <ul className="supervisor__cards" aria-label="Autopilot actions">
-          {thread.confirmations.map(item => (
+          {openCards.map(item => (
             <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
           ))}
         </ul>

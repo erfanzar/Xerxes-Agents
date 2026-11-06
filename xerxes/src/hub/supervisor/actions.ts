@@ -262,6 +262,7 @@ export function actionToWire(action: ActionRecord): Record<string, unknown> {
     requested_by: action.requestedByName,
     ...(action.confirmedByName === undefined ? {} : { confirmed_by: action.confirmedByName }),
     ...(action.auto ? { auto: true } : {}),
+    created_at: new Date(action.createdAt).toISOString(),
     expires_at: new Date(action.expiresAt).toISOString(),
     state,
     ...(message === undefined ? {} : { message }),

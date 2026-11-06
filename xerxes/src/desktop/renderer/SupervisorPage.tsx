@@ -19,6 +19,8 @@ import { Icon } from './Icon.js'
 import { ModelChooser } from './ModelChooser.js'
 import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
 import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
+import { isOpenCard } from '../../client/supervisorRecords.js'
+import { useTranscriptScroll } from './transcriptScroll.js'
 import { liveSteps } from '../../client/supervisorSteps.js'
 import {
   HUB_CHANGED_EVENT, cockpitCall, cockpitEnsureSession, createCockpitSockets, windowCockpitApi,
@@ -243,14 +245,11 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const thinkingSeconds = startedAt === null ? 0 : Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))
   const lastUser = [...supervisor.messages].reverse().find(message => message.role === 'user')
   const showPending = pending !== null && !(supervisor.messages.at(-1)?.role !== 'xerxes' && lastUser?.text === pending.text)
-  const streamRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const items = supervisor.messages.length + supervisor.confirmations.length
-  // Follow the newest message, as the task conversation does.
-  useEffect(() => {
-    const element = streamRef.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [items, thinking, showPending])
+  // Follow the tail while it grows (replies, live steps, cards), as the task view does; scrolling up pauses it.
+  const scroll = useTranscriptScroll(showThread ? 'autopilot' : 'shared', { more: false, automatic: false, load: async () => undefined })
+  const openCards = supervisor.confirmations.filter(isOpenCard)
+  const records = supervisor.confirmations.filter(card => !isOpenCard(card))
   const grow = (): void => {
     const element = inputRef.current
     if (!element) return
@@ -262,6 +261,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     if (message === '' || thinking || !live || unconfigured) return
     // A chat clears the box and shows the message straight away.
     setPending({ text: message, at: new Date().toISOString() })
+    // Sending brings you back to the tail, even if you had scrolled up to read.
+    scroll.scrollToLatest()
     setText('')
     requestAnimationFrame(grow)
     const sent = await onSend(message)
@@ -353,7 +354,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           ) : null}
         </div>
       ) : null}
-      <div className="supervisor__stream" ref={streamRef}>
+      <div className="supervisor__stream" ref={scroll.ref}>
         <div className="supervisor__col">
           {showThread ? (
             <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
@@ -380,10 +381,10 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                   </div>
                 </div>
               ) : null}
-              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
-              {supervisor.confirmations.length === 0 ? null : (
+              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" records={records} {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
+              {openCards.length === 0 ? null : (
                 <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
-                  {supervisor.confirmations.map(item => (
+                  {openCards.map(item => (
                     <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
                   ))}
                 </ul>

@@ -5,7 +5,8 @@ import { expect, test } from 'bun:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import type { SupervisorMessage } from '../src/client/hubParsers.js'
+import type { SupervisorConfirmation, SupervisorMessage } from '../src/client/hubParsers.js'
+import { isOpenCard, withRecords } from '../src/client/supervisorRecords.js'
 import { ThreadMessages, VISIBLE_EVENTS, noticeTone, threadItems } from '../src/desktop/renderer/SupervisorThread.js'
 
 const at = (minute: number): string => `2026-11-05T10:${String(minute).padStart(2, '0')}:00.000Z`
@@ -77,4 +78,38 @@ test('notice text from the Hub is rendered as text, never HTML', () => {
 
 test('nothing renders for an empty thread', () => {
   expect(render([])).toBe('')
+})
+
+const plain = (html: string): string => html.replaceAll('<!-- -->', '')
+
+const card = (id: string, patch: Partial<SupervisorConfirmation> = {}): SupervisorConfirmation => ({
+  id, tool: 'task.steer', summary: 'Steer it', targets: [], state: 'confirmed', auto: true, createdAt: at(2), ...patch,
+})
+
+test('only pending or confirming cards stay cards; every settled one is a record', () => {
+  expect(isOpenCard(card('a', { state: 'pending' }))).toBe(true)
+  expect(isOpenCard(card('a', { state: 'confirming' }))).toBe(true)
+  for (const state of ['confirmed', 'cancelled', 'expired', 'failed'] as const) expect(isOpenCard(card('a', { state }))).toBe(false)
+})
+
+test('a settled card is placed in the timeline at its own time, never piled under newer replies', () => {
+  const messages = [user('u1', 'first', 1), xerxes('x1', 'answer one', 3), user('u2', 'second', 5), xerxes('x2', 'answer two', 7)]
+  const merged = withRecords(messages, [card('c1', { createdAt: at(2) }), card('c2', { createdAt: at(6), state: 'failed', message: 'not found' })])
+  expect(merged.map(m => m.id)).toEqual(['u1', 'card:c1', 'x1', 'u2', 'card:c2', 'x2'])
+  expect(merged[1]!.text).toBe('XERXES did: task.steer: Steer it')
+  expect(merged[4]!.text).toBe('XERXES failed: task.steer: Steer it (not found)')
+  // An older Hub sends no time: the record goes after the newest message.
+  const old = withRecords(messages, [card('c3', { createdAt: undefined } as Partial<SupervisorConfirmation>)])
+  expect(old.at(-1)!.id).toBe('card:c3')
+})
+
+test('rendered: records are quiet event lines, and a failed one is marked as an error', () => {
+  const html = plain(renderToStaticMarkup(createElement(ThreadMessages, {
+    messages: [user('u1', 'kill it', 1), xerxes('x1', 'Done.', 4)], now: Date.parse(at(59)), label: 'Conversation',
+    records: [card('c1', { createdAt: at(2) }), card('c2', { createdAt: at(3), state: 'failed' })],
+  })))
+  expect(html).toContain('class="xevent" data-tone="autopilot"')
+  expect(html).toContain('class="xevent" data-tone="error"')
+  expect(html).not.toContain('action-card')
+  expect(html.indexOf('XERXES did:')).toBeLessThan(html.indexOf('Done.'))
 })
