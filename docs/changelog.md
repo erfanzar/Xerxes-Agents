@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.30 — 2026-11-06
+
+- **Finished XERXES actions no longer pile up under the chat.** An action that is done, cancelled, expired or failed is now one quiet line in the conversation at the time it happened ("XERXES did: task.steer: …", red when it failed). Only actions still waiting for your Confirm stay as cards. Desktop Chat and Activity, and the phone's XERXES tab. Placing them at the right time needs the updated Hub; with an older Hub they go after the newest message.
+- **The XERXES page follows the conversation again.** It now scrolls with live steps, the "Working…" line and growing replies, stops following when you scroll up to read, and jumps back to the bottom when you send.
+
 ## 0.8.29 — 2026-11-06
 
 - **XERXES works out loud.** While XERXES runs a turn, the Hub streams every step to the person who asked: a status line with a clock ("Searching every task for “shader”… 4s"), XERXES's own short lines about what it is about to check, and every tool it runs with a spinner, a check mark or a red error. When the answer lands, the steps fold into "Ran N steps" above it. This shows in Chat and in Activity (Autopilot wake-ups), on desktop and on the phone. Steps go only to the requester, are not stored, and need the updated Hub; an older Hub keeps showing "Thinking…".
