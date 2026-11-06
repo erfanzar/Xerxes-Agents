@@ -40,3 +40,10 @@ test('nothing runs when no profile uses Claude Code or it is turned off, and fai
   expect(await maintainClaudeCode({ inUse: true, environment: {}, run: failing.run, executable: () => '/bin/claude' }))
     .toEqual({ action: 'failed', error: 'claude update exited 1: network unreachable' })
 })
+
+test('a missing CLI is not installed when XERXES_AUTO_INSTALL_CLAUDE_CODE turns installs off', async () => {
+  const r = runner(0, 'Claude Code successfully installed!')
+  const outcome = await maintainClaudeCode({ inUse: true, environment: { XERXES_AUTO_INSTALL_CLAUDE_CODE: 'off' }, platform: 'linux', run: r.run, executable: () => undefined })
+  expect(outcome).toMatchObject({ action: 'skipped' })
+  expect(r.calls).toEqual([])
+})

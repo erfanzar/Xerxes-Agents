@@ -10,7 +10,7 @@ import { renderTrajectory } from '../src/context/trajectory.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import {
   buildReflectionPrompt, MAX_REFLECTION_PROMPT_CHARS, parseReflectionProposal, proposeReflection,
-  ReflectionError, ReflectionProposalStore, reflectionTrigger,
+  ReflectionError, ReflectionProposalStore, reflectionModeFor, reflectionTrigger,
   type ReflectionApplier, type ReflectionPromptInput, type ReflectionProposal,
 } from '../src/runtime/reflection.js'
 import { SkillBundleStore } from '../src/tools/agentMetaTools.js'
@@ -377,4 +377,21 @@ test('reflection tools refuse cross-workspace review and allow a reasoned reject
   expect(await tool(registry, 'reflection_review', { id: foreign.id, action: 'approve', reason: 'Approve.' })).toMatchObject({ ok: false, code: 'REFLECTION_NOT_FOUND' })
   expect(await tool(registry, 'reflection_review', { id: local.id, action: 'reject', reason: 'Not general enough.' })).toMatchObject({ ok: true, proposal: { status: 'rejected' } })
   expect(calls).toEqual([])
+})
+
+test('reflectionModeFor narrows the default all to goals for a local session and keeps a chosen mode', () => {
+  let asked = 0
+  const local = () => { asked += 1; return 'local' as const }
+  const cloud = () => 'cloud' as const
+  // Default `all`: a local model reflects on goal endings only, a cloud model on long turns too.
+  expect(reflectionModeFor({ configured: 'all', chosen: false, trust: local })).toBe('goals')
+  expect(reflectionModeFor({ configured: 'all', chosen: false, trust: cloud })).toBe('all')
+  // A user who chose `all` keeps it on a local model.
+  expect(reflectionModeFor({ configured: 'all', chosen: true, trust: local })).toBe('all')
+  // Narrower modes never consult the provider and are never widened.
+  asked = 0
+  expect(reflectionModeFor({ configured: 'off', chosen: false, trust: local })).toBe('off')
+  expect(reflectionModeFor({ configured: 'goals', chosen: false, trust: local })).toBe('goals')
+  expect(reflectionModeFor({ configured: undefined, chosen: false, trust: local })).toBe('goals')
+  expect(asked).toBe(0)
 })

@@ -15,6 +15,7 @@ import {
   formatGiB,
   memoryBudget,
   parseLocalConfig,
+  launchCtxSize,
   selectModel,
   type CatalogEntry,
   type LocalConfig,
@@ -32,7 +33,7 @@ Run a Bonsai model on this machine with llama.cpp's llama-server. Nothing runs u
 Commands:
   setup   Probe hardware, pick a model, download it (verified), start the server, save the
           "${LOCAL_PROFILE_NAME}" provider profile.
-            --model <id>         bonsai-9b | ternary-bonsai-27b (default: largest that fits)
+            --model <id>         bonsai-9b | ternary-bonsai-2-27b (default: largest that fits)
             --model-file <path>  use an existing .gguf instead of downloading
             --yes                continue even if the model is larger than this machine's memory
             --json               print one JSON object
@@ -43,7 +44,8 @@ Commands:
 
 Download sources are never built in. Configure them in ~/.xerxes/daemon/config.json:
   { "runtime": { "local": { "models": { "bonsai-9b": { "url": "https://…", "sha256": "…" } } } } }
-Other settings: runtime.local.llama_server_path, models_dir, port (default 11581).
+Other settings: runtime.local.llama_server_path, models_dir, port (default 11581), ctx_size
+(llama-server --ctx-size; up to the model's own window, 262144 for Ternary Bonsai 2 27B).
 `
 
 export interface SaveLocalProfileInput {
@@ -53,6 +55,8 @@ export interface SaveLocalProfileInput {
   readonly provider: string
   readonly dataTrust: 'local'
   readonly promptProfile: 'lean'
+  /** The --ctx-size llama-server runs with, so compaction and overflow rescue know the real window. */
+  readonly contextLimit: number
 }
 
 export interface LocalCommandPorts {
@@ -384,7 +388,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       progress(`Server already running on port ${port}.`)
     } else {
       progress(`Starting llama-server on 127.0.0.1:${cfg.port} (loading the model can take a while)…`)
-      const result = await ports.server.start({ modelPath, port: cfg.port, ctxSize: entry.ctxSize })
+      const result = await ports.server.start({ modelPath, port: cfg.port, ctxSize: launchCtxSize(entry, cfg) })
       port = result.port ?? cfg.port
       started = true
     }
@@ -397,6 +401,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       provider: 'custom',
       dataTrust: 'local',
       promptProfile: 'lean',
+      contextLimit: launchCtxSize(entry, cfg),
     })
     return ok(
       {
@@ -420,7 +425,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     const hw = await ports.hardware()
     const { entry, path } = await locateModel(parsed, cfg, catalog, hw)
     progress(`Starting llama-server on 127.0.0.1:${cfg.port}…`)
-    const result = await ports.server.start({ modelPath: path, port: cfg.port, ctxSize: entry.ctxSize })
+    const result = await ports.server.start({ modelPath: path, port: cfg.port, ctxSize: launchCtxSize(entry, cfg) })
     return ok({ already_running: false, model_id: entry.id, ...statusJson(result) }, `Started: ${statusLine(result)}`)
   }
 

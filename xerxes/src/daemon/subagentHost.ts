@@ -32,6 +32,7 @@ import type {
   SpawnedAgentStatus,
 } from '../operators/subagents.js'
 import { bootstrap, bootstrapSubagentsForAgent } from '../runtime/bootstrap.js'
+import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/leanPrompt.js'
 import { skillPromptSection, type SkillRegistry } from '../extensions/skills.js'
 import type { RunHistory } from '../runtime/runHistory.js'
 import { runWithActiveSession } from '../runtime/sessionContext.js'
@@ -130,6 +131,11 @@ export interface NativeSubagentHostOptions {
   readonly temperature?: number
   readonly toolExecutor: ToolExecutor
   readonly tools: readonly ToolDefinition[]
+  /**
+   * The prompt profile for a child's model, decided as for the main turn.
+   * `lean` gives the child the lean tools and terse prompt. Absent: full.
+   */
+  readonly promptProfileFor?: (model: string) => 'lean' | 'full'
   /**
    * The registry's current definitions, read before each child step so a
    * plugin installed while the child runs reaches it (still filtered by the
@@ -1370,7 +1376,12 @@ async function runNativeSubagent(
   }
   const permissionMode = permissionModeConfig(request.config.permissionMode, options.permissionMode)
   const permissionBroker = delegatedPermissionBroker(permissionMode)
-  const tools = subagentTools(options.tools, request.config)
+  // A child on a model that gets the lean prompt (Bonsai) gets the lean tools
+  // and prompt too. Otherwise every child pays a cold prefill of the full
+  // prompt, and on a one-slot local server it also evicts the parent's cache.
+  const lean = options.promptProfileFor?.(model) === 'lean'
+  const policyTools = subagentTools(options.tools, request.config)
+  const tools = lean ? selectLeanTools(policyTools) : policyTools
   const cwd = request.worktree?.path || options.cwd
   const conversation: SubagentConversationContext = {
     agentId: request.task.agentDefName || request.task.id,
@@ -1434,16 +1445,25 @@ async function runNativeSubagent(
         if (!skill) throw new ValidationError('skills', `preloaded skill '${name}' is unavailable; inspect /skills diagnostics`, name)
         return skillPromptSection(skill)
       })
-      const boot = await bootstrap({
-        ...(request.config._agentPromptMode === 'replace' ? { baseSystemPrompt: request.systemPrompt } : {}),
-        cwd,
-        subagents: bootstrapSubagentsForAgent(options.agentDefinitions, request.task.agentDefName),
-        ...(options.skills ? { skills: options.skills } : {}),
-        model,
-        tools,
-      })
+      // Lean: the terse rules, then the agent's own role prompt. A replace-mode
+      // agent prompt still gets the rules, which a small model needs most.
+      const basePrompt = lean
+        ? [
+          buildLeanSystemPrompt({ cwd, model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name) }),
+          request.systemPrompt,
+        ].filter(Boolean).join('\n\n')
+        : (await bootstrap({
+          ...(request.config._agentPromptMode === 'replace' ? { baseSystemPrompt: request.systemPrompt } : {}),
+          cwd,
+          subagents: bootstrapSubagentsForAgent(options.agentDefinitions, request.task.agentDefName),
+          ...(options.skills ? { skills: options.skills } : {}),
+          model,
+          tools,
+        })).systemPrompt
       const maxTokens = options.maxTokens ?? options.maxOutputTokens?.(model)
-      const childSystemPrompt = [boot.systemPrompt, ...(request.config._agentPromptMode === 'replace' ? [] : [request.systemPrompt]), ...preloadedSkills].filter(Boolean).join('\n\n')
+      const childSystemPrompt = lean
+        ? [basePrompt, ...preloadedSkills].filter(Boolean).join('\n\n')
+        : [basePrompt, ...(request.config._agentPromptMode === 'replace' ? [] : [request.systemPrompt]), ...preloadedSkills].filter(Boolean).join('\n\n')
       const midTurnCompaction = childMidTurnCompaction({ conversation, conversations, model, options, request, state }, childSystemPrompt, tools)
       const events = runTurn({
         agentId: request.task.agentDefName || request.task.id,

@@ -4,7 +4,10 @@
 import { expect, test } from 'bun:test'
 
 import { ValidationError } from '../src/core/errors.js'
+import { loadBuiltinAgentDefinitions } from '../src/agents/definitions.js'
 import {
+  LEAN_CORE_TOOL_NAMES,
+  automaticPromptProfile,
   buildLeanSystemPrompt,
   leanPromptSize,
   parsePromptProfileConfig,
@@ -20,7 +23,7 @@ import {
   READ_FILE_DEFINITION,
   WRITE_FILE_DEFINITION,
 } from '../src/tools/fileTools.js'
-import { EXEC_COMMAND_DEFINITION } from '../src/tools/processTools.js'
+import { CHECK_COMMAND_DEFINITION, EXEC_COMMAND_DEFINITION } from '../src/tools/processTools.js'
 import { CLAUDE_WORKFLOW_TOOL_DEFINITIONS } from '../src/tools/claudeTools/workflow.js'
 import { XLSX_READER_DEFINITION, XLSX_WRITER_DEFINITION } from '../src/tools/xlsxTools.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
@@ -36,6 +39,7 @@ const REAL_DEFINITIONS: readonly ToolDefinition[] = [
   GREP_TOOL_DEFINITION,
   FILE_EDIT_TOOL_DEFINITION,
   EXEC_COMMAND_DEFINITION,
+  CHECK_COMMAND_DEFINITION,
   CSV_PROCESSOR_DEFINITION,
   XLSX_WRITER_DEFINITION,
   XLSX_READER_DEFINITION,
@@ -75,6 +79,7 @@ test('selectLeanTools keeps only the core set and shortens descriptions without 
   const names = selected.map(tool => tool.function.name)
   expect(names).toContain('ReadFile')
   expect(names).toContain('exec_command')
+  expect(names).toContain('check_command')
   expect(names).toContain('XlsxWriter')
   expect(names).toContain('AskAdvisor')
   expect(names).not.toContain('TodoWriteTool')
@@ -152,4 +157,32 @@ test('the lean profile config strips the optional prompt layers and leaves the o
   expect(Object.isFrozen(lean)).toBe(true)
   expect(getPromptProfileConfig(PromptProfile.FULL).maxToolsListed).toBe(100)
   expect(getPromptProfileConfig(PromptProfile.COMPACT).maxToolsListed).toBe(20)
+})
+
+test('the default agent profile admits every lean core tool, so lean mode is not cut down by the profile', () => {
+  const agent = loadBuiltinAgentDefinitions().get('default')
+  if (agent === undefined) throw new Error('default agent profile is missing')
+  const declared = new Set(agent.tools)
+  const excluded = new Set(agent.excludeTools)
+  const missing = LEAN_CORE_TOOL_NAMES.filter(name => !declared.has(name) || excluded.has(name))
+  expect(missing).toEqual([])
+})
+
+test('with nothing configured, a Bonsai model or a known window of 32K or less picks lean', () => {
+  // A Bonsai model gets lean wherever it runs, even with its 262K window.
+  expect(automaticPromptProfile({ model: 'ternary-bonsai-2-27b', contextLimit: 262_144 })).toBe('lean')
+  expect(automaticPromptProfile({ model: 'prism-ml/ternary-bonsai-2-27b' })).toBe('lean')
+  // Other models: a small window gets lean; a big or unknown one keeps the full prompt.
+  expect(automaticPromptProfile({ model: 'gpt-5.5', contextLimit: 262_144 })).toBe('full')
+  expect(automaticPromptProfile({ contextLimit: 16_384 })).toBe('lean')
+  expect(automaticPromptProfile({ contextLimit: 32_768 })).toBe('lean')
+  expect(automaticPromptProfile({ contextLimit: 131_072 })).toBe('full')
+  // An unknown window stays full: a loopback proxy can front a large cloud model.
+  expect(automaticPromptProfile({})).toBe('full')
+  // Anything configured wins over the route.
+  expect(parsePromptProfileConfig({}, {}, 'full', { contextLimit: 16_384 })).toBe('full')
+  expect(parsePromptProfileConfig({ prompt_profile: 'full' }, {}, undefined, { contextLimit: 16_384 })).toBe('full')
+  expect(parsePromptProfileConfig({}, { XERXES_PROMPT_PROFILE: 'full' }, undefined, { contextLimit: 16_384 })).toBe('full')
+  expect(parsePromptProfileConfig({}, {}, undefined, { contextLimit: 16_384 })).toBe('lean')
+  expect(parsePromptProfileConfig({}, {})).toBe('full')
 })

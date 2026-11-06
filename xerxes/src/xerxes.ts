@@ -27,6 +27,11 @@ import {
   type ToolPolicy,
 } from './streaming/permissions.js'
 import type { StreamEvent } from './streaming/events.js'
+import { createEscalationFactory } from './daemon/turnEscalation.js'
+import type { AdvisorRequest, CascadingTurnOptions, ResultChecksMode } from './runtime/cascade.js'
+import { defaultEscalationMode } from './runtime/escalationPolicy.js'
+import { automaticPromptProfile, buildLeanSystemPrompt, localDay, selectLeanTools, type LeanPromptSetting } from './runtime/leanPrompt.js'
+import { ADVISOR_TOOL_NAME } from './tools/advisorTool.js'
 import { SandboxRouter, SandboxedToolExecutor } from './security/sandbox.js'
 import { registerCoreTools, type CoreToolsOptions } from './tools/index.js'
 import type { ToolDefinition } from './types/toolCalls.js'
@@ -81,6 +86,29 @@ export interface XerxesOptions {
   readonly systemPrompt?: string
   readonly toolRegistry?: ToolRegistry
   readonly workspaceRoot?: string
+  /**
+   * `lean` sends the terse prompt and the core tools (about 3K tokens). Default:
+   * lean for Bonsai models, full otherwise, as in the daemon and CLI.
+   */
+  readonly promptProfile?: LeanPromptSetting
+  /**
+   * Result checks and escalation around each turn: a failed check re-runs the
+   * model in the same turn, and once local retries are used up the advisor (a
+   * registered AskAdvisor tool, or `consultAdvisor`) is consulted. Needs
+   * `workspaceRoot` to read what the turn wrote. Default: on when
+   * `workspaceRoot` is set, with checks in `warn` mode and escalation on for
+   * Bonsai models; `false` turns it off.
+   */
+  readonly cascade?: false | XerxesCascadeOptions
+}
+
+export interface XerxesCascadeOptions {
+  /** Result checks: `warn` reports, `enforce` also tells the model. Default `warn`. */
+  readonly checks?: ResultChecksMode
+  /** As `runtime.escalation`: mode, max_local_retries, max_advisor_calls, … */
+  readonly escalation?: Record<string, unknown>
+  /** Consult a stronger model. Default: the registered AskAdvisor tool, when there is one. */
+  readonly consultAdvisor?: (request: AdvisorRequest, signal: AbortSignal) => Promise<string>
 }
 
 interface RegisteredAgent {
@@ -115,6 +143,9 @@ export class Xerxes {
   private readonly memoryMinChars: number
   private readonly permissionBroker: PermissionBroker | undefined
   private readonly policy: ToolPolicy | undefined
+  private readonly workspaceRoot: string | undefined
+  private readonly promptProfile: LeanPromptSetting | undefined
+  private readonly cascadeOptions: false | XerxesCascadeOptions | undefined
 
   constructor(options: XerxesOptions = {}) {
     const suppliedAgents = options.agents ? [...options.agents] : []
@@ -132,6 +163,9 @@ export class Xerxes {
     this.auditEmitter = options.auditEmitter
     this.hookRunner = options.hookRunner
     this.maxNetworkRetries = options.maxNetworkRetries
+    this.workspaceRoot = options.workspaceRoot ?? (options.coreTools ? options.coreTools.workspaceRoot : undefined)
+    this.promptProfile = options.promptProfile
+    this.cascadeOptions = options.cascade
 
     if (options.coreTools !== false) {
       const coreOptions = options.coreTools ?? {}
@@ -219,7 +253,15 @@ export class Xerxes {
       options.config?.model,
       this.defaultModel,
     ))
-    const systemPrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
+    const allowedTools = toolsForAgent(this.toolRegistry.definitions(agentId), agent)
+    // The daemon's rule: lean for Bonsai models unless told otherwise.
+    const lean = (this.promptProfile ?? automaticPromptProfile({ model })) === 'lean'
+    const tools = lean ? selectLeanTools(allowedTools) : allowedTools
+    const rolePrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
+    const systemPrompt = lean
+      ? [buildLeanSystemPrompt({ cwd: this.workspaceRoot ?? process.cwd(), model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name) }), rolePrompt].filter(Boolean).join('\n\n')
+      : rolePrompt
+    const cascade = this.cascadeFor(model, agentId)
     const permissionMode = options.permissionMode ?? options.config?.permissionMode ?? this.defaultPermissionMode
     const queryConfig: Partial<QueryEngineConfig> = {
       ...options.config,
@@ -240,8 +282,44 @@ export class Xerxes {
     }, {
       config: queryConfig,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-      tools: toolsForAgent(this.toolRegistry.definitions(agentId), agent),
+      tools,
+      ...(cascade ? { cascade } : {}),
     })
+  }
+
+  /**
+   * The cascade for one engine: its own escalation ladder over the shared
+   * checks. Reads no environment: an embedding host configures it explicitly.
+   */
+  private cascadeFor(model: string, agentId: string): Omit<CascadingTurnOptions, 'onStep'> | undefined {
+    if (this.cascadeOptions === false || this.workspaceRoot === undefined) return undefined
+    const settings = this.cascadeOptions ?? {}
+    const runtime: Record<string, unknown> = settings.escalation === undefined ? {} : { escalation: settings.escalation }
+    const registry = this.toolRegistry
+    const consultAdvisor = settings.consultAdvisor ?? (registry.get(ADVISOR_TOOL_NAME, agentId)
+      ? (request: AdvisorRequest, signal: AbortSignal) => registry.execute({
+        id: `escalation-advisor-${crypto.randomUUID()}`,
+        type: 'function',
+        function: { name: ADVISOR_TOOL_NAME, arguments: { question: request.question, context: request.context, kind: 'answer' } },
+      }, { agentId, metadata: {} }, signal)
+      : undefined)
+    const escalate = createEscalationFactory<{ readonly id: string; readonly cwd: string }>({
+      runtime: () => runtime,
+      env: {},
+      boundaryMode: () => 'off',
+      advisorAvailable: () => consultAdvisor !== undefined,
+      defaultMode: () => defaultEscalationMode({ runtime, env: {}, model, local: () => false }),
+    })
+    const session = { id: 'sdk', cwd: this.workspaceRoot }
+    const checks = settings.checks ?? 'warn'
+    return {
+      projectRoot: this.workspaceRoot,
+      hooks: {
+        checks: () => checks,
+        escalate: findings => escalate(session, findings),
+        ...(consultAdvisor ? { consultAdvisor } : {}),
+      },
+    }
   }
 
   /** Run one prompt, preserving the selected agent's default conversation by default. */

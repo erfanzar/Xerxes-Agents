@@ -893,7 +893,9 @@ export interface DaemonServerOptions {
   readonly goalDrainLapseMs?: number;
   /**
    * Generate a model-written session title after the first exchange. Defaults
-   * on; a runtime setting of `auto_title` set to false disables it. Generation
+   * on; a runtime setting of `auto_title` set to false disables it. Left unset
+   * here and in the runtime settings, a session whose provider is a loopback
+   * model server keeps its opening-prompt title instead. Generation
    * is background and silent: a failure leaves the session untitled and never
    * surfaces in the turn.
    */
@@ -1130,6 +1132,8 @@ export class DaemonServer {
   private readonly autoCompactDisabledWarned = new Set<string>();
   private readonly autoCompactThreshold: number;
   private readonly autoTitle: boolean;
+  /** The host passed `autoTitle`, so it applies to every provider, local ones included. */
+  private readonly autoTitleExplicit: boolean;
   private readonly titleClientFactory: TitleClientFactory | undefined;
   private readonly projectAgentClientFactory: DaemonServerOptions['projectAgentClientFactory'];
   private readonly reflectionClientFactory: DaemonServerOptions['reflectionClientFactory'];
@@ -1337,6 +1341,7 @@ export class DaemonServer {
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
     this.autoTitle = options.autoTitle ?? true;
+    this.autoTitleExplicit = options.autoTitle !== undefined;
     this.titleClientFactory = options.titleClientFactory;
     this.projectAgentClientFactory = options.projectAgentClientFactory;
     this.reflectionClientFactory = options.reflectionClientFactory;
@@ -8641,6 +8646,12 @@ export class DaemonServer {
     // for new sessions, not a backfill of long-lived history.
     if (session.turnCount < 1 || session.turnCount > TITLE_RETRY_TURN_WINDOW) return;
 
+    // A small model on a local server pays for a title twice: the call itself,
+    // and a cold prompt cache on the next turn when the title prompt evicts the
+    // conversation from the server's slot. The opening-prompt title already
+    // names the session, so a loopback provider keeps it unless auto_title was
+    // set explicitly or the host supplied its own title client.
+    if (!Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && this.titleDefaultsOffForLocalModel(session)) return;
     const attempt = attemptSessionTitle(session.id, async () => {
       let profile: ProviderProfile | undefined;
       const local = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING);
@@ -8700,6 +8711,17 @@ export class DaemonServer {
     const setting = this.runtime.status().auto_title;
     if (typeof setting === "boolean") return setting;
     return this.autoTitle;
+  }
+
+  /** No explicit title choice was made and the title call would reach a loopback model server. */
+  private titleDefaultsOffForLocalModel(session: DaemonSession): boolean {
+    if (this.titleClientFactory || this.autoTitleExplicit) return false;
+    const status = this.runtime.status();
+    if (typeof status.auto_title === "boolean") return false;
+    let profile: ProviderProfile | undefined;
+    try { profile = this.sessionAuxiliaryProfile(session, session.model); } catch { return false; }
+    const baseUrl = profile ? undefined : stringValue(status.base_url);
+    return deriveDataTrust(profile ?? (baseUrl ? { base_url: baseUrl } : undefined)) === "local";
   }
 
   private warnAutoCompactDisabled(

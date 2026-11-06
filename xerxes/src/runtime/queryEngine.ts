@@ -10,6 +10,7 @@ import { createAgentState } from '../streaming/events.js'
 import { runTurn, type TurnDependencies } from '../streaming/loop.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import { runCascadingTurn, type CascadeStep, type CascadingTurnOptions } from './cascade.js'
 import { CostTracker } from './costTracker.js'
 
 export interface QueryEngineConfig {
@@ -33,6 +34,8 @@ export interface TurnResult {
   readonly prompt: string
   readonly stopReason?: 'budget_exhausted' | 'max_turns'
   readonly toolCalls: readonly string[]
+  /** Each checked attempt, when the engine runs the cascade and the checks found something. */
+  readonly cascade?: readonly CascadeStep[]
 }
 
 export const DEFAULT_QUERY_ENGINE_CONFIG: QueryEngineConfig = {
@@ -52,6 +55,7 @@ export class QueryEngine {
   private readonly contextCompressor: ContextCompressor | undefined
   private readonly dependencies: TurnDependencies
   private readonly tools: readonly ToolDefinition[]
+  private readonly cascade: Omit<CascadingTurnOptions, 'onStep'> | undefined
   private submissionTail: Promise<void> = Promise.resolve()
   private turnCount = 0
 
@@ -65,6 +69,11 @@ export class QueryEngine {
       readonly costTracker?: CostTracker
       readonly sessionId?: string
       readonly tools?: readonly ToolDefinition[]
+      /**
+       * Result checks and escalation around each turn, as the daemon runs them.
+       * Absent: one attempt per prompt.
+       */
+      readonly cascade?: Omit<CascadingTurnOptions, 'onStep'>
     } = {},
   ) {
     const config = { ...DEFAULT_QUERY_ENGINE_CONFIG, ...options.config }
@@ -77,6 +86,7 @@ export class QueryEngine {
       ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
     })
     this.tools = options.tools ?? []
+    this.cascade = options.cascade
   }
 
   readonly state = createAgentState()
@@ -114,7 +124,8 @@ export class QueryEngine {
       const tools: string[] = []
       let inputTokens = 0
       let outputTokens = 0
-      for await (const event of runTurn({
+      const steps: CascadeStep[] = []
+      const request = {
         sessionId: this.sessionId,
         ...(this.config.agentId ? { agentId: this.config.agentId } : {}),
         model: this.config.model,
@@ -131,7 +142,14 @@ export class QueryEngine {
             }
           : {}),
         ...(this.config.systemPrompt ? { systemPrompt: this.config.systemPrompt } : {}),
-      }, this.dependencies, signal)) {
+      }
+      const events = this.cascade
+        ? runCascadingTurn(request, this.dependencies, {
+          ...this.cascade,
+          onStep: step => { if (step.findings.length || step.escalation || step.checkError || step.escalationError) steps.push(step) },
+        }, signal)
+        : runTurn(request, this.dependencies, signal)
+      for await (const event of events) {
         if (event.type === 'text') {
           output.push(event.text)
         } else if (event.type === 'tool_start') {
@@ -158,7 +176,7 @@ export class QueryEngine {
         yield event
       }
       this.compactIfDue()
-      return { prompt, output: output.join(''), toolCalls: tools, inputTokens, outputTokens }
+      return { prompt, output: output.join(''), toolCalls: tools, inputTokens, outputTokens, ...(steps.length ? { cascade: steps } : {}) }
     } finally {
       release()
     }

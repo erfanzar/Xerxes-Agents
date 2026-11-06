@@ -66,6 +66,9 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
       /too many tokens/i,
       /reduce.{0,8}messages/i,
       /prompt is too long/i,
+      // llama.cpp's server: "the request exceeds the available context size" (exceed_context_size_error).
+      /exceeds? the available context size/i,
+      /exceed_context_size/i,
     ],
   ],
   [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b40[13]\b/, /forbidden/i]],

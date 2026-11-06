@@ -31,7 +31,13 @@ export interface CatalogEntry {
   /** File name under the models directory. */
   readonly fileName: string
   readonly minMemoryBytes: number
+  /**
+   * Default --ctx-size for llama-server: what fits in this entry's memory tier
+   * next to the weights, not the model's limit. Override with local.ctx_size.
+   */
   readonly ctxSize: number
+  /** The model's own context window; local.ctx_size may not exceed it. */
+  readonly nativeContext?: number
   readonly source?: ModelSource
 }
 
@@ -46,11 +52,15 @@ export const BUILTIN_MODELS: Catalog = [
     ctxSize: 32768,
   },
   {
-    id: 'ternary-bonsai-27b',
-    label: 'Ternary Bonsai 27B',
-    fileName: 'ternary-bonsai-27b.gguf',
+    id: 'ternary-bonsai-2-27b',
+    label: 'Ternary Bonsai 2 27B',
+    fileName: 'ternary-bonsai-2-27b.gguf',
     minMemoryBytes: 24 * GIB,
+    // The model reads 262K tokens; 16K is the launch default for a 24 GB
+    // machine until KV-cache memory is measured there. Raise it with
+    // local.ctx_size where memory allows.
     ctxSize: 16384,
+    nativeContext: 262144,
   },
 ]
 
@@ -59,11 +69,15 @@ export interface LocalConfig {
   readonly modelsDir: string
   readonly port: number
   readonly models: Readonly<Record<string, ModelSource>>
+  /** --ctx-size override for llama-server (local.ctx_size, XERXES_LOCAL_CTX_SIZE). */
+  readonly ctxSize?: number
 }
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const LOCAL_KEYS = new Set(['llama_server_path', 'models_dir', 'port', 'models'])
+const LOCAL_KEYS = new Set(['llama_server_path', 'models_dir', 'port', 'models', 'ctx_size'])
+const MIN_CTX_SIZE = 2048
+const MAX_CTX_SIZE = 1_048_576
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,12 +189,45 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
     }
   }
 
+  const envCtx = env.XERXES_LOCAL_CTX_SIZE?.trim()
+  const ctxSize = envCtx
+    ? parseCtxSize(envCtx, 'XERXES_LOCAL_CTX_SIZE')
+    : section.ctx_size === undefined
+      ? undefined
+      : parseCtxSize(section.ctx_size, 'local.ctx_size')
+
   return {
     ...(serverPath === undefined ? {} : { llamaServerPath: serverPath }),
     modelsDir,
     port,
     models,
+    ...(ctxSize === undefined ? {} : { ctxSize }),
   }
+}
+
+function parseCtxSize(value: unknown, field: string): number {
+  const size = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value
+  if (typeof size !== 'number' || !Number.isInteger(size) || size < MIN_CTX_SIZE || size > MAX_CTX_SIZE) {
+    throw new ValidationError(field, `must be an integer from ${MIN_CTX_SIZE} to ${MAX_CTX_SIZE}`, value)
+  }
+  return size
+}
+
+/**
+ * The --ctx-size to launch an entry with: the configured override, else the
+ * entry's default. An override past the model's own window is refused rather
+ * than clamped, so the setting never silently means something else.
+ */
+export function launchCtxSize(entry: CatalogEntry, config: Pick<LocalConfig, 'ctxSize'>): number {
+  const size = config.ctxSize ?? entry.ctxSize
+  if (entry.nativeContext !== undefined && size > entry.nativeContext) {
+    throw new ValidationError(
+      'local.ctx_size',
+      `exceeds ${entry.label}'s ${entry.nativeContext}-token window`,
+      size,
+    )
+  }
+  return size
 }
 
 /** Built-in catalog with the user's `local.models` sources merged in. */

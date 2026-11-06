@@ -20,6 +20,9 @@ export const LEAN_CORE_TOOL_NAMES: readonly string[] = Object.freeze([
   'WriteFile',
   'FileEditTool',
   'exec_command',
+  // exec_command backgrounds a slow command and returns a proc_id that only
+  // check_command reads; slow local hardware hits that ceiling often.
+  'check_command',
   'CSVProcessor',
   'XlsxWriter',
   'XlsxReader',
@@ -39,20 +42,63 @@ function normalizeSetting(value: unknown, field: string): LeanPromptSetting {
 }
 
 /**
+ * The largest window that gets the lean prompt when nothing is configured. The
+ * full prompt (system text plus about 50 tool schemas) is near 29K tokens, so
+ * it overflows a 16K window and leaves no room to work in a 32K one.
+ */
+export const LEAN_AUTOMATIC_MAX_CONTEXT = 32_768
+
+/** What the turn's route says about fit. */
+export interface PromptProfileRoute {
+  /** The routed model's context window, when known. */
+  readonly contextLimit?: number
+  /** The routed model id. */
+  readonly model?: string
+}
+
+/** Prism's Bonsai models, the ones this harness is tuned for (bonsai-9b, ternary-bonsai-2-27b, prism-ml/…). */
+const BONSAI_MODEL = /bonsai/i
+
+/** True for a Bonsai model id, local or hosted. */
+export function isBonsaiModel(model: string): boolean {
+  return BONSAI_MODEL.test(model)
+}
+
+/**
+ * The profile when none is configured:
+ * - lean for a Bonsai model, wherever it runs. Ternary Bonsai 2 27B has a
+ *   262K window, so this is not about fit: a ~29K-token prompt costs minutes
+ *   of cold prefill on a laptop, and a small model picks better among a few
+ *   tools. Whether lean also wins on a fast cloud host is for the benchmarks;
+ *   set `prompt_profile: full` to compare;
+ * - lean for any known window of 32K or less, where the full prompt barely fits;
+ * - full otherwise. An unknown window on a loopback server stays full: a local
+ *   proxy can front a large cloud model.
+ */
+export function automaticPromptProfile(route: PromptProfileRoute): LeanPromptSetting {
+  if (route.model !== undefined && BONSAI_MODEL.test(route.model)) return 'lean'
+  return route.contextLimit !== undefined && route.contextLimit > 0 && route.contextLimit <= LEAN_AUTOMATIC_MAX_CONTEXT
+    ? 'lean'
+    : 'full'
+}
+
+/**
  * Resolve the prompt profile. Precedence: the provider profile's own field,
- * then `XERXES_PROMPT_PROFILE`, then `runtime.prompt_profile`, then `full`.
+ * then `XERXES_PROMPT_PROFILE`, then `runtime.prompt_profile`, then the
+ * route's fit ({@link automaticPromptProfile}), then `full`.
  * An unreadable value is a ValidationError, never a silent `full`.
  */
 export function parsePromptProfileConfig(
   runtime: Record<string, unknown>,
   env: Record<string, string | undefined>,
   profilePromptProfile?: LeanPromptSetting,
+  route?: PromptProfileRoute,
 ): LeanPromptSetting {
   if (profilePromptProfile !== undefined) return normalizeSetting(profilePromptProfile, 'prompt_profile')
   const fromEnv = env[PROMPT_PROFILE_ENV]?.trim()
   if (fromEnv) return normalizeSetting(fromEnv, PROMPT_PROFILE_ENV)
   const fromFile = runtime['prompt_profile']
-  if (fromFile === undefined || fromFile === null) return 'full'
+  if (fromFile === undefined || fromFile === null) return route ? automaticPromptProfile(route) : 'full'
   return normalizeSetting(fromFile, 'prompt_profile')
 }
 
@@ -92,6 +138,13 @@ export function selectLeanTools<T extends ToolDefinition>(
   return selected
 }
 
+/** The date as the bootstrap Environment line states it (YYYY-MM-DD Weekday). */
+export function localDay(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date)
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekday}`
+}
+
 export interface LeanSystemPromptInput {
   readonly cwd: string
   readonly model: string
@@ -117,6 +170,9 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
   ]
   if (has('exec_command')) {
     lines.push('- exec_command runs one program without a shell: cmd is the program, args is the list of arguments.')
+  }
+  if (has('check_command')) {
+    lines.push('- A command still running at its timeout keeps running in the background. Read it with check_command and the proc_id it returned.')
   }
   if (has('XlsxWriter')) {
     lines.push('- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')

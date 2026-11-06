@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, test } from 'bun:test'
 
-import { BUILTIN_MODELS, GIB, catalogWithConfig, parseLocalConfig, selectModel } from '../src/local/catalog.js'
+import { BUILTIN_MODELS, GIB, catalogWithConfig, launchCtxSize, parseLocalConfig, selectModel } from '../src/local/catalog.js'
 import { parseNvidiaSmi, probeHardware, type HardwareProfile, type HardwarePorts } from '../src/local/hardware.js'
 
 function ports(
@@ -109,7 +109,7 @@ describe('selectModel', () => {
     const at16 = selectModel(apple(16), catalog)
     expect(at16.ok && at16.entry.id).toBe('bonsai-9b')
     const at28 = selectModel(apple(28), catalog)
-    expect(at28.ok && at28.entry.id).toBe('ternary-bonsai-27b')
+    expect(at28.ok && at28.entry.id).toBe('ternary-bonsai-2-27b')
     const at27 = selectModel(apple(27), catalog)
     expect(at27.ok && at27.entry.id).toBe('bonsai-9b')
     expect(selectModel(apple(15), catalog).ok).toBe(false)
@@ -121,7 +121,7 @@ describe('selectModel', () => {
     expect(refused.ok).toBe(false)
     expect(refused.basis).toBe('vram')
     const roomy = selectModel(hw({ totalMemBytes: 16 * GIB, gpu: { vendor: 'nvidia', vramBytes: 24 * GIB } }), catalog)
-    expect(roomy.ok && roomy.entry.id).toBe('ternary-bonsai-27b')
+    expect(roomy.ok && roomy.entry.id).toBe('ternary-bonsai-2-27b')
   })
 
   test('other machines use system RAM and below 12 GiB suggest a cloud profile', () => {
@@ -153,7 +153,7 @@ describe('catalog', () => {
       sha256: 'a'.repeat(64),
       bytes: 10,
     })
-    expect(merged.find((m) => m.id === 'ternary-bonsai-27b')?.source).toBeUndefined()
+    expect(merged.find((m) => m.id === 'ternary-bonsai-2-27b')?.source).toBeUndefined()
   })
 })
 
@@ -189,4 +189,18 @@ describe('parseLocalConfig', () => {
     )
     expect(bad({ local: { models_dir: 'relative/dir' } })).toThrow('local.models_dir')
   })
+})
+
+test('local.ctx_size raises the launch window up to the model\'s own, and refuses more', () => {
+  const twentySeven = BUILTIN_MODELS.find((entry) => entry.id === 'ternary-bonsai-2-27b')
+  if (twentySeven === undefined) throw new Error('Ternary Bonsai 2 27B is missing from the catalog')
+  // Ternary Bonsai 2 27B reads 262K tokens; the 16K default is a memory choice, not its limit.
+  expect(twentySeven.nativeContext).toBe(262144)
+  expect(launchCtxSize(twentySeven, {})).toBe(16384)
+  const configured = parseLocalConfig({ local: { ctx_size: 131072 } }, {})
+  expect(launchCtxSize(twentySeven, configured)).toBe(131072)
+  expect(parseLocalConfig({ local: { ctx_size: 4096 } }, { XERXES_LOCAL_CTX_SIZE: '65536' }).ctxSize).toBe(65536)
+  expect(() => launchCtxSize(twentySeven, { ctxSize: 524288 })).toThrow(/262144-token window/)
+  expect(() => parseLocalConfig({ local: { ctx_size: 100 } }, {})).toThrow(/local\.ctx_size/)
+  expect(() => parseLocalConfig({}, { XERXES_LOCAL_CTX_SIZE: 'big' })).toThrow(/XERXES_LOCAL_CTX_SIZE/)
 })

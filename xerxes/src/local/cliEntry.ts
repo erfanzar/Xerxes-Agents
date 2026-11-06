@@ -4,7 +4,7 @@
 import { ProfileStore } from '../bridge/profiles.js'
 import { loadSystemDaemonConfig } from '../daemon/config.js'
 import { parseLocalConfig } from './catalog.js'
-import { runLocalCommand } from './command.js'
+import { runLocalCommand, type SaveLocalProfileInput } from './command.js'
 import { probeHardware, systemHardwarePorts } from './hardware.js'
 import { createLocalServer, systemServerPorts } from './server.js'
 
@@ -27,18 +27,7 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
       hardware: () => probeHardware(systemHardwarePorts()),
       fetch: (url, init) => fetch(url, init),
       server: createLocalServer(systemServerPorts(), local.llamaServerPath === undefined ? {} : { llamaServerPath: local.llamaServerPath }),
-      saveProfile: async input => {
-        new ProfileStore().save({
-          name: input.name,
-          apiKey: '',
-          baseUrl: input.baseUrl,
-          model: input.model,
-          provider: input.provider,
-          dataTrust: input.dataTrust,
-          promptProfile: input.promptProfile,
-          setActive: false,
-        })
-      },
+      saveProfile: async input => saveLocalProfile(new ProfileStore(), input),
       stdout: text => { process.stdout.write(text) },
       stderr: text => { process.stderr.write(text) },
       config: runtime,
@@ -48,4 +37,24 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
   } finally {
     process.off('SIGINT', onSignal)
   }
+}
+
+/**
+ * Save the `bonsai-local` profile with the window llama-server was launched
+ * with. llama.cpp's model list reports no context size, so without this the
+ * runtime never knows the window: auto-compaction does not run and a full
+ * prompt overflows instead of being compacted.
+ */
+export function saveLocalProfile(store: ProfileStore, input: SaveLocalProfileInput): void {
+  store.save({
+    name: input.name,
+    apiKey: '',
+    baseUrl: input.baseUrl,
+    model: input.model,
+    provider: input.provider,
+    dataTrust: input.dataTrust,
+    promptProfile: input.promptProfile,
+    setActive: false,
+  })
+  store.replaceModelCapabilities(input.name, { [input.model]: { context_limit: input.contextLimit } })
 }

@@ -1,6 +1,6 @@
 ---
 name: xlsx
-description: Create, read, edit Excel .xlsx workbooks and convert to/from CSV using openpyxl.
+description: Read and write Excel .xlsx workbooks. Plain tables go through the native XlsxReader and XlsxWriter tools; formulas, styling and in-place edits use openpyxl.
 version: 1.0.0
 author: Nous Research (adapted for Xerxes)
 platforms: [linux, macos, windows]
@@ -10,9 +10,25 @@ source: https://github.com/NousResearch/hermes-agent/tree/main/skills/productivi
 
 # Xlsx
 
-Work with Excel `.xlsx` workbooks using Python and `openpyxl`: build
-styled multi-sheet workbooks with formulas, inspect or dump existing
-files, edit cells and structure, and convert to/from CSV.
+## Native tools first
+
+When the request only needs cell values, use the built-in tools. They need
+no Python and work in lean mode:
+
+- `XlsxReader` reads rows from one sheet and lists every sheet name. Dates
+  come back as the serial numbers stored in the file.
+- `XlsxWriter` writes a new workbook with one or more sheets of rows.
+  Numbers, booleans and strings keep their types. It writes no formulas,
+  dates or styles.
+- `CSVProcessor` reads, writes, analyzes and converts CSV files.
+
+Never write `.xlsx` with `WriteFile`: that stores plain text Excel cannot
+open.
+
+Use Python and `openpyxl` (below) only when the task needs what those tools
+lack: formulas, number formats, styling, merged cells, charts, or editing an
+existing workbook in place without rewriting it. If Python is unavailable,
+say which part needs it instead of approximating.
 
 ## When to Use
 

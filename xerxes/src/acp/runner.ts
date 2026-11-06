@@ -11,6 +11,8 @@ import { createAgentState, type AgentState, type PermissionRequest, type StreamE
 import type { HookRunner } from '../extensions/hooks.js'
 import { EditFeedback } from '../runtime/editFeedback.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
+import { runCascadingTurn, type CascadeStep, type CascadingTurnOptions } from '../runtime/cascade.js'
+import { renderFindings } from '../runtime/resultChecks.js'
 import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionDecision, PermissionMode, ToolPolicy } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
@@ -43,6 +45,11 @@ export interface AcpAgentRunnerOptions {
   readonly tools?: readonly ToolDefinition[]
   readonly topK?: number
   readonly topP?: number
+  /**
+   * The cascade for one session (checks, escalation, advisor), as the daemon
+   * runs it. Absent: one attempt per prompt.
+   */
+  readonly cascadeFor?: (sessionId: string, cwd: string) => Pick<CascadingTurnOptions, 'hooks'> | undefined
 }
 
 interface ActivePrompt {
@@ -166,7 +173,22 @@ export class AcpAgentRunner {
       const permissionBroker: PermissionBroker = {
         request: (permission, signal) => this.resolvePermission(session, permission, emit, signal),
       }
-      for await (const event of withActiveSession(session, runTurn({
+      const cascade = this.options.cascadeFor?.(session.sessionId, session.cwd)
+      // A checked attempt is shown as plain text, as the edit-diagnostics report is.
+      const reportStep = (step: CascadeStep): void => {
+        const lines = [
+          ...(step.findings.length ? [renderFindings(step.findings)] : []),
+          ...(step.escalation ? [step.escalation.message] : []),
+          ...(step.advisor?.answered === true ? ['Escalation: the advisor answered; the model retries with its advice.'] : []),
+          ...(step.advisor?.answered === false ? [`Advisor consult failed: ${step.advisor.error}`] : []),
+        ]
+        if (lines.length) cascadeReports.push(`\n\n${lines.join('\n')}\n\n`)
+      }
+      const cascadeReports: string[] = []
+      const turn = (turnRequest: Parameters<typeof runTurn>[0], dependencies: Parameters<typeof runTurn>[1], turnSignal: AbortSignal) => cascade
+        ? runCascadingTurn(turnRequest, dependencies, { hooks: cascade.hooks, projectRoot: session.cwd, onStep: reportStep }, turnSignal)
+        : runTurn(turnRequest, dependencies, turnSignal)
+      for await (const event of withActiveSession(session, turn({
         model,
         state,
         userMessage: request.text,
@@ -199,6 +221,7 @@ export class AcpAgentRunner {
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(executor ? { toolExecutor: executor } : {}),
       }, controller.signal))) {
+        for (const text of cascadeReports.splice(0)) await emit(toAcpEvent({ type: 'text', text }).toWire())
         if (event.type === 'permission_request' || event.type === 'provider_wait') {
           continue
         }
@@ -212,6 +235,8 @@ export class AcpAgentRunner {
         await emit(toAcpEvent(event).toWire())
         updateSummary(summary, event)
       }
+      // The last attempt's check runs after its final event.
+      for (const text of cascadeReports.splice(0)) await emit(toAcpEvent({ type: 'text', text }).toWire())
     } catch (error) {
       return {
         ok: false,

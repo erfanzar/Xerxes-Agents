@@ -13,6 +13,8 @@
 import { ValidationError } from '../core/errors.js'
 import type { DataBoundaryMode } from '../security/boundaryTypes.js'
 import { buildCheckFailureAdvisorRequest } from '../tools/advisorTool.js'
+import { parseAdvisorConfig } from './advisorBudget.js'
+import { isBonsaiModel } from './leanPrompt.js'
 import { renderFindings, type CheckFinding } from './resultChecks.js'
 
 /** Environment variable that overrides `runtime.escalation.mode`. */
@@ -65,11 +67,13 @@ function usdSetting(source: Record<string, unknown>, key: string, fallback: numb
 
 /**
  * Parse `runtime.escalation` plus `XERXES_ESCALATION`. The env var wins for
- * `mode`. Invalid values and unknown keys throw a ValidationError naming the key.
+ * `mode`; with neither set, `defaultMode` applies (the host picks it per
+ * session). Invalid values and unknown keys throw a ValidationError naming the key.
  */
 export function parseEscalationConfig(
   runtime: Record<string, unknown>,
   env: Record<string, string | undefined>,
+  defaultMode: 'off' | 'on' = 'off',
 ): EscalationConfig {
   const raw = runtime['escalation']
   if (raw !== undefined && raw !== null && !isRecord(raw)) {
@@ -84,7 +88,7 @@ export function parseEscalationConfig(
   const mode = envMode
     ? normalizeMode(envMode, ESCALATION_ENV)
     : fileMode === undefined || fileMode === null
-      ? 'off'
+      ? defaultMode
       : normalizeMode(fileMode, 'escalation.mode')
   return {
     mode,
@@ -92,6 +96,32 @@ export function parseEscalationConfig(
     maxModelChanges: integerSetting(source, 'max_model_changes', ESCALATION_DEFAULT_MAX_MODEL_CHANGES, 0, 5),
     maxAdvisorCalls: integerSetting(source, 'max_advisor_calls', ESCALATION_DEFAULT_MAX_ADVISOR_CALLS, 0, 20),
     maxUsd: usdSetting(source, 'max_usd', ESCALATION_DEFAULT_MAX_USD),
+  }
+}
+
+export interface EscalationDefaultInput {
+  readonly runtime: Record<string, unknown>
+  readonly env: Record<string, string | undefined>
+  /** The model the turn runs on. */
+  readonly model: string
+  /** Whether that model runs on this machine; consulted only when it matters. */
+  readonly local: () => boolean
+}
+
+/**
+ * The escalation mode when neither `runtime.escalation.mode` nor
+ * XERXES_ESCALATION is set: on for a Bonsai model or a local one (a failed
+ * check is cheap to retry there, and the plan's "escalation by rule" applies),
+ * and when `advisor.auto_on_check_fail` asks for it; off otherwise. Every entry
+ * point uses this, so a benchmark run gets the same cascade as the daemon.
+ */
+export function defaultEscalationMode(input: EscalationDefaultInput): 'off' | 'on' {
+  if (parseAdvisorConfig(input.runtime, input.env).autoOnCheckFail) return 'on'
+  if (isBonsaiModel(input.model)) return 'on'
+  try {
+    return input.local() ? 'on' : 'off'
+  } catch {
+    return 'off'
   }
 }
 

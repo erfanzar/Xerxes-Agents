@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
+import { parsePromptProfileConfig } from '../src/runtime/leanPrompt.js'
 import type { DaemonSession } from '../src/daemon/runtime.js'
 import type { CompletionRequest, LlmClient } from '../src/llms/client.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
@@ -78,4 +79,29 @@ test('lean profile sends the terse prompt and only core tools with short descrip
     expect(entry.function.description).not.toContain('second sentence')
   }
   expect(system.length).toBeLessThan(4_000)
+})
+
+test("the prompt-profile hook sees the turn's window, so a small window can choose lean on its own", async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-lean-runner-window-'))
+  try {
+    const seen: unknown[] = []
+    const requests: CompletionRequest[] = []
+    const llm: LlmClient = { async *stream(request) { requests.push(request); yield { content: 'done' } } }
+    const runner = new AgentTurnRunner({
+      llm,
+      model: 'ternary-bonsai-27b',
+      contextLimit: 16_384,
+      tools: TOOLS,
+      bootstrapSystemPrompt: () => BOOTSTRAP,
+      promptProfileForSession: (_session, turn) => {
+        seen.push(turn)
+        return parsePromptProfileConfig({}, {}, undefined, turn.contextLimit === undefined ? {} : { contextLimit: turn.contextLimit })
+      },
+    })
+    for await (const event of runner.run(sessionFor(root, 'lean-window'), 'List the files.', new AbortController().signal)) void event
+    expect(seen[0]).toMatchObject({ contextLimit: 16_384 })
+    expect(systemText(requests[0]!)).not.toContain('FULL BOOTSTRAP PROMPT')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

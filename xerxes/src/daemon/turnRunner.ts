@@ -18,8 +18,9 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
-import { buildLeanSystemPrompt, selectLeanTools } from '../runtime/leanPrompt.js'
-import { renderFindings, runResultChecks, type CheckFinding, type ToolRunSummary } from '../runtime/resultChecks.js'
+import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/leanPrompt.js'
+import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
+import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
 import type { TurnRoute } from './turnRouting.js'
 import type { EscalationNotice } from './turnEscalation.js'
@@ -105,6 +106,16 @@ export interface TurnReflectionInput {
   readonly signal: AbortSignal
 }
 
+/** What a turn's route says to the prompt-profile hook. */
+export interface PromptProfileTurn {
+  /** The routed provider's window, else the runner's. */
+  readonly contextLimit?: number
+  /** The model this turn runs on (the route's, when policy routing chose one). */
+  readonly model: string
+  /** The routed profile, when policy routing chose a route. */
+  readonly profile?: string
+}
+
 export interface AgentTurnRunnerOptions {
   /**
    * How long a model question (AskUserQuestionTool, ask_user) waits for a person before it
@@ -116,7 +127,8 @@ export interface AgentTurnRunnerOptions {
   readonly lessonsForTurn?: (session: DaemonSession, userText: string, signal: AbortSignal) => Promise<string>
   /** Host owns provider authority, lifetime tracking, storage and session notification. */
   readonly reflection?: (input: TurnReflectionInput) => Promise<{ id: string; summary: string } | undefined>
-  readonly reflectionMode?: () => 'goals' | 'all' | 'off'
+  /** Per session: a host may narrow the mode for a session's provider. */
+  readonly reflectionMode?: (session?: DaemonSession) => 'goals' | 'all' | 'off'
   readonly remoteProviderBindings?: RemoteProviderBindings
   /** Retries for a turn served by the desktop's provider; its lapses wait for the desktop to bind again. Tests shorten it. */
   readonly localProviderRetryPolicy?: typeof DEFAULT_RETRY_POLICY
@@ -188,9 +200,11 @@ export interface AgentTurnRunnerOptions {
   /**
    * The session's prompt profile. `lean` (a small local model) sends a terse
    * system prompt and only the core tools; absent or `full` keeps today's
-   * prompt exactly. Throwing fails the turn with the validation error.
+   * prompt exactly. `turn` is this turn's route: its window, and the routed
+   * profile when policy routing chose one. Throwing fails the turn
+   * with the validation error.
    */
-  readonly promptProfileForSession?: (session: DaemonSession) => 'lean' | 'full'
+  readonly promptProfileForSession?: (session: DaemonSession, turn: PromptProfileTurn) => 'lean' | 'full'
   /**
    * Result checks after a finished turn (xlsx/csv validity, a claimed check
    * that never ran). Absent or `off`: none run. `warn` only notifies the user.
@@ -211,6 +225,17 @@ export interface AgentTurnRunnerOptions {
    * undefined (escalation off or nothing failed), keeps today's behavior.
    */
   readonly escalationForSession?: (session: DaemonSession, findings: readonly CheckFinding[]) => EscalationNotice | undefined
+  /**
+   * Consult the cloud advisor from code when escalation reaches `ask_advisor`,
+   * under the advisor's own budget and outbound gate. Returns its answer, or
+   * the reason it was not consulted. Absent: the model is told to call
+   * AskAdvisor itself.
+   */
+  readonly consultAdvisor?: (
+    session: DaemonSession,
+    request: { readonly question: string; readonly context: string },
+    signal: AbortSignal,
+  ) => Promise<string>
   /**
    * Relieve a mid-turn context overflow. The loop detects the overflow and can
    * retry the round, but owns no compaction policy — without this the turn can
@@ -511,7 +536,11 @@ export class AgentTurnRunner implements TurnRunner {
     if (resumedSubagent) state.metadata.status = 'running'
     const surfaceTools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
     // Lean prompt profile (off by default): core tools only, short descriptions.
-    const lean = this.options.promptProfileForSession?.(session) === 'lean'
+    const lean = this.options.promptProfileForSession?.(session, {
+      model,
+      ...(contextLimit === undefined ? {} : { contextLimit }),
+      ...(route?.ok ? { profile: route.profile } : {}),
+    }) === 'lean'
     const tools = lean && surfaceTools ? selectLeanTools(surfaceTools) : surfaceTools
     // The session's own mode wins over the runner default, so the pin reaches
     // the permission broker rather than only the status line.
@@ -613,7 +642,7 @@ export class AgentTurnRunner implements TurnRunner {
     // when; the learning tools had only per-tool notes and were never called.
     const learningPolicy = this.snapshots.learningPolicy.get(session.id) ?? learningPolicyPrompt({
       tools: new Set((tools ?? []).map(tool => tool.function.name)),
-      reflection: this.options.reflectionMode?.() ?? 'all',
+      reflection: this.options.reflectionMode?.(session) ?? 'all',
     })
     this.snapshots.learningPolicy.set(session.id, learningPolicy)
     // Lean: the terse prompt is the whole system prompt (about 3K tokens with
@@ -780,6 +809,12 @@ export class AgentTurnRunner implements TurnRunner {
       }
       let attemptLlm = gateLlmClient(routedProvider?.llm ?? this.options.llm, gateFor(model))
       let fallbackAttempted = false
+      // The cascade: when escalation decides a failed check gets another
+      // attempt, the loop runs again inside this turn with the feedback as
+      // the next (harness) message, then checks again. The escalation ladder
+      // bounds it; MAX_CASCADE_ROUNDS is only a backstop.
+      let attemptMessage: MessageContent = userMessage
+      let cascadeRound = 0
       for (;;) {
         const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
         const retryPolicy = requiresLocal ? this.options.localProviderRetryPolicy ?? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
@@ -797,10 +832,12 @@ export class AgentTurnRunner implements TurnRunner {
         model: attemptModel,
         sessionId: session.id,
         state,
-        userMessage,
-        ...(providerText === displayText ? {} : { userDisplayText: displayText }),
-        ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
-        ...(controls.actor ? { userActor: controls.actor } : {}),
+        userMessage: attemptMessage,
+        ...(cascadeRound > 0 ? { userOrigin: 'harness' as const } : {
+          ...(providerText === displayText ? {} : { userDisplayText: displayText }),
+          ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
+          ...(controls.actor ? { userActor: controls.actor } : {}),
+        }),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
         permissionMode,
@@ -999,37 +1036,47 @@ export class AgentTurnRunner implements TurnRunner {
           // error findings to the model (as edit diagnostics are). A check
           // that cannot run never fails a finished turn.
           if (!signal.aborted && this.options.resultChecksForSession) {
-            let checksMode: 'off' | 'warn' | 'enforce' = 'off'
-            let findings: readonly CheckFinding[] = []
-            try {
-              checksMode = this.options.resultChecksForSession(session)
-              if (checksMode !== 'off') findings = await turnResultFindings(state, executionsBefore, projectRoot)
-            } catch (error) {
-              yield { type: 'notification', payload: { level: 'warning', message: `Result checks did not run: ${error instanceof Error ? error.message : String(error)}` } }
+            // The shared cascade (runtime/cascade.ts): the same checks and
+            // ladder one-shot runs and the SDK use. A clean check resets the
+            // session's ladder.
+            const hooks: CascadeHooks = {
+              checks: () => this.options.resultChecksForSession!(session),
+              ...(this.options.escalationForSession ? { escalate: findings => this.options.escalationForSession!(session, findings) } : {}),
+              ...(this.options.consultAdvisor ? { consultAdvisor: (request, consultSignal) => this.options.consultAdvisor!(session, request, consultSignal) } : {}),
             }
-            // Escalation (off by default) decides the next step by rule from
-            // these findings; a clean check resets the session's ladder.
-            let escalation: EscalationNotice | undefined
-            if (checksMode !== 'off' && this.options.escalationForSession) {
-              try {
-                escalation = this.options.escalationForSession(session, findings)
-              } catch (error) {
-                yield { type: 'notification', payload: { level: 'warning', message: `Escalation did not run: ${error instanceof Error ? error.message : String(error)}` } }
-              }
+            const check = await cascadeCheck(state, executionsBefore, projectRoot, hooks)
+            if (check.checkError !== undefined) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Result checks did not run: ${check.checkError}` } }
             }
-            if (findings.length) {
+            if (check.escalationError !== undefined) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Escalation did not run: ${check.escalationError}` } }
+            }
+            if (check.findings.length) {
               yield {
                 type: 'notification',
-                payload: { level: 'warning', message: renderFindings(findings), result_checks: findings.map(finding => ({ ...finding })) },
-              }
-              if (escalation?.feedback) {
-                state.messages.push({ role: 'user', content: escalation.feedback, origin: 'harness' })
-              } else if (checksMode === 'enforce' && escalation === undefined && findings.some(finding => finding.severity === 'error')) {
-                state.messages.push({ role: 'user', content: `${renderFindings(findings)}\nFix these before you report the task as done.`, origin: 'harness' })
+                payload: { level: 'warning', message: renderFindings(check.findings), result_checks: check.findings.map(finding => ({ ...finding })) },
               }
             }
+            const escalation = check.escalation
             if (escalation) {
               yield { type: 'notification', payload: { level: escalation.level, message: escalation.message, escalation: { action: escalation.action } } }
+            }
+            const next = await cascadeNext(check, hooks, signal)
+            if (next.advisor?.answered === true) {
+              yield { type: 'notification', payload: { level: 'info', message: 'Escalation: the advisor answered; the model retries with its advice.' } }
+            } else if (next.advisor?.answered === false) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Advisor consult failed: ${next.advisor.error}` } }
+            }
+            if (next.feedback !== undefined) {
+              if (!signal.aborted && !turnErrored && cascadeRound < MAX_CASCADE_ROUNDS - 1) {
+                cascadeRound += 1
+                attemptMessage = next.feedback
+                continue
+              }
+              // Cancelled, failed or past the backstop: the model reads it next turn.
+              state.messages.push({ role: 'user', content: next.feedback, origin: 'harness' })
+            } else if (next.enforceMessage !== undefined) {
+              state.messages.push({ role: 'user', content: next.enforceMessage, origin: 'harness' })
             }
           }
           break
@@ -1043,7 +1090,7 @@ export class AgentTurnRunner implements TurnRunner {
         // Search backwards rather than assuming the message is last: a steer
         // drained at the round boundary may have been appended after it.
         const pushedIndex = state.messages.findLastIndex(
-          message => message.role === 'user' && message.content === userMessage,
+          message => message.role === 'user' && message.content === attemptMessage,
         )
         if (pushedIndex >= 0) {
           state.messages.splice(pushedIndex, 1)
@@ -1110,7 +1157,7 @@ export class AgentTurnRunner implements TurnRunner {
           // setting or snapshot must never turn a successful task into a failure.
           void Promise.resolve().then(() => {
             if (signal.aborted) return
-            const mode = this.options.reflectionMode?.() ?? 'all'
+            const mode = this.options.reflectionMode?.(completedSession) ?? 'all'
             if (mode === 'off') return
             const goalAfter = getGoal(completedSession.metadata, completedSession.id)
             const transitioned = goalAfter && (goalAfter.id !== goalBefore?.id || goalAfter.phase !== goalBefore?.phase)
@@ -1306,46 +1353,6 @@ function boundedToolResultPreview(toolName: string, content: string, path: strin
     ? 'The full output is on disk at the path above; read it only if the preview is insufficient.'
     : 'The full output was not retained.'
   return `<persisted-output ${attributes}>\n${compressed.compressed}\n${recovery}\n</persisted-output>`
-}
-
-/** Tools whose success means a file on disk changed and a checker could disagree. */
-const MUTATING_TOOL_NAMES = new Set([
-  'AppendFile', 'Edit', 'FileEditTool', 'NotebookEditTool', 'Write', 'WriteFile',
-  'append_file', 'edit_file', 'write_file',
-])
-
-/** Tools whose output file the result checks inspect, on top of {@link MUTATING_TOOL_NAMES}. */
-const CHECKED_OUTPUT_TOOL_NAMES = new Set(['XlsxWriter'])
-
-/**
- * Run the result checks over the executions this turn added: files it wrote,
- * the commands it ran, and what its final reply claims.
- */
-async function turnResultFindings(state: AgentState, executionsBefore: number, projectRoot: string): Promise<CheckFinding[]> {
-  const executions = state.toolExecutions.slice(executionsBefore)
-  const changedFiles: string[] = []
-  const toolRuns: ToolRunSummary[] = []
-  for (const execution of executions) {
-    const failed = !execution.permitted || execution.result.startsWith('Tool execution failed')
-    if (!failed && (MUTATING_TOOL_NAMES.has(execution.name) || CHECKED_OUTPUT_TOOL_NAMES.has(execution.name))) {
-      const path = execution.inputs.file_path ?? execution.inputs.path
-      if (typeof path === 'string' && path) changedFiles.push(path)
-    }
-    let ok = !failed
-    let command: string | undefined
-    if (execution.name === 'exec_command') {
-      const cmd = typeof execution.inputs.cmd === 'string' ? execution.inputs.cmd : ''
-      const args = Array.isArray(execution.inputs.args) ? execution.inputs.args.filter(arg => typeof arg === 'string') : []
-      command = [cmd, ...args].join(' ').trim()
-      try {
-        const parsed: unknown = JSON.parse(execution.result)
-        if (typeof parsed === 'object' && parsed !== null && 'exitCode' in parsed) ok = ok && parsed.exitCode === 0
-      } catch { /* A non-JSON result keeps the permitted/failed verdict. */ }
-    }
-    toolRuns.push({ name: execution.name, ok, ...(command ? { command } : {}) })
-  }
-  if (!changedFiles.length && !toolRuns.length) return []
-  return runResultChecks({ workspaceRoot: projectRoot, changedFiles, finalText: latestAssistantContent(state), toolRuns })
 }
 
 /** True when this turn wrote to the workspace, so a diagnostics pass can earn its latency. */
@@ -1614,12 +1621,6 @@ function auditStreamEvent(
   }
 }
 
-function latestAssistantContent(state: AgentState): string {
-  const message = state.messages.slice().reverse().find(candidate => candidate.role === 'assistant')
-  if (!message) return ''
-  return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
-}
-
 interface SessionMemorySnapshot {
   readonly key: string
   readonly section: string
@@ -1637,13 +1638,6 @@ interface MemoryForTurn {
   readonly changes: string
   readonly selfChanges: string
   readonly sources: readonly MemorySourceText[]
-}
-
-/** The date as the bootstrap Environment line states it (YYYY-MM-DD Weekday). */
-function localDay(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date)
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekday}`
 }
 
 function systemPromptAddendum(session: DaemonSession): string {

@@ -2,14 +2,18 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Feedback-driven escalation (M2.3) for the daemon turn runner.
+ * Escalation by rule (M1.1) for the daemon turn runner: the cascade.
  *
- * Off by default (`runtime.escalation.mode`, XERXES_ESCALATION). After a
- * turn's result checks run, the session's EscalationController decides by
- * rule what happens next: retry locally, ask the advisor, or stop. Each step
- * is delivered as a harness message the model reads on its next round, plus
- * a notice for the user. The ladder lives per session, so retries are counted
- * across turns, and a clean check resets it.
+ * After a turn's result checks run, the session's EscalationController decides
+ * what happens next from the findings, never from the model's opinion of its
+ * own work: retry locally, consult the cloud advisor, or stop. The runner acts
+ * on the step inside the same user turn: it re-runs the model with the
+ * feedback (and, for `ask_advisor`, consults the advisor itself and passes on
+ * the answer), then checks again. The ladder lives per session, so retries are
+ * counted across turns, and a clean check resets it.
+ *
+ * `runtime.escalation.mode` or XERXES_ESCALATION turns it on or off; unset,
+ * the host's `defaultMode` decides per session (on for local models).
  *
  * `change_model` is not offered here: switching models mid-task is the
  * router's decision, so the ladder goes retry → advisor → stop.
@@ -27,6 +31,8 @@ export interface EscalationNotice {
   readonly message: string
   /** Delivered to the model as a harness message; absent for `stop`. */
   readonly feedback?: string
+  /** For `ask_advisor`: what the runner sends the advisor itself. */
+  readonly advisorRequest?: { readonly question: string; readonly context: string }
 }
 
 export interface EscalationFactoryOptions<S extends { readonly id: string; readonly cwd: string }> {
@@ -37,6 +43,8 @@ export interface EscalationFactoryOptions<S extends { readonly id: string; reado
   readonly touchesPrivate?: (session: S) => boolean
   /** True when AskAdvisor is registered (an advisor profile is configured). */
   readonly advisorAvailable: () => boolean
+  /** The mode when neither runtime.escalation.mode nor XERXES_ESCALATION is set. Default off. */
+  readonly defaultMode?: (session: S) => 'off' | 'on'
 }
 
 const MAX_TRACKED_SESSIONS = 500
@@ -51,7 +59,7 @@ export function createEscalationFactory<S extends { readonly id: string; readonl
 ): (session: S, findings: readonly CheckFinding[]) => EscalationNotice | undefined {
   const controllers = new Map<string, EscalationController>()
   return (session, findings) => {
-    const config = parseEscalationConfig(options.runtime(), options.env ?? process.env)
+    const config = parseEscalationConfig(options.runtime(), options.env ?? process.env, options.defaultMode?.(session) ?? 'off')
     if (config.mode === 'off') {
       controllers.delete(session.id)
       return undefined
@@ -102,12 +110,14 @@ export function createEscalationFactory<S extends { readonly id: string; readonl
         return {
           action: 'ask_advisor',
           level: 'info',
-          message: `Escalation: checks keep failing; the model is told to consult AskAdvisor (${summary.advisorCalls} of ${config.maxAdvisorCalls}).`,
+          message: `Escalation: checks keep failing after local retries; consulting the advisor (${summary.advisorCalls} of ${config.maxAdvisorCalls}).`,
+          // Used only when the runner cannot consult the advisor itself.
           feedback: [
             'Local retries did not fix the failed checks. Call AskAdvisor once, with exactly this question and context, then apply its answer:',
             `question: ${step.question}`,
             `context: ${step.context}`,
           ].join('\n'),
+          advisorRequest: { question: step.question, context: step.context },
         }
       case 'stop':
         controllers.delete(session.id)

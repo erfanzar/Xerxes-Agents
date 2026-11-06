@@ -6,11 +6,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { ProfileStore, resolvedProfileContextLimit } from '../src/bridge/profiles.js'
 import { GIB } from '../src/local/catalog.js'
+import { saveLocalProfile } from '../src/local/cliEntry.js'
 import { LOCAL_USAGE, runLocalCommand, type LocalCommandPorts, type SaveLocalProfileInput } from '../src/local/command.js'
 import type { FetchPort } from '../src/local/download.js'
 import type { HardwareProfile } from '../src/local/hardware.js'
 import type { LocalServer, ServerStatus, StartOptions } from '../src/local/server.js'
+import { ErrorKind, classifyError } from '../src/runtime/errorClassifier.js'
 
 let dir: string
 beforeEach(async () => {
@@ -152,6 +155,7 @@ describe('runLocalCommand', () => {
         provider: 'custom',
         dataTrust: 'local',
         promptProfile: 'lean',
+        contextLimit: 32768,
       },
     ])
     // progress went to stderr, never stdout
@@ -183,10 +187,10 @@ describe('runLocalCommand', () => {
     const file = join(dir, 'mine.gguf')
     await writeFile(file, Buffer.concat([Buffer.from('GGUF'), Buffer.alloc(8)]))
     const refused = harness(hw16)
-    expect(await runLocalCommand(['setup', '--model', 'ternary-bonsai-27b', '--model-file', file], refused.ports)).toBe(1)
+    expect(await runLocalCommand(['setup', '--model', 'ternary-bonsai-2-27b', '--model-file', file], refused.ports)).toBe(1)
     expect(refused.err.join('')).toContain('--yes')
     const allowed = harness(hw16)
-    expect(await runLocalCommand(['setup', '--model', 'ternary-bonsai-27b', '--model-file', file, '--yes'], allowed.ports)).toBe(0)
+    expect(await runLocalCommand(['setup', '--model', 'ternary-bonsai-2-27b', '--model-file', file, '--yes'], allowed.ports)).toBe(0)
     expect(allowed.starts[0]?.ctxSize).toBe(16384)
   })
 
@@ -268,4 +272,31 @@ describe('runLocalCommand', () => {
     expect(body.model).toMatchObject({ present: true, verified: true, source_configured: true })
     expect(body.llama_server).toEqual({ found: true, path: '/opt/bin/llama-server' })
   })
+})
+
+test('the saved local profile carries the llama-server window, so the runtime can compact before overflowing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xerxes-local-profile-'))
+  try {
+    const store = new ProfileStore(join(dir, 'profiles.json'))
+    saveLocalProfile(store, {
+      name: 'bonsai-local',
+      baseUrl: 'http://127.0.0.1:11581/v1',
+      model: 'ternary-bonsai-2-27b',
+      provider: 'custom',
+      dataTrust: 'local',
+      promptProfile: 'lean',
+      contextLimit: 16384,
+    })
+    const saved = store.get('bonsai-local')
+    expect(resolvedProfileContextLimit(saved, 'ternary-bonsai-2-27b')).toBe(16384)
+    expect(saved?.prompt_profile).toBe('lean')
+    expect(store.active()?.name).not.toBe('bonsai-local')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("llama.cpp's context overflow error is classified as an overflow, so compaction can rescue the turn", () => {
+  const error = new Error('400 {"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}')
+  expect(classifyError(error).kind).toBe(ErrorKind.CONTEXT_OVERFLOW)
 })

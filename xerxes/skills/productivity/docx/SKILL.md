@@ -1,6 +1,6 @@
 ---
 name: docx
-description: Create, read, edit, template, and review Word .docx files using python-docx and LibreOffice.
+description: Read Word .docx text with the native ReadFile tool; create, edit, template and review .docx files with python-docx and LibreOffice.
 version: 1.0.0
 author: Nous Research (adapted for Xerxes)
 platforms: [linux, macos, windows]
@@ -9,6 +9,13 @@ source: https://github.com/NousResearch/hermes-agent/tree/main/skills/productivi
 ---
 
 # Docx
+
+## Reading needs no Python
+
+To read a `.docx`, call `ReadFile` on it: it returns the body text and table
+cells, without formatting, images or comments. Use `python-docx` (below) only
+for what that view lacks: styles, images, headers and footers, comments, or
+any change to the file. If Python is unavailable, say which part needs it.
 
 Create, read, edit, and template Microsoft Word `.docx` files with
 `python-docx`. Handles text, styles, lists, tables, images,
@@ -27,7 +34,7 @@ headers/footers, and `{{token}}` templating. Does not render documents
 ## Prerequisites
 
 ```bash
-# Install with uv (recommended — already available in Xerxes)
+# Install with uv, if it is on this machine
 uv pip install python-docx
 
 # Or with pip

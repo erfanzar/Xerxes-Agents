@@ -10,9 +10,10 @@ import { expect, test } from 'bun:test'
 import { createEscalationFactory } from '../src/daemon/turnEscalation.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import type { DaemonEvent, DaemonSession } from '../src/daemon/runtime.js'
-import type { LlmDelta } from '../src/llms/client.js'
+import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import type { CheckFinding } from '../src/runtime/resultChecks.js'
 import type { DataBoundaryMode } from '../src/security/boundaryTypes.js'
+import { createOfficeZip } from '../src/skills/powerpoint/zip.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 const ERROR: CheckFinding = { code: 'xlsx_is_text', severity: 'error', path: 'out.xlsx', message: 'not a workbook' }
@@ -77,39 +78,132 @@ function daemonSession(cwd: string): DaemonSession {
   }
 }
 
-test('in a turn, escalation feedback replaces the plain enforce message and is not duplicated', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'xerxes-turn-escalation-'))
-  try {
-    let round = 0
-    const runner = new AgentTurnRunner({
-      llm: {
-        async *stream(): AsyncGenerator<LlmDelta> {
-          round += 1
-          if (round === 1) {
-            yield { toolCalls: [{ id: 'w', type: 'function', function: { name: 'WriteFile', arguments: { file_path: 'out.xlsx', content: 'a,b\n1,2\n' } } }] }
-            return
-          }
-          yield { content: 'Wrote out.xlsx.' }
-        },
+const WORKBOOK = createOfficeZip([
+  { name: '[Content_Types].xml', data: new TextEncoder().encode('<Types/>') },
+  { name: 'xl/workbook.xml', data: new TextEncoder().encode('<workbook/>') },
+  { name: 'xl/worksheets/sheet1.xml', data: new TextEncoder().encode('<worksheet/>') },
+])
+
+/** A model scripted by call number; `write` puts CSV text or a real workbook at out.xlsx. */
+function scriptedModel(script: ReadonlyArray<'csv' | 'workbook' | 'done'>) {
+  const requests: CompletionRequest[] = []
+  const llm: LlmClient = {
+    async *stream(request): AsyncGenerator<LlmDelta> {
+      requests.push(request)
+      const step = script[Math.min(requests.length, script.length) - 1] ?? 'done'
+      if (step === 'done') {
+        yield { content: 'Wrote out.xlsx.' }
+        return
+      }
+      yield { toolCalls: [{ id: `w${requests.length}`, type: 'function', function: { name: 'WriteFile', arguments: { file_path: 'out.xlsx', content: step } } }] }
+    },
+  }
+  return { llm, requests }
+}
+
+function runnerFor(root: string, llm: LlmClient, extra: Partial<ConstructorParameters<typeof AgentTurnRunner>[0]> = {}): AgentTurnRunner {
+  return new AgentTurnRunner({
+    llm,
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    toolExecutor: {
+      async execute(call) {
+        const target = join(root, String(call.function.arguments.file_path))
+        if (call.function.arguments.content === 'workbook') await Bun.write(target, WORKBOOK)
+        else await writeFile(target, 'a,b\n1,2\n')
+        return 'written'
       },
-      model: 'gpt-4o',
-      permissionMode: 'accept-all',
-      toolExecutor: { async execute(call) { const args = call.function.arguments; await writeFile(join(root, String(args.file_path)), String(args.content)); return 'written' } },
-      tools: [WRITE_TOOL],
-      resultChecksForSession: () => 'enforce',
-      escalationForSession: factory({ escalation: { mode: 'on' } }),
+    },
+    tools: [WRITE_TOOL],
+    resultChecksForSession: () => 'enforce',
+    ...extra,
+  })
+}
+
+const harnessMessages = (target: DaemonSession): string[] => target.messages
+  .filter(message => (message as { role?: unknown }).role === 'user' && (message as { origin?: unknown }).origin === 'harness')
+  .map(message => String((message as { content?: unknown }).content))
+
+const escalationActions = (events: readonly DaemonEvent[]): unknown[] => events
+  .filter(event => event.type === 'notification' && event.payload.escalation !== undefined)
+  .map(event => (event.payload.escalation as { action?: unknown }).action)
+
+test('a failed check re-runs the model inside the same turn, and a passing fix ends the cascade', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-cascade-retry-'))
+  try {
+    // Writes CSV text into .xlsx, claims done, then fixes it on the retry.
+    const model = scriptedModel(['csv', 'done', 'workbook', 'done'])
+    const runner = runnerFor(root, model.llm, { escalationForSession: factory({ escalation: { mode: 'on' } }) })
+    const target = daemonSession(root)
+    const events: DaemonEvent[] = []
+    for await (const event of runner.run(target, 'Make a workbook.', new AbortController().signal)) events.push(event)
+    // One user turn, four model calls: the retry happened inside it.
+    expect(model.requests).toHaveLength(4)
+    expect(escalationActions(events)).toEqual(['retry_local'])
+    const harness = harnessMessages(target)
+    expect(harness).toHaveLength(1)
+    expect(harness[0]).toContain('failed these checks')
+    // The model saw the feedback on the very next call.
+    expect(JSON.stringify(model.requests[2]!.messages)).toContain('failed these checks')
+    const bytes = new Uint8Array(await Bun.file(join(root, 'out.xlsx')).arrayBuffer())
+    expect(bytes[0]).toBe(0x50)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('when the ladder reaches the advisor, the runner consults it itself and passes the answer on', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-cascade-advisor-'))
+  try {
+    const model = scriptedModel(['csv', 'done', 'workbook', 'done'])
+    const consulted: Array<{ question: string; context: string }> = []
+    const runner = runnerFor(root, model.llm, {
+      escalationForSession: factory({ escalation: { mode: 'on', max_local_retries: 0 } }, { advisor: true }),
+      consultAdvisor: async (_session, request) => {
+        consulted.push({ ...request })
+        return 'Write the file with XlsxWriter so it is a real workbook.'
+      },
     })
     const target = daemonSession(root)
     const events: DaemonEvent[] = []
     for await (const event of runner.run(target, 'Make a workbook.', new AbortController().signal)) events.push(event)
-    const harness = target.messages.filter(message => {
-      const record = message as { role?: unknown; origin?: unknown }
-      return record.role === 'user' && record.origin === 'harness'
-    })
+    expect(consulted).toHaveLength(1)
+    expect(consulted[0]!.context).toContain('xlsx_is_text')
+    expect(escalationActions(events)).toEqual(['ask_advisor'])
+    const harness = harnessMessages(target)
     expect(harness).toHaveLength(1)
-    expect(String((harness[0] as { content?: unknown }).content)).toContain('retry')
-    expect(events.some(event => event.type === 'notification' && event.payload.escalation !== undefined)).toBe(true)
+    expect(harness[0]).toContain('Write the file with XlsxWriter')
+    expect(harness[0]).not.toContain('Call AskAdvisor')
+    expect(model.requests).toHaveLength(4)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('a cascade that does not improve stops instead of looping', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-cascade-stop-'))
+  try {
+    // Never fixes the file.
+    const model = scriptedModel(['csv', 'done'])
+    const runner = runnerFor(root, model.llm, { escalationForSession: factory({ escalation: { mode: 'on', max_local_retries: 5 } }) })
+    const target = daemonSession(root)
+    const events: DaemonEvent[] = []
+    for await (const event of runner.run(target, 'Make a workbook.', new AbortController().signal)) events.push(event)
+    const actions = escalationActions(events)
+    expect(actions.at(-1)).toBe('stop')
+    // Two retries without improvement end it, well under the five allowed.
+    expect(actions.filter(action => action === 'retry_local').length).toBeLessThanOrEqual(3)
+    expect(model.requests.length).toBeLessThanOrEqual(8)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unset, escalation follows the host default, and an explicit mode wins', () => {
+  const withDefault = (runtime: Record<string, unknown>, mode: 'on' | 'off') => createEscalationFactory<{ id: string; cwd: string }>({
+    runtime: () => runtime, env: {}, boundaryMode: () => 'off', advisorAvailable: () => false, defaultMode: () => mode,
+  })
+  expect(withDefault({}, 'on')(session, [ERROR])?.action).toBe('retry_local')
+  expect(withDefault({}, 'off')(session, [ERROR])).toBeUndefined()
+  expect(withDefault({ escalation: { mode: 'off' } }, 'on')(session, [ERROR])).toBeUndefined()
 })

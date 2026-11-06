@@ -56,9 +56,11 @@ import { outboundApprovalPort } from './daemon/outboundGate.js';
 import { createTurnRouter } from './daemon/turnRouting.js';
 import { createEscalationFactory } from './daemon/turnEscalation.js';
 import { createHybridPlacement } from './daemon/hybridPlanTool.js';
-import { parsePromptProfileConfig } from './runtime/leanPrompt.js';
-import { parseChecksConfig } from './runtime/resultChecks.js';
+import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
+import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
+import { defaultEscalationMode } from './runtime/escalationPolicy.js';
+import { runCascadingTurn, type CascadeHooks, type CascadeStep } from './runtime/cascade.js';
 import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
 import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
@@ -124,7 +126,7 @@ import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
-import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
+import { ReflectionProposalStore, reflectionModeFor, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
 import { SkillBundleStore, addLearningToolsToBuiltinAgents, registerSessionSearchTool } from './tools/agentMetaTools.js';
 import { archiveSessionSearchPort } from './daemon/archiveSearch.js';
@@ -258,6 +260,7 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
+      ["xerxes local setup|start|stop|status|doctor", "run a Bonsai model on this machine with llama.cpp"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
@@ -1753,6 +1756,75 @@ async function runTui(resumeSessionId = ""): Promise<void> {
  * stay — reachable with XERXES_DEFERRED_TOOL_LOADING=1 — and the default goes
  * back to the behaviour that demonstrably completes work.
  */
+interface HeadlessCascadeInput {
+  readonly runtime: Record<string, unknown>;
+  readonly sessionId: string;
+  readonly workspaceRoot: string;
+  readonly model: string;
+  /** Whether the model runs on this machine. */
+  readonly local: () => boolean;
+  readonly tools: ToolRegistry;
+  readonly advisorRegistered: boolean;
+  readonly agentId: string;
+}
+
+/**
+ * The cascade for a headless run (one-shot, ACP): the same result checks,
+ * escalation ladder and advisor consult as the daemon, for one session, so a
+ * benchmark that drives the CLI measures the same harness. Invalid settings
+ * throw here, before the run starts.
+ */
+function headlessCascadeHooks(input: HeadlessCascadeInput): CascadeHooks {
+  const session = { id: input.sessionId, cwd: input.workspaceRoot };
+  const escalate = createEscalationFactory<typeof session>({
+    runtime: () => input.runtime,
+    boundaryMode: () => parseDataBoundaryConfig(input.runtime, process.env, { root: input.workspaceRoot }).mode,
+    advisorAvailable: () => input.advisorRegistered,
+    defaultMode: () => defaultEscalationMode({ runtime: input.runtime, env: process.env, model: input.model, local: input.local }),
+  });
+  const checks = parseChecksConfig(input.runtime, process.env);
+  return {
+    checks: () => checks,
+    escalate: findings => escalate(session, findings),
+    ...(input.advisorRegistered ? {
+      consultAdvisor: (request, signal) => input.tools.execute({
+        id: `escalation-advisor-${crypto.randomUUID()}`,
+        type: 'function',
+        function: { name: 'AskAdvisor', arguments: { question: request.question, context: request.context, kind: 'answer' } },
+      }, { agentId: input.agentId, metadata: {}, sessionId: input.sessionId }, signal),
+    } : {}),
+  };
+}
+
+/** One line per thing a checked attempt has to tell the user, for a terminal. */
+function cascadeStepLines(step: CascadeStep): string[] {
+  const lines: string[] = [];
+  if (step.checkError !== undefined) lines.push(`Result checks did not run: ${step.checkError}`);
+  if (step.escalationError !== undefined) lines.push(`Escalation did not run: ${step.escalationError}`);
+  if (step.findings.length) lines.push(renderFindings(step.findings));
+  if (step.escalation) lines.push(step.escalation.message);
+  if (step.advisor?.answered === true) lines.push('Escalation: the advisor answered; the model retries with its advice.');
+  if (step.advisor?.answered === false) lines.push(`Advisor consult failed: ${step.advisor.error}`);
+  return lines;
+}
+
+/** A checked attempt as a JSON record for --output-format json and stream-json. */
+function cascadeStepRecord(step: CascadeStep): Record<string, unknown> {
+  return {
+    checks: step.checksMode,
+    findings: step.findings.map(finding => ({ ...finding })),
+    ...(step.escalation ? { escalation: step.escalation.action } : {}),
+    ...(step.advisor ? { advisor: step.advisor.answered ? 'answered' : 'failed' } : {}),
+    retried: step.feedback !== undefined,
+  };
+}
+
+/** What the prompt-profile rule needs to know about a sub-agent's model. */
+function childPromptRoute(profileStore: Pick<ProfileStore, 'active'>, model: string): PromptProfileRoute {
+  const contextLimit = resolvedProfileContextLimit(profileStore.active(), model);
+  return { model, ...(contextLimit === undefined ? {} : { contextLimit }) };
+}
+
 function deferredToolLoadingEnabled(
   settings: Readonly<Record<string, unknown>>,
 ): boolean {
@@ -1884,6 +1956,7 @@ function daemonRuntime(
   const initialProfile = profileStore.active();
   // Default `all`: with `goals` only goal endings reflected, so ordinary long sessions never did.
   const reflection = process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection || 'all';
+  const reflectionChosen = Boolean(process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection);
   if (reflection !== 'goals' && reflection !== 'all' && reflection !== 'off') {
     throw new ConfigurationError('reflection', 'runtime.reflection / XERXES_REFLECTION must be goals, all or off');
   }
@@ -2205,6 +2278,8 @@ function daemonRuntime(
       worktreeForWorkspace: nativeSubagentWorktrees,
       validateInheritedSelection: nativeConnection ? inheritedSelectionValidator(connection) : async () => { throw new Error("Configure a remote provider or authorize a local provider connection before delegating work"); },
       ...(host.validateProviderSelection ? { validateProviderSelection: host.validateProviderSelection } : {}),
+      // Children get the lean prompt by the same rule as the main turn.
+      promptProfileFor: (model: string) => parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, undefined, childPromptRoute(profileStore, model)),
       resolveProviderProfile: agentProviderResolver(profileStore),
       resolveProviderRoute: agentProviderRouteResolver(profileStore),
       ...(nativeConnection ? { inheritedProviderRoute: providerRouteIdentity(connection.model, connection) } : {}),
@@ -2300,6 +2375,13 @@ function daemonRuntime(
     activeToolCount = tools.definitionsForTranscript([]).length;
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     const managedPluginHost = host.managedPlugins;
+    // Where a session's model runs: a loopback server is `local`.
+    const sessionDataTrust = (session: DaemonSession) => {
+      const model = session.model || connection.model;
+      const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+      const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
+      return deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
+    };
     return new AgentTurnRunner({
       lessonsForTurn: async (session, userText, signal) => {
         signal.throwIfAborted();
@@ -2313,10 +2395,16 @@ function daemonRuntime(
         return renderApprovedLessonsForTurn(lessons, { inContext: lessonIdsInContext(session.messages) });
       },
       ...(host.reflection ? { reflection: host.reflection } : {}),
-      reflectionMode: () => {
-        const value = runtime?.status().reflection ?? settings.reflection;
-        return value === 'all' || value === 'off' ? value : 'goals';
-      },
+      // Unless the user chose `all`, a local session reflects on goal endings only.
+      reflectionMode: session => reflectionModeFor({
+        configured: runtime?.status().reflection ?? settings.reflection,
+        chosen: reflectionChosen,
+        // An unresolvable profile keeps the configured mode; the turn reports that error itself.
+        trust: () => {
+          if (session === undefined) return 'cloud';
+          try { return sessionDataTrust(session); } catch { return 'cloud'; }
+        },
+      }),
       promptSnapshots,
       // The project-plugin scan starts in the background when this runner is
       // built; a turn waits briefly for it so its first step can call them.
@@ -2377,22 +2465,24 @@ function daemonRuntime(
       // XERXES_DATA_BOUNDARY gates file reads, shell and writes per session.
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
-        trustOf: session => {
-          const model = session.model || connection.model;
-          const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
-          const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
-          return deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
-        },
+        trustOf: sessionDataTrust,
       }),
       maxNetworkRetries: daemonMaxNetworkRetries,
       // Lean prompt (off by default): the session's profile field wins, then
       // XERXES_PROMPT_PROFILE, then runtime.prompt_profile.
-      promptProfileForSession: session => {
+      // Unset everywhere, the route decides: a Bonsai model, or a known window of
+      // 32K or less, gets lean. A routed turn uses the route's profile and model.
+      promptProfileForSession: (session, turn) => {
         const model = session.model || connection.model;
         const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
         let profile: ReturnType<typeof sessionProvider>;
-        try { profile = pinned ? sessionProvider(profileStore, session, model) : undefined; } catch { profile = undefined; }
-        return parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, profile?.prompt_profile);
+        try {
+          profile = turn.profile ? profileStore.get(turn.profile) : pinned ? sessionProvider(profileStore, session, model) : undefined;
+        } catch { profile = undefined; }
+        return parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, profile?.prompt_profile, {
+          model: turn.model,
+          ...(turn.contextLimit === undefined ? {} : { contextLimit: turn.contextLimit }),
+        });
       },
       // Result checks after a turn: runtime.checks / XERXES_RESULT_CHECKS.
       // `warn` (the default) only notifies the user; `enforce` tells the model.
@@ -2428,11 +2518,29 @@ function daemonRuntime(
       }),
       // Escalation (off unless runtime.escalation.mode / XERXES_ESCALATION is on):
       // failed result checks step from a local retry to the advisor to a stop.
+      // The cascade. Unset, it is on for a local model (where a failed check
+      // is cheap to retry and the doc's "escalation by rule" applies) and when
+      // advisor.auto_on_check_fail asks for it; runtime.escalation.mode or
+      // XERXES_ESCALATION decides otherwise.
       escalationForSession: createEscalationFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
         advisorAvailable: () => advisorRegistered,
+        defaultMode: session => defaultEscalationMode({
+          runtime: { ...config.runtime, ...settings },
+          env: process.env,
+          model: session.model || connection.model,
+          local: () => sessionDataTrust(session) === 'local',
+        }),
       }),
+      ...(advisorRegistered ? {
+        consultAdvisor: (session: DaemonSession, request: { readonly question: string; readonly context: string }, signal: AbortSignal) =>
+          tools.execute({
+            id: `escalation-advisor-${crypto.randomUUID()}`,
+            type: 'function',
+            function: { name: 'AskAdvisor', arguments: { question: request.question, context: request.context, kind: 'answer' } },
+          }, { agentId: session.agentId, metadata: session.metadata, sessionId: session.id }, signal),
+      } : {}),
       ...(fallbackModel === undefined ? {} : {
         fallbackModel,
         createLlmForModel: (candidate: string) => createLlmClient(candidate, {
@@ -2833,6 +2941,13 @@ async function acpServer(
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
+  // AskAdvisor when advisor.profile is set, as in the daemon and one-shot.
+  const advisorRegistered = registerConfiguredAdvisor(tools, {
+    runtime: config.runtime,
+    profiles: profileStore,
+    workspaceRoot,
+    reportError: message => console.error(message),
+  });
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   addMcpToolsToBuiltinAgents(definitions, mcpTools);
   addLspToolToBuiltinAgents(definitions, lspManager);
@@ -2855,6 +2970,8 @@ async function acpServer(
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
+    // Children get the lean prompt by the same rule as the main turn.
+    promptProfileFor: (model: string) => parsePromptProfileConfig(config.runtime, process.env, undefined, childPromptRoute(profileStore, model)),
     worktreeForWorkspace: nativeSubagentWorktrees,
     resolveProviderProfile: agentProviderResolver(profileStore),
     resolveProviderRoute: agentProviderRouteResolver(profileStore),
@@ -2886,20 +3003,38 @@ async function acpServer(
     manager: subagentHost.managerPort,
     workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
-  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
-  const boot = await bootstrap({
-    cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
-    model,
-    subagents: bootstrapSubagentsForAgent(definitions, agentId),
-    tools: selectedTools,
-  });
-  const systemPrompt = joinSystemPrompts(
-    boot.systemPrompt,
-    agent?.systemPrompt,
-    await selfMemory.systemPromptAddendum(),
-  );
+  const agentTools = agentToolDefinitions(tools.definitions(), agent);
+  // The daemon's prompt-profile rule: lean for Bonsai models and small windows.
+  const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
+  const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
+  const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  const systemPrompt = lean
+    ? buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name) })
+    : joinSystemPrompts(
+        (await bootstrap({
+          cwd: workspaceRoot,
+          ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
+          model,
+          subagents: bootstrapSubagentsForAgent(definitions, agentId),
+          tools: selectedTools,
+        })).systemPrompt,
+        agent?.systemPrompt,
+        await selfMemory.systemPromptAddendum(),
+      );
   const runner = new AcpAgentRunner({
+    // The daemon's cascade, one ladder per ACP session.
+    cascadeFor: (sessionId: string, cwd: string) => ({
+      hooks: headlessCascadeHooks({
+        runtime: config.runtime,
+        sessionId,
+        workspaceRoot: cwd,
+        model,
+        local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
+        tools,
+        advisorRegistered,
+        agentId,
+      }),
+    }),
     ...(process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? {} : { createEditFeedback: (cwd: string) => new EditFeedback(cwd, undefined, lspManager.configured ? lspManager.forWorkspace(cwd) : undefined) }),
     llm,
     model,
@@ -3037,6 +3172,14 @@ async function runOneShot(
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
+  // AskAdvisor when advisor.profile (or XERXES_ADVISOR_PROFILE) is set, as in
+  // the daemon: the cascade's advisor step needs it.
+  const advisorRegistered = registerConfiguredAdvisor(tools, {
+    runtime: config.runtime,
+    profiles: profileStore,
+    workspaceRoot,
+    reportError: message => console.error(message),
+  });
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   addMcpToolsToBuiltinAgents(definitions, mcpTools);
   addLspToolToBuiltinAgents(definitions, lspManager);
@@ -3073,6 +3216,8 @@ async function runOneShot(
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
+    // Children get the lean prompt by the same rule as the main turn.
+    promptProfileFor: (model: string) => parsePromptProfileConfig(config.runtime, process.env, undefined, childPromptRoute(profileStore, model)),
     worktreeForWorkspace: nativeSubagentWorktrees,
     resolveProviderProfile: agentProviderResolver(profileStore),
     resolveProviderRoute: agentProviderRouteResolver(profileStore),
@@ -3104,20 +3249,30 @@ async function runOneShot(
     manager: subagentHost.managerPort,
     workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
-  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
-  const boot = await bootstrap({
-    cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
-    model,
-    subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
-    tools: selectedTools,
-  });
-  const systemPrompt = joinSystemPrompts(
-    boot.systemPrompt,
-    agent?.systemPrompt,
-    await agentMemory.toPromptSection(),
-    await selfMemory.systemPromptAddendum(),
-  );
+  const agentTools = agentToolDefinitions(tools.definitions(), agent);
+  // The daemon's prompt-profile rule: lean for Bonsai models and small
+  // windows unless prompt_profile says otherwise.
+  const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
+  const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
+  const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  const systemPrompt = lean
+    ? joinSystemPrompts(
+        buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name) }),
+        // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.
+        agentReference === undefined ? undefined : agent?.systemPrompt,
+      )
+    : joinSystemPrompts(
+        (await bootstrap({
+          cwd: workspaceRoot,
+          ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
+          model,
+          subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
+          tools: selectedTools,
+        })).systemPrompt,
+        agent?.systemPrompt,
+        await agentMemory.toPromptSection(),
+        await selfMemory.systemPromptAddendum(),
+      );
   const feedback = process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? undefined : new EditFeedback(workspaceRoot, undefined, lspManager.configured ? lspManager.forWorkspace(workspaceRoot) : undefined);
   // A saved run is a normal daemon session (same store and format), so
   // `xerxes --resume <id> "prompt"` continues it after an interruption.
@@ -3160,8 +3315,29 @@ async function runOneShot(
   const writeStreamJson = (record: Record<string, unknown>) => {
     process.stdout.write(`${JSON.stringify(record)}\n`);
   };
+  // The daemon's cascade: checks after each attempt, and while escalation
+  // hands back feedback the model runs again in this same run.
+  const cascadeHooks = headlessCascadeHooks({
+    runtime: config.runtime,
+    sessionId,
+    workspaceRoot,
+    model,
+    local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
+    tools,
+    advisorRegistered,
+    agentId: agent?.name ?? "default",
+  });
+  const cascadeSteps: Record<string, unknown>[] = [];
+  const reportCascadeStep = (step: CascadeStep) => {
+    if (!step.findings.length && !step.escalation && !step.checkError && !step.escalationError) return;
+    const record = cascadeStepRecord(step);
+    cascadeSteps.push(record);
+    if (outputFormat === "stream-json") writeStreamJson({ type: "cascade", ...record });
+    // Text and json keep stdout for the answer; the user still sees why it retried.
+    else for (const line of cascadeStepLines(step)) process.stderr.write(`${line}\n`);
+  };
   try {
-    for await (const event of runTurn(
+    for await (const event of runCascadingTurn(
       {
         model,
         state,
@@ -3193,6 +3369,7 @@ async function runOneShot(
         maxNetworkRetries,
         toolExecutor: feedback ? feedback.wrap(tools) : tools,
       },
+      { hooks: cascadeHooks, projectRoot: workspaceRoot, onStep: reportCascadeStep },
       interrupt.signal,
     )) {
       // Save at every completed step so an interrupted run can be resumed.
@@ -3251,6 +3428,7 @@ async function runOneShot(
       type: "result",
       ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
       ...(lastUsage === undefined ? {} : { usage: lastUsage }),
+      ...(cascadeSteps.length ? { cascade: cascadeSteps } : {}),
     });
   } else if (outputFormat === "stream-json") {
     writeStreamJson({

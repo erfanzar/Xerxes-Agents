@@ -17,6 +17,7 @@ agent:
     - GrepTool
     - ListDir
     - DuckDuckGoSearch
+    - WebScraper
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write

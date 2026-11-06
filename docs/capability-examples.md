@@ -103,7 +103,7 @@ Lessons start **pending**. Approve a lesson yourself after checking its evidence
 
 ### Review reflection proposals before changing anything
 
-By default, a goal transitioning to complete or blocked, or a long turn (25 tool calls or 20 minutes), can request one background reflection using the session's provider. The turn ends first. Aborted/errored turns and subagent sessions do not reflect. The model must cite exact `[ACTION]`, `[OBSERVATION]` or `[ERROR]` lines from the shared trajectory, and may return no proposal. A clipped preview is not proof of failure. Configure `runtime.reflection: all | goals | off` (default `all`); `goals` limits it to goal transitions. `XERXES_REFLECTION` overrides the startup setting.
+By default, a goal transitioning to complete or blocked, or a long turn (25 tool calls or 20 minutes), can request one background reflection using the session's provider. The turn ends first. Aborted/errored turns and subagent sessions do not reflect. The model must cite exact `[ACTION]`, `[OBSERVATION]` or `[ERROR]` lines from the shared trajectory, and may return no proposal. A clipped preview is not proof of failure. Configure `runtime.reflection: all | goals | off` (default `all`); `goals` limits it to goal transitions. Left unset, a session whose provider is a loopback model server (a local llama.cpp, for example) uses `goals`, because a slow local model reaches the long-turn trigger on ordinary work; set `all` explicitly to keep long-turn reviews there. Model-written session titles follow the same rule: unless `auto_title` is set, a loopback provider keeps the title taken from the opening prompt. See "Bonsai and the local cascade" in the configuration guide. `XERXES_REFLECTION` overrides the startup setting.
 
 ```text
 /xerxes

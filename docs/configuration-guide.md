@@ -487,8 +487,52 @@ environment map rather than reading ambient secrets.
 When any profile uses the `claude-code` provider, each runtime start (local, or on an SSH host)
 runs `claude update` in the background, or installs Claude Code with Anthropic's official
 installer when the CLI is missing. Startup never waits for it, and the outcome is written to the
-runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. The Codex provider needs no
+runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. `XERXES_AUTO_INSTALL_CLAUDE_CODE=0`
+stops the install of a missing CLI but still lets an installed one update. The Codex provider needs no
 CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's saved sign-in.
+
+## Bonsai and the local cascade
+
+`xerxes local setup` downloads a Bonsai model, starts llama.cpp's `llama-server` on
+`127.0.0.1`, and saves a `bonsai-local` provider profile.
+- **Context window:** the profile records the window the server was launched with, so compaction
+  knows it. Ternary Bonsai 2 27B reads 262,144 tokens. It launches with 16,384 by default, sized for
+  a 24 GB machine until KV-cache memory is measured there. Raise it with `runtime.local.ctx_size` or
+  `XERXES_LOCAL_CTX_SIZE`, up to the model's own window.
+- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: 13 tools and terse rules,
+  about 3K tokens instead of about 29K. So does any model whose known window is 32K tokens or less.
+  The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
+  Sub-agents follow the same rule for their own model. Set `runtime.prompt_profile` (or
+  `XERXES_PROMPT_PROFILE`, or the profile's `prompt_profile`) to `full` or `lean` to choose
+  yourself.
+- **The cascade:** after a turn, result checks inspect what it wrote and ran. When a check fails,
+  the escalation ladder decides by rule what happens next, inside the same turn:
+  1. The model retries with the failed checks as feedback, up to `escalation.max_local_retries`
+     times (default 2).
+  2. If retries don't fix it and an advisor profile is configured (`advisor.profile`), Xerxes
+     consults the advisor itself and gives the model its answer.
+  3. The ladder stops when nothing improves twice in a row, when the advisor is not allowed, or
+     when its budget is spent.
+
+  Without a setting, the cascade is on for local models and Bonsai, and when
+  `advisor.auto_on_check_fail` is true. `runtime.escalation.mode` or `XERXES_ESCALATION` (`on`
+  or `off`) decides otherwise. On a local provider, model-written titles and long-turn
+  reflection are off unless set, so they don't compete with the turn for the one model.
+- **Every entry point:** the lean rule and the cascade are the same in the daemon, one-shot runs
+  (`xerxes "prompt"`), ACP and the embedded SDK. A benchmark driving any of them measures the same
+  harness.
+  - One-shot runs write what the checks found to stderr. With `--output-format json`, the result
+    gains a `cascade` array (`checks`, `findings`, `escalation`, `advisor`, `retried`), and
+    `stream-json` emits a `{"type":"cascade"}` record per checked attempt.
+  - ACP shows them as text in the reply.
+  - In the SDK, set `promptProfile` (`lean` or `full`) and `cascade`:
+    - `cascade` defaults on when `workspaceRoot` is set, with checks in `warn` mode and escalation
+      for Bonsai models.
+    - Its options are `checks`, `escalation` (as `runtime.escalation`) and `consultAdvisor`. A
+      registered `AskAdvisor` tool is used by default.
+    - `false` turns the cascade off.
+    - Each checked attempt is on `result.cascade`.
+    - The SDK reads no environment variables for either setting.
 
 ## Daemon settings
 

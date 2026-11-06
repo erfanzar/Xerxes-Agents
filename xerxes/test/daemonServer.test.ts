@@ -8368,6 +8368,60 @@ test("auto_title off leaves the session untitled with no provider call", async (
   }
 });
 
+/** Runs one turn against a daemon whose provider is a loopback server and returns how many title requests reached it. */
+async function titleRequestsToLoopbackProvider(autoTitle: boolean | undefined): Promise<{ requests: number; title: unknown }> {
+  resetTitleAttempts();
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-local-"));
+  const socketPath = join(directory, "daemon.sock");
+  let requests = 0;
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if ((await request.text()).includes("Write a very short title")) requests += 1;
+      return Response.json({ id: "t", object: "chat.completion", model: "test-model", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "Local title" } }] });
+    },
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    baseUrl: `http://127.0.0.1:${provider.port}/v1`,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, ...(autoTitle === undefined ? {} : { autoTitle }) });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "local" } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { session_key: "local", text: "hello there" } });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("turn_end"));
+    // The title call is background work; give it time to reach the server.
+    for (let waited = 0; waited < 1500 && requests === 0; waited += 50) await Bun.sleep(50);
+    return { requests, title: runtime.sessionStatus("local")?.metadata.title };
+  } finally {
+    client.close();
+    await server.stop();
+    provider.stop(true);
+    await rm(directory, { recursive: true, force: true });
+    resetTitleAttempts();
+  }
+}
+
+test("a loopback provider keeps the opening-prompt title and is not asked for a model-written one", async () => {
+  const result = await titleRequestsToLoopbackProvider(undefined);
+  expect(result.requests).toBe(0);
+  expect(result.title).toBe("Hello there");
+});
+
+test("an explicit autoTitle still asks a loopback provider for a title", async () => {
+  const result = await titleRequestsToLoopbackProvider(true);
+  expect(result.requests).toBeGreaterThan(0);
+});
+
 test("daemon.wipe_history removes the transcript store and reports counts while sessions stay live", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-wipe-history-"));
   const home = join(directory, "home");
