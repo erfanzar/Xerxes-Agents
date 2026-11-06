@@ -178,7 +178,10 @@ test('the owner gets a Watch button and a panel with review, expiry, save, stop 
   expect(html).toContain(WATCH_EXPLANATION)
   expect(html).toContain('no model cost')
   expect(html).not.toContain(WATCH_READ_ONLY_NOTE)
-  for (const label of ['No reviews', 'Review every 5 min', 'Review every 15 min', 'Review every 30 min', 'Review every 60 min']) expect(html).toContain(`>${label}<`)
+  // No native dropdowns: the review interval is a row of choice chips.
+  expect(html).not.toContain('<select')
+  expect(html).toContain('role="radiogroup" aria-label="Review interval for the new watch"')
+  for (const label of ['Off', '5 min', '15 min', '30 min', '60 min']) expect(html).toContain(`>${label}<`)
   expect(html).toContain('>Edit<')
   expect(html).toContain('>Stop watching<')
   // The editor Edit opens: review interval, expiry and Save.
@@ -187,10 +190,13 @@ test('the owner gets a Watch button and a panel with review, expiry, save, stop 
   expect(editor).toContain('>Save<')
   expect(html).toContain('>Start watching<')
   // Already watched tasks are not offered again.
-  const picker = /<select id="watch-pick"[\s\S]*?<\/select>/.exec(html)?.[0] ?? ''
-  expect(picker).toContain('Write docs — One')
-  expect(picker).toContain('Refactor — One')
+  const picker = /<div class="xlist__rows" role="radiogroup" aria-label="Task to watch">[\s\S]*?<\/div>/.exec(html)?.[0] ?? ''
+  expect(picker).toContain('>Write docs<')
+  expect(picker).toContain('>Refactor<')
+  expect(picker).toContain('<span class="xlist__hint">One</span>')
   expect(picker).not.toContain('Fix tests')
+  // Nothing is picked yet, so Start watching waits.
+  expect(html).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Start watching</)
   expect(watchKey('w1', 't2')).toBe('w1\u001ft2')
 })
 

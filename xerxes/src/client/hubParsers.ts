@@ -354,6 +354,37 @@ export function parseSupervisorMessage(raw: unknown): SupervisorMessage | undefi
   return { id, role, text: clip(text, 8000), at: isoOr(m.at ?? m.occurred_at, new Date(0).toISOString()), source: m.source === 'voice' ? 'voice' : 'text', ...(m.origin === 'wake' ? { origin: 'wake' as const } : {}), ...(threadId ? { threadId } : {}), ...(causalMessageId ? { causalMessageId } : {}), ...(actor ? { author: actor.display_name } : str(m.author) ? { author: str(m.author)! } : {}) }
 }
 
+export type SupervisorStepState = 'running' | 'done' | 'error'
+
+/**
+ * One live step of a running XERXES turn (`supervisor.thread_event.step`):
+ * a line XERXES says before it acts, or one tool call. Steps are not stored
+ * on the Hub; a tool's `running` and `done` events share one id.
+ */
+export interface SupervisorStep {
+  readonly id: string
+  readonly turnId: string
+  readonly kind: 'say' | 'tool'
+  readonly text: string
+  readonly tool?: string
+  readonly state: SupervisorStepState
+  readonly at: string
+}
+
+const LIVE_STEP_STATES: ReadonlySet<string> = new Set(['running', 'done', 'error'])
+
+export function parseSupervisorStep(raw: unknown): SupervisorStep | undefined {
+  const s = rec(raw)
+  const id = str(s.id)
+  const turnId = str(s.turn_id)
+  const text = typeof s.text === 'string' ? s.text.trim() : ''
+  const kind = s.kind === 'say' ? 'say' : s.kind === 'tool' ? 'tool' : undefined
+  if (!id || !turnId || text === '' || kind === undefined) return undefined
+  const state = typeof s.state === 'string' && LIVE_STEP_STATES.has(s.state) ? (s.state as SupervisorStepState) : 'done'
+  const tool = str(s.tool)
+  return { id, turnId, kind, text: clip(text, 400), state, at: isoOr(s.at, new Date(0).toISOString()), ...(tool ? { tool } : {}) }
+}
+
 const CONFIRMATION_STATES: ReadonlySet<string> = new Set(['pending', 'confirming', 'confirmed', 'cancelled', 'expired', 'failed'])
 
 export function parseConfirmation(raw: unknown): SupervisorConfirmation | undefined {

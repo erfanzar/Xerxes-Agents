@@ -4,7 +4,7 @@
 import type { UsageReportView } from '../auth/usageView.js'
 import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
-import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
+import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage, type SupervisorStep } from './hubParsers.js'
 import {
   AUTOPILOT_ALL_ID, taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
@@ -117,7 +117,21 @@ export interface SupervisorState {
    * `busy` alone ended the spinner before XERXES had started.
    */
   readonly working?: boolean
+  /** The live steps of the latest turn (one turn id); cleared when a new turn starts. */
+  readonly steps?: readonly SupervisorStep[]
   readonly error?: string
+}
+
+/** Live steps kept per turn. */
+export const SUPERVISOR_STEP_LIMIT = 60
+
+/** A step of the same turn replaces its earlier state; a step of a new turn starts a fresh list. */
+export function withStep(steps: readonly SupervisorStep[] | undefined, step: SupervisorStep): readonly SupervisorStep[] {
+  const current = (steps ?? []).filter(item => item.turnId === step.turnId)
+  const index = current.findIndex(item => item.id === step.id)
+  if (index !== -1) return current.map((item, i) => (i === index ? step : item))
+  const next = [...current, step]
+  return next.length > SUPERVISOR_STEP_LIMIT ? next.slice(next.length - SUPERVISOR_STEP_LIMIT) : next
 }
 
 /** Hub-level totals that sit beside the per-model rows. */
@@ -214,6 +228,8 @@ export interface AutopilotThreadState {
   readonly messages: readonly SupervisorMessage[]
   readonly confirmations: readonly SupervisorConfirmation[]
   readonly working?: boolean
+  /** The live steps of the latest wake turn. */
+  readonly steps?: readonly SupervisorStep[]
   readonly error?: string
 }
 
@@ -409,6 +425,8 @@ export type HubAction =
   /** Phase, id, working flag and errors of the owner's Autopilot thread. */
   | { readonly type: 'autopilotThread'; readonly patch: Partial<AutopilotThreadState> }
   | { readonly type: 'autopilotThreadMessages'; readonly messages: readonly SupervisorMessage[] }
+  /** One live step of a running turn, routed by thread. */
+  | { readonly type: 'supervisorStep'; readonly thread: 'shared' | 'autopilot'; readonly step: SupervisorStep }
   | { readonly type: 'autopilotThreadConfirmations'; readonly confirmations: readonly SupervisorConfirmation[] }
   | { readonly type: 'autopilotThreadConfirmation'; readonly id: string; readonly patch: Partial<SupervisorConfirmation> }
   /** A fresh `supervisor.watch.list` answer replaces every row. */
@@ -731,7 +749,12 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
         ? patchError === undefined
         : action.patch.phase !== undefined || action.patch.busy === true || action.patch.working === true
       if (clears) delete (next as { error?: string }).error
+      // Steps are kept: a new turn id replaces them (withStep), and a step can arrive before `working`.
       return { ...state, supervisor: next }
+    }
+    case 'supervisorStep': {
+      if (action.thread === 'shared') return { ...state, supervisor: { ...state.supervisor, steps: withStep(state.supervisor.steps, action.step) } }
+      return { ...state, autopilotThread: { ...state.autopilotThread, steps: withStep(state.autopilotThread.steps, action.step) } }
     }
     case 'threadRefreshed': {
       const target = action.thread === 'shared' ? state.supervisor : state.autopilotThread

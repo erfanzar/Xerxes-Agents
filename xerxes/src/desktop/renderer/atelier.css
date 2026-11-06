@@ -3197,8 +3197,28 @@ html,body,#root,.app.atelier{background:transparent}
 .xap__grid select{width:fit-content;min-width:200px}
 .xap__actions{display:flex;align-items:center;gap:var(--s-2)}
 .xap__flex{flex:1}
-.xwatch__start{display:flex;gap:var(--s-2);align-items:center;flex-wrap:wrap}
-.xwatch__start select:first-child{flex:1;min-width:220px}
+.xwatch__start{display:flex;flex-direction:column;gap:10px}
+.xwatch__startbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+/* In-app pickers (XChoice.tsx) in place of native dropdowns. */
+.xchoice{display:flex;flex-wrap:wrap;gap:4px}
+.xchip{height:26px;padding:0 11px;border:1px solid var(--x-hairline);border-radius:999px;background:transparent;color:var(--x-secondary);font:400 12.5px/1 var(--sans);cursor:pointer;white-space:nowrap}
+.xchip:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+.xchip.is-on{background:var(--x-title);border-color:var(--x-title);color:var(--x-screen);font-weight:500}
+.xchip:disabled{opacity:.45;cursor:default}
+.xchip:focus-visible,.xlist__row:focus-visible{outline:2px solid var(--x-focus);outline-offset:1px}
+.xlist{display:flex;flex-direction:column;gap:6px;min-width:0}
+.xlist__filter{height:30px;padding:0 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-screen);color:var(--x-title);font:var(--t-caption)}
+.xlist__rows{display:flex;flex-direction:column;max-height:220px;overflow-y:auto;border:1px solid var(--x-hairline);border-radius:8px;padding:3px}
+.xlist__row{display:flex;align-items:center;gap:8px;min-height:30px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--x-secondary);font:400 13px/1.3 var(--sans);text-align:left;cursor:pointer;min-width:0}
+.xlist__row:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+.xlist__row.is-on{background:var(--x-selected);color:var(--x-title)}
+.xlist__row:disabled{opacity:.45;cursor:default}
+.xlist__check{flex:none;display:inline-grid;place-items:center;width:14px;color:var(--x-done)}
+.xlist__label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xlist__hint{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta)}
+.xlist__empty{margin:0;padding:8px 10px;font:var(--t-caption);color:var(--x-meta)}
+.xfield{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.xfield__label{font:500 12px/1.3 var(--sans);color:var(--x-secondary)}
 .supervisor__badge{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:999px;background:var(--x-needs);color:#111;font:600 10.5px/1 var(--sans)}
 .autopilot-thread{display:flex;flex-direction:column;gap:var(--s-4)}
 .xthread-note{display:flex;align-items:center;gap:8px;margin:0;font:var(--t-caption);color:var(--x-meta)}
@@ -3259,6 +3279,22 @@ html,body,#root,.app.atelier{background:transparent}
 .xevents__more>summary::before{content:'▸';margin-right:6px}
 .xevents__more[open]>summary::before{content:'▾'}
 .xevents__more>summary:hover{color:var(--x-title)}
+/* Live steps: what XERXES says it will do, then each tool with a spinner, check or error. */
+.xsteps{display:flex;flex-direction:column;gap:4px}
+.xsteps>summary{display:inline-flex;align-items:center;min-height:24px;font:var(--t-caption);color:var(--x-meta);cursor:pointer;list-style:none}
+.xsteps>summary::-webkit-details-marker{display:none}
+.xsteps>summary::before{content:'▸';margin-right:6px}
+.xsteps[open]>summary::before{content:'▾'}
+.xsteps>summary:hover{color:var(--x-title)}
+.xsteps-item{list-style:none}
+.xsteps__list{list-style:none;margin:2px 0 0;padding:0 0 0 10px;border-left:1px solid var(--x-hairline);display:flex;flex-direction:column;gap:3px}
+.xstep{display:flex;align-items:center;gap:8px;min-height:22px;padding-left:8px;font:var(--t-caption);color:var(--x-meta)}
+.xstep>.app-icon{flex:none}
+.xstep[data-state='running']{color:var(--x-title)}
+.xstep[data-state='running']>.app-icon{animation:studio-spin .9s linear infinite;transform-origin:50% 50%}
+.xstep[data-state='done']>.app-icon{color:var(--x-done)}
+.xstep[data-state='error']{color:var(--x-failed-text)}
+.xstep--say{color:var(--x-secondary);font-style:italic}
 .supervisor__message{display:flex;flex-direction:column;gap:var(--s-1);min-width:0;overflow-wrap:anywhere}
 .supervisor__message--user{align-items:flex-end}
 .supervisor__message--user .msg--user{max-width:min(85%,640px);margin:0}

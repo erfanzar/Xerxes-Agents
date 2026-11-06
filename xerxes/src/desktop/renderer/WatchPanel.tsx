@@ -15,6 +15,7 @@ import {
   watchCardRows, watchFacts, watchReviewOptions, watchStateText,
 } from '../../client/watch.js'
 import { Icon } from './Icon.js'
+import { ChipChoice, ListChoice, type ChoiceOption } from './XChoice.js'
 
 /**
  * Watch, on the XERXES tab. The strip shows one live card per watched task;
@@ -24,8 +25,6 @@ import { Icon } from './Icon.js'
  * summary line) is untrusted: it is only ever rendered as text. `active` is the
  * Hub's verdict.
  */
-
-const slug = (text: string): string => text.replace(/[^\w-]/g, '_')
 
 // ── cards ─────────────────────────────────────────────────────────────
 
@@ -105,9 +104,9 @@ export function WatchStrip({ rows, now }: { readonly rows: readonly WatchRow[]; 
 
 // ── controls ──────────────────────────────────────────────────────────
 
-/** "No reviews", "Review every 15 min". */
-function reviewLabel(label: string): string {
-  return label === 'Off' ? 'No reviews' : `Review every ${label}`
+/** Off, 5 min, 15 min… as chip choices; a saved interval outside the presets stays offered. */
+function reviewChoices(current: number | null): readonly ChoiceOption<string>[] {
+  return watchReviewOptions(current).map(option => ({ value: option.value, label: option.label }))
 }
 
 /** One watch's review interval and expiry, opened in place by Edit. */
@@ -120,7 +119,6 @@ export function WatchEditor({ row, live, saving, onSave, onDone }: {
 }): ReactElement {
   const [review, setReview] = useState(() => reviewValueOf(row.reviewIntervalMinutes))
   const [expiry, setExpiry] = useState<AutopilotExpiryChoice>(() => defaultAutopilotExpiry(row, Date.now()))
-  const id = `watch-${slug(row.workspaceId)}-${slug(row.taskId)}`
   const nowMs = Date.now()
   const choice = effectiveExpiryChoice(expiry, row, nowMs)
   const lapsed = isExpiryLapsed(row.expiresAt, nowMs)
@@ -140,14 +138,10 @@ export function WatchEditor({ row, live, saving, onSave, onDone }: {
   return (
     <form className="xap__editor" aria-label={`Watch settings for ${row.title}`} onSubmit={event => { event.preventDefault(); void save() }}>
       <div className="xap__grid">
-        <label className="xap__label" htmlFor={`${id}-review`}>XERXES reviews</label>
-        <select id={`${id}-review`} value={review} onChange={event => setReview(event.target.value)}>
-          {watchReviewOptions(row.reviewIntervalMinutes).map(option => <option key={option.value} value={option.value}>{reviewLabel(option.label)}</option>)}
-        </select>
-        <label className="xap__label" htmlFor={`${id}-expiry`}>Stop watching</label>
-        <select id={`${id}-expiry`} value={choice} onChange={event => setExpiry(event.target.value as AutopilotExpiryChoice)}>
-          {autopilotExpiryOptions(row, nowMs).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
+        <span className="xap__label">XERXES reviews</span>
+        <ChipChoice label={`Review interval for ${row.title}`} value={review} options={reviewChoices(row.reviewIntervalMinutes)} disabled={!live || saving} onChange={setReview} />
+        <span className="xap__label">Stop watching</span>
+        <ChipChoice label={`When to stop watching ${row.title}`} value={choice} options={autopilotExpiryOptions(row, nowMs)} disabled={!live || saving} onChange={setExpiry} />
       </div>
       {lapsed ? <p role="status" className="xap__meta">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p> : null}
       <div className="xap__actions">
@@ -214,18 +208,23 @@ function StartWatch({ candidates, workspaces, live, saving, onSave }: {
   if (candidates.length === 0) return <p role="status" className="xap__meta">{WATCH_NO_TASKS_NOTE}</p>
   return (
     <form className="xwatch__start" aria-label="Watch another task" onSubmit={event => { event.preventDefault(); void start() }}>
-      <select id="watch-pick" aria-label="Task to watch" value={picked} onChange={event => setPicked(event.target.value)}>
-        <option value="">Choose a task…</option>
-        {candidates.map(candidate => (
-          <option key={watchKey(candidate.workspaceId, candidate.id)} value={watchKey(candidate.workspaceId, candidate.id)}>
-            {candidate.title} — {workspaces[candidate.workspaceId]?.label ?? candidate.workspaceId}
-          </option>
-        ))}
-      </select>
-      <select id="watch-pick-review" aria-label="XERXES reviews the run" value={review} onChange={event => setReview(event.target.value)}>
-        {watchReviewOptions(null).map(option => <option key={option.value} value={option.value}>{reviewLabel(option.label)}</option>)}
-      </select>
-      <button type="submit" className="btn btn--solid" disabled={!live || saving || task === undefined}>{saving ? 'Saving…' : 'Start watching'}</button>
+      <ListChoice
+        label="Task to watch"
+        value={picked}
+        options={candidates.map(candidate => ({
+          value: watchKey(candidate.workspaceId, candidate.id),
+          label: candidate.title,
+          hint: workspaces[candidate.workspaceId]?.label ?? candidate.workspaceId,
+        }))}
+        disabled={!live || saving}
+        onChange={setPicked}
+      />
+      <div className="xwatch__startbar">
+        <span className="xap__label">XERXES reviews</span>
+        <ChipChoice label="Review interval for the new watch" value={review} options={reviewChoices(null)} disabled={!live || saving} onChange={setReview} />
+        <span className="xap__flex" />
+        <button type="submit" className="btn btn--solid" disabled={!live || saving || task === undefined}>{saving ? 'Saving…' : 'Start watching'}</button>
+      </div>
     </form>
   )
 }

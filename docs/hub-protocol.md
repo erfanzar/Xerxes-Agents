@@ -279,6 +279,17 @@ Autopilot); `question.answer` (provider name `answer_question`, Autopilot only);
 Approval, review, permission-mode, shell, Workflow and generic RPC tools are
 refused by `assertSupervisorToolCeiling`.
 
+**Live steps.** While a turn runs, the Hub streams its steps as
+`supervisor.thread_event` frames carrying `step` (and no `message`):
+`{ thread_id, step: { turn_id, id, at, kind: 'say'|'tool', text, tool?, state: 'running'|'done'|'error' } }`.
+`say` is the short line the model wrote before a batch of tool calls; `tool` is
+one call with a Hub-written label (arguments are never copied, except a search
+query clipped to 60 characters). A tool's `running` and final event share one
+`id`; a new `turn_id` starts a new list. Steps go only to the person the turn
+answers (the requester), are not stored, and are not replayed by
+`supervisor.thread.open`; the turn's reply or `XERXES stopped: …` notice ends
+them. Clients that do not know `step` ignore it.
+
 ## Machines and project discovery
 
 A registry entry may be a **machine**: `connection.discover: true` (the registry

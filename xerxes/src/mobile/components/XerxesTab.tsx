@@ -7,8 +7,9 @@ import { AUTOPILOT_COMPOSER_HINT, AUTOPILOT_THREAD_NOTE, autoCardNote, autopilot
 import { newCommandId } from '../../client/bridge.js'
 import { relativeTime } from '../../client/format.js'
 import { watchChipText } from '../../client/watch.js'
-import type { ConfirmationState, SupervisorConfirmation, SupervisorMessage } from '../../client/hubParsers.js'
+import type { ConfirmationState, SupervisorConfirmation, SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
 import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
+import { liveSteps, stepPhrase } from '../../client/supervisorSteps.js'
 import { useHubState, useNow, useServices } from '../context.js'
 import { supervisorHeading } from '../viewModel.js'
 import { remainingAfterSend, withTranscript } from './Composer.js'
@@ -104,6 +105,27 @@ export function ConfirmationCard({ item, canAct, onRespond }: { item: Supervisor
   )
 }
 
+const STEP_MARK = { running: '…', done: '✓', error: '✕' } as const
+
+/** What XERXES is doing right now: the current phrase, then every step so far. */
+function LiveStepLines({ steps, idle }: { readonly steps: readonly SupervisorStep[]; readonly idle: string }): ReactElement {
+  return (
+    <div role="status" aria-live="polite" className="live-steps">
+      <p className="working-line">{stepPhrase(steps) ?? idle}</p>
+      {steps.length === 0 ? null : (
+        <ol className="live-steps__list" aria-label="Steps">
+          {steps.map(step => (
+            <li key={step.id} className={`live-step live-step--${step.kind}`} data-state={step.state}>
+              {step.kind === 'tool' ? <span className="live-step__mark" aria-hidden="true">{STEP_MARK[step.state]}</span> : null}
+              <span>{step.text}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
 /** The owner's private Autopilot thread: wake-ups, replies, cards waiting for Confirm, and what XERXES did alone. */
 export function AutopilotThreadBody(): ReactElement {
   const state = useHubState()
@@ -134,7 +156,9 @@ export function AutopilotThreadBody(): ReactElement {
           ))}
         </ul>
       )}
-      {thread.working === true ? <p role="status" aria-live="polite" className="working-line">Autopilot is working…</p> : null}
+      {thread.working === true || liveSteps(thread.steps, thread.messages).length > 0
+        ? <LiveStepLines steps={liveSteps(thread.steps, thread.messages)} idle="Autopilot is working…" />
+        : null}
       <JumpToLatest visible={follow.away} onJump={follow.toBottom} />
     </div>
   )
@@ -274,7 +298,9 @@ export function XerxesTab(): ReactElement {
                 ))}
               </ul>
             )}
-            {supervisor.working === true && supervisor.phase === 'ready' ? <p role="status" aria-live="polite" className="working-line">XERXES is thinking…</p> : null}
+            {(supervisor.working === true || liveSteps(supervisor.steps, supervisor.messages).length > 0) && supervisor.phase === 'ready'
+              ? <LiveStepLines steps={liveSteps(supervisor.steps, supervisor.messages)} idle="XERXES is thinking…" />
+              : null}
             <JumpToLatest visible={follow.away} onJump={follow.toBottom} />
           </div>
           {shownError !== undefined && supervisor.phase === 'ready' ? <p role="alert" className="field-error">{shownError}</p> : null}
