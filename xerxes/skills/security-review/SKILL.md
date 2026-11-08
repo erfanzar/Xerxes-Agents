@@ -11,7 +11,7 @@ tags: [Security, Review, OWASP, Git]
 ## Metadata
 
 - License: MIT
-- Related skills: code-review, bug-bounty-hunter
+- Related skills: code-review
 
 Adversarial review of the pending changes. Assume the reviewed code will handle
 hostile input. Findings are exploitable-or-not: each must name the attack

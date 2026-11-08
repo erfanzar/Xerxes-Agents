@@ -281,7 +281,6 @@ test("native bundled skill documentation is discoverable independently from the 
       "google-workspace",
       "grpo-rl-training",
       "ocr-and-documents",
-      "polymarket",
       "youtube-content",
     ]),
   );

@@ -202,38 +202,3 @@ test("bundled skill CLI dispatches nearby, YouTube, and arXiv queries through na
   expect(arxivOutput[0]).toContain("Native Bun");
   expect(arxivOutput[0]).toContain("2501.12345v1");
 });
-
-test("bundled skill CLI formats native Polymarket search results", async () => {
-  const output: string[] = [];
-  const code = await runBundledSkillCli(["polymarket", "search", "native"], {
-    fetchImplementation: async (input) => {
-      expect(String(input)).toContain("public-search?q=native");
-      return Response.json({
-        events: [
-          {
-            markets: [
-              {
-                outcomePrices: '["0.75","0.25"]',
-                outcomes: '["Yes","No"]',
-                question: "Will Bun ship?",
-                slug: "bun",
-                volume: "1200",
-              },
-            ],
-            slug: "native-event",
-            title: "Native Event",
-            volume: "1200",
-          },
-        ],
-        pagination: { totalResults: 1 },
-      });
-    },
-    writeLine: (line) => {
-      output.push(line);
-    },
-  });
-
-  expect(code).toBe(0);
-  expect(output[0]).toContain("Found 1 results");
-  expect(output[0]).toContain("Yes: 75.0%");
-});

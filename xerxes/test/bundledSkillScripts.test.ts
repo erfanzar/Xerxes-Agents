@@ -12,12 +12,6 @@ import {
 } from '../src/skills/excalidraw.js'
 import { FindNearbyClient, formatNearbyPlaces, haversineMeters, overpassNearbyQuery } from '../src/skills/nearby.js'
 import {
-  PolymarketClient,
-  formatPolymarketMarket,
-  formatPolymarketPercentage,
-  formatPolymarketVolume,
-} from '../src/skills/polymarket.js'
-import {
   YoutubeTranscriptClient,
   extractYoutubeVideoId,
   formatYoutubeTimestamp,
@@ -55,49 +49,6 @@ test('arXiv builds native Atom requests and parses results without an XML SDK', 
   expect(formatArxivResult(result)).toContain('Found 42 results (showing 1)')
   expect(parseArxivAtom('<feed />').papers).toEqual([])
   expect(arxivSearchUrl({ ids: '2501.12345', sort: 'updated' })).toContain('id_list=2501.12345')
-})
-
-test('Polymarket client covers public search, market data, order books, and trade history natively', async () => {
-  const calls: string[] = []
-  const client = new PolymarketClient({
-    gammaUrl: 'https://gamma.test',
-    clobUrl: 'https://clob.test',
-    dataUrl: 'https://data.test',
-    fetchImplementation: async input => {
-      const url = String(input)
-      calls.push(url)
-      if (url.includes('/public-search')) return Response.json({
-        events: [{ title: 'Election', slug: 'election', volume: '1200', markets: [{
-          question: 'Will it ship?', slug: 'ship', outcomePrices: '["0.75", "0.25"]', outcomes: '["Yes", "No"]', volume: '2500',
-        }] }],
-        pagination: { totalResults: 7 },
-      })
-      if (url.includes('/price?')) return Response.json({ price: '0.61' })
-      if (url.includes('/midpoint')) return Response.json({ mid: '0.60' })
-      if (url.includes('/spread')) return Response.json({ spread: '0.02' })
-      if (url.includes('/book?')) return Response.json({
-        bids: [{ price: '0.4', size: '4' }, { price: '0.7', size: '2' }],
-        asks: [{ price: '0.9', size: '1' }, { price: '0.8', size: '3' }],
-        last_trade_price: '0.5', tick_size: '0.01',
-      })
-      if (url.includes('/prices-history')) return Response.json({ history: [{ t: 1_000, p: '0.4' }] })
-      if (url.includes('/trades')) return Response.json([{ side: 'BUY', price: '0.4', size: '5', outcome: 'Yes', title: 'Election' }])
-      throw new Error(`unexpected endpoint ${url}`)
-    },
-  })
-  const search = await client.search('election 2026')
-  expect(search.totalResults).toBe(7)
-  expect(search.events[0]?.markets[0]?.outcomePrices).toEqual(['0.75', '0.25'])
-  expect(formatPolymarketMarket(search.events[0]?.markets[0] ?? fail('missing market'))).toContain('Yes: 75.0%')
-  expect(await client.price('token id')).toEqual({ tokenId: 'token id', buy: '0.61', midpoint: '0.60', spread: '0.02' })
-  const book = await client.book('token id')
-  expect(book.bids.map(order => order.price)).toEqual(['0.7', '0.4'])
-  expect(book.asks.map(order => order.price)).toEqual(['0.8', '0.9'])
-  expect(await client.history('condition')).toEqual([{ timestamp: 1_000, price: 0.4 }])
-  expect(await client.trades({ market: 'condition' })).toMatchObject([{ title: 'Election', side: 'BUY' }])
-  expect(calls.some(call => call.includes('q=election%202026'))).toBeTrue()
-  expect(formatPolymarketPercentage('0.375')).toBe('37.5%')
-  expect(formatPolymarketVolume('1200')).toBe('$1.2K')
 })
 
 test('YouTube transcript client discovers a native caption track and keeps transcript formatting behavior', async () => {

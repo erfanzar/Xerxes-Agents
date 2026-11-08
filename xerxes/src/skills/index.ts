@@ -10,6 +10,5 @@ export * from "./http.js";
 export * from "./nearby.js";
 export * as OcrDocuments from "./ocrDocuments/index.js";
 export * as PowerPoint from "./powerpoint/index.js";
-export * from "./polymarket.js";
 export * as SafetyEvaluation from "./safetyEvaluation/index.js";
 export * from "./youtubeTranscript.js";
