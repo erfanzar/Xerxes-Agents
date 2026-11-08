@@ -32,6 +32,8 @@ export type ServerErrorCode =
   | 'ALREADY_RUNNING'
   | 'START_FAILED'
   | 'START_TIMEOUT'
+  | 'LOAD_FAILED'
+  | 'STOP_FAILED'
 
 export class ServerError extends XerxesError {
   readonly code: ServerErrorCode
@@ -83,6 +85,8 @@ export interface ServerStatus {
   readonly model?: string
   readonly startedAt?: string
   readonly logPath?: string
+  /** The window the engine reports it loaded (LM Studio's `loaded_context_length`). */
+  readonly contextLength?: number
 }
 
 export interface StartOptions {

@@ -14,38 +14,54 @@ import {
   catalogWithConfig,
   formatGiB,
   memoryBudget,
+  parseCtxSize,
+  parseEngine,
   parseLocalConfig,
   launchCtxSize,
   selectModel,
   type CatalogEntry,
   type LocalConfig,
+  type LocalEngineName,
 } from './catalog.js'
 import { DownloadError, ensureModelFile, useExistingModelFile, verifyModelFile, type FetchPort } from './download.js'
 import type { HardwareProfile } from './hardware.js'
+import { LMS_INSTALL_HELP, type LmStudioEngine, type LmStudioModel } from './lmstudio.js'
+import { windowFor, type LoadedWindows } from './loadedWindow.js'
 import { ServerError, type LocalServer, type ServerStatus } from './server.js'
 
 export const LOCAL_PROFILE_NAME = 'bonsai-local'
 
 export const LOCAL_USAGE = `Usage: xerxes local <command> [options]
 
-Run a Bonsai model on this machine with llama.cpp's llama-server. Nothing runs until you ask.
+Run a Bonsai model on this machine with llama.cpp's llama-server or with LM Studio. Nothing
+runs until you ask.
 
 Commands:
-  setup   Probe hardware, pick a model, download it (verified), start the server, save the
-          "${LOCAL_PROFILE_NAME}" provider profile.
+  setup   Probe hardware, pick a model, start the engine with it, save the
+          "${LOCAL_PROFILE_NAME}" provider profile with the window the engine loaded.
+          llama-server: downloads the model first (verified).
+          lmstudio: loads a model from LM Studio's library with one slot (--parallel 1).
+            --engine <name>      llama-server (default) | lmstudio
             --model <id>         bonsai-9b | ternary-bonsai-2-27b (default: largest that fits)
-            --model-file <path>  use an existing .gguf instead of downloading
+            --model-file <path>  llama-server: use an existing .gguf instead of downloading
+            --model-key <key>    lmstudio: load this LM Studio model key (see \`lms ls\`)
+            --ctx-size <n>       context window to load (default: the model's launch default)
             --yes                continue even if the model is larger than this machine's memory
             --json               print one JSON object
-  start   Start the server with an already-downloaded model (--model, --model-file accepted).
-  stop    Stop the server started by Xerxes.
-  status  Show whether the server is running and healthy (exit 0 running, 1 not). --json
-  doctor  Report hardware, chosen model, llama-server, model file and server health. --json
+  start   Start the engine with an already-downloaded model (same options as setup).
+  stop    Stop what Xerxes started: the llama-server process, or the LM Studio model it
+          loaded (and LM Studio's server, if Xerxes started it).
+  status  Show whether the engine is running and healthy (exit 0 running, 1 not). --json
+  doctor  Report hardware, chosen model, engine binary, model and server health. --json
 
-Download sources are never built in. Configure them in ~/.xerxes/daemon/config.json:
+Download sources for llama-server are never built in. Configure them in
+~/.xerxes/daemon/config.json:
   { "runtime": { "local": { "models": { "bonsai-9b": { "url": "https://…", "sha256": "…" } } } } }
-Other settings: runtime.local.llama_server_path, models_dir, port (default 11581), ctx_size
-(llama-server --ctx-size; up to the model's own window, 262144 for Ternary Bonsai 2 27B).
+Other settings under runtime.local: engine (llama-server | lmstudio), llama_server_path,
+lms_path, models_dir, port (llama-server default 11581; LM Studio keeps its own port unless
+set), ctx_size (up to the model's own window, 262144 for Ternary Bonsai 2 27B).
+Ternary Bonsai 2 27B's MLX pack runs only under LM Studio on Apple silicon (key
+ternary-bonsai-2-27b-mlx); llama-server needs a GGUF build from Prism's llama.cpp fork.
 `
 
 export interface SaveLocalProfileInput {
@@ -55,7 +71,7 @@ export interface SaveLocalProfileInput {
   readonly provider: string
   readonly dataTrust: 'local'
   readonly promptProfile: 'lean'
-  /** The --ctx-size llama-server runs with, so compaction and overflow rescue know the real window. */
+  /** The window the engine loaded, so compaction and overflow rescue know the real window. */
   readonly contextLimit: number
 }
 
@@ -63,7 +79,12 @@ export interface LocalCommandPorts {
   /** Probe the machine (wrap `probeHardware(systemHardwarePorts())` in production). */
   readonly hardware: () => Promise<HardwareProfile>
   readonly fetch: FetchPort
+  /** The llama-server supervisor. */
   readonly server: LocalServer
+  /** The LM Studio engine adapter; absent, `--engine lmstudio` is refused. */
+  readonly lmstudio?: LmStudioEngine
+  /** Ask a started engine for the window it loaded; absent, llama-server's --ctx-size is recorded. */
+  readonly loadedWindow?: (baseUrl: string) => Promise<LoadedWindows>
   saveProfile(input: SaveLocalProfileInput): Promise<void>
   stdout(text: string): void
   stderr(text: string): void
@@ -78,8 +99,11 @@ export interface LocalCommandPorts {
 
 interface ParsedArgs {
   readonly sub?: string
+  readonly engine?: LocalEngineName
   readonly model?: string
   readonly modelFile?: string
+  readonly modelKey?: string
+  readonly ctxSize?: number
   readonly yes: boolean
   readonly json: boolean
   readonly help: boolean
@@ -88,8 +112,11 @@ interface ParsedArgs {
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   let sub: string | undefined
+  let engine: LocalEngineName | undefined
   let model: string | undefined
   let modelFile: string | undefined
+  let modelKey: string | undefined
+  let ctxSize: number | undefined
   let yes = false
   let json = false
   let help = false
@@ -118,6 +145,30 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         modelFile = v
         break
       }
+      case '--model-key': {
+        const v = value()
+        if (v === undefined || v.trim() === '') return { yes, json, help, error: '--model-key needs an LM Studio model key' }
+        modelKey = v.trim()
+        break
+      }
+      case '--engine': {
+        const v = value()
+        try {
+          engine = parseEngine(v, '--engine')
+        } catch {
+          return { yes, json, help, error: '--engine must be llama-server or lmstudio' }
+        }
+        break
+      }
+      case '--ctx-size': {
+        const v = value()
+        try {
+          ctxSize = parseCtxSize(v, '--ctx-size')
+        } catch (error) {
+          return { yes, json, help, error: error instanceof Error ? error.message : '--ctx-size needs a number' }
+        }
+        break
+      }
       case '--yes':
       case '-y':
         yes = true
@@ -140,8 +191,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     json,
     help,
     ...(sub === undefined ? {} : { sub }),
+    ...(engine === undefined ? {} : { engine }),
     ...(model === undefined ? {} : { model }),
     ...(modelFile === undefined ? {} : { modelFile }),
+    ...(modelKey === undefined ? {} : { modelKey }),
+    ...(ctxSize === undefined ? {} : { ctxSize }),
   }
 }
 
@@ -183,14 +237,28 @@ function statusJson(status: ServerStatus): Record<string, unknown> {
     ...(status.model === undefined ? {} : { model: status.model }),
     ...(status.startedAt === undefined ? {} : { started_at: status.startedAt }),
     ...(status.logPath === undefined ? {} : { log_path: status.logPath }),
+    ...(status.contextLength === undefined ? {} : { context_length: status.contextLength }),
   }
 }
 
-function statusLine(status: ServerStatus): string {
+function statusLine(status: ServerStatus, engine: LocalEngineName = 'llama-server'): string {
   if (status.running) {
-    return `running (pid ${status.pid}, port ${status.port}, ${status.healthy ? 'healthy' : 'not healthy yet'}) model ${status.model}`
+    const where = engine === 'lmstudio' ? `LM Studio, port ${status.port}` : `pid ${status.pid}, port ${status.port}`
+    const window = status.contextLength === undefined ? '' : `, ${status.contextLength}-token window`
+    return `running (${where}, ${status.healthy ? 'healthy' : 'not healthy yet'}) model ${status.model}${window}`
   }
-  return status.stale ? 'not running (a stale server record was found)' : 'not running'
+  if (!status.stale) return 'not running'
+  return engine === 'lmstudio'
+    ? 'not running (the model Xerxes loaded in LM Studio is gone)'
+    : 'not running (a stale server record was found)'
+}
+
+function lmStudioMissingModel(key: string, library: readonly LmStudioModel[]): string {
+  const keys = library.map((model) => model.modelKey)
+  return (
+    `LM Studio has no model with key "${key}". Download it in LM Studio, or pass --model-key with a key from \`lms ls\`` +
+    (keys.length === 0 ? '.' : `: ${keys.join(', ')}.`)
+  )
 }
 
 type Chosen =
@@ -273,20 +341,34 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
   }
 
   try {
-    const cfg = parseLocalConfig(ports.config, env)
+    const configured = parseLocalConfig(ports.config, env)
+    const cfg: LocalConfig = args.ctxSize === undefined ? configured : { ...configured, ctxSize: args.ctxSize }
     const catalog = catalogWithConfig(cfg)
+    // An explicit choice (flag, env, config) or, for stop/status, whichever engine has a record.
+    const chosen = args.engine ?? cfg.engine
+    const engine: LocalEngineName = chosen ?? 'llama-server'
+    if (engine === 'llama-server' && args.modelKey !== undefined) {
+      return fail('USAGE', '--model-key applies to --engine lmstudio; llama-server takes --model or --model-file.', 2)
+    }
+    if (engine === 'lmstudio' && args.modelFile !== undefined) {
+      return fail('USAGE', "--model-file applies to llama-server; LM Studio loads from its own library (use --model-key).", 2)
+    }
 
     switch (args.sub) {
       case 'setup':
-        return await setup(args, cfg, catalog)
+        return engine === 'lmstudio' ? await setupLmStudio(args, cfg, catalog, lmStudio()) : await setup(args, cfg, catalog)
       case 'start':
-        return await start(args, cfg, catalog)
-      case 'stop':
-        return await stop()
-      case 'status':
-        return await status()
+        return engine === 'lmstudio' ? await startLmStudio(args, cfg, catalog, lmStudio()) : await start(args, cfg, catalog)
+      case 'stop': {
+        const recorded = await recordedEngine(chosen)
+        return recorded.engine === 'lmstudio' ? await stopLmStudio(lmStudio()) : await stop()
+      }
+      case 'status': {
+        const recorded = await recordedEngine(chosen)
+        return report(recorded.status, recorded.engine)
+      }
       case 'doctor':
-        return await doctor(args, cfg, catalog)
+        return engine === 'lmstudio' ? await doctorLmStudio(args, cfg, catalog, lmStudio()) : await doctor(args, cfg, catalog)
       default:
         return fail('USAGE', `Unknown command "${args.sub}".\n\n${LOCAL_USAGE}`, 2)
     }
@@ -394,6 +476,9 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     }
 
     const baseUrl = `http://127.0.0.1:${port}/v1`
+    // What llama-server actually loaded (/props); a server that was already
+    // running may hold a different --ctx-size than this run's settings.
+    const contextLimit = (await probedWindow(baseUrl, entry.id)) ?? launchCtxSize(entry, cfg)
     await ports.saveProfile({
       name: LOCAL_PROFILE_NAME,
       baseUrl,
@@ -401,20 +486,270 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       provider: 'custom',
       dataTrust: 'local',
       promptProfile: 'lean',
-      contextLimit: launchCtxSize(entry, cfg),
+      contextLimit,
     })
     return ok(
       {
+        engine: 'llama-server',
         model: entry.id,
         model_path: modelPath,
         port,
         base_url: baseUrl,
         profile: LOCAL_PROFILE_NAME,
+        context_length: contextLimit,
         downloaded,
         started,
       },
-      `Local engine ready: ${entry.id} at ${baseUrl}\nSaved provider profile "${LOCAL_PROFILE_NAME}" (data trust: local, prompt profile: lean).`,
+      `Local engine ready: ${entry.id} at ${baseUrl} (${contextLimit}-token window)\nSaved provider profile "${LOCAL_PROFILE_NAME}" (data trust: local, prompt profile: lean).`,
     )
+  }
+
+  async function probedWindow(baseUrl: string, model: string): Promise<number | undefined> {
+    if (ports.loadedWindow === undefined) return undefined
+    const result = await ports.loadedWindow(baseUrl)
+    const window = windowFor(result, model)
+    if (window === undefined) {
+      progress(`Could not read the loaded window from the server (${result.ok ? `${model} is not loaded` : result.reason}); recording the launch setting.`)
+    }
+    return window
+  }
+
+  function lmStudio(): LmStudioEngine {
+    if (ports.lmstudio === undefined) throw new CommandFailure('UNSUPPORTED', 'The LM Studio engine is not available in this host.')
+    return ports.lmstudio
+  }
+
+  /** The engine stop/status act on: the explicit choice, else whichever engine Xerxes has a record for. */
+  async function recordedEngine(explicit: LocalEngineName | undefined): Promise<{ engine: LocalEngineName; status: ServerStatus }> {
+    if (explicit === 'lmstudio') return { engine: 'lmstudio', status: await lmStudio().status() }
+    const llama = await ports.server.status()
+    if (explicit === 'llama-server' || llama.running || llama.stale || ports.lmstudio === undefined) {
+      return { engine: 'llama-server', status: llama }
+    }
+    const lms = await ports.lmstudio.status()
+    return lms.running || lms.stale ? { engine: 'lmstudio', status: lms } : { engine: 'llama-server', status: llama }
+  }
+
+  /**
+   * What LM Studio should load: a `--model-key` the user named, or the
+   * catalog entry with an LM Studio build that fits this machine.
+   */
+  function lmStudioTarget(
+    parsed: ParsedArgs,
+    cfg: LocalConfig,
+    catalog: readonly CatalogEntry[],
+    hw: HardwareProfile,
+  ): { readonly modelKey: string; readonly entry?: CatalogEntry; readonly contextLength?: number } {
+    if (parsed.modelKey !== undefined) {
+      const entry =
+        parsed.model === undefined
+          ? catalog.find((candidate) => candidate.lmstudio?.modelKey === parsed.modelKey)
+          : catalog.find((candidate) => candidate.id === parsed.model)
+      if (parsed.model !== undefined && entry === undefined) {
+        throw new CommandFailure('UNKNOWN_MODEL', `Unknown model "${parsed.model}". Known models: ${catalog.map((c) => c.id).join(', ')}.`)
+      }
+      const contextLength = entry === undefined ? cfg.ctxSize : launchCtxSize(entry, cfg)
+      return { modelKey: parsed.modelKey, ...(entry === undefined ? {} : { entry }), ...(contextLength === undefined ? {} : { contextLength }) }
+    }
+    if (parsed.model !== undefined) {
+      const named = catalog.find((candidate) => candidate.id === parsed.model)
+      if (named !== undefined && named.lmstudio === undefined) {
+        throw new CommandFailure(
+          'NO_LMSTUDIO_BUILD',
+          `${named.id} has no LM Studio model key in the catalog. Pass --model-key with its key from \`lms ls\`.`,
+        )
+      }
+    }
+    const buildable = catalog.flatMap((entry) =>
+      entry.lmstudio === undefined ? [] : [{ ...entry, minMemoryBytes: entry.lmstudio.minMemoryBytes }],
+    )
+    const chosen = chooseEntry(parsed.model, buildable, hw, parsed.yes)
+    if (!chosen.ok) {
+      throw new CommandFailure(chosen.code, `${chosen.message} A smaller LM Studio model can be loaded with --model-key <key from \`lms ls\`>.`)
+    }
+    if (chosen.warning !== undefined) progress(chosen.warning)
+    const entry = chosen.entry
+    const modelKey = entry.lmstudio?.modelKey
+    if (modelKey === undefined) throw new CommandFailure('NO_LMSTUDIO_BUILD', `${entry.id} has no LM Studio model key.`)
+    return { modelKey, entry, contextLength: launchCtxSize(entry, cfg) }
+  }
+
+  /** Resolve the target and check `lms` and the model key before anything is started. */
+  async function prepareLmStudio(
+    parsed: ParsedArgs,
+    cfg: LocalConfig,
+    catalog: readonly CatalogEntry[],
+    lm: LmStudioEngine,
+  ): Promise<{ readonly modelKey: string; readonly entry?: CatalogEntry; readonly contextLength?: number }> {
+    progress('Probing hardware…')
+    const hw = await ports.hardware()
+    progress(hardwareLine(hw))
+    const target = lmStudioTarget(parsed, cfg, catalog, hw)
+    if ((await lm.findBinary()) === undefined) throw new CommandFailure('BINARY_NOT_FOUND', LMS_INSTALL_HELP)
+    const library = await lm.listModels()
+    const found = library.find((model) => model.modelKey === target.modelKey)
+    if (found === undefined) throw new CommandFailure('MODEL_MISSING', lmStudioMissingModel(target.modelKey, library))
+    if (target.contextLength !== undefined && found.maxContextLength !== undefined && target.contextLength > found.maxContextLength) {
+      throw new CommandFailure(
+        'INVALID_CONFIG',
+        `The ${target.contextLength}-token window exceeds ${target.modelKey}'s ${found.maxContextLength}-token maximum.`,
+        2,
+      )
+    }
+    progress(`Model: ${target.modelKey}${target.entry === undefined ? '' : ` (${target.entry.label})`}`)
+    return target
+  }
+
+  async function setupLmStudio(parsed: ParsedArgs, cfg: LocalConfig, catalog: readonly CatalogEntry[], lm: LmStudioEngine): Promise<number> {
+    const target = await prepareLmStudio(parsed, cfg, catalog, lm)
+    const current = await lm.status()
+    let result: ServerStatus
+    let started = false
+    if (current.running) {
+      if (current.model !== target.modelKey || (target.contextLength !== undefined && current.contextLength !== target.contextLength)) {
+        return fail(
+          'ALREADY_RUNNING',
+          `Xerxes already has ${current.model} loaded in LM Studio${current.contextLength === undefined ? '' : ` with a ${current.contextLength}-token window`}. ` +
+            'Run `xerxes local stop --engine lmstudio` first.',
+          1,
+        )
+      }
+      progress(`${target.modelKey} is already loaded in LM Studio on port ${current.port}.`)
+      result = current
+    } else {
+      result = await lm.start({
+        modelKey: target.modelKey,
+        identifier: target.modelKey,
+        ...(target.contextLength === undefined ? {} : { contextLength: target.contextLength }),
+        ...(cfg.portExplicit ? { port: cfg.port } : {}),
+        onProgress: progress,
+      })
+      started = true
+    }
+    const port = result.port
+    const window = result.contextLength
+    if (port === undefined || window === undefined) {
+      throw new CommandFailure('LOAD_FAILED', 'LM Studio did not report the port and window of the loaded model.')
+    }
+    const baseUrl = `http://127.0.0.1:${port}/v1`
+    await ports.saveProfile({
+      name: LOCAL_PROFILE_NAME,
+      baseUrl,
+      model: target.modelKey,
+      provider: 'custom',
+      dataTrust: 'local',
+      promptProfile: 'lean',
+      contextLimit: window,
+    })
+    return ok(
+      {
+        engine: 'lmstudio',
+        model: target.modelKey,
+        ...(target.entry === undefined ? {} : { model_id: target.entry.id }),
+        port,
+        base_url: baseUrl,
+        profile: LOCAL_PROFILE_NAME,
+        context_length: window,
+        started,
+      },
+      `Local engine ready: ${target.modelKey} in LM Studio at ${baseUrl} (${window}-token window, one slot)\n` +
+        `Saved provider profile "${LOCAL_PROFILE_NAME}" (data trust: local, prompt profile: lean).`,
+    )
+  }
+
+  async function startLmStudio(parsed: ParsedArgs, cfg: LocalConfig, catalog: readonly CatalogEntry[], lm: LmStudioEngine): Promise<number> {
+    const current = await lm.status()
+    if (current.running) {
+      return ok({ already_running: true, engine: 'lmstudio', ...statusJson(current) }, `Already running: ${statusLine(current, 'lmstudio')}`)
+    }
+    const target = await prepareLmStudio(parsed, cfg, catalog, lm)
+    const result = await lm.start({
+      modelKey: target.modelKey,
+      identifier: target.modelKey,
+      ...(target.contextLength === undefined ? {} : { contextLength: target.contextLength }),
+      ...(cfg.portExplicit ? { port: cfg.port } : {}),
+      onProgress: progress,
+    })
+    return ok(
+      { already_running: false, engine: 'lmstudio', ...(target.entry === undefined ? {} : { model_id: target.entry.id }), ...statusJson(result) },
+      `Started: ${statusLine(result, 'lmstudio')}`,
+    )
+  }
+
+  async function stopLmStudio(lm: LmStudioEngine): Promise<number> {
+    const result = await lm.stop()
+    if (result.stopped) {
+      const text = result.unloaded
+        ? `Unloaded ${result.model} from LM Studio${result.serverStopped ? " and stopped LM Studio's server" : ''}.`
+        : `${result.model} was already loaded before Xerxes used it, so it stays loaded; Xerxes' record was removed.`
+      return ok(
+        { stopped: true, engine: 'lmstudio', model: result.model, unloaded: result.unloaded, server_stopped: result.serverStopped },
+        text,
+      )
+    }
+    const text =
+      result.reason === 'not-running'
+        ? 'Xerxes has no model loaded in LM Studio.'
+        : 'The model Xerxes loaded in LM Studio was already gone; cleaned up its record.'
+    return ok({ stopped: false, engine: 'lmstudio', reason: result.reason }, text)
+  }
+
+  async function doctorLmStudio(parsed: ParsedArgs, cfg: LocalConfig, catalog: readonly CatalogEntry[], lm: LmStudioEngine): Promise<number> {
+    const hw = await ports.hardware()
+    let target: { readonly modelKey: string; readonly entry?: CatalogEntry; readonly contextLength?: number } | undefined
+    let selectionError: string | undefined
+    try {
+      target = lmStudioTarget(parsed, cfg, catalog, hw)
+    } catch (error) {
+      if (!(error instanceof CommandFailure)) throw error
+      selectionError = error.message
+    }
+    const binary = await lm.findBinary()
+    const library = binary === undefined ? undefined : await lm.listModels()
+    const serverInfo = binary === undefined ? undefined : await lm.serverInfo()
+    const found = target === undefined ? undefined : library?.find((model) => model.modelKey === target.modelKey)
+    const server = await lm.status()
+    const ready = target !== undefined && binary !== undefined && found !== undefined
+    const payload = {
+      engine: 'lmstudio',
+      ready,
+      hardware: hardwareJson(hw),
+      selection:
+        target === undefined
+          ? { ok: false, reason: selectionError ?? 'no model' }
+          : {
+              ok: true,
+              model_key: target.modelKey,
+              ...(target.entry === undefined ? {} : { model: target.entry.id }),
+              ...(target.contextLength === undefined ? {} : { context_length: target.contextLength }),
+            },
+      lms: { found: binary !== undefined, ...(binary === undefined ? {} : { path: binary }) },
+      lmstudio_server: serverInfo === undefined ? null : { running: serverInfo.running, ...(serverInfo.port === undefined ? {} : { port: serverInfo.port }) },
+      model:
+        target === undefined
+          ? { key: null, present: false }
+          : {
+              key: target.modelKey,
+              present: found !== undefined,
+              ...(found?.maxContextLength === undefined ? {} : { max_context_length: found.maxContextLength }),
+            },
+      server: statusJson(server),
+    }
+    if (args.json) {
+      ports.stdout(JSON.stringify({ ok: true, ...payload }) + '\n')
+    } else {
+      const lines = [
+        `Hardware:     ${hardwareLine(hw)}`,
+        `Model choice: ${target === undefined ? `none (${selectionError ?? 'no model'})` : `${target.modelKey}${target.contextLength === undefined ? '' : `, ${target.contextLength}-token window`}`}`,
+        `lms:          ${binary ?? `NOT FOUND (${LMS_INSTALL_HELP})`}`,
+        `LM Studio:    ${serverInfo === undefined ? 'n/a' : serverInfo.running ? `server running on port ${serverInfo.port ?? '?'}` : 'server not running'}`,
+        `Model:        ${target === undefined ? 'n/a' : found !== undefined ? `in LM Studio's library (${target.modelKey})` : `missing from LM Studio's library (${target.modelKey})`}`,
+        `Xerxes load:  ${statusLine(server, 'lmstudio')}`,
+        ready ? 'Ready: run `xerxes local setup --engine lmstudio`.' : 'Not ready yet.',
+      ]
+      ports.stdout(lines.join('\n') + '\n')
+    }
+    return ready ? 0 : 1
   }
 
   async function start(parsed: ParsedArgs, cfg: LocalConfig, catalog: readonly CatalogEntry[]): Promise<number> {
@@ -443,13 +778,12 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     return ok({ stopped: false, reason: result.reason, ...(result.pid === undefined ? {} : { pid: result.pid }) }, text)
   }
 
-  async function status(): Promise<number> {
-    const current = await ports.server.status()
-    const payload = statusJson(current)
+  function report(current: ServerStatus, engine: LocalEngineName): number {
+    const payload = { ...statusJson(current), ...(engine === 'lmstudio' ? { engine } : {}) }
     if (args.json) {
       ports.stdout(JSON.stringify({ ok: true, ...payload }) + '\n')
     } else {
-      ports.stdout(statusLine(current) + '\n')
+      ports.stdout(statusLine(current, engine) + '\n')
     }
     return current.running ? 0 : 1
   }

@@ -39,7 +39,19 @@ export interface CatalogEntry {
   /** The model's own context window; local.ctx_size may not exceed it. */
   readonly nativeContext?: number
   readonly source?: ModelSource
+  /** How LM Studio knows this model, when it has a build LM Studio can run. */
+  readonly lmstudio?: LmStudioCatalogEntry
 }
+
+export interface LmStudioCatalogEntry {
+  /** LM Studio model key (`lms ls`); also the API identifier Xerxes loads it under. */
+  readonly modelKey: string
+  /** Memory this build needs; replaces `minMemoryBytes` when choosing for LM Studio. */
+  readonly minMemoryBytes: number
+}
+
+export type LocalEngineName = 'llama-server' | 'lmstudio'
+export const LOCAL_ENGINES: readonly LocalEngineName[] = ['llama-server', 'lmstudio']
 
 export type Catalog = readonly CatalogEntry[]
 
@@ -61,13 +73,23 @@ export const BUILTIN_MODELS: Catalog = [
     // local.ctx_size where memory allows.
     ctxSize: 16384,
     nativeContext: 262144,
+    // The 2-bit MLX pack (8.6 GB on disk) runs in LM Studio. Measured on a
+    // 24 GB M4 Pro on 2026-11-05 with a 42,752-token window, so a 16 GiB
+    // budget (a 24 GB Mac after the OS reserve has 20) is enough for it.
+    lmstudio: { modelKey: 'ternary-bonsai-2-27b-mlx', minMemoryBytes: 16 * GIB },
   },
 ]
 
 export interface LocalConfig {
+  /** local.engine / XERXES_LOCAL_ENGINE; undefined when unset (setup and start then use llama-server). */
+  readonly engine?: LocalEngineName
   readonly llamaServerPath?: string
+  /** LM Studio's `lms` CLI (local.lms_path / XERXES_LOCAL_LMS). */
+  readonly lmsPath?: string
   readonly modelsDir: string
   readonly port: number
+  /** True when local.port or XERXES_LOCAL_PORT set the port, rather than the default. */
+  readonly portExplicit: boolean
   readonly models: Readonly<Record<string, ModelSource>>
   /** --ctx-size override for llama-server (local.ctx_size, XERXES_LOCAL_CTX_SIZE). */
   readonly ctxSize?: number
@@ -75,7 +97,7 @@ export interface LocalConfig {
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const LOCAL_KEYS = new Set(['llama_server_path', 'models_dir', 'port', 'models', 'ctx_size'])
+const LOCAL_KEYS = new Set(['engine', 'llama_server_path', 'lms_path', 'models_dir', 'port', 'models', 'ctx_size'])
 const MIN_CTX_SIZE = 2048
 const MAX_CTX_SIZE = 1_048_576
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
@@ -149,6 +171,20 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
   }
   const serverPath = envServer ? envServer : typeof fileServer === 'string' ? fileServer.trim() : undefined
 
+  const envLms = env.XERXES_LOCAL_LMS?.trim()
+  const fileLms = section.lms_path
+  if (fileLms !== undefined && (typeof fileLms !== 'string' || fileLms.trim() === '')) {
+    throw new ValidationError('local.lms_path', 'must be a non-empty string', fileLms)
+  }
+  const lmsPath = envLms ? envLms : typeof fileLms === 'string' ? expandHome(fileLms.trim(), env) : undefined
+
+  const envEngine = env.XERXES_LOCAL_ENGINE?.trim()
+  const engine = envEngine
+    ? parseEngine(envEngine, 'XERXES_LOCAL_ENGINE')
+    : section.engine === undefined
+      ? undefined
+      : parseEngine(section.engine, 'local.engine')
+
   const envDir = env.XERXES_LOCAL_MODELS_DIR?.trim()
   const fileDir = section.models_dir
   if (fileDir !== undefined && (typeof fileDir !== 'string' || fileDir.trim() === '')) {
@@ -197,15 +233,25 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
       : parseCtxSize(section.ctx_size, 'local.ctx_size')
 
   return {
+    ...(engine === undefined ? {} : { engine }),
     ...(serverPath === undefined ? {} : { llamaServerPath: serverPath }),
+    ...(lmsPath === undefined ? {} : { lmsPath }),
     modelsDir,
     port,
+    portExplicit: Boolean(envPort) || section.port !== undefined,
     models,
     ...(ctxSize === undefined ? {} : { ctxSize }),
   }
 }
 
-function parseCtxSize(value: unknown, field: string): number {
+/** `llama-server` or `lmstudio`; anything else is refused naming the field. */
+export function parseEngine(value: unknown, field: string): LocalEngineName {
+  const name = typeof value === 'string' ? value.trim().toLowerCase() : value
+  if (name === 'llama-server' || name === 'lmstudio') return name
+  throw new ValidationError(field, `must be one of ${LOCAL_ENGINES.join(', ')}`, value)
+}
+
+export function parseCtxSize(value: unknown, field: string): number {
   const size = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value
   if (typeof size !== 'number' || !Number.isInteger(size) || size < MIN_CTX_SIZE || size > MAX_CTX_SIZE) {
     throw new ValidationError(field, `must be an integer from ${MIN_CTX_SIZE} to ${MAX_CTX_SIZE}`, value)

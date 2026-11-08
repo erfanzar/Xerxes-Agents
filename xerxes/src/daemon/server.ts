@@ -330,6 +330,12 @@ import {
   type DiscoveredModel,
 } from "./modelDiscovery.js";
 import {
+  loopbackOrigin,
+  windowFor,
+  type LoadedWindows,
+  type ProbeLoadedWindowsInput,
+} from "../local/loadedWindow.js";
+import {
   ProviderProfileFlow,
   type ProviderFlowPrompt,
   type ProviderFlowTransition,
@@ -994,6 +1000,12 @@ export interface DaemonServerOptions {
   readonly agentSettingsDefaults?: unknown;
   /** Refresh provider-reported model capabilities after initialize. Host opt-in avoids ambient network calls. */
   readonly autoDiscoverModelCapabilities?: boolean;
+  /**
+   * Ask a loopback engine (LM Studio, llama-server) for the window it loaded,
+   * during model discovery for a profile whose base URL is on this machine.
+   * Their `/v1/models` does not report it. Absent, discovery is unchanged.
+   */
+  readonly localWindowProbe?: (input: ProbeLoadedWindowsInput) => Promise<LoadedWindows>;
   /** Optional host-owned model catalogue lookup for interactive `/provider` setup. */
   readonly providerModelDiscovery?: ProviderModelDiscoveryPort;
   readonly runtime?: DaemonRuntime;
@@ -1191,6 +1203,9 @@ export class DaemonServer {
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
   private readonly autoDiscoverModelCapabilities: boolean;
+  private readonly localWindowProbe: DaemonServerOptions["localWindowProbe"];
+  /** Last logged reason a local window probe failed, by profile, so a reason is logged once. */
+  private readonly localWindowProbeFailures = new Map<string, string>();
   private readonly modelCapabilityRefreshes = new Map<string, Promise<JsonRpcPayload | undefined>>();
   /** Per-model reasoning-level sets, so the picker does not refetch each open. */
   private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
@@ -1430,6 +1445,7 @@ export class DaemonServer {
     this.providerReadiness = options.providerReadiness;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
+    this.localWindowProbe = options.localWindowProbe;
     // What providers reported earlier (saved on each profile) is known to the
     // request builders from the start, before this run rediscovers it.
     for (const profile of this.profileStore.list()) {
@@ -5589,7 +5605,9 @@ export class DaemonServer {
         provider: profile.provider,
       });
       const models = catalog.map((model) => model.id);
-      if (models.length > 0) this.rememberDiscoveredContextLimits(profile, catalog);
+      if (models.length > 0) {
+        this.rememberDiscoveredContextLimits(profile, await this.withLoadedWindows(profile, catalog, apiKey));
+      }
       const cachedProfile = this.profileStore.get(profile.name) ?? profile;
       return models.length
         ? {
@@ -5795,6 +5813,55 @@ export class DaemonServer {
         warning: errorMessage(error),
       };
     }
+  }
+
+  /**
+   * Add the window a loopback engine actually loaded to the discovered
+   * catalog. LM Studio and llama-server list models without it, so their
+   * profiles otherwise lose the window `xerxes local setup` saved and the
+   * status bar reads "ctx unknown" until the server refuses a prompt. A failed
+   * probe changes nothing; its reason goes to the daemon log once.
+   */
+  private async withLoadedWindows(
+    profile: ProviderProfile,
+    catalog: readonly DiscoveredModel[],
+    apiKey: string,
+  ): Promise<readonly DiscoveredModel[]> {
+    if (!this.localWindowProbe || loopbackOrigin(profile.base_url) === undefined) return catalog;
+    const logOnce = (reason: string): void => {
+      const safe = sanitizeModelDiscoveryError(new Error(reason), { apiKey, baseUrl: profile.base_url });
+      if (this.localWindowProbeFailures.get(profile.name) === safe) return;
+      this.localWindowProbeFailures.set(profile.name, safe);
+      console.warn(`Local context window for profile ${profile.name} is unknown: ${safe}`);
+    };
+    let result: LoadedWindows;
+    try {
+      result = await this.localWindowProbe({ baseUrl: profile.base_url, ...(apiKey ? { apiKey } : {}) });
+    } catch (error) {
+      logOnce(errorMessage(error));
+      return catalog;
+    }
+    if (!result.ok) {
+      logOnce(result.reason);
+      return catalog;
+    }
+    const merged: DiscoveredModel[] = catalog.map((model) => {
+      const window = windowFor(result, model.id);
+      return window === undefined ? model : { ...model, contextLimit: window };
+    });
+    // llama-server answers to any model name and lists its file path, so the
+    // profile's own model id may be missing from the list it returned.
+    const own = profile.model.trim();
+    const ownWindow = own ? windowFor(result, own) : undefined;
+    if (own && ownWindow !== undefined && !merged.some((model) => model.id === own)) {
+      merged.push({ id: own, contextLimit: ownWindow });
+    }
+    if (own && ownWindow === undefined) {
+      logOnce(`${result.engine === "lmstudio" ? "LM Studio" : "llama-server"} has not loaded ${own}`);
+    } else {
+      this.localWindowProbeFailures.delete(profile.name);
+    }
+    return merged;
   }
 
   private rememberDiscoveredContextLimits(

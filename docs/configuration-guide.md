@@ -493,12 +493,41 @@ CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's sa
 
 ## Bonsai and the local cascade
 
-`xerxes local setup` downloads a Bonsai model, starts llama.cpp's `llama-server` on
-`127.0.0.1`, and saves a `bonsai-local` provider profile.
-- **Context window:** the profile records the window the server was launched with, so compaction
-  knows it. Ternary Bonsai 2 27B reads 262,144 tokens. It launches with 16,384 by default, sized for
-  a 24 GB machine until KV-cache memory is measured there. Raise it with `runtime.local.ctx_size` or
-  `XERXES_LOCAL_CTX_SIZE`, up to the model's own window.
+`xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
+profile. The engine is a separate process that Xerxes reaches over OpenAI-compatible HTTP; no
+inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine`
+(`XERXES_LOCAL_ENGINE`):
+- **`llama-server`** (default): downloads the GGUF build (verified against a configured sha256)
+  and supervises llama.cpp's `llama-server`. Ternary GGUF builds need Prism's llama.cpp fork.
+- **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
+  then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
+  On Apple silicon this is the engine for Ternary Bonsai 2 27B's MLX pack (key
+  `ternary-bonsai-2-27b-mlx`). Stock MLX loaders don't apply the pack's Hadamard transforms.
+  - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
+  - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
+    (`XERXES_LOCAL_LMS`) to use another.
+  - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
+    already running is used on its port.
+  - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
+    Xerxes started it and nothing else is loaded on it. `status` and `stop` find the LM Studio load
+    without `--engine`.
+
+With either engine:
+- **Context window:** the profile records the window the engine actually loaded: LM Studio's
+  `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary Bonsai 2 27B reads 262,144
+  tokens. It loads with 16,384 by default, sized for a 24 GB machine. Choose another with
+  `--ctx-size`, `runtime.local.ctx_size` or `XERXES_LOCAL_CTX_SIZE`, up to the model's own window.
+  An LM Studio model outside the catalog with no size set loads LM Studio's default window.
+  LM Studio does not apply `--context-length` to every model. On a 24 GB M4 Pro it loads Ternary
+  Bonsai 2 27B's MLX pack with 42,752 tokens whatever is asked, while stock models get the size
+  asked for. `setup` says when the loaded window differs and records the loaded one.
+- **Window discovery:** neither engine reports its loaded window in `/v1/models`. For any profile
+  whose base URL is on this machine (`localhost`, `127.0.0.1`, `::1`), the daemon asks the server
+  each time it discovers models: on attach, in the model picker, and on refresh. It asks LM Studio's
+  `GET /api/v0/models` first, then llama-server's `GET /props`. The status bar, compaction and
+  overflow rescue use that window, and a model reloaded with another window is picked up at the
+  next discovery. If the server answers neither, discovery works as before and the daemon log
+  says why. Cloud providers are never asked.
 - **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: 13 tools and terse rules,
   about 3K tokens instead of about 29K. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.

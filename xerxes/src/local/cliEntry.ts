@@ -6,10 +6,13 @@ import { loadSystemDaemonConfig } from '../daemon/config.js'
 import { parseLocalConfig } from './catalog.js'
 import { runLocalCommand, type SaveLocalProfileInput } from './command.js'
 import { probeHardware, systemHardwarePorts } from './hardware.js'
+import { createLmStudioEngine, systemLmStudioPorts } from './lmstudio.js'
+import { probeLoadedWindows, systemWindowFetch } from './loadedWindow.js'
 import { createLocalServer, systemServerPorts } from './server.js'
 
 /**
- * `xerxes local …`: production wiring of the managed llama.cpp runtime.
+ * `xerxes local …`: production wiring of the managed local engines
+ * (llama.cpp's llama-server, or LM Studio through its `lms` CLI).
  *
  * Nothing here runs at startup; every action is an explicit subcommand. The
  * saved `bonsai-local` profile is marked `data_trust: local` and
@@ -27,6 +30,8 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
       hardware: () => probeHardware(systemHardwarePorts()),
       fetch: (url, init) => fetch(url, init),
       server: createLocalServer(systemServerPorts(), local.llamaServerPath === undefined ? {} : { llamaServerPath: local.llamaServerPath }),
+      lmstudio: createLmStudioEngine(systemLmStudioPorts(), local.lmsPath === undefined ? {} : { lmsPath: local.lmsPath }),
+      loadedWindow: baseUrl => probeLoadedWindows({ baseUrl }, systemWindowFetch),
       saveProfile: async input => saveLocalProfile(new ProfileStore(), input),
       stdout: text => { process.stdout.write(text) },
       stderr: text => { process.stderr.write(text) },
@@ -40,10 +45,11 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
 }
 
 /**
- * Save the `bonsai-local` profile with the window llama-server was launched
- * with. llama.cpp's model list reports no context size, so without this the
- * runtime never knows the window: auto-compaction does not run and a full
- * prompt overflows instead of being compacted.
+ * Save the `bonsai-local` profile with the window the engine loaded (LM
+ * Studio's `loaded_context_length`, llama-server's `/props` n_ctx). Neither
+ * model list reports it, so without this the runtime never knows the window:
+ * auto-compaction does not run and a full prompt overflows instead of being
+ * compacted. The daemon re-reads it from the server on each model discovery.
  */
 export function saveLocalProfile(store: ProfileStore, input: SaveLocalProfileInput): void {
   store.save({

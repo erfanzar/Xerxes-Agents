@@ -220,6 +220,7 @@ import { AuthCommandError, runAuthCommand } from "./auth/command.js";
 import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
 import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
 import { ASK_USER_OPTIONS_SCHEMA, ASK_USER_POLICY } from "./tools/askUserPolicy.js";
+import { probeLoadedWindows, systemWindowFetch } from "./local/loadedWindow.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -260,7 +261,7 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
-      ["xerxes local setup|start|stop|status|doctor", "run a Bonsai model on this machine with llama.cpp"],
+      ["xerxes local setup|start|stop|status|doctor [--engine llama-server|lmstudio]", "run a Bonsai model on this machine with llama.cpp or LM Studio"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
@@ -1263,6 +1264,8 @@ async function runDaemonOwned(
     ...(monitorWebhookHub ? { monitorWebhookServer: monitorWebhookHub } : {}),
     profileStore,
     autoDiscoverModelCapabilities: true,
+    // LM Studio and llama-server do not list their loaded window in /v1/models.
+    localWindowProbe: input => probeLoadedWindows(input, systemWindowFetch),
     skillRegistry,
     declarativeForge,
     agentPresetRoster,
