@@ -59,7 +59,8 @@ export async function buildDesktopInstaller(): Promise<string> {
   let attached = false
   try {
     await mkdir(join(staging, '.background'), { recursive: true })
-    await cp(join(packageDirectory, 'Xerxes Agents.app'), join(staging, 'Xerxes Agents.app'), { recursive: true })
+    // verbatimSymlinks: a rewritten framework link would point back into this build directory.
+    await cp(join(packageDirectory, 'Xerxes Agents.app'), join(staging, 'Xerxes Agents.app'), { recursive: true, verbatimSymlinks: true })
     await symlink('/Applications', join(staging, 'Applications'))
     await cp(join(root, '..', 'assets', 'installer', 'background.tiff'), join(staging, '.background', 'background.tiff'))
     await run(['hdiutil', 'create', '-volname', `Xerxes Layout ${crypto.randomUUID().slice(0, 8)}`, '-srcfolder', staging, '-format', 'UDRW', '-fs', 'HFS+', writable])

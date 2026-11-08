@@ -91,7 +91,10 @@ async function packageDesktopMac(): Promise<void> {
 
   await mkdir(packageOutputDirectory, { recursive: true })
   await rm(applicationBundle, { recursive: true, force: true })
-  await cp(sourceBundle, applicationBundle, { recursive: true })
+  // Keep the framework's relative symlinks (Versions/Current, …) as they are:
+  // cp otherwise rewrites them to absolute paths into node_modules, and
+  // codesign then rejects the framework as having unsealed contents.
+  await cp(sourceBundle, applicationBundle, { recursive: true, verbatimSymlinks: true })
   await rename(sourceExecutable, productExecutable)
   await brandHelperBundles(join(contents, 'Frameworks'))
   await rm(join(resources, 'app'), { recursive: true, force: true })
