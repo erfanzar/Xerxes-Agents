@@ -590,18 +590,44 @@ async function loadXerxesMd(cwd: string, host: BootstrapHost): Promise<string> {
   // *.local.md variants (DSH parity) are personal overlays: they are
   // separate names, so they load ALONGSIDE the shared base file and belong
   // in .gitignore.
+  for (const file of await findProjectInstructionFiles(cwd, host.readText)) {
+    const label = `Project ${file.name}: ${file.path}`
+    parts.push('[' + label + ']\n' + boundedBootstrapContext(
+      file.content,
+      label,
+      MAX_BOOTSTRAP_INSTRUCTION_FILE_BYTES,
+    ))
+  }
+  return clipBootstrapContext(
+    parts.join('\n\n'),
+    MAX_BOOTSTRAP_INSTRUCTIONS_BYTES,
+    'project instructions',
+  )
+}
+
+export interface ProjectInstructionFile {
+  readonly name: (typeof INSTRUCTION_FILE_CANDIDATES)[number]
+  readonly path: string
+  readonly content: string
+}
+
+/**
+ * The project instruction files, nearest first per name, walking up at most
+ * ten folders from `cwd`. The full prompt and the lean prompt read the same
+ * files. A missing or unreadable file is skipped.
+ */
+export async function findProjectInstructionFiles(
+  cwd: string,
+  readText: (path: string) => Promise<string | undefined> = readOptionalText,
+): Promise<ProjectInstructionFile[]> {
+  const files: ProjectInstructionFile[] = []
   for (const name of INSTRUCTION_FILE_CANDIDATES) {
     let current = cwd
     for (let index = 0; index < 10; index += 1) {
       const candidate = join(current, name)
-      const project = await optionalContext(() => host.readText(candidate))
-      if (project) {
-        const label = `Project ${name}: ${candidate}`
-        parts.push('[' + label + ']\n' + boundedBootstrapContext(
-          project,
-          label,
-          MAX_BOOTSTRAP_INSTRUCTION_FILE_BYTES,
-        ))
+      const content = await optionalContext(() => readText(candidate))
+      if (content) {
+        files.push({ name, path: candidate, content })
         break
       }
       const parent = dirname(current)
@@ -609,11 +635,7 @@ async function loadXerxesMd(cwd: string, host: BootstrapHost): Promise<string> {
       current = parent
     }
   }
-  return clipBootstrapContext(
-    parts.join('\n\n'),
-    MAX_BOOTSTRAP_INSTRUCTIONS_BYTES,
-    'project instructions',
-  )
+  return files
 }
 
 function boundedBootstrapContext(content: string, label: string, maximum: number): string {

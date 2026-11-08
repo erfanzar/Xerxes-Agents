@@ -18,7 +18,7 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
-import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/leanPrompt.js'
+import { buildLeanSystemPrompt, localDay, readLeanProjectInstructions, selectLeanTools } from '../runtime/leanPrompt.js'
 import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import type { RunSafety } from '../runtime/runSafety.js'
@@ -587,6 +587,7 @@ export class AgentTurnRunner implements TurnRunner {
         date: localDay(new Date()),
         toolNames: (tools ?? []).map(tool => tool.function.name),
         commandSandbox: permissionMode === 'auto' && runSafety?.commandSandbox() !== undefined,
+        projectInstructions: await readLeanProjectInstructions(session.cwd),
       })
       : await this.bootstrapSystemPrompt(
         session,
@@ -648,7 +649,9 @@ export class AgentTurnRunner implements TurnRunner {
       ...(promptDay && promptDay !== today ? { dateChange: `Today's date is now ${today}.` } : {}),
       ...(goalChanged ? { goalStatus } : {}),
       contextDeltas: renderContextDeltas(contextDeltas),
-      ...(instructionUpdates ? { instructionUpdates } : {}),
+      // The lean prompt re-reads the instruction files every turn, within its
+      // budget; the update layer would resend whole files.
+      ...(instructionUpdates && !lean ? { instructionUpdates } : {}),
       memoryChanges: memoryState.changes,
       selfMemoryChanges: memoryState.selfChanges,
       recoveredSubagents: restoredSubagentCount

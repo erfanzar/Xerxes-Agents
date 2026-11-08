@@ -3,7 +3,9 @@
 
 import { ValidationError } from '../core/errors.js'
 import { modelCard } from '../llms/modelCards.js'
+import { scanContextContent } from '../security/promptScanner.js'
 import type { JsonSchema, ToolDefinition } from '../types/toolCalls.js'
+import { findProjectInstructionFiles, type ProjectInstructionFile } from './bootstrap.js'
 import { protectedRunExclusion } from './protectedRun.js'
 
 /** Environment variable that selects the prompt profile. */
@@ -145,7 +147,8 @@ export interface LeanSystemPromptInput {
   /** Date text as it should appear in the prompt, for example 2026-11-02. */
   readonly date: string
   readonly toolNames: readonly string[]
-  readonly projectInstructions?: string
+  /** The project instruction block (see `readLeanProjectInstructions`). */
+  readonly projectInstructions?: string | undefined
   /** exec_command runs in the OS sandbox this turn (`runtime/runSafety.ts`). */
   readonly commandSandbox?: boolean
 }
@@ -187,6 +190,28 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     lines.push('', 'Project instructions:', clipText(instructions, MAX_PROJECT_INSTRUCTION_CHARS))
   }
   return lines.join('\n')
+}
+
+/**
+ * The project instruction files (AGENTS.md and the rest) as one block for the
+ * lean prompt, scanned like the full prompt's and at most
+ * MAX_PROJECT_INSTRUCTION_CHARS long. A block that had to be cut ends by naming
+ * the files to read for the rest.
+ */
+export function leanProjectInstructions(files: readonly ProjectInstructionFile[]): string | undefined {
+  const parts = files
+    .map(file => ({ file, text: scanContextContent(file.content, `Project ${file.name}: ${file.path}`).trim() }))
+    .filter(part => part.text !== '')
+  if (parts.length === 0) return undefined
+  const text = parts.map(part => parts.length > 1 ? `[${part.file.name}]\n${part.text}` : part.text).join('\n\n')
+  if (text.length <= MAX_PROJECT_INSTRUCTION_CHARS) return text
+  const pointer = `\n(Cut to fit. Read ${parts.map(part => part.file.path).join(', ')} for the rest.)`
+  return clipText(text, Math.max(0, MAX_PROJECT_INSTRUCTION_CHARS - pointer.length)) + pointer
+}
+
+/** Read the project instruction files from `cwd` up, as the lean prompt's block. */
+export async function readLeanProjectInstructions(cwd: string): Promise<string | undefined> {
+  return leanProjectInstructions(await findProjectInstructionFiles(cwd))
 }
 
 export interface LeanPromptSize {

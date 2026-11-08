@@ -558,6 +558,10 @@ With either engine:
 - **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: 13 tools and terse rules,
   about 3K tokens instead of about 29K. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
+  It includes the project's instruction files (`XERXES.md`, `AGENTS.md`, `CLAUDE.md` and their
+  `.local.md` overlays, found the same way as for the full prompt) in at most 1,500 characters. A
+  longer block is cut and names the files to read for the rest. The daemon reads them again each turn,
+  so an edit applies from the next turn.
   Sub-agents follow the same rule for their own model. Set `runtime.prompt_profile` (or
   `XERXES_PROMPT_PROFILE`, or the profile's `prompt_profile`) to `full` or `lean` to choose
   yourself.

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -37,9 +37,10 @@ function tool(name: string): ToolDefinition {
 const TOOLS = [tool('ReadFile'), tool('WriteFile'), tool('AgentTool'), tool('Workflow'), tool('exec_command')]
 const BOOTSTRAP = 'FULL BOOTSTRAP PROMPT ' + 'with lots of doctrine '.repeat(200)
 
-async function requestFor(profile: 'lean' | 'full' | undefined): Promise<CompletionRequest> {
+async function requestFor(profile: 'lean' | 'full' | undefined, agentsMd?: string): Promise<CompletionRequest> {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-lean-runner-'))
   try {
+    if (agentsMd !== undefined) await writeFile(join(root, 'AGENTS.md'), agentsMd)
     const requests: CompletionRequest[] = []
     const llm: LlmClient = { async *stream(request) { requests.push(request); yield { content: 'done' } } }
     const runner = new AgentTurnRunner({
@@ -104,4 +105,11 @@ test("the prompt-profile hook sees the turn's window, so a small window can choo
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('the lean prompt carries the project AGENTS.md', async () => {
+  const request = await requestFor('lean', 'Write every report to out/.\n')
+  const system = systemText(request)
+  expect(system).toContain('Project instructions:\nWrite every report to out/.')
+  expect(system).not.toContain('FULL BOOTSTRAP PROMPT')
 })

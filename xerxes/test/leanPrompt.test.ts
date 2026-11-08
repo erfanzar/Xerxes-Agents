@@ -9,6 +9,7 @@ import {
   LEAN_CORE_TOOL_NAMES,
   automaticPromptProfile,
   buildLeanSystemPrompt,
+  leanProjectInstructions,
   leanPromptSize,
   parsePromptProfileConfig,
   selectLeanTools,
@@ -185,4 +186,20 @@ test('with nothing configured, a Bonsai model or a known window of 32K or less p
   expect(parsePromptProfileConfig({}, { XERXES_PROMPT_PROFILE: 'full' }, undefined, { contextLimit: 16_384 })).toBe('full')
   expect(parsePromptProfileConfig({}, {}, undefined, { contextLimit: 16_384 })).toBe('lean')
   expect(parsePromptProfileConfig({}, {})).toBe('full')
+})
+
+test('project instructions: one file as written, several labelled, a long block cut with the files to read', () => {
+  expect(leanProjectInstructions([])).toBeUndefined()
+  const agents = { name: 'AGENTS.md' as const, path: '/work/AGENTS.md', content: 'Use bun, not npm.\n' }
+  expect(leanProjectInstructions([agents])).toBe('Use bun, not npm.')
+
+  const claude = { name: 'CLAUDE.md' as const, path: '/work/CLAUDE.md', content: 'Write tests first.' }
+  expect(leanProjectInstructions([agents, claude])).toBe('[AGENTS.md]\nUse bun, not npm.\n\n[CLAUDE.md]\nWrite tests first.')
+
+  const long = leanProjectInstructions([{ ...agents, content: 'word '.repeat(1000) }, claude])
+  expect(long?.length).toBeLessThanOrEqual(1500)
+  expect(long).toContain('Read /work/AGENTS.md, /work/CLAUDE.md for the rest.')
+
+  // Scanned like the full prompt's instruction files.
+  expect(leanProjectInstructions([{ ...agents, content: 'Use\u200b bun.' }])).not.toContain('\u200b')
 })

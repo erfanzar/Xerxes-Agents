@@ -32,7 +32,7 @@ import type {
   SpawnedAgentStatus,
 } from '../operators/subagents.js'
 import { bootstrap, bootstrapSubagentsForAgent } from '../runtime/bootstrap.js'
-import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/leanPrompt.js'
+import { buildLeanSystemPrompt, localDay, readLeanProjectInstructions, selectLeanTools } from '../runtime/leanPrompt.js'
 import { skillPromptSection, type SkillRegistry } from '../extensions/skills.js'
 import type { RunHistory } from '../runtime/runHistory.js'
 import { runWithActiveSession } from '../runtime/sessionContext.js'
@@ -1449,7 +1449,7 @@ async function runNativeSubagent(
       // agent prompt still gets the rules, which a small model needs most.
       const basePrompt = lean
         ? [
-          buildLeanSystemPrompt({ cwd, model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name) }),
+          buildLeanSystemPrompt({ cwd, model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name), projectInstructions: await readLeanProjectInstructions(cwd) }),
           request.systemPrompt,
         ].filter(Boolean).join('\n\n')
         : (await bootstrap({

@@ -56,7 +56,7 @@ import { outboundApprovalPort } from './daemon/outboundGate.js';
 import { createTurnRouter } from './daemon/turnRouting.js';
 import { createEscalationFactory } from './daemon/turnEscalation.js';
 import { createHybridPlacement } from './daemon/hybridPlanTool.js';
-import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
+import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, readLeanProjectInstructions, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
 import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
 import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
@@ -3086,7 +3086,7 @@ async function acpServer(
   const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
   const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
   const systemPrompt = lean
-    ? buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name) })
+    ? buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name), projectInstructions: await readLeanProjectInstructions(workspaceRoot) })
     : joinSystemPrompts(
         (await bootstrap({
           cwd: workspaceRoot,
@@ -3348,6 +3348,7 @@ async function runOneShot(
           date: localDay(new Date()),
           toolNames: selectedTools.map(tool => tool.function.name),
           commandSandbox: runSafety?.commandSandbox() !== undefined,
+          projectInstructions: await readLeanProjectInstructions(workspaceRoot),
         }),
         // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.
         agentReference === undefined ? undefined : agent?.systemPrompt,
