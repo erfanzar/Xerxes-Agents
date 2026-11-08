@@ -709,12 +709,15 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
   if (checkEvents) return checkEvents
   const retry = asRecord(payload.retry)
   if (typeof retry.final === 'boolean') {
-    // A provider attempt failed. Before a retry the partial reply is dropped
-    // (the runtime drops it from history); on the final failure it is kept and
-    // the error starts on its own line.
+    // A provider attempt failed, or the reply budget stopped it. Before a retry
+    // the partial reply is dropped (the runtime drops it from history); on the
+    // final failure it is kept and the error starts on its own line.
     const attempt = num(retry.attempt, 1)
     const max = num(retry.maxAttempts)
-    const note = retry.final ? '' : `Model request failed · retry ${attempt}${max > 1 ? ` of ${max - 1}` : ''}`
+    const count = max > 1 ? ` of ${max - 1}` : ''
+    const note = retry.final ? ''
+      : retry.cause === 'reply_budget' ? `Reply stopped at its budget · asking again ${attempt}${count}`
+        : `Model request failed · retry ${attempt}${count}`
     // The final failure's error is already in the transcript, worded for the
     // user; a toast would repeat Bun's raw message. Mid-retry toasts keep the
     // reason but lose Bun's note to the developer holding the fetch() call.

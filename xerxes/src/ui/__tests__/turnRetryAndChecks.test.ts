@@ -100,6 +100,18 @@ describe('retry notices', () => {
   it('leaves the final failure to the transcript, which words it for the user', () => {
     expect(retryNotice(true)).toEqual([{ type: 'turn.retry', payload: { final: true, note: '' } }])
   })
+
+  it('names a reply the budget stopped instead of calling it a failed request', () => {
+    const message = 'Reply stopped: it reasoned for about 9,000 tokens over 10 min without a tool call or an answer (reply budget 10 min). Asking again with a note (1 of 2).'
+    expect(adaptDaemonEvent('notification', {
+      level: 'warning',
+      message,
+      retry: { type: 'provider_retry', cause: 'reply_budget', attempt: 1, maxAttempts: 3, delay: 0, final: false, error: message }
+    })).toEqual([
+      { type: 'turn.retry', payload: { final: false, note: 'Reply stopped at its budget · asking again 1 of 2' } },
+      { type: 'notification.show', payload: { kind: 'ttl', level: 'warn', text: message, ttl_ms: 8000 } }
+    ])
+  })
 })
 
 describe('result checks between cascade rounds', () => {

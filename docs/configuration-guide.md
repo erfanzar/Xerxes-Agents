@@ -515,7 +515,7 @@ inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine
 **Model cards.** Every Bonsai-specific setting lives in one record per model, in
 `xerxes/src/llms/modelCards.ts`:
 - **What a card holds:** the ids it answers to, published sampling, output limit, native window,
-  default prompt profile, escalation default and local builds.
+  default prompt profile, escalation default, reply budget and local builds.
 - **Which models have one:** Bonsai 2 at 2B, 4B and 9B, and Ternary Bonsai 2 27B each have a
   card. Any other model id containing "bonsai" (such as `bonsai-8b`) gets the family card: the lean
   prompt and the cascade, but no sampling, because Prism publishes sampling per model.
@@ -524,7 +524,7 @@ inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine
 - **Viewing it:** `/bonsai` in the TUI, or `xerxes bonsai [model]` in a terminal, shows the
   active model's card. For each setting it shows the value in effect and what set it.
   - **Settings it reports:** sampling, output limit, context window, prompt and tools, result
-    checks and escalation, and local builds.
+    checks and escalation, reply budget, and local builds.
   - **Sources it names:** the card, `/sampling` or another setting, a profile's
     `max_output_tokens` or `prompt_profile`, an environment variable, or the window the engine
     loaded. Only the daemon knows the loaded window.
@@ -594,6 +594,24 @@ With either engine:
   It applies only when nothing else sets one (`max_tokens`, a profile's `max_output_tokens`, or the
   provider). A reply that reaches it is told to continue, as with any other limit. It doesn't
   reduce the prompt budget used for compaction.
+- **Reply budget:** a local model can reason for many minutes in one reply without acting, which
+  can use up a task's whole time limit. Every Bonsai card gives a reply about 8,192 reasoning
+  tokens or 10 minutes, whichever comes first, to take its first action.
+  - **When a reply is stopped:** it is still reasoning past either limit, with no tool call and no
+    answer text yet. A reply that has started answering or calling a tool is never cut.
+  - **Counting:** time starts at the reply's first token, so reading a long prompt doesn't count.
+    Tokens are estimated at 4 characters each.
+  - **What happens:** the reply's reasoning is not kept, so the next prompt doesn't grow by the
+    whole runaway reply. The model is told what happened and asked to take its next step. The TUI
+    shows "Reply stopped at its budget" and the reason.
+  - **Limit per turn:** after 2 stops in one turn, the next reply that runs past the budget ends
+    the turn as "stopped · output limit", saying how to continue.
+  - **Setting it:** `runtime.reply_budget` sets it for any model. It takes `off`; `on` (the
+    card's budget, or 8,192 tokens and 10 minutes); or `{ max_reasoning_tokens, max_seconds }`
+    (256 to 1,000,000 tokens, 10 to 86,400 seconds; a field left out comes from `on`). Unset,
+    only a model whose card has a budget gets one.
+  - **Where it applies:** the daemon, one-shot runs and ACP read the setting. Sub-agents and the
+    SDK use the card's budget.
 - **The cascade:** after a turn, result checks inspect what it wrote and ran. When a check fails,
   the escalation ladder decides by rule what happens next, inside the same turn:
   1. The model retries with the failed checks as feedback, up to `escalation.max_local_retries`

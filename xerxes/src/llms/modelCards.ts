@@ -35,6 +35,18 @@ export interface LlamaServerBuild {
   readonly ctxSize: number
 }
 
+/**
+ * How long one reply may reason before it acts (see `runtime/replyBudget.ts`):
+ * a reply still reasoning past either limit, with no tool call and no answer
+ * text yet, is stopped and the model is asked again with a note.
+ */
+export interface ReplyBudget {
+  /** Reasoning tokens, estimated at 4 characters each. */
+  readonly maxReasoningTokens: number
+  /** Seconds from the reply's first streamed token, so reading the prompt does not count. */
+  readonly maxSeconds: number
+}
+
 /** An LM Studio build (`lms ls` key). */
 export interface LmStudioBuild {
   /** LM Studio model key; also the API identifier Xerxes loads it under. */
@@ -60,6 +72,8 @@ export interface ModelCard {
   readonly promptProfile?: 'lean' | 'full'
   /** The cascade is on by default for this model when no setting chooses. */
   readonly escalationByDefault?: boolean
+  /** The per-reply budget when `runtime.reply_budget` is unset; none means no budget. */
+  readonly replyBudget?: ReplyBudget
   readonly llamaServer?: LlamaServerBuild
   readonly lmstudio?: LmStudioBuild
 }
@@ -81,8 +95,19 @@ const BONSAI_2_SMALL_SAMPLING: PublishedSampling = Object.freeze({
   instruct: BONSAI_2_INSTRUCT,
 })
 
-/** What every Bonsai card shares: a small model picks better among a few tools, and a failed check is cheap to retry. */
-const BONSAI_DEFAULTS = { bonsai: true, promptProfile: 'lean', escalationByDefault: true } as const
+/**
+ * What every Bonsai card shares: a small model picks better among a few tools,
+ * a failed check is cheap to retry, and one reply that reasons for many
+ * minutes without acting should not use up the whole task. The reply budget is
+ * a quarter of the 27B's 32K output ceiling, and ten minutes so a slow machine
+ * does not wait out the token limit.
+ */
+const BONSAI_DEFAULTS = {
+  bonsai: true,
+  promptProfile: 'lean',
+  escalationByDefault: true,
+  replyBudget: Object.freeze({ maxReasoningTokens: 8_192, maxSeconds: 600 }),
+} as const
 
 /**
  * Most specific first: the first card whose `match` accepts an id wins, and

@@ -63,6 +63,7 @@ import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } fr
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
+import { resolveReplyBudget } from './runtime/replyBudget.js';
 import { runCascadingTurn, type CascadeHooks, type CascadeStep } from './runtime/cascade.js';
 import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
@@ -2554,6 +2555,9 @@ function daemonRuntime(
       // exec_command in the OS sandbox. Used by turns in auto mode only.
       runSafetyForSession: (session, outputFolder) => runSafetyRegistry.forSession(session.id, outputFolder),
       recoverEngineFor: systemEngineRecoveryFor(config.runtime, process.env),
+      // A reply that reasons past its budget without acting is stopped and
+      // asked again (runtime.reply_budget; Bonsai's model card sets one).
+      replyBudgetFor: (candidate: string) => resolveReplyBudget({ ...config.runtime, ...settings }, candidate),
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         trustOf: sessionDataTrust,
@@ -3123,6 +3127,7 @@ async function acpServer(
     // The safety floor in auto mode, one per ACP session and folder.
     runSafetyFor: (sessionId: string, cwd: string) => acpRunSafety.forSession(sessionId, cwd),
     recoverEngineFor: (candidate: string) => systemEngineRecoveryFor(config.runtime, process.env)({ baseUrl: connection.baseUrl, model: candidate }),
+    replyBudgetFor: (candidate: string) => resolveReplyBudget(config.runtime, candidate),
     // The daemon's cascade, one ladder per ACP session.
     cascadeFor: (sessionId: string, cwd: string) => ({
       hooks: headlessCascadeHooks({
@@ -3433,6 +3438,8 @@ async function runOneShot(
   const writeStreamJson = (record: Record<string, unknown>) => {
     process.stdout.write(`${JSON.stringify(record)}\n`);
   };
+  // Read before the run starts, so an invalid runtime.reply_budget fails here.
+  const replyBudget = resolveReplyBudget(config.runtime, model);
   // The daemon's cascade: checks after each attempt, and while escalation
   // hands back feedback the model runs again in this same run.
   const cascadeHooks: CascadeHooks = {
@@ -3475,6 +3482,7 @@ async function runOneShot(
         ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
         tools: selectedTools,
         ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
+        replyBudget,
       },
       {
         awaitAgentEvents: async (signal) => {

@@ -23,6 +23,7 @@ import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import type { RunSafety } from '../runtime/runSafety.js'
 import type { RecoverEngine } from '../local/engineRecovery.js'
+import type { ReplyBudget } from '../runtime/replyBudget.js'
 import { localOnlyActive } from '../runtime/localOnly.js'
 import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
 import type { TurnRoute } from './turnRouting.js'
@@ -206,6 +207,12 @@ export interface AgentTurnRunnerOptions {
    * for a route that is not a loopback endpoint.
    */
   readonly recoverEngineFor?: (route: { readonly baseUrl: string | undefined; readonly model: string }) => RecoverEngine | undefined
+  /**
+   * The per-reply budget for a model (`runtime/replyBudget.ts`), read per
+   * turn so a config change applies to the next one; null turns it off.
+   * Absent: the model card's budget.
+   */
+  readonly replyBudgetFor?: (model: string) => ReplyBudget | null
   /**
    * Network retries before a turn gives up on an unreachable provider. Absent:
    * the loop's default for a remote route.
@@ -874,6 +881,7 @@ export class AgentTurnRunner implements TurnRunner {
         }),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
+        ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(attemptModel) } : {}),
         permissionMode,
         ...(providerDefaults?.temperature !== undefined ? { temperature: providerDefaults.temperature } : {}),
         ...(providerDefaults?.serviceTier !== undefined ? { serviceTier: providerDefaults.serviceTier } : {}),

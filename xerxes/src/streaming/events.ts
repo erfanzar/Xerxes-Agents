@@ -72,7 +72,20 @@ export type StreamEvent =
   | { readonly type: 'compaction'; readonly active: boolean }
   | { readonly text: string; readonly type: 'text' }
   | { readonly text: string; readonly type: 'thinking' }
-  | { readonly attempt: number; readonly delay: number; readonly error: string; readonly final: boolean; readonly maxAttempts: number; readonly type: 'provider_retry' }
+  | {
+    readonly attempt: number
+    /**
+     * Set when the attempt did not fail but the harness stopped it:
+     * `reply_budget` means the reply reasoned past its budget without acting,
+     * and the next attempt carries a note to the model. Absent for a failure.
+     */
+    readonly cause?: 'reply_budget'
+    readonly delay: number
+    readonly error: string
+    readonly final: boolean
+    readonly maxAttempts: number
+    readonly type: 'provider_retry'
+  }
   | {
     readonly call: ToolCall
     /** The model's visible reasoning that preceded this call, when it exists. */

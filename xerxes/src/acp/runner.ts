@@ -18,6 +18,7 @@ import { runTurn } from '../streaming/loop.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionDecision, type PermissionMode, type ToolPolicy } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
 import type { RecoverEngine } from '../local/engineRecovery.js'
+import type { ReplyBudget } from '../runtime/replyBudget.js'
 import { routePermission, type AcpPermissionBoard } from './permissions.js'
 import type { AcpSession } from './session.js'
 import type { AcpEventEmitter, AcpModelInfo, AcpPromptRequest, AcpWireEvent } from './types.js'
@@ -56,6 +57,8 @@ export interface AcpAgentRunnerOptions {
   readonly runSafetyFor?: (sessionId: string, cwd: string) => Promise<RunSafety | undefined>
   /** Reloads a local engine Xerxes started when it loses the model (`local/engineRecovery.ts`). */
   readonly recoverEngineFor?: (model: string) => RecoverEngine | undefined
+  /** The per-reply budget for a model (`runtime/replyBudget.ts`); null is off. Absent: the model card's. */
+  readonly replyBudgetFor?: (model: string) => ReplyBudget | null
 }
 
 interface ActivePrompt {
@@ -218,6 +221,7 @@ export class AcpAgentRunner {
         ...(this.options.tools ? { tools: this.options.tools } : {}),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
+        ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(model) } : {}),
         permissionMode,
       }, {
         ...(subagentCohort ? {

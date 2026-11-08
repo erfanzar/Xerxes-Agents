@@ -6,11 +6,12 @@
  * each setting the card holds, the value in effect and what set it.
  */
 import { resolvedProfileModelCapabilities, type ProviderProfile } from '../bridge/profiles.js'
-import { modelCard, type ModelCard } from '../llms/modelCards.js'
+import { modelCard, type ModelCard, type ReplyBudget } from '../llms/modelCards.js'
 import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K, formatSamplingValues } from '../llms/samplingDefaults.js'
 import { deriveDataTrust } from '../security/dataBoundary.js'
 import { defaultEscalationMode, ESCALATION_ENV, parseEscalationConfig } from './escalationPolicy.js'
 import { parsePromptProfileConfig, PROMPT_PROFILE_ENV } from './leanPrompt.js'
+import { resolveReplyBudget } from './replyBudget.js'
 
 /** The wire names of the sampling values a card publishes. */
 const CARD_SAMPLING_KEYS = ['temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repetition_penalty'] as const
@@ -115,6 +116,23 @@ function escalationSetting(input: ModelCardReportInput, card: ModelCard): ModelC
   return { name: 'Result checks and escalation', card: card.escalationByDefault ? 'on' : '—', effective: mode, from }
 }
 
+function replyBudgetText(budget: ReplyBudget | null | undefined): string {
+  if (!budget) return 'none'
+  const time = budget.maxSeconds % 60 === 0 ? `${count(budget.maxSeconds / 60)} min` : `${count(budget.maxSeconds)} s`
+  return `${count(budget.maxReasoningTokens)} reasoning tokens or ${time}`
+}
+
+function replyBudgetSetting(input: ModelCardReportInput, card: ModelCard): ModelCardSetting {
+  const raw = input.runtime['reply_budget']
+  const from = raw !== undefined && raw !== null ? 'runtime.reply_budget' : card.replyBudget ? 'card' : '—'
+  return {
+    name: 'Reply budget',
+    card: card.replyBudget ? replyBudgetText(card.replyBudget) : '—',
+    effective: replyBudgetText(resolveReplyBudget(input.runtime, input.model)),
+    from,
+  }
+}
+
 function buildsSetting(card: ModelCard): ModelCardSetting | undefined {
   const builds = [
     ...(card.llamaServer ? [`llama-server ${card.llamaServer.fileName} (needs ${count(card.llamaServer.minMemoryBytes / 1024 ** 3)} GiB, launches with ${count(card.llamaServer.ctxSize)} tokens)`] : []),
@@ -136,6 +154,7 @@ export function modelCardReport(input: ModelCardReportInput): ModelCardReport {
       contextSetting(input, card),
       promptSetting(input, card),
       escalationSetting(input, card),
+      replyBudgetSetting(input, card),
       ...(builds ? [builds] : []),
     ],
   }
@@ -157,6 +176,6 @@ export function formatModelCardReport(report: ModelCardReport): string {
     '| --- | --- | --- | --- |',
     ...report.settings.map(setting => `| ${cell(setting.name)} | ${cell(setting.card)} | ${cell(setting.effective)} | ${cell(setting.from)} |`),
     '',
-    'Settings win over the card: `/sampling`, a profile\'s `max_output_tokens` or `prompt_profile`, `runtime.escalation.mode`.',
+    'Settings win over the card: `/sampling`, a profile\'s `max_output_tokens` or `prompt_profile`, `runtime.escalation.mode`, `runtime.reply_budget`.',
   ].join('\n')
 }

@@ -16,6 +16,7 @@ import { providerErrorText } from './providerErrorText.js'
 import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
 import { resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
+import { modelCard, type ReplyBudget } from '../llms/modelCards.js'
 import {
   DENIAL_LOOP_PATTERN,
   DenialBudget,
@@ -110,6 +111,65 @@ export const MAX_EMPTY_REPLY_NUDGES = 2
 export const EMPTY_REPLY_NUDGE = '[harness] Your last reply had no visible text and no tool call the harness could '
   + 'read, so nothing was run and nothing was answered. Continue the task: call the next tool in the exact tool-call '
   + 'form your instructions give, or, if the work is done, write your final answer as plain text.'
+/**
+ * Replies per turn the reply budget may stop and re-ask; the next one that runs
+ * past it ends the turn. Each stop already cost a full budget of waiting.
+ */
+export const MAX_REPLY_BUDGET_STOPS = 2
+/** The reply budget's token estimate: characters of reasoning per token, as for prompts. */
+export const REPLY_BUDGET_CHARS_PER_TOKEN = 4
+
+/**
+ * A reply that reasoned past its budget (`runtime/replyBudget.ts`) without a
+ * tool call or answer text. The loop stops the attempt with it and asks again.
+ */
+export class ReplyBudgetError extends Error {
+  readonly limit: 'tokens' | 'time'
+  readonly reasoningTokens: number
+  readonly seconds: number
+
+  constructor(limit: 'tokens' | 'time', reasoningTokens: number, seconds: number, budget: ReplyBudget) {
+    const spent = `about ${reasoningTokens.toLocaleString('en-US')} tokens over ${formatDuration(seconds)}`
+    const cap = limit === 'tokens'
+      ? `${budget.maxReasoningTokens.toLocaleString('en-US')} tokens`
+      : formatDuration(budget.maxSeconds)
+    super(`Reply stopped: it reasoned for ${spent} without a tool call or an answer (reply budget ${cap}).`)
+    this.name = 'ReplyBudgetError'
+    this.limit = limit
+    this.reasoningTokens = reasoningTokens
+    this.seconds = seconds
+  }
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} s`
+  const minutes = seconds / 60
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} min`
+}
+
+/** What the model reads after a stopped reply; its reasoning is not kept. */
+export function replyBudgetNudge(stopped: ReplyBudgetError): string {
+  return `[harness] Your last reply was stopped after about ${stopped.reasoningTokens.toLocaleString('en-US')} tokens `
+    + `(${formatDuration(stopped.seconds)}) of reasoning without a tool call or any answer text, and that reasoning was `
+    + 'not kept. Continue the task in short steps: make the next tool call now, or write your answer. Work that needs '
+    + 'long calculation or checking belongs in a tool call, not in your reasoning.'
+}
+
+/** The turn's last words when one more reply ran past the budget after the allowed stops. */
+export function replyBudgetStopText(stopped: ReplyBudgetError): string {
+  return `[Stopped: ${stopped.message} ${MAX_REPLY_BUDGET_STOPS} earlier replies this turn were stopped for the same `
+    + 'reason. Send a follow-up to continue, or change runtime.reply_budget.]'
+}
+
+/** The stop for a reply that is still reasoning, or undefined while it is within budget. */
+function replyBudgetExceeded(budget: ReplyBudget, reasoningChars: number, elapsedMs: number): ReplyBudgetError | undefined {
+  const tokens = Math.round(reasoningChars / REPLY_BUDGET_CHARS_PER_TOKEN)
+  const seconds = elapsedMs / 1_000
+  if (tokens > budget.maxReasoningTokens) return new ReplyBudgetError('tokens', tokens, seconds, budget)
+  if (seconds > budget.maxSeconds) return new ReplyBudgetError('time', tokens, seconds, budget)
+  return undefined
+}
+
 /**
  * Output ceiling used after a first `finish_reason: length`, when the caller
  * pinned no maxTokens of its own. A truncation means the model wanted more
@@ -299,6 +359,11 @@ export interface TurnRequest {
   /** Same prompt as `systemPrompt`, kept as named sources for prefix caching. */
   readonly systemSegments?: readonly SystemPromptSegment[]
   readonly temperature?: number
+  /**
+   * How long one reply may reason before it acts (`runtime/replyBudget.ts`);
+   * null turns it off. Absent, the model card's budget applies.
+   */
+  readonly replyBudget?: ReplyBudget | null
   /**
    * Per-turn extended-thinking directive; adapters map it to provider wire
    * fields. WHY a neutral ThinkingRequest type instead of extraBody: thinking
@@ -616,6 +681,9 @@ export async function* runTurn(
   let llm = dependencies.llm
   let credentialSwitchAttempted = false
   let engineRecoveryAttempted = false
+  const replyBudget = request.replyBudget === undefined ? modelCard(request.model).replyBudget : request.replyBudget ?? undefined
+  /** Replies the reply budget stopped this turn; see MAX_REPLY_BUDGET_STOPS. */
+  let replyBudgetStops = 0
   // The tools offered this step; refreshed between steps (see refreshTools).
   let turnTools = request.tools
   let outputLimitEscalations = 0
@@ -698,6 +766,10 @@ export async function* runTurn(
         let attemptCompleted = false
         let attemptStreamed = false
         let attemptRejected = false
+        // The reply budget counts reasoning until the reply acts: its first
+        // tool call or answer text. After that it is doing work, not stuck.
+        let replyActing = false
+        let replyReasoningChars = 0
         try {
           attemptSignal.controller.signal.throwIfAborted()
           if (dependencies.refreshLlm && !credentialSwitchAttempted) {
@@ -751,6 +823,20 @@ export async function* runTurn(
                 // replay suppression is unchanged.
                 for (const visible of textDeduper.push(part)) yield rememberVisible(visible)
               }
+              if (replyBudget !== undefined && !replyActing) {
+                for (const part of parts) {
+                  if (part.type === 'thinking') replyReasoningChars += part.text.length
+                  else if (part.text.trim()) replyActing = true
+                }
+                if (delta.toolCalls?.length) replyActing = true
+                const stopped = replyActing || roundFirstStreamTokenAt === undefined
+                  ? undefined
+                  : replyBudgetExceeded(replyBudget, replyReasoningChars, now() - roundFirstStreamTokenAt)
+                if (stopped) {
+                  attemptSignal.controller.abort(stopped)
+                  throw stopped
+                }
+              }
               if (delta.toolCalls) {
                 const merged = [...roundToolCalls]
                 for (const toolCall of delta.toolCalls) {
@@ -797,6 +883,32 @@ export async function* runTurn(
           // successful-round usage as a complete total for the turn.
           usageComplete = false
           reasoningUsageComplete = false
+          // The reply budget stopped this reply. It did not fail, so it spends
+          // no retry: its reasoning is dropped (kept, it would make the next
+          // prompt as long as the runaway reply), the model is told why, and
+          // the step is asked again. Past MAX_REPLY_BUDGET_STOPS the turn ends.
+          if (error instanceof ReplyBudgetError && !signal?.aborted) {
+            persistUnfinishedRound = undefined
+            replyBudgetStops += 1
+            if (replyBudgetStops > MAX_REPLY_BUDGET_STOPS) {
+              yield { type: 'text', text: replyBudgetStopText(error) }
+              terminalProviderFailure = true
+              stopReason = 'output_limit'
+              break
+            }
+            yield {
+              type: 'provider_retry',
+              cause: 'reply_budget',
+              error: `${error.message} Asking again with a note (${replyBudgetStops} of ${MAX_REPLY_BUDGET_STOPS}).`,
+              attempt: replyBudgetStops,
+              maxAttempts: MAX_REPLY_BUDGET_STOPS + 1,
+              delay: 0,
+              final: false,
+            }
+            state.messages.push({ role: 'user', content: replyBudgetNudge(error), origin: 'harness' })
+            attempt -= 1
+            continue
+          }
           attemptRejected = !attemptStreamed && providerRejectedRequest(error)
           const classified = classifyError(error)
           await dispatchHook(hookRunner, 'on_error', {
