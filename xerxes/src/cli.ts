@@ -223,6 +223,7 @@ import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
 import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
 import { ASK_USER_OPTIONS_SCHEMA, ASK_USER_POLICY } from "./tools/askUserPolicy.js";
 import { probeLoadedWindows, systemWindowFetch } from "./local/loadedWindow.js";
+import { systemEngineRecoveryFor } from "./local/systemEngineRecovery.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -2536,6 +2537,7 @@ function daemonRuntime(
       // The safety floor: inputs locked, outputs in the project folder, and
       // exec_command in the OS sandbox. Used by turns in auto mode only.
       runSafetyForSession: (session, outputFolder) => runSafetyRegistry.forSession(session.id, outputFolder),
+      recoverEngineFor: systemEngineRecoveryFor(config.runtime, process.env),
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         trustOf: sessionDataTrust,
@@ -3100,6 +3102,7 @@ async function acpServer(
   const runner = new AcpAgentRunner({
     // The safety floor in auto mode, one per ACP session and folder.
     runSafetyFor: (sessionId: string, cwd: string) => acpRunSafety.forSession(sessionId, cwd),
+    recoverEngineFor: (candidate: string) => systemEngineRecoveryFor(config.runtime, process.env)({ baseUrl: connection.baseUrl, model: candidate }),
     // The daemon's cascade, one ladder per ACP session.
     cascadeFor: (sessionId: string, cwd: string) => ({
       hooks: headlessCascadeHooks({
@@ -3291,6 +3294,7 @@ async function runOneShot(
       ...(connection.provider ? { provider: connection.provider } : {}),
     })).baseUrl;
   const maxNetworkRetries = providerNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(oneShotBaseUrl);
+  const recoverEngine = systemEngineRecoveryFor(config.runtime, process.env)({ baseUrl: oneShotBaseUrl, model });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
@@ -3460,6 +3464,7 @@ async function runOneShot(
         maxNetworkRetries,
         permissionBroker: oneShotPermissionBroker(),
         ...(runSafety ? { runSafety } : {}),
+        ...(recoverEngine ? { recoverEngine } : {}),
         toolExecutor: feedback ? feedback.wrap(tools) : tools,
       },
       { hooks: cascadeHooks, projectRoot: workspaceRoot, onStep: reportCascadeStep },

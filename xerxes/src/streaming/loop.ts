@@ -28,6 +28,7 @@ import {
 } from '../runtime/interventions.js'
 import { classifyError, ErrorKind, isRecoverableNetworkError } from '../runtime/errorClassifier.js'
 import { defaultMaxNetworkRetries } from '../llms/providerRegistry.js'
+import { isEngineFailure, type RecoverEngine } from '../local/engineRecovery.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -365,6 +366,14 @@ export interface TurnDependencies {
    */
   readonly refreshLlm?: () => LlmClient | undefined
   /**
+   * Reload a local engine Xerxes started when it lost the model mid-turn (see
+   * `local/engineRecovery.ts`). Asked at most once per turn, when a model
+   * request fails with a dropped or refused connection or the engine says the
+   * model is gone; a reload means the step is retried once, and the retry
+   * event says what was reloaded.
+   */
+  readonly recoverEngine?: RecoverEngine
+  /**
    * Re-read the tool list before each model step, given the one in use.
    * Return the same array when nothing changed (keeps the request byte-stable
    * for prompt caching). Lets a plugin installed mid-turn be called at once.
@@ -605,6 +614,7 @@ export async function* runTurn(
   // The client in use; swapped when a used-up account is replaced mid-turn.
   let llm = dependencies.llm
   let credentialSwitchAttempted = false
+  let engineRecoveryAttempted = false
   // The tools offered this step; refreshed between steps (see refreshTools).
   let turnTools = request.tools
   let outputLimitEscalations = 0
@@ -860,6 +870,37 @@ export async function* runTurn(
               continue
             }
           }
+          // A local engine that lost its model fails every request until it
+          // is reloaded, so waiting out the network backoff does not help.
+          // Reload it once per turn and retry the step; a reload that fails
+          // is named in the retry event and the usual handling follows.
+          let engineRecoveryFailure: string | undefined
+          if (
+            !engineRecoveryAttempted
+            && dependencies.recoverEngine !== undefined
+            && signal?.aborted !== true
+            && isEngineFailure(error)
+          ) {
+            engineRecoveryAttempted = true
+            let reloaded: string | undefined
+            try {
+              reloaded = await dependencies.recoverEngine()
+            } catch (recoveryError) {
+              engineRecoveryFailure = `the engine could not be reloaded: ${errorMessage(recoveryError)}`
+            }
+            if (reloaded !== undefined && !signal?.aborted) {
+              yield {
+                type: 'provider_retry',
+                error: `${providerErrorText(error)}. ${reloaded}`,
+                attempt: attempt + 1,
+                maxAttempts: retryDelays.length + 1,
+                delay: 0,
+                final: false,
+              }
+              attempt -= 1
+              continue
+            }
+          }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
           // A refused or unreachable endpoint waits on its own backoff, but only
@@ -881,7 +922,7 @@ export async function* runTurn(
           const delay = final ? 0 : Math.max(networkRetry ? Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5)) : (retryDelays[attempt] ?? 0), suggestedDelay)
           yield {
             type: 'provider_retry',
-            error: errorMessage(error),
+            error: engineRecoveryFailure === undefined ? errorMessage(error) : `${errorMessage(error)} — ${engineRecoveryFailure}`,
             attempt: attempt + 1,
             maxAttempts: networkRetry ? 0 : retryDelays.length + 1,
             delay,

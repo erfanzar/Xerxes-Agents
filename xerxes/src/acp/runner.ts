@@ -17,6 +17,7 @@ import type { RunSafety } from '../runtime/runSafety.js'
 import { runTurn } from '../streaming/loop.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionDecision, type PermissionMode, type ToolPolicy } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import type { RecoverEngine } from '../local/engineRecovery.js'
 import { routePermission, type AcpPermissionBoard } from './permissions.js'
 import type { AcpSession } from './session.js'
 import type { AcpEventEmitter, AcpModelInfo, AcpPromptRequest, AcpWireEvent } from './types.js'
@@ -53,6 +54,8 @@ export interface AcpAgentRunnerOptions {
   readonly cascadeFor?: (sessionId: string, cwd: string) => Pick<CascadingTurnOptions, 'hooks'> | undefined
   /** The session's safety floor (`runtime/runSafety.ts`), used in `auto` mode only. */
   readonly runSafetyFor?: (sessionId: string, cwd: string) => Promise<RunSafety | undefined>
+  /** Reloads a local engine Xerxes started when it loses the model (`local/engineRecovery.ts`). */
+  readonly recoverEngineFor?: (model: string) => RecoverEngine | undefined
 }
 
 interface ActivePrompt {
@@ -165,6 +168,7 @@ export class AcpAgentRunner {
     const model = session.modelOverride ?? this.options.model
     const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? DEFAULT_PERMISSION_MODE)
     state.metadata.permission_mode = permissionMode
+    const recoverEngine = this.options.recoverEngineFor?.(model)
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
     const subagentCohort = this.options.subagentCoordinator?.begin(session.sessionId)
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
@@ -233,6 +237,7 @@ export class AcpAgentRunner {
         ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         permissionBroker,
         ...(runSafety ? { runSafety } : {}),
+        ...(recoverEngine ? { recoverEngine } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(executor ? { toolExecutor: executor } : {}),
       }, controller.signal))) {

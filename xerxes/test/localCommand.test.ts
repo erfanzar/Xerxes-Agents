@@ -67,6 +67,7 @@ function harness(hardware: HardwareProfile, runtime: Record<string, unknown> = {
       return { stopped: true, pid: 4242, forced: false }
     },
     status: async () => h.status,
+    recover: async () => ({ recovered: false, reason: 'not-managed' as const }),
   }
   const fetchPort: FetchPort = async (url) => {
     fetched.push(url)
@@ -347,6 +348,7 @@ describe('runLocalCommand with LM Studio', () => {
         return { stopped: true, model: KEY, unloaded: true, serverStopped: true }
       },
       status: async () => h.status,
+      recover: async () => ({ recovered: false, reason: 'not-managed' as const }),
     }
     return Object.assign(h, { base, starts, ports: { ...base.ports, lmstudio } })
   }
@@ -494,6 +496,7 @@ test('llama-server setup records the window the server reports, not just the lau
       start: async (options) => ({ running: true, healthy: true, stale: false, pid: 1, port: options.port, model: options.modelPath }),
       stop: async () => ({ stopped: false, reason: 'not-running' }),
       status: async () => ({ running: false, healthy: false, stale: false }),
+      recover: async () => ({ recovered: false, reason: 'not-managed' as const }),
     }
     const ports: LocalCommandPorts = {
       hardware: async () => hw16,

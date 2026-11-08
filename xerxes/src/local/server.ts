@@ -19,6 +19,7 @@ import { basename, join } from 'node:path'
 
 import { XerxesError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import type { EngineRecovery, EngineTarget } from './engineRecovery.js'
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 180_000
 const DEFAULT_POLL_MS = 500
@@ -73,6 +74,8 @@ export interface LocalServerState {
   readonly logPath: string
   /** Resolved llama-server path; used to verify the pid before signalling. */
   readonly bin: string
+  /** The --ctx-size it was started with. Absent in state files written before it was recorded. */
+  readonly ctxSize?: number
 }
 
 export interface ServerStatus {
@@ -105,6 +108,13 @@ export interface LocalServer {
   start(options: StartOptions): Promise<ServerStatus>
   stop(): Promise<StopResult>
   status(): Promise<ServerStatus>
+  /**
+   * Restart the llama-server Xerxes started when it has exited, with the same
+   * model, port and window. One that is still alive (even if busy or
+   * unhealthy), one on another port, and one whose window was never recorded
+   * are left alone. Rejects when the restart fails.
+   */
+  recover(target: EngineTarget): Promise<EngineRecovery>
 }
 
 export interface LocalServerOptions {
@@ -130,7 +140,8 @@ function isState(value: unknown): value is LocalServerState {
     typeof v.model === 'string' &&
     typeof v.startedAt === 'string' &&
     typeof v.logPath === 'string' &&
-    typeof v.bin === 'string'
+    typeof v.bin === 'string' &&
+    (v.ctxSize === undefined || (typeof v.ctxSize === 'number' && Number.isInteger(v.ctxSize) && v.ctxSize > 0))
   )
 }
 
@@ -304,7 +315,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
       )
     }
     const startedAt = new Date(ports.now()).toISOString()
-    await writeState({ pid: child.pid, port: start.port, model: start.modelPath, startedAt, logPath, bin })
+    await writeState({ pid: child.pid, port: start.port, model: start.modelPath, startedAt, logPath, bin, ctxSize: start.ctxSize })
 
     let exitCode: number | undefined
     void child.exited.then((code) => {
@@ -373,7 +384,20 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
     return { stopped: true, pid: state.pid, forced }
   }
 
-  return { findBinary, start, stop, status }
+  async function recover(target: EngineTarget): Promise<EngineRecovery> {
+    const state = await readState()
+    if (state === undefined || state.ctxSize === undefined) return { recovered: false, reason: 'not-managed' }
+    if (state.port !== target.port) return { recovered: false, reason: 'other-endpoint' }
+    // A live process may be loading or busy; it is never killed to recover.
+    if ((await ownership(state)) === 'running') return { recovered: false, reason: 'still-running' }
+    await start({ modelPath: state.model, port: state.port, ctxSize: state.ctxSize })
+    return {
+      recovered: true,
+      message: `llama-server had stopped (it may have run out of memory). Xerxes restarted it with its ${state.ctxSize}-token window and is retrying the step once.`,
+    }
+  }
+
+  return { findBinary, start, stop, status, recover }
 }
 
 async function psCommand(pid: number): Promise<string | undefined> {

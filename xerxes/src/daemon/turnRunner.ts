@@ -22,6 +22,7 @@ import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/lea
 import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import type { RunSafety } from '../runtime/runSafety.js'
+import type { RecoverEngine } from '../local/engineRecovery.js'
 import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
 import type { TurnRoute } from './turnRouting.js'
 import type { EscalationNotice } from './turnEscalation.js'
@@ -198,6 +199,12 @@ export interface AgentTurnRunnerOptions {
    * inputs and command sandbox. The loop uses it in `auto` mode only.
    */
   readonly runSafetyForSession?: (session: DaemonSession, outputFolder: string) => Promise<RunSafety | undefined>
+  /**
+   * The crash-recovery hook for a route (`local/engineRecovery.ts`): reloads a
+   * local engine Xerxes started when it loses the model mid-turn. Undefined
+   * for a route that is not a loopback endpoint.
+   */
+  readonly recoverEngineFor?: (route: { readonly baseUrl: string | undefined; readonly model: string }) => RecoverEngine | undefined
   /**
    * Network retries before a turn gives up on an unreachable provider. Absent:
    * the loop's default for a remote route.
@@ -835,6 +842,11 @@ export class AgentTurnRunner implements TurnRunner {
       for (;;) {
         const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
         const retryPolicy = requiresLocal ? this.options.localProviderRetryPolicy ?? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
+        const routeBaseUrl = (routedProvider?.providerOverrides ?? this.options.providerOverrides)?.base_url
+        const recoverEngine: RecoverEngine | undefined = requiresLocal ? undefined : this.options.recoverEngineFor?.({
+          baseUrl: typeof routeBaseUrl === 'string' ? routeBaseUrl : undefined,
+          model: attemptModel,
+        })
         // An explicit off effort must cross the relay, otherwise absence
         // would correctly mean "use the local profile's thinking default".
         // Claude Code likewise thinks by default, so off has to be said.
@@ -895,6 +907,8 @@ export class AgentTurnRunner implements TurnRunner {
         ...(!requiresLocal && this.options.resolveSessionProvider ? {
           refreshLlm: () => this.options.resolveSessionProvider?.(session, attemptModel)?.llm,
         } : {}),
+        // A local engine Xerxes started is reloaded once if it loses the model.
+        ...(recoverEngine ? { recoverEngine } : {}),
         // A plugin installed or removed mid-turn (by the user or, with
         // approval, the model) changes the tool list from the next step,
         // under the same agent, mode and delegation filters as at turn start.

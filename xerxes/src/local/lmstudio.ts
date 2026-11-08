@@ -20,6 +20,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
+import type { EngineRecovery, EngineTarget } from './engineRecovery.js'
 import { parseLmStudioModels, systemWindowFetch, type LmStudioModelEntry, type WindowFetch } from './loadedWindow.js'
 import { ServerError, type ServerStatus } from './server.js'
 
@@ -108,6 +109,13 @@ export interface LmStudioEngine {
   start(options: LmStudioStartOptions): Promise<ServerStatus>
   stop(): Promise<LmStudioStopResult>
   status(): Promise<ServerStatus>
+  /**
+   * Reload the model Xerxes loaded when LM Studio no longer has it (it ran out
+   * of memory, or crashed), with the window recorded at start. A model Xerxes
+   * did not load, another port or model, and a model still loaded are left
+   * alone. Rejects when the reload fails.
+   */
+  recover(target: EngineTarget): Promise<EngineRecovery>
 }
 
 interface LmStudioState {
@@ -463,7 +471,30 @@ export function createLmStudioEngine(ports: LmStudioPorts, options: LmStudioOpti
     return { stopped: true, model: state.identifier, unloaded, serverStopped }
   }
 
-  return { findBinary, listModels, serverInfo, start, stop, status }
+  async function recover(target: EngineTarget): Promise<EngineRecovery> {
+    const state = await readState()
+    if (state === undefined) return { recovered: false, reason: 'not-managed' }
+    if (state.port !== target.port || state.identifier !== target.model) return { recovered: false, reason: 'other-endpoint' }
+    if ((await status()).running) return { recovered: false, reason: 'still-running' }
+    const reloaded = await start({
+      modelKey: state.modelKey,
+      identifier: state.identifier,
+      contextLength: state.contextLength,
+      port: state.port,
+    })
+    // Keep what Xerxes owned from the first start, so `stop` still undoes it.
+    const after = await readState()
+    if (after !== undefined && state.startedServer && !after.startedServer) {
+      await writeState({ ...after, startedServer: true })
+    }
+    const window = reloaded.contextLength ?? state.contextLength
+    return {
+      recovered: true,
+      message: `LM Studio no longer had ${state.identifier} loaded (it may have run out of memory). Xerxes reloaded it with its ${window}-token window and is retrying the step once.`,
+    }
+  }
+
+  return { findBinary, listModels, serverInfo, start, stop, status, recover }
 }
 
 /** Real ports: `lms` via Bun.spawn (argv only), the platform fetch, real time. */

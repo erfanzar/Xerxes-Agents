@@ -545,6 +545,16 @@ With either engine:
   overflow rescue use that window, and a model reloaded with another window is picked up at the
   next discovery. If the server answers neither, discovery works as before and the daemon log
   says why. Cloud providers are never asked.
+- **Crash recovery:** a model can disappear mid-task, for example when LM Studio unloads one that
+  ran out of memory or llama-server exits. The next request then fails with a dropped or refused
+  connection, or LM Studio says the model crashed or is not loaded. If Xerxes started that engine
+  with `xerxes local start` or `setup`, it reloads the model once per turn with the window recorded
+  at start, retries the step once, and says so in the retry message.
+  - **Left alone:** a model you loaded yourself, an engine on another port, and a model that is
+    still loaded. A llama-server process that is alive but busy is never killed.
+  - **A failed reload** is named in the retry message, and the failure is then handled as before.
+  - **Older starts:** a llama-server started before this release has no recorded window, so it is
+    not restarted. Run `xerxes local stop` and `start` once.
 - **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: 13 tools and terse rules,
   about 3K tokens instead of about 29K. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
