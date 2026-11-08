@@ -11,10 +11,10 @@
  */
 
 import { ValidationError } from '../core/errors.js'
+import { modelCard } from '../llms/modelCards.js'
 import type { DataBoundaryMode } from '../security/boundaryTypes.js'
 import { buildCheckFailureAdvisorRequest } from '../tools/advisorTool.js'
 import { parseAdvisorConfig } from './advisorBudget.js'
-import { isBonsaiModel } from './leanPrompt.js'
 import { renderFindings, type CheckFinding } from './resultChecks.js'
 
 /** Environment variable that overrides `runtime.escalation.mode`. */
@@ -110,14 +110,14 @@ export interface EscalationDefaultInput {
 
 /**
  * The escalation mode when neither `runtime.escalation.mode` nor
- * XERXES_ESCALATION is set: on for a Bonsai model or a local one (a failed
+ * XERXES_ESCALATION is set: on for a model whose card says so (Bonsai) or a local one (a failed
  * check is cheap to retry there, and the plan's "escalation by rule" applies),
  * and when `advisor.auto_on_check_fail` asks for it; off otherwise. Every entry
  * point uses this, so a benchmark run gets the same cascade as the daemon.
  */
 export function defaultEscalationMode(input: EscalationDefaultInput): 'off' | 'on' {
   if (parseAdvisorConfig(input.runtime, input.env).autoOnCheckFail) return 'on'
-  if (isBonsaiModel(input.model)) return 'on'
+  if (modelCard(input.model).escalationByDefault) return 'on'
   try {
     return input.local() ? 'on' : 'off'
   } catch {

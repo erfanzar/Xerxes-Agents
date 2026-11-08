@@ -12,6 +12,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import { localModelCards, type LmStudioBuild } from '../llms/modelCards.js'
 import type { HardwareProfile } from './hardware.js'
 
 export const GIB = 1024 ** 3
@@ -40,14 +41,7 @@ export interface CatalogEntry {
   readonly nativeContext?: number
   readonly source?: ModelSource
   /** How LM Studio knows this model, when it has a build LM Studio can run. */
-  readonly lmstudio?: LmStudioCatalogEntry
-}
-
-export interface LmStudioCatalogEntry {
-  /** LM Studio model key (`lms ls`); also the API identifier Xerxes loads it under. */
-  readonly modelKey: string
-  /** Memory this build needs; replaces `minMemoryBytes` when choosing for LM Studio. */
-  readonly minMemoryBytes: number
+  readonly lmstudio?: LmStudioBuild
 }
 
 export type LocalEngineName = 'llama-server' | 'lmstudio'
@@ -55,30 +49,21 @@ export const LOCAL_ENGINES: readonly LocalEngineName[] = ['llama-server', 'lmstu
 
 export type Catalog = readonly CatalogEntry[]
 
-export const BUILTIN_MODELS: Catalog = [
-  {
-    id: 'bonsai-9b',
-    label: 'Bonsai 9B',
-    fileName: 'bonsai-9b.gguf',
-    minMemoryBytes: 12 * GIB,
-    ctxSize: 32768,
-  },
-  {
-    id: 'ternary-bonsai-2-27b',
-    label: 'Ternary Bonsai 2 27B',
-    fileName: 'ternary-bonsai-2-27b.gguf',
-    minMemoryBytes: 24 * GIB,
-    // The model reads 262K tokens; 16K is the launch default for a 24 GB
-    // machine until KV-cache memory is measured there. Raise it with
-    // local.ctx_size where memory allows.
-    ctxSize: 16384,
-    nativeContext: 262144,
-    // The 2-bit MLX pack (8.6 GB on disk) runs in LM Studio. Measured on a
-    // 24 GB M4 Pro on 2026-11-05 with a 42,752-token window, so a 16 GiB
-    // budget (a 24 GB Mac after the OS reserve has 20) is enough for it.
-    lmstudio: { modelKey: 'ternary-bonsai-2-27b-mlx', minMemoryBytes: 16 * GIB },
-  },
-]
+/**
+ * The cards with a llama-server build, smallest first, in the shape local
+ * setup uses. Every value comes from the model card (llms/modelCards.ts).
+ */
+export const BUILTIN_MODELS: Catalog = localModelCards()
+  .flatMap((card): CatalogEntry[] => card.llamaServer === undefined ? [] : [{
+    id: card.id,
+    label: card.label,
+    fileName: card.llamaServer.fileName,
+    minMemoryBytes: card.llamaServer.minMemoryBytes,
+    ctxSize: card.llamaServer.ctxSize,
+    ...(card.nativeContext === undefined ? {} : { nativeContext: card.nativeContext }),
+    ...(card.lmstudio === undefined ? {} : { lmstudio: card.lmstudio }),
+  }])
+  .sort((a, b) => a.minMemoryBytes - b.minMemoryBytes)
 
 export interface LocalConfig {
   /** local.engine / XERXES_LOCAL_ENGINE; undefined when unset (setup and start then use llama-server). */

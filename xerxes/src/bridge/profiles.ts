@@ -9,7 +9,7 @@ import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
 import type { DataTrust } from '../security/boundaryTypes.js'
 import { modelsDev, reportedModelCapability, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
-import { publishedSamplingProfile } from '../llms/samplingDefaults.js'
+import { modelCard } from '../llms/modelCards.js'
 
 export const CLAUDE_CODE_PROFILE_NAME = 'claude-code'
 /**
@@ -621,7 +621,7 @@ export function resolvedProfileModelCapabilities(
   const contextLimit = override?.context_limit ?? cached?.context_limit ?? live?.contextLimit ?? catalog?.contextLimit
   // Last: the ceiling the model's maker runs its own agent setup with. Without
   // one, a local engine lets a runaway reply run until the turn's time limit.
-  const catalogOutput = catalog?.maxOutputTokens ?? publishedSamplingProfile(model)?.maxOutputTokens
+  const catalogOutput = catalog?.maxOutputTokens ?? modelCard(model).maxOutputTokens
   const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? live?.maxOutputTokens ?? catalogOutput
   return {
     ...(contextLimit === undefined ? {} : { contextLimit }),

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ValidationError } from '../core/errors.js'
+import { modelCard } from '../llms/modelCards.js'
 import type { JsonSchema, ToolDefinition } from '../types/toolCalls.js'
 import { protectedRunExclusion } from './protectedRun.js'
 
@@ -56,17 +57,9 @@ export interface PromptProfileRoute {
   readonly model?: string
 }
 
-/** Prism's Bonsai models, the ones this harness is tuned for (bonsai-9b, ternary-bonsai-2-27b, prism-ml/…). */
-const BONSAI_MODEL = /bonsai/i
-
-/** True for a Bonsai model id, local or hosted. */
-export function isBonsaiModel(model: string): boolean {
-  return BONSAI_MODEL.test(model)
-}
-
 /**
  * The profile when none is configured:
- * - lean for a Bonsai model, wherever it runs. Ternary Bonsai 2 27B has a
+ * - the model card's profile: lean for a Bonsai model, wherever it runs. Ternary Bonsai 2 27B has a
  *   262K window, so this is not about fit: a ~29K-token prompt costs minutes
  *   of cold prefill on a laptop, and a small model picks better among a few
  *   tools. Whether lean also wins on a fast cloud host is for the benchmarks;
@@ -76,7 +69,8 @@ export function isBonsaiModel(model: string): boolean {
  *   proxy can front a large cloud model.
  */
 export function automaticPromptProfile(route: PromptProfileRoute): LeanPromptSetting {
-  if (route.model !== undefined && BONSAI_MODEL.test(route.model)) return 'lean'
+  const fromCard = modelCard(route.model).promptProfile
+  if (fromCard !== undefined) return fromCard
   return route.contextLimit !== undefined && route.contextLimit > 0 && route.contextLimit <= LEAN_AUTOMATIC_MAX_CONTEXT
     ? 'lean'
     : 'full'

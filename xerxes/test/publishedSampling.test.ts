@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import { resolvedProfileModelCapabilities, type ProviderProfile } from '../src/bridge/profiles.js'
 import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
 import { OpenAiCompatibleClient, type CompletionRequest, type LlmDelta } from '../src/llms/client.js'
+import { modelCard } from '../src/llms/modelCards.js'
 import type { ProviderName } from '../src/llms/providerRegistry.js'
 import {
   DEFAULT_TEMPERATURE,
@@ -25,11 +26,11 @@ test('Bonsai 2 ids map to the profile Prism publishes for their size', () => {
     expect(publishedSamplingProfile(id)?.thinking).toEqual({
       temperature: 1, topP: 0.95, topK: 20, minP: 0, presencePenalty: 0, repetitionPenalty: 1,
     })
-    expect(publishedSamplingProfile(id)?.maxOutputTokens).toBe(32_768)
+    expect(modelCard(id).maxOutputTokens).toBe(32_768)
   }
   for (const id of ['Ternary-Bonsai-2-2B-mlx-2bit', 'bonsai-2-4b', 'bonsai-9b', 'local/bonsai-9b']) {
     expect(publishedSamplingProfile(id)?.thinking.presencePenalty).toBe(1)
-    expect(publishedSamplingProfile(id)?.maxOutputTokens).toBeUndefined()
+    expect(modelCard(id).maxOutputTokens).toBeUndefined()
   }
   expect(publishedSamplingProfile('bonsai-2-27b')?.instruct).toEqual({
     temperature: 0.7, topP: 0.8, topK: 20, minP: 0, presencePenalty: 1.5, repetitionPenalty: 1,

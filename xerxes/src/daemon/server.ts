@@ -33,6 +33,7 @@ import { FEATURES_GUIDE } from '../bridge/features.js';
 import { inspectSessionContext } from '../context/inspection.js';
 import { readContextControls, updateContextControls } from '../context/controls.js';
 import { parseTerminalOutputCursor } from '../runtime/terminalOutput.js';
+import { formatModelCardReport, modelCardReport } from "../runtime/modelCardReport.js";
 import { nativeSubagentWorktrees } from "../runtime/subagentWorktrees.js";
 import { parseTodoList, todosFromExecutions } from "../runtime/todoSnapshot.js";
 import { ModelCallBudget, withIndependentModelCallBudget, assertModelCallBudget, optionalModelCallAvailable, type ModelCallUsage } from "../llms/callBudget.js";
@@ -577,6 +578,7 @@ interface DaemonSlashCommand {
 const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "agents",
   "background",
+  "bonsai",
   "branch",
   "branches",
   "browser",
@@ -1009,6 +1011,11 @@ export interface DaemonServerOptions {
    * Their `/v1/models` does not report it. Absent, discovery is unchanged.
    */
   readonly localWindowProbe?: (input: ProbeLoadedWindowsInput) => Promise<LoadedWindows>;
+  /**
+   * The runtime settings and environment `/bonsai` resolves the prompt profile and
+   * escalation default from, as the host resolved them at start.
+   */
+  readonly modelCardContext?: () => { readonly runtime: Record<string, unknown>; readonly env: Record<string, string | undefined> };
   /** Optional host-owned model catalogue lookup for interactive `/provider` setup. */
   readonly providerModelDiscovery?: ProviderModelDiscoveryPort;
   readonly runtime?: DaemonRuntime;
@@ -1207,6 +1214,7 @@ export class DaemonServer {
   private readonly discoveredContextLimits = new Map<string, number>();
   private readonly autoDiscoverModelCapabilities: boolean;
   private readonly localWindowProbe: DaemonServerOptions["localWindowProbe"];
+  private readonly modelCardContext: DaemonServerOptions["modelCardContext"];
   /** Last logged reason a local window probe failed, by profile, so a reason is logged once. */
   private readonly localWindowProbeFailures = new Map<string, string>();
   private readonly modelCapabilityRefreshes = new Map<string, Promise<JsonRpcPayload | undefined>>();
@@ -1449,6 +1457,7 @@ export class DaemonServer {
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
     this.localWindowProbe = options.localWindowProbe;
+    this.modelCardContext = options.modelCardContext;
     // What providers reported earlier (saved on each profile) is known to the
     // request builders from the start, before this run rediscovers it.
     for (const profile of this.profileStore.list()) {
@@ -6083,6 +6092,8 @@ export class DaemonServer {
         return this.showRuntimeConfig(connection);
       case "sampling":
         return this.configureSampling(connection, args);
+      case "bonsai":
+        return this.showModelCard(connection);
       case "reasoning":
         return this.configureReasoning(connection, args);
       case "fast":
@@ -8077,6 +8088,35 @@ export class DaemonServer {
       "warning",
     );
     return { ok: false, error: `Unknown slash command: /${token}` };
+  }
+
+  /** `/bonsai`: the active model's card, and what each of its settings is in effect. */
+  private showModelCard(connection: DaemonTransportConnection): JsonRpcPayload {
+    const status = this.runtime.status();
+    const model = typeof status.model === "string" ? status.model : "";
+    if (!model) {
+      this.emitSlash(connection, "No model is selected. Choose one with `/provider` or `/model`.");
+      return { ok: false, error: "no model selected" };
+    }
+    const profile = this.profileStore.active();
+    const context = this.modelCardContext?.() ?? { runtime: {}, env: {} };
+    const loadedWindow = profile
+      ? this.discoveredContextLimits.get(discoveredContextKey(profile, model))
+      : undefined;
+    const report = modelCardReport({
+      model,
+      runtime: context.runtime,
+      env: context.env,
+      ...(profile ? { profile } : {}),
+      samplingSet: status,
+      ...(loadedWindow === undefined ? {} : { loadedWindow }),
+    });
+    this.emitSlash(connection, formatModelCardReport(report));
+    return {
+      ok: true,
+      card: report.card.id,
+      settings: report.settings.map((setting) => ({ ...setting })),
+    };
   }
 
   private async configureSampling(

@@ -4484,6 +4484,63 @@ test("daemon /sampling leaves a Bonsai model's temperature and top_k to its publ
   }
 });
 
+test("daemon /bonsai shows the active model's card, the value in effect and what set it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-model-card-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: {
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "ternary-bonsai-2-27b-mlx",
+      provider: "custom",
+      temperature: 0.3,
+    },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    profileStore: new ProfileStore(join(directory, "profiles.json")),
+    runtime,
+    modelCardContext: () => ({ runtime: { prompt_profile: "full" }, env: {} }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "model-card", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "commands.catalog", params: {} });
+    const catalog = await client.next((frame) => frame.id === 2);
+    expect(catalog.result?.pairs).toContainEqual([
+      "/bonsai",
+      "Show the active model's settings card and what overrides it",
+    ]);
+
+    client.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/bonsai" } });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
+      ok: true,
+      card: "ternary-bonsai-2-27b",
+    });
+    const body = String((await client.next(eventFrame("notification"))).params?.payload?.body);
+    expect(body).toContain("Model card for `ternary-bonsai-2-27b-mlx`: Ternary Bonsai 2 27B (`ternary-bonsai-2-27b`)");
+    expect(body).toContain("| temperature 0.3; the rest from the card | settings |");
+    expect(body).toContain("| Output limit | 32,768 tokens | 32,768 tokens | card |");
+    expect(body).toContain("| Prompt and tools | lean | full | runtime.prompt_profile |");
+    expect(body).toContain("| Result checks and escalation | on | on | card |");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon routes approval and question replies through the active connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replies-"));
   const socketPath = join(directory, "daemon.sock");

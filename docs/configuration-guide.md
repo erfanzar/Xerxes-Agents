@@ -512,6 +512,23 @@ inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine
     Xerxes started it and nothing else is loaded on it. `status` and `stop` find the LM Studio load
     without `--engine`.
 
+**Model cards.** Every Bonsai-specific setting lives in one record per model, in
+`xerxes/src/llms/modelCards.ts`:
+- **What a card holds:** the ids it answers to, published sampling, output limit, native window,
+  default prompt profile, escalation default and local builds.
+- **Which models have one:** Bonsai 2 at 2B, 4B and 9B, and Ternary Bonsai 2 27B each have a
+  card. Any other model id containing "bonsai" (such as `bonsai-8b`) gets the family card: the lean
+  prompt and the cascade, but no sampling, because Prism publishes sampling per model.
+- **Other models:** no card, so nothing about them changes.
+- **Precedence:** settings always win over the card.
+- **Viewing it:** `/bonsai` in the TUI, or `xerxes bonsai [model]` in a terminal, shows the
+  active model's card. For each setting it shows the value in effect and what set it.
+  - **Settings it reports:** sampling, output limit, context window, prompt and tools, result
+    checks and escalation, and local builds.
+  - **Sources it names:** the card, `/sampling` or another setting, a profile's
+    `max_output_tokens` or `prompt_profile`, an environment variable, or the window the engine
+    loaded. Only the daemon knows the loaded window.
+
 With either engine:
 - **Context window:** the profile records the window the engine actually loaded: LM Studio's
   `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary Bonsai 2 27B reads 262,144

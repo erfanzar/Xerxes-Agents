@@ -57,6 +57,7 @@ import { createTurnRouter } from './daemon/turnRouting.js';
 import { createEscalationFactory } from './daemon/turnEscalation.js';
 import { createHybridPlacement } from './daemon/hybridPlanTool.js';
 import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
+import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
@@ -262,6 +263,7 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
       ["xerxes local setup|start|stop|status|doctor [--engine llama-server|lmstudio]", "run a Bonsai model on this machine with llama.cpp or LM Studio"],
+      ["xerxes bonsai [model]", "show a model's settings card and what overrides it"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
@@ -332,6 +334,7 @@ const [argument, ...argumentsAfterCommand] = cliArguments;
  */
 const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "skill",
+  "bonsai",
   "auth",
   "doctor",
   "usage",
@@ -843,6 +846,8 @@ if (argument === "--help" || argument === "-h") {
   }
   if (result.message) console.log(result.message)
   process.exit(0)
+} else if (argument === "bonsai") {
+  process.exit(runBonsaiCommand(argumentsAfterCommand));
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "local") {
@@ -1247,6 +1252,7 @@ async function runDaemonOwned(
     autoSnapshotTurns: true,
     managedPlugins,
     agentSettingsDefaults: config.runtime.agent_intelligence,
+    modelCardContext: () => ({ runtime: config.runtime, env: process.env }),
     socketPath,
     runtime,
     // Sessions created without an explicit project_dir belong to THIS
@@ -1539,6 +1545,33 @@ interface ExportCommandOptions {
   readonly projectDirectory: string | undefined;
   readonly session: string;
   readonly storeDirectory: string | undefined;
+}
+
+/** `xerxes bonsai [model]`: the settings card for the active model, or the one named. */
+function runBonsaiCommand(args: readonly string[]): number {
+  if (args.length > 1 || args[0]?.startsWith("-")) {
+    console.error("Usage: xerxes bonsai [model]");
+    return args[0] === "--help" || args[0] === "-h" ? 0 : 2;
+  }
+  const config = loadSystemDaemonConfig();
+  const active = new ProfileStore().active();
+  const model = args[0] ?? active?.model ?? (typeof config.runtime.model === "string" ? config.runtime.model : "");
+  // The active profile's settings apply only to the model it serves.
+  const profile = active && (args[0] === undefined || args[0] === active.model) ? active : undefined;
+  if (!model) {
+    console.error("No model is configured. Run `xerxes setup`, or name one: xerxes bonsai <model>");
+    return 1;
+  }
+  const report = modelCardReport({
+    model,
+    runtime: config.runtime,
+    env: process.env,
+    ...(profile ? { profile } : {}),
+    samplingSet: { ...config.runtime, ...(profile?.sampling ?? {}) },
+  });
+  console.log(formatModelCardReport(report));
+  console.log("\nThe running daemon also knows the window the engine loaded: use /bonsai there.");
+  return 0;
 }
 
 async function runExport(args: readonly string[]): Promise<void> {

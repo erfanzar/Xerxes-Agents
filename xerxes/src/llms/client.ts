@@ -90,8 +90,8 @@ import {
   DEFAULT_TEMPERATURE,
   publishedSampling,
   publishedSamplingProfile,
-  type PublishedSamplingProfile,
 } from './samplingDefaults.js'
+import type { PublishedSampling } from './modelCards.js'
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 
 export interface TokenUsage {
@@ -2247,7 +2247,7 @@ function addPublishedSampling(
   payload: Record<string, unknown>,
   request: CompletionRequest,
   providerName: ProviderName,
-  profile: PublishedSamplingProfile,
+  profile: PublishedSampling,
 ): void {
   const values = wireDisablesThinking(payload) ? profile.instruct : profile.thinking
   if (
