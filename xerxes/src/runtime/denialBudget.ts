@@ -36,9 +36,9 @@ export class DenialBudget {
 
   /**
    * `undefined` means "no opinion" and takes the default; an explicit `null` or
-   * a non-positive number is an operator opting out. Defaulting to unbounded the
-   * way IterationBudget does would leave the loop exactly as unprotected as it
-   * was before this class existed.
+   * a non-positive number is an operator opting out. Defaulting to unbounded
+   * would leave the loop exactly as unprotected as it was before this class
+   * existed.
    */
   constructor(maxDenials?: number | null) {
     this.maxDenials = maxDenials === undefined

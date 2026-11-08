@@ -35,8 +35,6 @@ import { hasDoctorFailures, runAllDoctorChecks } from '../src/runtime/doctor.js'
 import { classifyError, ErrorKind } from '../src/runtime/errorClassifier.js'
 import { buildInsightsReport } from '../src/runtime/insights.js'
 import { InterruptToken } from '../src/runtime/interrupt.js'
-import { BudgetExhausted, IterationBudget } from '../src/runtime/iterationBudget.js'
-import { RateLimitTracker } from '../src/runtime/rateLimitTracker.js'
 import { ProcessRegistry } from '../src/runtime/processRegistry.js'
 import { runSetupWizard, writeSetupConfig } from '../src/runtime/setupWizard.js'
 import { checkBunPackageUpdate, planBunUpdate } from '../src/runtime/update.js'
@@ -49,7 +47,6 @@ import { ToolPolicy } from '../src/security/policy.js'
 import { redactString } from '../src/security/redact.js'
 import { SshSandboxAdapter } from '../src/security/sandboxBackends/ssh.js'
 import { checkUrl } from '../src/security/urlSafety.js'
-import { branchSession, sessionLineage } from '../src/session/branching.js'
 import { SessionRecord, TurnRecord } from '../src/session/models.js'
 import { SnapshotManager } from '../src/session/snapshots.js'
 import { FileSessionStore, SQLiteSessionStore } from '../src/session/store.js'
@@ -254,7 +251,7 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
     },
     {
       plan: '18',
-      feature: 'SQLite session persistence, branching, and lineage',
+      feature: 'SQLite session persistence and search',
       run: checkSessions,
     },
     {
@@ -306,7 +303,7 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
     },
     {
       plan: '24',
-      feature: 'Error classification, rate-limit throttling, and injected auxiliary summarization',
+      feature: 'Error classification and injected auxiliary summarization',
       run: checkRuntimeRouting,
     },
     {
@@ -332,7 +329,7 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
     },
     {
       plan: '28',
-      feature: 'Iteration budget, process registry, interrupt token, and deterministic tool IDs run natively',
+      feature: 'Process registry, interrupt token, and deterministic tool IDs run natively',
       run: checkRuntimePrimitives,
     },
     {
@@ -992,11 +989,9 @@ async function checkSessions(context: RealUseContext): Promise<string> {
         workspaceId: 'real-use',
         turns: [new TurnRecord({ turnId: 'turn-1', prompt: 'native session prompt', responseContent: 'native response' })],
       }))
-      const child = branchSession(store, { sourceSessionId: 'root', newSessionId: 'branch' })
-      require(child.turns.length === 1, 'branched session did not retain the source turn')
-      require(sessionLineage(store, 'branch').join(',') === 'branch,root', 'session lineage did not retain parentage')
+      require(store.loadSession('root')?.turns.length === 1, 'SQLite session store did not keep the turn')
       require(store.search('native session').length > 0, 'SQLite session search did not index the persisted turn')
-      return 'SQLite record persisted, indexed, branched, and traversed to its root'
+      return 'SQLite record persisted and indexed'
     } finally {
       store.close()
     }
@@ -1122,12 +1117,6 @@ async function checkSkillsHub(context: RealUseContext): Promise<string> {
 
 async function checkRuntimeRouting(): Promise<string> {
   require(classifyError(new Error('HTTP 429 too many requests')).kind === ErrorKind.RATE_LIMIT, 'error classifier did not identify 429')
-  const rates = new RateLimitTracker({ throttleRatio: 0.1, now: () => 100 })
-  rates.update('openai', 'gpt-4o', {
-    'x-ratelimit-limit-requests': '100',
-    'x-ratelimit-remaining-requests': '3',
-  })
-  require(rates.shouldThrottle('openai', 'gpt-4o'), 'rate-limit tracker did not throttle a low budget')
   const auxiliary = new AuxiliaryClient({
     model: 'local-auxiliary',
     backend: request => ({ text: `summary:${request.messages.length}`, requestTokens: 3, responseTokens: 2 }),
@@ -1194,17 +1183,6 @@ async function checkInteractiveRuntime(): Promise<string> {
 }
 
 async function checkRuntimePrimitives(): Promise<string> {
-  const budget = new IterationBudget(2)
-  require(budget.consume(2) === 2 && budget.exhausted, 'iteration budget did not charge its bounded capacity')
-  let exhausted = false
-  try {
-    budget.consume()
-  } catch (error) {
-    exhausted = error instanceof BudgetExhausted
-  }
-  require(exhausted, 'iteration budget did not raise BudgetExhausted')
-  require(budget.refund() === 1 && budget.remaining === 1, 'iteration budget did not refund one charge')
-
   const registry = new ProcessRegistry({ idFactory: () => 'process-real-use', now: () => 1 })
   const processHandle = Bun.spawn([process.execPath, '-e', 'process.exit(0)'], { stdout: 'ignore', stderr: 'ignore' })
   const processId = registry.register(processHandle, { name: 'quick-native-bun', command: 'bun -e process.exit(0)' })

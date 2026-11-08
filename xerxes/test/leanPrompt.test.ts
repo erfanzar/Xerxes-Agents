@@ -14,7 +14,6 @@ import {
   parsePromptProfileConfig,
   selectLeanTools,
 } from '../src/runtime/leanPrompt.js'
-import { PromptProfile, getPromptProfileConfig } from '../src/runtime/promptProfiles.js'
 import { CSV_PROCESSOR_DEFINITION } from '../src/tools/dataTools.js'
 import {
   FILE_EDIT_TOOL_DEFINITION,
@@ -146,19 +145,6 @@ test('lean prompt plus real tool schemas, with a full instruction block, stays w
 
   const full = leanPromptSize('', REAL_DEFINITIONS)
   expect(size.estimatedTokens - Math.ceil(prompt.length / 4)).toBeLessThan(full.estimatedTokens)
-})
-
-test('the lean profile config strips the optional prompt layers and leaves the others unchanged', () => {
-  const lean = getPromptProfileConfig(PromptProfile.LEAN)
-  expect(lean.profile).toBe('lean')
-  expect(lean.includeToolsList).toBe(false)
-  expect(lean.includeSkillsIndex).toBe(false)
-  expect(lean.includeBootstrap).toBe(false)
-  expect(lean.includeRelevantMemories).toBe(false)
-  expect(lean.maxMemoriesInjected).toBe(0)
-  expect(Object.isFrozen(lean)).toBe(true)
-  expect(getPromptProfileConfig(PromptProfile.FULL).maxToolsListed).toBe(100)
-  expect(getPromptProfileConfig(PromptProfile.COMPACT).maxToolsListed).toBe(20)
 })
 
 test('the default agent profile admits every lean core tool, so lean mode is not cut down by the profile', () => {

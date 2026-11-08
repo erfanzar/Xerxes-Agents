@@ -13,7 +13,6 @@ import {
   CompactionStrategy,
   ContextCompressor,
   ProviderTokenCounter,
-  RepoMapper,
   SlidingWindowStrategy,
   SmartCompactionStrategy,
   SmartTokenCounter,
@@ -147,40 +146,6 @@ test('compaction strategy aliases are non-destructive without a model and model-
   expect(defaultPriorityScorer({ role: 'system', content: 'x' }, 0)).toBeGreaterThan(0.5)
   expect(defaultPriorityScorer({ role: 'assistant', content: 'x', tool_calls: [] }, 5)).toBeGreaterThan(0.5)
   expect(defaultPriorityScorer({ role: 'user', content: 'x'.repeat(600) }, 0)).toBeGreaterThanOrEqual(0.6)
-})
-
-test('repo mapping retains public Python declarations, skips private/broken definitions, and honors gitignore', async () => {
-  await inTemporaryDirectory(async root => {
-    await writeFile(join(root, 'app.py'), [
-      'MAX_RETRIES = 3',
-      'def public_function(value):',
-      '    return value',
-      'async def async_fetch(url: str) -> str:',
-      '    return url',
-      'class DataProcessor:',
-      '    def process(self, value):',
-      '        return value',
-      '    def _hidden(self):',
-      '        return value',
-      'def _private():',
-      '    return None',
-    ].join('\n'))
-    await writeFile(join(root, 'broken.py'), 'def (\n')
-    await writeFile(join(root, 'good.py'), 'def works():\n    return True\n')
-    await mkdir(join(root, 'ignored'))
-    await writeFile(join(root, 'ignored', 'secret.py'), 'SECRET = "not visible"\n')
-    await writeFile(join(root, '.gitignore'), 'ignored/\n')
-
-    const result = await new RepoMapper({ tokenBudget: 2_000 }).build(root)
-    expect(result.text).toContain('MAX_RETRIES')
-    expect(result.text).toContain('public_function')
-    expect(result.text).toContain('async_fetch')
-    expect(result.text).toContain('DataProcessor.process')
-    expect(result.text).toContain('works')
-    expect(result.text).not.toContain('_hidden')
-    expect(result.text).not.toContain('_private')
-    expect(result.text).not.toContain('SECRET')
-  })
 })
 
 async function inTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {

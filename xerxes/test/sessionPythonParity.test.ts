@@ -20,20 +20,16 @@ import {
   CURRENT_SESSION_SCHEMA_VERSION,
   FileSessionStore,
   InMemorySessionStore,
-  ReplayView,
   SessionFTSIndex,
   SessionIndex,
   SessionManager,
   SessionRecord,
-  SessionReplay,
   SessionSummarizer,
   SnapshotManager,
   ToolCallRecord,
   TurnRecord,
-  branchSession,
   migrateSessionRecord,
   registerMigration,
-  sessionLineage,
   unregisterMigration,
 } from '../src/session/index.js'
 import { SearchHistoryTool } from '../src/tools/history.js'
@@ -188,62 +184,6 @@ test('the migration registry chains upgrades, rejects duplicate and missing step
     unregisterMigration(second)
     unregisterMigration(duplicate)
   }
-})
-
-test('branches and replay views preserve full copied history, projections, and timeline detail', () => {
-  const store = new InMemorySessionStore()
-  const source = new SessionRecord({
-    sessionId: 'root',
-    agentId: 'agent-a',
-    turns: [
-      turn('t1', { agentId: 'agent-a', toolCalls: [toolCall('tc1', 'search'), toolCall('tc2', 'calc')] }),
-      turn('t2', { agentId: 'agent-b', toolCalls: [toolCall('tc3', 'fetch')] }),
-      turn('t3', { agentId: 'agent-a' }),
-    ],
-    agentTransitions: [
-      new AgentTransitionRecord({ fromAgent: 'agent-a', toAgent: 'agent-b', reason: 'capability', turnId: 't1', timestamp: '2026-01-01T00:00:05.000Z' }),
-      new AgentTransitionRecord({ fromAgent: 'agent-b', toAgent: 'agent-a', reason: 'review', turnId: 't2', timestamp: '2026-01-01T00:01:05.000Z' }),
-    ],
-  })
-  store.saveSession(source)
-
-  const child = branchSession(store, { sourceSessionId: 'root', newSessionId: 'child', title: 'experiment' })
-  child.turns[0]!.prompt = 'mutated child prompt'
-  store.saveSession(child)
-  expect(child.parentSessionId).toBe('root')
-  expect(child.metadata).toMatchObject({ forked_from: 'root', title: 'experiment' })
-  expect(child.turns.map(record => record.turnId)).toEqual(['t1', 't2', 't3'])
-  expect(store.loadSession('root')?.turns[0]?.prompt).toBe('prompt t1')
-  expect(sessionLineage(store, 'child')).toEqual(['child', 'root'])
-  expect(() => branchSession(store, { sourceSessionId: 'missing' })).toThrow('unknown source session')
-
-  const view = SessionReplay.load(source)
-  expect(view.session).toBe(source)
-  expect(new ReplayView(source, [source.turns[0]!]).turns).toHaveLength(1)
-  expect(view.getTurn(0)?.turnId).toBe('t1')
-  expect(view.getTurn('t2')?.agentId).toBe('agent-b')
-  expect(view.getTurn(-1)).toBeUndefined()
-  expect(view.getTurn(99)).toBeUndefined()
-  expect(view.getTurn('missing')).toBeUndefined()
-  expect(view.getToolCalls().map(call => call.toolName)).toEqual(['search', 'calc', 'fetch'])
-  expect(view.getAgentTransitions().map(transition => transition.toAgent)).toEqual(['agent-b', 'agent-a'])
-
-  const timeline = view.getTimeline()
-  expect(timeline.map(event => event.timestamp)).toEqual([...timeline.map(event => event.timestamp)].sort())
-  expect(timeline.filter(event => event.eventType === 'turn_start')).toHaveLength(3)
-  expect(timeline.filter(event => event.eventType === 'turn_end')).toHaveLength(3)
-  expect(timeline.filter(event => event.eventType === 'tool_call')).toHaveLength(3)
-  expect(timeline.filter(event => event.eventType === 'agent_transition')).toHaveLength(2)
-
-  const filtered = view.filterByAgent('agent-a')
-  expect(filtered.session).toBe(source)
-  expect(filtered.turns.map(record => record.turnId)).toEqual(['t1', 't3'])
-  expect(filtered.getToolCalls().map(call => call.toolName)).toEqual(['search', 'calc'])
-  expect(view.filterByAgent('missing').turns).toEqual([])
-  const markdown = view.toMarkdown()
-  expect(markdown).toStartWith('# Session root')
-  expect(markdown).toContain('search')
-  expect(markdown).toContain('agent-a -> agent-b')
 })
 
 test('native FTS, indexed history, and session search retain filters, replacement, and deletion semantics', () => {

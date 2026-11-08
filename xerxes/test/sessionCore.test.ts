@@ -13,7 +13,6 @@ import {
   AgentTransitionRecord,
   FileSessionStore,
   InMemorySessionStore,
-  ReplayView,
   SessionFTSIndex,
   SessionIndex,
   SessionManager,
@@ -24,13 +23,10 @@ import {
   SQLiteSessionStore,
   ToolCallRecord,
   TurnRecord,
-  branchSession,
-  branchSessionExclusive,
   cloneSessionRecord,
   diffAgainstSnapshot,
   migrateSessionRecord,
   registerMigration,
-  sessionLineage,
   unregisterMigration,
 } from '../src/session/index.js'
 
@@ -104,7 +100,7 @@ test('SQLite store migrates old records once and preserves migration fields', ()
   }
 })
 
-test('SQLite session store persists, indexes turns, branches, and replays', async () => {
+test('SQLite session store persists and indexes turns', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-'))
   const database = join(directory, 'sessions.db')
   let store: SQLiteSessionStore | undefined
@@ -122,15 +118,7 @@ test('SQLite session store persists, indexes turns, branches, and replays', asyn
     }))
 
     expect(store.search('Kubernetes').map(hit => hit.turnId)).toEqual(['turn-1'])
-    const child = branchSession(store, { sourceSessionId: 'root', newSessionId: 'child', title: 'Experiment' })
-    child.turns[0]!.prompt = 'A different prompt'
-    store.saveSession(child)
     expect(store.loadSession('root')?.turns[0]?.prompt).toContain('Kubernetes')
-    expect(sessionLineage(store, 'child')).toEqual(['child', 'root'])
-
-    const replay = new ReplayView(store.loadSession('root')!)
-    expect(replay.getTimeline().map(event => event.eventType)).toContain('tool_call')
-    expect(replay.toMarkdown()).toContain('exec_command')
     store.close()
     store = undefined
 
@@ -912,52 +900,6 @@ test('startSessionExclusive waits behind a held cross-process lock', async () =>
     const session = await pending
     expect(session.sessionId).toBe('fresh')
     expect(store.loadSession('fresh')?.sessionId).toBe('fresh')
-  } finally {
-    store?.close()
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('branchSessionExclusive performs its existence checks under one lock', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-branch-lock-'))
-  const database = join(directory, 'sessions.db')
-  let store: SQLiteSessionStore | undefined
-  try {
-    store = new SQLiteSessionStore({ dbPath: database })
-    new SessionManager(store).startSession({ sessionId: 'source', metadata: { title: 'Origin' } })
-
-    // Two processes branching to the same explicit id race their check-then-
-    // create cycles through one lock: exactly one wins, the other observes
-    // the created row and fails its own check instead of overwriting it.
-    const attempts = await Promise.allSettled([
-      branchSessionExclusive(store, { newSessionId: 'child', sourceSessionId: 'source' }),
-      branchSessionExclusive(store, { newSessionId: 'child', sourceSessionId: 'source' }),
-    ])
-    const fulfilled = attempts.filter(result => result.status === 'fulfilled')
-    const rejected = attempts.filter(result => result.status === 'rejected')
-    expect(fulfilled).toHaveLength(1)
-    expect(rejected).toHaveLength(1)
-    const rejected0 = rejected[0]
-    expect(rejected0 !== undefined && rejected0.status === 'rejected'
-      ? String((rejected0 as PromiseRejectedResult).reason?.message ?? rejected0.reason)
-      : '').toContain('session already exists')
-
-    const child = store.loadSession('child')
-    expect(child?.parentSessionId).toBe('source')
-    expect(child?.metadata.forked_from).toBe('source')
-
-    // The exclusive form also defers to a held cross-process lock.
-    const lockPath = holdStoreLock(database)
-    let settled = false
-    const pending = branchSessionExclusive(store, { newSessionId: 'held', sourceSessionId: 'source' }).then(branch => {
-      settled = true
-      return branch
-    })
-    await Bun.sleep(150)
-    expect(settled).toBeFalse()
-    rmSync(lockPath, { force: true })
-    await pending
-    expect(store.loadSession('held')?.sessionId).toBe('held')
   } finally {
     store?.close()
     rmSync(directory, { recursive: true, force: true })

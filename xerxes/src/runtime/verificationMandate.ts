@@ -4,12 +4,11 @@
 /**
  * Claim-verification rules for every agent, main and sub-agent alike.
  *
- * Two independent assemblers render a system prompt: `PromptContextBuilder`
- * composes the profile-based prefix, and `buildBootstrapSystemPrompt` builds
- * the prompt the daemon actually sends on a live turn. These rules first
- * landed in the former only, so they shipped to tests and to nothing else —
- * a real session ran without them while the repo looked like it had them.
- * Both assemblers now read this constant so neither half can drift again.
+ * `buildBootstrapSystemPrompt` reads this constant for the prompt the daemon
+ * sends on a live turn. The rules once lived in a second, unused prompt
+ * assembler only, so a real session ran without them while the repo looked
+ * like it had them; keeping them here keeps the live prompt the one that
+ * carries them.
  */
 export const VERIFICATION_MANDATE_RULES: readonly string[] = Object.freeze([
   '- Never claim work is done, fixed, passing, or live without fresh evidence from this session: read the tool output, run the check, or say plainly that it is unverified.',

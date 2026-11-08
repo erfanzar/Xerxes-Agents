@@ -21,11 +21,6 @@ import {
   formatInsightsReport,
 } from '../src/runtime/insights.js'
 import {
-  BudgetExhausted,
-  IterationBudget,
-  iterationBudgetFromConfig,
-} from '../src/runtime/iterationBudget.js'
-import {
   inspectObjectiveResponse,
   normalizeInteractionMode,
   objectiveGuardRetryLimit,
@@ -34,33 +29,6 @@ import {
   TranscriptEntry,
   TranscriptStore,
 } from '../src/runtime/transcript.js'
-
-test('iteration budgets enforce bounded charges, refund safely, and honor injected config environment', () => {
-  const unbounded = new IterationBudget(0)
-  expect(unbounded.maxIterations).toBeUndefined()
-  expect(unbounded.tryConsume(100)).toBe(true)
-  expect(unbounded.remaining).toBeUndefined()
-
-  const bounded = new IterationBudget(2)
-  expect(bounded.consume()).toBe(1)
-  expect(bounded.remaining).toBe(1)
-  expect(bounded.tryConsume()).toBe(true)
-  expect(bounded.tryConsume()).toBe(false)
-  expect(bounded.exhausted).toBe(true)
-  expect(() => bounded.consume()).toThrow(BudgetExhausted)
-  expect(bounded.refund(10)).toBe(0)
-  expect(() => bounded.consume(0)).toThrow('positive')
-  bounded.consume(2)
-  bounded.reset()
-  expect(bounded.used).toBe(0)
-
-  expect(iterationBudgetFromConfig({ max_tool_turns: 3 }).maxIterations).toBe(3)
-  expect(iterationBudgetFromConfig({}, {
-    environment: { XERXES_MAX_TOOL_TURNS: '4' },
-  }).maxIterations).toBe(4)
-  expect(iterationBudgetFromConfig({}, { environment: {} }).maxIterations).toBeUndefined()
-  expect(() => iterationBudgetFromConfig({ max_tool_turns: 'bad' })).toThrow(RangeError)
-})
 
 test('objective guard accepts verified outcomes or evidenced blockers and rejects premature objective final answers', () => {
   const passingTests = {
