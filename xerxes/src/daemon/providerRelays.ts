@@ -6,7 +6,7 @@ import type { ProfileStore, ProviderProfile } from '../bridge/profiles.js'
 import { createLlmClient, type LlmClient } from '../llms/client.js'
 import { LocalProviderEndpoint } from '../security/localProviderEndpoint.js'
 import { LocalProviderRelay, LocalProviderRelayError, type LocalProviderDefaults, type LocalProviderGrant, type LocalProviderGrantView, type RelayPeer } from '../security/localProviderRelay.js'
-import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
+import { nativeSamplingDefaults } from '../llms/samplingDefaults.js'
 import { resolveProvider, type ProviderName } from '../llms/providerRegistry.js'
 import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
 import { providerRouteIdentity } from './agentProvider.js'
@@ -176,10 +176,14 @@ function profileDefaults(profile: ProviderProfile): LocalProviderDefaults {
     ...(budgetTokens === undefined ? {} : { budgetTokens }),
     ...(typeof sampling.reasoning_effort === 'string' ? { effort: sampling.reasoning_effort } : {}),
   } })
+  // None for a model with published sampling: its client applies that profile per request.
+  const native = nativeSamplingDefaults(profile.model || undefined)
+  const temperature = numeric('temperature', 0, 2) ?? native.temperature
+  const topK = numeric('top_k', 0, Infinity, true) ?? native.top_k
   return Object.freeze({
     ...(maxTokens === undefined ? {} : { maxTokens }),
-    temperature: numeric('temperature', 0, 2) ?? DEFAULT_TEMPERATURE,
-    topK: numeric('top_k', 0, Infinity, true) ?? DEFAULT_TOP_K,
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(topK === undefined ? {} : { topK }),
     ...(topP === undefined ? {} : { topP }),
     ...(typeof sampling.service_tier === 'string' && ['auto', 'default', 'flex', 'priority'].includes(sampling.service_tier) ? { serviceTier: sampling.service_tier } : {}),
     ...(thinking ? { thinking: Object.freeze({ budgetTokens: thinking.budgetTokens, effort: thinking.effort }) } : {}),

@@ -3,7 +3,7 @@
 
 import { claudeExecutable } from '../auth/claudeCodeLogin.js'
 import type { ProviderProfile } from '../bridge/profiles.js'
-import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
+import { nativeSamplingDefaults } from '../llms/samplingDefaults.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../streaming/permissions.js'
 import type { DaemonConfig } from './config.js'
 
@@ -64,12 +64,15 @@ export function runtimeConnection(
   const provider = stringSetting(runtime.provider) || useProfile?.provider
   const maxTokens = numberSetting(runtime.max_tokens)
     ?? numberSetting(useProfile?.sampling.max_tokens)
+  // Unset for a model whose maker publishes its sampling: the provider client
+  // applies that profile per request (see nativeSamplingDefaults).
+  const nativeDefaults = nativeSamplingDefaults(model)
   const temperature = numberSetting(runtime.temperature)
     ?? numberSetting(useProfile?.sampling.temperature)
-    ?? DEFAULT_TEMPERATURE
+    ?? nativeDefaults.temperature
   const topK = numberSetting(runtime.top_k)
     ?? numberSetting(useProfile?.sampling.top_k)
-    ?? DEFAULT_TOP_K
+    ?? nativeDefaults.top_k
   const topP = numberSetting(runtime.top_p)
     ?? numberSetting(useProfile?.sampling.top_p)
   const responsesApi = booleanSetting(runtime.responses_api)
@@ -94,10 +97,10 @@ export function runtimeConnection(
     ...(responsesApi === undefined ? {} : { responsesApi }),
     ...(serviceTier ? { serviceTier } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
-    temperature,
+    ...(temperature !== undefined ? { temperature } : {}),
     ...(thinking === undefined ? {} : { thinking }),
     ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
-    topK,
+    ...(topK !== undefined ? { topK } : {}),
     ...(topP !== undefined ? { topP } : {}),
   }
 }

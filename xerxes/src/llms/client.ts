@@ -86,7 +86,12 @@ import {
   providerModel,
   resolveProvider,
 } from './providerRegistry.js'
-import { DEFAULT_TEMPERATURE } from './samplingDefaults.js'
+import {
+  DEFAULT_TEMPERATURE,
+  publishedSampling,
+  publishedSamplingProfile,
+  type PublishedSamplingProfile,
+} from './samplingDefaults.js'
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 
 export interface TokenUsage {
@@ -1572,7 +1577,7 @@ export function getLlmModelInfo(
   return {
     provider: resolveProvider(model, overrides),
     model,
-    temperature: options.temperature ?? DEFAULT_TEMPERATURE,
+    temperature: options.temperature ?? publishedSampling(model, 'thinking')?.temperature ?? DEFAULT_TEMPERATURE,
     maxTokens: options.maxTokens ?? 2_048,
     ...(options.contextLimit === undefined ? {} : { maxModelLen: options.contextLimit }),
     stream: options.stream ?? false,
@@ -2212,6 +2217,11 @@ function addSampling(
       }
     }
   }
+  const published = publishedSamplingProfile(request.model)
+  if (published) {
+    addPublishedSampling(payload, request, providerName, published)
+    return
+  }
   if (!supportsExtendedSampling(providerName)) {
     return
   }
@@ -2224,6 +2234,47 @@ function addSampling(
   if (request.repetitionPenalty !== undefined) {
     payload.repetition_penalty = request.repetitionPenalty
   }
+}
+
+/**
+ * Send a model's whole published sampling profile, as its maker asks. MLX and
+ * llama.cpp servers (LM Studio included) do not read `generation_config.json`,
+ * so a field left out is the engine's own default, not the model's. Values
+ * the request or its extra body already set are kept. The non-thinking values
+ * apply only when this payload turns thinking off.
+ */
+function addPublishedSampling(
+  payload: Record<string, unknown>,
+  request: CompletionRequest,
+  providerName: ProviderName,
+  profile: PublishedSamplingProfile,
+): void {
+  const values = wireDisablesThinking(payload) ? profile.instruct : profile.thinking
+  if (
+    request.temperature === undefined
+    && payload.temperature === undefined
+    && supportsTemperature(providerName, request.model, values.temperature)
+  ) {
+    payload.temperature = values.temperature
+  }
+  payload.top_p ??= values.topP
+  payload.top_k ??= request.topK ?? values.topK
+  payload.min_p ??= request.minP ?? values.minP
+  payload.presence_penalty ??= values.presencePenalty
+  const repetition = request.repetitionPenalty ?? values.repetitionPenalty
+  // vLLM, MLX servers and OpenRouter read `repetition_penalty`; llama.cpp and
+  // LM Studio read `repeat_penalty`. Each ignores the other's name.
+  payload.repetition_penalty ??= repetition
+  payload.repeat_penalty ??= repetition
+}
+
+/** Whether this payload turns the model's thinking off, in any form an OpenAI-compatible server reads. */
+function wireDisablesThinking(payload: Readonly<Record<string, unknown>>): boolean {
+  if (payload.enable_thinking === false) return true
+  const kwargs = payload.chat_template_kwargs
+  if (typeof kwargs === 'object' && kwargs !== null && (kwargs as Record<string, unknown>).enable_thinking === false) return true
+  const thinking = payload.thinking
+  return typeof thinking === 'object' && thinking !== null && (thinking as Record<string, unknown>).type === 'disabled'
 }
 
 const OPENAI_COMPATIBLE_RESERVED_BODY_FIELDS = new Set([

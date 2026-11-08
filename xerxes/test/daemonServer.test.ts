@@ -4407,6 +4407,83 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
   }
 });
 
+test("daemon /sampling leaves a Bonsai model's temperature and top_k to its published profile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-published-sampling-"));
+  const socketPath = join(directory, "daemon.sock");
+  const rebuiltSettings: Array<Readonly<Record<string, unknown>>> = [];
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    // What an older daemon materialized for every model.
+    runtimeSettings: {
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "ternary-bonsai-2-27b-mlx",
+      provider: "custom",
+      temperature: 0.6,
+      top_k: 64,
+    },
+    sessionDirectory: join(directory, "sessions"),
+    turnRunnerFactory: (settings) => {
+      rebuiltSettings.push({ ...settings });
+      return undefined;
+    },
+  });
+  const server = new DaemonServer({
+    socketPath,
+    profileStore: new ProfileStore(join(directory, "profiles.json")),
+    runtime,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "published-sampling", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/sampling reset" },
+    });
+    const reset = (await client.next((frame) => frame.id === 2)).result as {
+      readonly sampling: Record<string, unknown>;
+    };
+    expect(reset).toMatchObject({ ok: true });
+    expect(reset.sampling.temperature).toBeUndefined();
+    expect(reset.sampling.top_k).toBeUndefined();
+    expect(rebuiltSettings.at(-1)).not.toHaveProperty("temperature");
+    expect(rebuiltSettings.at(-1)).not.toHaveProperty("top_k");
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toBe("Restored Prism's model card sampling for ternary-bonsai-2-27b-mlx.");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/sampling" },
+    });
+    await client.next((frame) => frame.id === 3);
+    const shown = String(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    );
+    expect(shown).toContain("`temperature` = `(model profile)`");
+    expect(shown).toContain(
+      "Unset values follow Prism's model card for `ternary-bonsai-2-27b-mlx`: temperature 1, top_p 0.95, top_k 20",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon routes approval and question replies through the active connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replies-"));
   const socketPath = join(directory, "daemon.sock");

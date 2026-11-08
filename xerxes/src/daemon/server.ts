@@ -192,6 +192,9 @@ import {
 import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_K,
+  formatSamplingValues,
+  nativeSamplingDefaults,
+  publishedSamplingProfile,
 } from "../llms/samplingDefaults.js";
 import {
   closeLlmClient,
@@ -8082,13 +8085,22 @@ export class DaemonServer {
   ): Promise<JsonRpcPayload> {
     const input = raw.trim();
     if (!input) {
-      const sampling = samplingConfig(this.runtime.status());
+      const status = this.runtime.status();
+      const sampling = samplingConfig(status);
+      const model = typeof status.model === "string" ? status.model : "";
+      const published = model ? publishedSamplingProfile(model) : undefined;
       const body = [
         "Native next-turn sampling:",
         ...NATIVE_SAMPLING_KEYS.map(
           (name) =>
-            `  \`${name}\` = \`${sampling[name] ?? "(provider default)"}\``,
+            `  \`${name}\` = \`${sampling[name] ?? (published ? "(model profile)" : "(provider default)")}\``,
         ),
+        ...(published
+          ? [
+              "",
+              `Unset values follow ${published.source} for \`${model}\`: ${formatSamplingValues(published.thinking)} when thinking; ${formatSamplingValues(published.instruct)} when not.`,
+            ]
+          : []),
         "",
         "Use `/sampling <key> <value>` or `/sampling reset`.",
       ].join("\n");
@@ -8100,10 +8112,12 @@ export class DaemonServer {
       const cleared = Object.fromEntries(
         NATIVE_SAMPLING_KEYS.map((key) => [key, null]),
       );
+      const status = this.runtime.status();
+      const model = typeof status.model === "string" ? status.model : "";
+      const published = model ? publishedSamplingProfile(model) : undefined;
       this.runtime.reload({
         ...cleared,
-        temperature: DEFAULT_TEMPERATURE,
-        top_k: DEFAULT_TOP_K,
+        ...nativeSamplingDefaults(model || undefined),
       });
       const active = this.profileStore.active();
       if (active) {
@@ -8111,7 +8125,9 @@ export class DaemonServer {
       }
       this.emitSlash(
         connection,
-        `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
+        published
+          ? `Restored ${published.source} sampling for ${model}.`
+          : `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
       );
       return { ok: true, sampling: samplingConfig(this.runtime.status()) };
     }
@@ -13875,6 +13891,10 @@ function displayedRuntimeConfig(status: JsonRpcPayload): JsonRpcPayload {
 function samplingConfig(
   status: JsonRpcPayload,
 ): Record<string, boolean | number | string | undefined> {
+  const defaults: Readonly<Record<string, number | undefined>> =
+    nativeSamplingDefaults(
+      typeof status.model === "string" && status.model ? status.model : undefined,
+    );
   return Object.fromEntries(
     NATIVE_SAMPLING_KEYS.map((key) => {
       const value = status[key];
@@ -13884,15 +13904,7 @@ function samplingConfig(
         typeof value === "string"
           ? value
           : undefined;
-      return [
-        key,
-        configured ??
-          (key === "temperature"
-            ? DEFAULT_TEMPERATURE
-            : key === "top_k"
-              ? DEFAULT_TOP_K
-              : undefined),
-      ];
+      return [key, configured ?? defaults[key]];
     }),
   );
 }
@@ -13995,14 +14007,13 @@ function profileOverrides(
   if (!profile) {
     return {
       ...clearedSampling,
-      temperature: DEFAULT_TEMPERATURE,
-      top_k: DEFAULT_TOP_K,
+      ...nativeSamplingDefaults(undefined),
     };
   }
   return {
     ...clearedSampling,
-    temperature: DEFAULT_TEMPERATURE,
-    top_k: DEFAULT_TOP_K,
+    // None for a model with published sampling, which its client applies per request.
+    ...nativeSamplingDefaults(profile.model || undefined),
     ...profile.sampling,
     provider_profile: profile.name,
     model: profile.model,

@@ -534,6 +534,25 @@ With either engine:
   Sub-agents follow the same rule for their own model. Set `runtime.prompt_profile` (or
   `XERXES_PROMPT_PROFILE`, or the profile's `prompt_profile`) to `full` or `lean` to choose
   yourself.
+- **Sampling:** a Bonsai 2 model gets the sampling Prism publishes for it, wherever it runs. MLX
+  and llama.cpp servers, LM Studio included, don't read the model's `generation_config.json`, so a
+  value Xerxes leaves out is the engine's default, not the model's.
+  - With thinking on (the default), the 27B gets temperature 1.0, top_p 0.95, top_k 20, min_p 0,
+    presence_penalty 0 and repetition_penalty 1.0. The 2B, 4B and 9B get the same with
+    presence_penalty 1.0.
+  - With thinking turned off in the request, every size gets temperature 0.7, top_p 0.8, top_k 20,
+    min_p 0 and presence_penalty 1.5.
+  - The repetition penalty goes out as both `repetition_penalty` and `repeat_penalty`, because
+    engines name it differently.
+  - A value set in runtime settings, the profile's `sampling` block, `/sampling`, or a request's
+    extra body wins. `/sampling` lists the profile's values, and `/sampling reset` returns to them.
+  - Other models keep Xerxes's defaults (temperature 0.6, top_k 64), and a custom endpoint still
+    gets no `top_k`, `min_p` or repetition penalty for them.
+- **Output limit:** Ternary Bonsai 2 27B's replies are capped at 32,768 tokens, the limit Prism's own
+  agent demo uses. Without it, a local engine lets a runaway reply run until the turn's time limit.
+  It applies only when nothing else sets one (`max_tokens`, a profile's `max_output_tokens`, or the
+  provider). A reply that reaches it is told to continue, as with any other limit. It doesn't
+  reduce the prompt budget used for compaction.
 - **The cascade:** after a turn, result checks inspect what it wrote and ran. When a check fails,
   the escalation ladder decides by rule what happens next, inside the same turn:
   1. The model retries with the failed checks as feedback, up to `escalation.max_local_retries`
