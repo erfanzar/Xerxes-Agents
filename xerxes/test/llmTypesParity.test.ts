@@ -3,7 +3,6 @@
 
 import { expect, test } from 'bun:test'
 
-import { CortexAgent } from '../src/cortex/agents/agent.js'
 import { LLMConfig } from '../src/core/config.js'
 import { ProviderError } from '../src/core/errors.js'
 import {
@@ -396,45 +395,6 @@ test('native OpenAI message and tool conversion covers every supported role with
     ],
   })).toBe('Inspect this.')
   expect(() => parseOpenAiProtocolMessage({ role: 'unknown', content: 'test' })).toThrow(OpenAiProtocolValidationError)
-})
-
-test('native Cortex agents retain explicit identity and sampling fields while rejecting duplicate tools', () => {
-  const agent = new CortexAgent({
-    id: 'test_agent',
-    role: 'Test Agent',
-    goal: 'Verify native agent values.',
-    backstory: 'A precise test agent.',
-    model: 'gpt-4',
-    instructions: 'Test instructions',
-    capabilities: [{ name: 'function_calling', description: 'Can call functions' }],
-    llm: EMPTY_LLM,
-    maxTokens: 1_024,
-    temperature: 0.5,
-    topP: 0.9,
-  })
-  expect(agent).toMatchObject({
-    id: 'test_agent',
-    name: 'Test Agent',
-    model: 'gpt-4',
-    instructions: 'Test instructions',
-    maxTokens: 1_024,
-    temperature: 0.5,
-    topP: 0.9,
-  })
-  expect(agent.capabilities).toEqual([{ name: 'function_calling', description: 'Can call functions' }])
-
-  const duplicateTool = {
-    type: 'function' as const,
-    function: { name: 'search', description: 'Search the web', parameters: { type: 'object' } },
-  }
-  expect(() => new CortexAgent({
-    role: 'Duplicate Tool Agent',
-    goal: 'Reject duplicate names.',
-    backstory: 'A strict native agent.',
-    model: 'gpt-4',
-    llm: EMPTY_LLM,
-    tools: [duplicateTool, duplicateTool],
-  })).toThrow('Duplicate CortexAgent tool: search')
 })
 
 test('OpenAI-compatible streams throw on in-stream error payloads instead of skipping them', async () => {

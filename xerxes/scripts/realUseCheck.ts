@@ -66,7 +66,6 @@ import { AgentAuthoredSkillStore } from '../src/tools/skillManage.js'
 import { VisionRegistry, visionImageFromBase64 } from '../src/tools/vision.js'
 import { VoiceModeController, type VoiceRecorder } from '../src/tools/voiceMode.js'
 import { WorkspaceMemoryStore } from '../src/tools/workspaceMemory.js'
-import { runSwarmIntegration } from './swarmIntegration.js'
 
 export type RealUseStatus = 'failed' | 'passed' | 'skipped'
 
@@ -331,11 +330,6 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       plan: '28',
       feature: 'Process registry, interrupt token, and deterministic tool IDs run natively',
       run: checkRuntimePrimitives,
-    },
-    {
-      plan: '28',
-      feature: 'Native agent swarm exercises orchestration, execution, Cortex, and sandbox policy',
-      run: checkNativeSwarm,
     },
     {
       plan: '29',
@@ -1276,12 +1270,6 @@ async function checkCredentialStorage(context: RealUseContext): Promise<string> 
     require(await storage.remove('local'), 'temporary credential was not removed')
     return 'AES-GCM credential round-trip succeeded without writing plaintext tokens'
   })
-}
-
-async function checkNativeSwarm(): Promise<string> {
-  const report = await runSwarmIntegration()
-  require(report.ok, `native swarm failed ${report.failed} category check(s)`)
-  return `completed ${report.passed} native runtime categories (orchestration, executor, Cortex, security)`
 }
 
 async function checkStreaming(): Promise<string> {

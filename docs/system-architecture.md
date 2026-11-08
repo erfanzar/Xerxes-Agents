@@ -29,7 +29,7 @@ CLI / OpenTUI / channel / HTTP API / ACP
 | Executors and tools | `executors/`, `tools/` | Schema lookup, policy/permission gates, native operations, host ports. |
 | State | `session/`, `memory/`, `context/` | Durable transcripts, replay, retrieval, bounded prompt context. |
 | Services | `daemon/`, `api-server/`, `acp/`, `mcp/` | v35 local protocol, OpenAI-compatible API, ACP, MCP transports. |
-| Integrations | `channels/`, `extensions/`, `cortex/`, `skills/` | Channels, plugins, skills, topology orchestration, native skill modules. |
+| Integrations | `channels/`, `extensions/`, `cortex/`, `skills/` | Channels, plugins, skills, the hybrid execution planner, native skill modules. |
 | Terminal client | `xerxes/src/ui/` | React + OpenTUI renderer and v35 gateway client. |
 
 ## Turn lifecycle

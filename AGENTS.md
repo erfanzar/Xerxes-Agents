@@ -76,7 +76,7 @@ xerxes/
 │   ├── llms/               # Provider routing and transports
 │   ├── executors/          # Tool registry and dispatch
 │   ├── tools/              # Built-in and Claude-compatible tools
-│   ├── agents/, cortex/    # Agent specs and orchestration
+│   ├── agents/, cortex/    # Agent specs; cortex/ holds the hybrid execution planner
 │   ├── session/, memory/   # Durable state, FTS, replay, retrieval
 │   ├── security/           # Policies, scanning, sandbox routing
 │   ├── mcp/, acp/          # MCP and Agent Client Protocol surfaces

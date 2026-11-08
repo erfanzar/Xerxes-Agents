@@ -2365,7 +2365,7 @@ function daemonRuntime(
       // The durable attempt log. Its runtime, bridge, and every consumer branch
       // were written and tested, and nothing ever constructed one — so in
       // production `durableTaskBridge` was always undefined and every guarded
-      // recording branch in the manager and the Cortex orchestrator was dead.
+      // recording branch in the manager was dead.
       durableTaskBridge: bridgeDurableTaskLifecycle(
         new DurableTaskRuntime({ directory: join(xerxesHome(), "tasks") }),
       ),
