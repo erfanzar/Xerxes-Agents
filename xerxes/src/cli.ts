@@ -58,13 +58,14 @@ import { createEscalationFactory } from './daemon/turnEscalation.js';
 import { createHybridPlacement } from './daemon/hybridPlanTool.js';
 import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
 import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
+import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
 import { runCascadingTurn, type CascadeHooks, type CascadeStep } from './runtime/cascade.js';
 import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
-import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
+import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionMode } from "./streaming/permissions.js";
 import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime, type DaemonSession } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
@@ -1547,6 +1548,37 @@ interface ExportCommandOptions {
   readonly storeDirectory: string | undefined;
 }
 
+/**
+ * One-shot runs never ask. A call that would ask is refused, and the run says
+ * which one and why on stderr, where scripts read errors.
+ */
+function oneShotPermissionBroker(): PermissionBroker {
+  return {
+    request: async (request) => {
+      process.stderr.write(
+        `Refused without asking: ${request.description.split("\n")[0]}\n`
+          + "One-shot runs don't ask for approval. Run the task in the TUI, or set runtime.permission_mode to accept-all.\n",
+      );
+      return "reject";
+    },
+  };
+}
+
+/** The run's safety floor in auto mode; in other modes, or when it cannot start, none (and the run says so). */
+async function oneShotRunSafety(mode: PermissionMode, sessionId: string, workspaceRoot: string): Promise<RunSafety | undefined> {
+  if (mode !== "auto") return undefined;
+  try {
+    const runSafety = await new RunSafetyRegistry().forSession(sessionId, workspaceRoot);
+    if (runSafety.sandboxUnavailable) {
+      process.stderr.write(`Commands are refused in this run: ${runSafety.sandboxUnavailable}.\n`);
+    }
+    return runSafety;
+  } catch (error) {
+    process.stderr.write(`The safety floor did not start, so writes and commands are refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    return undefined;
+  }
+}
+
 /** `xerxes bonsai [model]`: the settings card for the active model, or the one named. */
 function runBonsaiCommand(args: readonly string[]): number {
   if (args.length > 1 || args[0]?.startsWith("-")) {
@@ -1962,6 +1994,8 @@ function daemonRuntime(
     readonly validateProviderSelection?: NativeSubagentHostOptions['validateProviderSelection'];
   } = {},
 ): InMemoryDaemonRuntime {
+  // One safety floor per session, kept across settings reloads (see runtime/runSafety.ts).
+  const runSafetyRegistry = new RunSafetyRegistry();
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const learning = host.learning ?? createLearningServices(workspaceRoot, host.skillRegistry);
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -2499,6 +2533,9 @@ function daemonRuntime(
       hookRunnerForSession: session => hooksForWorkspace(session.cwd),
       // Data boundary (off by default): a mode in runtime.data_boundary or
       // XERXES_DATA_BOUNDARY gates file reads, shell and writes per session.
+      // The safety floor: inputs locked, outputs in the project folder, and
+      // exec_command in the OS sandbox. Used by turns in auto mode only.
+      runSafetyForSession: (session, outputFolder) => runSafetyRegistry.forSession(session.id, outputFolder),
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         trustOf: sessionDataTrust,
@@ -2936,7 +2973,7 @@ function registerDaemonQuestionTool(registry: ToolRegistry): void {
 async function acpServer(
   config: DaemonConfig,
   projectDirectory: string | undefined,
-  defaultPermissionMode: AcpPermissionMode,
+  requestedPermissionMode: AcpPermissionMode | undefined,
 ): Promise<{
   readonly server: AcpServer;
   readonly shutdown: () => Promise<void>;
@@ -2948,6 +2985,8 @@ async function acpServer(
       "ACP requires a configured runtime connection or active provider profile",
     );
   }
+  // The --permission-mode flag wins; otherwise runtime.permission_mode, else auto.
+  const defaultPermissionMode = requestedPermissionMode ?? connection.permissionMode;
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -3057,7 +3096,10 @@ async function acpServer(
         agent?.systemPrompt,
         await selfMemory.systemPromptAddendum(),
       );
+  const acpRunSafety = new RunSafetyRegistry();
   const runner = new AcpAgentRunner({
+    // The safety floor in auto mode, one per ACP session and folder.
+    runSafetyFor: (sessionId: string, cwd: string) => acpRunSafety.forSession(sessionId, cwd),
     // The daemon's cascade, one ladder per ACP session.
     cascadeFor: (sessionId: string, cwd: string) => ({
       hooks: headlessCascadeHooks({
@@ -3269,7 +3311,7 @@ async function runOneShot(
     ...(maxTokens === undefined ? {} : { maxTokens }),
     maxOutputTokens,
     model,
-    permissionMode: "accept-all",
+    permissionMode: connection.permissionMode,
     ...(connection.temperature === undefined
       ? {}
       : { temperature: connection.temperature }),
@@ -3291,9 +3333,18 @@ async function runOneShot(
   const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
   const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
   const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  // The safety floor in auto mode: inputs locked, new files in the working
+  // folder, commands in the OS sandbox. Without it every write and command is refused.
+  const runSafety = await oneShotRunSafety(connection.permissionMode, "oneshot", workspaceRoot);
   const systemPrompt = lean
     ? joinSystemPrompts(
-        buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name) }),
+        buildLeanSystemPrompt({
+          cwd: workspaceRoot,
+          model,
+          date: localDay(new Date()),
+          toolNames: selectedTools.map(tool => tool.function.name),
+          commandSandbox: runSafety?.commandSandbox() !== undefined,
+        }),
         // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.
         agentReference === undefined ? undefined : agent?.systemPrompt,
       )
@@ -3322,7 +3373,7 @@ async function runOneShot(
         agentId: agent?.name ?? "default",
         model,
         agentsRoot: join(xerxesHome(), "agents"),
-        permissionMode: "accept-all",
+        permissionMode: connection.permissionMode,
         ...(systemPrompt ? { systemPrompt } : {}),
       })
     : undefined;
@@ -3353,16 +3404,20 @@ async function runOneShot(
   };
   // The daemon's cascade: checks after each attempt, and while escalation
   // hands back feedback the model runs again in this same run.
-  const cascadeHooks = headlessCascadeHooks({
-    runtime: config.runtime,
-    sessionId,
-    workspaceRoot,
-    model,
-    local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
-    tools,
-    advisorRegistered,
-    agentId: agent?.name ?? "default",
-  });
+  const cascadeHooks: CascadeHooks = {
+    ...headlessCascadeHooks({
+      runtime: config.runtime,
+      sessionId,
+      workspaceRoot,
+      model,
+      local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
+      tools,
+      advisorRegistered,
+      agentId: agent?.name ?? "default",
+    }),
+    // Under accept-all the user chose to let the run change anything.
+    ...(runSafety && connection.permissionMode !== "accept-all" ? { inputFindings: () => runSafety.inputFindings() } : {}),
+  };
   const cascadeSteps: Record<string, unknown>[] = [];
   const reportCascadeStep = (step: CascadeStep) => {
     if (!step.findings.length && !step.escalation && !step.checkError && !step.escalationError) return;
@@ -3378,7 +3433,7 @@ async function runOneShot(
         model,
         state,
         userMessage: prompt,
-        permissionMode: "accept-all",
+        permissionMode: connection.permissionMode,
         sessionId,
         ...(agent?.name ? { agentId: agent.name } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
@@ -3403,6 +3458,8 @@ async function runOneShot(
         llm,
         hookRunner,
         maxNetworkRetries,
+        permissionBroker: oneShotPermissionBroker(),
+        ...(runSafety ? { runSafety } : {}),
         toolExecutor: feedback ? feedback.wrap(tools) : tools,
       },
       { hooks: cascadeHooks, projectRoot: workspaceRoot, onStep: reportCascadeStep },
@@ -3434,6 +3491,7 @@ async function runOneShot(
   } finally {
     process.off("SIGINT", onSigint);
     subagentCohort.close();
+    await runSafety?.dispose();
     try {
       // Also on an interruption or failure: the partial run stays resumable.
       if (recorder) {
@@ -3517,7 +3575,9 @@ async function runResumedOneShot(
   let wroteText = false;
   let turnFailed = false;
   try {
-    runtime.reload({ permission_mode: "accept-all" });
+    // The same rule as a new one-shot run: the configured mode (auto unless
+    // set), and nothing waits for an approval nobody can give.
+    runtime.reload({ permission_mode: runtimePermissionMode(config.runtime.permission_mode) ?? DEFAULT_PERMISSION_MODE });
     const session = await runtime.openSession(sessionId, undefined, {
       cwd: projectDirectory,
       resume: true,
@@ -3532,6 +3592,11 @@ async function runResumedOneShot(
           wroteText = true;
           process.stdout.write(text);
         }
+        return;
+      }
+      if (event.type === "approval_request") {
+        const description = stringSetting(event.payload.description) || stringSetting(event.payload.tool_name) || "a tool call";
+        process.stderr.write(`Refused without asking: ${description.split("\n")[0]}\nOne-shot runs don't ask for approval. Run the task in the TUI, or set runtime.permission_mode to accept-all.\n`);
         return;
       }
       if (event.type === "notification" && event.payload.level === "error") {

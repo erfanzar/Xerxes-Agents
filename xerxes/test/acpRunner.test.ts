@@ -14,6 +14,7 @@ import { AcpServer } from '../src/acp/server.js'
 import type { SubagentTurnCoordinator } from '../src/daemon/subagentCoordinator.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { RunSafety } from '../src/runtime/runSafety.js'
 import type { SpawnedAgentSnapshot } from '../src/operators/subagents.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
@@ -389,6 +390,7 @@ function completedAgent(sourceAgentId: string): SpawnedAgentSnapshot {
 
 test('an ACP prompt runs the cascade: a failed check is retried in the same prompt and reported as text', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-acp-cascade-'))
+  const floors: RunSafety[] = []
   try {
     const requests: CompletionRequest[] = []
     const llm: LlmClient = {
@@ -424,6 +426,12 @@ test('an ACP prompt runs the cascade: a failed check is retried in the same prom
     const runner = new AcpAgentRunner({
       llm, model: 'gpt-4o', tools: [WRITE_FILE], toolExecutor: executor,
       cascadeFor: sessionId => ({ hooks: { checks: () => 'warn', escalate: findings => escalate({ id: sessionId, cwd: root }, findings) } }),
+      // In auto, the floor lets the new out.xlsx be written without asking.
+      runSafetyFor: async (_sessionId, cwd) => {
+        const floor = await RunSafety.start({ outputFolder: cwd })
+        floors.push(floor)
+        return floor
+      },
     })
     const server = new AcpServer({ runner })
     const session = server.sessions.get(String(server.openSession(root).session_id))
@@ -435,6 +443,7 @@ test('an ACP prompt runs the cascade: a failed check is retried in the same prom
     expect(JSON.stringify(events)).toContain('xlsx_is_text')
     expect(JSON.stringify(events)).toContain('retrying locally')
   } finally {
+    await Promise.all(floors.map(floor => floor.dispose()))
     await rm(root, { recursive: true, force: true })
   }
 })

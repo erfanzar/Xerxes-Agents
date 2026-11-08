@@ -7,7 +7,8 @@ export type AcpPermissionMode = (typeof ACP_PERMISSION_MODES)[number]
 
 export interface AcpCommandOptions {
   readonly help: boolean
-  readonly permissionMode: AcpPermissionMode
+  /** Undefined when the flag is absent: the runtime.permission_mode setting applies. */
+  readonly permissionMode: AcpPermissionMode | undefined
   readonly projectDirectory: string | undefined
   readonly writeRegistry: boolean
 }
@@ -22,14 +23,15 @@ Usage:
 
 Options:
   --write-registry               Write the ACP discovery manifest and exit.
-  --permission-mode <mode>       Default tool-approval mode (default: accept-all).
+  --permission-mode <mode>       Default tool-approval mode (default: runtime.permission_mode,
+                                 else auto).
   --project-dir <directory>      Workspace used to load local Xerxes configuration.
 `
 
 /** Parse the public ACP launcher flags without starting a provider-backed runtime. */
 export function parseAcpCommandOptions(args: readonly string[]): AcpCommandOptions {
   let help = false
-  let permissionMode: AcpPermissionMode = 'accept-all'
+  let permissionMode: AcpPermissionMode | undefined
   let projectDirectory: string | undefined
   let writeRegistry = false
 

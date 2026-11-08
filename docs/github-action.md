@@ -64,10 +64,15 @@ xerxes --output-format stream-json "tally the test files" \
 
 ## Notes and limits
 
-- One-shot mode runs with `accept-all` permissions and never waits for an
-  interactive approval — that is what makes it safe to leave unattended in
-  CI. If a workflow needs a human gate, put the gate in the workflow, not in
-  the turn.
+- One-shot mode never waits for an interactive approval, so it can run
+  unattended in CI.
+  - **In `auto` (the default):** it writes new files and runs sandboxed
+    commands. Anything that would ask, such as editing a checked-out file, is
+    refused and printed on stderr. On Linux runners the sandbox needs
+    bubblewrap (`apt-get install bubblewrap`); without it commands are refused.
+  - **For a job that must edit the checkout:** set
+    `XERXES_PERMISSION_MODE=accept-all`.
+  - **For a human gate:** put it in the workflow, not in the turn.
 - The PR template installs from the published `@xsimurgh/xerxes-agents` npm package. To
   track a source checkout instead, replace the install step with
   `bun install --frozen-lockfile && bun run xerxes …` against your clone.

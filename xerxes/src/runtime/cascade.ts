@@ -58,6 +58,8 @@ export interface CascadeHooks {
   escalate?(findings: readonly CheckFinding[]): CascadeEscalation | undefined
   /** Consult the cloud advisor from code; returns its answer or why it was not consulted. */
   consultAdvisor?(request: AdvisorRequest, signal: AbortSignal): Promise<string>
+  /** Inputs the run changed or deleted (the safety floor's input check), each reported once. */
+  inputFindings?(): Promise<readonly CheckFinding[]>
 }
 
 /** What the checks and the escalation ladder said about one attempt. */
@@ -159,7 +161,12 @@ export async function cascadeCheck(
   let checkError: string | undefined
   try {
     checksMode = hooks.checks()
-    if (checksMode !== 'off') findings = await turnResultFindings(state, executionsBefore, projectRoot)
+    if (checksMode !== 'off') {
+      findings = [
+        ...await turnResultFindings(state, executionsBefore, projectRoot),
+        ...await hooks.inputFindings?.() ?? [],
+      ]
+    }
   } catch (error) {
     checkError = message(error)
   }

@@ -34,6 +34,7 @@ import {
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import { getGoal } from '../runtime/goalDomain.js'
+import type { RunSafetyPort } from '../runtime/runSafety.js'
 import { withoutXerxesAnnotations, type ChatMessage, type MessageContent, type HarnessOrigin, type XerxesActor } from '../types/messages.js'
 import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
@@ -56,6 +57,7 @@ import {
   permissionDescription,
   type PermissionBroker,
   type PermissionDisposition,
+  type PermissionGateOptions,
   type PermissionMode,
   type ToolPolicy,
 } from './permissions.js'
@@ -418,6 +420,13 @@ export interface TurnDependencies {
     toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
     reason?(call: Pick<ToolCall, 'function'>, agentId?: string): string | undefined
   }
+  /**
+   * The run's safety floor (`runtime/runSafety.ts`). Used only in `auto` mode:
+   * it allows writes of new files in the output folder and sandboxed commands
+   * without asking, gives exec_command its sandbox, and is told when the user
+   * approves a write to an input file.
+   */
+  readonly runSafety?: RunSafetyPort
   /**
    * Relieve a context overflow once per overflowing round. Absent it the loop can only
    * report the overflow, because it has no compaction policy of its own.
@@ -1269,7 +1278,7 @@ export async function* runTurn(
           permissionMode,
           dependencies.policy,
           request.agentId,
-          dependencies.dataBoundary === undefined ? undefined : { boundary: dependencies.dataBoundary },
+          permissionGateOptions(dependencies, permissionMode),
         )
         if (permission === 'deny') {
           const boundaryReason = dependencies.dataBoundary?.reason?.(effectiveCall, request.agentId)
@@ -1296,6 +1305,7 @@ export async function* runTurn(
             decisions.push({ call, kind: 'denied', reason: 'permission_rejected' })
             continue
           }
+          dependencies.runSafety?.approved(effectiveCall)
         }
         if (hookRunner !== undefined) {
           const extensionPermission = await resolveToolPermission(hookRunner, {
@@ -1350,8 +1360,13 @@ export async function* runTurn(
         // The metadata object stays the same reference, so a lone call still
         // writes straight into the turn's shared record.
         const steerWakeSignal = dependencies.steerWake?.()
-        const roundContext: ToolExecutionContext = steerWakeSignal
-          ? { ...toolContext, wakeSignal: steerWakeSignal }
+        const commandSandbox = permissionMode === 'auto' ? dependencies.runSafety?.commandSandbox() : undefined
+        const roundContext: ToolExecutionContext = steerWakeSignal || commandSandbox
+          ? {
+              ...toolContext,
+              ...(steerWakeSignal ? { wakeSignal: steerWakeSignal } : {}),
+              ...(commandSandbox ? { commandSandbox } : {}),
+            }
           : toolContext
         const outcomes = await Promise.all(group.map(async (decision, member) => {
           if (decision.kind !== 'allowed') return undefined
@@ -2302,4 +2317,17 @@ function capabilitiesFor(
 ): { readonly concurrencySafe: boolean; readonly interruptBehavior: 'block' | 'cancel' } {
   return dependencies.capabilities?.(call.function.name, request.agentId, call.function.arguments)
     ?? { concurrencySafe: false, interruptBehavior: 'cancel' }
+}
+
+/**
+ * The permission gate's ports for one call: the data boundary whenever the host
+ * supplied one, and the run's safety floor in `auto` mode only.
+ */
+function permissionGateOptions(dependencies: TurnDependencies, mode: PermissionMode): PermissionGateOptions | undefined {
+  const runSafety = mode === 'auto' ? dependencies.runSafety : undefined
+  if (dependencies.dataBoundary === undefined && runSafety === undefined) return undefined
+  return {
+    ...(dependencies.dataBoundary === undefined ? {} : { boundary: dependencies.dataBoundary }),
+    ...(runSafety === undefined ? {} : { runSafety }),
+  }
 }

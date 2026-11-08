@@ -19,7 +19,30 @@ test('CLI keeps a bare --resume interactive when standard input is not a termina
   expect(stderr).toContain('The interactive TUI requires a terminal')
 })
 
-test('CLI --resume submits a supplied prompt to the persisted native session without interactive waits', async () => {
+interface ResumeRun {
+  readonly project: string
+  readonly stderr: string
+}
+
+test('CLI --resume in auto writes a new file without asking', async () => {
+  await resumeWithAWrite(undefined, async run => {
+    expect(run.stderr).toBe('')
+    expect(await Bun.file(join(run.project, 'accepted.txt')).text()).toBe('accepted without a TUI')
+  })
+})
+
+test('CLI --resume keeps a configured manual mode and refuses the write without waiting', async () => {
+  await resumeWithAWrite('manual', async run => {
+    expect(run.stderr).toContain('Refused without asking')
+    expect(await Bun.file(join(run.project, 'accepted.txt')).exists()).toBe(false)
+  })
+})
+
+/** Resume a persisted session with a prompt whose first reply writes a file. */
+async function resumeWithAWrite(
+  permissionMode: string | undefined,
+  check: (run: ResumeRun) => Promise<void>,
+): Promise<void> {
   // Canonicalize the temp root: on macOS /tmp is a symlink to /private/tmp,
   // and the daemon rejects resuming a transcript whose stored project dir
   // differs from the (realpath-resolved) cwd the CLI child connects with.
@@ -82,7 +105,7 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
           provider: 'openai',
           base_url: `${server.url}v1`,
           api_key: 'test-key',
-          permission_mode: 'manual',
+          ...(permissionMode === undefined ? {} : { permission_mode: permissionMode }),
         },
       }),
       'utf8',
@@ -117,7 +140,6 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
     ])
 
     expect(exitCode).toBe(0)
-    expect(stderr).toBe('')
     expect(stdout).toBe('resumed reply\n')
     expect(requests).toHaveLength(2)
     const firstRequest = requests[0]
@@ -153,7 +175,6 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
         }),
       ]),
     )
-    expect(await Bun.file(join(project, 'accepted.txt')).text()).toBe('accepted without a TUI')
 
     const persisted = JSON.parse(await readFile(join(sessions, `${sessionId}.json`), 'utf8')) as {
       messages: Array<{ content?: string; role: string }>
@@ -166,11 +187,12 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
         { role: 'assistant', content: 'resumed reply', turn_outcome: {version: 1, reason: 'completed', turn_id: expect.any(String)} },
       ]),
     )
+    await check({ project, stderr })
   } finally {
     server.stop(true)
     await rm(root, { recursive: true, force: true })
   }
-})
+}
 
 test('CLI --resume rejects a flag in place of the session ID', async () => {
   const child = Bun.spawn([process.execPath, CLI, '--resume', '--help'], {

@@ -21,6 +21,7 @@ import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
 import { buildLeanSystemPrompt, localDay, selectLeanTools } from '../runtime/leanPrompt.js'
 import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
+import type { RunSafety } from '../runtime/runSafety.js'
 import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
 import type { TurnRoute } from './turnRouting.js'
 import type { EscalationNotice } from './turnEscalation.js'
@@ -192,6 +193,11 @@ export interface AgentTurnRunnerOptions {
    * Returning undefined, or a boundary in mode `off`, keeps today's behavior.
    */
   readonly dataBoundaryForSession?: (session: DaemonSession) => BoundaryPermissionPort | undefined
+  /**
+   * The session's safety floor (`runtime/runSafety.ts`): its output folder, locked
+   * inputs and command sandbox. The loop uses it in `auto` mode only.
+   */
+  readonly runSafetyForSession?: (session: DaemonSession, outputFolder: string) => Promise<RunSafety | undefined>
   /**
    * Network retries before a turn gives up on an unreachable provider. Absent:
    * the loop's default for a remote route.
@@ -550,6 +556,16 @@ export class AgentTurnRunner implements TurnRunner {
       ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
       : configuredPermissionMode
     state.metadata.permission_mode = permissionMode
+    let runSafety: RunSafety | undefined
+    try {
+      runSafety = await this.options.runSafetyForSession?.(session, projectRoot)
+    } catch (error) {
+      // Without the floor every write and command asks, as before; say why.
+      yield {
+        type: 'notification',
+        payload: { level: 'warning', message: `The safety floor did not start, so writes and commands ask: ${error instanceof Error ? error.message : String(error)}` },
+      }
+    }
     const promptAgent = modeAgent ?? agent
     // The prompt describes the always-loaded core; loaded deferred tools carry
     // their own schemas. Loading one must not re-render the system prompt.
@@ -563,6 +579,7 @@ export class AgentTurnRunner implements TurnRunner {
         model,
         date: localDay(new Date()),
         toolNames: (tools ?? []).map(tool => tool.function.name),
+        commandSandbox: permissionMode === 'auto' && runSafety?.commandSandbox() !== undefined,
       })
       : await this.bootstrapSystemPrompt(
         session,
@@ -894,6 +911,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...dataBoundaryDependency(this.options.dataBoundaryForSession?.(session)),
+        ...(runSafety ? { runSafety } : {}),
         ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         ...(toolExecutor ? { toolExecutor } : {}),
         ...(this.options.reduceContext ? { reduceContext: async (messages, signal) => {
@@ -1043,6 +1061,8 @@ export class AgentTurnRunner implements TurnRunner {
               checks: () => this.options.resultChecksForSession!(session),
               ...(this.options.escalationForSession ? { escalate: findings => this.options.escalationForSession!(session, findings) } : {}),
               ...(this.options.consultAdvisor ? { consultAdvisor: (request, consultSignal) => this.options.consultAdvisor!(session, request, consultSignal) } : {}),
+              // Under accept-all the user chose to let the run change anything.
+              ...(runSafety && permissionMode !== 'accept-all' ? { inputFindings: () => runSafety.inputFindings() } : {}),
             }
             const check = await cascadeCheck(state, executionsBefore, projectRoot, hooks)
             if (check.checkError !== undefined) {

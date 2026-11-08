@@ -617,13 +617,37 @@ Useful process-level overrides include:
 | `XERXES_MAX_TURNS` | Maximum concurrent daemon turns. |
 | `XERXES_MODEL` | Runtime model override. |
 | `XERXES_BASE_URL` | Runtime provider base URL. |
-| `XERXES_PERMISSION_MODE` | Runtime permission mode (`accept-all` by default; also `auto`, `manual`, or `plan`). |
+| `XERXES_PERMISSION_MODE` | Runtime permission mode (`auto` by default; also `accept-all`, `manual`, or `plan`). |
 
 Run `bun run xerxes daemon --project-dir .` to use the native daemon with an explicit workspace.
 
-Interactive sessions start in YOLO mode (`accept-all`). The TUI shows `YOLO ON`
-beside the active model while it is enabled; `/yolo` switches between `accept-all`
-and `auto`. Explicit tool-policy denials remain final in every permission mode.
+### The safety floor
+
+Sessions, one-shot runs and `xerxes acp` start in `auto` mode. A setting of
+`accept-all` (YOLO) still applies, and `/yolo` switches to it; the TUI then shows
+`YOLO ON` beside the active model. Explicit tool-policy denials remain final in every
+permission mode. In `auto`, each session gets a safety floor for its working folder:
+- **Inputs:** every file in the folder when the session's first turn starts.
+  - Editing or overwriting one asks first. An approved edit releases that file.
+  - A result check reports any input that changed anyway, once.
+  - `.git`, `node_modules` and virtual environments are never written without asking.
+- **Outputs:** a new file in the folder, or one the session created, is written
+  without asking: `WriteFile`, `XlsxWriter`, `CSVProcessor` writes and edits.
+- **Commands:** `exec_command` runs in an OS sandbox without asking. The sandbox
+  reads anything and writes only the folder and a per-session temp folder (its
+  `TMPDIR`). It can't change, delete or rename inputs, and has no network.
+  - **Runners:** macOS uses Seatbelt (`sandbox-exec`), and also refuses requests to
+    other apps through LaunchServices or Apple events. Linux uses bubblewrap
+    (`bwrap`), which must be installed and allowed to create user namespaces.
+  - **Leaving the sandbox:** a call with `unsandboxed: true` (to download, or to
+    change an input the user asked about) asks first.
+- **No floor:** with no working sandbox, or a folder of more than 2,000 files, there
+  are no locked inputs and commands ask as before. The run says why.
+- **One-shot runs** (`xerxes "prompt"` and `--resume`) can't ask, so they refuse
+  anything that would ask. Each refusal is printed on stderr.
+- **Embedding:** an SDK host passes `runSafety: await RunSafety.start({ outputFolder, sandbox })`,
+  using `findCommandSandbox()` for the sandbox. Without one, `auto` sends every write
+  and non-read-only command to the host's permission broker.
 
 `/delegate off|auto|eager` sets how eagerly a conversation fans out to agents and
 workflows (the desktop's Agents chip beside Plan). `auto`, the default, delegates

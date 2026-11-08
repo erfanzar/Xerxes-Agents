@@ -45,7 +45,7 @@ test('consecutive concurrency-safe calls run together but report in model-emitte
 
   const events: StreamEvent[] = []
   for await (const event of runTurn(
-    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client(calls),
       capabilities: () => SAFE,
@@ -78,7 +78,7 @@ test('capability refinement receives each effective call arguments', async () =>
   const observed: Array<Readonly<Record<string, unknown>> | undefined> = []
 
   for await (const _ of runTurn(
-    { agentId: 'worker', model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    { agentId: 'worker', model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client(calls),
       capabilities: (_name, _agentId, args) => {
@@ -100,7 +100,7 @@ test('an unsafe call is a barrier: neither side overlaps it', async () => {
   let peak = 0
 
   for await (const _ of runTurn(
-    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client(calls),
       capabilities: name => (name === 'Write' ? UNSAFE : SAFE),
@@ -127,7 +127,7 @@ test('a failing member does not fail its siblings and every call still gets a re
   const calls = [call('a', 'Read'), call('b', 'Read'), call('c', 'Read')]
   const events: StreamEvent[] = []
   for await (const event of runTurn(
-    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client(calls),
       capabilities: () => SAFE,
@@ -151,7 +151,7 @@ test('a parallel round writes exactly one tool message per call, in order', asyn
   const calls = [call('a', 'Read'), call('b', 'Read')]
   const state = createAgentState([])
   for await (const _ of runTurn(
-    { model: 'm', state, userMessage: 'go', tools: TOOLS },
+    { model: 'm', state, userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client(calls),
       capabilities: () => SAFE,
@@ -189,7 +189,7 @@ test('parallel tools merge only their own metadata writes and deletions in call 
   const state = createAgentState([])
   Object.assign(state.metadata, { first: 'old', second: 'old', remove: true, conflict: 'initial' })
   for await (const _ of runTurn(
-    { model: 'm', state, userMessage: 'go', tools: TOOLS },
+    { model: 'm', state, userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     {
       llm: client([call('a', 'Read'), call('b', 'Read')]),
       capabilities: () => SAFE,
@@ -216,7 +216,7 @@ test('parallel tools merge only their own metadata writes and deletions in call 
 test('a tool rejection with undefined is still a failure, not an empty successful result', async () => {
   const events: StreamEvent[] = []
   for await (const event of runTurn(
-    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS },
+    { model: 'm', state: createAgentState([]), userMessage: 'go', tools: TOOLS, permissionMode: 'accept-all' },
     { llm: client([call('a', 'Read')]), toolExecutor: { execute: async () => { throw undefined } } },
   )) events.push(event)
   const result = events.find(event => event.type === 'tool_end')

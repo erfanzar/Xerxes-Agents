@@ -13,8 +13,9 @@ import { EditFeedback } from '../runtime/editFeedback.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
 import { runCascadingTurn, type CascadeStep, type CascadingTurnOptions } from '../runtime/cascade.js'
 import { renderFindings } from '../runtime/resultChecks.js'
+import type { RunSafety } from '../runtime/runSafety.js'
 import { runTurn } from '../streaming/loop.js'
-import type { PermissionBroker, PermissionDecision, PermissionMode, ToolPolicy } from '../streaming/permissions.js'
+import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionDecision, type PermissionMode, type ToolPolicy } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
 import { routePermission, type AcpPermissionBoard } from './permissions.js'
 import type { AcpSession } from './session.js'
@@ -50,6 +51,8 @@ export interface AcpAgentRunnerOptions {
    * runs it. Absent: one attempt per prompt.
    */
   readonly cascadeFor?: (sessionId: string, cwd: string) => Pick<CascadingTurnOptions, 'hooks'> | undefined
+  /** The session's safety floor (`runtime/runSafety.ts`), used in `auto` mode only. */
+  readonly runSafetyFor?: (sessionId: string, cwd: string) => Promise<RunSafety | undefined>
 }
 
 interface ActivePrompt {
@@ -160,7 +163,7 @@ export class AcpAgentRunner {
     const state = this.states.get(session.sessionId) ?? createAgentState()
     this.states.set(session.sessionId, state)
     const model = session.modelOverride ?? this.options.model
-    const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? 'accept-all')
+    const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? DEFAULT_PERMISSION_MODE)
     state.metadata.permission_mode = permissionMode
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
     const subagentCohort = this.options.subagentCoordinator?.begin(session.sessionId)
@@ -173,7 +176,18 @@ export class AcpAgentRunner {
       const permissionBroker: PermissionBroker = {
         request: (permission, signal) => this.resolvePermission(session, permission, emit, signal),
       }
-      const cascade = this.options.cascadeFor?.(session.sessionId, session.cwd)
+      let runSafety: RunSafety | undefined
+      let runSafetyNote: string | undefined
+      try {
+        runSafety = await this.options.runSafetyFor?.(session.sessionId, session.cwd)
+      } catch (error) {
+        runSafetyNote = `The safety floor did not start, so writes and commands ask: ${errorMessage(error)}`
+      }
+      const configured = this.options.cascadeFor?.(session.sessionId, session.cwd)
+      // Under accept-all the user chose to let the run change anything.
+      const cascade = configured && runSafety && permissionMode !== 'accept-all'
+        ? { hooks: { ...configured.hooks, inputFindings: () => runSafety.inputFindings() } }
+        : configured
       // A checked attempt is shown as plain text, as the edit-diagnostics report is.
       const reportStep = (step: CascadeStep): void => {
         const lines = [
@@ -184,7 +198,7 @@ export class AcpAgentRunner {
         ]
         if (lines.length) cascadeReports.push(`\n\n${lines.join('\n')}\n\n`)
       }
-      const cascadeReports: string[] = []
+      const cascadeReports: string[] = runSafetyNote ? [`${runSafetyNote}\n\n`] : []
       const turn = (turnRequest: Parameters<typeof runTurn>[0], dependencies: Parameters<typeof runTurn>[1], turnSignal: AbortSignal) => cascade
         ? runCascadingTurn(turnRequest, dependencies, { hooks: cascade.hooks, projectRoot: session.cwd, onStep: reportStep }, turnSignal)
         : runTurn(turnRequest, dependencies, turnSignal)
@@ -218,6 +232,7 @@ export class AcpAgentRunner {
         ...(hookRunner ? { hookRunner } : {}),
         ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         permissionBroker,
+        ...(runSafety ? { runSafety } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(executor ? { toolExecutor: executor } : {}),
       }, controller.signal))) {

@@ -10,12 +10,18 @@ export type PermissionMode = 'accept-all' | 'auto' | 'manual' | 'plan'
 export type PolicyAction = 'allow' | 'deny'
 export type PermissionDisposition = 'allow' | 'deny' | 'prompt'
 
-/** Xerxes starts in YOLO mode unless an embedding host explicitly chooses a stricter policy. */
-export const DEFAULT_PERMISSION_MODE: PermissionMode = 'accept-all'
+/**
+ * The mode when nothing chooses one: `auto` runs reads and read-only commands
+ * without asking and asks before anything else. With a run's safety floor
+ * (`runtime/runSafety.ts`) it also writes new files in the output folder and
+ * runs sandboxed commands without asking. `accept-all` stays available as an
+ * explicit setting.
+ */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = 'auto'
 
 /**
  * Tools that always require an explicit user approval, in every permission
- * mode including the default `accept-all` (YOLO) mode.
+ * mode, `accept-all` (YOLO) included.
  *
  * These calls have durable or externally visible side effects that outlive the
  * current turn: `send_message` delivers outbound channel messages and
@@ -51,6 +57,14 @@ export interface PermissionGateOptions {
    */
   readonly boundary?: {
     toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
+  }
+  /**
+   * The run's safety floor (see `runtime/runSafety.ts`). Asked only in `auto`
+   * mode, after every rule that can deny or prompt: `allow` admits a write to a
+   * new file in the output folder, or a command that will run in the sandbox.
+   */
+  readonly runSafety?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>): 'allow' | undefined
   }
 }
 
@@ -151,7 +165,12 @@ export function permissionDisposition(
   if (mode === 'manual') {
     return 'prompt'
   }
-  if (SAFE_TOOLS.has(name)) {
+  if (mode === 'auto' && options?.runSafety?.toolDisposition(call) === 'allow') {
+    return 'allow'
+  }
+  // CSVProcessor reads, analyzes and converts in memory, but `write` creates or
+  // overwrites a file, so it is a write like WriteFile.
+  if (SAFE_TOOLS.has(name) && !(name === 'CSVProcessor' && stringInput(call.function.arguments, 'operation') === 'write')) {
     return 'allow'
   }
   const command = commandInput(name, call.function.arguments)

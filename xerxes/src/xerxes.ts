@@ -31,6 +31,7 @@ import { createEscalationFactory } from './daemon/turnEscalation.js'
 import type { AdvisorRequest, CascadingTurnOptions, ResultChecksMode } from './runtime/cascade.js'
 import { defaultEscalationMode } from './runtime/escalationPolicy.js'
 import { automaticPromptProfile, buildLeanSystemPrompt, localDay, selectLeanTools, type LeanPromptSetting } from './runtime/leanPrompt.js'
+import type { RunSafety } from './runtime/runSafety.js'
 import { ADVISOR_TOOL_NAME } from './tools/advisorTool.js'
 import { SandboxRouter, SandboxedToolExecutor } from './security/sandbox.js'
 import { registerCoreTools, type CoreToolsOptions } from './tools/index.js'
@@ -100,6 +101,15 @@ export interface XerxesOptions {
    * Bonsai models; `false` turns it off.
    */
   readonly cascade?: false | XerxesCascadeOptions
+  /**
+   * The safety floor for `auto` mode, created by the host with
+   * `RunSafety.start({ outputFolder, sandbox })` (and `findCommandSandbox()` for
+   * the sandbox). With it, new files in the output folder and sandboxed
+   * commands run without asking and changed inputs fail the result checks.
+   * Without it, `auto` asks the permission broker before every write and
+   * command that is not read-only.
+   */
+  readonly runSafety?: RunSafety
 }
 
 export interface XerxesCascadeOptions {
@@ -144,6 +154,7 @@ export class Xerxes {
   private readonly permissionBroker: PermissionBroker | undefined
   private readonly policy: ToolPolicy | undefined
   private readonly workspaceRoot: string | undefined
+  private readonly runSafety: RunSafety | undefined
   private readonly promptProfile: LeanPromptSetting | undefined
   private readonly cascadeOptions: false | XerxesCascadeOptions | undefined
 
@@ -164,6 +175,7 @@ export class Xerxes {
     this.hookRunner = options.hookRunner
     this.maxNetworkRetries = options.maxNetworkRetries
     this.workspaceRoot = options.workspaceRoot ?? (options.coreTools ? options.coreTools.workspaceRoot : undefined)
+    this.runSafety = options.runSafety
     this.promptProfile = options.promptProfile
     this.cascadeOptions = options.cascade
 
@@ -259,7 +271,7 @@ export class Xerxes {
     const tools = lean ? selectLeanTools(allowedTools) : allowedTools
     const rolePrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
     const systemPrompt = lean
-      ? [buildLeanSystemPrompt({ cwd: this.workspaceRoot ?? process.cwd(), model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name) }), rolePrompt].filter(Boolean).join('\n\n')
+      ? [buildLeanSystemPrompt({ cwd: this.workspaceRoot ?? process.cwd(), model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name), commandSandbox: this.defaultPermissionMode === 'auto' && this.runSafety?.commandSandbox() !== undefined }), rolePrompt].filter(Boolean).join('\n\n')
       : rolePrompt
     const cascade = this.cascadeFor(model, agentId)
     const permissionMode = options.permissionMode ?? options.config?.permissionMode ?? this.defaultPermissionMode
@@ -279,6 +291,7 @@ export class Xerxes {
       ...(this.policy ? { policy: this.policy } : {}),
       ...(this.hookRunner ? { hookRunner: this.hookRunner } : {}),
       ...(this.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.maxNetworkRetries }),
+      ...(this.runSafety ? { runSafety: this.runSafety } : {}),
     }, {
       config: queryConfig,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
@@ -311,6 +324,8 @@ export class Xerxes {
       defaultMode: () => defaultEscalationMode({ runtime, env: {}, model, local: () => false }),
     })
     const session = { id: 'sdk', cwd: this.workspaceRoot }
+    // Inputs are checked only where the floor is in charge: not under accept-all.
+    const runSafety = this.defaultPermissionMode === 'accept-all' ? undefined : this.runSafety
     const checks = settings.checks ?? 'warn'
     return {
       projectRoot: this.workspaceRoot,
@@ -318,6 +333,7 @@ export class Xerxes {
         checks: () => checks,
         escalate: findings => escalate(session, findings),
         ...(consultAdvisor ? { consultAdvisor } : {}),
+        ...(runSafety ? { inputFindings: () => runSafety.inputFindings() } : {}),
       },
     }
   }
