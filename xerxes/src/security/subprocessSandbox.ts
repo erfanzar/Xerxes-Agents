@@ -25,6 +25,8 @@ const DEFAULT_MAX_TIMEOUT_MS = 30_000
  */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_ARGUMENT_BYTES = 64 * 1024
+/** The same ceiling `exec_command` applies to `stdin` outside the sandbox. */
+const MAX_STDIN_CHARS = 1_000_000
 const MAX_OUTPUT_CHARS = 1_000_000
 const BLOCKED_ENVIRONMENT_NAMES = new Set(['BUN_INSTALL', 'BUN_OPTIONS', 'NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH'])
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -109,6 +111,8 @@ interface Invocation {
   readonly arguments_: readonly string[]
   readonly command: string
   readonly maxOutputChars: number
+  /** Text written to the child's standard input, then closed. */
+  readonly stdin?: string
   readonly timeoutMs: number
   readonly workdir: string
 }
@@ -199,6 +203,10 @@ export class SubprocessSandboxBackend implements SandboxBackend {
     if (argumentBytes > MAX_ARGUMENT_BYTES) {
       throw new SubprocessSandboxRequestError(toolName, `arguments exceed the ${MAX_ARGUMENT_BYTES}-byte limit`)
     }
+    const stdin = arguments_.stdin
+    if (stdin !== undefined && (typeof stdin !== 'string' || stdin.length > MAX_STDIN_CHARS)) {
+      throw new SubprocessSandboxRequestError(toolName, `stdin must be a string of at most ${MAX_STDIN_CHARS} characters`)
+    }
     const workdir = optionalWorkdir(arguments_, toolName)
     const requestedTimeout = optionalPositiveInteger(arguments_, toolName, 'timeout_ms')
     if (requestedTimeout !== undefined && requestedTimeout > this.maxTimeoutMs) {
@@ -217,6 +225,7 @@ export class SubprocessSandboxBackend implements SandboxBackend {
     return {
       command,
       arguments_: args,
+      ...(stdin === undefined ? {} : { stdin }),
       workdir,
       timeoutMs: requestedTimeout ?? this.maxTimeoutMs,
       maxOutputChars: requestedOutput ?? this.maxOutputChars,
@@ -266,7 +275,7 @@ export class SubprocessSandboxBackend implements SandboxBackend {
       const child = Bun.spawn([invocation.command, ...invocation.arguments_], {
         cwd,
         env: { ...this.environment },
-        stdin: 'ignore',
+        stdin: invocation.stdin === undefined ? 'ignore' : new TextEncoder().encode(invocation.stdin),
         stdout: 'pipe',
         stderr: 'pipe',
         signal: controller.signal,

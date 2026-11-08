@@ -30,6 +30,8 @@ const PROCESS_GROUPS_AVAILABLE = process.platform !== 'win32'
  * exits. Short: it is paid on every call, and it is not a wait for EOF.
  */
 const OUTPUT_SETTLE_MS = 50
+/** Largest `stdin` text accepted, in characters: room for a long script, not for a data file. */
+export const MAX_STDIN_CHARS = 1_000_000
 
 export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
   type: 'function',
@@ -40,8 +42,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + '$VAR expansion do not exist here, and every entry in `args` reaches the program literally — "*.ts" arrives '
       + 'as the three characters, unexpanded. Express filtering with the program\'s own flags rather than piping to '
       + 'head or grep; if a workflow genuinely needs shell semantics, invoke the interpreter as the executable and '
-      + 'note that the approval gate then only sees that interpreter. stdin is /dev/null, so a command that prompts '
-      + 'receives nothing and burns the whole timeout doing nothing — pass the non-interactive flag (--yes, '
+      + 'note that the approval gate then only sees that interpreter. To run a script, pass its text as `stdin` to '
+      + 'the interpreter (cmd python3 with args ["-"], or sh with ["-s"]) instead of escaping it into args. Without '
+      + '`stdin` the program reads an empty standard input, so a command that prompts receives nothing and burns the '
+      + 'whole timeout doing nothing — pass the non-interactive flag (--yes, '
       + '--no-pager, --porcelain, CI mode) up front. A non-zero exitCode is a normal successful call and never an '
       + 'exception: read stderr and decide. The tool itself only fails for shell syntax in `cmd`, a workdir that is '
       + `not an existing directory inside the workspace, or cancellation. A timeout (default ${DEFAULT_TIMEOUT_MS}ms, `
@@ -68,6 +72,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
           items: { type: 'string' },
           default: [],
           description: 'Arguments passed directly to the executable.',
+        },
+        stdin: {
+          type: 'string',
+          description: 'Text written to standard input, e.g. a script for python3 with args ["-"].',
         },
         workdir: { type: 'string', default: '.', description: 'Workspace-relative working directory.' },
         timeout_ms: {
@@ -322,6 +330,10 @@ export async function executeCommand(
     )
   }
   const args = optionalStringArray(inputs, 'args')
+  const stdin = optionalString(inputs, 'stdin')
+  if (stdin !== undefined && stdin.length > MAX_STDIN_CHARS) {
+    throw new ValidationError('stdin', `must be at most ${MAX_STDIN_CHARS} characters; write larger input to a file and pass its path`, `${stdin.length} characters`)
+  }
   const workdir = optionalString(inputs, 'workdir') ?? '.'
   const timeout = requireRange(optionalInteger(inputs, 'timeout_ms', DEFAULT_TIMEOUT_MS), 'timeout_ms', 1, 120_000)
   const maxOutputChars = requireRange(
@@ -341,6 +353,9 @@ export async function executeCommand(
   if (optionalBoolean(inputs, 'run_in_background', false)) {
     if (background === undefined) {
       throw new ValidationError('run_in_background', 'is not enabled by this host', true)
+    }
+    if (stdin !== undefined) {
+      throw new ValidationError('stdin', 'cannot be combined with run_in_background; write the input to a file and pass its path', true)
     }
     // No timeout is applied on purpose: outliving the foreground ceiling is the
     // entire reason a caller asks for this.
@@ -411,7 +426,7 @@ export async function executeCommand(
     id: `fg_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`,
     kind: 'foreground',
     ownerSessionId,
-    command: [command, ...args].join(' '),
+    command: [command, ...args].join(' ') + (stdin === undefined ? '' : ` < stdin (${stdin.length} chars)`),
     cwd,
     control: {
       kill: async killSignal => {
@@ -432,7 +447,8 @@ export async function executeCommand(
     childStartedAt = Date.now()
     const process = Bun.spawn([command, ...args], {
       cwd,
-      stdin: 'ignore',
+      // Written in full and closed; a program that reads to EOF sees the whole text.
+      stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin),
       stdout: 'pipe',
       stderr: 'pipe',
       ...(PROCESS_GROUPS_AVAILABLE ? { detached: true } : {}),

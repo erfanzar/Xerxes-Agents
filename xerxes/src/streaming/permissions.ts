@@ -79,9 +79,14 @@ interface DirectCommand {
   readonly workdir: string | undefined
 }
 
+/**
+ * `stdin` is text written to the program's standard input. It can carry a whole
+ * program for an interpreter or data for a writer, so a command that receives it
+ * is never auto-approved as read-only.
+ */
 type CommandInput =
-  | { readonly kind: 'argv'; readonly value: DirectCommand }
-  | { readonly kind: 'shell'; readonly value: string }
+  | { readonly kind: 'argv'; readonly value: DirectCommand; readonly stdin?: string }
+  | { readonly kind: 'shell'; readonly value: string; readonly stdin?: string }
 
 /**
  * Whether a shell command is read-only enough to auto-approve.
@@ -181,7 +186,10 @@ export function permissionDescription(call: Pick<ToolCall, 'function'>): string 
   const inputs = call.function.arguments
   const command = commandInput(name, inputs)
   if (command) {
-    return `Run: ${command.kind === 'argv' ? formatDirectCommand(command.value) : command.value}`
+    const run = `Run: ${command.kind === 'argv' ? formatDirectCommand(command.value) : command.value}`
+    if (command.stdin === undefined) return run
+    const lines = command.stdin.split('\n').length
+    return `${run} with ${lines} line${lines === 1 ? '' : 's'} on stdin:\n${command.stdin}`
   }
   if (name === 'Write' || name === 'WriteFile') {
     return `Write to: ${stringInput(inputs, 'file_path')}`
@@ -267,6 +275,8 @@ function commandInput(name: string, inputs: JsonObject): CommandInput | undefine
 function execCommandInput(inputs: JsonObject): CommandInput | undefined {
   const command = stringInput(inputs, 'cmd').trim()
   if (!command) return undefined
+  const stdinValue = optionalStringInput(inputs, 'stdin')
+  const stdin = stdinValue === undefined ? {} : { stdin: stdinValue }
 
   const argsValue = inputs.args
   if (argsValue !== undefined) {
@@ -278,6 +288,7 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
         args: argsValue,
         workdir: optionalStringInput(inputs, 'workdir'),
       },
+      ...stdin,
     }
   }
 
@@ -285,7 +296,7 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
   // operator uses one shell string. Preserve the shell parser whenever `cmd`
   // contains shell syntax or whitespace rather than trying to reinterpret it.
   if (/\s|[;&|`$()<>]/.test(command)) {
-    return { kind: 'shell', value: command }
+    return { kind: 'shell', value: command, ...stdin }
   }
   return {
     kind: 'argv',
@@ -294,10 +305,12 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
       args: [],
       workdir: optionalStringInput(inputs, 'workdir'),
     },
+    ...stdin,
   }
 }
 
 function isSafeCommandInput(input: CommandInput): boolean {
+  if (input.stdin !== undefined) return false
   return input.kind === 'shell' ? isSafeShellCommand(input.value) : isSafeDirectCommand(input.value)
 }
 

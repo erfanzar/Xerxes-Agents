@@ -249,9 +249,10 @@ interface CompiledPattern {
   readonly base: string
 }
 
+/** `stdin` is text the program reads; it is scanned like the command and is never read-only. */
 type ShellInput =
-  | { readonly kind: 'argv'; readonly command: string; readonly args: readonly string[]; readonly workdir?: string }
-  | { readonly kind: 'shell'; readonly text: string; readonly workdir?: string }
+  | { readonly kind: 'argv'; readonly command: string; readonly args: readonly string[]; readonly workdir?: string; readonly stdin?: string }
+  | { readonly kind: 'shell'; readonly text: string; readonly workdir?: string; readonly stdin?: string }
 
 interface ShellSegment {
   readonly executable: string | undefined
@@ -474,6 +475,11 @@ export class DataBoundary {
       segments = analysis.segments.map(segment => ({ executable: segment.executable, args: segment.args }))
       tokens = shellTokens(shell.text)
     }
+    if (shell.stdin !== undefined) {
+      // A script on stdin is the same program text `python3 -c` would carry in args.
+      readOnly = false
+      tokens = [...tokens, ...shellTokens(shell.stdin)]
+    }
     const referenced = this.shellPrivateReference(tokens, segments, workdir)
     if (referenced !== undefined) {
       if (trust === 'cloud') {
@@ -565,12 +571,14 @@ function shellInput(name: string, inputs: JsonObject): ShellInput | undefined {
   if (name === 'exec_command') {
     const command = (stringValue(inputs.cmd) ?? stringValue(inputs.command))?.trim()
     if (!command) return undefined
+    const stdinText = typeof inputs.stdin === 'string' ? inputs.stdin : undefined
+    const extra = { ...where, ...(stdinText === undefined ? {} : { stdin: stdinText }) }
     const args = inputs.args
     if (Array.isArray(args) && args.every(value => typeof value === 'string')) {
-      return { kind: 'argv', command, args: args as string[], ...where }
+      return { kind: 'argv', command, args: args as string[], ...extra }
     }
-    if (args !== undefined || /\s|[;&|`$()<>]/.test(command)) return { kind: 'shell', text: command, ...where }
-    return { kind: 'argv', command, args: [], ...where }
+    if (args !== undefined || /\s|[;&|`$()<>]/.test(command)) return { kind: 'shell', text: command, ...extra }
+    return { kind: 'argv', command, args: [], ...extra }
   }
   const text = name === 'pty_write' ? stringValue(inputs.chars) : stringValue(inputs.command) ?? stringValue(inputs.cmd)
   return text?.trim() ? { kind: 'shell', text, ...where } : undefined

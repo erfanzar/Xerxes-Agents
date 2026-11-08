@@ -169,7 +169,7 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     '- Never say you checked or validated something you did not run. If you could not check, say so.',
   ]
   if (has('exec_command')) {
-    lines.push('- exec_command runs one program without a shell: cmd is the program, args is the list of arguments.')
+    lines.push('- exec_command runs one program without a shell: cmd is the program, args is the list of arguments, and stdin is text for its standard input, such as a script for an interpreter.')
   }
   if (has('check_command')) {
     lines.push('- A command still running at its timeout keeps running in the background. Read it with check_command and the proc_id it returned.')

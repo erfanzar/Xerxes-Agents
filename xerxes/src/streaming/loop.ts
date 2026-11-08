@@ -39,6 +39,7 @@ import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
 import { steerMessage, steerText, type SteerInput } from './steer.js'
+import { repairToolCall } from './toolCallRepair.js'
 export type { SteerInput } from './steer.js'
 import type {
   AgentState,
@@ -68,6 +69,25 @@ export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
 export const DEFAULT_RETRY_DELAYS = [10_000, 10_000, 10_000, 10_000] as const
 /** Generous default chunk-arrival budget before a provider stream is treated as stalled. */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
+/**
+ * Before the first chunk the model may still be reading the prompt, and a
+ * local server sends nothing while it does. Allow this much per estimated
+ * prompt token (20 tokens a second, slower than a laptop reads an uncached prompt).
+ */
+export const FIRST_CHUNK_MS_PER_PROMPT_TOKEN = 50
+/** However long the prompt, a stream silent for this long before its first chunk is stalled. */
+export const MAX_FIRST_CHUNK_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * The wait allowed for a provider stream's first chunk: the inactivity budget,
+ * or longer for a prompt big enough to take longer than that to read. A
+ * disabled watchdog stays disabled.
+ */
+export function firstChunkTimeoutMs(inactivityTimeoutMs: number, promptTokens: number): number {
+  if (!Number.isFinite(inactivityTimeoutMs) || inactivityTimeoutMs <= 0) return inactivityTimeoutMs
+  const forPrompt = Number.isFinite(promptTokens) && promptTokens > 0 ? promptTokens * FIRST_CHUNK_MS_PER_PROMPT_TOKEN : 0
+  return Math.max(inactivityTimeoutMs, Math.min(MAX_FIRST_CHUNK_TIMEOUT_MS, forPrompt))
+}
 /** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */
 export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
 /** Shorter event bursts measure transport batching rather than model decode. */
@@ -434,7 +454,8 @@ export interface TurnDependencies {
    * Abort a provider attempt that yields no chunk within this budget (ms), so a
    * socket held open without data stalls one attempt instead of the whole turn.
    * Defaults to {@link DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS}; non-positive or
-   * non-finite values disable the watchdog.
+   * non-finite values disable the watchdog. The first chunk of each attempt
+   * may take longer, scaled to the prompt size ({@link firstChunkTimeoutMs}).
    */
   readonly streamInactivityTimeoutMs?: number
   /** Override parser behavior for an isolated diagnostic streaming surface. */
@@ -668,7 +689,8 @@ export async function* runTurn(
           roundFirstOutputAt = undefined
           roundFirstStreamTokenAt = undefined
           roundCompletedAt = 0
-          yield { type: 'provider_wait', active: true, promptTokens: roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools) }
+          const promptTokens = roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools)
+          yield { type: 'provider_wait', active: true, promptTokens }
           let awaitingOutput = true
           try {
             for await (const delta of watchProviderStream(
@@ -684,6 +706,7 @@ export async function* runTurn(
               ),
               streamInactivityTimeoutMs,
               attemptSignal,
+              firstChunkTimeoutMs(streamInactivityTimeoutMs, promptTokens),
             )) {
               attemptStreamed = true
               const hasStreamToken = Boolean(delta.content || delta.thinking)
@@ -1227,17 +1250,20 @@ export async function* runTurn(
           decisions.push({ call, kind: 'truncated' })
           continue
         }
+        // Repaired before hooks and checks see it, so every gate judges the
+        // command that will run; a hook's own mutation is repaired the same way.
+        const repairedCall = repairToolCall(call)
         const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
-          arguments: call.function.arguments,
-          name: call.function.name,
+          arguments: repairedCall.function.arguments,
+          name: repairedCall.function.name,
           ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-          toolCallId: call.id,
+          toolCallId: repairedCall.id,
         })
-        const effectiveCall = applyToolArgumentsMutation(
-          call,
-          hookMutation(beforeResult, call.function.arguments),
-        )
+        const effectiveCall = repairToolCall(applyToolArgumentsMutation(
+          repairedCall,
+          hookMutation(beforeResult, repairedCall.function.arguments),
+        ))
         const permission = permissionDisposition(
           effectiveCall,
           permissionMode,
@@ -2158,16 +2184,20 @@ function linkAttemptSignal(signal: AbortSignal | undefined): AttemptSignal {
  * while waiting for the next chunk, so it cannot fire during tool execution,
  * and it is cleared on completion, error, and consumer-close paths.
  * Disabling the timer does not disable cancellation of an unresponsive stream.
+ * The first chunk gets `firstTimeoutMs`, which covers reading a long prompt.
  */
 async function* watchProviderStream(
   stream: AsyncIterable<LlmDelta>,
   timeoutMs: number,
   attempt: AttemptSignal,
+  firstTimeoutMs: number = timeoutMs,
 ): AsyncGenerator<LlmDelta> {
   const iterator = stream[Symbol.asyncIterator]()
+  let first = true
   try {
     while (true) {
-      const result = await nextDeltaWithTimeout(iterator, timeoutMs, attempt)
+      const result = await nextDeltaWithTimeout(iterator, first ? firstTimeoutMs : timeoutMs, attempt)
+      first = false
       if (result.done) {
         return
       }

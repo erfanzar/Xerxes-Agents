@@ -724,6 +724,32 @@ configured routing, not the identity of the currently authenticated account.
 Legacy recovered tasks without routing identity require new work rather than
 guessing the original connection. Archived tasks retain the same selectors.
 
+### Scripts on standard input
+
+`exec_command` runs one program without a shell. To run a script, the model
+passes its text as `stdin` to the interpreter (`cmd: "python3"`,
+`args: ["-"]`, or `sh` with `["-s"]`) instead of escaping it into `args`. A
+command that receives `stdin` is never auto-approved as read-only, the approval
+prompt shows the text, and the data boundary scans it like the command itself.
+`stdin` is limited to 1,000,000 characters and cannot be combined with
+`run_in_background`. The built-in local subprocess sandbox passes it through.
+Sandbox backends that run commands through a host port (Docker, SSH, Modal,
+Daytona, Singularity and the host-port subprocess adapter) reject it with an
+error rather than run the interpreter on empty input.
+
+Before those checks run, Xerxes repairs two common argument mistakes that have
+only one possible reading: a `cmd` made of plain words (`"wc -l"`) is split into
+the program and its arguments, and `args` sent as a JSON-encoded string array is
+decoded. Anything a shell would read differently (quotes, globs, `$`, `~`,
+operators) is still rejected.
+
+### Waiting for the first token
+
+A provider stream that sends nothing for 120 seconds is treated as stalled and
+retried. Before the first token, a local model may still be reading a long
+prompt, so that first wait is allowed 50 ms per estimated prompt token
+(at most 30 minutes) when that is longer than 120 seconds.
+
 ### Command completion follow-ups
 
 In a direct user turn, `exec_command` can set `notify_on_completion: true`

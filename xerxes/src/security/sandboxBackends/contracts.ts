@@ -289,6 +289,16 @@ function commandArgv(backend: string, toolName: string, arguments_: JsonObject):
       command,
     )
   }
+  if (arguments_.stdin !== undefined) {
+    // Host ports carry a direct argv only. Dropping the text would run the
+    // interpreter on an empty program and report success.
+    throw new SandboxBackendAdapterRequestError(
+      backend,
+      toolName,
+      'stdin is not supported by this sandbox backend; write the input to a workspace file and pass its path',
+      typeof arguments_.stdin === 'string' ? `${arguments_.stdin.length} characters` : arguments_.stdin,
+    )
+  }
   const args = arguments_.args
   if (args === undefined) return [command]
   if (!Array.isArray(args)) {
