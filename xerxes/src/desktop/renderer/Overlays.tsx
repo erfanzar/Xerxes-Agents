@@ -29,6 +29,7 @@ import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab
 import { RemoteProviders } from './RemoteProviders.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
+import { CompactionSetting } from './CompactionSetting.js'
 import { Icon, type IconName } from './Icon.js'
 import { isVscodeHost } from './host.js'
 import { HubPhoneCard } from './HubPhonePanel.js'
@@ -651,6 +652,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
         />
       </div>
       <MemoryGuardSetting snap={snap} />
+      <CompactionSetting snap={snap} />
     </>
   )
 }
@@ -887,8 +889,8 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
               ? <span className="provcard__use">{row.viaMac ? 'Use via Mac' : 'Use'}</span>
               : null}
           </button>
-          {/* Relayed through this computer while the host's own sign-in works: offer the way back. */}
-          {row.inUse && row.viaMac && provider.ready === true && !snap.turnActive && (
+          {/* The host's sign-in can be selected before any relay exists, too. */}
+          {snap.storageScope?.startsWith('ssh:') && provider.signsIn && provider.ready === true && (!row.inUse || row.viaMac) && !snap.turnActive && (
             <button className="provcard__use provcard__use--host" disabled={!!snap.providerSwitching}
               title={`run this task on the host's own ${name} sign-in`}
               onClick={() => store.useHostProvider(provider.name)}>Run on the server</button>

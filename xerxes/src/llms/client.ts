@@ -67,7 +67,8 @@ import {
   splitDeferredTools,
 } from './deferredTools.js'
 import { OllamaClient } from './ollama.js'
-import { wireCapability, type WireApi } from './modelsDev.js'
+import { reportModelCapability, wireCapability, type WireApi } from './modelsDev.js'
+import { reportedContextLimit } from '../runtime/errorClassifier.js'
 import type { ChatMessage, MessageContent, OpenAiChatMessage } from '../types/messages.js'
 import { messageText, messagesToOpenAi } from '../types/messages.js'
 import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
@@ -372,6 +373,8 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
+    const mapped = wireToolNames(request, this.providerName)
+    request = mapped.request
     const endpoint = new URL('chat/completions', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
@@ -385,6 +388,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         this.providerName,
         `completion request failed (${response.status}): ${httpErrorBody(body)}`,
         response,
+        request.model,
       )
     }
 
@@ -409,7 +413,7 @@ export class OpenAiCompatibleClient implements LlmClient {
 
     return {
       content,
-      toolCalls: completedToolCalls(pendingToolCalls, grammarProperties),
+      toolCalls: mapped.restore(completedToolCalls(pendingToolCalls, grammarProperties)),
       ...(finishReason === undefined ? {} : { finishReason }),
       ...(thinking === undefined ? {} : { thinking }),
       ...(usage === undefined ? {} : { usage }),
@@ -417,6 +421,8 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+    const mapped = wireToolNames(request, this.providerName)
+    request = mapped.request
     const endpoint = new URL('chat/completions', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
@@ -430,6 +436,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         this.providerName,
         `stream request failed (${response.status}): ${httpErrorBody(body)}`,
         response,
+        request.model,
       )
     }
     if (!response.body) {
@@ -483,7 +490,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         terminal = true
       }
       if (finishReason && pendingToolCalls.size) {
-        event.toolCalls = completedToolCalls(pendingToolCalls, grammarProperties)
+        event.toolCalls = mapped.restore(completedToolCalls(pendingToolCalls, grammarProperties))
         emittedToolCalls = true
       }
       if (Object.keys(event).length) {
@@ -503,7 +510,7 @@ export class OpenAiCompatibleClient implements LlmClient {
       throw new ProviderError(this.providerName, 'stream request returned a response with no event stream and no completion')
     }
     if (!emittedToolCalls && pendingToolCalls.size) {
-      yield { toolCalls: completedToolCalls(pendingToolCalls, grammarProperties) }
+      yield { toolCalls: mapped.restore(completedToolCalls(pendingToolCalls, grammarProperties)) }
     }
   }
 }
@@ -561,7 +568,7 @@ export class ResponsesApiClient implements LlmClient {
     if (this.providerName === 'openai-codex') {
       return collectLlmCompletion(this.stream(request, signal))
     }
-    const mapped = responsesToolNames(request)
+    const mapped = wireToolNames(request)
     request = mapped.request
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const response = await this.fetchImplementation(endpoint, {
@@ -576,6 +583,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API completion request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        request.model,
       )
     }
     const result = parseResponsesCompletion(parseJsonObject(await response.text(), this.providerName))
@@ -583,7 +591,7 @@ export class ResponsesApiClient implements LlmClient {
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
-    const mapped = responsesToolNames(request)
+    const mapped = wireToolNames(request)
     for await (const delta of this.streamWire(mapped.request, signal)) {
       yield delta.toolCalls ? { ...delta, toolCalls: mapped.restore(delta.toolCalls) } : delta
     }
@@ -607,6 +615,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        request.model,
       )
     }
     if (!response.body) {
@@ -768,6 +777,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        request.model,
       )
     }
     if (!response.body) {
@@ -815,8 +825,14 @@ function codexAssistantResponseItems(
 }
 
 /** Preserve HTTP retry metadata without mixing provider headers into user-facing messages. */
-function openAiHttpError(provider: ProviderName, message: string, response: Response): ProviderError {
+function openAiHttpError(provider: ProviderName, message: string, response: Response, model?: string): ProviderError {
   const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
+  // A provider refusing a request for its size usually states its window
+  // (Kimi: "exceeded model token limit: 1048576"). Kept as what the provider
+  // reported, so the overflow compaction targets the real window and the next
+  // turn's threshold check fires before the window fills again.
+  const contextLimit = model !== undefined && response.status === 400 ? reportedContextLimit(message) : undefined
+  if (model !== undefined && contextLimit !== undefined) reportModelCapability(provider, model, { contextLimit })
   return new ProviderError(provider, message, undefined, {
     status: response.status,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
@@ -1615,28 +1631,55 @@ function responsesMessageContent(content: MessageContent): unknown {
 }
 
 
-/** Provider aliases never escape into execution or persisted session names. */
-function responsesToolNames(original: CompletionRequest): { request: CompletionRequest; restore: (calls: readonly ToolCall[]) => readonly ToolCall[] } {
+/**
+ * Alias only at the provider boundary, before deferred tools are split, so
+ * schemas, load markers and replayed calls all use the same name. Restoring
+ * calls here keeps aliases out of execution and persisted session history.
+ *
+ * Responses accepts digits/underscores first; Kimi's completions endpoints
+ * require a leading ASCII letter. Other completions hosts retain their names.
+ */
+function wireToolNames(
+  original: CompletionRequest,
+  completionsProvider?: ProviderName,
+): { request: CompletionRequest; restore: (calls: readonly ToolCall[]) => readonly ToolCall[] } {
+  const unchanged = { request: original, restore: (calls: readonly ToolCall[]) => calls }
+  const kimi = completionsProvider === 'kimi' || completionsProvider === 'kimi-code'
+    || completionsProvider === 'moonshotai' || completionsProvider === 'moonshotai-cn'
+  if (completionsProvider !== undefined && !kimi) return unchanged
+  const validName = kimi ? /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/ : /^[a-zA-Z0-9_-]{1,64}$/
   const names = new Set(original.tools?.map(tool => tool.function.name) ?? [])
   for (const message of original.messages) {
     if (message.role === 'assistant') for (const call of message.tool_calls ?? []) names.add(call.function.name)
-    if (message.role === 'tool') for (const name of message.added_tool_names ?? []) names.add(name)
+    if (message.role === 'tool') {
+      if (message.name !== undefined) names.add(message.name)
+      for (const name of message.added_tool_names ?? []) names.add(name)
+    }
   }
   const aliases = new Map<string, string>()
   const reverse = new Map<string, string>()
-  for (const name of names) {
-    if (/^[a-zA-Z0-9_-]{1,64}$/.test(name)) continue
+  // Sorting makes collision resolution independent of schema/history order.
+  // Reserve every original name, including valid names that look like aliases.
+  for (const name of [...names].sort()) {
+    if (validName.test(name)) continue
     let alias = 'xerxes_' + createHash('sha256').update(name).digest('hex').slice(0, 48)
     while (names.has(alias) || reverse.has(alias)) alias = 'xerxes_' + createHash('sha256').update(alias + name).digest('hex').slice(0, 48)
-    aliases.set(name, alias); reverse.set(alias, name)
+    aliases.set(name, alias)
+    reverse.set(alias, name)
   }
+  if (!aliases.size) return unchanged
   const wireName = (name: string) => aliases.get(name) ?? name
   return {
-    request: { ...original,
+    request: {
+      ...original,
       ...(original.tools ? { tools: original.tools.map(tool => ({ ...tool, function: { ...tool.function, name: wireName(tool.function.name) } })) } : {}),
       messages: original.messages.map(message => message.role === 'assistant' && message.tool_calls
         ? { ...message, tool_calls: message.tool_calls.map(call => ({ ...call, function: { ...call.function, name: wireName(call.function.name) } })) }
-        : message.role === 'tool' ? { ...message, ...(message.name ? { name: wireName(message.name) } : {}), ...(message.added_tool_names ? { added_tool_names: message.added_tool_names.map(wireName) } : {}) } : message),
+        : message.role === 'tool' ? {
+          ...message,
+          ...(message.name !== undefined ? { name: wireName(message.name) } : {}),
+          ...(message.added_tool_names ? { added_tool_names: message.added_tool_names.map(wireName) } : {}),
+        } : message),
     },
     restore: calls => calls.map(call => ({ ...call, function: { ...call.function, name: reverse.get(call.function.name) ?? call.function.name } })),
   }

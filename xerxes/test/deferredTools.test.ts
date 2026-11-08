@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import { AnthropicMessagesClient } from '../src/llms/anthropic.js'
-import { OpenAiCompatibleClient, ResponsesApiClient } from '../src/llms/client.js'
+import { OpenAiCompatibleClient, ResponsesApiClient, collectLlmCompletion, type CompletionRequest } from '../src/llms/client.js'
 import {
   anthropicSupportsToolReferences,
   completionsDeferredToolsMode,
@@ -265,6 +265,93 @@ test('responses tool-search mode replays a synthetic client-executed search pair
     name: 'deploy_service',
     defer_loading: true,
   })
+})
+
+test('Kimi load/use/reload requests preserve the cached prefix and alias deferred schemas and history together', async () => {
+  const name = 'mcp.deploy/service'
+  const laterName = 'mcp.status/service'
+  const loadedTool: ToolDefinition = { ...DEFERRED, function: { ...DEFERRED.function, name } }
+  const laterTool: ToolDefinition = { ...DEFERRED, function: { ...DEFERRED.function, name: laterName } }
+  const history: ChatMessage[] = [
+    { role: 'system', content: 'Stable session instructions.' },
+    { role: 'user', content: 'Deploy the API, then check it.' },
+  ]
+  const loadHistory: ChatMessage[] = [
+    ...history,
+    { role: 'assistant', content: '', tool_calls: [{ id: 'search', type: 'function', function: { name: 'ToolSearchTool', arguments: { query: 'deploy' } } }] },
+    { role: 'tool', tool_call_id: 'search', name: 'ToolSearchTool', content: JSON.stringify({ loaded_tool: name }), added_tool_names: [name] },
+  ]
+  const useHistory: ChatMessage[] = [
+    ...loadHistory,
+    { role: 'assistant', content: '', tool_calls: [{ id: 'deploy', type: 'function', function: { name, arguments: { name: 'api' } } }] },
+    { role: 'tool', tool_call_id: 'deploy', name, content: 'deployed' },
+  ]
+  const reloadHistory: ChatMessage[] = [
+    ...useHistory,
+    { role: 'assistant', content: '', tool_calls: [{ id: 'search-again', type: 'function', function: { name: 'ToolSearchTool', arguments: { query: 'deploy status' } } }] },
+    { role: 'tool', tool_call_id: 'search-again', name: 'ToolSearchTool', content: JSON.stringify({ loaded_tools: [name, laterName] }), added_tool_names: [name, laterName] },
+  ]
+  for (const providerName of ['kimi', 'kimi-code'] as const) {
+    reportModelCapability(providerName, 'kimi-k3', { dynamicTools: true })
+    for (const stream of [false, true]) {
+      const payloads: {
+        tools: unknown[]
+        messages: {
+          role: string
+          content?: string
+          name?: string
+          tools?: { function: { name: string } }[]
+          tool_calls?: { function: { name: string } }[]
+        }[]
+      }[] = []
+      const client = new OpenAiCompatibleClient({
+        providerName,
+        apiKey: 'test',
+        baseUrl: 'https://example.invalid/v1',
+        fetchImplementation: async (_url, init) => {
+          payloads.push(JSON.parse(String(init?.body)))
+          return stream
+            ? new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+            : Response.json({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] })
+        },
+      })
+      const requests: CompletionRequest[] = [
+        { model: 'kimi-k3', tools: [SEARCH], messages: history },
+        { model: 'kimi-k3', tools: [SEARCH, loadedTool], messages: loadHistory },
+        { model: 'kimi-k3', tools: [loadedTool, SEARCH], messages: useHistory },
+        { model: 'kimi-k3', tools: [laterTool, SEARCH, loadedTool], messages: reloadHistory },
+      ]
+      const before = JSON.stringify(requests)
+      for (const request of requests) {
+        if (stream) await collectLlmCompletion(client.stream(request))
+        else await client.complete(request)
+      }
+      expect(JSON.stringify(requests)).toBe(before)
+      expect(payloads).toHaveLength(4)
+      for (const [index, payload] of payloads.entries()) {
+        expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(payloads[0]?.tools))
+        if (index === 0) continue
+        const previous = payloads[index - 1]
+        // Compare the actual serialized prompt head, not just tool membership.
+        expect(JSON.stringify(payload.messages.slice(0, previous?.messages.length))).toBe(JSON.stringify(previous?.messages))
+      }
+      const loaded = payloads[1]?.messages.at(-1)
+      const wireName = loaded?.tools?.[0]?.function.name
+      expect(loaded?.role).toBe('system')
+      expect(loaded?.content).toBeUndefined()
+      expect(wireName).toMatch(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/)
+      const used = payloads[2]?.messages.at(-2)
+      expect(used?.tool_calls?.[0]?.function.name).toBe(wireName)
+      expect(payloads[2]?.messages.at(-1)?.name).toBe(wireName)
+      const reloaded = payloads[3]?.messages.filter(message => Array.isArray(message.tools))
+      expect(reloaded).toHaveLength(2)
+      expect(reloaded?.[0]).toEqual(loaded)
+      const later = reloaded?.[1]?.tools
+      expect(later).toHaveLength(1)
+      expect(later?.[0]?.function.name).toMatch(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/)
+      expect(later?.[0]?.function.name).not.toBe(wireName)
+    }
+  }
 })
 
 test('kimi deferred mode moves loaded tools into a system message after the result', async () => {

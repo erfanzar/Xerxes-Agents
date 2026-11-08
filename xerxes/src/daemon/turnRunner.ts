@@ -23,6 +23,7 @@ import { isScreenshotToolResult } from '../context/screenshotSuperseder.js'
 import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
 import { CONTEXT_CALIBRATION_METADATA_KEY, contextCalibrationRatio, estimateContextTokens, promptCalibration } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
+import { compactionThresholdTokens, DEFAULT_AUTO_COMPACT_THRESHOLD } from '../context/compactionThreshold.js'
 import { classify, ErrorKind } from '../runtime/errorClassifier.js'
 import { instructionFileUpdateLayer } from '../runtime/instructionFreshness.js'
 import { appendSkillSuggestion } from '../extensions/skillSuggestions.js'
@@ -547,7 +548,7 @@ export class AgentTurnRunner implements TurnRunner {
     // Frozen per session: the context limit can arrive late (models.dev loads
     // in the background), and the prompt must not gain this line mid-session.
     const compacts = this.snapshots.compaction.get(session.id)
-      ?? (Boolean(contextLimit && contextLimit > 0) && (this.options.autoCompactThreshold?.() ?? 0.8) > 0)
+      ?? (Boolean(contextLimit && contextLimit > 0) && (this.options.autoCompactThreshold?.() ?? DEFAULT_AUTO_COMPACT_THRESHOLD) > 0)
     this.snapshots.compaction.set(session.id, compacts)
     // When to recall, record and search. Goals are used because their policy says
     // when; the learning tools had only per-tool notes and were never called.
@@ -802,8 +803,9 @@ export class AgentTurnRunner implements TurnRunner {
         contextCompactionDue: (messages, observedPromptTokens) => {
           const limit = contextLimit
           if (!limit || limit <= 0) return false
-          const threshold = this.options.autoCompactThreshold?.() ?? 0.8
-          if (threshold <= 0) return false
+          // A share of the window (0.6) or a token count (400000); 0 is off.
+          const due = compactionThresholdTokens(limit, this.options.autoCompactThreshold?.() ?? DEFAULT_AUTO_COMPACT_THRESHOLD)
+          if (due <= 0) return false
           const projected = calibration.project(estimateContextTokens(messages as unknown as Record<string, unknown>[], {
             model: attemptModel,
             ...(systemPrompt ? { systemPrompt } : {}),
@@ -819,7 +821,7 @@ export class AgentTurnRunner implements TurnRunner {
           // output ceiling is not subtracted here — it can be half the window
           // (Mistral Large 4: 262K of 524K), which compacted at 40% full. The
           // reply's room is reserved per round by `roundOutputRoom` instead.
-          return projected >= limit * Math.min(1, threshold)
+          return projected >= due
         },
         roundOutputRoom: () => contextLimit && contextLimit > 0 && projectedPrompt !== undefined
           ? contextLimit - projectedPrompt

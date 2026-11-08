@@ -343,6 +343,7 @@ import {
   InMemoryDaemonRuntime,
 } from "./runtime.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
+import { compactionSettingsPath, describeCompactionThreshold, readCompactionSetting, saveCompactionSetting } from "../context/compactionThreshold.js";
 import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
@@ -905,6 +906,8 @@ export interface DaemonServerOptions {
   readonly terminalRegistry?: TerminalRegistry;
   /** Where the agent-command memory limit is saved, and how a change reaches the running guard. */
   readonly memoryGuard?: { readonly settingsFile: string; readonly applied: (settings: MemoryGuardSettings) => void };
+  /** Where Settings saves the automatic-compaction threshold. Defaults to `<home>/daemon/compaction.json`. */
+  readonly compactionSettingsFile?: string;
   /**
    * Where an update restart lists the sessions whose armed goals the next
    * process resumes at startup. Without it a goal continues only when a client
@@ -1222,6 +1225,7 @@ export class DaemonServer {
   private readonly socketPath: string;
   private readonly terminalRegistry: TerminalRegistry | undefined;
   private readonly memoryGuard: DaemonServerOptions["memoryGuard"];
+  private readonly compactionSettingsFile: string;
   private readonly goalRearmFile: string | undefined;
   private readonly ptySessions: PtySessionManager | undefined;
   /** Live output subscriptions per client: terminal id → unsubscribe. */
@@ -1325,6 +1329,7 @@ export class DaemonServer {
     this.autoCompactThreshold = normalizeCompactionThreshold(
       options.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
     );
+    this.compactionSettingsFile = options.compactionSettingsFile ?? compactionSettingsPath(xerxesHome());
     this.autoTitle = options.autoTitle ?? true;
     this.titleClientFactory = options.titleClientFactory;
     this.projectAgentClientFactory = options.projectAgentClientFactory;
@@ -3360,6 +3365,27 @@ export class DaemonServer {
         default_mb: mb(defaultMemoryLimitBytes()),
         total_mb: mb(totalmem()),
         environment_override: /^\d+$/.test(process.env.XERXES_COMMAND_MEMORY_LIMIT_MB?.trim() ?? ""),
+      };
+    }
+    if (method === "compaction.settings.get" || method === "compaction.settings.save") {
+      if (method === "compaction.settings.save") {
+        // "60%", 0.6, "400k", "off", or null for the default. Saved first, so a
+        // value that cannot be written never reaches the running sessions.
+        if (params.threshold === null) {
+          await rm(this.compactionSettingsFile, { force: true });
+          this.runtime.reload({ auto_compact_threshold: null });
+        } else {
+          this.runtime.reload({ auto_compact_threshold: saveCompactionSetting(this.compactionSettingsFile, params.threshold) });
+        }
+      }
+      const threshold = this.resolvedAutoCompactThreshold();
+      return {
+        ok: true,
+        threshold,
+        label: describeCompactionThreshold(threshold),
+        default_threshold: DEFAULT_AUTO_COMPACT_THRESHOLD,
+        default_label: describeCompactionThreshold(DEFAULT_AUTO_COMPACT_THRESHOLD),
+        saved: readCompactionSetting(this.compactionSettingsFile) !== undefined,
       };
     }
     if (method === "agent.settings.options") {

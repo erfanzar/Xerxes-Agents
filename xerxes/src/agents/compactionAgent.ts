@@ -5,6 +5,7 @@ import {
   COMPACTION_SUMMARY_PREFIX,
   CompactionProvisioner,
   DEFAULT_COMPACTION_SUMMARY_MAX_TOKENS,
+  DEFAULT_COMPACTION_THRESHOLD_RATIO,
   buildCompactionPromptFromText,
   renderMessagesForSummary,
   stripCompactionAnalysis,
@@ -219,6 +220,7 @@ export class CompactionAgent {
       model: this.model,
       maxContextTokens: Math.min(currentTokens, this.maxContextTokens),
       targetTokens: Math.max(1, Math.floor(Math.min(currentTokens, this.maxContextTokens) / 2)),
+      thresholdTokens: Math.max(1, Math.floor(this.maxContextTokens * DEFAULT_COMPACTION_THRESHOLD_RATIO)),
       tokenCounter: this.tokenCounter,
       summaryAgent: candidate => {
         compactable = candidate

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 
 import { ProviderError, StreamTruncatedError } from '../src/core/errors.js'
 import {
@@ -14,7 +15,8 @@ import {
   type LlmDelta,
 } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
-import type { ToolCall } from '../src/types/toolCalls.js'
+import { reportedModelCapability } from '../src/llms/modelsDev.js'
+import type { ToolCall, ToolDefinition } from '../src/types/toolCalls.js'
 
 function openAiClient(fetchImplementation: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   return new OpenAiCompatibleClient({
@@ -116,6 +118,134 @@ test('index-less continuation deltas without id or name still append to the curr
   ])
 })
 
+test('Kimi chat-completions aliases invalid names consistently and restores completed and streamed calls', async () => {
+  const dottedName = 'mcp.tools/search'
+  // A legitimate tool may occupy the first deterministic alias candidate.
+  const reservedAlias = 'xerxes_' + createHash('sha256').update(dottedName).digest('hex').slice(0, 48)
+  const names = [dottedName, 'mcp_tools_search', 'tool with spaces', '工具', '_private', '1tool', '-tool', 'x'.repeat(65), 'Valid-tool_2', reservedAlias]
+  const historyOnly = 'retired.tool'
+  const resultOnly = 'result.only'
+  const tools: ToolDefinition[] = names.map(name => ({
+    type: 'function',
+    function: { name, description: 'tool', parameters: { type: 'object', properties: {} } },
+  }))
+  const input: CompletionRequest = {
+    model: 'kimi-for-coding',
+    tools,
+    messages: [
+      { role: 'assistant', content: '', tool_calls: [
+        { id: 'previous', type: 'function', function: { name: dottedName, arguments: {} } },
+        { id: 'retired', type: 'function', function: { name: historyOnly, arguments: {} } },
+      ] },
+      { role: 'tool', name: dottedName, tool_call_id: 'previous', content: 'done' },
+      { role: 'tool', name: resultOnly, tool_call_id: 'retired', content: 'done' },
+    ],
+  }
+  const before = JSON.stringify(input)
+  for (const providerName of ['kimi', 'kimi-code', 'moonshotai', 'moonshotai-cn'] as const) {
+    for (const operation of ['complete', 'stream', 'stream-done'] as const) {
+      let previousNames: (string | undefined)[] | undefined
+      const client = new OpenAiCompatibleClient({
+        providerName,
+        apiKey: 'test',
+        baseUrl: 'https://example.invalid/v1',
+        fetchImplementation: async (_url, init) => {
+          const payload = JSON.parse(String(init?.body)) as {
+            tools: { function: { name: string } }[]
+            messages: { name?: string; tool_calls?: { function: { name: string } }[] }[]
+          }
+          const wireNames = payload.tools.map(tool => tool.function.name)
+          expect(new Set(wireNames).size).toBe(names.length)
+          for (const name of wireNames) expect(name).toMatch(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/)
+          for (const [index, name] of names.entries()) {
+            if (/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name)) expect(wireNames[index]).toBe(name)
+          }
+          expect(wireNames[0]).not.toBe(reservedAlias)
+          expect(payload.messages[0]?.tool_calls?.[0]?.function.name).toBe(wireNames[0])
+          expect(payload.messages[1]?.name).toBe(wireNames[0])
+          const retired = payload.messages[0]?.tool_calls?.[1]?.function.name
+          const result = payload.messages[2]?.name
+          expect(retired).toMatch(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/)
+          expect(result).toMatch(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/)
+          const allNames = [...wireNames, retired, result]
+          expect(new Set(allNames).size).toBe(names.length + 2)
+          if (previousNames) expect(allNames).toEqual(previousNames)
+          previousNames = allNames
+          const calls = [wireNames[0], retired, result, 'Valid-tool_2'].map((name, index) => ({
+            index,
+            id: `call-${index}`,
+            type: 'function',
+            function: { name, arguments: '{}' },
+          }))
+          return operation === 'complete'
+            ? Response.json({ choices: [{ message: { content: '', tool_calls: calls }, finish_reason: 'tool_calls' }] })
+            : sseResponse([
+              { choices: [{ delta: { tool_calls: calls.map(call => ({ ...call, function: { ...call.function, arguments: '{' } })) } }] },
+              { choices: [{ delta: { tool_calls: calls.map(call => ({ index: call.index, function: { arguments: '}' } })) } }] },
+              ...(operation === 'stream' ? [{ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }] : []),
+            ])
+        },
+      })
+      // A retry must produce the identical aliases without mutating the transcript.
+      for (let retry = 0; retry < 2; retry += 1) {
+        const completion = operation === 'complete'
+          ? await client.complete(input)
+          : await collectLlmCompletion(client.stream(input))
+        expect(completion.toolCalls.map(call => call.function.name)).toEqual([dottedName, historyOnly, resultOnly, 'Valid-tool_2'])
+      }
+    }
+  }
+  expect(JSON.stringify(input)).toBe(before)
+})
+
+test('non-Kimi chat-completions leaves tool names unchanged', async () => {
+  const name = 'mcp.tools/search'
+  const client = openAiClient(async (_url, init) => {
+    const payload = JSON.parse(String(init?.body)) as {
+      tools: { function: { name: string } }[]
+      messages: { name?: string; tool_calls?: { function: { name: string } }[] }[]
+    }
+    expect(payload.tools[0]?.function.name).toBe(name)
+    expect(payload.messages[0]?.tool_calls?.[0]?.function.name).toBe(name)
+    expect(payload.messages[1]?.name).toBe(name)
+    return Response.json({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] })
+  })
+  await client.complete({
+    ...request(),
+    tools: [{ type: 'function', function: { name, description: 'tool', parameters: {} } }],
+    messages: [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'old', type: 'function', function: { name, arguments: {} } }] },
+      { role: 'tool', tool_call_id: 'old', name, content: 'ok' },
+    ],
+  })
+})
+
+test('Kimi usage keeps cache reads, writes and uncached input disjoint without masking top-level reads', async () => {
+  const usage = {
+    prompt_tokens: 1_000,
+    completion_tokens: 20,
+    cached_tokens: 700,
+    prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 100 },
+  }
+  for (const operation of ['complete', 'stream'] as const) {
+    const client = new OpenAiCompatibleClient({
+      providerName: 'kimi-code',
+      apiKey: 'test',
+      baseUrl: 'https://example.invalid/v1',
+      fetchImplementation: async () => operation === 'complete'
+        ? Response.json({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage })
+        : sseResponse([
+          { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+          { choices: [], usage },
+        ]),
+    })
+    const completion = operation === 'complete'
+      ? await client.complete(request())
+      : await collectLlmCompletion(client.stream(request()))
+    expect(completion.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 700, cacheCreationTokens: 100 })
+  }
+})
+
 test('chat-completions usage reports cached prompt tokens apart from fresh input tokens', async () => {
   const usage = {
     prompt_tokens: 20,
@@ -204,6 +334,24 @@ test('chat-completions propagates Retry-After delta-seconds as structured classi
       suggestedBackoffSeconds: 2.5,
     })
   }
+})
+
+test('a size refusal that states the window is an overflow and records that window for the model', async () => {
+  const refusal = JSON.stringify({ error: { message: 'Invalid request: Your request exceeded model token limit: 1048576 (requested: 1232443)', type: 'invalid_request_error' } })
+  for (const operation of ['complete', 'stream'] as const) {
+    // A model id of its own, so the shared capability map stays clean for other tests.
+    const model = `window-probe-${operation}`
+    const client = openAiClient(async () => new Response(refusal, { status: 400 }))
+    const input: CompletionRequest = { model, messages: [{ role: 'user', content: 'hi' }] }
+    const failure = await (operation === 'complete' ? client.complete(input) : collect(client.stream(input))).catch(error => error as unknown)
+    expect(failure).toBeInstanceOf(ProviderError)
+    expect(classifyError(failure)).toMatchObject({ kind: 'context_overflow' })
+    expect(reportedModelCapability('openai', model)?.contextLimit).toBe(1_048_576)
+  }
+  // A plain bad request records nothing.
+  const plain = openAiClient(async () => new Response('{"error":{"message":"max_tokens must be at most 32768"}}', { status: 400 }))
+  await plain.complete({ model: 'window-probe-plain', messages: [{ role: 'user', content: 'hi' }] }).catch(() => undefined)
+  expect(reportedModelCapability('openai', 'window-probe-plain')).toBeUndefined()
 })
 
 test('chat-completions parses Retry-After HTTP dates and ignores malformed values', async () => {

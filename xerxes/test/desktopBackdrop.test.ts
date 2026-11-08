@@ -166,3 +166,12 @@ test('menus and suggestion lists stay opaque over a see-through window', async (
   expect(tokens['--x-popover']).toMatch(/^#[0-9a-f]{6}$/i)
   expect(tokens['--x-card']).not.toMatch(/^#[0-9a-f]{6}$/i)
 })
+
+test('background and theme card descriptions wrap instead of being cut off', async () => {
+  // One line cut "Artwork · colours only in Shading" to "…Shadi…" on every card.
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  const rule = /\.atelier \.palette-card__desc\{([^}]*)\}/.exec(css)?.[1] ?? ''
+  expect(rule).toContain('overflow-wrap:anywhere')
+  expect(rule).not.toContain('nowrap')
+  expect(rule).not.toContain('ellipsis')
+})

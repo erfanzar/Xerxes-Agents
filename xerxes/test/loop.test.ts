@@ -45,6 +45,13 @@ class TelemetryClient implements LlmClient {
   }
 }
 
+/** Counts thinking it never streams, as Claude Code does with hidden thinking. */
+class HiddenThinkingTelemetryClient implements LlmClient {
+  async *stream(): AsyncGenerator<LlmDelta> {
+    yield { content: 'Short reply.', usage: { inputTokens: 25, outputTokens: 3_000 } }
+  }
+}
+
 class ToolOnlyTelemetryClient implements LlmClient {
   private calls = 0
 
@@ -332,6 +339,27 @@ test('tool-only terminal events do not fabricate Codex decode throughput', async
   const firstUsage = events.find(event => event.type === 'usage_update')
   expect(firstUsage).toMatchObject({ type: 'usage_update', durationMs: 16_001, ttftMs: 16_000 })
   expect(firstUsage).not.toHaveProperty('tokensPerSecond')
+})
+
+test('output the provider counted but never streamed does not inflate the decode rate', async () => {
+  // 3,000 tokens over the one second the short reply streamed read as
+  // 3,000 tokens a second; the hidden thinking ran before that second began.
+  const times = [1_000, 1_250, 2_250]
+  const events = []
+  for await (const event of runTurn({
+    model: 'claude-code/opus',
+    state: createAgentState(),
+    userMessage: 'think, then answer',
+  }, {
+    llm: new HiddenThinkingTelemetryClient(),
+    now: () => times.shift() ?? 2_250,
+  })) {
+    events.push(event)
+  }
+
+  const usage = events.find(event => event.type === 'usage_update')
+  expect(usage).toMatchObject({ type: 'usage_update', durationMs: 1_250, ttftMs: 250 })
+  expect(usage).not.toHaveProperty('tokensPerSecond')
 })
 
 test('agent loop emits and persists an identical cross-tool-round sentinel only once', async () => {

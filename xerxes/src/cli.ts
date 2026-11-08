@@ -75,6 +75,7 @@ import {
   type ToolExecutionContext,
 } from "./executors/toolRegistry.js";
 import { compactMessagesIfNeeded, compactionSummaryBudgets, precompactArchivePath } from "./daemon/compactionRunner.js";
+import { compactionSettingsPath, DEFAULT_AUTO_COMPACT_THRESHOLD, optionalCompactionThreshold, readCompactionSetting } from "./context/compactionThreshold.js";
 import { recordCompaction } from "./context/compactionHistory.js";
 import { FILE_READS_METADATA_KEY, fileStateTracker } from "./tools/fileState.js";
 import { AuditEmitter } from "./audit/emitter.js";
@@ -1206,6 +1207,7 @@ async function runDaemonOwned(
   const daemon = new DaemonServer({
     learning,
     memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
+    compactionSettingsFile: compactionSettingsPath(xerxesHome()),
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
     providerReadiness: createSignInReadinessProbe(),
@@ -1858,9 +1860,12 @@ function daemonRuntime(
   if (reflection !== 'goals' && reflection !== 'all' && reflection !== 'off') {
     throw new ConfigurationError('reflection', 'runtime.reflection / XERXES_REFLECTION must be goals, all or off');
   }
+  const savedCompactionThreshold = readCompactionSetting(compactionSettingsPath(home));
   const initialSettings: Record<string, unknown> = {
     provider_profile: initialProfile && initialConnection && profileAcceptsModel(initialProfile, initialConnection.model) && !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key) ? initialProfile.name : undefined,
     ...config.runtime,
+    // What a person chose in Settings wins over config.json.
+    ...(savedCompactionThreshold === undefined ? {} : { auto_compact_threshold: savedCompactionThreshold }),
     reflection,
     ...(initialConnection
       ? {
@@ -2145,6 +2150,8 @@ function daemonRuntime(
       || (typeof fallbackSetting === "string" ? fallbackSetting.trim() : "")
       || undefined;
     const subagentOptions = {
+      // Children compact at the same point as their parent session.
+      autoCompactThreshold: optionalCompactionThreshold(settings.auto_compact_threshold) ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
       ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
       ...(resources.skillRegistry ? { skillRegistry: resources.skillRegistry } : {}),
       ...(host.remoteProviderBindings ? { resolveSourceClient: (sourceId: string, model: string, profile?: string) => {
@@ -2378,7 +2385,7 @@ function daemonRuntime(
       // Compaction as a mid-turn recovery, not only a between-turn chore: the
       // loop can retry an overflowed round once, but only if something is
       // willing to shrink the history for it.
-      autoCompactThreshold: () => Number(runtime?.status().auto_compact_threshold ?? 0.8),
+      autoCompactThreshold: () => optionalCompactionThreshold(runtime?.status().auto_compact_threshold) ?? DEFAULT_AUTO_COMPACT_THRESHOLD,
       reduceContext: async (messages, signal, session) => {
         // The turn's own session decides the provider, exactly as it does for the turn.
         const active = session;

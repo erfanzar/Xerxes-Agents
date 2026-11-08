@@ -292,7 +292,7 @@ export class CompactionProvisioner {
     }
 
     const conversationMessages = original.filter(message => message.role !== 'system')
-    const protectedTail = this.protectedTailCount(conversationMessages)
+    const protectedTail = this.protectedTailCount(conversationMessages, tokensBefore)
     if (conversationMessages.length < 2 || protectedTail >= conversationMessages.length) {
       return unchanged(original, tokensBefore, 'nothing_to_compact')
     }
@@ -366,7 +366,7 @@ export class CompactionProvisioner {
     })
   }
 
-  private protectedTailCount(messages: readonly ContextMessage[]): number {
+  private protectedTailCount(messages: readonly ContextMessage[], totalTokens: number): number {
     if (!messages.length) return 0
     const tailBudget = Math.max(1, Math.floor(this.targetTokens * this.tailRatio))
     let start = messages.length
@@ -382,6 +382,12 @@ export class CompactionProvisioner {
     if (start === messages.length) start = messages.length - 1
     while (start > 0 && messages[start]?.role === 'tool') {
       start -= 1
+      // Keep tool results paired with their assistant call, but never let that
+      // repair pull an oversized round back into the protected tail. Summarize
+      // the whole slice instead; otherwise one screenshot or other large tool
+      // result survives every pass and the next model round still cannot fit.
+      tailTokens += Math.max(1, this.countTokens([messages[start]!]))
+      if (tailTokens > tailBudget && totalTokens >= this.thresholdTokens && totalTokens <= this.maxContextTokens) return 0
       if (messages[start]?.role === 'assistant') break
     }
     return messages.length - start

@@ -912,6 +912,14 @@ the limit. `limit_mb` is the saved value, `null` for the default (half of
 shape. A stopped command's tool result carries a `[memory guard] Stopped` note
 in its stderr, and every client receives a warning `notification`. A person's
 own terminal shells are never stopped.
+`compaction.settings.get` returns `{ok, threshold, label, default_threshold,
+default_label, saved}`: `threshold` is a share of the prompt budget (`0 < n <= 1`),
+a token count (`n >= 1024`) or `0` for off; `label` reads it back (`60%`,
+`400K tokens`, `off`). `compaction.settings.save` takes `{threshold}` as a number or
+text (`"60%"`, `0.7`, `"400k"`, `"off"`), or `null` to return to the default (60%),
+saves it to `daemon/compaction.json`, applies it to running sessions and children,
+and returns the same shape. An unreadable value is a validation error naming
+`auto_compact_threshold`, and nothing is saved.
 The `subagent.retry` response also includes optional `provider_profile` and
 `reasoning_effort` fields alongside `model`. Resetting a recovered child and
 sending new input retains these settings; rejected empty input does not consume

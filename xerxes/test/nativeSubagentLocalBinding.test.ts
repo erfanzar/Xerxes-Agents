@@ -97,6 +97,23 @@ test('local child preserves an explicit agent effort instead of the remote fallb
   } finally { f.bindings.close(); await host.manager.shutdown() }
 })
 
+test('terminal reconfiguration revalidates local binding authority and switches only to an approved provider', async () => {
+  const f = fixture(true, true), host = createNativeSubagentHost(f.options)
+  try {
+    const task = await spawn(host)
+    await host.managerPort.wait([task.id], 5000)
+    for (const selection of [{ model: 'unapproved-model' }, { providerProfile: 'unapproved-profile' }]) {
+      await expect(host.retry(task.id, { selection })).rejects.toThrow('not covered')
+    }
+    expect(host.managerPort.listHandles()[0]?.attempt).toBe(0)
+    const resumed = await host.retry(task.id, { message: 'Use the second approved local provider', selection: { providerProfile: 'second', reasoningEffort: 'low' } })
+    await host.managerPort.wait([task.id], 5000)
+    expect(resumed).toMatchObject({ id: task.id, attempt: 1, model: 'gpt-4o', providerProfile: 'second', reasoningEffort: 'low', providerRoute: f.bindings.sourceClient(f.session, 'gpt-4o', 'second')!.route })
+    expect(f.frames.filter(frame => frame.frame.op === 'next')).toHaveLength(2)
+    expect(f.fallbackCalls()).toBe(0)
+  } finally { f.bindings.close(); await host.manager.shutdown() }
+})
+
 test('disconnect interrupts an active local child and never uses the remote fallback', async () => {
   const f = fixture(false), host = createNativeSubagentHost(f.options)
   try {

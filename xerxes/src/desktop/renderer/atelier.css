@@ -2242,7 +2242,8 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .palette-card:hover{border-color:color-mix(in srgb,var(--x-accent) 45%,var(--x-hairline))}
 .atelier .palette-card.is-on{border-color:var(--x-accent);box-shadow:0 0 0 1px var(--x-accent)}
 .atelier .palette-card__label{margin-top:4px;font:var(--t-body);font-weight:600}
-.atelier .palette-card__desc{font:var(--t-caption);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Descriptions wrap: on one line "Artwork · colours only in Shading" was cut to "…Shadi…" on every card. */
+.atelier .palette-card__desc{font:var(--t-caption);color:var(--x-meta);overflow-wrap:anywhere}
 .atelier .palette-preview{display:flex;height:64px;border-radius:6px;overflow:hidden;border:1px solid var(--pv-border,var(--x-hairline));background:var(--pv-bg)}
 .atelier .palette-preview--xerxes{--pv-bg:var(--x-screen);--pv-side:var(--x-chrome);--pv-fg:var(--x-title);--pv-muted:var(--x-meta);--pv-primary:var(--x-accent)}
 .atelier .palette-preview__side{flex:0 0 22%;background:var(--pv-side);border-right:1px solid var(--pv-border,var(--x-hairline))}
@@ -2637,7 +2638,10 @@ html,body,#root,.app.atelier{background:transparent}
 :root[data-layout='claude'] .atelier .chat__head--minimal{gap:10px}
 :root[data-layout='claude'] .atelier .chat__head--minimal .chat__title{max-width:none;flex:0 1 auto;font:500 14px/1.2 var(--sans)}
 :root[data-layout='claude'] .atelier .chat__kind{flex:none;padding:3px 8px;border-radius:6px;background:color-mix(in srgb,var(--x-title) 8%,transparent);font:400 12.5px/1.2 var(--sans);color:var(--x-secondary)}
-:root[data-layout='claude'] .atelier .chat__view{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:0;border-radius:8px;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary);cursor:pointer;-webkit-app-region:no-drag}
+/* flex:none and nowrap: squeezed by a long title, "Session edits" broke onto
+   two lines with its +/− count stacked inside a 28px button. The title is the
+   part that shrinks (it truncates); the button keeps its one line. */
+:root[data-layout='claude'] .atelier .chat__view{display:inline-flex;flex:none;align-items:center;gap:6px;height:28px;padding:0 10px;border:0;border-radius:8px;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary);white-space:nowrap;cursor:pointer;-webkit-app-region:no-drag}
 :root[data-layout='claude'] .atelier .chat__view:hover,:root[data-layout='claude'] .atelier .chat__view.is-on{background:var(--x-selected);color:var(--x-title)}
 :root[data-layout='claude'] .atelier .chat__view .pillcount{font:500 12px/1 var(--mono);background:none;padding:0}
 :root[data-layout='claude'] .atelier .chat__view .add{color:var(--x-done)}
@@ -3025,6 +3029,8 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .memguard{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .atelier .memguard__field{display:flex;align-items:center;gap:8px;font:400 13px/1.4 var(--sans);color:var(--x-secondary)}
 .atelier .memguard__field input{width:80px;background:var(--x-screen);border:1px solid var(--x-hairline);border-radius:6px;color:var(--x-title);padding:4px 8px;font:inherit}
+/* Auto-compact threshold: holds "1,048,576 tokens" without clipping. */
+.atelier .memguard__field .compact-threshold__input{width:150px}
 
 /* Provider cards (Settings → Models & Providers): a card per profile with a
    monogram, its model in plain type, one clear action, and quiet icon tools.
@@ -3134,7 +3140,7 @@ html,body,#root,.app.atelier{background:transparent}
 /* XERXES is a page of its own inside .chat: toolbar, scrolling reading
    column, docked composer. The task's composer host is hidden meanwhile. */
 .atelier .chat__composer-host{display:contents}
-.supervisor{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden}
+.supervisor{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden;container-type:inline-size}
 .supervisor--connect{gap:var(--s-3);padding:var(--s-5);overflow-y:auto;max-width:var(--conversation-width,720px);width:100%;margin:0 auto;box-sizing:border-box}
 .supervisor h3{font:var(--t-title);margin:0}
 /* Header: Chat | Activity on the left; one pill per control (name + live state) on the right, then the Hub. */
@@ -3161,6 +3167,9 @@ html,body,#root,.app.atelier{background:transparent}
 .xicon{flex:none;display:inline-grid;place-items:center;width:28px;height:28px;border:0;border-radius:7px;background:transparent;color:var(--x-meta);cursor:pointer}
 .xicon:hover{background:var(--x-selected);color:var(--x-title)}
 @media(max-width:1100px){.xpill__value{display:none}.supervisor__hub{max-width:28px}.supervisor__hubname{display:none}}
+/* Sidebars can leave the supervisor narrow even in a wide window. Respond to
+   its real inline size, not just the viewport, before the controls clip. */
+@container (max-width:980px){.xpill__value{display:none}.supervisor__hub{max-width:28px}.supervisor__hubname{display:none}}
 .autopilot__state{font:var(--t-caption);color:var(--x-meta)}
 .autopilot__state.is-on{color:var(--x-working)}
 /* XERXES controls dialog (Autopilot, Watch, Model): shaped like Settings. */

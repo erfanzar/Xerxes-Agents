@@ -82,3 +82,19 @@ test('an unreadable workspace list degrades to empty instead of throwing', async
     expect(loadDesktopWorkspaces(file)).toEqual(['/good'])
   } finally {await rm(root,{recursive:true,force:true})}
 })
+
+// A server path that reached this Mac's list showed as an empty "This Mac ·
+// prismcore" beside the real one. The sidebar lists only folders that exist
+// here; the file keeps every entry, so a folder on an unplugged disk returns.
+test('the sidebar lists only saved folders that exist on this computer', async () => {
+  const {mkdtemp,rm,writeFile,readFile} = await import('node:fs/promises')
+  const {localDesktopWorkspaces} = await import('../src/desktop/main/workspaceSettings.js')
+  const root=await mkdtemp('/tmp/xerxes-workspaces-local-'), file=root+'/desktop.json'
+  const server='/home/xerxes-test-absent/prismcore'
+  try {
+    await writeFile(file, JSON.stringify({workspace:root, directories:[server, root]}))
+    expect(localDesktopWorkspaces(file)).toEqual([root])
+    expect(localDesktopWorkspaces(file, path => path === server)).toEqual([server])
+    expect(JSON.parse(await readFile(file,'utf8')).directories).toEqual([server, root])
+  } finally {await rm(root,{recursive:true,force:true})}
+})

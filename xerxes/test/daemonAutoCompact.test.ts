@@ -797,12 +797,66 @@ test("manual compaction does not restore stale idle status over a live turn", as
   }
 });
 
-test("default auto-compaction threshold is 80% of the prompt budget", async () => {
-  const { DEFAULT_AUTO_COMPACT_THRESHOLD } = await import("../src/daemon/compactionRunner.js");
-  expect(DEFAULT_AUTO_COMPACT_THRESHOLD).toBe(0.8);
+test("Settings saves the auto-compact threshold, applies it, refuses nonsense and returns to the default", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-compaction-settings-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "openai-test",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "gpt-4",
+    provider: "openai",
+    setActive: true,
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    autoTitle: false,
+    socketPath,
+    runtime,
+    profileStore,
+    compactionSettingsFile: join(directory, "compaction.json"),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "settings", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "compaction.settings.get", params: {} });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      ok: true, threshold: 0.6, label: "60%", default_threshold: 0.6, default_label: "60%", saved: false,
+    });
+
+    client.send({ jsonrpc: "2.0", id: 3, method: "compaction.settings.save", params: { threshold: "400k" } });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({ threshold: 400_000, label: "400K tokens", saved: true });
+    expect(runtime.status().auto_compact_threshold).toBe(400_000);
+
+    client.send({ jsonrpc: "2.0", id: 4, method: "compaction.settings.save", params: { threshold: "whenever" } });
+    const refused = await client.next((frame) => frame.id === 4);
+    expect(refused.error?.message ?? JSON.stringify(refused.result)).toContain("auto_compact_threshold");
+    expect(runtime.status().auto_compact_threshold).toBe(400_000);
+
+    client.send({ jsonrpc: "2.0", id: 5, method: "compaction.settings.save", params: { threshold: null } });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject({ threshold: 0.6, label: "60%", saved: false });
+    expect(runtime.status().auto_compact_threshold).toBeUndefined();
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
-test("daemon leaves small transcripts alone under the default 80% threshold", async () => {
+test("default auto-compaction threshold is 60% of the prompt budget", async () => {
+  const { DEFAULT_AUTO_COMPACT_THRESHOLD } = await import("../src/daemon/compactionRunner.js");
+  expect(DEFAULT_AUTO_COMPACT_THRESHOLD).toBe(0.6);
+});
+
+test("daemon leaves small transcripts alone under the default 60% threshold", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autocompact-off-"));
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));

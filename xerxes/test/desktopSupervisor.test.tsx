@@ -126,6 +126,12 @@ test('a XERXES reply is never a scroll box inside the conversation', async () =>
   expect(css).toContain('.supervisor__message--xerxes .md{max-height:none;overflow:visible;padding:0}')
 })
 
+test('the XERXES toolbar adapts to its content width with sidebars open', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain('.supervisor{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden;container-type:inline-size}')
+  expect(css).toContain('@container (max-width:980px){.xpill__value{display:none}.supervisor__hub{max-width:28px}.supervisor__hubname{display:none}}')
+})
+
 test('XERXES replies render as Markdown and the page uses the task composer, not raw text in boxes', () => {
   const state = ready({
     supervisor: {

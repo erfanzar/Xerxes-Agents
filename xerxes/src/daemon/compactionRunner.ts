@@ -31,8 +31,12 @@ import { catalogReasoningLevels, fallbackReasoningLevels } from "../llms/reasoni
 import { detectProvider, isProviderName, type ProviderName } from "../llms/providerRegistry.js";
 import { ConfigurationError } from "../core/errors.js";
 
-/** Auto-compact once the estimated context usage reaches this fraction of the prompt budget. */
-export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
+// The threshold lives in one module so the daemon, the turn loop and children agree.
+export {
+  compactionThresholdTokens,
+  DEFAULT_AUTO_COMPACT_THRESHOLD,
+  normalizeCompactionThreshold,
+} from "../context/compactionThreshold.js";
 
 /**
  * Wall-clock deadline for one compaction completion call.
@@ -86,29 +90,6 @@ export function compactionSummaryBudgets(
   if (output !== undefined && Number.isFinite(output) && output > 0) first = Math.min(first, Math.max(512, Math.floor(output * 0.9)));
   if (midTurn) return [first];
   return [first, Math.max(512, Math.floor(first / 2)), Math.max(512, Math.floor(first / 4))];
-}
-
-export function normalizeCompactionThreshold(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) {
-    return 0;
-  }
-  return Math.min(value, 1);
-}
-
-/**
- * Token count at which a context is due for compaction, or 0 when compaction
- * is disabled. Main sessions and delegated children both read the threshold
- * here so a child cannot silently run against a different — or missing — one.
- */
-export function compactionThresholdTokens(
-  promptBudget: number,
-  threshold: number,
-): number {
-  const normalized = normalizeCompactionThreshold(threshold);
-  if (normalized <= 0 || !Number.isFinite(promptBudget) || promptBudget <= 0) {
-    return 0;
-  }
-  return Math.floor(promptBudget * normalized);
 }
 
 /**
