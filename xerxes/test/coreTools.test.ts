@@ -19,7 +19,6 @@ import {
   BrowserSession,
   ComputerUseSession,
   HomeAssistantClient,
-  InMemoryRLBackend,
   OutboundMessageRegistry,
   SearchHistoryTool,
   StaticAsker,
@@ -232,7 +231,6 @@ test('core registration exposes every supplied host-bound port without enabling 
           memory: new ContextualMemory({ longTerm: new LongTermMemory({ storage: new SimpleStorage() }) }),
         },
       },
-      rlTools: { backend: new InMemoryRLBackend() },
       sendMessageTool: { registry: outbound },
       workspaceMemoryTools: { workspaceRoot: workspace },
     })
@@ -249,7 +247,6 @@ test('core registration exposes every supplied host-bound port without enabling 
       'search_history',
       'ha_get_state',
       'save_memory',
-      'rl_list_environments',
       'send_message',
       'skill_manage',
       'memory_add',

@@ -28,7 +28,6 @@ import type { BackgroundCommandManager } from './backgroundCommands.js'
 import type { PtySessionManager } from '../operators/pty.js'
 import { registerProcessTools, type CommandCompletionWatch } from './processTools.js'
 import { registerPtyTools } from './ptyTools.js'
-import { registerRlTools, type RLToolsOptions } from './rlTools.js'
 import { registerSendMessageTool, type SendMessageToolOptions } from './sendMessage.js'
 import { registerSkillManageTool, type SkillManageOptions } from './skillManage.js'
 import { registerSystemTools } from './systemTools.js'
@@ -64,7 +63,6 @@ export * from './mediaTools.js'
 export * from './memoryTools.js'
 export * from './pathSafety.js'
 export * from './processTools.js'
-export * from './rlTools.js'
 export * from './sendMessage.js'
 export * from './skillManage.js'
 export * from './systemTools.js'
@@ -141,8 +139,6 @@ export interface CoreToolsOptions {
   readonly memoryTools?: MemoryToolsOptions
   /** Outbound messages are registered only with a configured channel dispatcher. */
   readonly sendMessageTool?: SendMessageToolOptions
-  /** RL controls are opt-in because training and inference require a host-selected backend. */
-  readonly rlTools?: RLToolsOptions
   /** Skill authoring writes are opt-in because they mutate persistent user storage. */
   readonly skillManageTools?: SkillManageOptions
   /** Persistent interactive PTY sessions (pty_open/pty_write/pty_close/pty_list); opt-in per host. */
@@ -276,9 +272,6 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   }
   if (options.sendMessageTool !== undefined) {
     registerSendMessageTool(registry, options.sendMessageTool)
-  }
-  if (options.rlTools !== undefined) {
-    registerRlTools(registry, options.rlTools)
   }
   if (options.skillManageTools !== undefined) {
     registerSkillManageTool(registry, options.skillManageTools)

@@ -25,7 +25,6 @@ import { calcCost } from '../src/llms/providerRegistry.js'
 import { checkPackage, type OSVFetch } from '../src/mcp/osv.js'
 import { buildAuthorizeUrl, generatePkcePair, OAuthToken } from '../src/mcp/oauth.js'
 import { ReconnectPolicy, reconnectWithBackoff } from '../src/mcp/reconnect.js'
-import { HolographicProvider, Mem0Provider, type ExternalMemoryUpstream } from '../src/memory/plugins/index.js'
 import { createBrowserProviderRegistry, SUPPORTED_BROWSER_PROVIDERS } from '../src/operators/browserProviders.js'
 import { AuxiliaryClient } from '../src/runtime/auxiliaryClient.js'
 import { BackgroundSessionManager, BackgroundStatus } from '../src/runtime/backgroundSessions.js'
@@ -55,9 +54,6 @@ import { ResponsesEventTranslator } from '../src/streaming/responsesApi.js'
 import { parseSseStream } from '../src/streaming/sse.js'
 import { createAgentState } from '../src/streaming/events.js'
 import { deterministicToolCallId } from '../src/streaming/toolCallIds.js'
-import { BatchRunner } from '../src/training/batchRunner.js'
-import { builtinEnvironments, TinkerClient, TinkerRunConfig, RLRunStatus } from '../src/training/rl/index.js'
-import { TrajectoryCompressor } from '../src/training/trajectoryCompressor.js'
 import { clarify, StaticAsker } from '../src/tools/clarify.js'
 import { ImageGenerationRegistry } from '../src/tools/imageGeneration.js'
 import { OutboundMessageRegistry, sendMessage } from '../src/tools/sendMessage.js'
@@ -161,11 +157,6 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       run: checkAgentAuthoredSkill,
     },
     {
-      plan: '05',
-      feature: 'External-memory plugin lifecycle uses an injected local upstream and preserves unavailable Mem0 state',
-      run: checkMemoryPlugins,
-    },
-    {
       plan: '07',
       feature: 'MCP reconnect retries a local callback and redacts failed credential-like details',
       run: checkMcpReconnect,
@@ -226,21 +217,6 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       plan: '14',
       feature: 'Raw-text tool-call parsers cover every native provider family',
       run: checkParserMatrix,
-    },
-    {
-      plan: '15',
-      feature: 'RL Tinker client normalizes a local injected training lifecycle',
-      run: checkRlTraining,
-    },
-    {
-      plan: '16',
-      feature: 'Trajectory compressor writes native batch metrics and JSONL output',
-      run: checkTrajectoryCompression,
-    },
-    {
-      plan: '17',
-      feature: 'Batch runner records successful and failed local records in JSONL',
-      run: checkBatchRunner,
     },
     {
       plan: '18',
@@ -549,38 +525,6 @@ async function checkAgentAuthoredSkill(context: RealUseContext): Promise<string>
   })
 }
 
-async function checkMemoryPlugins(): Promise<string> {
-  const entries: string[] = []
-  const upstream: ExternalMemoryUpstream = {
-    call(action, arguments_) {
-      if (action === 'add') {
-        const content = arguments_.content
-        if (typeof content !== 'string') throw new Error('missing content')
-        entries.push(content)
-        return { id: `entry-${entries.length}`, content }
-      }
-      if (action === 'search') {
-        const query = arguments_.query
-        if (typeof query !== 'string') throw new Error('missing query')
-        return entries.filter(content => content.includes(query)).map((content, index) => ({ id: `entry-${index + 1}`, content }))
-      }
-      return []
-    },
-  }
-  const holographic = new HolographicProvider({ environment: { get: () => undefined }, upstream })
-  const added = await holographic.handleToolCall({ name: 'holo_add', arguments: { content: 'user prefers linen tea cups' } })
-  const found = await holographic.handleToolCall({ name: 'holo_search', arguments: { query: 'linen' } })
-  require(added.ok === true, 'holographic provider did not add through its host upstream')
-  require(found.ok === true && Array.isArray(found.result) && found.result.length === 1, 'holographic provider did not search its host upstream')
-
-  const mem0 = new Mem0Provider({
-    environment: { get: () => undefined },
-    transport: { request: async () => ({ ok: true, status: 200, body: {} }) },
-  })
-  require(!(await mem0.isAvailable()), 'Mem0 reported available without explicit configuration')
-  return 'holographic add/search used an injected local upstream; unconfigured Mem0 remained unavailable'
-}
-
 async function checkMcpReconnect(): Promise<string> {
   let attempts = 0
   const sleeps: number[] = []
@@ -844,93 +788,6 @@ async function checkParserMatrix(): Promise<string> {
     require(calls.length === 1 && calls[0]?.name === 'read', `${format} did not parse its real wire form`)
   }
   return `parsed ${formats.length} provider wire formats through the native registry`
-}
-
-async function checkRlTraining(): Promise<string> {
-  const states = [
-    { status: 'running', iteration: 1, reward: 0.25 },
-    { status: 'succeeded', iteration: 2, reward: 1 },
-  ]
-  const client = new TinkerClient({
-    transport: {
-      createRun: payload => {
-        require(payload.env === 'xerxes-terminal-test', 'RL payload did not retain environment')
-        return { id: 'local-run-1' }
-      },
-      getRun: () => states.shift() ?? { status: 'succeeded', iteration: 2, reward: 1 },
-      cancelRun: () => true,
-    },
-  })
-  const runId = await client.start(new TinkerRunConfig({ model: 'local/model', env: 'xerxes-terminal-test', steps: 2 }))
-  const first = await client.status(runId)
-  const final = await client.status(runId)
-  require(first.status === RLRunStatus.RUNNING, 'RL client did not normalize a running state')
-  require(final.status === RLRunStatus.SUCCEEDED && final.reward === 1, 'RL client did not normalize a successful state')
-  require((await client.cancel(runId)) === true, 'RL client did not route cancellation through the host transport')
-  const environments = builtinEnvironments().listEnvironments()
-  require(environments.some(environment => environment.name === 'xerxes-terminal-test'), 'built-in RL environment catalog omitted terminal test')
-  return `injected Tinker transport completed running→succeeded lifecycle and accepted cancellation; ${environments.length} environments registered`
-}
-
-async function checkTrajectoryCompression(context: RealUseContext): Promise<string> {
-  return await context.withTemporaryDirectory('trajectories', async directory => {
-    const outputPath = join(directory, 'trajectories.jsonl')
-    const metricsPath = join(directory, 'metrics.json')
-    const compressor = new TrajectoryCompressor({
-      compressor: new ContextCompressor({
-        contextWindow: 4,
-        threshold: 0.5,
-        protectFirst: 1,
-        protectLast: 1,
-        summaryMinTokens: 1,
-        summarizer: naiveSummarizer,
-      }),
-    })
-    const run = await compressor.run([
-      {
-        id: 'trajectory-1',
-        messages: [
-          { role: 'user', content: 'start' },
-          { role: 'assistant', content: 'middle one' },
-          { role: 'user', content: 'middle two' },
-          { role: 'assistant', content: 'middle three' },
-          { role: 'user', content: 'finish' },
-        ],
-      },
-      { id: 'trajectory-2', messages: [{ role: 'user', content: 'short' }] },
-    ], { outPath: outputPath, metricsPath })
-    require(run.processed === 2 && run.errors.length === 0, 'trajectory compressor did not process both local trajectories')
-    const lines = (await readFile(outputPath, 'utf8')).trim().split(/\r?\n/)
-    require(lines.length === 2, 'trajectory compressor did not write JSONL output')
-    require((await Bun.file(metricsPath).exists()), 'trajectory compressor did not write metrics')
-    return `compressed ${run.processed} trajectories and wrote ${lines.length} JSONL record(s)`
-  })
-}
-
-async function checkBatchRunner(context: RealUseContext): Promise<string> {
-  return await context.withTemporaryDirectory('batch-runner', async directory => {
-    const outputPath = join(directory, 'results.jsonl')
-    const runner = new BatchRunner(async record => {
-      if (record.id === 'bad') throw new Error('simulated local failure')
-      return {
-        id: record.id,
-        response: `response:${record.prompt}`,
-        inputTokens: 10,
-        outputTokens: 5,
-        costUsd: 0.001,
-      }
-    }, 2)
-    const summary = await runner.run([
-      { id: 'one', prompt: 'one' },
-      { id: 'two', prompt: 'two' },
-      { id: 'three', prompt: 'three' },
-      { id: 'bad', prompt: 'bad' },
-    ], { outPath: outputPath })
-    require(summary.total === 4 && summary.succeeded === 3 && summary.failed === 1, 'batch runner summary changed')
-    const lines = (await readFile(outputPath, 'utf8')).trim().split(/\r?\n/)
-    require(lines.length === 4, 'batch runner did not write one JSONL line per record')
-    return `processed ${summary.total} batch records (${summary.succeeded} succeeded, ${summary.failed} failed)`
-  })
 }
 
 async function checkSessions(context: RealUseContext): Promise<string> {
