@@ -7,6 +7,16 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.31 — 2026-11-08
+
+- **Automatic compaction frees room, and you choose when it runs.** An oversized last round used to be protected, so compaction removed a few hundred tokens, said "Nothing to compact" and the turn still failed. That round is now summarized. A new **Auto-compact** setting (Settings → General) picks when a task's history is summarized: **60% of the model's window by default** (earlier releases waited much longer), a token count such as `400k`, or `off`. The full history is archived first.
+- **Kimi.** A "Your request exceeded model token limit" refusal is now treated as a full context: Xerxes compacts and retries, and remembers that model's window. Tool names Kimi rejects are renamed on the wire and restored in its replies.
+- **Sub-agents survive a model switch.** Resuming a saved sub-agent after the main model changed now continues it on the new model instead of refusing. Retries for one agent run one at a time.
+- **Codex on a server.** A host with a signed-in Codex CLI, or a stored Codex sign-in, counts as ready, so "Run on the server" is offered without relaying through this Mac.
+- **The desktop app no longer freezes at launch on a keychain prompt.** The saved Hub session is read in the background: the window opens while macOS asks for keychain access, and the Hub sign-in loads once you answer.
+- **Desktop fixes.** Sign-in links in the terminal open the real address after you press OK, instead of a blank page. The XERXES header hides its Autopilot/Watch/Model chips when space runs out instead of clipping them. The status card says "To-dos" instead of a second "Steps". Folders from SSH servers no longer show up as empty "This Mac" sections. Background and theme card descriptions wrap instead of being cut off, and "Session edits" stays on one line.
+- **No more impossible generation speeds.** When a provider counts output it never streams (Claude Code's hidden thinking), the tokens-per-second figure is left out instead of reading thousands of tokens a second.
+
 ## 0.8.30 — 2026-11-06
 
 - **Finished XERXES actions no longer pile up under the chat.** An action that is done, cancelled, expired or failed is now one quiet line in the conversation at the time it happened ("XERXES did: task.steer: …", red when it failed). Only actions still waiting for your Confirm stay as cards. Desktop Chat and Activity, and the phone's XERXES tab. Placing them at the right time needs the updated Hub; with an older Hub they go after the newest message.
