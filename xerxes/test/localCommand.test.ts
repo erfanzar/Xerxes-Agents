@@ -11,6 +11,7 @@ import { GIB } from '../src/local/catalog.js'
 import { saveLocalProfile } from '../src/local/cliEntry.js'
 import { LOCAL_USAGE, runLocalCommand, type LocalCommandPorts, type SaveLocalProfileInput } from '../src/local/command.js'
 import type { FetchPort } from '../src/local/download.js'
+import type { GgufAttention } from '../src/local/ggufMetadata.js'
 import type { HardwareProfile } from '../src/local/hardware.js'
 import type { LmStudioEngine, LmStudioStartOptions } from '../src/local/lmstudio.js'
 import type { LocalServer, ServerStatus, StartOptions } from '../src/local/server.js'
@@ -529,4 +530,56 @@ test('llama-server setup records the window the server reports, not just the lau
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+describe('runLocalCommand sizes the llama-server window from free memory', () => {
+  const KIB = 1024
+  const fitPorts = (free: number | undefined, attention: () => Promise<GgufAttention>): NonNullable<LocalCommandPorts['memoryFit']> => ({
+    freeBytes: async () => free,
+    attention,
+    weightsBytes: () => 8 * GIB,
+  })
+  const shape = async (): Promise<GgufAttention> => ({ architecture: 'qwen35', blockCount: 64, cachedLayers: 16, kvBytesPerToken: 64 * KIB, contextLength: 262_144 })
+
+  async function modelFile(): Promise<string> {
+    const file = join(dir, 'mine.gguf')
+    await writeFile(file, Buffer.concat([Buffer.from('GGUF'), Buffer.alloc(8)]))
+    return file
+  }
+
+  test('setup starts with the window that fits and records it in the profile', async () => {
+    const file = await modelFile()
+    const h = harness(hw16)
+    const ports = { ...h.ports, memoryFit: fitPorts(16 * GIB, shape) }
+    expect(await runLocalCommand(['setup', '--model-file', file], ports)).toBe(0)
+    // (16 - 8 - 1) GiB / 2 over 64 KiB per token, below bonsai-9b's own window.
+    expect(h.starts[0]?.ctxSize).toBe(57_344)
+    expect(h.profiles[0]?.contextLimit).toBe(57_344)
+    expect(h.err.join('')).toContain('Window: 57344 tokens, sized from 16.0 GiB free (64 KiB of cache per token)')
+  })
+
+  test('a configured ctx_size wins; an unreadable header or unmeasured memory keeps the fixed window and says why', async () => {
+    const file = await modelFile()
+    const configured = harness(hw16, { local: { ctx_size: 20_000 } })
+    expect(await runLocalCommand(['setup', '--model-file', file], { ...configured.ports, memoryFit: fitPorts(16 * GIB, shape) })).toBe(0)
+    expect(configured.starts[0]?.ctxSize).toBe(20_000)
+
+    const badHeader = harness(hw16)
+    const failing = async (): Promise<GgufAttention> => { throw new Error('not a GGUF header') }
+    expect(await runLocalCommand(['setup', '--model-file', file], { ...badHeader.ports, memoryFit: fitPorts(16 * GIB, failing) })).toBe(0)
+    expect(badHeader.starts[0]?.ctxSize).toBe(32_768)
+    expect(badHeader.err.join('')).toContain('Using the 32768-token window: not a GGUF header')
+
+    const unmeasured = harness(hw16)
+    expect(await runLocalCommand(['setup', '--model-file', file], { ...unmeasured.ports, memoryFit: fitPorts(undefined, shape) })).toBe(0)
+    expect(unmeasured.err.join('')).toContain('free memory could not be measured')
+  })
+
+  test('too little free memory starts with the minimum window and warns', async () => {
+    const file = await modelFile()
+    const h = harness(hw16)
+    expect(await runLocalCommand(['setup', '--model-file', file], { ...h.ports, memoryFit: fitPorts(9 * GIB, shape) })).toBe(0)
+    expect(h.starts[0]?.ctxSize).toBe(4096)
+    expect(h.err.join('')).toContain('the model may not load')
+  })
 })

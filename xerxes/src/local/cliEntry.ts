@@ -5,9 +5,11 @@ import { ProfileStore } from '../bridge/profiles.js'
 import { loadSystemDaemonConfig } from '../daemon/config.js'
 import { parseLocalConfig } from './catalog.js'
 import { runLocalCommand, type SaveLocalProfileInput } from './command.js'
+import { ggufAttention, readGgufMetadata } from './ggufMetadata.js'
 import { probeHardware, systemHardwarePorts } from './hardware.js'
 import { createLmStudioEngine, systemLmStudioPorts } from './lmstudio.js'
 import { probeLoadedWindows, systemWindowFetch } from './loadedWindow.js'
+import { freeMemoryBytes } from './memoryFit.js'
 import { createLocalServer, systemServerPorts } from './server.js'
 
 /**
@@ -32,6 +34,11 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
       server: createLocalServer(systemServerPorts(), local.llamaServerPath === undefined ? {} : { llamaServerPath: local.llamaServerPath }),
       lmstudio: createLmStudioEngine(systemLmStudioPorts(), local.lmsPath === undefined ? {} : { lmsPath: local.lmsPath }),
       loadedWindow: baseUrl => probeLoadedWindows({ baseUrl }, systemWindowFetch),
+      memoryFit: {
+        freeBytes: hw => freeMemoryBytes(hw, systemHardwarePorts().run),
+        attention: async path => ggufAttention(path, await readGgufMetadata(path)),
+        weightsBytes: path => Bun.file(path).size,
+      },
       saveProfile: async input => saveLocalProfile(new ProfileStore(), input),
       stdout: text => { process.stdout.write(text) },
       stderr: text => { process.stderr.write(text) },

@@ -532,8 +532,16 @@ inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine
 With either engine:
 - **Context window:** the profile records the window the engine actually loaded: LM Studio's
   `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary Bonsai 2 27B reads 262,144
-  tokens. It loads with 16,384 by default, sized for a 24 GB machine. Choose another with
-  `--ctx-size`, `runtime.local.ctx_size` or `XERXES_LOCAL_CTX_SIZE`, up to the model's own window.
+  tokens. Choose a window with `--ctx-size`, `runtime.local.ctx_size` or
+  `XERXES_LOCAL_CTX_SIZE`, up to the model's own window. Without one:
+  - **llama-server** sizes it from the memory free when it starts: half of what is left after the
+    weights and a 1 GiB reserve, divided by the cache one token needs, up to the model's own window.
+    The cache per token comes from the GGUF header; a hybrid model such as Ternary Bonsai 2 27B
+    keeps a cache in only one layer in four (64 KiB per token). Free memory is the GPU's free VRAM,
+    macOS's free, inactive, speculative and purgeable pages, or Linux's `MemAvailable`. `setup`
+    and `start` print the window and why. If the header or free memory cannot be read, they say so
+    and use the catalog's fixed window (16,384 for the 27B, sized for a 24 GB machine).
+  - **LM Studio** gets the catalog's fixed window.
   An LM Studio model outside the catalog with no size set loads LM Studio's default window.
   LM Studio does not apply `--context-length` to every model. On a 24 GB M4 Pro it loads Ternary
   Bonsai 2 27B's MLX pack with 42,752 tokens whatever is asked, while stock models get the size

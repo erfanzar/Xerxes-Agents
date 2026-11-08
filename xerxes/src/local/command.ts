@@ -24,9 +24,11 @@ import {
   type LocalEngineName,
 } from './catalog.js'
 import { DownloadError, ensureModelFile, useExistingModelFile, verifyModelFile, type FetchPort } from './download.js'
+import type { GgufAttention } from './ggufMetadata.js'
 import type { HardwareProfile } from './hardware.js'
 import { LMS_INSTALL_HELP, type LmStudioEngine, type LmStudioModel } from './lmstudio.js'
 import { windowFor, type LoadedWindows } from './loadedWindow.js'
+import { fitWindow } from './memoryFit.js'
 import { ServerError, type LocalServer, type ServerStatus } from './server.js'
 
 export const LOCAL_PROFILE_NAME = 'bonsai-local'
@@ -85,6 +87,16 @@ export interface LocalCommandPorts {
   readonly lmstudio?: LmStudioEngine
   /** Ask a started engine for the window it loaded; absent, llama-server's --ctx-size is recorded. */
   readonly loadedWindow?: (baseUrl: string) => Promise<LoadedWindows>
+  /**
+   * Size llama-server's window from free memory (`memoryFit.ts`) when no
+   * ctx_size is set; absent, the catalog's fixed window is used.
+   */
+  readonly memoryFit?: {
+    freeBytes(hw: HardwareProfile): Promise<number | undefined>
+    /** The model file's attention shape; rejects when its header cannot be read. */
+    attention(modelPath: string): Promise<GgufAttention>
+    weightsBytes(modelPath: string): number
+  }
   saveProfile(input: SaveLocalProfileInput): Promise<void>
   stdout(text: string): void
   stderr(text: string): void
@@ -411,6 +423,37 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     return { entry: chosen.entry, path }
   }
 
+  /**
+   * llama-server's --ctx-size: ctx_size when set, else fitted to the memory
+   * free now, else the catalog's window. Says which, and why.
+   */
+  async function llamaWindow(entry: CatalogEntry, cfg: LocalConfig, modelPath: string, hw: HardwareProfile): Promise<number> {
+    const fixed = launchCtxSize(entry, cfg)
+    if (cfg.ctxSize !== undefined || ports.memoryFit === undefined) return fixed
+    let shape: GgufAttention
+    try {
+      shape = await ports.memoryFit.attention(modelPath)
+    } catch (error) {
+      progress(`Using the ${fixed}-token window: ${error instanceof Error ? error.message : String(error)}`)
+      return fixed
+    }
+    const free = await ports.memoryFit.freeBytes(hw)
+    if (free === undefined) {
+      progress(`Using the ${fixed}-token window: free memory could not be measured.`)
+      return fixed
+    }
+    const fit = fitWindow({
+      freeBytes: free,
+      weightsBytes: ports.memoryFit.weightsBytes(modelPath),
+      kvBytesPerToken: shape.kvBytesPerToken,
+      maxWindow: entry.nativeContext ?? shape.contextLength ?? fixed,
+    })
+    progress(fit.fits
+      ? `Window: ${fit.ctxSize} tokens, sized from ${formatGiB(free)} free (${Math.round(shape.kvBytesPerToken / 1024)} KiB of cache per token). Set runtime.local.ctx_size to choose another.`
+      : `Only ${formatGiB(free)} is free, so the window is the ${fit.ctxSize}-token minimum and the model may not load. Close other apps, or set runtime.local.ctx_size.`)
+    return fit.ctxSize
+  }
+
   async function setup(parsed: ParsedArgs, cfg: LocalConfig, catalog: readonly CatalogEntry[]): Promise<number> {
     progress('Probing hardware…')
     const hw = await ports.hardware()
@@ -458,6 +501,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     const current = await ports.server.status()
     let started = false
     let port = cfg.port
+    let ctxSize = launchCtxSize(entry, cfg)
     if (current.running) {
       if (current.model !== modelPath) {
         return fail(
@@ -470,7 +514,8 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       progress(`Server already running on port ${port}.`)
     } else {
       progress(`Starting llama-server on 127.0.0.1:${cfg.port} (loading the model can take a while)…`)
-      const result = await ports.server.start({ modelPath, port: cfg.port, ctxSize: launchCtxSize(entry, cfg) })
+      ctxSize = await llamaWindow(entry, cfg, modelPath, hw)
+      const result = await ports.server.start({ modelPath, port: cfg.port, ctxSize })
       port = result.port ?? cfg.port
       started = true
     }
@@ -478,7 +523,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     const baseUrl = `http://127.0.0.1:${port}/v1`
     // What llama-server actually loaded (/props); a server that was already
     // running may hold a different --ctx-size than this run's settings.
-    const contextLimit = (await probedWindow(baseUrl, entry.id)) ?? launchCtxSize(entry, cfg)
+    const contextLimit = (await probedWindow(baseUrl, entry.id)) ?? ctxSize
     await ports.saveProfile({
       name: LOCAL_PROFILE_NAME,
       baseUrl,
@@ -760,7 +805,7 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
     const hw = await ports.hardware()
     const { entry, path } = await locateModel(parsed, cfg, catalog, hw)
     progress(`Starting llama-server on 127.0.0.1:${cfg.port}…`)
-    const result = await ports.server.start({ modelPath: path, port: cfg.port, ctxSize: launchCtxSize(entry, cfg) })
+    const result = await ports.server.start({ modelPath: path, port: cfg.port, ctxSize: await llamaWindow(entry, cfg, path, hw) })
     return ok({ already_running: false, model_id: entry.id, ...statusJson(result) }, `Started: ${statusLine(result)}`)
   }
 
