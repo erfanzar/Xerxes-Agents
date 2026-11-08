@@ -127,13 +127,22 @@ export interface AutopilotRow {
   readonly enabledBy: AutopilotPerson | null
   readonly updatedAt: string | null
   readonly active: boolean
+  /** `auto` acts without a Confirm; `observe` (watch only) proposes cards and records answers. */
+  readonly mode: 'auto' | 'observe'
+  /** On only because the Hub-wide "All workspaces" row is on. */
+  readonly viaAll?: true
 }
+
+/** The Hub-wide row id: Autopilot for every workspace, including ones linked later. */
+export const AUTOPILOT_ALL_ID = '*'
 
 /** The shape of `supervisor.autopilot.get`. */
 export interface AutopilotView {
   /** Whether this person may change Autopilot (the Hub owner only). */
   readonly canEdit: boolean
   readonly workspaces: readonly AutopilotRow[]
+  /** The "All workspaces" row; absent from a Hub that predates it. */
+  readonly all?: AutopilotRow
 }
 
 // ── watch ─────────────────────────────────────────────────────────────

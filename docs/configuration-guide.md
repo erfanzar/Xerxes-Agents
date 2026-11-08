@@ -2430,8 +2430,15 @@ packages.
 
 Automatic compaction checks the estimated prompt size before a new turn and
 between model/tool rounds. It uses the routed model's context window, reserves
-output capacity, and honors `auto_compact_threshold` (default `0.8`; `0` disables
-automatic checks). Large transcripts are summarized in bounded chronological
+output capacity, and honors `auto_compact_threshold` (default `0.6`, that is 60% of
+the prompt budget; `0` or `"off"` disables automatic checks). The value is either a
+share of the window (`0.75`, `"75%"`) or an absolute token count of at least 1024
+(`400000`, `"400k"`); a token count at or above a smaller model's budget uses 60%
+of that budget instead. Settings → General → Auto-compact saves the same value to
+`~/.xerxes/daemon/compaction.json`, which wins over `config.json`. When a provider
+refuses a request for its size and states its window (Kimi: "exceeded model token
+limit: 1048576"), the turn compacts once and retries, and that window is used for
+the next threshold check. Large transcripts are summarized in bounded chronological
 segments, then combined, instead of sending the entire oversized history to a
 single request. The original transcript is archived before replacement.
 

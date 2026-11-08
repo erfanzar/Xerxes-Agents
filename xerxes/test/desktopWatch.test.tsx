@@ -13,8 +13,13 @@ import type { TaskSummary, WatchRow } from '../src/client/hubTypes.js'
 import { NO_ACTIVITY } from '../src/client/taskTypes.js'
 import { WATCH_EXPLANATION, WATCH_READ_ONLY_NOTE } from '../src/client/watch.js'
 import { SupervisorView, type SupervisorViewProps } from '../src/desktop/renderer/SupervisorPage.js'
+import { WatchEditor } from '../src/desktop/renderer/WatchPanel.js'
 
 const noop = (): void => {}
+
+function watchEditor(item: WatchRow, opts: { live?: boolean; saving?: boolean } = {}): string {
+  return renderToStaticMarkup(createElement(WatchEditor, { row: item, live: opts.live ?? true, saving: opts.saving ?? false, onSave: async () => true, onDone: noop })).replaceAll('<!-- -->', '')
+}
 const plain = (html: string): string => html.replaceAll('<!-- -->', '')
 
 const STATS = {
@@ -105,7 +110,9 @@ test('a watched task shows as a live card: title, workspace, status, summary, co
   expect(html).toContain('repeated exec_command ×4')
   expect(html).toContain('Failing: test_autoscale, test_scale_down')
   expect(html).toContain('Review every 15 min')
-  expect(html).toContain('Watching · 1 task<')
+  expect(html).toContain('title="Watch: 1 task"')
+  // The anomaly turns the Watch pill amber.
+  expect(html).toMatch(/class="xpill" data-tone="warn"[^>]*title="Watch: /)
 })
 
 test('anomalies are highlighted chips with their kind and detail', () => {
@@ -163,22 +170,33 @@ test('an enabled watch that is no longer active reads as Off, not Watching', () 
 test('the owner gets a Watch button and a panel with review, expiry, save, stop and a task picker', () => {
   const state = hub({ rows: [watchRow()], tasks: [task('t1', 'Fix tests'), task('t2', 'Write docs'), task('t3', 'Refactor')] })
   const closed = view(state)
-  expect(closed).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Watch</)
+  expect(closed).toMatch(/<button[^>]*class="xpill"[^>]*aria-expanded="false"[^>]*title="Watch: /)
   const html = view(state, { watchOpen: true })
+  expect(html).toContain('role="dialog"')
+  expect(html).toMatch(/class="mtab xcontrols__tab is-on"[^>]*aria-current="page"><span>Watch</)
   expect(html).toContain('aria-label="Watch"')
   expect(html).toContain(WATCH_EXPLANATION)
   expect(html).toContain('no model cost')
   expect(html).not.toContain(WATCH_READ_ONLY_NOTE)
-  for (const label of ['Off', 'Every 5 min', 'Every 15 min', 'Every 30 min', 'Every 60 min']) expect(html).toContain(`>${label}<`)
-  for (const label of ['Keep current expiry', 'No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(html).toContain(`>${label}<`)
-  expect(html).toContain('>Save<')
+  // No native dropdowns: the review interval is a row of choice chips.
+  expect(html).not.toContain('<select')
+  expect(html).toContain('role="radiogroup" aria-label="Review interval for the new watch"')
+  for (const label of ['Off', '5 min', '15 min', '30 min', '60 min']) expect(html).toContain(`>${label}<`)
+  expect(html).toContain('>Edit<')
   expect(html).toContain('>Stop watching<')
+  // The editor Edit opens: review interval, expiry and Save.
+  const editor = watchEditor(watchRow())
+  for (const label of ['Keep current expiry', 'No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(editor).toContain(`>${label}<`)
+  expect(editor).toContain('>Save<')
   expect(html).toContain('>Start watching<')
   // Already watched tasks are not offered again.
-  const picker = /<select id="watch-pick"[\s\S]*?<\/select>/.exec(html)?.[0] ?? ''
-  expect(picker).toContain('Write docs — One')
-  expect(picker).toContain('Refactor — One')
+  const picker = /<div class="xlist__rows" role="radiogroup" aria-label="Task to watch">[\s\S]*?<\/div>/.exec(html)?.[0] ?? ''
+  expect(picker).toContain('>Write docs<')
+  expect(picker).toContain('>Refactor<')
+  expect(picker).toContain('<span class="xlist__hint">One</span>')
   expect(picker).not.toContain('Fix tests')
+  // Nothing is picked yet, so Start watching waits.
+  expect(html).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Start watching</)
   expect(watchKey('w1', 't2')).toBe('w1\u001ft2')
 })
 
@@ -187,7 +205,7 @@ test('a non-owner sees the cards and the rows read-only, with no inputs, no Save
   expect(html).toContain(WATCH_READ_ONLY_NOTE)
   expect(html).toContain('aria-label="Watching"')
   expect(html).toContain('Turned on by Ann.')
-  const panel = /<section class="autopilot watchpanel"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
+  const panel = /<section class="xwatch"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
   expect(panel).toContain('Turned on by Ann.')
   expect(panel).not.toContain('<select')
   expect(panel).not.toContain('<form')
@@ -197,14 +215,14 @@ test('a non-owner sees the cards and the rows read-only, with no inputs, no Save
 })
 
 test('Save is disabled while offline or while that task saves', () => {
+  expect(watchEditor(watchRow(), { live: false })).toMatch(/<button[^>]*disabled=""[^>]*>Save</)
+  expect(watchEditor(watchRow(), { saving: true })).toMatch(/<button[^>]*disabled=""[^>]*>Saving…</)
   const offline = view({ ...hub({ rows: [watchRow()] }), connection: { state: 'reconnecting', attempt: 1 } as HubState['connection'] }, { watchOpen: true })
-  expect(offline).toMatch(/<button[^>]*disabled=""[^>]*>Save</)
-  const saving = view(hub({ rows: [watchRow()], watch: { savingKey: watchKey('w1', 't1') } }), { watchOpen: true })
-  expect(saving).toMatch(/<button[^>]*disabled=""[^>]*>Saving…</)
+  expect(offline).toMatch(/<button[^>]*disabled=""[^>]*>Stop watching</)
 })
 
 test('an expiry that has passed is not offered as Keep and says so', () => {
-  const html = view(hub({ rows: [watchRow({ expires_at: '2020-01-01T00:00:00.000Z', active: false })] }), { watchOpen: true })
+  const html = watchEditor(watchRow({ expires_at: '2020-01-01T00:00:00.000Z', active: false }))
   expect(html).not.toContain('>Keep current expiry<')
   expect(html).toContain('The previous expiry has passed')
 })
@@ -230,11 +248,11 @@ test('a Hub without Watch has no Watch control, strip or chip', () => {
 test('the owner gets the Autopilot thread switch when only a watch is active', () => {
   const onlyWatch = hub({ rows: [watchRow()] })
   expect(autopilotThreadAvailable(onlyWatch)).toBe(true)
-  expect(view(onlyWatch)).toContain('Autopilot thread')
+  expect(view(onlyWatch)).toContain('aria-label="XERXES view"')
   // Neither Autopilot nor a watch is active: no switch.
   expect(autopilotThreadAvailable(hub({ rows: [watchRow({ active: false })] }))).toBe(false)
-  expect(view(hub({ rows: [watchRow({ active: false })] }))).not.toContain('Autopilot thread')
+  expect(view(hub({ rows: [watchRow({ active: false })] }))).not.toContain('aria-label="XERXES view"')
   // A non-owner never gets it.
   expect(autopilotThreadAvailable(hub({ canEdit: false, rows: [watchRow()] }))).toBe(false)
-  expect(view(hub({ canEdit: false, rows: [watchRow()] }))).not.toContain('Autopilot thread')
+  expect(view(hub({ canEdit: false, rows: [watchRow()] }))).not.toContain('aria-label="XERXES view"')
 })

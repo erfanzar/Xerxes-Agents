@@ -8,6 +8,7 @@ import type { LspServerHealth } from '../lsp/manager.js';
 import { join, resolve } from "node:path";
 
 import { ValidationError } from "../core/errors.js";
+import { optionalCompactionThreshold } from "../context/compactionThreshold.js";
 import { XERXES_VERSION } from "../core/version.js";
 import type { HookRunner } from "../extensions/hooks.js";
 import { inspectWorkspaceHooks, type WorkspaceHookInspection } from "../extensions/workspaceHooks.js";
@@ -1658,14 +1659,15 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ...(typeof this.runtimeSettings.auto_title === "boolean"
         ? { auto_title: this.runtimeSettings.auto_title }
         : {}),
-      ...(optionalFiniteNumber(this.runtimeSettings.auto_compact_threshold) !==
+      // Parsed, so config.json may say "60%", 0.6, "400k" or "off".
+      ...(optionalCompactionThreshold(this.runtimeSettings.auto_compact_threshold) ===
         undefined
-        ? {
-          auto_compact_threshold: optionalFiniteNumber(
+        ? {}
+        : {
+          auto_compact_threshold: optionalCompactionThreshold(
             this.runtimeSettings.auto_compact_threshold,
           ),
-        }
-        : {}),
+        }),
       ...Object.fromEntries(
         ["debug", "fast_mode", "nudge", "verbose"].flatMap((key) =>
           typeof this.runtimeSettings[key] === "boolean"

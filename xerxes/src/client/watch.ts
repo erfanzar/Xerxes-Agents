@@ -13,7 +13,7 @@ import type { WatchAnomalyKind, WatchRow, WatchStats } from './hubTypes.js'
  */
 
 export const WATCH_EXPLANATION =
-  'A watcher on the Hub reads every step of a watched run as it happens, at no model cost. XERXES only wakes when something looks wrong (a loop, a stall, tests failing again and again, a burst of errors, a nearly full context or a blocked goal) and, if you choose, at the review interval. In a workspace with Autopilot on, XERXES may steer or stop the run itself; otherwise it asks you to confirm.'
+  'The Hub reads every step of a watched run at no model cost. XERXES wakes only when something looks wrong (a loop, a stall, repeated test failures, an error burst, a full context or a blocked goal), or at the review interval you pick.'
 
 export const WATCH_STRIP_NOTE = 'Read live from every step of the run, at no model cost.'
 

@@ -15,10 +15,16 @@ import { dirname, join } from 'node:path'
 import { checkHubTarget, parseHubOrigin } from '../hubShared.js'
 import type { HubCockpitStorage, StoredHub } from './hubCockpit.js'
 
+/**
+ * The platform's encryption. Every call is asynchronous: on macOS each one can
+ * wait on the keychain, and a synchronous wait on the main thread kept the app
+ * from ever opening a window while a keychain prompt went unanswered.
+ */
 export interface SecretBox {
-  available(): boolean
-  encrypt(text: string): Uint8Array
-  decrypt(bytes: Uint8Array): string
+  available(): Promise<boolean>
+  encrypt(text: string): Promise<Uint8Array>
+  /** `stale`: the platform asks for the text to be encrypted again (a rotated key). */
+  decrypt(bytes: Uint8Array): Promise<{ readonly text: string; readonly stale: boolean }>
 }
 
 export const HUB_SETTINGS_FILE = 'desktop-hub.json'
@@ -85,25 +91,34 @@ export function createHubStorage(directory: string, box: SecretBox): HubCockpitS
         linked_machine_id: value.linkedMachineId,
       }, null, 2))
     },
-    loadSession() {
-      if (!box.available() || !existsSync(sessionPath)) return undefined
+    async loadSession() {
+      // No saved session: the keychain is never asked.
+      if (!existsSync(sessionPath)) return undefined
+      if (!(await box.available())) return undefined
+      let opened: { readonly text: string; readonly stale: boolean }
       try {
-        return box.decrypt(readFileSync(sessionPath))
+        opened = await box.decrypt(readFileSync(sessionPath))
       } catch {
+        // Unreadable now is not proof it is worthless: the file stays, and the
+        // next sign-in replaces it.
         return undefined
       }
+      if (opened.stale) {
+        try { writePrivate(sessionPath, await box.encrypt(opened.text)) } catch { /* the old copy still opens */ }
+      }
+      return opened.text
     },
-    saveSession(value) {
+    async saveSession(value) {
       if (value === undefined) {
         rmSync(sessionPath, { force: true })
         return
       }
       // No encryption available: keep nothing on disk.
-      if (!box.available()) {
+      if (!(await box.available())) {
         rmSync(sessionPath, { force: true })
         return
       }
-      writePrivate(sessionPath, box.encrypt(value))
+      writePrivate(sessionPath, await box.encrypt(value))
     },
   }
 }

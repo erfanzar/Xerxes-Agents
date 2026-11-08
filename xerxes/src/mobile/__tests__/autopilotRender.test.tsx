@@ -59,9 +59,9 @@ describe('Xerxes tab Autopilot', () => {
       supervisor: { ...state.supervisor, confirmations: [{ id: 'a1', tool: 'task.steer', summary: 'Steer the task: focus on tests', targets: ['One / First task'], state: 'confirmed', auto: true, confirmedBy: 'Ann' }] },
     }
     const html = plain(render(withCard, '/xerxes'))
-    expect(html).toContain('XERXES did: task.steer')
-    expect(html).toContain('Steer the task: focus on tests')
-    expect(html).toContain('Done automatically on behalf of Ann.')
+    // A settled auto card is one event line in the timeline.
+    expect(html).toContain('XERXES did: task.steer: Steer the task: focus on tests')
+    expect(html).not.toContain('Done automatically on behalf of Ann.')
     expect(html).not.toContain('>Confirm<')
     expect(html).not.toContain('>Cancel<')
     expect(html).not.toContain('Nothing runs until you confirm')
@@ -74,8 +74,8 @@ describe('Xerxes tab Autopilot', () => {
     const state = withAutopilot({ rows: [row()] })
     const failed: HubState = { ...state, supervisor: { ...state.supervisor, confirmations: [{ id: 'a2', tool: 'task.stop', summary: 'Stop it', targets: [], state: 'failed', auto: true, confirmedBy: 'Ann', message: 'The task was already gone.' }] } }
     const html = plain(render(failed, '/xerxes'))
-    expect(html).toContain('role="alert"')
-    expect(html).toContain('The task was already gone.')
+    expect(html).toContain('XERXES failed: task.stop: Stop it (The task was already gone.)')
+    expect(html).not.toContain('XERXES did:')
     expect(html).not.toContain('Done automatically')
   })
 })
@@ -86,14 +86,15 @@ describe('Autopilot sheet', () => {
     expect(html).toContain('role="dialog"')
     expect(html).toContain(AUTOPILOT_EXPLANATION)
     expect(html).toContain('questions and permission requests')
-    expect(html.match(/type="checkbox"/g)).toHaveLength(2)
+    expect(html.match(/role="switch"/g)).toHaveLength(2)
+    expect(html.match(/<details class="ap-settings"/g)).toHaveLength(2)
     expect(html.match(/<textarea/g)).toHaveLength(2)
     expect(html).toContain('maxLength="2000"')
     expect(html).toContain('placeholder="Keep going until the goal is done; take the recommended option"')
     for (const label of ['No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(html).toContain(`>${label}<`)
     expect(html).toContain('>Keep current expiry<')
-    expect(html).toContain('Mac · app · On')
-    expect(html).toContain('Server · Off')
+    expect(html).toContain('<strong>Mac · app</strong><span class="block-meta">On · until')
+    expect(html).toContain('<strong>Server</strong><span class="block-meta">Off</span>')
     expect(html).not.toContain(AUTOPILOT_READ_ONLY_NOTE)
     expect(html).not.toMatch(/<button type="submit"[^>]*disabled/)
   })
@@ -101,11 +102,11 @@ describe('Autopilot sheet', () => {
   it('is read-only for a non-owner: the rows and the reason, no inputs, no Save', () => {
     const html = sheet(withAutopilot({ canEdit: false, rows: [row()] }))
     expect(html).toContain(AUTOPILOT_READ_ONLY_NOTE)
-    expect(html).toContain('Mac · app · On')
+    expect(html).toContain('<strong>Mac · app</strong><span class="block-meta">On · until')
     expect(html).toContain('Turned on by Ann.')
     expect(html).toContain('Keep going')
     expect(html).not.toContain('<textarea')
-    expect(html).not.toContain('type="checkbox"')
+    expect(html).not.toContain('role="switch"')
     expect(html).not.toContain('<select')
     expect(html).not.toContain('>Save<')
   })
@@ -129,6 +130,14 @@ describe('Autopilot sheet', () => {
     expect(error).toContain('Could not read Autopilot: timed out')
     expect(error).toContain('Try again')
     expect(sheet(withAutopilot({ rows: [row()], saveError: 'Only the Hub owner can do this.' }))).toContain('Only the Hub owner can do this.')
+  })
+
+  it('puts All workspaces on top with its own switch', () => {
+    const all = row({ workspace_id: '*', label: 'All workspaces', instruction: '', expires_at: null })
+    const html = sheet(withAutopilot({ all, rows: [row({ enabled: false, instruction: '', expires_at: null, enabled_by: null, via_all: true })] }))
+    expect(html).toContain('aria-label="Turn off Autopilot for All workspaces"')
+    expect(html).toContain('On · all workspaces')
+    expect(html.indexOf('All workspaces')).toBeLessThan(html.indexOf('Mac · app'))
   })
 
   it('says so when no workspace is linked', () => {

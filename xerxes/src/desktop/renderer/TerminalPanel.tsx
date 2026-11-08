@@ -21,6 +21,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { desktopCall, text, type RpcRecord } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { userShells, type ShellRow } from './terminalShells.js'
+import { openTerminalLink } from './terminalLinks.js'
 import type { Snapshot } from './store.js'
 
 const DARK_ANSI = {
@@ -154,11 +155,14 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
   const host = useRef<HTMLDivElement>(null)
   const term = useRef<XTerm | null>(null)
   const fit = useRef<FitAddon | null>(null)
+  const [linkError, setLinkError] = useState<string | null>(null)
   const call = useCallback((method: string, params: RpcRecord = {}) => desktopCall(window.xerxes, snap.sessionKey, method, { terminal_id: terminalId, ...params }), [snap.sessionKey, terminalId])
 
   useEffect(() => {
     const element = host.current
     if (!element) return
+    let alive = true
+    setLinkError(null)
     const xterm = new XTerm({
       allowProposedApi: false,
       convertEol: false,
@@ -172,13 +176,21 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
       scrollback: 5000,
       macOptionIsMeta: true,
       theme: terminalTheme(element),
+      linkHandler: {
+        allowNonHttpProtocols: false,
+        activate: (_event, uri) => {
+          setLinkError(null)
+          void openTerminalLink(uri, message => window.confirm(message), window.xerxes).then(error => {
+            if (alive) setLinkError(error)
+          })
+        },
+      },
     })
     const fitter = new FitAddon()
     xterm.loadAddon(fitter)
     xterm.open(element)
     term.current = xterm
     fit.current = fitter
-    let alive = true
     let exited = false
 
     // Subscribe before attaching: an event that races the attach reply is
@@ -263,5 +275,10 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
 
   // xterm opens in an unpadded host: the fit addon sizes rows from its
   // parent's box, and padding there made it propose a row that got clipped.
-  return <div className="term__view" hidden={!visible} onClick={() => term.current?.focus()}><div className="term__host" ref={host} /></div>
+  return (
+    <div className="term__view" hidden={!visible} onClick={() => term.current?.focus()}>
+      {linkError && <div className="term__error" role="alert"><span>{linkError}</span><button className="btn" onClick={event => { event.stopPropagation(); setLinkError(null) }}>Dismiss</button></div>}
+      <div className="term__host" ref={host} />
+    </div>
+  )
 }

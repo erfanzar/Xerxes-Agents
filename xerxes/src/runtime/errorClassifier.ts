@@ -69,6 +69,8 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
       // llama.cpp's server: "the request exceeds the available context size" (exceed_context_size_error).
       /exceeds? the available context size/i,
       /exceed_context_size/i,
+      // Kimi / Moonshot: "Your request exceeded model token limit: 1048576 (requested: 1232443)".
+      /exceeded.{0,32}model token limit/i,
     ],
   ],
   [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b40[13]\b/, /forbidden/i]],
@@ -183,6 +185,25 @@ export function classifyError(error: unknown): ClassifiedError {
 
 /** Python-compatible concise alias for `classifyError`. */
 export const classify = classifyError
+
+const REPORTED_WINDOW: readonly RegExp[] = [
+  /model token limit:?\s*(\d{4,})/i, // Kimi: "exceeded model token limit: 1048576"
+  /maximum context length is\s*(\d{4,})/i, // OpenAI
+  /tokens?\s*>\s*(\d{4,})\s*maximum/i, // Anthropic: "213000 tokens > 200000 maximum"
+]
+
+/**
+ * The context window a provider states in its overflow error, when it states
+ * one. Compaction sizes its target from it, and the next turn's threshold
+ * check can fire before the window fills again.
+ */
+export function reportedContextLimit(message: string): number | undefined {
+  for (const pattern of REPORTED_WINDOW) {
+    const value = Number(pattern.exec(message)?.[1])
+    if (Number.isSafeInteger(value) && value > 0) return value
+  }
+  return undefined
+}
 
 function classified(
   kind: ErrorKind,

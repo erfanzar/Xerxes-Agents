@@ -17,6 +17,10 @@ import {
   type SubagentTaskRunRequest,
   type SubagentWorktreePort,
   type SubagentWorktree,
+  type SubagentModelSelection,
+  type SubagentRetryConfiguration,
+  type SubagentRetryOptions,
+  type RetryableSubagentManagerPort,
 } from '../agents/subagentManager.js'
 import type { ContextMessage } from '../context/compressor.js'
 import { ValidationError } from '../core/errors.js'
@@ -68,6 +72,8 @@ import { DaemonSubagentEventBus } from './subagentEvents.js'
 import { resolveOwnedSubagentRetry } from './subagentRetryOwnership.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 import { recordModelUsage } from '../runtime/modelUsageLedger.js'
+
+export type { SubagentRetryOptions } from '../agents/subagentManager.js'
 
 export type SourceProviderClient = Pick<NativeSubagentHostOptions, 'llm' | 'contextLimit' | 'maxTokens' | 'maxOutputTokens' | 'temperature' | 'topK' | 'topP'> & { readonly route: string; readonly profile?: string }
 
@@ -148,17 +154,6 @@ export interface NativeSubagentHostOptions {
   readonly transcriptStore?: DaemonTranscriptStore
 }
 
-export interface SubagentRetryOptions {
-  /** Host-verified requesting session. When present, resolve task names within this owner only. */
-  readonly sourceAgentId?: string
-  /**
-   * Optional replacement instruction for the new attempt. Defaults to a
-   * continuation nudge when the task's conversation persisted, otherwise the
-   * task's original prompt.
-   */
-  readonly message?: string
-}
-
 /**
  * Instruction sent as the retry attempt's user message when the dead task's
  * conversation was persisted: the earlier user prompt and partial progress
@@ -173,7 +168,7 @@ export const SUBAGENT_RETRY_CONTINUATION_PROMPT = [
 
 export interface NativeSubagentHost {
   readonly manager: SubAgentManager
-  readonly managerPort: SpawnedAgentManagerPort
+  readonly managerPort: RetryableSubagentManagerPort
   readonly turnCoordinator: SubagentTurnCoordinator
   /** Cancel and invalidate every child owned by this host. */
   invalidateAll(): number
@@ -373,8 +368,6 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
 
 interface HandleMetadata {
   readonly group?: SubAgentGroup
-  readonly providerProfile?: string
-  readonly reasoningEffort?: string
   readonly agentId: string
   closed: boolean
   readonly createdAt: string
@@ -414,6 +407,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private readonly handles = new Map<string, HandleMetadata>()
   private readonly invalidatedHandles = new Set<string>()
   private readonly pendingResume = new Set<string>()
+  private readonly retryQueues = new Map<string, Promise<SpawnedAgentSnapshot>>()
   private transcripts: DaemonTranscriptStore | undefined
 
   constructor(
@@ -646,8 +640,6 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     })
     this.handles.set(task.id, {
       agentId: definition.name,
-      ...(resolved.providerProfile ? { providerProfile: resolved.providerProfile } : {}),
-      ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: resolved.creatorAgentId,
@@ -674,6 +666,20 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     if (!value) throw new ValidationError('handle_id', 'spawned agent id or name is required', handleId)
     const info = this.manager.findTask(value)
     if (info === undefined) throw new ValidationError('handle_id', 'spawned agent not found', value)
+    // Canonical ids serialize id/name aliases before either call captures or
+    // replaces handle metadata. A rejected predecessor must not poison the queue.
+    const previous = this.retryQueues.get(info.id)
+    const admit = (joinExisting = false) => this.retryUnlocked(info.id, options, joinExisting && options.selection === undefined)
+    const pending = previous ? previous.then(() => admit(true), () => admit()) : Promise.resolve().then(() => admit())
+    this.retryQueues.set(info.id, pending)
+    try { return await pending }
+    finally { if (this.retryQueues.get(info.id) === pending) this.retryQueues.delete(info.id) }
+  }
+
+  private async retryUnlocked(handleId: string, options: SubagentRetryOptions, joinExisting: boolean): Promise<SpawnedAgentSnapshot> {
+    // Admission and all metadata reads happen after the preceding operation.
+    const info = this.manager.findTask(handleId)
+    if (info === undefined) throw new ValidationError('handle_id', 'spawned agent not found', handleId)
     if (this.invalidatedHandles.has(info.id)) {
       throw new ValidationError(
         'handle_id',
@@ -681,9 +687,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
         info.id,
       )
     }
-    // Idempotent fast path: a live task returns its current snapshot without
-    // starting (or even planning) another attempt.
-    if (info.status === 'pending' || info.status === 'running') {
+    options.signal?.throwIfAborted()
+    // Plain retry remains idempotent; explicit selectors must never mutate a live attempt.
+    if (joinExisting || info.status === 'pending' || info.status === 'running') {
+      if (options.selection) throw new ValidationError('selection', 'cannot reconfigure a running agent; wait for it to finish or stop it first', info.id)
       const live = this.manager.listTasks().find(candidate => candidate.id === info.id)
       if (live) return this.snapshot(live)
     }
@@ -699,27 +706,80 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     const workspace = taskRecord?.workspace ?? this.resolveWorkspace(taskRecord?.sourceAgentId)
     const input = options.message?.trim()
       || await this.continuationInput(historySessionId, metadata?.lastInput ?? '', workspace)
-    const task = await this.manager.retry(info.id, input)
-    if (task === undefined) {
-      throw new ValidationError(
-        'handle_id',
-        'could not be retried because its runtime state never started or is gone; spawn a new agent instead',
-        info.id,
-      )
+    let reconfigure: SubagentRetryConfiguration | undefined
+    if (options.selection) {
+      const savedSelection = this.manager.retryModelSelection(info.id)
+      if (savedSelection === undefined) {
+        throw new ValidationError('selection', 'cannot reconfigure an agent without its saved model/provider selection metadata', info.id)
+      }
+      reconfigure = await this.resolveRetrySelection(savedSelection, options.selection, taskRecord?.sourceAgentId, options.signal)
+    }
+    options.signal?.throwIfAborted()
+    if (this.invalidatedHandles.has(info.id)) throw new ValidationError('handle_id', 'was invalidated while validating the provider selection', info.id)
+    // Retry may await the cancelled runner and worktree setup. Pin the admitted
+    // generation now so an intervening host reconfigure cannot prune it.
+    const pinnedMetadata = reconfigure && metadata ? { ...metadata, generation: reconfigure.hostGeneration } : undefined
+    if (pinnedMetadata) this.handles.set(info.id, pinnedMetadata)
+    let task: SubAgentTask
+    try {
+      const retried = await this.manager.retry(info.id, input, reconfigure)
+      if (retried === undefined) {
+        throw new ValidationError(
+          'handle_id',
+          'could not be retried because its runtime state never started or is gone; spawn a new agent instead',
+          info.id,
+        )
+      }
+      task = retried
+    } catch (error) {
+      if (metadata && pinnedMetadata && this.handles.get(info.id) === pinnedMetadata) this.handles.set(info.id, metadata)
+      throw error
     }
     this.pendingResume.delete(task.id)
     if (metadata) {
-      metadata.closed = false
-      metadata.lastInput = input
+      this.handles.set(task.id, {
+        ...metadata,
+        closed: false,
+        lastInput: input,
+        generation: reconfigure?.hostGeneration ?? metadata.generation,
+      })
     }
     return this.snapshot(task)
+  }
+
+  /** Validate a new route while leaving the saved policy, workspace and identity untouched. */
+  private async resolveRetrySelection(
+    previous: SubagentModelSelection,
+    selection: SubagentModelSelection,
+    sourceAgentId: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<SubagentRetryConfiguration> {
+    signal?.throwIfAborted()
+    for (const [key, value] of Object.entries(selection)) {
+      if (typeof value !== 'string' || !value.trim()) throw new ValidationError(key, 'must be a non-empty string', value)
+    }
+    const model = selection.model?.trim() ?? previous.model?.trim() ?? this.fallbackModel
+    const requestedProfile = selection.providerProfile?.trim() ?? previous.providerProfile
+    const sourceClient = sourceAgentId ? this.resolveSourceClient?.(sourceAgentId, model, requestedProfile) : undefined
+    const providerProfile = sourceClient ? sourceClient.profile : requestedProfile
+    const reasoningEffort = selection.reasoningEffort?.trim() ?? previous.reasoningEffort
+    const providerRoute = this.captureProviderRoute(providerProfile, model, sourceAgentId)
+    const hostGeneration = this.generation
+    if (!sourceClient) {
+      if (providerProfile) await this.validateProviderSelection?.(providerProfile, model, reasoningEffort, signal)
+      else await this.validateInheritedSelection?.(model, reasoningEffort, signal)
+    }
+    signal?.throwIfAborted()
+    if (hostGeneration !== this.generation) throw new Error('Agent host changed during selection validation; retry the resume')
+    this.assertProviderRoute(providerProfile, model, providerRoute, sourceAgentId)
+    return { model, providerProfile, reasoningEffort, providerRoute, hostGeneration }
   }
 
   /**
    * Respawn a task recovered from a persisted parent transcript after a
    * daemon restart, keeping its stable task id, name, and history link.
    */
-  async respawnRecovered(snapshot: SpawnedAgentSnapshot, input: string, mode: 'retry' | 'reset' = 'retry'): Promise<SpawnedAgentSnapshot> {
+  async respawnRecovered(snapshot: SpawnedAgentSnapshot, input: string, mode: 'retry' | 'reset' = 'retry', options: SubagentRetryOptions = {}): Promise<SpawnedAgentSnapshot> {
     // Unknown serialized scopes cannot become unrestricted work on restart.
     if (!this.restoreModelCallScopes && snapshot.modelCallBindings?.length) {
       throw new ValidationError('task', 'Cannot restore delegated budget ownership in this host; dispatch new work from the parent session', snapshot.id)
@@ -734,18 +794,24 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
         snapshot.promptProfile,
       )
     }
-    const model = snapshot.model?.trim() || stringConfig(definition.model) || this.fallbackModel
+    const reconfigure = options.selection
+      ? await this.resolveRetrySelection(snapshot, options.selection, snapshot.sourceAgentId, options.signal)
+      : undefined
+    const model = reconfigure?.model ?? (snapshot.model?.trim() || stringConfig(definition.model) || this.fallbackModel)
+    const providerProfile = reconfigure ? reconfigure.providerProfile : snapshot.providerProfile
+    const reasoningEffort = reconfigure ? reconfigure.reasoningEffort : snapshot.reasoningEffort
     const workspace = this.resolveRecoveredWorkspace(snapshot)
-    const providerRoute = providerRouteOf(snapshot)
+    const providerRoute = reconfigure ? reconfigure.providerRoute : providerRouteOf(snapshot)
     if (providerRoute === undefined && (this.inheritedProviderRoute !== undefined || this.resolveProviderRoute !== undefined || this.resolveSourceClient !== undefined)) {
       throw new ValidationError('provider_route', 'cannot recover a child without its original provider route; dispatch new work under the current route', snapshot.id)
     }
-    this.assertProviderRoute(snapshot.providerProfile, model, providerRoute, snapshot.sourceAgentId)
+    this.assertProviderRoute(providerProfile, model, providerRoute, snapshot.sourceAgentId)
     const requestedMode = snapshot.rules?.length ? permissionModeFromRules(snapshot.rules) : this.fallbackPermissionMode
     const permissionMode = delegatedPermissionExceeds(requestedMode, this.fallbackPermissionMode)
       ? this.fallbackPermissionMode
       : requestedMode
     const task = await withCapturedModelCallScopes(scopes, () => this.spawnResolved({
+      ...(options.signal ? { signal: options.signal } : {}),
       definition,
       ...(snapshot.rules?.includes('worktree-source:working-tree') ? { worktreeSource: 'working-tree' as const } : {}),
       ...(snapshot.rules?.includes('isolation:worktree') ? { isolation: 'worktree' as const } : {}),
@@ -760,8 +826,8 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       // are keyed by id plus attempt and survive the restart, so starting the
       // respawn at attempt 0 again made its result look already delivered.
       ...(mode === 'retry' ? { attempt: (snapshot.attempt ?? 0) + 1 } : {}),
-      ...(snapshot.providerProfile ? { providerProfile: snapshot.providerProfile } : {}),
-      ...(snapshot.reasoningEffort ? { reasoningEffort: snapshot.reasoningEffort } : {}),
+      ...(providerProfile ? { providerProfile } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(mode === 'retry' && snapshot.historySessionId ? { historySessionId: snapshot.historySessionId } : {}),
       ...(snapshot.name ? { name: snapshot.name } : {}),
       ...(snapshot.title ? { title: snapshot.title } : {}),
@@ -1033,8 +1099,6 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private snapshot(task: SubAgentTask, statusOverride?: SpawnedAgentStatus): SpawnedAgentSnapshot {
     const metadata = this.handles.get(task.id) ?? {
       agentId: task.agentDefName || task.name,
-      ...(task.providerProfile === undefined ? {} : { providerProfile: task.providerProfile }),
-      ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: task.creatorId || undefined,
@@ -1061,8 +1125,8 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(task.error ? { error: task.error } : {}),
       ...(metadata.historySessionId ? { historySessionId: metadata.historySessionId } : {}),
       id: task.id,
-      ...(metadata.providerProfile ? { providerProfile: metadata.providerProfile } : {}),
-      ...(metadata.reasoningEffort ? { reasoningEffort: metadata.reasoningEffort } : {}),
+      ...(task.providerProfile ? { providerProfile: task.providerProfile } : {}),
+      ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
       ...(metadata.lastInput ? { lastInput: metadata.lastInput } : {}),
       ...(task.result === undefined ? {} : { lastOutput: task.result }),
       name: task.name,
@@ -1253,7 +1317,7 @@ class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
         recovered.id,
       )
     }
-    const replacement = await this.live.respawnRecovered(recovered, input)
+    const replacement = await this.live.respawnRecovered(recovered, input, 'retry', options)
     // The respawned task reuses the recovered identity, so the tombstone is
     // superseded by a live handle rather than tombstoned forever.
     this.recovered.delete(recovered.id)

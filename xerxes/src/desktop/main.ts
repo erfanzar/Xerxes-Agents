@@ -30,7 +30,7 @@ import { copyProfilesToRemote, localActiveProfile, watchProfiles } from './main/
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
-import { loadDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
+import { localDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
 import {
   openRemote,
   remoteTarget,
@@ -539,7 +539,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     } else useProject(dir, typeof sessionId === 'string' ? sessionId : null)
     return dir
   })
-  handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : loadDesktopWorkspaces(workspaceFile()))
+  handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : localDesktopWorkspaces(workspaceFile()))
   handle('desktop:context-scope', () => contextScope(remoteMachine ?? saved?.remote))
   // The name the sidebar gives this view's host: the SSH alias, or null for this Mac.
   handle('desktop:context-host', () => (remoteMachine ?? saved?.remote)?.alias ?? null)
@@ -960,10 +960,16 @@ void app.whenReady().then(async () => {
     runner: createCliRunner(process.env, homedir()),
     http: nodeHubHttp,
     connect: (target, handlers) => connectHubSocket(target, handlers),
+    // The asynchronous keychain API only: the synchronous one waits on the
+    // main thread, and an unanswered keychain prompt kept the app from ever
+    // opening a window.
     storage: createHubStorage(xerxesHome(), {
-      available: () => safeStorage.isEncryptionAvailable(),
-      encrypt: text => safeStorage.encryptString(text),
-      decrypt: bytes => safeStorage.decryptString(Buffer.from(bytes)),
+      available: () => safeStorage.isAsyncEncryptionAvailable(),
+      encrypt: text => safeStorage.encryptStringAsync(text),
+      decrypt: async bytes => {
+        const opened = await safeStorage.decryptStringAsync(Buffer.from(bytes))
+        return { text: opened.result, stale: opened.shouldReEncrypt }
+      },
     }),
     emit: (senderId, channel, payload) => {
       const contents = webContents.fromId(senderId)

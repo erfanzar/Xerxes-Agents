@@ -119,13 +119,16 @@ export function RailStatus({ snap }: { snap: Snapshot }): ReactElement {
         <dl className="railstatus__facts">
           {todos.length > 0 && (
             <div>
-              <dt>Steps</dt>
+              {/* "To-dos", never "Steps": the statistics below count model
+                  and tool steps under that name, and the two sat one above
+                  the other reading "Steps 0 of 6" and "Steps 5607". */}
+              <dt>To-dos</dt>
               <dd>{doneTodos} of {todos.length}</dd>
             </div>
           )}
           {context !== null && (
             <div>
-              {/* Labelled on its own row. Sitting unlabelled under "Steps"
+              {/* Labelled on its own row. Sitting unlabelled under "To-dos"
                   the bar read as step progress, which it never was. */}
               <dt>Context</dt>
               <dd>

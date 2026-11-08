@@ -33,7 +33,7 @@ import type { PermissionMode } from '../../streaming/permissions.js'
 import type { DataTrust } from '../../security/boundaryTypes.js'
 import { DEFAULT_BOUNDARY_AGENT, type DataBoundary } from '../../security/dataBoundary.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from '../inputs.js'
-import { SpawnBudgetExhaustedError, type SubAgentGroup } from '../../agents/subagentManager.js'
+import { SpawnBudgetExhaustedError, type SubAgentGroup, type SubagentModelSelection, type RetryableSubagentManagerPort } from '../../agents/subagentManager.js'
 import type { ToolCapabilities } from '../../executors/toolRegistry.js'
 import {
   DEFAULT_WORKFLOW_CONCURRENCY,
@@ -236,7 +236,7 @@ export interface ClaudeAgentToolsOptions {
   /** Resolves an agent type to the runtime descriptor consumed by the manager. */
   readonly agentResolver?: (subagentType: string, model?: string) => SpawnedAgentDescriptor | undefined
   readonly mailbox?: AgentEventMailbox
-  readonly manager: SpawnedAgentManagerPort
+  readonly manager: RetryableSubagentManagerPort
   /** Manifest-refresh cadence during a blocking wait; test seam for the 1.5s default. */
   readonly manifestHeartbeatMs?: number
   readonly now?: () => number
@@ -282,15 +282,15 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     prompt: stringSchema('Complete brief for an agent that sees none of this conversation: goal, relevant paths, constraints, what is already known, and the result shape you want.'),
     title: titleSchema('Short human-readable title describing this delegated task.'),
     description: titleSchema('Short task description; accepted as an alternative to title.'),
-    resume: stringSchema('Resume an existing subagent by its returned id, retaining its conversation.'),
+    resume: stringSchema('Resume an existing subagent by its returned id, retaining its conversation. Terminal agents may change model, provider_profile or reasoning_effort; omitted selectors retain the saved settings. Running agents cannot be reconfigured.'),
     subagent_type: stringSchema('Agent definition to run.'),
     worktree_source: { type: 'string', enum: ['working-tree'], description: 'Copy current tracked and untracked non-ignored files into the isolated checkout. Requires isolation=worktree; mutually exclusive with worktree_ref.' },
     worktree_ref: stringSchema('Optional Git revision for worktree isolation. Defaults to HEAD. Resolved at each allocation; use a commit ID for a fixed baseline.'),
     isolation: { type: 'string', enum: ['worktree'], description: 'Run in a separate Git checkout. Requires a configured native worktree adapter; starts at committed HEAD.' },
     name: stringSchema('Stable subagent name.'),
     model: stringSchema('Exact model id from list_available_models; pass the provider_profile it was listed under. Takes precedence over intelligence presets.'),
-    provider_profile: stringSchema('Profile the model was listed under in list_available_models. Requires explicit model.'),
-    reasoning_effort: stringSchema('One of that entry\'s reasoning_efforts from list_available_models; omit when it lists none. Requires explicit model.'),
+    provider_profile: stringSchema('Profile the model was listed under in list_available_models. Requires explicit model for a new agent; resume retains the saved model when omitted.'),
+    reasoning_effort: stringSchema('One of that entry\'s reasoning_efforts from list_available_models; omit when it lists none. Requires explicit model for a new agent; resume retains omitted selectors.'),
     intelligence: { type: 'string', enum: [...AGENT_INTELLIGENCE_LEVELS], description: 'Choose light for simple tasks, balanced for normal work, smart for difficult reasoning. Uses user-configured model mappings; omit to use the configured default.' },
     run_in_background: booleanSchema('Return the agent id at once instead of waiting (same as wait=false).', false),
     wait: booleanSchema('Wait for the subagent to finish.', true),
@@ -299,6 +299,9 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   definition('SendMessageTool', 'Send follow-up work to a subagent. Running agents queue it; finished, failed or interrupted agents (including ones from earlier turns or before a runtime restart) continue under the same id with their saved conversation and configuration, so a failed agent is retried this way rather than respawned. Returns after accepting input without waiting for completion. Explicitly closed agents must be resumed with AgentTool first. Prefer this over a new spawn when that agent already has the needed context.', {
     target: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Message for the subagent.'),
+    model: stringSchema('New model for a terminal agent; keeps its id and saved conversation. Running agents cannot change settings.'),
+    provider_profile: stringSchema('Provider profile for a terminal agent. Omit to retain the saved profile.'),
+    reasoning_effort: stringSchema('Reasoning effort for a terminal agent. Omit to retain the saved effort.'),
   }, ['target', 'message']),
   definition('TaskCreateTool', 'Start a background subagent without waiting; same as AgentTool with run_in_background=true.', {
     isolation: { type: 'string', enum: ['worktree'], description: 'Run in a separate Git checkout using the native worktree adapter.' },
@@ -492,6 +495,17 @@ function configuredIntelligenceSchema(schema: Readonly<Record<string, unknown>>,
   return copy
 }
 
+function resumeModelSelection(inputs: JsonObject): SubagentModelSelection | undefined {
+  const selection: { model?: string; providerProfile?: string; reasoningEffort?: string } = {}
+  for (const [field, key] of [['model', 'model'], ['provider_profile', 'providerProfile'], ['reasoning_effort', 'reasoningEffort']] as const) {
+    const value = optionalString(inputs, field)
+    if (value === undefined) continue
+    if (!value.trim()) throw new ValidationError(field, 'must be a non-empty string', value)
+    selection[key] = value.trim()
+  }
+  return Object.keys(selection).length ? selection : undefined
+}
+
 /** Adapter that maps Claude-style task calls onto the Bun `SpawnedAgentManager`. */
 export class ClaudeAgentTools {
   private readonly intelligence: AgentIntelligenceConfig
@@ -539,7 +553,7 @@ export class ClaudeAgentTools {
       }
       switch (name) {
         case 'AgentTool': return await this.agentTool(inputs, context, signal)
-        case 'SendMessageTool': return await this.sendMessage(inputs, context)
+        case 'SendMessageTool': return await this.sendMessage(inputs, context, signal)
         case 'TaskCreateTool': return await this.taskCreate(inputs, context, signal)
         case 'SpawnAgents': return await this.spawnAgents(inputs, context, signal)
         case 'TaskGetTool': return this.taskGet(requiredString(inputs, 'task_id'), context, 'task_id')
@@ -568,14 +582,16 @@ export class ClaudeAgentTools {
     const prompt = requiredString(inputs, 'prompt')
     const resume = optionalString(inputs, 'resume')?.trim()
     if (resume) {
-      for (const field of ['model', 'intelligence', 'provider_profile', 'reasoning_effort', 'isolation', 'worktree_ref', 'worktree_source']) {
+      for (const field of ['intelligence', 'isolation', 'worktree_ref', 'worktree_source']) {
         if (inputs[field] !== undefined) throw new ValidationError(field, 'cannot reconfigure an existing agent while resuming; spawn a new agent for different settings', inputs[field])
       }
       const previous = this.requireSnapshot(resume, context, 'resume')
       const requestedType = optionalString(inputs, 'subagent_type')?.trim()
       if (requestedType && requestedType !== previous.promptProfile) throw new ValidationError('subagent_type', 'cannot change the profile of a resumed agent', requestedType)
+      const selection = resumeModelSelection(inputs)
+      this.assertRetrySelection(previous, selection)
       const snapshot = isTerminal(previous) && this.options.manager.retry
-        ? await this.options.manager.retry(previous.id, { message: prompt, ...(context.sessionId ? { sourceAgentId: context.sessionId } : {}) })
+        ? await this.options.manager.retry(previous.id, { message: prompt, ...(context.sessionId ? { sourceAgentId: context.sessionId } : {}), ...(selection ? { selection } : {}), ...(signal ? { signal } : {}) })
         : await this.options.manager.sendInput(previous.id, { message: prompt })
       this.capture()
       if (snapshot.rules?.includes('background') || optionalBoolean(inputs, 'run_in_background', false) || !optionalBoolean(inputs, 'wait', true)) {
@@ -626,10 +642,21 @@ export class ClaudeAgentTools {
     }
   }
 
-  private async sendMessage(inputs: JsonObject, context: ToolExecutionContext): Promise<Record<string, unknown>> {
-    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'target'), context), {
-      message: requiredString(inputs, 'message'),
-    })
+  private assertRetrySelection(previous: SpawnedAgentSnapshot, selection: SubagentModelSelection | undefined): void {
+    if (!selection) return
+    if (!isTerminal(previous)) throw new ValidationError('selection', 'cannot reconfigure a running agent; wait for it to finish or stop it first', previous.id)
+    if (!this.options.manager.retry) throw new ValidationError('selection', 'this host cannot reconfigure a saved agent', previous.id)
+  }
+
+  private async sendMessage(inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const previous = this.requireSnapshot(requiredString(inputs, 'target'), context)
+    const message = requiredString(inputs, 'message')
+    const selection = resumeModelSelection(inputs)
+    this.assertRetrySelection(previous, selection)
+    if (selection && previous.closed) throw new ValidationError('target', 'is closed; explicitly resume the agent before sending more work', previous.id)
+    const snapshot = selection && this.options.manager.retry
+      ? await this.options.manager.retry(previous.id, { message, ...(context.sessionId ? { sourceAgentId: context.sessionId } : {}), selection, ...(signal ? { signal } : {}) })
+      : await this.options.manager.sendInput(previous.id, { message })
     this.capture()
     this.observeBackgroundState([snapshot])
     return agentSnapshotWire(snapshot)

@@ -6,7 +6,7 @@ import { AUTOPILOT_THREAD_PREFIX, autopilotThreadId } from './autopilot.js'
 import { newCommandId } from './bridge.js'
 import { HubRequestError, type HubConnection, type SubscriptionHandle, type Timers } from './hubConnection.js'
 import {
-  parseAgentDetail, parseAgentList, parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage,
+  parseAgentDetail, parseAgentList, parseAutopilotRow, parseAutopilotView, parseConfirmation, parseHistoryPage, parseMachines, parsePresence, parseSummaries, parseSupervisorConfig, parseSupervisorMessage, parseSupervisorStep,
   parseSupervisorOptions, parseWatchRow, parseWatchView, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
 import { IDLE_AGENT_DETAIL, canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
@@ -109,6 +109,8 @@ export interface AutopilotInput {
   readonly instruction?: string
   /** Omitted: keep the saved expiry. null: no expiry. Otherwise an ISO time in the future. */
   readonly expiresAt?: string | null
+  /** Omitted: keep the saved mode. `observe` is watch only: actions become cards, answers are recorded. */
+  readonly mode?: 'auto' | 'observe'
 }
 
 export const AUTOPILOT_INSTRUCTION_LIMIT = 2000
@@ -1039,6 +1041,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
         enabled: input.enabled,
         ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
         ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
+        ...(input.mode === undefined ? {} : { mode: input.mode }),
       })
       const row = parseAutopilotRow(result.workspace)
       if (row === undefined) {
@@ -1157,7 +1160,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
   async function maybeOpenAutopilotThread(): Promise<void> {
     const snapshot = store.getSnapshot()
     if (!isHubOwner(snapshot) || snapshot.selfUserId === undefined) return
-    if (!snapshot.autopilot.rows.some(row => row.active) && !snapshot.watch.rows.some(row => row.active)) return
+    if (snapshot.autopilot.all?.active !== true && !snapshot.autopilot.rows.some(row => row.active) && !snapshot.watch.rows.some(row => row.active)) return
     await autopilotThreadOpen()
   }
 
@@ -1318,6 +1321,8 @@ export function createHubController(options: HubControllerOptions): HubControlle
         // The owner's private Autopilot thread: its own state, never the shared thread's.
         const messages = [payload.message, ...arr(payload.messages)].flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
         if (messages.length > 0) store.dispatch({ type: 'autopilotThreadMessages', messages })
+        const step = parseSupervisorStep(payload.step)
+        if (step) store.dispatch({ type: 'supervisorStep', thread: 'autopilot', step })
         if (payload.activity === 'working') store.dispatch({ type: 'autopilotThread', patch: { working: true } })
         else if (payload.activity === 'idle' || messages.some(message => message.role === 'xerxes')) store.dispatch({ type: 'autopilotThread', patch: { working: false } })
         const confirmation = parseConfirmation(type === 'supervisor.confirmation' ? payload.confirmation ?? payload : payload.confirmation)
@@ -1329,6 +1334,9 @@ export function createHubController(options: HubControllerOptions): HubControlle
       } else if (type === 'supervisor.thread_event') {
         const messages = [payload.message, ...arr(payload.messages)].flatMap(raw => { const m = parseSupervisorMessage(raw); return m ? [m] : [] })
         if (messages.length > 0) store.dispatch({ type: 'supervisorMessages', messages })
+        // What XERXES is doing right now: narration lines and each tool as it runs.
+        const step = parseSupervisorStep(payload.step)
+        if (step) store.dispatch({ type: 'supervisorStep', thread: 'shared', step })
         // The Hub reports when a turn starts and ends; a XERXES reply also ends it.
         if (payload.activity === 'working') store.dispatch({ type: 'supervisor', patch: { working: true } })
         // "XERXES stopped: …" is the Hub's notice for a failed turn; an older Hub sends no `idle`.

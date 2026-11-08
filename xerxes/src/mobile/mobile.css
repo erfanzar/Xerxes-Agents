@@ -466,6 +466,16 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; }
 .stream-caret { display: inline-block; width: 0.5em; height: 1em; margin-top: 0.2rem; background: var(--x-activity); animation: stream-caret 1s steps(2) infinite; }
 @keyframes stream-caret { 50% { opacity: 0; } }
 .working-line { color: var(--x-activity); font-size: 14px; font-style: italic; }
+/* Live steps of a running XERXES turn: one line per narration and tool. */
+.live-steps { display: flex; flex-direction: column; gap: 4px; }
+.live-steps .working-line { margin: 0; }
+.live-steps__list { list-style: none; margin: 0; padding: 0 0 0 10px; border-left: 1px solid var(--x-hairline); display: flex; flex-direction: column; gap: 3px; }
+.live-step { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--x-meta); overflow-wrap: anywhere; }
+.live-step--say { color: var(--x-secondary); font-style: italic; }
+.live-step__mark { flex: none; width: 1em; text-align: center; }
+.live-step[data-state='running'] { color: var(--x-title); }
+.live-step[data-state='done'] .live-step__mark { color: var(--x-done); }
+.live-step[data-state='error'] { color: var(--x-failed-text); }
 .block-system .block-who { color: var(--x-meta); }
 .block-system .md { color: var(--x-secondary); font-size: 14.5px; }
 .block-system { border-left: 2px solid var(--x-hairline-hi); padding-left: 0.75rem !important; }
@@ -784,6 +794,27 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; }
 .repair-paste { margin: 0.75rem 0; }
 .repair-paste summary { cursor: pointer; color: var(--x-secondary); font-size: 14px; font-weight: 500; min-height: var(--tap); display: flex; align-items: center; }
 .repair-paste form { margin-top: 0.5rem; }
+
+/* ── Autopilot: one line per workspace, a switch, settings folded away ── */
+.ap-rows { list-style: none; margin: 0 0 1rem; padding: 0; border: 1px solid var(--x-hairline); border-radius: var(--r); background: var(--x-card); }
+.ap-line { padding: 0.7rem 0.9rem; }
+.ap-line + .ap-line { border-top: 1px solid var(--x-hairline); }
+.ap-line:first-child:not(:only-child) { background: var(--x-accent-soft); border-radius: var(--r) var(--r) 0 0; }
+.ap-head { display: flex; align-items: center; gap: 0.75rem; min-height: var(--tap); }
+.ap-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ap-text strong { color: var(--x-title); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-line.is-on .ap-text .block-meta:first-of-type { color: var(--x-activity); }
+.ap-instruction { color: var(--x-secondary); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ap-switch { flex: 0 0 auto; width: 44px; height: 26px; border-radius: 13px; border: 1px solid var(--x-hairline-hi); background: var(--x-sunken); position: relative; cursor: pointer; padding: 0; }
+.ap-switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--x-meta); transition: left 0.15s ease; }
+.ap-switch.is-on { background: var(--x-accent); border-color: var(--x-accent); }
+.ap-switch.is-on::after { left: 21px; background: var(--x-on-accent); }
+.ap-switch:disabled { opacity: 0.5; cursor: default; }
+.ap-settings > summary { cursor: pointer; color: var(--x-meta); font-size: 13px; list-style: none; width: fit-content; padding: 0.25rem 0; }
+.ap-settings > summary::-webkit-details-marker { display: none; }
+.ap-settings > summary::before { content: '▸ '; }
+.ap-settings[open] > summary::before { content: '▾ '; }
+.ap-settings .composer-row { justify-content: space-between; align-items: center; }
 
 @media (min-width: 900px) {
   .app-main { padding-top: 2rem; }

@@ -177,9 +177,36 @@ export interface SupervisorRunnerOptions {
 
 const CONTEXT_MESSAGES = 40
 const TOOL_RESULT_CHARS = 60_000
+/** Longest narration line streamed as a live step. */
+const STEP_TEXT_CHARS = 400
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
+}
+
+const STEP_LABELS: Readonly<Record<string, string>> = {
+  workspace_list: 'Listing workspaces',
+  tasks_list: 'Listing tasks',
+  task_digest: 'Reading a task summary',
+  task_tail: 'Reading a task’s latest steps',
+  pending_interactions: 'Checking what tasks are waiting on',
+  answer_question: 'Answering a question',
+  answer_permission: 'Deciding a permission request',
+  task_start: 'Starting a task',
+  task_steer: 'Steering a task',
+  task_stop: 'Stopping a task',
+  agent_message: 'Messaging an agent',
+  goal_set: 'Setting a goal',
+  model_set: 'Changing a task’s model',
+  notify_user: 'Sending a notice',
+}
+
+/** A short human line for one supervisor tool call, shown live while the turn runs. */
+export function supervisorStepLabel(name: string, args: Readonly<Record<string, unknown>>): string {
+  const query = typeof args.query === 'string' ? clip(args.query.trim(), 60) : ''
+  if (name === 'tasks_search') return query === '' ? 'Searching every task' : `Searching every task for “${query}”`
+  if (name === 'task_search') return query === '' ? 'Searching a task' : `Searching a task for “${query}”`
+  return STEP_LABELS[name] ?? name.replaceAll('_', ' ')
 }
 
 function toChat(message: ThreadMessage): ChatMessage {
@@ -334,6 +361,13 @@ export class SupervisorRunner {
       else this.replyTo.set(threadId, inReplyTo)
       const tools = registry.definitions()
       let turnTokens = 0
+      // Live steps go only to the person this turn answers: tool arguments can name tasks
+      // other people in a shared thread may not read. They are not stored; the reply is.
+      const turnId = `turn-${this.clock().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      let stepSeq = 0
+      const step = (payload: Readonly<Record<string, unknown>>): void => {
+        threads.emit(threadId, 'supervisor.thread_event', { step: { turn_id: turnId, at: new Date(this.clock()).toISOString(), ...payload } }, [requester.id])
+      }
 
       for (;;) {
         if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
@@ -372,11 +406,16 @@ export class SupervisorRunner {
         }
 
         messages.push({ role: 'assistant', content: response.text, tool_calls: response.toolCalls })
+        const said = response.text.trim()
+        if (said !== '') step({ id: `${turnId}-${(stepSeq += 1)}`, kind: 'say', text: clip(said, STEP_TEXT_CHARS), state: 'done' })
         for (const call of response.toolCalls) {
           if (counts.toolCalls >= this.quotas.maxToolCallsPerTurn) {
             return this.finishWith(threadId, requester, 'tool_cap', counts, `it reached the limit of ${this.quotas.maxToolCallsPerTurn} tool calls in one turn`)
           }
           counts.toolCalls += 1
+          const stepId = `${turnId}-${(stepSeq += 1)}`
+          const label = supervisorStepLabel(call.function.name, call.function.arguments)
+          step({ id: stepId, kind: 'tool', tool: call.function.name, text: label, state: 'running' })
           let content: string
           let failed = false
           try {
@@ -386,6 +425,7 @@ export class SupervisorRunner {
             failed = true
             content = error instanceof Error ? error.message : String(error)
           }
+          step({ id: stepId, kind: 'tool', tool: call.function.name, text: label, state: failed ? 'error' : 'done' })
           messages.push({
             role: 'tool', name: call.function.name, tool_call_id: call.id,
             content: fenceUntrusted(`tool_result.${call.function.name}`, clip(content, TOOL_RESULT_CHARS)),

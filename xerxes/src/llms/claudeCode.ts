@@ -158,6 +158,8 @@ type InputBlock = (
 ) & { cache_control?: { type: 'ephemeral'; ttl: TranscriptCacheTtl } }
 
 export type TranscriptCacheTtl = '1h' | '5m'
+/** Our transcript mark: a TTL, or none at all once both TTLs were refused next to Claude Code's markers. */
+export type TranscriptCacheMark = TranscriptCacheTtl | 'none'
 
 /**
  * Mark the end of our transcript as a cache entry. Claude Code adds its own
@@ -168,10 +170,17 @@ export type TranscriptCacheTtl = '1h' | '5m'
  * our own last block is a prefix the next step extends. 1h matches the TTL
  * Claude Code usually sets on its markers; a longer TTL may not follow a
  * shorter one, so a request whose earlier markers are 5m uses 5m here too
- * (see isCacheTtlOrderRejection).
+ * (see isCacheTtlOrderRejection). `none` leaves only Claude Code's markers,
+ * which never conflict with each other.
  */
-export function withTranscriptCacheMark(blocks: readonly InputBlock[], ttl: TranscriptCacheTtl = '1h'): InputBlock[] {
+export function withTranscriptCacheMark(blocks: readonly InputBlock[], ttl: TranscriptCacheMark = '1h'): InputBlock[] {
+  if (ttl === 'none') return [...blocks]
   return blocks.map((block, index) => index === blocks.length - 1 ? { ...block, cache_control: { type: 'ephemeral', ttl } } : block)
+}
+
+/** The next mark to try after the API refused the TTL order: 1h, then 5m, then none. */
+export function nextTranscriptCacheMark(mark: TranscriptCacheMark): TranscriptCacheMark | undefined {
+  return mark === '1h' ? '5m' : mark === '5m' ? 'none' : undefined
 }
 
 /**
@@ -1072,10 +1081,13 @@ export class ClaudeCodeClient implements LlmClient {
         }
         return
       } catch (error) {
-        // A 400 before any reply: Claude Code's own markers are 5m on this
-        // request, so ours must be too. Kept for this client's later steps.
-        if (isCacheTtlOrderRejection(error) && this.transcriptCacheTtl === '1h' && !signal?.aborted) {
-          this.transcriptCacheTtl = '5m'
+        // A 400 before any reply: our mark disagrees with Claude Code's own
+        // markers on this request. Try 5m, then no mark of ours at all (on
+        // alham the 5m retry was refused too, with a 1h block after it, and
+        // the step failed). Kept for this client's later steps.
+        const next = isCacheTtlOrderRejection(error) && !signal?.aborted ? nextTranscriptCacheMark(this.transcriptCacheTtl) : undefined
+        if (next !== undefined) {
+          this.transcriptCacheTtl = next
           attempt -= 1
           continue
         }
@@ -1092,8 +1104,8 @@ export class ClaudeCodeClient implements LlmClient {
 
   /** Native tool calls through the MCP declaration; false once Claude Code could not reach it. */
   private nativeTools = true
-  /** TTL of the transcript cache mark; 5m once the API refused 1h after Claude Code's 5m markers. */
-  private transcriptCacheTtl: TranscriptCacheTtl = '1h'
+  /** Our transcript cache mark; stepped down (1h, 5m, none) each time the API refuses the TTL order. */
+  private transcriptCacheTtl: TranscriptCacheMark = '1h'
 
   private async *attempt(request: CompletionRequest, signal: AbortSignal | undefined, correction: string | undefined): AsyncIterable<LlmDelta> {
     signal?.throwIfAborted()

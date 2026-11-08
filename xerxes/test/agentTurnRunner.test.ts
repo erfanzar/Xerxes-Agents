@@ -106,13 +106,15 @@ test('compaction is handed the turn\'s own session, so it reaches the provider t
 test('a model whose output ceiling is half its window is not compacted at 40% full, and its reply is fitted to the room left', async () => {
   // Mistral Large 4 reports a 524,288 window and a 262,144 output ceiling.
   // Reserving that whole ceiling put the 80% trigger at 209,715 tokens, so a
-  // session at 211K (40% of the window) compacted every round.
+  // session at 211K (40% of the window) compacted every round. The threshold
+  // is pinned at 80% here: this test is about the reply's room at 70% full,
+  // not about the default (60%), which would compact that turn first.
   const window = 524_288
   const ceiling = 262_144
   const requested: (number | undefined)[] = []
   let reductions = 0
   const runner = new AgentTurnRunner({
-    model: 'mistral-large-4', contextLimit: window, maxOutputTokens: () => ceiling,
+    model: 'mistral-large-4', contextLimit: window, maxOutputTokens: () => ceiling, autoCompactThreshold: () => 0.8,
     llm: { async *stream(request: CompletionRequest) { requested.push(request.maxTokens); yield { content: 'done' } } },
     reduceContext: async messages => { reductions += 1; return { messages, tokensFreed: 0 } },
   })

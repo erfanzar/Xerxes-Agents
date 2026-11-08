@@ -237,7 +237,9 @@ describe('Xerxes tab', () => {
     expect(html).toContain('>Confirm<')
     expect(html).toContain('>Cancel<')
     expect(html).toContain('Nothing runs until you confirm')
-    expect(html).toContain('Confirmed.')
+    // A settled card is a one-line event in the timeline, not a card below it.
+    expect(html).toContain('Confirmed: task.steer: Steer task C')
+    expect(html).not.toContain('XERXES proposes: task.steer')
   })
 
   it('hides the talk button without a voice control and shows it with one', () => {

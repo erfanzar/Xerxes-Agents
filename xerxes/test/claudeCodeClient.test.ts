@@ -361,12 +361,30 @@ test('a 1h-after-5m cache_control 400 retries the step with a 5m mark and keeps 
   expect(ttls()).toEqual(['1h', '5m'])
   await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'again' }] }))
   expect(ttls()).toEqual(['1h', '5m', '5m'])
-  // A request still refused with a 5m mark is not retried forever.
+  // Still refused with 5m (Claude Code's 1h marker follows ours): drop our mark, then give up.
   const always = fakeLauncher([result({ is_error: true, result: rejection, api_error_status: 400 })])
-  const stuck = new ClaudeCodeClient({ executable: '/bin/claude', launch: always.launch, workingDirectory: '/tmp', environment: { PATH: '/bin' } })
+  const stuckInputs: string[] = []
+  const stuck = new ClaudeCodeClient({ executable: '/bin/claude', launch: (argv, spawn) => { stuckInputs.push(spawn.input); return always.launch(argv, spawn) }, workingDirectory: '/tmp', environment: { PATH: '/bin' } })
   const failure = await collect(stuck.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] })).catch((error: unknown) => error)
   expect(failure).toBeInstanceOf(ProviderError)
-  expect(always.calls).toHaveLength(2)
+  expect(always.calls).toHaveLength(3)
+  expect(stuckInputs.map(input => (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).at(-1)?.cache_control?.ttl)).toEqual(['1h', '5m', undefined])
+})
+
+test('a 5m mark still refused falls back to no mark of ours, and the step succeeds', async () => {
+  const rejection = "API Error: 400 messages.1.content.0.cache_control.ttl: a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block. Note that blocks are processed in the following order: `tools`, `system`, `messages`."
+  const refused = fakeLauncher([result({ is_error: true, result: rejection, api_error_status: 400 })])
+  const working = fakeLauncher([textDelta('Done.'), result()])
+  const inputs: string[] = []
+  let launches = 0
+  const launch: ClaudeCodeLauncher = (argv, spawn) => {
+    inputs.push(spawn.input)
+    return (launches++ < 2 ? refused : working).launch(argv, spawn)
+  }
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp', environment: { PATH: '/bin' } })
+  expect((await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] }))).text).toBe('Done.')
+  const marks = inputs.map(input => (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).every(block => block.cache_control === undefined) ? 'none' : (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).at(-1)?.cache_control?.ttl)
+  expect(marks).toEqual(['1h', '5m', 'none'])
 })
 
 test('only the last transcript block carries the cache mark, so each step extends the previous entry', () => {

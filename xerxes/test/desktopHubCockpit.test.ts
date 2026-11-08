@@ -164,8 +164,8 @@ function rig(script: (args: readonly string[]) => CliOutcome, http?: HubHttp, in
   const storage: HubCockpitStorage = {
     loadSettings: () => stored.settings,
     saveSettings: value => { stored.settings = value },
-    loadSession: () => stored.session,
-    saveSession: text => { stored.session = text },
+    loadSession: async () => stored.session,
+    saveSession: async text => { stored.session = text },
   }
   const runner: CliRunner = {
     async run(args, options) {
@@ -217,6 +217,47 @@ const standard = (args: readonly string[]): CliOutcome => {
 async function call(cockpit: HubCockpit, action: unknown, params: unknown = {}, sender = 1): Promise<Record<string, unknown>> {
   return (await cockpit.handle(action, params, sender)) as unknown as Record<string, unknown>
 }
+
+test('a keychain read that never answers cannot block launch or Hub actions, and a saved session still restores', async () => {
+  const base = {
+    runner: { async run() { return done({}) } } satisfies CliRunner,
+    http: (async () => ({ status: 401, setCookies: [], body: '{}' })) satisfies HubHttp,
+    connect: () => ({ send() {}, close() {} }),
+    emit: () => {},
+    now: () => 1_000_000,
+  }
+  let loads = 0
+  // Constructing the cockpit returns at once even though the keychain never answers.
+  const stuck = createHubCockpit({
+    ...base,
+    restoreWaitMs: 20,
+    storage: {
+      loadSettings: () => saved,
+      saveSettings: () => {},
+      loadSession: () => { loads += 1; return new Promise<string | undefined>(() => {}) },
+      saveSession: async () => {},
+    },
+  })
+  const started = Date.now()
+  expect((await call(stuck, 'status')).status).toMatchObject({ target: TARGET, hasSession: false })
+  expect(Date.now() - started).toBeLessThan(2_000)
+  expect(loads).toBe(1)
+  stuck.dispose()
+
+  const jar = new CookieJar()
+  jar.store('__Host-xerxes_refresh=refresh-token-1; Max-Age=86400; Path=/; Secure; HttpOnly', 1_000_000)
+  const restored = createHubCockpit({
+    ...base,
+    storage: {
+      loadSettings: () => saved,
+      saveSettings: () => {},
+      loadSession: async () => jar.serialize(1_000_000),
+      saveSession: async () => {},
+    },
+  })
+  expect((await call(restored, 'status')).status).toMatchObject({ hasSession: true })
+  restored.dispose()
+})
 
 test('IPC input: unknown actions, non-object params, extra fields and bad targets never reach the CLI', async () => {
   const { cockpit, runs } = rig(standard)

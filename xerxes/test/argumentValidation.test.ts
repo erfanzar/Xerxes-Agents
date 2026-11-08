@@ -93,6 +93,28 @@ test('declared-type coercion repairs exactly the literal provider forms and noth
   expect(coerceDeclared('1', 'unknown-type')).toBe('1')
 })
 
+test('a JSON-encoded array or object string is decoded only into its declared container', () => {
+  expect(coerceDeclared('["-c", "echo \\"hi\\""]', 'array')).toEqual(['-c', 'echo "hi"'])
+  expect(coerceDeclared('  ["a"]  ', 'array')).toEqual(['a'])
+  expect(coerceDeclared('{"a": 1}', 'object')).toEqual({ a: 1 })
+  // Wrong container, not JSON, or a scalar: left as the string, so the type check still rejects it.
+  for (const rejected of ['{"a":1}', '[1,', 'a,b', '1', '"[1]"', 'null', '']) {
+    expect(coerceDeclared(rejected, 'array')).toBe(rejected)
+  }
+  for (const rejected of ['[1]', '{', 'null', 'x']) {
+    expect(coerceDeclared(rejected, 'object')).toBe(rejected)
+  }
+  const schema = {
+    type: 'object', additionalProperties: false, required: ['cmd'],
+    properties: { cmd: { type: 'string' }, args: { type: 'array', items: { type: 'string' } } },
+  } as const
+  const decoded = validateToolArguments('exec_command', { cmd: '/bin/bash', args: '["-c", "ls"]' }, schema)
+  expect(decoded).toMatchObject({ ok: true, coerced: { cmd: '/bin/bash', args: ['-c', 'ls'] } })
+  // Element checks still apply to the decoded array.
+  expect(validateToolArguments('exec_command', { cmd: 'x', args: '[1]' }, schema).error).toContain("parameter 'args[0]' expected string, got number")
+  expect(validateToolArguments('exec_command', { cmd: 'x', args: 'ls -la' }, schema).error).toContain("parameter 'args' expected array, got string")
+})
+
 test('validation coerces declared literals in place and still rejects the near-miss spellings', () => {
   const repaired = validateToolArguments('Edit', {
     offset: '0',

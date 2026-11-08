@@ -43,10 +43,13 @@ export interface HubCockpitStorage {
   loadSettings(): StoredHub | undefined
   /** `undefined` forgets the Hub. Throws when it cannot be written. */
   saveSettings(value: StoredHub | undefined): void
-  /** The serialized cookie jar, when the platform can keep it encrypted. */
-  loadSession(): string | undefined
-  saveSession(text: string | undefined): void
+  /** The serialized cookie jar, when the platform can keep it encrypted. Can wait on the OS keychain. */
+  loadSession(): Promise<string | undefined>
+  saveSession(text: string | undefined): Promise<void>
 }
+
+/** How long a Hub action waits for the saved session before going on without it. */
+export const SESSION_RESTORE_WAIT_MS = 5_000
 
 export interface HubCockpitDeps {
   readonly runner: CliRunner
@@ -56,6 +59,8 @@ export interface HubCockpitDeps {
   readonly emit: (senderId: number, channel: string, payload: unknown) => void
   readonly now?: () => number
   readonly log?: (message: string) => void
+  /** Bound on waiting for the saved session; defaults to SESSION_RESTORE_WAIT_MS. */
+  readonly restoreWaitMs?: number
 }
 
 export interface HubCockpit {
@@ -128,19 +133,39 @@ export function createHubCockpit(deps: HubCockpitDeps): HubCockpit {
 
   try {
     settings = deps.storage.loadSettings()
-    const session = deps.storage.loadSession()
-    if (session !== undefined) jar.restore(session, now())
   } catch (error) {
     deps.log?.(`Hub settings could not be read: ${error instanceof Error ? error.message : String(error)}`)
   }
 
-  const persistSession = (): void => {
+  // The saved session opens through the OS keychain, which can wait on a
+  // permission prompt for as long as nobody answers it. That never happens on
+  // the launch path: Hub actions wait a bounded time for it, and a session
+  // that arrives after this run already changed its own is dropped.
+  let sessionChanged = false
+  let restoreTimer: ReturnType<typeof setTimeout> | undefined
+  const restored = (async () => {
     try {
-      deps.storage.saveSession(jar.serialize(now()))
+      const session = await deps.storage.loadSession()
+      if (session !== undefined && !sessionChanged) jar.restore(session, now())
     } catch (error) {
+      deps.log?.(`Hub session could not be read: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })()
+  const sessionReady = Promise.race([
+    restored,
+    new Promise<void>(resolve => { restoreTimer = setTimeout(resolve, deps.restoreWaitMs ?? SESSION_RESTORE_WAIT_MS) }),
+  ])
+  void restored.then(() => clearTimeout(restoreTimer))
+
+  // Writes are queued so an older jar can never land after a newer one.
+  let saving: Promise<void> = Promise.resolve()
+  const persistSession = (): void => {
+    sessionChanged = true
+    const text = jar.serialize(now())
+    saving = saving.then(() => deps.storage.saveSession(text)).catch(error => {
       // The session still works for this run; it just will not survive a restart.
       deps.log?.(`Hub session could not be kept: ${error instanceof Error ? error.message : String(error)}`)
-    }
+    })
   }
 
   const statusOf = (): CockpitStatus => ({
@@ -502,6 +527,7 @@ export function createHubCockpit(deps: HubCockpitDeps): HubCockpit {
     async handle(action, params, senderId) {
       if (!isCockpitActionName(action)) return fail('invalid_input', 'Unknown Hub action.')
       if (!Number.isInteger(senderId)) return fail('invalid_input', 'Unknown caller.')
+      await sessionReady
       switch (action) {
         case 'status': {
           const checked = paramsOf(params, [])
@@ -527,6 +553,7 @@ export function createHubCockpit(deps: HubCockpitDeps): HubCockpit {
       }
     },
     dispose() {
+      clearTimeout(restoreTimer)
       closeAllSockets()
       sockets.clear()
     },

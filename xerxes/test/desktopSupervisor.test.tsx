@@ -83,7 +83,8 @@ test('the old env-var instructions are gone; an old Hub gets a plain update noti
 
 test('the header shows the model chip with model and effort, and a Model button', () => {
   const html = view(ready())
-  expect(html).toMatch(/class="supervisor__model"[^>]*>model-a · high</)
+  expect(html).toContain('title="Model: model-a · high"')
+  expect(html).toContain('<span class="xpill__value">model-a · high</span>')
   expect(html).toContain('>Model<')
   expect(html).toContain('aria-expanded="false"')
   expect(html).not.toContain('aria-label="XERXES model" aria-busy')
@@ -125,6 +126,12 @@ test('a XERXES reply is never a scroll box inside the conversation', async () =>
   expect(css).toContain('.supervisor__message--xerxes .md{max-height:none;overflow:visible;padding:0}')
 })
 
+test('the XERXES toolbar adapts to its content width with sidebars open', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  expect(css).toContain('.supervisor{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden;container-type:inline-size}')
+  expect(css).toContain('@container (max-width:980px){.xpill__value{display:none}.supervisor__hub{max-width:28px}.supervisor__hubname{display:none}}')
+})
+
 test('XERXES replies render as Markdown and the page uses the task composer, not raw text in boxes', () => {
   const state = ready({
     supervisor: {
@@ -160,16 +167,19 @@ test('the chooser lists machine, profile, model and effort from the options, and
   const html = view(state, { chooserOpen: true })
   expect(html).toContain('aria-expanded="true"')
   expect(html).toContain('>Close<')
-  expect(html).toContain('Mac')
-  expect(html).toContain('Work · anthropic')
-  expect(html).toContain('Model B')
-  expect(html).toContain('high — think harder')
-  expect(html).toContain('Provider default (low)')
+  // Pickable lists and chips, never native dropdowns.
+  expect(html).not.toContain('<select')
+  expect(html).toContain('>Mac<')
+  expect(html).toContain('<span class="xlist__label">Work</span><span class="xlist__hint">anthropic</span>')
+  expect(html).toContain('>Model B<')
+  expect(html).toMatch(/role="radio" aria-checked="true" class="xlist__row is-on"[^>]*>[\s\S]*?>Model A</)
+  expect(html).toContain('title="think harder"')
+  expect(html).toContain('>Default (low)<')
   expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Save</)
   // A non-owner sees the choice read-only.
   const readOnly = view({ ...state, supervisorConfig: { ...state.supervisorConfig, canEdit: false } }, { chooserOpen: true })
   expect(readOnly).toContain('Only the Hub owner can change')
-  expect(readOnly).toMatch(/<select[^>]*disabled=""/)
+  expect(readOnly).toMatch(/<button type="button" role="radio"[^>]*disabled=""/)
   expect(readOnly).toMatch(/<button[^>]*disabled=""[^>]*>Save</)
 })
 

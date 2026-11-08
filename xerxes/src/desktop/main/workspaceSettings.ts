@@ -37,6 +37,16 @@ export function loadDesktopWorkspaces(file: string): string[] {
   return [...new Set(paths.filter((path): path is string => typeof path === 'string' && isAbsolute(path) && !/[\x00-\x1f]/.test(path)))]
 }
 
+/**
+ * The saved folders that exist on this computer: the sidebar's "This Mac"
+ * sections. A server path (`/home/…`) that reached the list showed as an
+ * empty "This Mac · prismcore" beside the real one. The file keeps every
+ * entry, so a folder on an unplugged disk comes back with the disk.
+ */
+export function localDesktopWorkspaces(file: string, exists: (path: string) => boolean = existsSync): string[] {
+  return loadDesktopWorkspaces(file).filter(path => exists(path))
+}
+
 export function saveDesktopWorkspace(file: string, directory: string): void {
   if (!isAbsolute(directory) || /[\0\r\n]/.test(directory)) throw new Error('Choose an absolute workspace folder')
   // A file we cannot parse is not an empty file: merging into it would silently

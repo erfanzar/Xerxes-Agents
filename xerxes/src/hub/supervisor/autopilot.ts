@@ -53,6 +53,24 @@ export function autopilotCheckInFromEnvironment(environment: Record<string, stri
 
 // ── settings ─────────────────────────────────────────────────────────
 
+/**
+ * What Autopilot may do. `auto`: wake-up turns act without a Confirm tap. `observe`
+ * (watch only): wake-up turns still run, but every action becomes a Confirm card and an
+ * answer is only recorded, so the owner sees what it would have done before trusting it.
+ */
+export type AutopilotMode = 'auto' | 'observe'
+
+function rowMode(value: unknown): AutopilotMode {
+  return value === 'observe' ? 'observe' : 'auto'
+}
+
+/**
+ * The Hub-wide row: while it is active, Autopilot applies to every workspace, including
+ * ones linked later. A workspace's own active row still wins (its instruction and mode).
+ */
+export const AUTOPILOT_ALL_WORKSPACES = '*'
+export const AUTOPILOT_ALL_LABEL = 'All workspaces'
+
 interface AutopilotRow {
   workspace_id: string
   enabled: number
@@ -61,6 +79,7 @@ interface AutopilotRow {
   enabled_by_id: string | null
   enabled_by_name: string | null
   updated_at: number
+  mode: string
 }
 
 /** Autopilot as it applies right now to one workspace. */
@@ -69,6 +88,7 @@ export interface AutopilotActive {
   readonly ownerId: string
   readonly ownerName: string
   readonly instruction: string
+  readonly mode: AutopilotMode
 }
 
 export type AutopilotChangeReason = 'set' | 'expired' | 'owner_lost'
@@ -112,9 +132,14 @@ export class AutopilotSettings {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hub_supervisor_autopilot (
         workspace_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, instruction TEXT NOT NULL, expires_at INTEGER,
-        enabled_by_id TEXT, enabled_by_name TEXT, updated_at INTEGER NOT NULL
+        enabled_by_id TEXT, enabled_by_name TEXT, updated_at INTEGER NOT NULL, mode TEXT NOT NULL DEFAULT 'auto'
       );
     `)
+    // Databases from before watch-only mode have no `mode` column; their rows keep acting (`auto`).
+    const columns = this.db.query<{ name: string }, []>('PRAGMA table_info(hub_supervisor_autopilot)').all()
+    if (!columns.some(column => column.name === 'mode')) {
+      this.db.exec("ALTER TABLE hub_supervisor_autopilot ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto'")
+    }
     this.handlers = {
       'supervisor.autopilot.get': ctx => this.getHandler(ctx.context, ctx.grants),
       'supervisor.autopilot.set': (ctx, params) => this.setHandler(ctx.context, params),
@@ -142,12 +167,22 @@ export class AutopilotSettings {
     return this.ownerNow(row.enabled_by_id)
   }
 
+  /** The row that makes Autopilot apply to this workspace now: its own, else the all-workspaces row. */
+  private effective(workspaceId: string): (AutopilotRow & { enabled_by_id: string }) | undefined {
+    const own = this.load(workspaceId)
+    if (this.isActive(own)) return own
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return undefined
+    const all = this.load(AUTOPILOT_ALL_WORKSPACES)
+    return this.isActive(all) ? all : undefined
+  }
+
   /** Autopilot for this workspace if it applies right now. */
   active(workspaceId: string): AutopilotActive | undefined {
-    const row = this.load(workspaceId)
-    if (!this.isActive(row)) return undefined
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return undefined
+    const row = this.effective(workspaceId)
+    if (row === undefined) return undefined
     if (!this.options.workspaces.list().some(workspace => workspace.id === workspaceId)) return undefined
-    return { workspaceId, ownerId: row.enabled_by_id, ownerName: row.enabled_by_name ?? row.enabled_by_id, instruction: row.instruction }
+    return { workspaceId, ownerId: row.enabled_by_id, ownerName: row.enabled_by_name ?? row.enabled_by_id, instruction: row.instruction, mode: rowMode(row.mode) }
   }
 
   /** Every workspace where Autopilot applies right now. */
@@ -161,8 +196,12 @@ export class AutopilotSettings {
   /** The wire row of the contract. */
   wire(workspaceId: string, label: string): Record<string, unknown> {
     const row = this.load(workspaceId)
+    const own = this.isActive(row)
+    // On only because All workspaces is on: `via_all` says so (additive; omitted otherwise).
+    const viaAll = !own && workspaceId !== AUTOPILOT_ALL_WORKSPACES && this.isActive(this.load(AUTOPILOT_ALL_WORKSPACES))
+    const tail = viaAll ? { via_all: true } : {}
     if (row === undefined) {
-      return { workspace_id: workspaceId, label, enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: false }
+      return { workspace_id: workspaceId, label, enabled: false, instruction: '', expires_at: null, enabled_by: null, updated_at: null, active: viaAll, mode: 'auto', ...tail }
     }
     return {
       workspace_id: workspaceId,
@@ -172,11 +211,14 @@ export class AutopilotSettings {
       expires_at: iso(row.expires_at),
       enabled_by: row.enabled_by_id === null ? null : { id: row.enabled_by_id, name: row.enabled_by_name ?? row.enabled_by_id },
       updated_at: iso(row.updated_at),
-      active: this.isActive(row),
+      active: own || viaAll,
+      mode: rowMode(row.mode),
+      ...tail,
     }
   }
 
   private label(workspaceId: string): string | undefined {
+    if (workspaceId === AUTOPILOT_ALL_WORKSPACES) return AUTOPILOT_ALL_LABEL
     return this.options.workspaces.list().find(workspace => workspace.id === workspaceId)?.label
   }
 
@@ -185,6 +227,10 @@ export class AutopilotSettings {
     const row = this.wire(workspaceId, label)
     try {
       this.options.broadcast?.(workspaceId, { workspace: row })
+      // All workspaces changed every workspace's verdict: send each its row too.
+      if (workspaceId === AUTOPILOT_ALL_WORKSPACES) {
+        for (const workspace of this.options.workspaces.list()) this.options.broadcast?.(workspace.id, { workspace: this.wire(workspace.id, workspace.label) })
+      }
     } catch (error) {
       this.options.onError?.(error, 'autopilot broadcast')
     }
@@ -233,13 +279,13 @@ export class AutopilotSettings {
     const workspaces = this.options.workspaces.list()
       .filter(workspace => canSeeWorkspace(principal, grants, workspace.id, now))
       .map(workspace => this.wire(workspace.id, workspace.label))
-    return { can_edit: principal.hubOwner, workspaces }
+    return { can_edit: principal.hubOwner, workspaces, all: this.wire(AUTOPILOT_ALL_WORKSPACES, AUTOPILOT_ALL_LABEL) }
   }
 
   private async setHandler(context: AuthenticatedContext, params: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
     const hash = createHash('sha256').update(canonicalJson({
       workspace_id: params.workspace_id ?? null, enabled: params.enabled ?? null,
-      instruction: params.instruction ?? null, expires_at: params.expires_at ?? null,
+      instruction: params.instruction ?? null, expires_at: params.expires_at ?? null, mode: params.mode ?? null,
     })).digest('hex')
     const record = (decision: 'allowed' | 'denied', outcome: HubAuditInput['outcome'], workspaceId?: string): HubAuditInput => ({
       actor: context.actor, action: 'supervisor.autopilot.set', ...(workspaceId === undefined ? {} : { workspaceId }), requestHash: hash, decision, outcome,
@@ -250,11 +296,17 @@ export class AutopilotSettings {
       await this.options.audit(record('denied', 'rejected')).catch(error => this.options.onError?.(error, 'audit autopilot denial'))
       throw new HubProtocolError('forbidden', 'only the Hub owner can change Autopilot')
     }
-    exactKeys(params, ['workspace_id', 'enabled', 'instruction', 'expires_at'])
+    exactKeys(params, ['workspace_id', 'enabled', 'instruction', 'expires_at', 'mode'])
     const workspaceId = readId(params.workspace_id, 'workspace_id')
     if (typeof params.enabled !== 'boolean') throw new HubProtocolError('invalid_request', 'enabled must be true or false')
     const enabled = params.enabled
     const existing = this.load(workspaceId)
+    // Omitted keeps the stored mode; a new row acts (`auto`), as before watch-only mode existed.
+    let mode: AutopilotMode = existing === undefined ? 'auto' : rowMode(existing.mode)
+    if (params.mode !== undefined) {
+      if (params.mode !== 'auto' && params.mode !== 'observe') throw new HubProtocolError('invalid_request', 'mode must be auto or observe')
+      mode = params.mode
+    }
     let instruction = existing?.instruction ?? ''
     if (params.instruction !== undefined) {
       if (typeof params.instruction !== 'string' || [...params.instruction].length > AUTOPILOT_MAX_INSTRUCTION_CHARS
@@ -286,10 +338,11 @@ export class AutopilotSettings {
       this.options.onError?.(error, 'audit autopilot')
       throw new HubProtocolError('unavailable', 'the audit log is unavailable; Autopilot was not changed')
     }
-    this.db.query(`INSERT INTO hub_supervisor_autopilot (workspace_id, enabled, instruction, expires_at, enabled_by_id, enabled_by_name, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(workspace_id) DO UPDATE SET enabled = excluded.enabled, instruction = excluded.instruction,
-        expires_at = excluded.expires_at, enabled_by_id = excluded.enabled_by_id, enabled_by_name = excluded.enabled_by_name, updated_at = excluded.updated_at`)
-      .run(workspaceId, enabled ? 1 : 0, instruction, expiresAt, principal.id, principal.displayName, now)
+    this.db.query(`INSERT INTO hub_supervisor_autopilot (workspace_id, enabled, instruction, expires_at, enabled_by_id, enabled_by_name, updated_at, mode)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(workspace_id) DO UPDATE SET enabled = excluded.enabled, instruction = excluded.instruction,
+        expires_at = excluded.expires_at, enabled_by_id = excluded.enabled_by_id, enabled_by_name = excluded.enabled_by_name, updated_at = excluded.updated_at,
+        mode = excluded.mode`)
+      .run(workspaceId, enabled ? 1 : 0, instruction, expiresAt, principal.id, principal.displayName, now, mode)
     await this.options.audit(record('allowed', 'accepted', workspaceId)).catch(error => this.options.onError?.(error, 'audit autopilot outcome'))
     this.changed(workspaceId, 'set', principal)
     return { workspace: this.wire(workspaceId, label) }
@@ -736,6 +789,7 @@ export class AutopilotWaker {
       text: autopilotTriggerText({
         reason, workspaceId, label: this.label(workspaceId), sessionId, title: rawTitle, ownerName: owner.displayName,
         instruction: active.instruction, ...(options.otherTasks === undefined ? {} : { otherTasks: options.otherTasks }),
+        ...(active.mode === 'observe' ? { observe: true } : {}),
       }),
     }
     this.options.enqueue({ threadId, requester: owner, trigger }).catch(error => this.options.onError?.(error, 'autopilot turn'))
@@ -753,10 +807,14 @@ export function autopilotTriggerText(input: {
   readonly ownerName: string
   readonly instruction: string
   readonly otherTasks?: readonly string[]
+  /** Watch-only mode: nothing runs; actions become Confirm cards and answers are only recorded. */
+  readonly observe?: boolean
 }): string {
   const lines = [
     `Autopilot: the Hub woke you for ${REASON_TEXT[input.reason]}. This message comes from the Hub, not from a task.`,
-    `You act for ${input.ownerName}, the Hub owner. In this wake-up everything you do runs immediately, without a Confirm tap, on this task or any other: steer, stop, message agents, start tasks, set goals, change models, answer questions and decide permission requests.`,
+    input.observe === true
+      ? `You act for ${input.ownerName}, the Hub owner, in WATCH-ONLY mode. Nothing you do here runs: each action becomes a Confirm card the owner can approve, and an answer to a question or permission request is only recorded as what you would have answered. Propose only what you would really do, so the owner can judge whether to let you act.`
+      : `You act for ${input.ownerName}, the Hub owner. In this wake-up everything you do runs immediately, without a Confirm tap, on this task or any other: steer, stop, message agents, start tasks, set goals, change models, answer questions and decide permission requests.`,
     `Workspace id: ${promptId(input.workspaceId)}. Task id: ${promptId(input.sessionId)}.`,
     `Workspace label:\n${fenceUntrusted('workspace_label', clipTitle(input.label, 80))}`,
     `Task title:\n${fenceUntrusted('task_title', clipTitle(input.title, 200))}`,

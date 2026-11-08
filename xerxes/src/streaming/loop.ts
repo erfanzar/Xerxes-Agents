@@ -99,6 +99,13 @@ export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
 const MIN_THROUGHPUT_SAMPLE_MS = 100
 /** Defensive ceiling for corrupted or batch-derived throughput samples. */
 const MAX_THROUGHPUT_TOKENS_PER_SECOND = 100_000
+// A decoded token is at least about two bytes of UTF-8 (CJK runs near three,
+// English near four). Output tokens well past what streamed inside the
+// measured interval were produced outside it — thinking a provider counts
+// but never sends (Claude Code) — so a rate over the interval would be made up.
+const MIN_STREAMED_BYTES_PER_TOKEN = 2
+const THROUGHPUT_TOKEN_SLACK = 16
+const utf8 = new TextEncoder()
 /**
  * Consecutive rounds in which the model requests only unconfigured tools
  * before the turn stops with an explicit error. Without a cap that pattern
@@ -734,6 +741,7 @@ export async function* runTurn(
       let roundStartedAt = 0
       let roundFirstOutputAt: number | undefined
       let roundFirstStreamTokenAt: number | undefined
+      let roundStreamedBytes = 0
       let roundCompletedAt = 0
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
@@ -780,6 +788,7 @@ export async function* runTurn(
           roundStartedAt = now()
           roundFirstOutputAt = undefined
           roundFirstStreamTokenAt = undefined
+          roundStreamedBytes = 0
           roundCompletedAt = 0
           const promptTokens = roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools)
           yield { type: 'provider_wait', active: true, promptTokens }
@@ -802,6 +811,7 @@ export async function* runTurn(
             )) {
               attemptStreamed = true
               const hasStreamToken = Boolean(delta.content || delta.thinking)
+              roundStreamedBytes += streamedBytesOf(delta)
               if (awaitingOutput && hasModelOutput(delta)) {
                 awaitingOutput = false
                 yield { type: 'provider_wait', active: false }
@@ -1127,6 +1137,7 @@ export async function* runTurn(
           : Math.max(0, roundCompletedAt - roundFirstStreamTokenAt)
         const decodedTokens = Math.max(0, lastUsage.outputTokens - (lastUsage.reasoningTokens ?? 0))
         const measuredTokensPerSecond = decodeMilliseconds >= MIN_THROUGHPUT_SAMPLE_MS && decodedTokens > 0
+          && decodedTokens <= roundStreamedBytes / MIN_STREAMED_BYTES_PER_TOKEN + THROUGHPUT_TOKEN_SLACK
           ? decodedTokens * 1_000 / decodeMilliseconds
           : undefined
         const tokensPerSecond = measuredTokensPerSecond !== undefined
@@ -2065,6 +2076,15 @@ function partitionToolCalls(
 
 function hasModelOutput(delta: LlmDelta): boolean {
   return Boolean(delta.content || delta.thinking || delta.toolCalls?.length)
+}
+
+/** UTF-8 bytes of the model output a delta carries: text, thinking and tool calls. */
+function streamedBytesOf(delta: LlmDelta): number {
+  let bytes = 0
+  if (delta.content) bytes += utf8.encode(delta.content).byteLength
+  if (delta.thinking) bytes += utf8.encode(delta.thinking).byteLength
+  for (const call of delta.toolCalls ?? []) bytes += utf8.encode(call.function.name + JSON.stringify(call.function.arguments)).byteLength
+  return bytes
 }
 
 function processDelta(

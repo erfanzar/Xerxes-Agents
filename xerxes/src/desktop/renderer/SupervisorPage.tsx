@@ -4,7 +4,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import type { ConnectionStatus } from '../../client/bridge.js'
-import { relativeTime } from '../../client/format.js'
 import { HubConnection } from '../../client/hubConnection.js'
 import { AUTOPILOT_COMPOSER_HINT, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput, type WatchInput } from '../../client/hubController.js'
@@ -17,8 +16,12 @@ import { AutopilotThreadView } from './AutopilotThreadView.js'
 import { WatchPanel, WatchStrip } from './WatchPanel.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
-import { Markdown } from './markdown.js'
 import { ModelChooser } from './ModelChooser.js'
+import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
+import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
+import { isOpenCard } from '../../client/supervisorRecords.js'
+import { useTranscriptScroll } from './transcriptScroll.js'
+import { liveSteps } from '../../client/supervisorSteps.js'
 import {
   HUB_CHANGED_EVENT, cockpitCall, cockpitEnsureSession, createCockpitSockets, windowCockpitApi,
   type CockpitApi,
@@ -54,6 +57,38 @@ function useNow(intervalMs = 30_000): number {
     return () => clearInterval(timer)
   }, [intervalMs])
   return now
+}
+
+const DEFAULT_COMPOSER_HINT = 'XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.'
+
+/** One-tap starting questions in the empty conversation. */
+const SUGGESTIONS: readonly string[] = ['What needs me right now?', 'What is every task doing?', 'Did anything fail today?']
+
+type PillTone = 'on' | 'off' | 'warn'
+
+/** A header control: its name and live state; opens the controls dialog on its tab. */
+function ControlPill({ name, value, tone, expanded, onClick }: {
+  readonly name: string
+  readonly value: string
+  readonly tone: PillTone
+  readonly expanded: boolean
+  readonly onClick: () => void
+}): ReactElement {
+  return (
+    <button type="button" className="xpill" data-tone={tone} aria-haspopup="dialog" aria-expanded={expanded} title={`${name}: ${value}`} onClick={onClick}>
+      <span className="xpill__dot" aria-hidden="true" />
+      <span className="xpill__name">{name}</span>
+      <span className="xpill__value">{value}</span>
+    </button>
+  )
+}
+
+function modelTone(config: SupervisorConfigState): PillTone {
+  switch (config.status) {
+    case 'configured': return 'on'
+    case 'unknown': return config.phase === 'error' ? 'warn' : 'off'
+    default: return 'warn'
+  }
 }
 
 /** The text of the model chip in the tab header. */
@@ -151,7 +186,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const supervisor = state.supervisor
   const config = state.supervisorConfig
   const autopilot = state.autopilot
-  const autopilotChip = autopilotChipText(activeAutopilotRows(state))
+  const autopilotChip = autopilotChipText(activeAutopilotRows(state), state.autopilot.all)
   const autopilotAvailable = props.onAutopilotChange !== undefined && !autopilot.unsupported
   const showAutopilot = autopilotAvailable && props.autopilotOpen === true && supervisor.phase !== 'unsupported'
   const threadAvailable = props.onAutopilotThreadChange !== undefined && autopilotThreadAvailable(state)
@@ -166,7 +201,28 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
   const unconfigured = config.status === 'unconfigured'
-  const showChooser = (props.chooserOpen || unconfigured) && supervisor.phase !== 'unsupported'
+  // An unconfigured XERXES keeps its chooser in the page; everything else opens the controls dialog.
+  const inlineChooser = unconfigured && supervisor.phase !== 'unsupported'
+  const controlsTab: ControlsTab | undefined = showAutopilot ? 'autopilot' : showWatch ? 'watch'
+    : props.chooserOpen && !inlineChooser && supervisor.phase !== 'unsupported' ? 'model' : undefined
+  const controlTabs: ControlsTabEntry[] = [
+    ...(autopilotAvailable ? [{ id: 'autopilot' as const, label: 'Autopilot', hint: autopilotChip?.replace(/^Autopilot /, '') ?? 'Off' }] : []),
+    ...(watchAvailable ? [{ id: 'watch' as const, label: 'Watch', hint: watchChip ?? 'Nothing watched' }] : []),
+    { id: 'model', label: 'Model', hint: modelChipText(config) },
+  ]
+  const openTab = (tab: ControlsTab): void => {
+    if (tab !== 'autopilot' && props.autopilotOpen) props.onAutopilotChange?.(false)
+    if (tab !== 'watch' && props.watchOpen) props.onWatchChange?.(false)
+    if (tab !== 'model' && props.chooserOpen) props.onChooserChange(false)
+    if (tab === 'autopilot' && !props.autopilotOpen) props.onAutopilotChange?.(true)
+    if (tab === 'watch' && !props.watchOpen) props.onWatchChange?.(true)
+    if (tab === 'model' && !props.chooserOpen) props.onChooserChange(true)
+  }
+  const closeControls = (): void => {
+    if (props.autopilotOpen) props.onAutopilotChange?.(false)
+    if (props.watchOpen) props.onWatchChange?.(false)
+    if (props.chooserOpen) props.onChooserChange(false)
+  }
   const ready = supervisor.phase === 'ready'
   const conversing = supervisor.phase !== 'unsupported' && supervisor.phase !== 'error'
   const canType = ready && !unconfigured
@@ -174,6 +230,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   // XERXES has answered, so without this nothing moved for the whole wait.
   const [pending, setPending] = useState<{ readonly text: string; readonly at: string } | null>(null)
   const thinking = supervisor.busy || supervisor.working === true || pending !== null
+  // The running turn's steps; a finished turn's steps fold above its reply instead.
+  const runningSteps = liveSteps(supervisor.steps, supervisor.messages)
   const canSend = canType && live && !thinking && text.trim() !== ''
   // The task view's "Thinking… 3s" clock.
   const [startedAt, setStartedAt] = useState<number | null>(null)
@@ -187,14 +245,11 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const thinkingSeconds = startedAt === null ? 0 : Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))
   const lastUser = [...supervisor.messages].reverse().find(message => message.role === 'user')
   const showPending = pending !== null && !(supervisor.messages.at(-1)?.role !== 'xerxes' && lastUser?.text === pending.text)
-  const streamRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const items = supervisor.messages.length + supervisor.confirmations.length
-  // Follow the newest message, as the task conversation does.
-  useEffect(() => {
-    const element = streamRef.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [items, thinking, showPending])
+  // Follow the tail while it grows (replies, live steps, cards), as the task view does; scrolling up pauses it.
+  const scroll = useTranscriptScroll(showThread ? 'autopilot' : 'shared', { more: false, automatic: false, load: async () => undefined })
+  const openCards = supervisor.confirmations.filter(isOpenCard)
+  const records = supervisor.confirmations.filter(card => !isOpenCard(card))
   const grow = (): void => {
     const element = inputRef.current
     if (!element) return
@@ -206,6 +261,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     if (message === '' || thinking || !live || unconfigured) return
     // A chat clears the box and shows the message straight away.
     setPending({ text: message, at: new Date().toISOString() })
+    // Sending brings you back to the tail, even if you had scrolled up to read.
+    scroll.scrollToLatest()
     setText('')
     requestAnimationFrame(grow)
     const sent = await onSend(message)
@@ -216,27 +273,50 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   return (
     <section className="supervisor" aria-label="XERXES">
       <header className="supervisor__bar">
-        <span className="supervisor__hub" title={`Hub: ${hubLabel}`}><span className={`supervisor__dot${live ? ' is-live' : ''}`} aria-hidden="true" />{hubLabel}</span>
-        <span className="supervisor__flex" />
-        {autopilotChip === undefined ? null : <span className="supervisor__autopilot" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
-        <span className="supervisor__model" aria-label="XERXES model">{modelChipText(config)}</span>
         {threadAvailable ? (
-          <button type="button" className="btn" aria-pressed={showThread} onClick={() => props.onAutopilotThreadChange?.(!props.autopilotThreadOpen)}>
-            {showThread ? 'Back to chat' : 'Autopilot thread'}
-            {threadPending > 0 ? <span className="supervisor__badge" aria-label={pendingBadgeLabel(threadPending)}>{threadPending}</span> : null}
-          </button>
+          <div className="xseg" role="group" aria-label="XERXES view">
+            <button type="button" aria-pressed={!showThread} onClick={() => { if (showThread) props.onAutopilotThreadChange?.(false) }}>Chat</button>
+            <button type="button" aria-pressed={showThread} onClick={() => { if (!showThread) props.onAutopilotThreadChange?.(true) }}>
+              Activity
+              {threadPending > 0 ? <span className="supervisor__badge" aria-label={pendingBadgeLabel(threadPending)}>{threadPending}</span> : null}
+            </button>
+          </div>
         ) : null}
-        {watchChip === undefined ? null : <span className="supervisor__autopilot" role="status" aria-label="Watch status">{watchChip}</span>}
-        {autopilotAvailable ? <button type="button" className="btn" aria-expanded={showAutopilot} onClick={() => props.onAutopilotChange?.(!props.autopilotOpen)}>Autopilot</button> : null}
-        {watchAvailable ? <button type="button" className="btn" aria-expanded={showWatch} onClick={() => props.onWatchChange?.(!props.watchOpen)}>Watch</button> : null}
-        <button type="button" className="btn" aria-expanded={showChooser} onClick={() => props.onChooserChange(!props.chooserOpen)}>Model</button>
-        <button type="button" className="btn" onClick={onOpenSettings}>Hub settings</button>
+        <span className="supervisor__flex" />
+        <div className="xpills" role="group" aria-label="Autopilot, Watch and Model">
+          {autopilotAvailable ? (
+            <ControlPill name="Autopilot" value={autopilotChip === undefined ? 'Off' : autopilotChip.replace(/^Autopilot on · /, '')}
+              tone={autopilotChip === undefined ? 'off' : 'on'} expanded={controlsTab === 'autopilot'} onClick={() => openTab('autopilot')} />
+          ) : null}
+          {watchAvailable ? (
+            <ControlPill name="Watch" value={watchChip === undefined ? 'Off' : watchChip.replace(/^Watching · /, '')}
+              tone={watchChip === undefined ? 'off' : watch.rows.some(row => row.active && (row.stats?.anomalies.length ?? 0) > 0) ? 'warn' : 'on'}
+              expanded={controlsTab === 'watch'} onClick={() => openTab('watch')} />
+          ) : null}
+          <ControlPill name="Model" value={modelChipText(config)} tone={modelTone(config)} expanded={controlsTab === 'model' || inlineChooser} onClick={() => openTab('model')} />
+        </div>
+        <span className="xbar__sep" aria-hidden="true" />
+        <span className="supervisor__hub" title={`Hub: ${hubLabel}${live ? '' : ' (not connected)'}`}>
+          <span className={`supervisor__dot${live ? ' is-live' : ''}`} aria-hidden="true" />
+          <span className="supervisor__hubname">{hubLabel}</span>
+        </span>
+        <button type="button" className="xicon" aria-label="Hub settings" title="Hub settings" onClick={onOpenSettings}><Icon name="settings" size={15} /></button>
       </header>
-      {note || showChooser || showAutopilot || showWatch || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
-        <div className="supervisor__panel">
-          {note ? <p role="status" className="notice">{note}</p> : null}
-          {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
-          {showWatch ? (
+      {controlsTab === undefined ? null : (
+        <SupervisorControls
+          tab={controlsTab}
+          tabs={controlTabs}
+          onTab={openTab}
+          onClose={closeControls}
+        >
+          {controlsTab === 'autopilot' ? (
+            <AutopilotPanel
+              autopilot={autopilot}
+              live={live}
+              onSave={props.onSaveAutopilot ?? (async () => false)}
+              onRetry={props.onRetryAutopilot ?? (() => undefined)}
+            />
+          ) : controlsTab === 'watch' ? (
             <WatchPanel
               watch={watch}
               tasks={watchTasks}
@@ -244,31 +324,37 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               live={live}
               onSave={props.onSaveWatch ?? (async () => false)}
               onRetry={props.onRetryWatch ?? (() => undefined)}
-              onClose={() => props.onWatchChange?.(false)}
             />
-          ) : null}
-          {showAutopilot ? (
-            <AutopilotPanel
-              autopilot={autopilot}
-              live={live}
-              onSave={props.onSaveAutopilot ?? (async () => false)}
-              onRetry={props.onRetryAutopilot ?? (() => undefined)}
-              onClose={() => props.onAutopilotChange?.(false)}
-            />
-          ) : null}
-          {showChooser ? (
+          ) : (
             <ModelChooser
               machines={state.machines}
               config={config}
               onOptions={props.onOptions}
               onSave={props.onSaveModel}
               onOpen={props.onChooserShown}
-              {...(props.chooserOpen && !unconfigured ? { onClose: () => props.onChooserChange(false) } : {})}
+              onClose={closeControls}
+              embedded
+            />
+          )}
+        </SupervisorControls>
+      )}
+      {note || inlineChooser || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
+        <div className="supervisor__panel">
+          {note ? <p role="status" className="notice">{note}</p> : null}
+          {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
+          {inlineChooser ? (
+            // No model yet: the chat cannot work without one, so the chooser stays in the page.
+            <ModelChooser
+              machines={state.machines}
+              config={config}
+              onOptions={props.onOptions}
+              onSave={props.onSaveModel}
+              onOpen={props.onChooserShown}
             />
           ) : null}
         </div>
       ) : null}
-      <div className="supervisor__stream" ref={streamRef}>
+      <div className="supervisor__stream" ref={scroll.ref}>
         <div className="supervisor__col">
           {showThread ? (
             <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
@@ -281,53 +367,30 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             </div>
           ) : (
             <>
-              {!ready ? <p className="supervisor__empty" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
+              {!ready ? <p className="xempty xempty--wait" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
               {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
-                <div className="supervisor__empty">
+                <div className="xempty">
+                  <span className="xempty__mark" aria-hidden="true">X</span>
                   <strong>Ask XERXES about your work</strong>
-                  <p>It sees every task on your Hub and acts for you: it starts, steers and stops tasks, answers their questions and decides their permission requests. With anyone else in the thread, its actions wait for Confirm.</p>
-                  <p className="supervisor__try">Try “What needs me right now?”</p>
+                  <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
+                  <div className="xempty__try" role="group" aria-label="Try asking">
+                    {SUGGESTIONS.map(suggestion => (
+                      <button key={suggestion} type="button" className="xsuggest" disabled={!canType}
+                        onClick={() => { setText(suggestion); inputRef.current?.focus(); requestAnimationFrame(grow) }}>{suggestion}</button>
+                    ))}
+                  </div>
                 </div>
               ) : null}
-              {supervisor.messages.length > 0 || showPending ? (
-                <ol className="supervisor__messages" aria-label="Conversation">
-                  {supervisor.messages.map(message => (
-                    <li key={message.id} className={`supervisor__message supervisor__message--${message.role}`}>
-                      <p className="supervisor__who">
-                        {message.role === 'xerxes' ? 'XERXES' : message.role === 'system' ? 'Notice' : message.author ?? 'You'}
-                        {message.source === 'voice' ? ' · voice' : ''}
-                        <span> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
-                      </p>
-                      {message.role === 'xerxes'
-                        ? <div className="msg msg--agent"><Markdown text={message.text} className="msg__text" /></div>
-                        : message.role === 'user'
-                          ? <div className="msg msg--user"><div className="msg__text">{message.text}</div></div>
-                          : <p className="supervisor__notice">{message.text}</p>}
-                    </li>
-                  ))}
-                  {showPending && pending ? (
-                    <li className="supervisor__message supervisor__message--user supervisor__message--pending">
-                      <p className="supervisor__who">You<span> · <time dateTime={pending.at}>just now</time></span></p>
-                      <div className="msg msg--user"><div className="msg__text">{pending.text}</div></div>
-                    </li>
-                  ) : null}
-                </ol>
-              ) : null}
-              {supervisor.confirmations.length === 0 ? null : (
+              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" records={records} {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
+              {openCards.length === 0 ? null : (
                 <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
-                  {supervisor.confirmations.map(item => (
+                  {openCards.map(item => (
                     <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
                   ))}
                 </ul>
               )}
-              {thinking ? (
-                <div className="streamstatus supervisor__thinking" role="status" aria-live="polite">
-                  <AgentOrb size={20} state="working" />
-                  <span className="streamstatus__phrase">Thinking…</span>
-                  <span className="streamstatus__clock">{elapsedOf(thinkingSeconds)}</span>
-                </div>
-              ) : null}
-              {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="action-card__error">{supervisor.error}</p> : null}
+              {thinking || runningSteps.length > 0 ? <LiveSteps steps={runningSteps} seconds={thinkingSeconds} /> : null}
+              {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="xevent" data-tone="error"><Icon name="error" size={13} /><span className="xevent__text">{supervisor.error}</span></p> : null}
             </>
           )}
         </div>
@@ -353,11 +416,9 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               <button type="submit" className="composer__send" aria-label={thinking ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
             </div>
           </div>
-          <p className="supervisor__hint">
-            {autopilotChip === undefined
-              ? 'XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.'
-              : AUTOPILOT_COMPOSER_HINT}
-            {' '}⏎ send · ⇧⏎ new line
+          <p className="supervisor__hint" title={autopilotChip === undefined ? DEFAULT_COMPOSER_HINT : AUTOPILOT_COMPOSER_HINT}>
+            {autopilotChip === undefined ? 'Acts for you; asks first when others are in the thread' : 'Autopilot on: acts at once'}
+            <span aria-hidden="true"> · </span>⏎ send · ⇧⏎ new line
           </p>
         </form>
       ) : null}

@@ -12,6 +12,7 @@ import {
   PriorityBasedStrategy,
   SlidingWindowStrategy,
   SmartCompactionStrategy,
+  SmartTokenCounter,
   SummarizationStrategy,
   TruncateStrategy,
   buildCompactionPromptFromText,
@@ -240,6 +241,40 @@ test('provisioner retains the shared compressor prune-only result without invoki
   expect(result.summarizedCount).toBe(0)
   expect(modelCalls).toBe(0)
   expect(result.tokensAfter).toBeLessThan(result.tokensBefore)
+})
+
+test('an oversized tool round is summarized using full-input tokens, including system instructions', () => {
+  const history = [
+    { role: 'system', content: 's'.repeat(4_000) },
+    { role: 'user', content: 'previous compacted working record' },
+    { role: 'user', content: 'older instruction' },
+    { role: 'assistant', content: '', tool_calls: [
+      { id: 'screenshot', type: 'function', function: { name: 'plugin_ui_audit', arguments: '{}' } },
+      { id: 'status', type: 'function', function: { name: 'get_goal', arguments: '{}' } },
+    ] },
+    { role: 'tool', tool_call_id: 'screenshot', content: 'x'.repeat(10_000) },
+    { role: 'tool', tool_call_id: 'status', content: '{"ok":true}' },
+    { role: 'user', content: 'latest request' },
+  ]
+  const counter = new SmartTokenCounter({ model: 'gpt-4o' })
+  const fullTokens = counter.countTokens(history)
+  expect(counter.countTokens(history.filter(message => message.role !== 'system'))).toBeLessThan(fullTokens * 0.75)
+  let summarized: readonly Record<string, unknown>[] = []
+  const result = new CompactionProvisioner({
+    model: 'gpt-4o',
+    maxContextTokens: fullTokens,
+    tokenCounter: counter,
+    summaryAgent: candidate => {
+      summarized = candidate
+      return 'compact record of the screenshot round and the latest request'
+    },
+  }).compact(history, { force: true })
+
+  expect(summarized).toHaveLength(history.length - 1)
+  expect(result.compacted).toBe(true)
+  expect(result.tokensAfter).toBeLessThan(result.tokensBefore * 0.5)
+  expect(result.messages[0]).toEqual(history[0])
+  expect(JSON.stringify(result.messages)).not.toContain('x'.repeat(1_000))
 })
 
 test('summary rendering and strategy selection are stable and model-backed smart compaction is tagged', () => {

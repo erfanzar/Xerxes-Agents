@@ -4,9 +4,9 @@
 import type { UsageReportView } from '../auth/usageView.js'
 import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
-import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage } from './hubParsers.js'
+import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage, type SupervisorStep } from './hubParsers.js'
 import {
-  taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
+  AUTOPILOT_ALL_ID, taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type PendingInteraction, type SessionTail } from './sessionFold.js'
@@ -117,7 +117,21 @@ export interface SupervisorState {
    * `busy` alone ended the spinner before XERXES had started.
    */
   readonly working?: boolean
+  /** The live steps of the latest turn (one turn id); cleared when a new turn starts. */
+  readonly steps?: readonly SupervisorStep[]
   readonly error?: string
+}
+
+/** Live steps kept per turn. */
+export const SUPERVISOR_STEP_LIMIT = 60
+
+/** A step of the same turn replaces its earlier state; a step of a new turn starts a fresh list. */
+export function withStep(steps: readonly SupervisorStep[] | undefined, step: SupervisorStep): readonly SupervisorStep[] {
+  const current = (steps ?? []).filter(item => item.turnId === step.turnId)
+  const index = current.findIndex(item => item.id === step.id)
+  if (index !== -1) return current.map((item, i) => (i === index ? step : item))
+  const next = [...current, step]
+  return next.length > SUPERVISOR_STEP_LIMIT ? next.slice(next.length - SUPERVISOR_STEP_LIMIT) : next
 }
 
 /** Hub-level totals that sit beside the per-model rows. */
@@ -177,6 +191,8 @@ export interface AutopilotState {
   readonly phase: LoadPhase
   readonly canEdit: boolean
   readonly rows: readonly AutopilotRow[]
+  /** The "All workspaces" row (id `*`); absent until a Hub that has it answers. */
+  readonly all?: AutopilotRow
   readonly error?: string
   /** A save is in flight for this workspace id. */
   readonly savingId?: string
@@ -212,6 +228,8 @@ export interface AutopilotThreadState {
   readonly messages: readonly SupervisorMessage[]
   readonly confirmations: readonly SupervisorConfirmation[]
   readonly working?: boolean
+  /** The live steps of the latest wake turn. */
+  readonly steps?: readonly SupervisorStep[]
   readonly error?: string
 }
 
@@ -289,7 +307,7 @@ export function isHubOwner(state: Pick<HubState, 'autopilot' | 'watch'>): boolea
  */
 export function autopilotThreadAvailable(state: Pick<HubState, 'autopilot' | 'autopilotThread' | 'selfUserId' | 'watch'>): boolean {
   if (!isHubOwner(state) || state.selfUserId === undefined || state.autopilotThread.phase === 'hidden') return false
-  return state.autopilot.rows.some(row => row.active) || state.watch.rows.some(row => row.active) || autopilotPendingCount(state) > 0
+  return state.autopilot.all?.active === true || state.autopilot.rows.some(row => row.active) || state.watch.rows.some(row => row.active) || autopilotPendingCount(state) > 0
 }
 
 /** Rows that are on right now (the Hub's verdict). */
@@ -407,6 +425,8 @@ export type HubAction =
   /** Phase, id, working flag and errors of the owner's Autopilot thread. */
   | { readonly type: 'autopilotThread'; readonly patch: Partial<AutopilotThreadState> }
   | { readonly type: 'autopilotThreadMessages'; readonly messages: readonly SupervisorMessage[] }
+  /** One live step of a running turn, routed by thread. */
+  | { readonly type: 'supervisorStep'; readonly thread: 'shared' | 'autopilot'; readonly step: SupervisorStep }
   | { readonly type: 'autopilotThreadConfirmations'; readonly confirmations: readonly SupervisorConfirmation[] }
   | { readonly type: 'autopilotThreadConfirmation'; readonly id: string; readonly patch: Partial<SupervisorConfirmation> }
   /** A fresh `supervisor.watch.list` answer replaces every row. */
@@ -729,7 +749,12 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
         ? patchError === undefined
         : action.patch.phase !== undefined || action.patch.busy === true || action.patch.working === true
       if (clears) delete (next as { error?: string }).error
+      // Steps are kept: a new turn id replaces them (withStep), and a step can arrive before `working`.
       return { ...state, supervisor: next }
+    }
+    case 'supervisorStep': {
+      if (action.thread === 'shared') return { ...state, supervisor: { ...state.supervisor, steps: withStep(state.supervisor.steps, action.step) } }
+      return { ...state, autopilotThread: { ...state.autopilotThread, steps: withStep(state.autopilotThread.steps, action.step) } }
     }
     case 'threadRefreshed': {
       const target = action.thread === 'shared' ? state.supervisor : state.autopilotThread
@@ -789,10 +814,18 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
     }
     case 'supervisorConfigOptions': return { ...state, supervisorConfig: { ...state.supervisorConfig, options: action.state } }
     case 'autopilotView': {
-      const { error: _error, saveError: _saveError, savingId: _savingId, ...rest } = state.autopilot
-      return { ...state, autopilot: { ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.workspaces, unsupported: false } }
+      const { error: _error, saveError: _saveError, savingId: _savingId, all: _all, ...rest } = state.autopilot
+      return {
+        ...state,
+        autopilot: {
+          ...rest, phase: 'ready', canEdit: action.view.canEdit, rows: action.view.workspaces, unsupported: false,
+          ...(action.view.all === undefined ? {} : { all: action.view.all }),
+        },
+      }
     }
     case 'autopilotRow': {
+      // The Hub-wide row is kept apart: it is not a workspace.
+      if (action.row.workspaceId === AUTOPILOT_ALL_ID) return { ...state, autopilot: { ...state.autopilot, all: action.row } }
       const rows = state.autopilot.rows
       const index = rows.findIndex(row => row.workspaceId === action.row.workspaceId)
       const next = index === -1 ? [...rows, action.row] : rows.map((row, i) => (i === index ? action.row : row))

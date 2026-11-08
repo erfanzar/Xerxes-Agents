@@ -370,6 +370,40 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   expect(permissions).toContain('Accept all')
 })
 
+test('SSH provider settings offer host sign-in before a Mac relay exists and keep switching guards', async () => {
+  const { SettingsModal } = await import('../src/desktop/renderer/Overlays.js')
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { xerxes: {} } })
+  try {
+    for (const name of ['codex', 'claude-code']) {
+      const provider = { name, provider: name === 'codex' ? 'openai-codex' : name, model: 'host-model', active: false, signsIn: true, ready: true }
+      const renderProviders = (overrides: Partial<Snapshot> = {}) => renderToStaticMarkup(createElement(SettingsModal, { snap: snapshot({
+        settingsOpen: true, settingsTab: 'models', storageScope: 'ssh:fixture-host', providers: [provider], providerRelay: null, ...overrides,
+      }) }))
+      // An unused profile is selectable on the host without first creating a relay.
+      expect(renderProviders()).toContain('Run on the server')
+      const relay = { bound: true, live: true, profile: name, model: provider.model, requests: 0, inFlight: 0 }
+      expect(renderProviders({ providerRelay: relay })).toContain('Run on the server')
+      expect(renderProviders({ providerRelay: { ...relay, profile: 'another-provider' } })).toContain('Run on the server')
+      // Already using host credentials needs no second switch. Local and keyed rows never get one.
+      expect(renderProviders({ providers: [{ ...provider, active: true }] })).not.toContain('Run on the server')
+      expect(renderProviders({ storageScope: 'local' })).not.toContain('Run on the server')
+      expect(renderProviders({ providers: [{ ...provider, signsIn: false }] })).not.toContain('Run on the server')
+      for (const readiness of [{ ready: false }, {}]) {
+        const { ready: _ready, ...withoutReadiness } = provider
+        const html = renderProviders({ providers: [{ ...withoutReadiness, ...readiness }] })
+        expect(html).not.toContain('Run on the server')
+        expect(html).toContain('Use via Mac')
+      }
+      expect(renderProviders({ turnActive: true })).not.toContain('Run on the server')
+      expect(renderProviders({ providerSwitching: name })).toMatch(/<button class="provcard__use provcard__use--host" disabled=""[^>]*>Run on the server<\/button>/)
+    }
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'window', previous)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
 test('agent preset settings mirror the DSH roster and creator entry point', () => {
   const html = render(snapshot({
     settingsOpen: true,
@@ -1146,6 +1180,9 @@ test('the status head shows the running tool and omits unreported measurements',
   // The rail and the feed header share one phrase for the running call.
   expect(html).toContain('Running bun test')
   expect(html).toContain('1 of 2')
+  // To-dos are named as such; "Steps" is the statistics' model and tool step count.
+  expect(html).toContain('<dt>To-dos</dt><dd>1 of 2</dd>')
+  expect(html).not.toContain('<dt>Steps</dt><dd>1 of 2</dd>')
   expect(html).toContain('50%')
   // Cost rides the header only once the turn is over — mid-turn that slot
   // belongs to the elapsed clock and Stop. (The collapsed statistics below
@@ -1159,6 +1196,17 @@ test('the status head shows the running tool and omits unreported measurements',
   const unknown = renderToStaticMarkup(createElement(RailStatus, { snap: snapshot({ turnActive: true, contextMax: 256_000 }) }))
   expect(unknown).not.toContain('railstatus__track')
   expect(unknown).not.toContain('context')
+})
+
+test('the header view buttons keep one line beside a long task title', async () => {
+  // Squeezed by a long title, "Session edits" wrapped onto two lines with its
+  // +/− count stacked inside the 28px button.
+  const css = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
+  const rule = /:root\[data-layout='claude'\] \.atelier \.chat__view\{([^}]*)\}/.exec(css)?.[1] ?? ''
+  expect(rule).toContain('flex:none')
+  expect(rule).toContain('white-space:nowrap')
+  const title = /:root\[data-layout='claude'\] \.atelier \.chat__head--minimal \.chat__title\{([^}]*)\}/.exec(css)?.[1] ?? ''
+  expect(title).toContain('flex:0 1 auto')
 })
 
 test('the rail folds its utilities into one drawer instead of six siblings', () => {

@@ -10,6 +10,7 @@ import { parseAutopilotRow } from '../src/client/hubParsers.js'
 import { initialHubState, initialSupervisorConfig, type AutopilotState, type HubState } from '../src/client/hubStore.js'
 import type { AutopilotRow } from '../src/client/hubTypes.js'
 import { ActionConfirmationCard } from '../src/desktop/renderer/ActionConfirmationCard.js'
+import { AutopilotEditor } from '../src/desktop/renderer/AutopilotPanel.js'
 import { SupervisorView, type SupervisorViewProps } from '../src/desktop/renderer/SupervisorPage.js'
 
 const noop = (): void => {}
@@ -21,6 +22,10 @@ function row(patch: Record<string, unknown> = {}): AutopilotRow {
   })
   if (!parsed) throw new Error('fixture row is malformed')
   return parsed
+}
+
+function editorHtml(item: AutopilotRow, opts: { live?: boolean; saving?: boolean } = {}): string {
+  return renderToStaticMarkup(createElement(AutopilotEditor, { row: item, live: opts.live ?? true, saving: opts.saving ?? false, onSave: async () => true, onDone: noop }))
 }
 
 function state(autopilot: Partial<AutopilotState> = {}, patch: Partial<HubState> = {}): HubState {
@@ -45,7 +50,9 @@ function view(hub: HubState, extra: Partial<SupervisorViewProps> = {}): string {
 
 test('the header has an Autopilot button beside Model, and no chip while nothing is active', () => {
   const html = view(state({ rows: [row({ active: false })] }))
-  expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Autopilot</)
+  // One pill per control: its name and live state; it opens the controls dialog.
+  expect(html).toMatch(/<button[^>]*class="xpill"[^>]*aria-haspopup="dialog"[^>]*aria-expanded="false"[^>]*title="Autopilot: Off"/)
+  expect(html).toContain('<span class="xpill__name">Autopilot</span>')
   expect(html).toContain('>Model<')
   expect(html).not.toContain('Autopilot on ·')
   expect(html).toContain('XERXES acts for the Hub owner at once; with anyone else in the thread its actions wait for Confirm.')
@@ -54,9 +61,10 @@ test('the header has an Autopilot button beside Model, and no chip while nothing
 
 test('the chip counts only workspaces the Hub reports as active', () => {
   const one = view(state({ rows: [row(), row({ workspace_id: 'w2', active: false })] }))
-  expect(one).toMatch(/class="supervisor__autopilot"[^>]*>Autopilot on · 1 workspace</)
+  expect(one).toContain('title="Autopilot: 1 workspace"')
+  expect(one).toMatch(/class="xpill" data-tone="on"[^>]*title="Autopilot: /)
   const two = view(state({ rows: [row(), row({ workspace_id: 'w2' })] }))
-  expect(two).toContain('Autopilot on · 2 workspaces')
+  expect(two).toContain('title="Autopilot: 2 workspaces"')
 })
 
 test('while Autopilot is on the composer hint says XERXES acts at once, except while another person is in the thread', () => {
@@ -71,15 +79,37 @@ test('the owner gets a toggle, a 2000-character instruction box and the expiry c
   expect(html).toContain('aria-label="Autopilot"')
   expect(html).toContain(AUTOPILOT_EXPLANATION)
   expect(html).toContain('questions and permission requests')
-  expect(html.match(/type="checkbox"/g)).toHaveLength(2)
-  expect(html.match(/<textarea[^>]*maxLength="2000"/g)).toHaveLength(2)
-  expect(html).toContain('placeholder="Keep going until the goal is done; take the recommended option"')
-  for (const label of ['No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(html).toContain(`>${label}<`)
+  // A popup dialog like Settings, with a tab per control.
+  expect(html).toContain('role="dialog"')
+  expect(html).toContain('aria-label="XERXES controls"')
+  expect(html).toMatch(/class="mtab xcontrols__tab is-on"[^>]*aria-current="page"><span>Autopilot</)
+  // Model is always a tab; Watch only when the page can open it (this harness passes no Watch handler).
+  expect(html).toContain('<span>Model</span>')
+  expect(html).not.toContain('<span>Watch</span>')
+  // One switch and one Edit per line, saved on flip; the settings open in place.
+  expect(html.match(/role="switch"/g)).toHaveLength(2)
+  expect(html).toContain('aria-label="Turn off Autopilot for One · app"')
+  expect(html).toContain('aria-label="Turn on Autopilot for Two · api"')
+  expect(html.match(/>Edit</g)).toHaveLength(2)
   expect(html).toContain('One · app')
   expect(html).toContain('Two · api')
   expect(html).toContain('aria-expanded="true"')
   expect(html).not.toContain(AUTOPILOT_READ_ONLY_NOTE)
-  expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Save</)
+  // The editor Edit opens: mode, expiry and a 2000-character instruction.
+  const editor = editorHtml(row())
+  expect(editor).toContain('role="radiogroup"')
+  expect(editor).toContain('>Watch only<')
+  expect(editor).toContain('>Act<')
+  expect(editor.match(/<textarea[^>]*maxLength="2000"/g)).toHaveLength(1)
+  expect(editor).toContain('placeholder="Keep going until the goal is done; take the recommended option"')
+  for (const label of ['No expiry', '1 hour', '8 hours', '24 hours', '7 days']) expect(editor).toContain(`>${label}<`)
+  expect(editor).not.toMatch(/<button[^>]*disabled=""[^>]*>Save</)
+})
+
+test('closed, the controls dialog is not rendered and the conversation is untouched', () => {
+  const html = view(state({ rows: [row()] }))
+  expect(html).not.toContain('role="dialog"')
+  expect(html).not.toContain('aria-label="XERXES controls"')
 })
 
 test('a non-owner sees the rows and the reason, with no inputs and no Save', () => {
@@ -88,12 +118,22 @@ test('a non-owner sees the rows and the reason, with no inputs and no Save', () 
   expect(html).toContain('Turned on by Ann.')
   expect(html).toContain('Keep going')
   // The composer has its own textarea, so look only inside the Autopilot panel.
-  const panel = /<section class="autopilot"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
+  const panel = /<section class="xap"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
   expect(panel).toContain('Turned on by Ann.')
   expect(panel).not.toContain('<textarea')
-  expect(panel).not.toContain('type="checkbox"')
+  expect(panel).not.toContain('role="switch"')
   expect(panel).not.toContain('<select')
   expect(panel).not.toContain('>Save<')
+})
+
+test('All workspaces sits on top with its own switch, and a row on only through it says so', () => {
+  const all = row({ workspace_id: '*', label: 'All workspaces', instruction: '', expires_at: null })
+  const html = view(state({ all, rows: [row({ enabled: false, instruction: '', expires_at: null, enabled_by: null, via_all: true })] }), { autopilotOpen: true })
+  expect(html).toContain('aria-label="Turn off Autopilot for All workspaces"')
+  expect(html).toContain('including ones you link later')
+  expect(html).toContain('On · all workspaces')
+  expect(html.indexOf('All workspaces')).toBeLessThan(html.indexOf('One · app'))
+  expect(html).toContain('title="Autopilot: all workspaces"')
 })
 
 test('a row that is enabled but not active reads as Off, never On', () => {
@@ -103,10 +143,11 @@ test('a row that is enabled but not active reads as Off, never On', () => {
 })
 
 test('Save is disabled while offline or while that workspace saves', () => {
+  expect(editorHtml(row(), { live: false })).toMatch(/<button[^>]*disabled=""[^>]*>Save</)
+  expect(editorHtml(row(), { saving: true })).toMatch(/<button[^>]*disabled=""[^>]*>Saving…</)
+  // The line's switch is disabled too.
   const offline = view(state({ rows: [row()] }, { connection: { state: 'reconnecting', attempt: 1 } as HubState['connection'] }), { autopilotOpen: true })
-  expect(offline).toMatch(/<button[^>]*disabled=""[^>]*>Save</)
-  const saving = view(state({ rows: [row()], savingId: 'w1' }), { autopilotOpen: true })
-  expect(saving).toMatch(/<button[^>]*disabled=""[^>]*>Saving…</)
+  expect(offline).toMatch(/<button[^>]*role="switch"[^>]*disabled=""/)
 })
 
 test('loading, a retryable read error, a save error and an empty list are all stated', () => {

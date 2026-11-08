@@ -279,6 +279,17 @@ Autopilot); `question.answer` (provider name `answer_question`, Autopilot only);
 Approval, review, permission-mode, shell, Workflow and generic RPC tools are
 refused by `assertSupervisorToolCeiling`.
 
+**Live steps.** While a turn runs, the Hub streams its steps as
+`supervisor.thread_event` frames carrying `step` (and no `message`):
+`{ thread_id, step: { turn_id, id, at, kind: 'say'|'tool', text, tool?, state: 'running'|'done'|'error' } }`.
+`say` is the short line the model wrote before a batch of tool calls; `tool` is
+one call with a Hub-written label (arguments are never copied, except a search
+query clipped to 60 characters). A tool's `running` and final event share one
+`id`; a new `turn_id` starts a new list. Steps go only to the person the turn
+answers (the requester), are not stored, and are not replayed by
+`supervisor.thread.open`; the turn's reply or `XERXES stopped: …` notice ends
+them. Clients that do not know `step` ignore it.
+
 ## Machines and project discovery
 
 A registry entry may be a **machine**: `connection.discover: true` (the registry
@@ -406,11 +417,23 @@ Per workspace, the Hub owner can let XERXES act for them. Rows live in
 | Method | Params | Result |
 |---|---|---|
 | `supervisor.autopilot.get` | none | `{can_edit, workspaces:[row]}` for every workspace the caller can see (unconfigured ones as `enabled:false, instruction:'', nulls`) |
-| `supervisor.autopilot.set` (owner) | `{workspace_id, enabled, instruction? (≤2000 chars), expires_at? (ISO, future, ≤30 days, or null)}` | `{workspace: row}` |
+| `supervisor.autopilot.set` (owner) | `{workspace_id, enabled, instruction? (≤2000 chars), expires_at? (ISO, future, ≤30 days, or null), mode? ('auto'|'observe')}` | `{workspace: row}` |
 
 Row: `{workspace_id, label, enabled, instruction, expires_at, enabled_by:{id,name}|null,
-updated_at, active}`; `active` = enabled, not expired, and the enabler is still the
-Hub owner. In `set`, an omitted `expires_at` keeps the stored expiry and only an
+updated_at, active, mode}`; `active` = enabled, not expired, and the enabler is still the
+Hub owner. `mode` (additive, 0.8.25) is `auto` (wake-ups act without a Confirm) or
+`observe` (watch only: wake-ups still run, but every action becomes a normal Confirm
+card, and an `answer_question` / `answer_permission` call only posts
+`Autopilot (watch only) would answer …` to the shared thread and returns
+`state: 'recorded'`; nothing reaches the task). An omitted `mode` keeps the stored one; a
+new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`.
+
+All workspaces (additive, 0.8.26): `workspace_id: '*'` is the Hub-wide row. While it is
+active, Autopilot applies to every workspace, including ones linked later; a workspace's
+own active row still wins (its instruction and mode). `get` returns it as `all` (label
+`All workspaces`). A workspace row that is active only through it carries `via_all: true`
+(omitted otherwise). Setting `*` broadcasts its row and then every workspace's row. Only
+the Hub owner can set it, like any row. In `set`, an omitted `expires_at` keeps the stored expiry and only an
 explicit `null` clears it; `enabled:true` with a kept expiry that has already
 passed is refused (`invalid_request`, choose a new expiry). `set` refuses agents and non-owners (`forbidden`, audited), unknown keys
 and bad values (`invalid_request`), unknown workspaces (`not_found`), and an

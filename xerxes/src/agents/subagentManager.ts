@@ -9,6 +9,7 @@ import {
   MAX_AGENT_TITLE_LENGTH,
   normalizeAgentTitle,
   SpawnedAgentManager,
+  type SpawnedAgentManagerPort,
   type SpawnedAgentSnapshot,
 } from '../operators/subagents.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
@@ -118,6 +119,35 @@ export interface SubAgentTaskSnapshot {
   readonly writtenFiles: readonly string[]
 }
 
+/** Only provider selection may change when continuing a terminal identity. */
+export interface SubagentModelSelection {
+  readonly model?: string
+  readonly providerProfile?: string
+  readonly reasoningEffort?: string
+}
+
+export interface SubagentRetryOptions {
+  readonly message?: string
+  /** Host-verified requester; names are resolved within this owner only. */
+  readonly sourceAgentId?: string
+  readonly selection?: SubagentModelSelection
+  readonly signal?: AbortSignal
+}
+
+/** Native retry extension; the generic handle port and persisted shapes stay unchanged. */
+export interface RetryableSubagentManagerPort extends SpawnedAgentManagerPort {
+  retry?(handleId: string, options: SubagentRetryOptions): Promise<SpawnedAgentSnapshot>
+}
+
+/** Fully resolved by the host, never an arbitrary execution-config patch. */
+export interface SubagentRetryConfiguration {
+  readonly model: string
+  readonly providerProfile: string | undefined
+  readonly reasoningEffort: string | undefined
+  readonly providerRoute: string | undefined
+  readonly hostGeneration: number
+}
+
 export interface SubAgentTaskOptions {
   readonly modelCallBindings?: readonly ModelCallBinding[]
   readonly providerProfile?: string
@@ -143,9 +173,9 @@ export interface SubAgentTaskOptions {
 /** One delegated task plus the state exposed to its parent. */
 export class SubAgentTask {
   readonly modelCallBindings: readonly ModelCallBinding[]
-  readonly providerProfile: string | undefined
-  readonly reasoningEffort: string | undefined
-  readonly providerRoute: string | undefined
+  providerProfile: string | undefined
+  reasoningEffort: string | undefined
+  providerRoute: string | undefined
   readonly workspace: string | undefined
   readonly agentDefName: string
   readonly creatorId: string
@@ -484,7 +514,7 @@ export interface FilterSubagentToolsOptions<T extends Record<string, unknown>> {
 interface TaskRuntime {
   readonly modelCallScopes: readonly ModelCallScope[]
   readonly agentDefinition: AgentDefinition | undefined
-  readonly config: Readonly<Record<string, unknown>>
+  config: Readonly<Record<string, unknown>>
   readonly isolation: string
   readonly originalPrompt: string
   readonly originalSystemPrompt: string
@@ -978,12 +1008,14 @@ export class SubAgentManager {
    * current task without starting anything, so duplicate retry requests
    * (double-clicks, repeated RPCs) can never double-start one agent.
    */
-  async retry(taskIdOrName: string, input = ''): Promise<SubAgentTask | undefined> {
+  async retry(taskIdOrName: string, input = '', reconfigure?: SubagentRetryConfiguration): Promise<SubAgentTask | undefined> {
     let task = this.resolveTask(taskIdOrName)
     if (task === undefined) task = this.rebuildArchivedTask(taskIdOrName)
     if (task === undefined) return undefined
-    if (this.setups.has(task.id)) return task
-    if (!TERMINAL_STATUSES.has(task.status)) return task
+    if (this.setups.has(task.id) || !TERMINAL_STATUSES.has(task.status)) {
+      if (reconfigure) throw new ValidationError('selection', 'cannot reconfigure a running agent; wait for it to finish or stop it first', task.id)
+      return task
+    }
     const runtime = this.runtimes.get(task.id)
     // Tasks rejected before runtime registration (for example by the depth
     // ceiling) have nothing coherent to resume. Setup failures retain runtime.
@@ -991,6 +1023,8 @@ export class SubAgentManager {
     const previousError = task.error
     const previousResult = task.result
     const previousStatus = task.status
+    const previousConfig = runtime.config
+    const previousSelection = { model: task.model, providerProfile: task.providerProfile, reasoningEffort: task.reasoningEffort, providerRoute: task.providerRoute }
     // Transition synchronously so a concurrent retry observes a non-terminal
     // status and joins this attempt instead of starting a duplicate.
     task.status = 'pending'
@@ -1013,6 +1047,21 @@ export class SubAgentManager {
       const settling = runtime.run
       if (settling !== undefined) await settling.then(() => undefined, () => undefined)
       controller.signal.throwIfAborted()
+      if (reconfigure) {
+        const { providerProfile: _profile, reasoningEffort: _effort, _nativeSubagentProviderRoute: _route, ...preserved } = runtime.config
+        runtime.config = Object.freeze({
+          ...preserved,
+          model: reconfigure.model,
+          ...(reconfigure.providerProfile === undefined ? {} : { providerProfile: reconfigure.providerProfile }),
+          ...(reconfigure.reasoningEffort === undefined ? {} : { reasoningEffort: reconfigure.reasoningEffort }),
+          ...(reconfigure.providerRoute === undefined ? {} : { _nativeSubagentProviderRoute: reconfigure.providerRoute }),
+          _nativeSubagentHostGeneration: reconfigure.hostGeneration,
+        })
+        task.model = reconfigure.model
+        task.providerProfile = reconfigure.providerProfile
+        task.reasoningEffort = reconfigure.reasoningEffort
+        task.providerRoute = reconfigure.providerRoute
+      }
       if (runtime.isolation === 'worktree') await this.recreateRetryWorktree(task, runtime, controller.signal)
       controller.signal.throwIfAborted()
       const handle = this.handleManager.listHandles().find(candidate => candidate.id === task.id)
@@ -1056,8 +1105,26 @@ export class SubAgentManager {
       task.status = previousStatus
       task.error = previousError
       task.result = previousResult
+      runtime.config = previousConfig
+      Object.assign(task, previousSelection)
       throw error
     } finally { this.finishSetup(task.id, setup) }
+  }
+
+  /** Read selection without reactivating an archived task or exposing its policy config. */
+  retryModelSelection(taskIdOrName: string): SubagentModelSelection | undefined {
+    const task = this.resolveTask(taskIdOrName)
+    const archived = task === undefined ? this.resolveArchivedTask(taskIdOrName) : undefined
+    const model = task?.model ?? archived?.model
+    if (model === undefined) return undefined
+    const config = archived?.config
+    const providerProfile = task?.providerProfile ?? stringValue(config?.providerProfile)
+    const reasoningEffort = task?.reasoningEffort ?? stringValue(config?.reasoningEffort)
+    return {
+      model,
+      ...(providerProfile ? { providerProfile } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+    }
   }
 
   /** Resolve a live or evicted-but-archived terminal task by id or name. */

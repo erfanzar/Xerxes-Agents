@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { parseAutopilotRow } from '../src/client/hubParsers.js'
 import { autopilotPendingCount, autopilotThreadAvailable, initialHubState, initialSupervisorConfig, type AutopilotState, type AutopilotThreadState, type HubState } from '../src/client/hubStore.js'
 import type { AutopilotRow } from '../src/client/hubTypes.js'
+import { AutopilotEditor } from '../src/desktop/renderer/AutopilotPanel.js'
 import { SupervisorView, type SupervisorViewProps } from '../src/desktop/renderer/SupervisorPage.js'
 
 const noop = (): void => {}
@@ -49,7 +50,7 @@ function view(state: HubState, extra: Partial<SupervisorViewProps> = {}): string
 
 test('the owner with an active workspace gets an Autopilot thread switch with the pending-card badge', () => {
   const html = view(hub())
-  expect(html).toContain('Autopilot thread')
+  expect(html).toContain('aria-label="XERXES view"')
   // One pending card; the auto card is a record and is not counted.
   expect(html).toContain('aria-label="1 waiting for you"')
   expect(autopilotPendingCount(hub())).toBe(1)
@@ -59,12 +60,19 @@ test('the owner with an active workspace gets an Autopilot thread switch with th
 
 test('open, the thread shows pending cards with Confirm/Cancel and auto cards as done, in place of the shared chat', () => {
   const html = view(hub({ thread: { messages: [{ id: 'm1', role: 'system', text: 'Autopilot: woke for a question in “Fix tests”.', at: new Date().toISOString(), source: 'text' }] } }), { autopilotThreadOpen: true })
-  expect(html).toContain('aria-label="Autopilot thread"')
+  expect(html).toContain('aria-label="Autopilot activity"')
+  // Repeated Hub notices are one-line events, not boxes.
+  expect(html).toContain('class="xevent" data-tone="autopilot"')
   expect(html).toContain('Autopilot: woke for a question')
   expect(html).toContain('>Confirm<')
   expect(html).toContain('>Cancel<')
-  expect(html).toContain('Done automatically on behalf of Ann.')
-  expect(html).toContain('Back to chat')
+  // A settled auto card is a one-line event in the timeline, not a card that piles up below.
+  expect(html).toContain('XERXES did: task.steer: Steer it')
+  expect(html).not.toContain('Done automatically on behalf of Ann.')
+  expect(html.match(/<article class="action-card/g)).toHaveLength(1)
+  // Chat | Activity: Activity is pressed, Chat takes you back.
+  expect(html).toContain('<button type="button" aria-pressed="false">Chat</button>')
+  expect(html).toMatch(/<button type="button" aria-pressed="true">Activity/)
   expect(html).not.toContain('aria-label="Message to XERXES"')
 })
 
@@ -72,7 +80,7 @@ test('a non-owner never gets the view', () => {
   const state = hub({ canEdit: false })
   expect(autopilotThreadAvailable(state)).toBe(false)
   const html = view(state, { autopilotThreadOpen: true })
-  expect(html).not.toContain('Autopilot thread')
+  expect(html).not.toContain('aria-label="XERXES view"')
   expect(html).not.toContain('waiting for you')
   expect(html).toContain('aria-label="Message to XERXES"')
 })
@@ -81,18 +89,20 @@ test('no view without a known signed-in user, without an active workspace, or af
   expect(autopilotThreadAvailable(hub({ self: undefined }))).toBe(false)
   expect(autopilotThreadAvailable(hub({ rows: [row({ active: false })], thread: { confirmations: [] } }))).toBe(false)
   expect(autopilotThreadAvailable(hub({ thread: { phase: 'hidden' } }))).toBe(false)
-  expect(view(hub({ thread: { phase: 'hidden' } }), { autopilotThreadOpen: true })).not.toContain('Autopilot thread')
+  expect(view(hub({ thread: { phase: 'hidden' } }), { autopilotThreadOpen: true })).not.toContain('aria-label="XERXES view"')
   // Cards still waiting for the owner keep the view reachable after Autopilot turned off.
   expect(autopilotThreadAvailable(hub({ rows: [row({ active: false })] }))).toBe(true)
 })
 
 test('an expiry that has passed is not offered as "Keep current expiry" and says so', () => {
+  // The expiry lives in the editor a line's Edit opens.
+  const editor = (item: AutopilotRow): string => renderToStaticMarkup(createElement(AutopilotEditor, { row: item, live: true, saving: false, onSave: async () => true, onDone: noop }))
   const lapsed = row({ expires_at: '2020-01-01T00:00:00.000Z', active: false })
-  const html = view(hub({ rows: [lapsed] }), { autopilotOpen: true })
+  const html = editor(lapsed)
   expect(html).not.toContain('>Keep current expiry<')
   expect(html).toContain('The previous expiry has passed')
   for (const label of ['No expiry', '1 hour', '7 days']) expect(html).toContain(`>${label}<`)
-  const live = view(hub({ rows: [row()] }), { autopilotOpen: true })
+  const live = editor(row())
   expect(live).toContain('>Keep current expiry<')
   expect(live).not.toContain('The previous expiry has passed')
 })
