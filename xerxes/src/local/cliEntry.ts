@@ -10,11 +10,12 @@ import { probeHardware, systemHardwarePorts } from './hardware.js'
 import { createLmStudioEngine, systemLmStudioPorts } from './lmstudio.js'
 import { probeLoadedWindows, systemWindowFetch } from './loadedWindow.js'
 import { freeMemoryBytes } from './memoryFit.js'
+import { readMlxAttention } from './mlxConfig.js'
 import { createLocalServer, systemServerPorts } from './server.js'
 
 /**
  * `xerxes local …`: production wiring of the managed local engines
- * (llama.cpp's llama-server, or LM Studio through its `lms` CLI).
+ * (llama.cpp's llama-server, mlx-lm's mlx_lm.server, or LM Studio through its `lms` CLI).
  *
  * Nothing here runs at startup; every action is an explicit subcommand. The
  * saved `bonsai-local` profile is marked `data_trust: local` and
@@ -31,13 +32,15 @@ export async function runLocalCli(argv: readonly string[]): Promise<number> {
     return await runLocalCommand([...argv], {
       hardware: () => probeHardware(systemHardwarePorts()),
       fetch: (url, init) => fetch(url, init),
-      server: createLocalServer(systemServerPorts(), local.llamaServerPath === undefined ? {} : { llamaServerPath: local.llamaServerPath }),
+      server: createLocalServer(systemServerPorts(), local.llamaServerPath === undefined ? {} : { binaryPath: local.llamaServerPath }),
+      mlx: createLocalServer(systemServerPorts(), { engine: 'mlx', ...(local.mlxServerPath === undefined ? {} : { binaryPath: local.mlxServerPath }) }),
       lmstudio: createLmStudioEngine(systemLmStudioPorts(), local.lmsPath === undefined ? {} : { lmsPath: local.lmsPath }),
       loadedWindow: baseUrl => probeLoadedWindows({ baseUrl }, systemWindowFetch),
       memoryFit: {
         freeBytes: hw => freeMemoryBytes(hw, systemHardwarePorts().run),
         attention: async path => ggufAttention(path, await readGgufMetadata(path)),
         weightsBytes: path => Bun.file(path).size,
+        mlxAttention: readMlxAttention,
       },
       saveProfile: async input => saveLocalProfile(new ProfileStore(), input),
       stdout: text => { process.stdout.write(text) },

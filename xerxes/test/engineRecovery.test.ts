@@ -83,7 +83,7 @@ test('llama-server recovery restarts a server that exited, with the same model, 
   const stateDir = await mkdtemp(join(tmpdir(), 'xerxes-llama-recover-'))
   try {
     const server = fakeLlamaServer()
-    const engine = createLocalServer(server.ports, { llamaServerPath: '/bin/llama-server', stateDir, pollMs: 1, graceMs: 1 })
+    const engine = createLocalServer(server.ports, { binaryPath: '/bin/llama-server', stateDir, pollMs: 1, graceMs: 1 })
     await engine.start({ modelPath: '/models/bonsai.gguf', port: 11581, ctxSize: 32_768 })
     expect(await engine.recover({ port: 11581, model: 'bonsai' })).toEqual({ recovered: false, reason: 'still-running' })
     expect(await engine.recover({ port: 8080, model: 'bonsai' })).toEqual({ recovered: false, reason: 'other-endpoint' })
@@ -107,7 +107,7 @@ test('llama-server recovery does not guess a window it never recorded', async ()
     await writeFile(join(stateDir, 'server.json'), JSON.stringify({
       pid: 4242, port: 11581, model: '/models/bonsai.gguf', startedAt: '2026-11-01T00:00:00.000Z', logPath: join(stateDir, 'log'), bin: '/bin/llama-server',
     }))
-    const engine = createLocalServer(server.ports, { llamaServerPath: '/bin/llama-server', stateDir, pollMs: 1, graceMs: 1 })
+    const engine = createLocalServer(server.ports, { binaryPath: '/bin/llama-server', stateDir, pollMs: 1, graceMs: 1 })
     expect(await engine.recover({ port: 11581, model: 'bonsai' })).toEqual({ recovered: false, reason: 'not-managed' })
     expect(server.spawned).toEqual([])
   } finally {
@@ -257,6 +257,7 @@ function fakeLlamaServer(): { ports: ServerPorts; spawned: string[][]; kill(): v
     commandOf: async pid => pid === alive ? spawned.at(-1)?.join(' ') : undefined,
     signal: () => { alive = undefined },
     portInUse: async () => false,
+    run: async () => ({ exitCode: 0, output: '' }),
     sleep: async () => undefined,
     now: () => Date.now(),
   }

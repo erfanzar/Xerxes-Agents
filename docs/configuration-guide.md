@@ -496,21 +496,48 @@ CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's sa
 `xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
 profile. The engine is a separate process that Xerxes reaches over OpenAI-compatible HTTP; no
 inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine`
-(`XERXES_LOCAL_ENGINE`):
-- **`llama-server`** (default): downloads the GGUF build (verified against a configured sha256)
-  and supervises llama.cpp's `llama-server`. Ternary GGUF builds need Prism's llama.cpp fork.
-- **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
-  then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
-  On Apple silicon this is the engine for Ternary Bonsai 2 27B's MLX pack (key
-  `ternary-bonsai-2-27b-mlx`). Stock MLX loaders don't apply the pack's Hadamard transforms.
-  - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
-  - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
-    (`XERXES_LOCAL_LMS`) to use another.
-  - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
-    already running is used on its port.
-  - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
-    Xerxes started it and nothing else is loaded on it. `status` and `stop` find the LM Studio load
-    without `--engine`.
+(`XERXES_LOCAL_ENGINE`). Unset, setup, start and doctor use the first engine installed, in this
+order, and say which they picked. `--model-key` picks LM Studio and `--model-file` picks
+llama-server.
+- **Downloads:** Ternary Bonsai 2 27B's builds come from Prism's Hugging Face repos at a pinned
+  commit. Each file is checked against its pinned size and SHA-256 before it is used, and a
+  download that does not match is discarded. Other models need a source in
+  `runtime.local.models`, which also replaces a built-in one.
+- **Version checks:** before downloading, setup reads the engine's version and refuses one older
+  than the model needs, or one whose version it cannot read. A llama.cpp build from before a
+  model's runtime loads the file and writes gibberish without an error. `--yes` goes on anyway,
+  for example with Prism's own builds, which report other build numbers.
+1. **`llama-server`**: supervises llama.cpp's `llama-server`.
+   - **The 27B:** downloads the `Q2_0` GGUF (7.6 GB), which stock llama.cpp runs from build b11555
+     (release v0.7.0). Prism's smaller `PQ2_0` and `PTQ1_0` packings still need its fork; pass one
+     with `--model-file`.
+   - **Finding the binary:** `llama-server` is found on `PATH`. Set
+     `runtime.local.llama_server_path` (`XERXES_LOCAL_LLAMA_SERVER`) to use another.
+2. **`mlx`** (Apple silicon only): supervises mlx-lm's `mlx_lm.server`, installed with
+   `uv tool install mlx-lm`.
+   - **The 27B:** downloads the 2-bit MLX pack (8.6 GB) into a folder under the models directory.
+     mlx-lm runs it from 0.32.2, the first release with its model type (`prism_hadamard_qwen35`).
+   - **Request shape:** one request at a time and two prompt caches, so cached prompts don't
+     crowd the weights out of memory.
+   - **Model name:** the saved profile's model is the folder's path. `mlx_lm.server` treats any
+     other model name in a request as a new model to download.
+   - **Context window:** mlx-lm has no window setting. The window recorded for compaction is sized
+     from free memory and the model's `config.json`, as for llama-server.
+   - **Finding the binary:** `runtime.local.mlx_server_path` (`XERXES_LOCAL_MLX_SERVER`) points
+     at another `mlx_lm.server`. Its version is read from the `mlx_lm` command beside it.
+3. **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
+   then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
+   Ternary Bonsai 2 27B's MLX pack has the key `ternary-bonsai-2-27b-mlx`. LM Studio runs it
+   with its own bundled runtime, so whether a model loads depends on LM Studio's version.
+   - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
+   - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
+     (`XERXES_LOCAL_LMS`) to use another.
+   - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
+     already running is used on its port.
+   - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
+     Xerxes started it and nothing else is loaded on it.
+
+`status` and `stop` find whichever engine Xerxes started without `--engine`.
 
 **Model cards.** Every Bonsai-specific setting lives in one record per model, in
 `xerxes/src/llms/modelCards.ts`:

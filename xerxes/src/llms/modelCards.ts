@@ -26,13 +26,52 @@ export interface PublishedSampling {
   readonly instruct: SamplingValues
 }
 
+/** One file of a Hugging Face repo, pinned to a commit and checked by its SHA-256. */
+export interface PinnedFile {
+  /** Path in the repo; also the file name on disk. */
+  readonly path: string
+  readonly sha256: string
+  readonly bytes: number
+}
+
+/** Where a build is published: a Hugging Face repo at one commit. */
+export interface HuggingFaceRepo {
+  readonly repo: string
+  /** The commit the files are pinned to, so a later upload cannot change what is downloaded. */
+  readonly revision: string
+}
+
+/** The download URL of a pinned file. */
+export function huggingFaceUrl(source: HuggingFaceRepo, path: string): string {
+  return `https://huggingface.co/${source.repo}/resolve/${source.revision}/${path}`
+}
+
 /** A llama-server (GGUF) build Xerxes can download and run. */
 export interface LlamaServerBuild {
-  /** File name under the local models directory. */
+  /** File name under the local models directory; the repo path when the build is published. */
   readonly fileName: string
   readonly minMemoryBytes: number
   /** Launch window: what fits in this build's memory tier next to the weights, not the model's limit. */
   readonly ctxSize: number
+  /** Where `xerxes local setup` downloads it from, when it is published. */
+  readonly published?: HuggingFaceRepo & { readonly sha256: string; readonly bytes: number }
+  /**
+   * The oldest stock llama.cpp that runs it: a build number, or the release
+   * version for builds that report one. Older builds may load the file and
+   * write gibberish, so setup refuses them.
+   */
+  readonly minLlamaCpp?: { readonly build: number; readonly version: string }
+}
+
+/** An MLX build that the stock `mlx_lm.server` runs, downloaded file by file. */
+export interface MlxBuild extends HuggingFaceRepo {
+  /** Folder under the local models directory. */
+  readonly dirName: string
+  /** Every file the server reads; nothing else in the repo is downloaded. */
+  readonly files: readonly PinnedFile[]
+  readonly minMemoryBytes: number
+  /** The oldest mlx-lm that loads this model type. */
+  readonly minMlxLm: string
 }
 
 /**
@@ -75,6 +114,7 @@ export interface ModelCard {
   /** The per-reply budget when `runtime.reply_budget` is unset; none means no budget. */
   readonly replyBudget?: ReplyBudget
   readonly llamaServer?: LlamaServerBuild
+  readonly mlx?: MlxBuild
   readonly lmstudio?: LmStudioBuild
 }
 
@@ -129,8 +169,42 @@ export const MODEL_CARDS: readonly ModelCard[] = Object.freeze([
     // The ceiling Prism's own agent demo runs with, and the hosted completion limit.
     maxOutputTokens: 32_768,
     nativeContext: 262_144,
-    // 16K is the llama-server launch default for a 24 GB machine; raise it with local.ctx_size.
-    llamaServer: Object.freeze({ fileName: 'ternary-bonsai-2-27b.gguf', minMemoryBytes: 24 * GIB, ctxSize: 16_384 }),
+    // Stock llama.cpp runs the Q2_0 packing from build b11555 (release v0.7.0);
+    // Prism's smaller PQ2_0 and PTQ1_0 packings still need its fork. 20 GiB is a
+    // 24 GB machine after the OS reserve. 16K is the window when free memory
+    // cannot be measured; raise it with local.ctx_size.
+    llamaServer: Object.freeze({
+      fileName: 'Ternary-Bonsai-2-27B-Q2_0.gguf',
+      minMemoryBytes: 20 * GIB,
+      ctxSize: 16_384,
+      published: Object.freeze({
+        repo: 'prism-ml/Ternary-Bonsai-2-27B-gguf',
+        revision: '839bd57023c1558945afea70a74fa83c054f35f9',
+        sha256: '4f99aed01b8a877e153f9aa6569a4440fe17c59701cc0953e36d7f460549e70e',
+        bytes: 7_626_008_928,
+      }),
+      minLlamaCpp: Object.freeze({ build: 11_555, version: '0.7.0' }),
+    }),
+    // The 2-bit MLX pack. mlx-lm 0.32.2 is the first release with its model type
+    // (prism_hadamard_qwen35); the files are what mlx_lm.server reads.
+    mlx: Object.freeze({
+      repo: 'prism-ml/Ternary-Bonsai-2-27B-mlx-2bit',
+      revision: '24b5937a4a104a44f790b6ccbd0c79b6fabd4299',
+      dirName: 'Ternary-Bonsai-2-27B-mlx-2bit',
+      minMemoryBytes: 16 * GIB,
+      minMlxLm: '0.32.2',
+      files: Object.freeze([
+        { path: 'config.json', sha256: '238de7c512cc56a733421e3fd011d88f8260739e3d00e32c5d65b7943cc9f837', bytes: 58_145 },
+        { path: 'model.safetensors', sha256: '130de5925082c168b7866b2e91b52e44abbafc99017e3ca352b77b5b55a269ed', bytes: 8_595_477_990 },
+        { path: 'hadamard.json', sha256: '7132a3ec364f0bdac1f08f905f24f0ad2f14245060f592637a0396826d3b5fe6', bytes: 297_903 },
+        { path: 'tokenizer.json', sha256: '0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3', bytes: 12_809_320 },
+        { path: 'tokenizer_config.json', sha256: 'b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27', bytes: 17_928 },
+        { path: 'chat_template.jinja', sha256: 'c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041', bytes: 8_952 },
+        { path: 'generation_config.json', sha256: 'e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e', bytes: 202 },
+        { path: 'preprocessor_config.json', sha256: '27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516', bytes: 390 },
+        { path: 'video_preprocessor_config.json', sha256: '7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13', bytes: 385 },
+      ]),
+    }),
     // The 2-bit MLX pack (8.6 GB on disk), measured on a 24 GB M4 Pro on 2026-11-05
     // with a 42,752-token window: a 16 GiB budget (20 after the OS reserve) is enough.
     lmstudio: Object.freeze({ modelKey: 'ternary-bonsai-2-27b-mlx', minMemoryBytes: 16 * GIB }),

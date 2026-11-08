@@ -25,7 +25,13 @@ export function systemEngineRecoveryFor(
     {
       recover: async target => {
         const { llamaServerPath } = parseLocalConfig(runtime, env)
-        return createLocalServer(systemServerPorts(), llamaServerPath === undefined ? {} : { llamaServerPath }).recover(target)
+        return createLocalServer(systemServerPorts(), llamaServerPath === undefined ? {} : { binaryPath: llamaServerPath }).recover(target)
+      },
+    },
+    {
+      recover: async target => {
+        const { mlxServerPath } = parseLocalConfig(runtime, env)
+        return createLocalServer(systemServerPorts(), { engine: 'mlx', ...(mlxServerPath === undefined ? {} : { binaryPath: mlxServerPath }) }).recover(target)
       },
     },
   ]

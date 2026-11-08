@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Supervisor for a harness-managed `llama-server` (llama.cpp). Nothing here runs
- * until the user calls `xerxes local start` / `setup`. The child is detached from
+ * Supervisor for a harness-managed engine process: llama.cpp's `llama-server`
+ * or mlx-lm's `mlx_lm.server`. Both serve an OpenAI-compatible API on
+ * 127.0.0.1 and answer `/health`. Nothing here runs until the user calls
+ * `xerxes local start` / `setup`. The child is detached from
  * the daemon lifecycle, logs to a file, and is recorded in a state file so a
  * later `stop` / `status` can find it. Every privileged action (spawn, signals,
  * process inspection, network) goes through `ServerPorts`, so tests use fakes.
@@ -15,13 +17,14 @@ import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
 import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { XerxesError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
 import type { EngineRecovery, EngineTarget } from './engineRecovery.js'
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 180_000
+const VERSION_TIMEOUT_MS = 10_000
 const DEFAULT_POLL_MS = 500
 const DEFAULT_GRACE_MS = 10_000
 const LOG_TAIL_BYTES = 4096
@@ -62,9 +65,14 @@ export interface ServerPorts {
   commandOf(pid: number): Promise<string | undefined>
   signal(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void
   portInUse(port: number): Promise<boolean>
+  /** Run a short command and return its stdout and stderr together; rejects when it cannot run. */
+  run(argv: readonly string[], timeoutMs: number): Promise<{ readonly exitCode: number; readonly output: string }>
   sleep(ms: number): Promise<void>
   now(): number
 }
+
+/** The engine processes this supervisor can run. */
+export type ManagedEngine = 'llama-server' | 'mlx'
 
 export interface LocalServerState {
   readonly pid: number
@@ -72,16 +80,19 @@ export interface LocalServerState {
   readonly model: string
   readonly startedAt: string
   readonly logPath: string
-  /** Resolved llama-server path; used to verify the pid before signalling. */
+  /** Resolved engine binary path; used to verify the pid before signalling. */
   readonly bin: string
-  /** The --ctx-size it was started with. Absent in state files written before it was recorded. */
+  /**
+   * The window it was started with (llama-server's --ctx-size; for mlx-lm, the
+   * window recorded for the profile). Absent in older state files.
+   */
   readonly ctxSize?: number
 }
 
 export interface ServerStatus {
   readonly running: boolean
   readonly healthy: boolean
-  /** A state file exists but its process is gone or is not our llama-server. */
+  /** A state file exists but its process is gone or is not our engine. */
   readonly stale: boolean
   readonly pid?: number
   readonly port?: number
@@ -93,6 +104,7 @@ export interface ServerStatus {
 }
 
 export interface StartOptions {
+  /** llama-server: the .gguf file. mlx: the model folder. */
   readonly modelPath: string
   readonly port: number
   readonly ctxSize: number
@@ -104,12 +116,18 @@ export type StopResult =
   | { readonly stopped: false; readonly reason: 'not-running' | 'stale' | 'foreign-process'; readonly pid?: number }
 
 export interface LocalServer {
+  readonly engine: ManagedEngine
   findBinary(): Promise<string | undefined>
+  /**
+   * What the engine says its version is (`llama-server --version`, or
+   * `mlx_lm --version` next to `mlx_lm.server`), or undefined when it cannot be read.
+   */
+  version(): Promise<string | undefined>
   start(options: StartOptions): Promise<ServerStatus>
   stop(): Promise<StopResult>
   status(): Promise<ServerStatus>
   /**
-   * Restart the llama-server Xerxes started when it has exited, with the same
+   * Restart the engine Xerxes started when it has exited, with the same
    * model, port and window. One that is still alive (even if busy or
    * unhealthy), one on another port, and one whose window was never recorded
    * are left alone. Rejects when the restart fails.
@@ -118,16 +136,64 @@ export interface LocalServer {
 }
 
 export interface LocalServerOptions {
-  readonly llamaServerPath?: string
+  /** Default llama-server. */
+  readonly engine?: ManagedEngine
+  /** The engine binary; found on PATH when absent. */
+  readonly binaryPath?: string
   readonly stateDir?: string
   readonly pollMs?: number
   readonly graceMs?: number
 }
 
 export const BINARY_INSTALL_HELP =
-  'llama-server (llama.cpp) was not found. Install it with `brew install llama.cpp` (macOS/Linux), ' +
-  "or build Prism's llama.cpp fork that supports Bonsai models, then put `llama-server` on PATH or set " +
+  'llama-server (llama.cpp) was not found. Install it with `brew install llama.cpp` (macOS/Linux) or from ' +
+  'https://github.com/ggml-org/llama.cpp/releases, then put `llama-server` on PATH or set ' +
   '`runtime.local.llama_server_path` in ~/.xerxes/daemon/config.json (or XERXES_LOCAL_LLAMA_SERVER).'
+
+export const MLX_INSTALL_HELP =
+  'mlx_lm.server (mlx-lm) was not found. Install it on Apple silicon with `uv tool install mlx-lm` ' +
+  '(or `pip install mlx-lm`), then put `mlx_lm.server` on PATH or set `runtime.local.mlx_server_path` ' +
+  'in ~/.xerxes/daemon/config.json (or XERXES_LOCAL_MLX_SERVER).'
+
+interface EngineSpec {
+  readonly label: string
+  readonly binary: string
+  readonly stateFile: string
+  readonly logFile: string
+  readonly installHelp: string
+  argv(bin: string, start: StartOptions): string[]
+  versionArgv(bin: string): string[]
+}
+
+const ENGINES: Readonly<Record<ManagedEngine, EngineSpec>> = {
+  'llama-server': {
+    label: 'llama-server',
+    binary: 'llama-server',
+    stateFile: 'server.json',
+    logFile: 'llama-server.log',
+    installHelp: BINARY_INSTALL_HELP,
+    argv: (bin, start) => [
+      bin, '-m', start.modelPath, '--host', '127.0.0.1', '--port', String(start.port), '--ctx-size', String(start.ctxSize), '--jinja',
+    ],
+    versionArgv: bin => [bin, '--version'],
+  },
+  mlx: {
+    label: 'mlx_lm.server',
+    binary: 'mlx_lm.server',
+    stateFile: 'mlx-server.json',
+    logFile: 'mlx-server.log',
+    installHelp: MLX_INSTALL_HELP,
+    // One request at a time, as llama-server and LM Studio run (one slot), and
+    // two prompt caches (the task and one helper call) instead of ten: each
+    // holds a whole context's cache in the same memory as the weights.
+    argv: (bin, start) => [
+      bin, '--model', start.modelPath, '--host', '127.0.0.1', '--port', String(start.port),
+      '--decode-concurrency', '1', '--prompt-concurrency', '1', '--prompt-cache-size', '2',
+    ],
+    // mlx_lm.server has no --version; the mlx_lm command installed beside it does.
+    versionArgv: bin => [join(dirname(bin), 'mlx_lm'), '--version'],
+  },
+}
 
 function isState(value: unknown): value is LocalServerState {
   if (typeof value !== 'object' || value === null) return false
@@ -165,17 +231,33 @@ export async function readLogTail(path: string, bytes = LOG_TAIL_BYTES): Promise
 }
 
 export function createLocalServer(ports: ServerPorts, options: LocalServerOptions = {}): LocalServer {
+  const engine = options.engine ?? 'llama-server'
+  const spec = ENGINES[engine]
   const stateDir = options.stateDir ?? join(xerxesHome(), 'local')
-  const statePath = join(stateDir, 'server.json')
-  const logPath = join(stateDir, 'llama-server.log')
+  const statePath = join(stateDir, spec.stateFile)
+  const logPath = join(stateDir, spec.logFile)
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS
   const graceMs = options.graceMs ?? DEFAULT_GRACE_MS
 
   async function findBinary(): Promise<string | undefined> {
-    if (options.llamaServerPath !== undefined) {
-      return (await ports.exists(options.llamaServerPath)) ? options.llamaServerPath : undefined
+    if (options.binaryPath !== undefined) {
+      return (await ports.exists(options.binaryPath)) ? options.binaryPath : undefined
     }
-    return ports.which('llama-server')
+    return ports.which(spec.binary)
+  }
+
+  async function version(): Promise<string | undefined> {
+    const bin = await findBinary()
+    if (bin === undefined) return undefined
+    const argv = spec.versionArgv(bin)
+    if (argv[0] !== bin && !(await ports.exists(argv[0]!))) return undefined
+    try {
+      const result = await ports.run(argv, VERSION_TIMEOUT_MS)
+      const output = result.output.trim()
+      return output === '' ? undefined : output
+    } catch {
+      return undefined
+    }
   }
 
   async function readState(): Promise<LocalServerState | undefined> {
@@ -200,7 +282,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
 
   const removeState = (): Promise<void> => rm(statePath, { force: true })
 
-  /** `running` only when the pid is alive AND its command line is our llama-server on our model. */
+  /** `running` only when the pid is alive AND its command line is our engine on our model. */
   async function ownership(state: LocalServerState): Promise<'running' | 'dead' | 'foreign'> {
     if (!ports.isPidAlive(state.pid)) return 'dead'
     const command = await ports.commandOf(state.pid)
@@ -277,10 +359,10 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
 
     const bin = await findBinary()
     if (bin === undefined) {
-      const configured = options.llamaServerPath
+      const configured = options.binaryPath
       throw new ServerError(
         'BINARY_NOT_FOUND',
-        configured === undefined ? BINARY_INSTALL_HELP : `llama-server not found at the configured path ${configured}. ${BINARY_INSTALL_HELP}`,
+        configured === undefined ? spec.installHelp : `${spec.label} not found at the configured path ${configured}. ${spec.installHelp}`,
       )
     }
     if (await ports.portInUse(start.port)) {
@@ -293,18 +375,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
 
     await mkdir(stateDir, { recursive: true, mode: 0o700 })
     await rm(logPath, { force: true })
-    const argv = [
-      bin,
-      '-m',
-      start.modelPath,
-      '--host',
-      '127.0.0.1',
-      '--port',
-      String(start.port),
-      '--ctx-size',
-      String(start.ctxSize),
-      '--jinja',
-    ]
+    const argv = spec.argv(bin, start)
     let child: SpawnedProcess
     try {
       child = ports.spawn(argv, { logPath })
@@ -329,7 +400,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
         const tail = await readLogTail(logPath)
         throw new ServerError(
           'START_FAILED',
-          `llama-server exited with code ${exitCode} before it became healthy.${tail === '' ? '' : `\nLog tail (${logPath}):\n${tail}`}`,
+          `${spec.label} exited with code ${exitCode} before it became healthy.${tail === '' ? '' : `\nLog tail (${logPath}):\n${tail}`}`,
           { exitCode, logPath },
         )
       }
@@ -340,7 +411,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
         const tail = await readLogTail(logPath)
         throw new ServerError(
           'START_TIMEOUT',
-          `llama-server did not report healthy on port ${start.port} within ${Math.round(timeoutMs / 1000)}s and was stopped.${tail === '' ? '' : `\nLog tail (${logPath}):\n${tail}`}`,
+          `${spec.label} did not report healthy on port ${start.port} within ${Math.round(timeoutMs / 1000)}s and was stopped.${tail === '' ? '' : `\nLog tail (${logPath}):\n${tail}`}`,
           { timeoutMs, logPath },
         )
       }
@@ -393,11 +464,11 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
     await start({ modelPath: state.model, port: state.port, ctxSize: state.ctxSize })
     return {
       recovered: true,
-      message: `llama-server had stopped (it may have run out of memory). Xerxes restarted it with its ${state.ctxSize}-token window and is retrying the step once.`,
+      message: `${spec.label} had stopped (it may have run out of memory). Xerxes restarted it with its ${state.ctxSize}-token window and is retrying the step once.`,
     }
   }
 
-  return { findBinary, start, stop, status, recover }
+  return { engine, findBinary, version, start, stop, status, recover }
 }
 
 async function psCommand(pid: number): Promise<string | undefined> {
@@ -463,6 +534,16 @@ export function systemServerPorts(): ServerPorts {
     commandOf: psCommand,
     signal: (pid, signal) => process.kill(pid, signal),
     portInUse: portIsInUse,
+    async run(argv, timeoutMs) {
+      const proc = Bun.spawn({ cmd: [...argv], stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+      const timer = setTimeout(() => proc.kill(), timeoutMs)
+      try {
+        const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+        return { exitCode: await proc.exited, output: `${stdout}\n${stderr}` }
+      } finally {
+        clearTimeout(timer)
+      }
+    },
     sleep: (ms) => Bun.sleep(ms),
     now: () => Date.now(),
   }
