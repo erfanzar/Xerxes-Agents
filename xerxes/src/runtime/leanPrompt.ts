@@ -152,6 +152,8 @@ export interface LeanSystemPromptInput {
   readonly projectInstructions?: string | undefined
   /** exec_command runs in the OS sandbox this turn (`runtime/runSafety.ts`). */
   readonly commandSandbox?: boolean
+  /** Fully local mode: nothing runs outside the sandbox (`runtime/localOnly.ts`). */
+  readonly localOnly?: boolean
 }
 
 /** A terse system prompt for small local models. */
@@ -172,7 +174,9 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     lines.push('- exec_command runs one program without a shell: cmd is the program, args is the list of arguments, and stdin is text for its standard input, such as a script for an interpreter.')
   }
   if (has('exec_command') && input.commandSandbox) {
-    lines.push('- Commands run in a sandbox with no network, and cannot change files that were in the folder when the task started. To run one outside it, set unsandboxed: true; the user is asked first.')
+    lines.push(input.localOnly
+      ? '- Commands run in a sandbox with no network, and cannot change files that were in the folder when the task started. Nothing runs outside it in this mode.'
+      : '- Commands run in a sandbox with no network, and cannot change files that were in the folder when the task started. To run one outside it, set unsandboxed: true; the user is asked first.')
   }
   if (has('check_command')) {
     lines.push('- A command still running at its timeout keeps running in the background. Read it with check_command and the proc_id it returned.')

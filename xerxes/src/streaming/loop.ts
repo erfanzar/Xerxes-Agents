@@ -29,6 +29,7 @@ import {
 import { classifyError, ErrorKind, isRecoverableNetworkError } from '../runtime/errorClassifier.js'
 import { defaultMaxNetworkRetries } from '../llms/providerRegistry.js'
 import { isEngineFailure, type RecoverEngine } from '../local/engineRecovery.js'
+import { localOnlyActive } from '../runtime/localOnly.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -1401,7 +1402,8 @@ export async function* runTurn(
         // The metadata object stays the same reference, so a lone call still
         // writes straight into the turn's shared record.
         const steerWakeSignal = dependencies.steerWake?.()
-        const commandSandbox = permissionMode === 'auto' ? dependencies.runSafety?.commandSandbox() : undefined
+        // Fully local mode sandboxes commands whatever the permission mode.
+        const commandSandbox = permissionMode === 'auto' || localOnlyActive() ? dependencies.runSafety?.commandSandbox() : undefined
         const roundContext: ToolExecutionContext = steerWakeSignal || commandSandbox
           ? {
               ...toolContext,

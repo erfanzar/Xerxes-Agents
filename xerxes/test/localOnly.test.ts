@@ -8,7 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ConfigurationError, ValidationError } from '../src/core/errors.js'
-import { createLlmClient } from '../src/llms/client.js'
+import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { createLlmClient, type LlmClient, type LlmDelta } from '../src/llms/client.js'
+import type { BoundCommandSandbox } from '../src/security/commandSandbox.js'
+import { createAgentState } from '../src/streaming/events.js'
+import { runTurn } from '../src/streaming/loop.js'
+import { registerCoreTools } from '../src/tools/index.js'
+import { EXEC_COMMAND_DEFINITION } from '../src/tools/processTools.js'
 import { EditDiagnostics } from '../src/runtime/editDiagnostics.js'
 import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from '../src/runtime/localOnly.js'
 
@@ -277,3 +283,57 @@ test.each(['oneshot', 'daemon'] as const)('fully local mode reaches no other mac
     await rm(root, { recursive: true, force: true })
   }
 }, 90_000)
+
+test('local mode runs a command only inside the no-network sandbox', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'xerxes-local-exec-'))
+  const registry = new ToolRegistry()
+  registerCoreTools(registry, { workspaceRoot: workspace })
+  const exec = (args: Record<string, unknown>, commandSandbox?: BoundCommandSandbox) => registry.execute(
+    { id: 'c', type: 'function', function: { name: 'exec_command', arguments: { cmd: process.execPath, args: ['-e', 'console.log("ran")'], ...args } } },
+    { metadata: {}, sessionId: 'local-session', ...(commandSandbox ? { commandSandbox } : {}) },
+  )
+  // A stand-in sandbox that runs the command as is.
+  const sandbox: BoundCommandSandbox = { runner: 'seatbelt', wrap: argv => [...argv], env: {} }
+  const restore = enableLocalOnly({})
+  try {
+    await expect(exec({})).rejects.toThrow(/no sandbox without network is available/)
+    await expect(exec({ unsandboxed: true }, sandbox)).rejects.toThrow(/outside the no-network sandbox/)
+    expect(JSON.parse(await exec({}, sandbox))).toMatchObject({ exitCode: 0, sandbox: 'seatbelt' })
+  } finally {
+    restore()
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('local mode hands commands the sandbox under accept-all too', async () => {
+  const sandbox: BoundCommandSandbox = { runner: 'seatbelt', wrap: argv => [...argv], env: {} }
+  const seen: Array<BoundCommandSandbox | undefined> = []
+  const turn = async (): Promise<void> => {
+    let round = 0
+    const llm: LlmClient = {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        if (round++ === 0) {
+          yield { toolCalls: [{ id: 'run', type: 'function', function: { name: 'exec_command', arguments: { cmd: 'true' } } }] }
+          return
+        }
+        yield { content: 'done' }
+      },
+    }
+    for await (const _ of runTurn(
+      { model: 'local', state: createAgentState([]), userMessage: 'go', permissionMode: 'accept-all', tools: [EXEC_COMMAND_DEFINITION] },
+      {
+        llm,
+        runSafety: { toolDisposition: () => undefined, commandSandbox: () => sandbox, approved: () => undefined },
+        toolExecutor: { execute: async (_call, context) => { seen.push(context.commandSandbox); return 'ok' } },
+      },
+    )) { /* drain */ }
+  }
+  await turn()
+  const restore = enableLocalOnly({})
+  try {
+    await turn()
+  } finally {
+    restore()
+  }
+  expect(seen).toEqual([undefined, sandbox])
+})

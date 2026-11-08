@@ -19,6 +19,7 @@
 import { ValidationError } from '../core/errors.js'
 import type { ToolRegistry } from '../executors/toolRegistry.js'
 import type { PtySessionManager } from '../operators/pty.js'
+import { assertNotLocalOnly } from '../runtime/localOnly.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 
@@ -139,6 +140,8 @@ export function registerPtyTools(registry: ToolRegistry, manager: PtySessionMana
   registry.register(
     PTY_OPEN_DEFINITION,
     async (inputs, context) => {
+      // A terminal is an unsandboxed shell, so fully local mode has none.
+      assertNotLocalOnly('opening a terminal, which runs outside the no-network sandbox')
       const workdir = optionalString(inputs, 'workdir')
       return manager.createSession(requiredString(inputs, 'command'), {
         ownerSessionId: requireOwner(context.sessionId),

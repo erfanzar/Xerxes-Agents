@@ -23,6 +23,7 @@ import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import type { RunSafety } from '../runtime/runSafety.js'
 import type { RecoverEngine } from '../local/engineRecovery.js'
+import { localOnlyActive } from '../runtime/localOnly.js'
 import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
 import type { TurnRoute } from './turnRouting.js'
 import type { EscalationNotice } from './turnEscalation.js'
@@ -586,7 +587,8 @@ export class AgentTurnRunner implements TurnRunner {
         model,
         date: localDay(new Date()),
         toolNames: (tools ?? []).map(tool => tool.function.name),
-        commandSandbox: permissionMode === 'auto' && runSafety?.commandSandbox() !== undefined,
+        commandSandbox: (permissionMode === 'auto' || localOnlyActive()) && runSafety?.commandSandbox() !== undefined,
+        localOnly: localOnlyActive(),
         projectInstructions: await readLeanProjectInstructions(session.cwd),
       })
       : await this.bootstrapSystemPrompt(

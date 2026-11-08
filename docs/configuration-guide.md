@@ -669,16 +669,18 @@ daemon, one-shot runs, `--resume` and `xerxes acp` read it at start.
   image generation, WebSocket monitors to other hosts, git fetch, pull and push, plugin clones,
   and asking Claude Code for its models. Edit diagnostics use only installed tools
   (`bunx --no-install`, `cargo --offline`).
+- **Commands:** `exec_command` runs only inside the no-network sandbox (see the safety floor below),
+  in every permission mode, so inputs are read-only too. `unsandboxed: true` is refused, and with
+  no sandbox available (no bubblewrap on Linux, or a folder over 2,000 files) commands are refused.
+  Terminals (`pty_open`) are off.
 - **Remote MCP servers** over HTTP are refused; a loopback one still needs `allowPrivateNetwork`.
 - **Tested:** `test/localOnly.test.ts` starts the real one-shot CLI and daemon with this setting,
   lists models and runs a turn, and fails if anything tried to reach another machine through
   `fetch`, a WebSocket, a socket, DNS, or a `claude`, `curl` or git remote command.
 
-What this mode does not police:
-- **Commands the model runs.** In `auto` mode with a sandbox (see the safety floor below), they
-  have no network. Under `accept-all`, or without a sandbox, they can reach it.
-- **MCP servers started as local commands (stdio)** and plugin processes run as configured. A
-  plugin's own `fetch` is still limited to the hosts in its `permissions.network`.
+What this mode does not police: MCP servers started as local commands (stdio) and plugin processes
+run as configured. A plugin's own `fetch` is still limited to the hosts in its
+`permissions.network`.
 
 ### The safety floor
 

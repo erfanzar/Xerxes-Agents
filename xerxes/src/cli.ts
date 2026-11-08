@@ -1571,7 +1571,8 @@ function oneShotPermissionBroker(): PermissionBroker {
 
 /** The run's safety floor in auto mode; in other modes, or when it cannot start, none (and the run says so). */
 async function oneShotRunSafety(mode: PermissionMode, sessionId: string, workspaceRoot: string): Promise<RunSafety | undefined> {
-  if (mode !== "auto") return undefined;
+  // Fully local mode needs the floor's command sandbox in every mode.
+  if (mode !== "auto" && !localOnlyActive()) return undefined;
   try {
     const runSafety = await new RunSafetyRegistry().forSession(sessionId, workspaceRoot);
     if (runSafety.sandboxUnavailable) {
@@ -3372,6 +3373,7 @@ async function runOneShot(
           date: localDay(new Date()),
           toolNames: selectedTools.map(tool => tool.function.name),
           commandSandbox: runSafety?.commandSandbox() !== undefined,
+          localOnly: localOnlyActive(),
           projectInstructions: await readLeanProjectInstructions(workspaceRoot),
         }),
         // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.

@@ -8,6 +8,7 @@ import { stat } from 'node:fs/promises'
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import { ProcessRegistry, terminateProcessSubtree, type ProcessSignal } from '../runtime/processRegistry.js'
+import { localOnlyActive, localOnlyRefusal } from '../runtime/localOnly.js'
 import type { BoundCommandSandbox, CommandSandboxRunner } from '../security/commandSandbox.js'
 import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
@@ -244,6 +245,12 @@ export function registerProcessTools(
       // The loop sets the sandbox exactly when the run-safety port allowed
       // sandboxed commands; a call that asked to run outside it never gets one.
       const sandbox = inputs.unsandboxed === true ? undefined : context.commandSandbox
+      // Fully local mode runs a command only inside the no-network sandbox.
+      if (localOnlyActive() && sandbox === undefined) {
+        throw localOnlyRefusal(inputs.unsandboxed === true
+          ? 'running a command outside the no-network sandbox'
+          : 'running a command, because no sandbox without network is available here')
+      }
       const result = await executeCommand(inputs, paths, signal, background, terminals, owner, sandbox)
       if (!notify || !('procId' in result)) return result
       try {
