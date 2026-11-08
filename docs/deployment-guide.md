@@ -119,12 +119,6 @@ write requested code changes. Docker Desktop users can keep the default UID. Sup
 credentials through the environment rather than baking them into the image, and never commit the
 daemon token.
 
-## HTTP API embedding
-
-The OpenAI-compatible HTTP handler is a native library surface, not an implicit background server.
-An application supplies its `LlmClient`, advertised models, authentication policy, CORS policy, and
-optional rate limiter before listening with Bun. See the [HTTP API reference](api-reference.md).
-
 ## Channels and remote services
 
 Use an explicit daemon configuration and provider/channel credentials stored outside source

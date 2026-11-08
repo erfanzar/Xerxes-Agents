@@ -24,7 +24,6 @@ test('native real-use runner executes local Bun surfaces and safely skips gated 
     '02',
     '04',
     '05',
-    '06',
     '08',
     '09',
     '10',

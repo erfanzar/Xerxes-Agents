@@ -5,7 +5,6 @@ import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { MCPClient } from '../src/mcp/client.js'
-import { MAX_MCP_FRAME_BYTES, MCPToolServer, serveMCPStdio } from '../src/mcp/server.js'
 import { MCPConnectionError, MCPProtocolError, type MCPJsonRpcResponse } from '../src/mcp/types.js'
 
 const TEST_MCP_SERVER = String.raw`
@@ -248,125 +247,6 @@ test('MCPClient.callTool aborts through an AbortSignal and discards the pending 
   } finally {
     await client.disconnect()
   }
-})
-
-test('MCPToolServer exposes ToolRegistry definitions and turns call failures into MCP results', async () => {
-  const registry = new ToolRegistry()
-  registry.register(
-    {
-      type: 'function',
-      function: {
-        name: 'upper',
-        description: 'Uppercase a message.',
-        parameters: { type: 'object', required: ['message'] },
-      },
-    },
-    arguments_ => ({ value: String(arguments_.message).toUpperCase() }),
-  )
-  registry.register(
-    {
-      type: 'function',
-      function: { name: 'fails', description: 'Always fails.', parameters: { type: 'object' } },
-    },
-    () => {
-      throw new Error('expected failure')
-    },
-  )
-  const server = new MCPToolServer(registry, {
-    serverInfo: { name: 'xerxes-test', version: '0.3.0-test' },
-  })
-
-  expect(resultOf(await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }))).toMatchObject({
-    protocolVersion: '2024-11-05',
-    capabilities: { tools: { listChanged: false } },
-    serverInfo: { name: 'xerxes-test', version: '0.3.0-test' },
-  })
-  expect(resultOf(await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }))).toEqual({
-    tools: [
-      { name: 'upper', description: 'Uppercase a message.', inputSchema: { type: 'object', required: ['message'] } },
-      { name: 'fails', description: 'Always fails.', inputSchema: { type: 'object' } },
-    ],
-  })
-  expect(resultOf(await server.handle({
-    jsonrpc: '2.0',
-    id: 3,
-    method: 'tools/call',
-    params: { name: 'upper', arguments: { message: 'hello' } },
-  }))).toEqual({ content: [{ type: 'text', text: '{"value":"HELLO"}' }] })
-  expect(resultOf(await server.handle({
-    jsonrpc: '2.0',
-    id: 4,
-    method: 'tools/call',
-    params: { name: 'fails', arguments: {} },
-  }))).toMatchObject({
-    isError: true,
-    content: [{ type: 'text', text: 'Function fails: expected failure' }],
-  })
-  expect(await server.handle({ jsonrpc: '2.0', method: 'notifications/initialized' })).toBeUndefined()
-
-  const unknown = await server.handle({ jsonrpc: '2.0', id: 5, method: 'resources/list', params: {} })
-  expect(unknown).toMatchObject({ error: { code: -32601 } })
-})
-
-test('serveMCPStdio preserves NDJSON framing and skips notification responses', async () => {
-  const registry = new ToolRegistry()
-  registry.register(
-    {
-      type: 'function',
-      function: { name: 'ping', description: 'Reply with pong.', parameters: { type: 'object' } },
-    },
-    () => 'pong',
-  )
-  const server = new MCPToolServer(registry)
-  const encoder = new TextEncoder()
-  const input = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode('{"jsonrpc":"2.0","id":1,"method":"tools/li'))
-      controller.enqueue(encoder.encode('st","params":{}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n'))
-      controller.close()
-    },
-  })
-  const output: string[] = []
-
-  await serveMCPStdio(server, input, line => {
-    output.push(line)
-  })
-
-  expect(output).toHaveLength(1)
-  expect(JSON.parse(output[0] ?? '')).toEqual({
-    jsonrpc: '2.0',
-    id: 1,
-    result: {
-      tools: [{ name: 'ping', description: 'Reply with pong.', inputSchema: { type: 'object' } }],
-    },
-  })
-})
-
-test('serveMCPStdio rejects an oversized unterminated frame and cancels input', async () => {
-  const server = new MCPToolServer(new ToolRegistry())
-  const encoder = new TextEncoder()
-  let cancelled = false
-  const input = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode('x'.repeat(MAX_MCP_FRAME_BYTES + 1)))
-    },
-    cancel() {
-      cancelled = true
-    },
-  })
-  const output: string[] = []
-
-  await serveMCPStdio(server, input, line => {
-    output.push(line)
-  })
-
-  expect(cancelled).toBeTrue()
-  expect(output).toHaveLength(1)
-  expect(JSON.parse(output[0] ?? '')).toMatchObject({
-    jsonrpc: '2.0',
-    id: null,
-    error: { code: -32600, message: `frame exceeds maximum size of ${MAX_MCP_FRAME_BYTES} bytes` },
-  })
 })
 
 function resultOf(response: MCPJsonRpcResponse | undefined): Record<string, unknown> {

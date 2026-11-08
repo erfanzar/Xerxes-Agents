@@ -333,11 +333,6 @@ xerxes export [session]
 xerxes skill <skill> [arguments]
 ```
 
-The OpenAI-compatible HTTP server is an embeddable Bun handler rather than an implicit
-background command. Hosts inject their model client, model catalogue, authentication,
-CORS, and rate-limit policy before listening. See the
-[API reference](docs/api-reference.md).
-
 ## How it fits together
 
 ```text
@@ -433,7 +428,6 @@ Container deployment is documented in the
 - [Desktop workspace](docs/desktop-workspace.md)
 - [Configuration](docs/configuration-guide.md)
 - [Deployment](docs/deployment-guide.md)
-- [API reference](docs/api-reference.md)
 - [System architecture](docs/system-architecture.md)
 - [Testing](docs/testing-guide.md)
 - [Contributing](docs/contributing.md)

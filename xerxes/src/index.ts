@@ -24,8 +24,6 @@ export * from './context/index.js'
 // pool with depth caps, cohort join, and persistence.
 export * from './cron/index.js'
 export * from './api-server/protocol.js'
-export * from './api-server/cortexCompletionService.js'
-export * from './api-server/server.js'
 export * from './audit/index.js'
 export * from './acp/index.js'
 export * from './agents/agentSpec.js'

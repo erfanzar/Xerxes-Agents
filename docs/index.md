@@ -32,7 +32,6 @@ credentials without attempting a remote request.
 - [Goal mode](goal-mode.md)
 - [GitHub Actions](github-action.md)
 - [System architecture](system-architecture.md)
-- [API reference](api-reference.md)
 - [Release history](changelog.md)
 
 ## Source layout

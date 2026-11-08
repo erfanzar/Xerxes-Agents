@@ -25,7 +25,6 @@ import { calcCost } from '../src/llms/providerRegistry.js'
 import { checkPackage, type OSVFetch } from '../src/mcp/osv.js'
 import { buildAuthorizeUrl, generatePkcePair, OAuthToken } from '../src/mcp/oauth.js'
 import { ReconnectPolicy, reconnectWithBackoff } from '../src/mcp/reconnect.js'
-import { MCPToolServer } from '../src/mcp/server.js'
 import { HolographicProvider, Mem0Provider, type ExternalMemoryUpstream } from '../src/memory/plugins/index.js'
 import { createBrowserProviderRegistry, SUPPORTED_BROWSER_PROVIDERS } from '../src/operators/browserProviders.js'
 import { AuxiliaryClient } from '../src/runtime/auxiliaryClient.js'
@@ -165,11 +164,6 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       plan: '05',
       feature: 'External-memory plugin lifecycle uses an injected local upstream and preserves unavailable Mem0 state',
       run: checkMemoryPlugins,
-    },
-    {
-      plan: '06',
-      feature: 'MCP tool server lists and executes a registered native tool in-process',
-      run: checkMcpToolServer,
     },
     {
       plan: '07',
@@ -585,41 +579,6 @@ async function checkMemoryPlugins(): Promise<string> {
   })
   require(!(await mem0.isAvailable()), 'Mem0 reported available without explicit configuration')
   return 'holographic add/search used an injected local upstream; unconfigured Mem0 remained unavailable'
-}
-
-async function checkMcpToolServer(): Promise<string> {
-  const registry = new ToolRegistry()
-  registry.register(
-    {
-      type: 'function',
-      function: {
-        name: 'upper',
-        description: 'Uppercase a string.',
-        parameters: {
-          type: 'object',
-          properties: { text: { type: 'string' } },
-          required: ['text'],
-          additionalProperties: false,
-        },
-      },
-    },
-    inputs => ({ value: String(inputs.text).toUpperCase() }),
-  )
-  const server = new MCPToolServer(registry)
-  const listed = resultOf(await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }))
-  const tools = listed.tools
-  require(Array.isArray(tools) && tools.length === 1, 'MCP tool list did not expose the registered tool')
-  const called = resultOf(await server.handle({
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/call',
-    params: { name: 'upper', arguments: { text: 'native' } },
-  }))
-  const content = called.content
-  require(Array.isArray(content), 'MCP tool call returned no content')
-  const first = content[0]
-  require(isRecord(first) && first.text === '{"value":"NATIVE"}', 'MCP tool call produced an unexpected result')
-  return 'registered tool listed and executed through MCP JSON-RPC'
 }
 
 async function checkMcpReconnect(): Promise<string> {

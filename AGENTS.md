@@ -5,7 +5,7 @@ Guidance for agents working in Xerxes. Read this before changing the repository.
 ## Project overview
 
 Xerxes (`@xsimurgh/xerxes-agents` v0.8.23) is a Bun-native TypeScript multi-agent runtime. It provides a
-terminal UI, JSON-RPC daemon, OpenAI-compatible API, provider routing, tool execution, MCP,
+terminal UI, JSON-RPC daemon, provider routing, tool execution, MCP,
 subagents, channels, persistent sessions, and tiered memory.
 
 - Runtime: Bun 1.3+
@@ -81,7 +81,7 @@ xerxes/
 │   ├── security/           # Policies, scanning, sandbox routing
 │   ├── mcp/, acp/          # MCP and Agent Client Protocol surfaces
 │   ├── channels/           # Messaging adapters and gateways
-│   ├── api-server/         # OpenAI-compatible HTTP service
+│   ├── api-server/         # Chat-completions request parsing for the provider relay
 │   ├── extensions/         # Skills, hooks, plugins, authoring
 │   ├── ui/                 # React + OpenTUI terminal client
 │   └── vscode/             # VS Code extension: sidebar chat view (ui/) and host
@@ -101,7 +101,7 @@ scripts/install.sh           # Bun installer and launcher setup
 3. `streaming/loop.ts` normalizes provider deltas into serializable stream events, routes tool
    calls through permissions and the tool registry, and guarantees a terminal turn event.
 4. `runtime/` enforces turn, budget, and compaction limits while `session/` persists data.
-5. The TUI renders the same event vocabulary the daemon, API, MCP, and channels consume.
+5. The TUI renders the same event vocabulary the daemon, ACP, and channels consume.
 
 Preserve public wire formats and persisted-session behavior unless the user explicitly authorizes a
 protocol migration. Do not invent a successful fallback for an unsupported external integration:
