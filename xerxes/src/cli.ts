@@ -213,6 +213,8 @@ import {
   registerClaudeSkillTool,
   registerClaudeWorkflowTools,
   registerCoreTools,
+  extraToolOptions,
+  parseExtraTools,
 } from "./tools/index.js";
 import { createMemoryToolContextResolver, type MemoryToolContextResolver } from "./tools/memoryToolContext.js";
 import { createAgentState } from "./streaming/events.js";
@@ -2170,7 +2172,9 @@ function daemonRuntime(
     const mcpTools = resources.mcpManager ? registerMcpTools(tools, resources.mcpManager) : [];
     registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
     if (host.schedules) registerScheduleTools(tools, host.schedules);
+    const extraTools = parseExtraTools({ ...config.runtime, ...settings }, process.env);
     const corePaths = registerCoreTools(tools, {
+      ...extraToolOptions(extraTools),
       ...(host.modelInventory ? { modelInventory: host.modelInventory } : {}),
       workspaceRoot,
       activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
@@ -2201,7 +2205,7 @@ function daemonRuntime(
           );
         },
       },
-      memoryTools: { resolveContext: memoryToolContext.resolve },
+      ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
     });
     // Same workspace-safe path resolver as the core file tools.
     registerClaudeNotebookTools(tools, corePaths);
@@ -3002,7 +3006,9 @@ async function acpServer(
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const acpComputerUseTool = computerUseHost.toolOptions(config.runtime);
+  const extraTools = parseExtraTools(config.runtime, process.env);
   registerCoreTools(tools, {
+    ...extraToolOptions(extraTools),
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
@@ -3013,7 +3019,7 @@ async function acpServer(
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
-    memoryTools: { resolveContext: memoryToolContext.resolve },
+    ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
   });
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
@@ -3237,7 +3243,9 @@ async function runOneShot(
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
   const computerUseTool = computerUseHost.toolOptions(config.runtime);
+  const extraTools = parseExtraTools(config.runtime, process.env);
   registerCoreTools(tools, {
+    ...extraToolOptions(extraTools),
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
@@ -3248,7 +3256,7 @@ async function runOneShot(
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
-    memoryTools: { resolveContext: memoryToolContext.resolve },
+    ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
   });
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));

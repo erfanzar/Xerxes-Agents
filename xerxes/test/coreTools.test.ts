@@ -25,6 +25,8 @@ import {
   StaticAsker,
   WorkspacePathError,
   WorkspacePathResolver,
+  extraToolOptions,
+  parseExtraTools,
   registerCoreTools,
 } from '../src/tools/index.js'
 import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
@@ -138,9 +140,18 @@ test.skipIf(process.platform === 'win32')('exec_command uses direct argv and ret
   })
 })
 
-test('core registration includes the dependency-free AI, data, mathematics, and system surfaces', () => {
+test('core registration leaves the extra math, text and system tools off unless asked for', () => {
+  const plain = new ToolRegistry()
+  registerCoreTools(plain, { includeProcessTools: false })
+  const defaults = new Set(plain.definitions().map(definition => definition.function.name))
+  expect(defaults).toContain('CSVProcessor')
+  expect(defaults).toContain('XlsxReader')
+  for (const name of ['Calculator', 'StatisticalAnalyzer', 'TextEmbedder', 'TextSummarizer', 'SystemInfo', 'EnvironmentManager']) {
+    expect(defaults).not.toContain(name)
+  }
+
   const registry = new ToolRegistry()
-  registerCoreTools(registry, { includeProcessTools: false })
+  registerCoreTools(registry, { includeProcessTools: false, ...extraToolOptions(parseExtraTools({ extra_tools: ['math', 'text', 'system'] }, {})) })
   const names = new Set(registry.definitions().map(definition => definition.function.name))
 
   expect(names).toContain('JSONProcessor')
@@ -255,4 +266,13 @@ test('core registration rejects ambiguous skill_manage registrations', () => {
     agentMetaTools: {},
     skillManageTools: { authoredDirectory: '/tmp/xerxes-skills' },
   })).toThrow(ConfigurationError)
+})
+
+test('extra tool groups come from runtime.extra_tools or XERXES_EXTRA_TOOLS, and an unknown group is refused', () => {
+  expect([...parseExtraTools({}, {})]).toEqual([])
+  expect([...parseExtraTools({ extra_tools: ['Math', 'memory'] }, {})]).toEqual(['math', 'memory'])
+  expect([...parseExtraTools({ extra_tools: ['math'] }, { XERXES_EXTRA_TOOLS: 'text, system' })]).toEqual(['text', 'system'])
+  expect(() => parseExtraTools({ extra_tools: ['maths'] }, {})).toThrow('must be a list of: math, text, system, memory')
+  expect(() => parseExtraTools({ extra_tools: 'math' }, {})).not.toThrow()
+  expect(() => parseExtraTools({ extra_tools: 3 }, {})).toThrow('extra_tools')
 })

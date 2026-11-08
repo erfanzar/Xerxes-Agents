@@ -19,7 +19,8 @@ export const LEAN_CORE_TOOL_NAMES: readonly string[] = Object.freeze([
   'ReadFile',
   'GlobTool',
   'GrepTool',
-  'ListDir',
+  // No ListDir: GlobTool with `*` lists a folder, and every schema rides
+  // with every request.
   'WriteFile',
   'FileEditTool',
   'exec_command',
@@ -233,6 +234,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function shrinkSchema(schema: JsonSchema): JsonSchema {
   const shrunk: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(schema)) {
+    // The registry checks arguments against the full schema; the model does
+    // not need the strictness marker.
+    if (key === 'additionalProperties' && value === false) continue
     shrunk[key] = key === 'description' && typeof value === 'string'
       ? clipText(value.replace(/\s+/gu, ' ').trim(), MAX_SCHEMA_DESCRIPTION_CHARS)
       : shrinkValue(value)

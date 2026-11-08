@@ -129,7 +129,7 @@ test('buildLeanSystemPrompt states the rules, adapts to tools, and clips project
   expect(long.length).toBeLessThan(without.length + 1700)
 })
 
-test('lean prompt plus real tool schemas stays within the 3,500 token target', () => {
+test('lean prompt plus real tool schemas, with a full instruction block, stays within 3,000 tokens', () => {
   const tools = selectLeanTools([...REAL_DEFINITIONS, advisor()])
   const prompt = buildLeanSystemPrompt({
     cwd: '/Users/someone/Documents/Projects/a-fairly-long-project-name',
@@ -140,7 +140,8 @@ test('lean prompt plus real tool schemas stays within the 3,500 token target', (
   })
   const size = leanPromptSize(prompt, tools)
   console.log(`lean prompt: ${size.chars} chars, ~${size.estimatedTokens} tokens, ${tools.length} tools`)
-  expect(size.estimatedTokens).toBeLessThanOrEqual(3500)
+  expect(size.estimatedTokens).toBeLessThanOrEqual(3000)
+  expect(tools.map(tool => tool.function.name)).not.toContain('ListDir')
   expect(size.chars).toBe(prompt.length + JSON.stringify(tools).length)
 
   const full = leanPromptSize('', REAL_DEFINITIONS)

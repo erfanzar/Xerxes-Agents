@@ -555,8 +555,10 @@ With either engine:
   - **A failed reload** is named in the retry message, and the failure is then handled as before.
   - **Older starts:** a llama-server started before this release has no recorded window, so it is
     not restarted. Run `xerxes local stop` and `start` once.
-- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: 13 tools and terse rules,
-  about 3K tokens instead of about 29K. So does any model whose known window is 32K tokens or less.
+- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 12 tools and terse
+  rules, at most 3K tokens with a full instruction block, instead of about 29K. The tools are
+  ReadFile, WriteFile, FileEditTool, GlobTool, GrepTool, exec_command, check_command, CSVProcessor,
+  XlsxReader, XlsxWriter, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
   It includes the project's instruction files (`XERXES.md`, `AGENTS.md`, `CLAUDE.md` and their
   `.local.md` overlays, found the same way as for the full prompt) in at most 1,500 characters. A
@@ -632,6 +634,15 @@ Useful process-level overrides include:
 | `XERXES_MODEL` | Runtime model override. |
 | `XERXES_BASE_URL` | Runtime provider base URL. |
 | `XERXES_PERMISSION_MODE` | Runtime permission mode (`auto` by default; also `accept-all`, `manual`, or `plan`). |
+| `XERXES_EXTRA_TOOLS` | Comma-separated tool groups to turn on; wins over `runtime.extra_tools` (see below). |
+
+**Extra tool groups.** These tools are off by default. Code does their work, and every tool's
+schema is sent with every request. Turn groups on with `runtime.extra_tools` (a list) or
+`XERXES_EXTRA_TOOLS`. An unknown group name is an error.
+- `math`: Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter.
+- `text`: TextClassifier, TextSummarizer, EntityExtractor, TextEmbedder, TextSimilarity.
+- `system`: SystemInfo, EnvironmentManager.
+- `memory`: the older `save_memory` and `search_memory` store, next to the markdown memory.
 
 Run `bun run xerxes daemon --project-dir .` to use the native daemon with an explicit workspace.
 

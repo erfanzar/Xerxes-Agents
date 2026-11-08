@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { ConfigurationError } from '../core/errors.js'
+import { ConfigurationError, ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import { registerAgentMemoryTools, type AgentMemoryToolsOptions } from './agentMemoryTools.js'
@@ -97,9 +97,11 @@ export interface CoreToolsOptions {
    */
   readonly claudeCompatibilityTools?: ClaudeCompatibilityToolsOptions
   readonly includeDataTools?: boolean
+  /** The `text` group of EXTRA_TOOL_GROUPS; off unless asked for. */
   readonly includeAiTools?: boolean
   /** Lower-case compatibility coding tools include destructive Git/file actions and stay opt-in. */
   readonly includeCodingTools?: boolean
+  /** The `math` group of EXTRA_TOOL_GROUPS; off unless asked for. */
   readonly includeMathTools?: boolean
   readonly includeProcessTools?: boolean
   /**
@@ -119,6 +121,7 @@ export interface CoreToolsOptions {
    */
   readonly completionWatch?: CommandCompletionWatch
   readonly terminals?: TerminalRegistry
+  /** The `system` group of EXTRA_TOOL_GROUPS; off unless asked for. */
   readonly includeSystemTools?: boolean
   /** Safe public HTTP tools; enabled by default and independently permission-gated. */
   readonly includeWebTools?: boolean
@@ -162,6 +165,49 @@ export interface CoreToolsOptions {
  * default. Process execution is direct argv-only and can be disabled while a
  * caller has not yet connected its permission and sandbox layers.
  */
+/**
+ * Tool groups that are off by default, turned on with `runtime.extra_tools`
+ * (a list) or `XERXES_EXTRA_TOOLS` (comma-separated; it wins over the file):
+ * - `math`: Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter.
+ * - `text`: TextClassifier, TextSummarizer, EntityExtractor, TextEmbedder, TextSimilarity.
+ * - `system`: SystemInfo, EnvironmentManager.
+ * - `memory`: the older save_memory and search_memory store, next to the markdown memory.
+ *
+ * A model doing knowledge work does these in code, and every schema is sent
+ * with every request.
+ */
+export const EXTRA_TOOL_GROUPS = ['math', 'text', 'system', 'memory'] as const
+export type ExtraToolGroup = (typeof EXTRA_TOOL_GROUPS)[number]
+export const EXTRA_TOOLS_ENV = 'XERXES_EXTRA_TOOLS'
+
+/** The extra tool groups asked for. An unknown group is refused, not ignored. */
+export function parseExtraTools(
+  runtime: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>>,
+): ReadonlySet<ExtraToolGroup> {
+  const fromEnv = env[EXTRA_TOOLS_ENV]?.trim()
+  const field = fromEnv ? EXTRA_TOOLS_ENV : 'extra_tools'
+  const raw: unknown = fromEnv ? fromEnv.split(',') : runtime['extra_tools']
+  if (raw === undefined || raw === null) return new Set()
+  const values = typeof raw === 'string' ? raw.split(',') : raw
+  if (!Array.isArray(values)) throw new ValidationError(field, `must be a list of: ${EXTRA_TOOL_GROUPS.join(', ')}`, raw)
+  const groups = new Set<ExtraToolGroup>()
+  for (const value of values) {
+    const name = typeof value === 'string' ? value.trim().toLowerCase() : value
+    if (name === '') continue
+    if (!(EXTRA_TOOL_GROUPS as readonly unknown[]).includes(name)) {
+      throw new ValidationError(field, `must be a list of: ${EXTRA_TOOL_GROUPS.join(', ')}`, value)
+    }
+    groups.add(name as ExtraToolGroup)
+  }
+  return groups
+}
+
+/** registerCoreTools options for the extra tool groups asked for. */
+export function extraToolOptions(groups: ReadonlySet<ExtraToolGroup>): Pick<CoreToolsOptions, 'includeAiTools' | 'includeMathTools' | 'includeSystemTools'> {
+  return { includeAiTools: groups.has('text'), includeMathTools: groups.has('math'), includeSystemTools: groups.has('system') }
+}
+
 export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOptions = {}): WorkspacePathResolver {
   if (options.agentMetaTools !== undefined && options.skillManageTools !== undefined) {
     throw new ConfigurationError(
@@ -173,7 +219,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   const paths = new WorkspacePathResolver(options.workspaceRoot ?? process.cwd(), options.activeWorkspaceRoot, options.readOnlyRoots)
   registerFileTools(registry, paths)
   registerProjectSetupTool(registry, paths)
-  if (options.includeAiTools ?? true) {
+  if (options.includeAiTools ?? false) {
     registerAiTools(registry, options.aiTools ?? {})
   }
   if (options.includeDataTools ?? true) {
@@ -183,7 +229,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   if (options.includeCodingTools ?? false) {
     registerCodingTools(registry, paths)
   }
-  if (options.includeMathTools ?? true) {
+  if (options.includeMathTools ?? false) {
     registerMathTools(registry)
   }
   if (options.includeProcessTools ?? true) {
@@ -192,7 +238,7 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
       registerPtyTools(registry, options.ptySessions)
     }
   }
-  if (options.includeSystemTools ?? true) {
+  if (options.includeSystemTools ?? false) {
     registerSystemTools(registry)
   }
   if (options.includeWebTools ?? true) {
