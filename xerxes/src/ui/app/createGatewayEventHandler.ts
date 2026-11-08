@@ -595,7 +595,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
         if (p?.kind === 'provider_wait' || p?.kind === 'provider_ready') {
-          patchTurnState({ providerWaiting: p.kind === 'provider_wait', ...(p.kind === 'provider_ready' ? { networkRetrying: false } : {}) })
+          patchTurnState(p.kind === 'provider_wait'
+            ? { providerStarted: true, providerWaiting: true, providerPromptTokens: p.prompt_tokens ?? 0 }
+            : { networkRetrying: false, providerWaiting: false })
           return
         }
 
@@ -1098,6 +1100,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         turnController.recordMessageDelta(ev.payload ?? {})
 
         return
+      case 'turn.retry':
+        turnController.recordProviderRetry(ev.payload)
+
+        return
+
+      case 'turn.checks':
+        turnController.recordHarnessNote(ev.payload)
+
+        return
+
       case 'transcript.append': {
         const outcome = turnOutcomeReason(ev.payload?.outcome)
         if (outcome) {
@@ -1119,7 +1131,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         // idle() would otherwise drop the live overlay without a trace.
         flushAbandonedClarify()
 
-        const { finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete(ev.payload ?? {})
+        const { checksFailing, finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete(ev.payload ?? {})
 
         if (wasInterrupted) {
           // The daemon confirmed the interruption (turn_end cancelled). Persist
@@ -1156,7 +1168,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         }
 
         const outcome = turnOutcomeReason(ev.payload?.outcome) ?? (wasInterrupted ? 'aborted' : undefined)
-        if (!ev.payload?.unstarted && outcome) appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome, ...liveTurnDuration() })
+        if (!ev.payload?.unstarted && outcome) {
+          appendMessage({ kind: 'outcome', role: 'assistant', text: '', outcome, ...liveTurnDuration(), ...(checksFailing ? { checksFailing } : {}) })
+        }
 
         if (ev.payload?.usage) {
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))

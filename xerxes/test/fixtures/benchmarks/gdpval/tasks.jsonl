@@ -1,0 +1,3 @@
+{"task_id": "g1", "sector": "Finance", "occupation": "Analyst", "prompt": "Write a one-page memo.", "reference_files": ["refs/brief.txt"]}
+{"task_id": "g2", "sector": "Legal", "occupation": "Paralegal", "prompt": "Draft a short cover letter."}
+{"task_id": "g3", "sector": "Health", "occupation": "Nurse", "prompt": "Summarize the chart.", "reference_files": ["refs/missing.txt"]}

@@ -35,6 +35,28 @@ export function reflectionTrigger(input: ReflectionTriggerInput): ReflectionTrig
     || (Number.isFinite(input.turnDurationMs) && input.turnDurationMs >= duration) ? 'long_turn' : undefined
 }
 
+export type ReflectionMode = 'goals' | 'all' | 'off'
+
+export interface ReflectionModeInput {
+  /** The live setting; anything but `all` or `off` reads as `goals`. */
+  readonly configured: unknown
+  /** True when the user set the mode (environment or config), not the built-in default. */
+  readonly chosen: boolean
+  /** Where the session's model runs. Only consulted when the answer depends on it. */
+  readonly trust: () => 'local' | 'cloud'
+}
+
+/**
+ * The mode one session reflects with. A slow local model passes the long-turn
+ * trigger on ordinary work and each reflection is another long call on the same
+ * server, so a local session falls back to goal endings unless `all` was chosen.
+ */
+export function reflectionModeFor(input: ReflectionModeInput): ReflectionMode {
+  const mode: ReflectionMode = input.configured === 'all' || input.configured === 'off' ? input.configured : 'goals'
+  if (mode !== 'all' || input.chosen) return mode
+  return input.trust() === 'local' ? 'goals' : mode
+}
+
 export interface ReflectionPromptInput {
   readonly objective: string
   readonly criteria?: readonly GoalCriterion[]

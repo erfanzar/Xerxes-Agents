@@ -14,14 +14,11 @@ interface ExampleCommand {
 }
 
 const EXAMPLES: readonly ExampleCommand[] = [
-  { path: 'examples/cortex_deepsearch_agent.ts', args: ['--topic', 'native test', '--researchers', '2'], expected: 'CORTEX DEEP-SEARCH' },
-  { path: 'examples/cortex_parallel_benchmark.ts', args: ['--agents', '2', '--min-context-tokens', '16'], expected: 'Completed 2/2 workers' },
   { path: 'examples/deepsearch_agent_demo.ts', args: ['--topic', 'native test', '--queries', '2'], expected: 'Collected 3 illustrative results' },
   { path: 'examples/interactive_agent.ts', args: [], expected: 'INTERACTIVE BUN AGENT' },
   { path: 'examples/openclaw_capabilities_demo.ts', args: [], expected: 'OPENCLAW-CLASS CAPABILITIES' },
   { path: 'examples/scenario_1_conversational_assistant.ts', args: [], expected: 'CONVERSATIONAL ASSISTANT WITH MEMORY' },
   { path: 'examples/scenario_2_code_analyzer.ts', args: [], expected: 'INTELLIGENT CODE ANALYSIS AGENT' },
-  { path: 'examples/scenario_3_multi_agent_collaboration.ts', args: [], expected: 'MULTI-AGENT COLLABORATION' },
   { path: 'examples/scenario_4_streaming_research_assistant.ts', args: [], expected: 'STREAMING RESEARCH ASSISTANT' },
   { path: 'examples/textual_tui.ts', args: [], expected: 'XERXES NATIVE TERMINAL UI' },
 ]

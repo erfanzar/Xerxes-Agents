@@ -52,6 +52,8 @@ export interface BackgroundStartOptions {
   readonly command: string
   readonly cwd: string
   readonly name?: string
+  /** Variables added to the inherited environment (a sandbox's TMPDIR). */
+  readonly env?: Readonly<Record<string, string>>
 }
 
 /**
@@ -136,6 +138,7 @@ export class BackgroundCommandManager {
     // group-aware signaling and `exited`-based reaping.
     const child = Bun.spawn(argv, {
       cwd: options.cwd,
+      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',

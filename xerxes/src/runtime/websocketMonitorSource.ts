@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
+import { localOnlyActive, localOnlyRefusal } from './localOnly.js'
 import { createBoundedMonitorSocket, type MonitorSocket } from './websocketMonitorSocket.js'
 import { WebSocketMonitorProtocolError } from './websocketMonitorFrames.js'
 
@@ -185,6 +186,8 @@ function validateUrl(value: string): string {
   if (parsed.username || parsed.password) throw new Error('WebSocket monitor URL must not contain credentials')
   if (parsed.search || parsed.hash) throw new Error('WebSocket monitor URL must not contain query parameters or fragments')
   if (parsed.protocol === 'ws:' && !isLoopback(parsed.hostname)) throw new Error('Unencrypted ws:// monitors are limited to loopback hosts')
+  // The monitor opens raw sockets, which the local-only fetch guard does not see.
+  if (localOnlyActive() && !isLoopback(parsed.hostname)) throw localOnlyRefusal(`a WebSocket monitor to ${parsed.origin}`)
   return parsed.toString()
 }
 

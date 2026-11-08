@@ -9,7 +9,9 @@ import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import type { FileToolContext } from './fileState.js'
 import { guardedCreate, guardedWrite, recordedAppend, recordFileRead, withStaleNotice } from './fileState.js'
+import { OfficePackageError } from '../skills/powerpoint/errors.js'
 import { GitignoreMatcher } from './gitignore.js'
+import { BINARY_SNIFF_BYTES, binaryFileHint, extractOfficeText, looksBinary, officeTextKind, type OfficeTextKind } from './officeText.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 
@@ -62,7 +64,8 @@ export const READ_FILE_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'ReadFile',
-    description: 'Read a window of lines from one UTF-8 text file. file_path is workspace-relative; an absolute path '
+    description: 'Read a window of lines from one UTF-8 text file, or the extracted text of a .docx or .pptx document. '
+      + 'Other binary files are refused with a hint. file_path is workspace-relative; an absolute path '
       + 'inside the workspace also resolves, anything outside it is refused. Output is the file text verbatim with no '
       + 'line-number prefix, so it can be pasted straight back into FileEditTool old_string. Defaults to '
       + `${DEFAULT_READ_LINE_LIMIT} lines from offset 0 and reports the offset to continue from; limit=-1 means a `
@@ -322,6 +325,11 @@ export async function readFile(
   const fileInfo = await stat(target)
   const tooLarge = readSizeRefusal(fileInfo.size, limit === -1, { tool: 'ReadFile', window: 'offset and limit' })
   if (tooLarge) throw new ValidationError('file_path', tooLarge, filePath)
+  const documentKind = officeTextKind(target)
+  if (documentKind !== undefined) return readOfficeDocument(target, filePath, documentKind, offset, limit, maxChars)
+  if (looksBinary(new Uint8Array(await Bun.file(target).slice(0, BINARY_SNIFF_BYTES).arrayBuffer()))) {
+    throw new ValidationError('file_path', binaryFileHint(target), filePath)
+  }
   const text = await Bun.file(target).text()
   // An explicit max_chars is itself bounded by the window ceiling: a caller
   // passing max_chars=1_000_000 over a 60k-character window used to skip
@@ -359,6 +367,44 @@ export async function readFile(
       + 'Use limit=-1 only when the whole file is intentionally required.'
     : ''
   return selected + notice
+}
+
+/**
+ * The extracted text of a .docx or .pptx, windowed like a text file. It is not
+ * recorded as a read: the file on disk is a zip, so this view cannot back a
+ * FileEditTool replacement.
+ */
+async function readOfficeDocument(
+  target: string,
+  filePath: string,
+  kind: OfficeTextKind,
+  offset: number,
+  limit: number,
+  maxChars: number,
+): Promise<string> {
+  let text: string
+  try {
+    text = extractOfficeText(new Uint8Array(await Bun.file(target).arrayBuffer()), kind)
+  } catch (error) {
+    if (error instanceof OfficePackageError) {
+      throw new ValidationError('file_path', `is not a readable .${kind} document: ${error.message}`, filePath)
+    }
+    throw error
+  }
+  const header = `[ReadFile] Text extracted from a .${kind} document; formatting, images and comments are left out, `
+    + 'and this view cannot be edited with FileEditTool.\n\n'
+  const effectiveMaxChars = maxChars === -1 ? -1 : Math.min(maxChars, MAX_READ_WINDOW_CHARS)
+  const lines = splitLines(text)
+  const endOffset = limit === -1 ? lines.length : Math.min(offset + limit, lines.length)
+  if (offset >= lines.length && lines.length > 0) {
+    return `[ReadFile] Offset ${offset} is past end of the extracted text (${lines.length} lines).`
+  }
+  const selected = truncateCharacters(lines.slice(offset, endOffset).join(''), effectiveMaxChars)
+  enforceReadWindowCeiling(selected, { charCap: 'max_chars', filePath, lineParameter: 'limit', toolName: 'ReadFile' })
+  const notice = endOffset < lines.length
+    ? `\n\n[ReadFile] Showing lines ${offset + 1}-${endOffset} of ${lines.length}. Continue with offset=${endOffset}, limit=${limit}.`
+    : ''
+  return header + selected + notice
 }
 
 /** Where a returned read window came from, so the refusal can name the knob that narrows it. */

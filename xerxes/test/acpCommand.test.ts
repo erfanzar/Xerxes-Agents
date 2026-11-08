@@ -8,7 +8,7 @@ import { ACP_HELP, parseAcpCommandOptions } from '../src/acp/command.js'
 test('ACP command parser retains the native ACP launch contract', () => {
   expect(parseAcpCommandOptions([])).toEqual({
     help: false,
-    permissionMode: 'accept-all',
+    permissionMode: undefined,
     projectDirectory: undefined,
     writeRegistry: false,
   })

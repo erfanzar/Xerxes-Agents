@@ -5,6 +5,7 @@ import { ClientError, ConfigurationError, ValidationError } from '../core/errors
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requiredString } from './inputs.js'
+import { DEFAULT_SOURCE_SESSION, getSourceLog } from './sourceLog.js'
 import { PublicWebClient } from './webTools.js'
 
 const DUCKDUCKGO_INSTANT_ANSWER_ENDPOINT = 'https://api.duckduckgo.com/'
@@ -220,8 +221,17 @@ export function registerDuckDuckGoSearchTool(
   search: DuckDuckGoSearch,
   agentId = 'default',
 ): void {
-  registry.register(DUCKDUCKGO_SEARCH_DEFINITION, async (inputs, _context, signal) => {
+  registry.register(DUCKDUCKGO_SEARCH_DEFINITION, async (inputs, context, signal) => {
     const result = await search.search(searchRequestFromInputs(inputs), signal)
+    const log = getSourceLog()
+    for (const entry of result.results) {
+      log.record({
+        sessionId: context.sessionId ?? DEFAULT_SOURCE_SESSION,
+        title: entry.title,
+        tool: 'DuckDuckGoSearch',
+        url: entry.url,
+      })
+    }
     return optionalBoolean(inputs, 'return_metadata', false) ? result : result.results
   }, agentId)
 }

@@ -487,8 +487,159 @@ environment map rather than reading ambient secrets.
 When any profile uses the `claude-code` provider, each runtime start (local, or on an SSH host)
 runs `claude update` in the background, or installs Claude Code with Anthropic's official
 installer when the CLI is missing. Startup never waits for it, and the outcome is written to the
-runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. The Codex provider needs no
+runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. `XERXES_AUTO_INSTALL_CLAUDE_CODE=0`
+stops the install of a missing CLI but still lets an installed one update. The Codex provider needs no
 CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's saved sign-in.
+
+## Bonsai and the local cascade
+
+`xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
+profile. The engine is a separate process that Xerxes reaches over OpenAI-compatible HTTP; no
+inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine`
+(`XERXES_LOCAL_ENGINE`):
+- **`llama-server`** (default): downloads the GGUF build (verified against a configured sha256)
+  and supervises llama.cpp's `llama-server`. Ternary GGUF builds need Prism's llama.cpp fork.
+- **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
+  then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
+  On Apple silicon this is the engine for Ternary Bonsai 2 27B's MLX pack (key
+  `ternary-bonsai-2-27b-mlx`). Stock MLX loaders don't apply the pack's Hadamard transforms.
+  - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
+  - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
+    (`XERXES_LOCAL_LMS`) to use another.
+  - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
+    already running is used on its port.
+  - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
+    Xerxes started it and nothing else is loaded on it. `status` and `stop` find the LM Studio load
+    without `--engine`.
+
+**Model cards.** Every Bonsai-specific setting lives in one record per model, in
+`xerxes/src/llms/modelCards.ts`:
+- **What a card holds:** the ids it answers to, published sampling, output limit, native window,
+  default prompt profile, escalation default, reply budget and local builds.
+- **Which models have one:** Bonsai 2 at 2B, 4B and 9B, and Ternary Bonsai 2 27B each have a
+  card. Any other model id containing "bonsai" (such as `bonsai-8b`) gets the family card: the lean
+  prompt and the cascade, but no sampling, because Prism publishes sampling per model.
+- **Other models:** no card, so nothing about them changes.
+- **Precedence:** settings always win over the card.
+- **Viewing it:** `/bonsai` in the TUI, or `xerxes bonsai [model]` in a terminal, shows the
+  active model's card. For each setting it shows the value in effect and what set it.
+  - **Settings it reports:** sampling, output limit, context window, prompt and tools, result
+    checks and escalation, reply budget, and local builds.
+  - **Sources it names:** the card, `/sampling` or another setting, a profile's
+    `max_output_tokens` or `prompt_profile`, an environment variable, or the window the engine
+    loaded. Only the daemon knows the loaded window.
+
+With either engine:
+- **Context window:** the profile records the window the engine actually loaded: LM Studio's
+  `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary Bonsai 2 27B reads 262,144
+  tokens. Choose a window with `--ctx-size`, `runtime.local.ctx_size` or
+  `XERXES_LOCAL_CTX_SIZE`, up to the model's own window. Without one:
+  - **llama-server** sizes it from the memory free when it starts: half of what is left after the
+    weights and a 1 GiB reserve, divided by the cache one token needs, up to the model's own window.
+    The cache per token comes from the GGUF header; a hybrid model such as Ternary Bonsai 2 27B
+    keeps a cache in only one layer in four (64 KiB per token). Free memory is the GPU's free VRAM,
+    macOS's free, inactive, speculative and purgeable pages, or Linux's `MemAvailable`. `setup`
+    and `start` print the window and why. If the header or free memory cannot be read, they say so
+    and use the catalog's fixed window (16,384 for the 27B, sized for a 24 GB machine).
+  - **LM Studio** gets the catalog's fixed window.
+  An LM Studio model outside the catalog with no size set loads LM Studio's default window.
+  LM Studio does not apply `--context-length` to every model. On a 24 GB M4 Pro it loads Ternary
+  Bonsai 2 27B's MLX pack with 42,752 tokens whatever is asked, while stock models get the size
+  asked for. `setup` says when the loaded window differs and records the loaded one.
+- **Window discovery:** neither engine reports its loaded window in `/v1/models`. For any profile
+  whose base URL is on this machine (`localhost`, `127.0.0.1`, `::1`), the daemon asks the server
+  each time it discovers models: on attach, in the model picker, and on refresh. It asks LM Studio's
+  `GET /api/v0/models` first, then llama-server's `GET /props`. The status bar, compaction and
+  overflow rescue use that window, and a model reloaded with another window is picked up at the
+  next discovery. If the server answers neither, discovery works as before and the daemon log
+  says why. Cloud providers are never asked.
+- **Crash recovery:** a model can disappear mid-task, for example when LM Studio unloads one that
+  ran out of memory or llama-server exits. The next request then fails with a dropped or refused
+  connection, or LM Studio says the model crashed or is not loaded. If Xerxes started that engine
+  with `xerxes local start` or `setup`, it reloads the model once per turn with the window recorded
+  at start, retries the step once, and says so in the retry message.
+  - **Left alone:** a model you loaded yourself, an engine on another port, and a model that is
+    still loaded. A llama-server process that is alive but busy is never killed.
+  - **A failed reload** is named in the retry message, and the failure is then handled as before.
+  - **Older starts:** a llama-server started before this release has no recorded window, so it is
+    not restarted. Run `xerxes local stop` and `start` once.
+- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 12 tools and terse
+  rules, at most 3K tokens with a full instruction block, instead of about 29K. The tools are
+  ReadFile, WriteFile, FileEditTool, GlobTool, GrepTool, exec_command, check_command, CSVProcessor,
+  XlsxReader, XlsxWriter, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
+  The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
+  It includes the project's instruction files (`XERXES.md`, `AGENTS.md`, `CLAUDE.md` and their
+  `.local.md` overlays, found the same way as for the full prompt) in at most 1,500 characters. A
+  longer block is cut and names the files to read for the rest. The daemon reads them again each turn,
+  so an edit applies from the next turn.
+  Sub-agents follow the same rule for their own model. Set `runtime.prompt_profile` (or
+  `XERXES_PROMPT_PROFILE`, or the profile's `prompt_profile`) to `full` or `lean` to choose
+  yourself.
+- **Sampling:** a Bonsai 2 model gets the sampling Prism publishes for it, wherever it runs. MLX
+  and llama.cpp servers, LM Studio included, don't read the model's `generation_config.json`, so a
+  value Xerxes leaves out is the engine's default, not the model's.
+  - With thinking on (the default), the 27B gets temperature 1.0, top_p 0.95, top_k 20, min_p 0,
+    presence_penalty 0 and repetition_penalty 1.0. The 2B, 4B and 9B get the same with
+    presence_penalty 1.0.
+  - With thinking turned off in the request, every size gets temperature 0.7, top_p 0.8, top_k 20,
+    min_p 0 and presence_penalty 1.5.
+  - The repetition penalty goes out as both `repetition_penalty` and `repeat_penalty`, because
+    engines name it differently.
+  - A value set in runtime settings, the profile's `sampling` block, `/sampling`, or a request's
+    extra body wins. `/sampling` lists the profile's values, and `/sampling reset` returns to them.
+  - Other models keep Xerxes's defaults (temperature 0.6, top_k 64), and a custom endpoint still
+    gets no `top_k`, `min_p` or repetition penalty for them.
+- **Output limit:** Ternary Bonsai 2 27B's replies are capped at 32,768 tokens, the limit Prism's own
+  agent demo uses. Without it, a local engine lets a runaway reply run until the turn's time limit.
+  It applies only when nothing else sets one (`max_tokens`, a profile's `max_output_tokens`, or the
+  provider). A reply that reaches it is told to continue, as with any other limit. It doesn't
+  reduce the prompt budget used for compaction.
+- **Reply budget:** a local model can reason for many minutes in one reply without acting, which
+  can use up a task's whole time limit. Every Bonsai card gives a reply about 8,192 reasoning
+  tokens or 10 minutes, whichever comes first, to take its first action.
+  - **When a reply is stopped:** it is still reasoning past either limit, with no tool call and no
+    answer text yet. A reply that has started answering or calling a tool is never cut.
+  - **Counting:** time starts at the reply's first token, so reading a long prompt doesn't count.
+    Tokens are estimated at 4 characters each.
+  - **What happens:** the reply's reasoning is not kept, so the next prompt doesn't grow by the
+    whole runaway reply. The model is told what happened and asked to take its next step. The TUI
+    shows "Reply stopped at its budget" and the reason.
+  - **Limit per turn:** after 2 stops in one turn, the next reply that runs past the budget ends
+    the turn as "stopped · output limit", saying how to continue.
+  - **Setting it:** `runtime.reply_budget` sets it for any model. It takes `off`; `on` (the
+    card's budget, or 8,192 tokens and 10 minutes); or `{ max_reasoning_tokens, max_seconds }`
+    (256 to 1,000,000 tokens, 10 to 86,400 seconds; a field left out comes from `on`). Unset,
+    only a model whose card has a budget gets one.
+  - **Where it applies:** the daemon, one-shot runs and ACP read the setting. Sub-agents and the
+    SDK use the card's budget.
+- **The cascade:** after a turn, result checks inspect what it wrote and ran. When a check fails,
+  the escalation ladder decides by rule what happens next, inside the same turn:
+  1. The model retries with the failed checks as feedback, up to `escalation.max_local_retries`
+     times (default 2).
+  2. If retries don't fix it and an advisor profile is configured (`advisor.profile`), Xerxes
+     consults the advisor itself and gives the model its answer.
+  3. The ladder stops when nothing improves twice in a row, when the advisor is not allowed, or
+     when its budget is spent.
+
+  Without a setting, the cascade is on for local models and Bonsai, and when
+  `advisor.auto_on_check_fail` is true. `runtime.escalation.mode` or `XERXES_ESCALATION` (`on`
+  or `off`) decides otherwise. On a local provider, model-written titles and long-turn
+  reflection are off unless set, so they don't compete with the turn for the one model.
+- **Every entry point:** the lean rule and the cascade are the same in the daemon, one-shot runs
+  (`xerxes "prompt"`), ACP and the embedded SDK. A benchmark driving any of them measures the same
+  harness.
+  - One-shot runs write what the checks found to stderr. With `--output-format json`, the result
+    gains a `cascade` array (`checks`, `findings`, `escalation`, `advisor`, `retried`), and
+    `stream-json` emits a `{"type":"cascade"}` record per checked attempt.
+  - ACP shows them as text in the reply.
+  - In the SDK, set `promptProfile` (`lean` or `full`) and `cascade`:
+    - `cascade` defaults on when `workspaceRoot` is set, with checks in `warn` mode and escalation
+      for Bonsai models.
+    - Its options are `checks`, `escalation` (as `runtime.escalation`) and `consultAdvisor`. A
+      registered `AskAdvisor` tool is used by default.
+    - `false` turns the cascade off.
+    - Each checked attempt is on `result.cascade`.
+    - The SDK reads no environment variables for either setting.
 
 ## Daemon settings
 
@@ -508,13 +659,74 @@ Useful process-level overrides include:
 | `XERXES_MAX_TURNS` | Maximum concurrent daemon turns. |
 | `XERXES_MODEL` | Runtime model override. |
 | `XERXES_BASE_URL` | Runtime provider base URL. |
-| `XERXES_PERMISSION_MODE` | Runtime permission mode (`accept-all` by default; also `auto`, `manual`, or `plan`). |
+| `XERXES_PERMISSION_MODE` | Runtime permission mode (`auto` by default; also `accept-all`, `manual`, or `plan`). |
+| `XERXES_EXTRA_TOOLS` | Comma-separated tool groups to turn on; wins over `runtime.extra_tools` (see below). |
+| `XERXES_LOCAL_ONLY` | `1` turns on fully local mode, `0` turns it off; wins over `runtime.local_only` (see below). |
+
+**Extra tool groups.** These tools are off by default. Code does their work, and every tool's
+schema is sent with every request. Turn groups on with `runtime.extra_tools` (a list) or
+`XERXES_EXTRA_TOOLS`. An unknown group name is an error.
+- `math`: Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter.
+- `text`: TextClassifier, TextSummarizer, EntityExtractor, TextEmbedder, TextSimilarity.
+- `system`: SystemInfo, EnvironmentManager.
+- `memory`: the older `save_memory` and `search_memory` store, next to the markdown memory.
 
 Run `bun run xerxes daemon --project-dir .` to use the native daemon with an explicit workspace.
 
-Interactive sessions start in YOLO mode (`accept-all`). The TUI shows `YOLO ON`
-beside the active model while it is enabled; `/yolo` switches between `accept-all`
-and `auto`. Explicit tool-policy denials remain final in every permission mode.
+### Fully local mode
+
+`runtime.local_only: true` (or `XERXES_LOCAL_ONLY=1`) makes Xerxes reach only this machine. The
+daemon, one-shot runs, `--resume` and `xerxes acp` read it at start.
+- **Requests:** `fetch` and WebSockets reach only `localhost`, `127.0.0.0/8`, `::1` and unix
+  sockets. Anything else fails at once with `Configuration local_only: fully local mode refuses …`,
+  naming the address but not its path or query.
+- **Models:** a model client is built only for a model served on this machine. A cloud profile, a
+  sub-agent on a cloud model, the advisor, Claude Code, Bedrock and Vertex are refused before they
+  start, and sub-agents are offered only local profiles.
+- **Off in this mode:** the models.dev catalogue, Claude Code updates and installs, the web tools and
+  image generation, WebSocket monitors to other hosts, git fetch, pull and push, plugin clones,
+  and asking Claude Code for its models. Edit diagnostics use only installed tools
+  (`bunx --no-install`, `cargo --offline`).
+- **Commands:** `exec_command` runs only inside the no-network sandbox (see the safety floor below),
+  in every permission mode, so inputs are read-only too. `unsandboxed: true` is refused, and with
+  no sandbox available (no bubblewrap on Linux, or a folder over 2,000 files) commands are refused.
+  Terminals (`pty_open`) are off.
+- **Remote MCP servers** over HTTP are refused; a loopback one still needs `allowPrivateNetwork`.
+- **Tested:** `test/localOnly.test.ts` starts the real one-shot CLI and daemon with this setting,
+  lists models and runs a turn, and fails if anything tried to reach another machine through
+  `fetch`, a WebSocket, a socket, DNS, or a `claude`, `curl` or git remote command.
+
+What this mode does not police: MCP servers started as local commands (stdio) and plugin processes
+run as configured. A plugin's own `fetch` is still limited to the hosts in its
+`permissions.network`.
+
+### The safety floor
+
+Sessions, one-shot runs and `xerxes acp` start in `auto` mode. A setting of
+`accept-all` (YOLO) still applies, and `/yolo` switches to it; the TUI then shows
+`YOLO ON` beside the active model. Explicit tool-policy denials remain final in every
+permission mode. In `auto`, each session gets a safety floor for its working folder:
+- **Inputs:** every file in the folder when the session's first turn starts.
+  - Editing or overwriting one asks first. An approved edit releases that file.
+  - A result check reports any input that changed anyway, once.
+  - `.git`, `node_modules` and virtual environments are never written without asking.
+- **Outputs:** a new file in the folder, or one the session created, is written
+  without asking: `WriteFile`, `XlsxWriter`, `CSVProcessor` writes and edits.
+- **Commands:** `exec_command` runs in an OS sandbox without asking. The sandbox
+  reads anything and writes only the folder and a per-session temp folder (its
+  `TMPDIR`). It can't change, delete or rename inputs, and has no network.
+  - **Runners:** macOS uses Seatbelt (`sandbox-exec`), and also refuses requests to
+    other apps through LaunchServices or Apple events. Linux uses bubblewrap
+    (`bwrap`), which must be installed and allowed to create user namespaces.
+  - **Leaving the sandbox:** a call with `unsandboxed: true` (to download, or to
+    change an input the user asked about) asks first.
+- **No floor:** with no working sandbox, or a folder of more than 2,000 files, there
+  are no locked inputs and commands ask as before. The run says why.
+- **One-shot runs** (`xerxes "prompt"` and `--resume`) can't ask, so they refuse
+  anything that would ask. Each refusal is printed on stderr.
+- **Embedding:** an SDK host passes `runSafety: await RunSafety.start({ outputFolder, sandbox })`,
+  using `findCommandSandbox()` for the sandbox. Without one, `auto` sends every write
+  and non-read-only command to the host's permission broker.
 
 `/delegate off|auto|eager` sets how eagerly a conversation fans out to agents and
 workflows (the desktop's Agents chip beside Plan). `auto`, the default, delegates
@@ -679,6 +891,32 @@ credentials can rotate without changing the configured route. This identifies
 configured routing, not the identity of the currently authenticated account.
 Legacy recovered tasks without routing identity require new work rather than
 guessing the original connection. Archived tasks retain the same selectors.
+
+### Scripts on standard input
+
+`exec_command` runs one program without a shell. To run a script, the model
+passes its text as `stdin` to the interpreter (`cmd: "python3"`,
+`args: ["-"]`, or `sh` with `["-s"]`) instead of escaping it into `args`. A
+command that receives `stdin` is never auto-approved as read-only, the approval
+prompt shows the text, and the data boundary scans it like the command itself.
+`stdin` is limited to 1,000,000 characters and cannot be combined with
+`run_in_background`. The built-in local subprocess sandbox passes it through.
+Sandbox backends that run commands through a host port (Docker, SSH, Modal,
+Daytona, Singularity and the host-port subprocess adapter) reject it with an
+error rather than run the interpreter on empty input.
+
+Before those checks run, Xerxes repairs two common argument mistakes that have
+only one possible reading: a `cmd` made of plain words (`"wc -l"`) is split into
+the program and its arguments, and `args` sent as a JSON-encoded string array is
+decoded. Anything a shell would read differently (quotes, globs, `$`, `~`,
+operators) is still rejected.
+
+### Waiting for the first token
+
+A provider stream that sends nothing for 120 seconds is treated as stalled and
+retried. Before the first token, a local model may still be reading a long
+prompt, so that first wait is allowed 50 ms per estimated prompt token
+(at most 30 minutes) when that is longer than 120 seconds.
 
 ### Command completion follow-ups
 

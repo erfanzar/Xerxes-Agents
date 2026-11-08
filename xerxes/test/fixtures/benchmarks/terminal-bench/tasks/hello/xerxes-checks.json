@@ -1,0 +1,4 @@
+[
+  { "kind": "file_exists", "path": "hello.txt" },
+  { "kind": "file_contains", "path": "hello.txt", "text": "hello" }
+]

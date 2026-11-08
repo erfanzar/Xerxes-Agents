@@ -5,8 +5,11 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
+import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import type { DataTrust } from '../security/boundaryTypes.js'
 import { modelsDev, reportedModelCapability, type LiveCost, type LiveReasoning } from '../llms/modelsDev.js'
+import { modelCard } from '../llms/modelCards.js'
 
 export const CLAUDE_CODE_PROFILE_NAME = 'claude-code'
 /**
@@ -85,7 +88,20 @@ export interface ProviderProfile {
   readonly name: string
   readonly provider: string
   readonly sampling: Record<string, unknown>
+  /**
+   * Where this profile may send data. Unset means derived from base_url
+   * (`deriveDataTrust` in security/dataBoundary.ts): loopback or a unix
+   * socket is local, anything else cloud.
+   */
+  readonly data_trust?: DataTrust
+  /** Prompt profile for turns on this profile; wins over runtime.prompt_profile. */
+  readonly prompt_profile?: ProfilePromptProfile
 }
+
+export type ProfilePromptProfile = 'lean' | 'full'
+
+const DATA_TRUSTS: readonly DataTrust[] = ['local', 'cloud']
+const PROMPT_PROFILES: readonly ProfilePromptProfile[] = ['lean', 'full']
 
 interface ProfilesDocument {
   active: string | null
@@ -100,6 +116,10 @@ export interface SaveProfileInput {
   readonly provider?: string
   readonly sampling?: Record<string, unknown>
   readonly setActive?: boolean
+  /** Explicit data trust; kept from the saved profile only while its connection is unchanged. */
+  readonly dataTrust?: DataTrust
+  /** Prompt profile; kept from the saved profile when omitted. */
+  readonly promptProfile?: ProfilePromptProfile
 }
 
 /** Compatibility store for `$XERXES_HOME/profiles.json`. */
@@ -154,6 +174,16 @@ export class ProfileStore {
     const sameConnection = existing !== undefined
       && existing.base_url === baseUrl
       && existing.provider === provider
+    if (input.dataTrust !== undefined && !DATA_TRUSTS.includes(input.dataTrust)) {
+      throw new ValidationError('data_trust', 'must be local or cloud', input.dataTrust)
+    }
+    if (input.promptProfile !== undefined && !PROMPT_PROFILES.includes(input.promptProfile)) {
+      throw new ValidationError('prompt_profile', 'must be lean or full', input.promptProfile)
+    }
+    // An explicit trust describes one endpoint: a profile moved to another URL
+    // must not keep a stale `local` label.
+    const dataTrust = input.dataTrust ?? (sameConnection ? existing.data_trust : undefined)
+    const promptProfile = input.promptProfile ?? existing?.prompt_profile
     const profile: ProviderProfile = {
       name: input.name,
       base_url: baseUrl,
@@ -163,6 +193,8 @@ export class ProfileStore {
       model_overrides: sameConnection ? existing.model_overrides ?? {} : {},
       provider,
       sampling: input.sampling ?? existing?.sampling ?? {},
+      ...(dataTrust === undefined ? {} : { data_trust: dataTrust }),
+      ...(promptProfile === undefined ? {} : { prompt_profile: promptProfile }),
     }
     document.profiles[input.name] = profile
     if (input.setActive ?? true) {
@@ -509,7 +541,21 @@ function providerProfile(value: unknown): ProviderProfile | undefined {
     name: value.name,
     provider: value.provider,
     sampling: value.sampling,
+    ...storedDataTrust(value.data_trust),
+    ...(typeof value.prompt_profile === 'string' && PROMPT_PROFILES.includes(value.prompt_profile as ProfilePromptProfile)
+      ? { prompt_profile: value.prompt_profile as ProfilePromptProfile }
+      : {}),
   }
+}
+
+/**
+ * A stored trust label. A present but unrecognized value fails closed to
+ * `cloud` rather than being dropped, since dropping it could let a loopback
+ * URL derive `local` for a profile the user meant to mark otherwise.
+ */
+function storedDataTrust(value: unknown): { readonly data_trust?: DataTrust } {
+  if (value === undefined || value === null) return {}
+  return { data_trust: value === 'local' ? 'local' : 'cloud' }
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -573,7 +619,10 @@ export function resolvedProfileModelCapabilities(
   const live = profile?.provider ? reportedModelCapability(profile.provider, model) : undefined
   const catalog = modelsDev.find({ model, ...(profile?.provider ? { provider: profile.provider } : {}), ...(profile?.base_url ? { baseUrl: profile.base_url } : {}) })
   const contextLimit = override?.context_limit ?? cached?.context_limit ?? live?.contextLimit ?? catalog?.contextLimit
-  const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? live?.maxOutputTokens ?? catalog?.maxOutputTokens
+  // Last: the ceiling the model's maker runs its own agent setup with. Without
+  // one, a local engine lets a runaway reply run until the turn's time limit.
+  const catalogOutput = catalog?.maxOutputTokens ?? modelCard(model).maxOutputTokens
+  const maxOutputTokens = override?.max_output_tokens ?? cached?.max_output_tokens ?? live?.maxOutputTokens ?? catalogOutput
   return {
     ...(contextLimit === undefined ? {} : { contextLimit }),
     contextSource: override?.context_limit !== undefined
@@ -588,7 +637,7 @@ export function resolvedProfileModelCapabilities(
       ? 'override'
       : cached?.max_output_tokens !== undefined || live?.maxOutputTokens !== undefined
         ? 'provider'
-        : catalog?.maxOutputTokens !== undefined
+        : catalogOutput !== undefined
           ? 'catalog'
           : 'unknown',
   }

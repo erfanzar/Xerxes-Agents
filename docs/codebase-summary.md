@@ -22,7 +22,7 @@ examples/               runnable TypeScript examples
 docs/                   Markdown sources and generated TypeScript API site
 ```
 
-The CLI, daemon, ACP path, session export, OpenAI-compatible API library, and OpenTUI gateway all
+The CLI, daemon, ACP path, session export, and OpenTUI gateway all
 run through Bun. Remote capabilities retain explicit native host boundaries where credentials or
 a privileged integration are required. Browser automation is an explicit attachment to a running
 Chromium CDP endpoint, not an implicit browser launch. Document those requirements as configuration

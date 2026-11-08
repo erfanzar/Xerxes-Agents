@@ -7,6 +7,7 @@ import {
   parseAgentIntelligence,
   parseAgentIntelligenceConfig,
   resolveAgentIntelligenceSettings,
+  resolveAgentIntelligenceTier,
   type AgentIntelligence,
   type AgentIntelligenceConfig,
 } from '../../agents/intelligence.js'
@@ -29,6 +30,8 @@ import {
 } from '../../operators/subagents.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import type { PermissionMode } from '../../streaming/permissions.js'
+import type { DataTrust } from '../../security/boundaryTypes.js'
+import { DEFAULT_BOUNDARY_AGENT, type DataBoundary } from '../../security/dataBoundary.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from '../inputs.js'
 import { SpawnBudgetExhaustedError, type SubAgentGroup, type SubagentModelSelection, type RetryableSubagentManagerPort } from '../../agents/subagentManager.js'
 import type { ToolCapabilities } from '../../executors/toolRegistry.js'
@@ -257,6 +260,21 @@ export interface ClaudeAgentToolsOptions {
     track(snapshots: readonly SpawnedAgentSnapshot[]): void
     trackedIds?(sourceAgentId: string): readonly string[]
   }
+  /**
+   * Local/cloud data boundary. When present and enabled, a tainted child's
+   * result is withheld from a cloud-trust parent and a selection that would
+   * move work from a local tier to a cloud-trust model is refused. Absent (or
+   * mode off) = unchanged behavior.
+   */
+  readonly dataBoundary?: ClaudeAgentDataBoundary
+}
+
+export interface ClaudeAgentDataBoundary {
+  readonly boundary: DataBoundary
+  /** Trust of a model on a profile (the parent's profile when providerProfile is omitted). */
+  trustOf(model: string, providerProfile?: string): DataTrust
+  /** Trust of the model running the parent conversation. */
+  parentTrust(): DataTrust
 }
 
 export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
@@ -496,8 +514,18 @@ export class ClaudeAgentTools {
   private readonly now: () => number
   private readonly rolledBackIds = new Set<string>()
   private readonly spawnConcurrency: number
+  private readonly options: ClaudeAgentToolsOptions
+  /** Specs already resolved (and boundary-checked); a second resolve must not re-apply the default tier. */
+  private readonly resolvedSpecs = new WeakSet<ClaudeAgentSpec>()
 
-  constructor(private readonly options: ClaudeAgentToolsOptions) {
+  constructor(options: ClaudeAgentToolsOptions) {
+    // Every snapshot the tools read passes through the boundary once, so no
+    // result path (wire, TaskOutput, handoff, workflow, mailbox, background
+    // delivery, manifest) can forward a withheld result. No boundary: the
+    // caller's manager is used as is.
+    this.options = options.dataBoundary === undefined
+      ? options
+      : { ...options, manager: boundaryGuardedManager(options.manager, options.dataBoundary) }
     this.intelligence = parseAgentIntelligenceConfig(options.intelligence)
     this.mailbox = options.mailbox ?? new AgentEventMailbox()
     this.now = options.now ?? (() => Date.now())
@@ -660,7 +688,7 @@ export class ClaudeAgentTools {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<readonly Record<string, unknown>[] | Record<string, unknown>> {
-    const specs = parseAgentSpecs(inputs.agents).map(spec => this.resolveSpec(spec))
+    const specs = parseAgentSpecs(inputs.agents).map(spec => this.resolveSpec(spec, context))
     if (!specs.length) throw new ValidationError('agents', 'must contain at least one agent specification', inputs.agents)
     if (specs.length > MAX_SPAWN_BATCH_SIZE) {
       throw new ValidationError(
@@ -1087,13 +1115,34 @@ export class ClaudeAgentTools {
     return costUsd === undefined ? outcome : { ...outcome, costUsd }
   }
 
-  private resolveSpec(spec: ClaudeAgentSpec): ClaudeAgentSpec {
+  private resolveSpec(spec: ClaudeAgentSpec, context?: ToolExecutionContext): ClaudeAgentSpec {
+    if (this.resolvedSpecs.has(spec)) return spec
     if ((spec.providerProfile || spec.reasoningEffort) && !spec.model?.trim()) throw new ValidationError('model', 'explicit provider/reasoning selectors require model', spec.model)
     if (spec.worktreeSource === 'working-tree' && spec.worktreeRef === 'HEAD') spec = { ...spec, worktreeRef: undefined }
     if (spec.worktreeSource && (spec.worktreeRef || spec.isolation !== 'worktree')) throw new ValidationError('worktree_source', 'requires isolation=worktree and no worktree_ref', spec.worktreeSource)
     if (spec.worktreeRef && spec.isolation !== 'worktree') throw new ValidationError('worktree_ref', 'requires isolation=worktree', spec.worktreeRef)
     const selected = resolveAgentIntelligenceSettings(this.intelligence, spec.intelligence, spec.model)
-    return { ...spec, intelligence: undefined, model: selected?.model, providerProfile: selected?.provider_profile ?? spec.providerProfile, reasoningEffort: selected?.reasoning_effort ?? spec.reasoningEffort }
+    const resolved: ClaudeAgentSpec = { ...spec, intelligence: undefined, model: selected?.model, providerProfile: selected?.provider_profile ?? spec.providerProfile, reasoningEffort: selected?.reasoning_effort ?? spec.reasoningEffort }
+    this.assertBoundaryTier(spec, resolved, context)
+    this.resolvedSpecs.add(resolved)
+    return resolved
+  }
+
+  /** Data boundary tier lock: an explicit cloud model may not override a local tier. */
+  private assertBoundaryTier(requested: ClaudeAgentSpec, resolved: ClaudeAgentSpec, context?: ToolExecutionContext): void {
+    const port = this.options.dataBoundary
+    if (!port?.boundary.enabled) return
+    const parentTrust = port.parentTrust()
+    const model = resolved.model?.trim()
+    // No model means the child inherits the parent's model and profile.
+    const requestedTrust = model ? port.trustOf(model, resolved.providerProfile) : parentTrust
+    const tier = resolveAgentIntelligenceTier(this.intelligence, requested.intelligence)
+    port.boundary.assertTierAllowed({
+      requestedTrust,
+      ...(tier === undefined ? {} : { tierTrust: port.trustOf(tier.model, tier.provider_profile) }),
+      parentTrust,
+      parentAgentId: context?.agentId ?? DEFAULT_BOUNDARY_AGENT,
+    })
   }
 
   /**
@@ -1115,7 +1164,7 @@ export class ClaudeAgentTools {
 
   private async spawnSpec(spec: ClaudeAgentSpec, context: ToolExecutionContext, signal?: AbortSignal): Promise<SpawnedAgentSnapshot> {
     signal?.throwIfAborted()
-    spec = this.resolveSpec(spec)
+    spec = this.resolveSpec(spec, context)
     const type = spec.subagentType?.trim() || 'general-purpose'
     const parentPermissionMode = contextPermissionMode(context)
     const resolved = this.options.agentResolver?.(type, spec.model)
@@ -1611,6 +1660,62 @@ function boundedWireText(value: string, limit: number): string {
  */
 function boundedOutput(value: string, limit = MAX_WIRE_OUTPUT_CHARS): string {
   return value.length <= limit ? value : `${value.slice(0, limit)}… [truncated ${value.length - limit} chars]`
+}
+
+/**
+ * Wrap a manager so every snapshot it returns has passed the data boundary.
+ * A withheld result is replaced in `lastOutput` and `completionSummary`
+ * before any tool, mailbox, delivery or manifest code can read it.
+ */
+function boundaryGuardedManager(manager: SpawnedAgentManagerPort, port: ClaudeAgentDataBoundary): SpawnedAgentManagerPort {
+  const guard = <S extends SpawnedAgentSnapshot>(snapshot: S): S => guardSnapshot(snapshot, port)
+  const steer = manager.steer
+  const retry = manager.retry
+  return {
+    close: id => guard(manager.close(id)),
+    listHandles: () => manager.listHandles().map(guard),
+    resume: id => guard(manager.resume(id)),
+    sendInput: async (id, options) => guard(await manager.sendInput(id, options)),
+    spawn: async options => guard(await manager.spawn(options)),
+    wait: async (targets, timeoutMs) => {
+      const result = await manager.wait(targets, timeoutMs)
+      return { completed: result.completed.map(guard), pending: result.pending.map(guard) }
+    },
+    ...(steer === undefined ? {} : { steer: (id: string, message: string) => steer.call(manager, id, message) }),
+    ...(retry === undefined ? {} : {
+      retry: async (id: string, options: { readonly message?: string; readonly sourceAgentId?: string }) => guard(await retry.call(manager, id, options)),
+    }),
+  }
+}
+
+function guardSnapshot<S extends SpawnedAgentSnapshot>(snapshot: S, port: ClaudeAgentDataBoundary): S {
+  const boundary = port.boundary
+  if (!boundary.enabled || (snapshot.lastOutput === undefined && snapshot.completionSummary === undefined)) return snapshot
+  const parentTrust = port.parentTrust()
+  // A child without its own model runs on the parent's model and profile.
+  const childTrust = snapshot.model?.trim() ? port.trustOf(snapshot.model.trim(), snapshot.providerProfile) : parentTrust
+  const aliases = [snapshot.agentId, snapshot.historySessionId].filter((value): value is string => typeof value === 'string' && value.length > 0)
+  const context = {
+    childAgentId: snapshot.id,
+    childAliases: aliases,
+    childTrust,
+    parentTrust,
+    ...(snapshot.parentAgentId ? { parentAgentId: snapshot.parentAgentId } : {}),
+  }
+  let withheld = false
+  const filter = (text: string): string => {
+    const result = boundary.filterSubagentResult(text, context)
+    if (result.withheld) withheld = true
+    return result.text
+  }
+  const lastOutput = snapshot.lastOutput === undefined ? undefined : filter(snapshot.lastOutput)
+  const completionSummary = snapshot.completionSummary === undefined ? undefined : filter(snapshot.completionSummary)
+  if (!withheld) return snapshot
+  return {
+    ...snapshot,
+    ...(lastOutput === undefined ? {} : { lastOutput }),
+    ...(completionSummary === undefined ? {} : { completionSummary }),
+  }
 }
 
 function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {

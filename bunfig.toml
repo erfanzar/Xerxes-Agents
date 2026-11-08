@@ -1,0 +1,5 @@
+[test]
+# `bun test xerxes/test/<file>` from the repository root reads this file, not
+# xerxes/bunfig.toml. Load the same preload so those runs also stay out of the
+# developer's real ~/.xerxes (see the preload file).
+preload = ["./xerxes/test/support/isolatedHome.ts"]

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { FunctionExecutionError, ValidationError } from '../core/errors.js'
+import type { BoundCommandSandbox } from '../security/commandSandbox.js'
 import { isReadOnlyInvocation } from '../security/shellAnalysis.js'
 import { validateToolArguments } from '../runtime/argumentValidation.js'
 import type { ChatMessage } from '../types/messages.js'
@@ -18,6 +19,12 @@ export interface ToolExecutionContext {
    * next round. It is never a cancellation: work in flight keeps running.
    */
   readonly wakeSignal?: AbortSignal
+  /**
+   * The OS sandbox exec_command runs in this round: set by the loop in `auto`
+   * mode when the run's safety floor has one, which is also when it allows
+   * commands without asking. Absent, commands run as they always have.
+   */
+  readonly commandSandbox?: BoundCommandSandbox
 }
 
 /**

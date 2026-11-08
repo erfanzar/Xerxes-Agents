@@ -51,8 +51,23 @@ import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
+import { createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
+import { outboundApprovalPort } from './daemon/outboundGate.js';
+import { createTurnRouter } from './daemon/turnRouting.js';
+import { createEscalationFactory } from './daemon/turnEscalation.js';
+import { createHybridPlacement } from './daemon/hybridPlanTool.js';
+import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, readLeanProjectInstructions, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
+import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
+import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
+import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
+import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
+import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
+import { defaultEscalationMode } from './runtime/escalationPolicy.js';
+import { resolveReplyBudget } from './runtime/replyBudget.js';
+import { runCascadingTurn, type CascadeHooks, type CascadeStep } from './runtime/cascade.js';
+import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
-import { DEFAULT_PERMISSION_MODE } from "./streaming/permissions.js";
+import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionMode } from "./streaming/permissions.js";
 import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime, type DaemonSession } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
@@ -116,13 +131,27 @@ import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
-import { ReflectionProposalStore, type ReflectionApplier } from './runtime/reflection.js';
+import { ReflectionProposalStore, reflectionModeFor, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
 import { SkillBundleStore, addLearningToolsToBuiltinAgents, registerSessionSearchTool } from './tools/agentMetaTools.js';
 import { archiveSessionSearchPort } from './daemon/archiveSearch.js';
 import { registerClaudeNotebookTools } from './tools/claudeTools/notebook.js';
 import type { TurnReflectionInput } from './daemon/turnRunner.js';
 import { extractAgentOption, extractOutputFormatOption, parseValueOptions, type OutputFormat } from "./runtime/commandOptions.js";
+import {
+  extractNoSaveOption,
+  newOneShotSessionId,
+  OneShotSessionRecorder,
+  oneShotTranscriptStore,
+  parseOneShotSaveConfig,
+  userHookRunnerForCwd,
+} from "./runtime/oneShotSession.js";
+import {
+  defaultMaxNetworkRetries,
+  getProviderConfig as providerConfigFor,
+  parseProviderNetworkConfig,
+  resolveProvider as resolveProviderName,
+} from "./llms/providerRegistry.js";
 import { ProcessRegistry } from "./runtime/processRegistry.js";
 import { TerminalRegistry } from "./runtime/terminalRegistry.js";
 import { formatBytes, hostMemoryGuardPorts, MemoryGuard, memoryGuardSupported, readMemoryGuardSettings, resolveMemoryLimitBytes } from "./runtime/memoryGuard.js";
@@ -187,6 +216,8 @@ import {
   registerClaudeSkillTool,
   registerClaudeWorkflowTools,
   registerCoreTools,
+  extraToolOptions,
+  parseExtraTools,
 } from "./tools/index.js";
 import { createMemoryToolContextResolver, type MemoryToolContextResolver } from "./tools/memoryToolContext.js";
 import { createAgentState } from "./streaming/events.js";
@@ -196,6 +227,8 @@ import { AuthCommandError, runAuthCommand } from "./auth/command.js";
 import { bridgeDurableTaskLifecycle } from "./tasks/durableTaskBridge.js";
 import { DurableTaskRuntime } from "./tasks/durableTaskRuntime.js";
 import { ASK_USER_OPTIONS_SCHEMA, ASK_USER_POLICY } from "./tools/askUserPolicy.js";
+import { probeLoadedWindows, systemWindowFetch } from "./local/loadedWindow.js";
+import { systemEngineRecoveryFor } from "./local/systemEngineRecovery.js";
 
 /**
  * Command list for `--help`, grouped by what the reader is trying to do.
@@ -236,6 +269,8 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
+      ["xerxes local setup|start|stop|status|doctor [--engine llama-server|lmstudio]", "run a Bonsai model on this machine with llama.cpp or LM Studio"],
+      ["xerxes bonsai [model]", "show a model's settings card and what overrides it"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
@@ -296,7 +331,8 @@ const OVERFLOW_SUMMARY_MAX_TOKENS = 2_048;
 const { agent: cliAgentReference, rest: agentlessArguments } = extractAgentOption(
   Bun.argv.slice(2),
 );
-const { format: cliOutputFormat, rest: cliArguments } = extractOutputFormatOption(agentlessArguments);
+const { format: cliOutputFormat, rest: formatlessArguments } = extractOutputFormatOption(agentlessArguments);
+const { noSave: cliNoSave, rest: cliArguments } = extractNoSaveOption(formatlessArguments);
 const [argument, ...argumentsAfterCommand] = cliArguments;
 
 /**
@@ -305,6 +341,7 @@ const [argument, ...argumentsAfterCommand] = cliArguments;
  */
 const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "skill",
+  "bonsai",
   "auth",
   "doctor",
   "usage",
@@ -312,6 +349,7 @@ const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "install",
   "update",
   "export",
+  "local",
   "setup",
   "workspace",
   "schedule",
@@ -815,8 +853,14 @@ if (argument === "--help" || argument === "-h") {
   }
   if (result.message) console.log(result.message)
   process.exit(0)
+} else if (argument === "bonsai") {
+  process.exit(runBonsaiCommand(argumentsAfterCommand));
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
+} else if (argument === "local") {
+  // Managed llama.cpp runtime (off until the user runs a subcommand).
+  const { runLocalCli } = await import("./local/cliEntry.js");
+  process.exit(await runLocalCli(argumentsAfterCommand));
 } else if (argument === "daemon") {
   const options = parseValueOptions(argumentsAfterCommand, "daemon", [
     "--pid-file",
@@ -827,6 +871,7 @@ if (argument === "--help" || argument === "-h") {
   const config = loadSystemDaemonConfig({
     ...(projectDirectory ? { projectDirectory } : {}),
   });
+  applyLocalOnly(config);
   const socketPath =
     options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
   const pidPath = options.get("--pid-file") ?? (options.has("--socket") ? undefined : daemonPaths(projectDirectory).pidPath);
@@ -1216,6 +1261,7 @@ async function runDaemonOwned(
     autoSnapshotTurns: true,
     managedPlugins,
     agentSettingsDefaults: config.runtime.agent_intelligence,
+    modelCardContext: () => ({ runtime: config.runtime, env: process.env }),
     socketPath,
     runtime,
     // Sessions created without an explicit project_dir belong to THIS
@@ -1233,6 +1279,8 @@ async function runDaemonOwned(
     ...(monitorWebhookHub ? { monitorWebhookServer: monitorWebhookHub } : {}),
     profileStore,
     autoDiscoverModelCapabilities: true,
+    // LM Studio and llama-server do not list their loaded window in /v1/models.
+    localWindowProbe: input => probeLoadedWindows(input, systemWindowFetch),
     skillRegistry,
     declarativeForge,
     agentPresetRoster,
@@ -1508,6 +1556,73 @@ interface ExportCommandOptions {
   readonly storeDirectory: string | undefined;
 }
 
+/**
+ * One-shot runs never ask. A call that would ask is refused, and the run says
+ * which one and why on stderr, where scripts read errors.
+ */
+function oneShotPermissionBroker(): PermissionBroker {
+  return {
+    request: async (request) => {
+      process.stderr.write(
+        `Refused without asking: ${request.description.split("\n")[0]}\n`
+          + "One-shot runs don't ask for approval. Run the task in the TUI, or set runtime.permission_mode to accept-all.\n",
+      );
+      return "reject";
+    },
+  };
+}
+
+/** The run's safety floor in auto mode; in other modes, or when it cannot start, none (and the run says so). */
+async function oneShotRunSafety(mode: PermissionMode, sessionId: string, workspaceRoot: string): Promise<RunSafety | undefined> {
+  // Fully local mode needs the floor's command sandbox in every mode.
+  if (mode !== "auto" && !localOnlyActive()) return undefined;
+  try {
+    const runSafety = await new RunSafetyRegistry().forSession(sessionId, workspaceRoot);
+    if (runSafety.sandboxUnavailable) {
+      process.stderr.write(`Commands are refused in this run: ${runSafety.sandboxUnavailable}.\n`);
+    }
+    return runSafety;
+  } catch (error) {
+    process.stderr.write(`The safety floor did not start, so writes and commands are refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    return undefined;
+  }
+}
+
+/**
+ * Fully local mode (`runtime/localOnly.ts`): turned on before any client,
+ * tool or MCP server is built, because clients keep the fetch they start with.
+ */
+function applyLocalOnly(config: DaemonConfig): void {
+  if (parseLocalOnlyConfig(config.runtime, process.env)) enableLocalOnly();
+}
+
+/** `xerxes bonsai [model]`: the settings card for the active model, or the one named. */
+function runBonsaiCommand(args: readonly string[]): number {
+  if (args.length > 1 || args[0]?.startsWith("-")) {
+    console.error("Usage: xerxes bonsai [model]");
+    return args[0] === "--help" || args[0] === "-h" ? 0 : 2;
+  }
+  const config = loadSystemDaemonConfig();
+  const active = new ProfileStore().active();
+  const model = args[0] ?? active?.model ?? (typeof config.runtime.model === "string" ? config.runtime.model : "");
+  // The active profile's settings apply only to the model it serves.
+  const profile = active && (args[0] === undefined || args[0] === active.model) ? active : undefined;
+  if (!model) {
+    console.error("No model is configured. Run `xerxes setup`, or name one: xerxes bonsai <model>");
+    return 1;
+  }
+  const report = modelCardReport({
+    model,
+    runtime: config.runtime,
+    env: process.env,
+    ...(profile ? { profile } : {}),
+    samplingSet: { ...config.runtime, ...(profile?.sampling ?? {}) },
+  });
+  console.log(formatModelCardReport(report));
+  console.log("\nThe running daemon also knows the window the engine loaded: use /bonsai there.");
+  return 0;
+}
+
 async function runExport(args: readonly string[]): Promise<void> {
   try {
     const options = parseExportOptions(args);
@@ -1726,6 +1841,75 @@ async function runTui(resumeSessionId = ""): Promise<void> {
  * stay — reachable with XERXES_DEFERRED_TOOL_LOADING=1 — and the default goes
  * back to the behaviour that demonstrably completes work.
  */
+interface HeadlessCascadeInput {
+  readonly runtime: Record<string, unknown>;
+  readonly sessionId: string;
+  readonly workspaceRoot: string;
+  readonly model: string;
+  /** Whether the model runs on this machine. */
+  readonly local: () => boolean;
+  readonly tools: ToolRegistry;
+  readonly advisorRegistered: boolean;
+  readonly agentId: string;
+}
+
+/**
+ * The cascade for a headless run (one-shot, ACP): the same result checks,
+ * escalation ladder and advisor consult as the daemon, for one session, so a
+ * benchmark that drives the CLI measures the same harness. Invalid settings
+ * throw here, before the run starts.
+ */
+function headlessCascadeHooks(input: HeadlessCascadeInput): CascadeHooks {
+  const session = { id: input.sessionId, cwd: input.workspaceRoot };
+  const escalate = createEscalationFactory<typeof session>({
+    runtime: () => input.runtime,
+    boundaryMode: () => parseDataBoundaryConfig(input.runtime, process.env, { root: input.workspaceRoot }).mode,
+    advisorAvailable: () => input.advisorRegistered,
+    defaultMode: () => defaultEscalationMode({ runtime: input.runtime, env: process.env, model: input.model, local: input.local }),
+  });
+  const checks = parseChecksConfig(input.runtime, process.env);
+  return {
+    checks: () => checks,
+    escalate: findings => escalate(session, findings),
+    ...(input.advisorRegistered ? {
+      consultAdvisor: (request, signal) => input.tools.execute({
+        id: `escalation-advisor-${crypto.randomUUID()}`,
+        type: 'function',
+        function: { name: 'AskAdvisor', arguments: { question: request.question, context: request.context, kind: 'answer' } },
+      }, { agentId: input.agentId, metadata: {}, sessionId: input.sessionId }, signal),
+    } : {}),
+  };
+}
+
+/** One line per thing a checked attempt has to tell the user, for a terminal. */
+function cascadeStepLines(step: CascadeStep): string[] {
+  const lines: string[] = [];
+  if (step.checkError !== undefined) lines.push(`Result checks did not run: ${step.checkError}`);
+  if (step.escalationError !== undefined) lines.push(`Escalation did not run: ${step.escalationError}`);
+  if (step.findings.length) lines.push(renderFindings(step.findings));
+  if (step.escalation) lines.push(step.escalation.message);
+  if (step.advisor?.answered === true) lines.push('Escalation: the advisor answered; the model retries with its advice.');
+  if (step.advisor?.answered === false) lines.push(`Advisor consult failed: ${step.advisor.error}`);
+  return lines;
+}
+
+/** A checked attempt as a JSON record for --output-format json and stream-json. */
+function cascadeStepRecord(step: CascadeStep): Record<string, unknown> {
+  return {
+    checks: step.checksMode,
+    findings: step.findings.map(finding => ({ ...finding })),
+    ...(step.escalation ? { escalation: step.escalation.action } : {}),
+    ...(step.advisor ? { advisor: step.advisor.answered ? 'answered' : 'failed' } : {}),
+    retried: step.feedback !== undefined,
+  };
+}
+
+/** What the prompt-profile rule needs to know about a sub-agent's model. */
+function childPromptRoute(profileStore: Pick<ProfileStore, 'active'>, model: string): PromptProfileRoute {
+  const contextLimit = resolvedProfileContextLimit(profileStore.active(), model);
+  return { model, ...(contextLimit === undefined ? {} : { contextLimit }) };
+}
+
 function deferredToolLoadingEnabled(
   settings: Readonly<Record<string, unknown>>,
 ): boolean {
@@ -1827,6 +2011,8 @@ function daemonRuntime(
     readonly validateProviderSelection?: NativeSubagentHostOptions['validateProviderSelection'];
   } = {},
 ): InMemoryDaemonRuntime {
+  // One safety floor per session, kept across settings reloads (see runtime/runSafety.ts).
+  const runSafetyRegistry = new RunSafetyRegistry();
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const learning = host.learning ?? createLearningServices(workspaceRoot, host.skillRegistry);
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -1857,6 +2043,7 @@ function daemonRuntime(
   const initialProfile = profileStore.active();
   // Default `all`: with `goals` only goal endings reflected, so ordinary long sessions never did.
   const reflection = process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection || 'all';
+  const reflectionChosen = Boolean(process.env.XERXES_REFLECTION?.trim() || config.runtime.reflection);
   if (reflection !== 'goals' && reflection !== 'all' && reflection !== 'off') {
     throw new ConfigurationError('reflection', 'runtime.reflection / XERXES_REFLECTION must be goals, all or off');
   }
@@ -2002,7 +2189,9 @@ function daemonRuntime(
     const mcpTools = resources.mcpManager ? registerMcpTools(tools, resources.mcpManager) : [];
     registerConfiguredLspTool(tools, lspManager, () => getActiveSession<{ cwd: string }>()?.cwd ?? workspaceRoot);
     if (host.schedules) registerScheduleTools(tools, host.schedules);
+    const extraTools = parseExtraTools({ ...config.runtime, ...settings }, process.env);
     const corePaths = registerCoreTools(tools, {
+      ...extraToolOptions(extraTools),
       ...(host.modelInventory ? { modelInventory: host.modelInventory } : {}),
       workspaceRoot,
       activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
@@ -2011,7 +2200,8 @@ function daemonRuntime(
       readOnlyRoots: [join(xerxesHome(), "tool-results")],
       backgroundCommands,
       ptySessions,
-      generateImageTool: generateImageToolOptions(workspaceRoot),
+      // Fully local mode: no web or image tools, which only reach other hosts.
+      ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
       ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(host.monitors ? { completionWatch: (owner: string, terminalId: string) => host.monitors!.start(owner, {
         terminalId, trigger: "completion", durationMs: 86_400_000, maxEvents: 1,
@@ -2033,7 +2223,7 @@ function daemonRuntime(
           );
         },
       },
-      memoryTools: { resolveContext: memoryToolContext.resolve },
+      ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
     });
     // Same workspace-safe path resolver as the core file tools.
     registerClaudeNotebookTools(tools, corePaths);
@@ -2136,12 +2326,16 @@ function daemonRuntime(
     // Installed plugin tools (plugin_*) reach the shipped full-access agents;
     // the main-session profiles may also manage plugins, with approval.
     addPluginToolsToBuiltinAgents(agentDefinitions, { manage: host.managedPlugins !== undefined });
+    // Fail fast on a dead endpoint: runtime.provider_network (or env) sets the
+    // connect timeout and retry cap; loopback routes default to 3 retries.
+    const daemonProviderNetwork = parseProviderNetworkConfig({ ...config.runtime, ...settings });
+    const daemonMaxNetworkRetries = daemonProviderNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(connection.baseUrl);
     const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),
       ...(connection.responsesApi ? { responses_api: true } : {}),
-    }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
+    }, { connectTimeoutMs: daemonProviderNetwork.connectTimeoutMs }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
     // Fallback model chain (Claude Code fallback-model parity): configured via
     // XERXES_FALLBACK_MODEL or runtime.fallback_model; the fallback client
     // reuses the primary connection's credentials and routing.
@@ -2179,6 +2373,8 @@ function daemonRuntime(
       worktreeForWorkspace: nativeSubagentWorktrees,
       validateInheritedSelection: nativeConnection ? inheritedSelectionValidator(connection) : async () => { throw new Error("Configure a remote provider or authorize a local provider connection before delegating work"); },
       ...(host.validateProviderSelection ? { validateProviderSelection: host.validateProviderSelection } : {}),
+      // Children get the lean prompt by the same rule as the main turn.
+      promptProfileFor: (model: string) => parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, undefined, childPromptRoute(profileStore, model)),
       resolveProviderProfile: agentProviderResolver(profileStore),
       resolveProviderRoute: agentProviderRouteResolver(profileStore),
       ...(nativeConnection ? { inheritedProviderRoute: providerRouteIdentity(connection.model, connection) } : {}),
@@ -2189,7 +2385,7 @@ function daemonRuntime(
       // The durable attempt log. Its runtime, bridge, and every consumer branch
       // were written and tested, and nothing ever constructed one — so in
       // production `durableTaskBridge` was always undefined and every guarded
-      // recording branch in the manager and the Cortex orchestrator was dead.
+      // recording branch in the manager was dead.
       durableTaskBridge: bridgeDurableTaskLifecycle(
         new DurableTaskRuntime({ directory: join(xerxesHome(), "tasks") }),
       ),
@@ -2236,6 +2432,14 @@ function daemonRuntime(
         });
       },
     });
+    // AskAdvisor (off by default): registered only when advisor.profile or
+    // XERXES_ADVISOR_PROFILE names a provider profile.
+    const advisorRegistered = registerConfiguredAdvisor(tools, {
+      runtime: { ...config.runtime, ...settings },
+      profiles: profileStore,
+      workspaceRoot,
+      reportError: message => console.error(message),
+    });
     // Deterministic multi-agent orchestration: PlanTool decomposes an explicit
     // objective into dependency-ordered steps and executes them through the
     // same managed subagent pool (depth caps, cohort join, persistence).
@@ -2252,6 +2456,12 @@ function daemonRuntime(
           return createLlmPlanGenerator(planner, { model }).generate(request, signal);
         },
       },
+      // Hybrid placement (off unless runtime.hybrid_plans / XERXES_HYBRID_PLANS is on).
+      hybridPlacement: createHybridPlacement({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        cwd: () => getActiveSession<DaemonSession>()?.cwd ?? workspaceRoot,
+        profiles: profileStore,
+      }),
       subagentManager: subagentHost.managerPort,
     });
     // Report what a request actually carries, not what is registered. With
@@ -2260,6 +2470,13 @@ function daemonRuntime(
     activeToolCount = tools.definitionsForTranscript([]).length;
     const contextLimit = resolvedProfileContextLimit(profileStore.active(), connection.model);
     const managedPluginHost = host.managedPlugins;
+    // Where a session's model runs: a loopback server is `local`.
+    const sessionDataTrust = (session: DaemonSession) => {
+      const model = session.model || connection.model;
+      const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+      const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
+      return deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
+    };
     return new AgentTurnRunner({
       lessonsForTurn: async (session, userText, signal) => {
         signal.throwIfAborted();
@@ -2273,10 +2490,16 @@ function daemonRuntime(
         return renderApprovedLessonsForTurn(lessons, { inContext: lessonIdsInContext(session.messages) });
       },
       ...(host.reflection ? { reflection: host.reflection } : {}),
-      reflectionMode: () => {
-        const value = runtime?.status().reflection ?? settings.reflection;
-        return value === 'all' || value === 'off' ? value : 'goals';
-      },
+      // Unless the user chose `all`, a local session reflects on goal endings only.
+      reflectionMode: session => reflectionModeFor({
+        configured: runtime?.status().reflection ?? settings.reflection,
+        chosen: reflectionChosen,
+        // An unresolvable profile keeps the configured mode; the turn reports that error itself.
+        trust: () => {
+          if (session === undefined) return 'cloud';
+          try { return sessionDataTrust(session); } catch { return 'cloud'; }
+        },
+      }),
       promptSnapshots,
       // The project-plugin scan starts in the background when this runner is
       // built; a turn waits briefly for it so its first step can call them.
@@ -2333,6 +2556,93 @@ function daemonRuntime(
         }).then((result) => result.systemPrompt),
       llm,
       hookRunnerForSession: session => hooksForWorkspace(session.cwd),
+      // Data boundary (off by default): a mode in runtime.data_boundary or
+      // XERXES_DATA_BOUNDARY gates file reads, shell and writes per session.
+      // The safety floor: inputs locked, outputs in the project folder, and
+      // exec_command in the OS sandbox. Used by turns in auto mode only.
+      runSafetyForSession: (session, outputFolder) => runSafetyRegistry.forSession(session.id, outputFolder),
+      recoverEngineFor: systemEngineRecoveryFor(config.runtime, process.env),
+      // A reply that reasons past its budget without acting is stopped and
+      // asked again (runtime.reply_budget; Bonsai's model card sets one).
+      replyBudgetFor: (candidate: string) => resolveReplyBudget({ ...config.runtime, ...settings }, candidate),
+      dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        trustOf: sessionDataTrust,
+      }),
+      maxNetworkRetries: daemonMaxNetworkRetries,
+      // Lean prompt (off by default): the session's profile field wins, then
+      // XERXES_PROMPT_PROFILE, then runtime.prompt_profile.
+      // Unset everywhere, the route decides: a Bonsai model, or a known window of
+      // 32K or less, gets lean. A routed turn uses the route's profile and model.
+      promptProfileForSession: (session, turn) => {
+        const model = session.model || connection.model;
+        const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+        let profile: ReturnType<typeof sessionProvider>;
+        try {
+          profile = turn.profile ? profileStore.get(turn.profile) : pinned ? sessionProvider(profileStore, session, model) : undefined;
+        } catch { profile = undefined; }
+        return parsePromptProfileConfig({ ...config.runtime, ...settings }, process.env, profile?.prompt_profile, {
+          model: turn.model,
+          ...(turn.contextLimit === undefined ? {} : { contextLimit: turn.contextLimit }),
+        });
+      },
+      // Result checks after a turn: runtime.checks / XERXES_RESULT_CHECKS.
+      // `warn` (the default) only notifies the user; `enforce` tells the model.
+      resultChecksForSession: () => parseChecksConfig({ ...config.runtime, ...settings }, process.env),
+      // Outbound gate (off unless a data_boundary mode is set): private mode
+      // refuses cloud requests, approve_outbound asks with Send/Deny, and every
+      // decision is logged by size and hash. No UI board means fail closed.
+      outboundGateForSession: createOutboundGateFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        routeOf: (session, model) => {
+          const pinned = session.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key);
+          const profile = pinned ? sessionProvider(profileStore, session, model) : undefined;
+          return {
+            trust: deriveDataTrust(profile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)),
+            provider: profile?.name ?? connection.provider ?? 'provider',
+          };
+        },
+        ...(interactions ? { approve: outboundApprovalPort((sessionId, question, signal) => interactions.ask(sessionId, question, signal)) } : {}),
+      }),
+      // Policy routing (off unless runtime.routing / XERXES_ROUTING is set):
+      // the data boundary decides which routes are allowed, the router picks.
+      routeForSession: createTurnRouter<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        profiles: profileStore,
+        boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
+        buildProvider: (profile, model) => ({
+          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          providerOverrides: { provider: profile.provider, base_url: profile.base_url },
+          contextLimit: resolvedProfileContextLimit(profile, model),
+          maxOutputTokens: candidate => resolvedProfileMaxOutputTokens(profile, candidate),
+        }),
+      }),
+      // Escalation (off unless runtime.escalation.mode / XERXES_ESCALATION is on):
+      // failed result checks step from a local retry to the advisor to a stop.
+      // The cascade. Unset, it is on for a local model (where a failed check
+      // is cheap to retry and the doc's "escalation by rule" applies) and when
+      // advisor.auto_on_check_fail asks for it; runtime.escalation.mode or
+      // XERXES_ESCALATION decides otherwise.
+      escalationForSession: createEscalationFactory<DaemonSession>({
+        runtime: () => ({ ...config.runtime, ...settings }),
+        boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
+        advisorAvailable: () => advisorRegistered,
+        defaultMode: session => defaultEscalationMode({
+          runtime: { ...config.runtime, ...settings },
+          env: process.env,
+          model: session.model || connection.model,
+          local: () => sessionDataTrust(session) === 'local',
+        }),
+      }),
+      ...(advisorRegistered ? {
+        consultAdvisor: (session: DaemonSession, request: { readonly question: string; readonly context: string }, signal: AbortSignal) =>
+          tools.execute({
+            id: `escalation-advisor-${crypto.randomUUID()}`,
+            type: 'function',
+            function: { name: 'AskAdvisor', arguments: { question: request.question, context: request.context, kind: 'answer' } },
+          }, { agentId: session.agentId, metadata: session.metadata, sessionId: session.id }, signal),
+      } : {}),
       ...(fallbackModel === undefined ? {} : {
         fallbackModel,
         createLlmForModel: (candidate: string) => createLlmClient(candidate, {
@@ -2351,7 +2661,8 @@ function daemonRuntime(
         : { reasoningEffort: connection.reasoningEffort }),
       subagentCoordinator: subagentHost.turnCoordinator,
       delegationModels: session => renderDelegationModels(
-        profileStore.list(),
+        // Fully local mode offers sub-agents only models served on this machine.
+        localOnlyActive() ? profileStore.list().filter(profile => isLocalUrl(profile.base_url ?? "")) : profileStore.list(),
         typeof session.metadata.provider_profile === "string"
           ? canonicalProfileName(session.metadata.provider_profile)
           : profileStore.active()?.name,
@@ -2692,7 +3003,7 @@ function registerDaemonQuestionTool(registry: ToolRegistry): void {
 async function acpServer(
   config: DaemonConfig,
   projectDirectory: string | undefined,
-  defaultPermissionMode: AcpPermissionMode,
+  requestedPermissionMode: AcpPermissionMode | undefined,
 ): Promise<{
   readonly server: AcpServer;
   readonly shutdown: () => Promise<void>;
@@ -2704,6 +3015,8 @@ async function acpServer(
       "ACP requires a configured runtime connection or active provider profile",
     );
   }
+  // The --permission-mode flag wins; otherwise runtime.permission_mode, else auto.
+  const defaultPermissionMode = requestedPermissionMode ?? connection.permissionMode;
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -2717,22 +3030,32 @@ async function acpServer(
   await skillRegistry.refresh(...defaultSkillDiscoveryRoots({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const acpComputerUseTool = computerUseHost.toolOptions(config.runtime);
+  const extraTools = parseExtraTools(config.runtime, process.env);
   registerCoreTools(tools, {
+    ...extraToolOptions(extraTools),
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
-    generateImageTool: generateImageToolOptions(workspaceRoot),
+    // Fully local mode: no web or image tools, which only reach other hosts.
+    ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
     ...(acpComputerUseTool === undefined ? {} : { computerUseTool: acpComputerUseTool }),
     agentMemoryTools: {
       memory: new AgentMemory({ projectRoot: workspaceRoot }),
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
-    memoryTools: { resolveContext: memoryToolContext.resolve },
+    ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
   });
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
+  // AskAdvisor when advisor.profile is set, as in the daemon and one-shot.
+  const advisorRegistered = registerConfiguredAdvisor(tools, {
+    runtime: config.runtime,
+    profiles: profileStore,
+    workspaceRoot,
+    reportError: message => console.error(message),
+  });
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   addMcpToolsToBuiltinAgents(definitions, mcpTools);
   addLspToolToBuiltinAgents(definitions, lspManager);
@@ -2745,15 +3068,18 @@ async function acpServer(
   const maxOutputTokens = (candidate: string): number | undefined =>
     resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
   const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
+  const acpProviderNetwork = parseProviderNetworkConfig(config.runtime);
   const llm = createLlmClient(connection.model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  });
+  }, { connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
+    // Children get the lean prompt by the same rule as the main turn.
+    promptProfileFor: (model: string) => parsePromptProfileConfig(config.runtime, process.env, undefined, childPromptRoute(profileStore, model)),
     worktreeForWorkspace: nativeSubagentWorktrees,
     resolveProviderProfile: agentProviderResolver(profileStore),
     resolveProviderRoute: agentProviderRouteResolver(profileStore),
@@ -2785,20 +3111,43 @@ async function acpServer(
     manager: subagentHost.managerPort,
     workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
-  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
-  const boot = await bootstrap({
-    cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
-    model,
-    subagents: bootstrapSubagentsForAgent(definitions, agentId),
-    tools: selectedTools,
-  });
-  const systemPrompt = joinSystemPrompts(
-    boot.systemPrompt,
-    agent?.systemPrompt,
-    await selfMemory.systemPromptAddendum(),
-  );
+  const agentTools = agentToolDefinitions(tools.definitions(), agent);
+  // The daemon's prompt-profile rule: lean for Bonsai models and small windows.
+  const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
+  const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
+  const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  const systemPrompt = lean
+    ? buildLeanSystemPrompt({ cwd: workspaceRoot, model, date: localDay(new Date()), toolNames: selectedTools.map(tool => tool.function.name), projectInstructions: await readLeanProjectInstructions(workspaceRoot) })
+    : joinSystemPrompts(
+        (await bootstrap({
+          cwd: workspaceRoot,
+          ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
+          model,
+          subagents: bootstrapSubagentsForAgent(definitions, agentId),
+          tools: selectedTools,
+        })).systemPrompt,
+        agent?.systemPrompt,
+        await selfMemory.systemPromptAddendum(),
+      );
+  const acpRunSafety = new RunSafetyRegistry();
   const runner = new AcpAgentRunner({
+    // The safety floor in auto mode, one per ACP session and folder.
+    runSafetyFor: (sessionId: string, cwd: string) => acpRunSafety.forSession(sessionId, cwd),
+    recoverEngineFor: (candidate: string) => systemEngineRecoveryFor(config.runtime, process.env)({ baseUrl: connection.baseUrl, model: candidate }),
+    replyBudgetFor: (candidate: string) => resolveReplyBudget(config.runtime, candidate),
+    // The daemon's cascade, one ladder per ACP session.
+    cascadeFor: (sessionId: string, cwd: string) => ({
+      hooks: headlessCascadeHooks({
+        runtime: config.runtime,
+        sessionId,
+        workspaceRoot: cwd,
+        model,
+        local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
+        tools,
+        advisorRegistered,
+        agentId,
+      }),
+    }),
     ...(process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? {} : { createEditFeedback: (cwd: string) => new EditFeedback(cwd, undefined, lspManager.configured ? lspManager.forWorkspace(cwd) : undefined) }),
     llm,
     model,
@@ -2806,6 +3155,12 @@ async function acpServer(
     ...(systemPrompt ? { systemPrompt } : {}),
     ...(effectiveMaxTokens === undefined ? {} : { maxTokens: effectiveMaxTokens }),
     defaultPermissionMode,
+    // The same user hooks the daemon runs, per ACP session working directory.
+    hookRunnerForCwd: userHookRunnerForCwd({ home: xerxesHome() }),
+    maxNetworkRetries: acpProviderNetwork.maxNetworkRetries
+      ?? defaultMaxNetworkRetries(connection.baseUrl ?? providerConfigFor(resolveProviderName(connection.model, {
+        ...(connection.provider ? { provider: connection.provider } : {}),
+      })).baseUrl),
     subagentCoordinator: subagentHost.turnCoordinator,
     ...(connection.temperature !== undefined
       ? { temperature: connection.temperature }
@@ -2848,6 +3203,7 @@ async function runAcp(args: readonly string[]): Promise<void> {
       ? { projectDirectory: options.projectDirectory }
       : {}),
   });
+  applyLocalOnly(config);
   const runtime = await acpServer(
     config,
     options.projectDirectory,
@@ -2875,7 +3231,7 @@ async function runOneShotOrUsageError(
   agentReference?: string,
 ): Promise<void> {
   try {
-    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat });
+    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat, noSave: cliNoSave });
   } catch (error) {
     if (error instanceof RuntimeConnectionRequiredError) {
       reportCommandUsageError(error, "xerxes --help");
@@ -2887,9 +3243,10 @@ async function runOneShotOrUsageError(
 async function runOneShot(
   prompt: string,
   agentReference?: string,
-  options: { readonly outputFormat?: OutputFormat } = {},
+  options: { readonly outputFormat?: OutputFormat; readonly noSave?: boolean } = {},
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
+  applyLocalOnly(config);
   const profileStore = new ProfileStore();
   const connection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   if (!connection) {
@@ -2897,6 +3254,9 @@ async function runOneShot(
       "One-shot execution requires a configured runtime connection or active provider profile",
     );
   }
+  // Parsed before any work starts so an invalid setting fails fast.
+  const saveRun = options.noSave !== true && parseOneShotSaveConfig(config.runtime);
+  const providerNetwork = parseProviderNetworkConfig(config.runtime);
   const workspaceRoot = config.projectDirectory;
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
@@ -2911,22 +3271,33 @@ async function runOneShot(
   const memoryToolContext = memoryToolContextResolver(workspaceRoot);
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
   const computerUseTool = computerUseHost.toolOptions(config.runtime);
+  const extraTools = parseExtraTools(config.runtime, process.env);
   registerCoreTools(tools, {
+    ...extraToolOptions(extraTools),
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
-    generateImageTool: generateImageToolOptions(workspaceRoot),
+    // Fully local mode: no web or image tools, which only reach other hosts.
+    ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
     ...(computerUseTool === undefined ? {} : { computerUseTool }),
     agentMemoryTools: {
       memory: agentMemory,
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default", typeof context.metadata.project_root === "string" ? context.metadata.project_root : workspaceRoot),
     },
-    memoryTools: { resolveContext: memoryToolContext.resolve },
+    ...(extraTools.has("memory") ? { memoryTools: { resolveContext: memoryToolContext.resolve } } : {}),
   });
   registerCreatorForgeTool(tools, new DeclarativeToolForge());
   registerAgentPresetTools(tools, new AgentPresetRoster({ projectDirectory: workspaceRoot }));
   registerClaudeSkillTool(tools, skillRegistry);
+  // AskAdvisor when advisor.profile (or XERXES_ADVISOR_PROFILE) is set, as in
+  // the daemon: the cascade's advisor step needs it.
+  const advisorRegistered = registerConfiguredAdvisor(tools, {
+    runtime: config.runtime,
+    profiles: profileStore,
+    workspaceRoot,
+    reportError: message => console.error(message),
+  });
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   addMcpToolsToBuiltinAgents(definitions, mcpTools);
   addLspToolToBuiltinAgents(definitions, lspManager);
@@ -2952,10 +3323,20 @@ async function runOneShot(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  });
+  }, { connectTimeoutMs: providerNetwork.connectTimeoutMs });
+  // A refused or hung endpoint gives up after a bounded number of retries:
+  // fewer for a local server, which either answers or is down.
+  const oneShotBaseUrl = connection.baseUrl
+    ?? providerConfigFor(resolveProviderName(model, {
+      ...(connection.provider ? { provider: connection.provider } : {}),
+    })).baseUrl;
+  const maxNetworkRetries = providerNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(oneShotBaseUrl);
+  const recoverEngine = systemEngineRecoveryFor(config.runtime, process.env)({ baseUrl: oneShotBaseUrl, model });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
+    // Children get the lean prompt by the same rule as the main turn.
+    promptProfileFor: (model: string) => parsePromptProfileConfig(config.runtime, process.env, undefined, childPromptRoute(profileStore, model)),
     worktreeForWorkspace: nativeSubagentWorktrees,
     resolveProviderProfile: agentProviderResolver(profileStore),
     resolveProviderRoute: agentProviderRouteResolver(profileStore),
@@ -2971,7 +3352,7 @@ async function runOneShot(
     ...(maxTokens === undefined ? {} : { maxTokens }),
     maxOutputTokens,
     model,
-    permissionMode: "accept-all",
+    permissionMode: connection.permissionMode,
     ...(connection.temperature === undefined
       ? {}
       : { temperature: connection.temperature }),
@@ -2987,23 +3368,71 @@ async function runOneShot(
     manager: subagentHost.managerPort,
     workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
-  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
-  const boot = await bootstrap({
-    cwd: workspaceRoot,
-    ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
-    model,
-    subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
-    tools: selectedTools,
-  });
-  const systemPrompt = joinSystemPrompts(
-    boot.systemPrompt,
-    agent?.systemPrompt,
-    await agentMemory.toPromptSection(),
-    await selfMemory.systemPromptAddendum(),
-  );
+  const agentTools = agentToolDefinitions(tools.definitions(), agent);
+  // The daemon's prompt-profile rule: lean for Bonsai models and small
+  // windows unless prompt_profile says otherwise.
+  const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
+  const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
+  const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  // The safety floor in auto mode: inputs locked, new files in the working
+  // folder, commands in the OS sandbox. Without it every write and command is refused.
+  const runSafety = await oneShotRunSafety(connection.permissionMode, "oneshot", workspaceRoot);
+  const systemPrompt = lean
+    ? joinSystemPrompts(
+        buildLeanSystemPrompt({
+          cwd: workspaceRoot,
+          model,
+          date: localDay(new Date()),
+          toolNames: selectedTools.map(tool => tool.function.name),
+          commandSandbox: runSafety?.commandSandbox() !== undefined,
+          localOnly: localOnlyActive(),
+          projectInstructions: await readLeanProjectInstructions(workspaceRoot),
+        }),
+        // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.
+        agentReference === undefined ? undefined : agent?.systemPrompt,
+      )
+    : joinSystemPrompts(
+        (await bootstrap({
+          cwd: workspaceRoot,
+          ...(skillRegistry.markdownIndex() ? { skills: skillRegistry.markdownIndex() } : {}),
+          model,
+          subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
+          tools: selectedTools,
+        })).systemPrompt,
+        agent?.systemPrompt,
+        await agentMemory.toPromptSection(),
+        await selfMemory.systemPromptAddendum(),
+      );
   const feedback = process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? undefined : new EditFeedback(workspaceRoot, undefined, lspManager.configured ? lspManager.forWorkspace(workspaceRoot) : undefined);
-  const sessionId = `oneshot-${crypto.randomUUID()}`;
+  // A saved run is a normal daemon session (same store and format), so
+  // `xerxes --resume <id> "prompt"` continues it after an interruption.
+  const sessionId = saveRun ? newOneShotSessionId() : `oneshot-${crypto.randomUUID()}`;
   const state = createAgentState();
+  const recorder = saveRun
+    ? new OneShotSessionRecorder({
+        store: oneShotTranscriptStore(xerxesHome(), workspaceRoot),
+        sessionId,
+        cwd: workspaceRoot,
+        agentId: agent?.name ?? "default",
+        model,
+        agentsRoot: join(xerxesHome(), "agents"),
+        permissionMode: connection.permissionMode,
+        ...(systemPrompt ? { systemPrompt } : {}),
+      })
+    : undefined;
+  // Only on a terminal: scripts read stderr for errors, and --output-format
+  // json already reports session_id.
+  if (recorder && process.stderr.isTTY) process.stderr.write(`session: ${sessionId}\n`);
+  // The same user hooks the daemon runs (before_tool_call, PreToolUse, …).
+  const hookRunner = userHookRunnerForCwd({ home: xerxesHome() })(workspaceRoot);
+  // Ctrl-C ends the turn through its signal, so the partial run is saved
+  // before the process exits; a second Ctrl-C exits at once.
+  const interrupt = new AbortController();
+  const onSigint = () => {
+    if (interrupt.signal.aborted) process.exit(130);
+    interrupt.abort(new DOMException("Interrupted", "AbortError"));
+  };
+  process.on("SIGINT", onSigint);
   const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
   const outputFormat: OutputFormat = options.outputFormat ?? "text";
   let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = [];
@@ -3016,13 +3445,40 @@ async function runOneShot(
   const writeStreamJson = (record: Record<string, unknown>) => {
     process.stdout.write(`${JSON.stringify(record)}\n`);
   };
+  // Read before the run starts, so an invalid runtime.reply_budget fails here.
+  const replyBudget = resolveReplyBudget(config.runtime, model);
+  // The daemon's cascade: checks after each attempt, and while escalation
+  // hands back feedback the model runs again in this same run.
+  const cascadeHooks: CascadeHooks = {
+    ...headlessCascadeHooks({
+      runtime: config.runtime,
+      sessionId,
+      workspaceRoot,
+      model,
+      local: () => deriveDataTrust(activeProfile ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined)) === "local",
+      tools,
+      advisorRegistered,
+      agentId: agent?.name ?? "default",
+    }),
+    // Under accept-all the user chose to let the run change anything.
+    ...(runSafety && connection.permissionMode !== "accept-all" ? { inputFindings: () => runSafety.inputFindings() } : {}),
+  };
+  const cascadeSteps: Record<string, unknown>[] = [];
+  const reportCascadeStep = (step: CascadeStep) => {
+    if (!step.findings.length && !step.escalation && !step.checkError && !step.escalationError) return;
+    const record = cascadeStepRecord(step);
+    cascadeSteps.push(record);
+    if (outputFormat === "stream-json") writeStreamJson({ type: "cascade", ...record });
+    // Text and json keep stdout for the answer; the user still sees why it retried.
+    else for (const line of cascadeStepLines(step)) process.stderr.write(`${line}\n`);
+  };
   try {
-    for await (const event of runTurn(
+    for await (const event of runCascadingTurn(
       {
         model,
         state,
         userMessage: prompt,
-        permissionMode: "accept-all",
+        permissionMode: connection.permissionMode,
         sessionId,
         ...(agent?.name ? { agentId: agent.name } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
@@ -3033,6 +3489,7 @@ async function runOneShot(
         ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
         tools: selectedTools,
         ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
+        replyBudget,
       },
       {
         awaitAgentEvents: async (signal) => {
@@ -3045,9 +3502,18 @@ async function runOneShot(
           pendingAgentEventSnapshots = [];
         },
         llm,
+        hookRunner,
+        maxNetworkRetries,
+        permissionBroker: oneShotPermissionBroker(),
+        ...(runSafety ? { runSafety } : {}),
+        ...(recoverEngine ? { recoverEngine } : {}),
         toolExecutor: feedback ? feedback.wrap(tools) : tools,
       },
+      { hooks: cascadeHooks, projectRoot: workspaceRoot, onStep: reportCascadeStep },
+      interrupt.signal,
     )) {
+      // Save at every completed step so an interrupted run can be resumed.
+      if (recorder && (event.type === "tool_end" || event.type === "turn_done")) recorder.schedule(state);
       if (event.type === "text") {
         wroteText = true;
         if (outputFormat === "stream-json") {
@@ -3070,8 +3536,22 @@ async function runOneShot(
       }
     }
   } finally {
+    process.off("SIGINT", onSigint);
     subagentCohort.close();
-    await subagentHost.manager.shutdown();
+    await runSafety?.dispose();
+    try {
+      // Also on an interruption or failure: the partial run stays resumable.
+      if (recorder) {
+        try { await recorder.flush(state); }
+        catch (error) { console.error(`Could not save session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    } finally {
+      await subagentHost.manager.shutdown();
+    }
+  }
+  if (interrupt.signal.aborted) {
+    if (recorder) process.stderr.write(`interrupted; resume with: xerxes --resume ${sessionId} "<prompt>"\n`);
+    process.exitCode = 130;
   }
   const diagnosticReport = await feedback?.report();
   if (diagnosticReport) {
@@ -3089,6 +3569,7 @@ async function runOneShot(
       type: "result",
       ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
       ...(lastUsage === undefined ? {} : { usage: lastUsage }),
+      ...(cascadeSteps.length ? { cascade: cascadeSteps } : {}),
     });
   } else if (outputFormat === "stream-json") {
     writeStreamJson({
@@ -3123,6 +3604,7 @@ async function runResumedOneShot(
 ): Promise<void> {
   const projectDirectory = resolve(process.cwd());
   const config = loadSystemDaemonConfig({ projectDirectory });
+  applyLocalOnly(config);
   const mcpManager = new MCPManager();
   try {
   await startConfiguredMcpServers(mcpManager, mcpHostOptions(projectDirectory));
@@ -3141,7 +3623,9 @@ async function runResumedOneShot(
   let wroteText = false;
   let turnFailed = false;
   try {
-    runtime.reload({ permission_mode: "accept-all" });
+    // The same rule as a new one-shot run: the configured mode (auto unless
+    // set), and nothing waits for an approval nobody can give.
+    runtime.reload({ permission_mode: runtimePermissionMode(config.runtime.permission_mode) ?? DEFAULT_PERMISSION_MODE });
     const session = await runtime.openSession(sessionId, undefined, {
       cwd: projectDirectory,
       resume: true,
@@ -3156,6 +3640,11 @@ async function runResumedOneShot(
           wroteText = true;
           process.stdout.write(text);
         }
+        return;
+      }
+      if (event.type === "approval_request") {
+        const description = stringSetting(event.payload.description) || stringSetting(event.payload.tool_name) || "a tool call";
+        process.stderr.write(`Refused without asking: ${description.split("\n")[0]}\nOne-shot runs don't ask for approval. Run the task in the TUI, or set runtime.permission_mode to accept-all.\n`);
         return;
       }
       if (event.type === "notification" && event.payload.level === "error") {

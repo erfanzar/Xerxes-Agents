@@ -8,6 +8,8 @@ import { stat } from 'node:fs/promises'
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import { ProcessRegistry, terminateProcessSubtree, type ProcessSignal } from '../runtime/processRegistry.js'
+import { localOnlyActive, localOnlyRefusal } from '../runtime/localOnly.js'
+import type { BoundCommandSandbox, CommandSandboxRunner } from '../security/commandSandbox.js'
 import type { TerminalRegistry } from '../runtime/terminalRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, optionalStringArray, requireRange, requiredString } from './inputs.js'
@@ -30,6 +32,8 @@ const PROCESS_GROUPS_AVAILABLE = process.platform !== 'win32'
  * exits. Short: it is paid on every call, and it is not a wait for EOF.
  */
 const OUTPUT_SETTLE_MS = 50
+/** Largest `stdin` text accepted, in characters: room for a long script, not for a data file. */
+export const MAX_STDIN_CHARS = 1_000_000
 
 export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
   type: 'function',
@@ -40,8 +44,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + '$VAR expansion do not exist here, and every entry in `args` reaches the program literally — "*.ts" arrives '
       + 'as the three characters, unexpanded. Express filtering with the program\'s own flags rather than piping to '
       + 'head or grep; if a workflow genuinely needs shell semantics, invoke the interpreter as the executable and '
-      + 'note that the approval gate then only sees that interpreter. stdin is /dev/null, so a command that prompts '
-      + 'receives nothing and burns the whole timeout doing nothing — pass the non-interactive flag (--yes, '
+      + 'note that the approval gate then only sees that interpreter. To run a script, pass its text as `stdin` to '
+      + 'the interpreter (cmd python3 with args ["-"], or sh with ["-s"]) instead of escaping it into args. Without '
+      + '`stdin` the program reads an empty standard input, so a command that prompts receives nothing and burns the '
+      + 'whole timeout doing nothing — pass the non-interactive flag (--yes, '
       + '--no-pager, --porcelain, CI mode) up front. A non-zero exitCode is a normal successful call and never an '
       + 'exception: read stderr and decide. The tool itself only fails for shell syntax in `cmd`, a workdir that is '
       + `not an existing directory inside the workspace, or cancellation. A timeout (default ${DEFAULT_TIMEOUT_MS}ms, `
@@ -57,7 +63,7 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
       + 'tools, where the host enables them. For work you KNOW will outlast the timeout, pass '
       + 'run_in_background:true to background it immediately; anything that merely outlives the timeout by surprise '
       + 'is backgrounded automatically at the ceiling. Either way, never use `&` or nohup: that output goes nowhere '
-      + 'you can read and its failure is invisible. When asked to report when background work finishes, set notify_on_completion:true; on supported hosts this schedules one bounded follow-up without polling.',
+      + 'you can read and its failure is invisible. When asked to report when background work finishes, set notify_on_completion:true; on supported hosts this schedules one bounded follow-up without polling. When the run has a command sandbox the command runs in it: no network, writes only inside the working folder and temp, and files that were there when the task started cannot be changed; set unsandboxed:true to ask the user to run it outside.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -68,6 +74,15 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
           items: { type: 'string' },
           default: [],
           description: 'Arguments passed directly to the executable.',
+        },
+        stdin: {
+          type: 'string',
+          description: 'Text written to standard input, e.g. a script for python3 with args ["-"].',
+        },
+        unsandboxed: {
+          type: 'boolean',
+          default: false,
+          description: 'Run outside the command sandbox (for network access or changing a file that was there when the task started). Asks the user first.',
         },
         workdir: { type: 'string', default: '.', description: 'Workspace-relative working directory.' },
         timeout_ms: {
@@ -189,6 +204,8 @@ export interface ProcessResult {
   readonly stdout: string
   readonly timedOut: boolean
   readonly truncated: boolean
+  /** The OS sandbox the command ran in, when it ran in one. */
+  readonly sandbox?: CommandSandboxRunner
 }
 
 /** Register a bounded, direct-argv process tool; persistent PTYs remain a separate port. */
@@ -225,7 +242,16 @@ export function registerProcessTools(
       const notify = optionalBoolean(inputs, 'notify_on_completion', false)
       if (notify && context.metadata.goal_turn_human !== true) throw new ValidationError('notify_on_completion', 'requires a direct user turn')
       if (notify && !completionWatch) throw new ValidationError('notify_on_completion', 'is not enabled by this host')
-      const result = await executeCommand(inputs, paths, signal, background, terminals, owner)
+      // The loop sets the sandbox exactly when the run-safety port allowed
+      // sandboxed commands; a call that asked to run outside it never gets one.
+      const sandbox = inputs.unsandboxed === true ? undefined : context.commandSandbox
+      // Fully local mode runs a command only inside the no-network sandbox.
+      if (localOnlyActive() && sandbox === undefined) {
+        throw localOnlyRefusal(inputs.unsandboxed === true
+          ? 'running a command outside the no-network sandbox'
+          : 'running a command, because no sandbox without network is available here')
+      }
+      const result = await executeCommand(inputs, paths, signal, background, terminals, owner, sandbox)
       if (!notify || !('procId' in result)) return result
       try {
         signal?.throwIfAborted()
@@ -312,6 +338,7 @@ export async function executeCommand(
   background?: BackgroundCommandManager,
   terminals?: TerminalRegistry,
   ownerSessionId?: string,
+  sandbox?: BoundCommandSandbox,
 ): Promise<AutoBackgroundedResult | BackgroundStartResult | ProcessResult> {
   const command = requiredString(inputs, 'cmd')
   if (/\s/.test(command) || /[;&|`$<>]/.test(command)) {
@@ -322,6 +349,10 @@ export async function executeCommand(
     )
   }
   const args = optionalStringArray(inputs, 'args')
+  const stdin = optionalString(inputs, 'stdin')
+  if (stdin !== undefined && stdin.length > MAX_STDIN_CHARS) {
+    throw new ValidationError('stdin', `must be at most ${MAX_STDIN_CHARS} characters; write larger input to a file and pass its path`, `${stdin.length} characters`)
+  }
   const workdir = optionalString(inputs, 'workdir') ?? '.'
   const timeout = requireRange(optionalInteger(inputs, 'timeout_ms', DEFAULT_TIMEOUT_MS), 'timeout_ms', 1, 120_000)
   const maxOutputChars = requireRange(
@@ -342,9 +373,19 @@ export async function executeCommand(
     if (background === undefined) {
       throw new ValidationError('run_in_background', 'is not enabled by this host', true)
     }
+    if (stdin !== undefined) {
+      throw new ValidationError('stdin', 'cannot be combined with run_in_background; write the input to a file and pass its path', true)
+    }
     // No timeout is applied on purpose: outliving the foreground ceiling is the
     // entire reason a caller asks for this.
-    const startOptions = { command, args, cwd, name: [command, ...args].join(' ').slice(0, 60) }
+    const [startCommand = command, ...startArgs] = sandbox ? sandbox.wrap([command, ...args]) : [command, ...args]
+    const startOptions = {
+      command: startCommand,
+      args: startArgs,
+      cwd,
+      name: [command, ...args].join(' ').slice(0, 60),
+      ...(sandbox ? { env: sandbox.env } : {}),
+    }
     return ownerSessionId === undefined
       ? background.start(startOptions)
       : background.startForOwner(ownerSessionId, startOptions)
@@ -411,7 +452,7 @@ export async function executeCommand(
     id: `fg_${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`,
     kind: 'foreground',
     ownerSessionId,
-    command: [command, ...args].join(' '),
+    command: [command, ...args].join(' ') + (stdin === undefined ? '' : ` < stdin (${stdin.length} chars)`),
     cwd,
     control: {
       kill: async killSignal => {
@@ -430,9 +471,11 @@ export async function executeCommand(
     // no longer dies with us — which the normal path already accounts for by
     // reaping via `process.exited` and cancelling the drains unconditionally.
     childStartedAt = Date.now()
-    const process = Bun.spawn([command, ...args], {
+    const process = Bun.spawn(sandbox ? sandbox.wrap([command, ...args]) : [command, ...args], {
       cwd,
-      stdin: 'ignore',
+      ...(sandbox ? { env: { ...globalThis.process.env, ...sandbox.env } } : {}),
+      // Written in full and closed; a program that reads to EOF sees the whole text.
+      stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin),
       stdout: 'pipe',
       stderr: 'pipe',
       ...(PROCESS_GROUPS_AVAILABLE ? { detached: true } : {}),
@@ -530,6 +573,7 @@ export async function executeCommand(
       stderr: guardNote ? (stderrResult.text ? stderrResult.text + '\n' : '') + guardNote : stderrResult.text,
       timedOut,
       truncated: stdoutResult.truncated || stderrResult.truncated,
+      ...(sandbox ? { sandbox: sandbox.runner } : {}),
     }
   } finally {
     clearTimeout(timer)

@@ -10,15 +10,13 @@ Run an example from the repository root:
 
 ```sh
 bun examples/scenario_1_conversational_assistant.ts
-bun examples/cortex_deepsearch_agent.ts --topic "Bun-native agent runtimes"
-bun examples/cortex_parallel_benchmark.ts --agents 4 --min-context-tokens 512
 ```
 
 Examples that use an LLM accept a deliberate live mode. Supply all connection
 details on the command line; nothing is inferred from environment variables:
 
 ```sh
-bun examples/cortex_parallel_benchmark.ts \
+bun examples/scenario_1_conversational_assistant.ts \
   --live --model gpt-4o-mini --base-url https://api.example.test/v1 --api-key "$KEY"
 ```
 

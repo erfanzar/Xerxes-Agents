@@ -6,6 +6,8 @@ import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 
+import { assertNotLocalOnly } from '../runtime/localOnly.js'
+
 /** Runs git with an argv list (never a shell). Injected so tests do not reach the network. */
 export type GitRunner = (args: readonly string[], options: { readonly cwd: string; readonly timeoutMs: number }) => Promise<{ readonly exitCode: number; readonly output: string }>
 
@@ -89,6 +91,7 @@ export class PluginSourceCache {
 
   async preview(rawUrl: string): Promise<GitPluginPreview> {
     const url = validateGitUrl(rawUrl)
+    assertNotLocalOnly('cloning a plugin from a git remote')
     const now = this.options.now?.() ?? Date.now()
     await mkdir(this.directory, { recursive: true, mode: 0o700 })
     // A fresh folder per clone: an earlier clone of the same URL may already be installed.

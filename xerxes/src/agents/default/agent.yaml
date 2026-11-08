@@ -12,9 +12,6 @@ agent:
     - GrepTool
     - ListDir
     - exec_command
-    - write_stdin
-    - list_terminal_sessions
-    - close_terminal_session
     - check_command
     - list_commands
     - kill_command
@@ -23,6 +20,11 @@ agent:
     - pty_list
     - pty_close
     - DuckDuckGoSearch
+    - WebScraper
+    - RSSReader
+    - CSVProcessor
+    - XlsxReader
+    - XlsxWriter
     - computer_use
     - agent_memory_status
     - agent_memory_read
@@ -48,6 +50,7 @@ agent:
     - ResetAgent
     - HandoffTool
     - AskUserQuestionTool
+    - AskAdvisor
     - SetInteractionModeTool
     - get_goal
     - create_goal

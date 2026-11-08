@@ -26,7 +26,6 @@
     "release:publish-dry-run": "bun xerxes/scripts/releasePackage.ts publish-dry-run",
     "release:smoke": "bun xerxes/scripts/smokeReleasePackage.ts",
     "smoke": "bun run --cwd xerxes smoke:ui",
-    "swarm": "bun run --cwd xerxes swarm",
     "test": "bun run --cwd xerxes test",
     "test:runtime": "bun run --cwd xerxes test:runtime",
     "test:ui": "bun run --cwd xerxes test:ui",

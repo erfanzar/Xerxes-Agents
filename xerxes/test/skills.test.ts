@@ -281,7 +281,6 @@ test("native bundled skill documentation is discoverable independently from the 
       "google-workspace",
       "grpo-rl-training",
       "ocr-and-documents",
-      "polymarket",
       "youtube-content",
     ]),
   );
@@ -727,4 +726,29 @@ test("YAML block-scalar descriptions keep their text instead of the indicator", 
   await registry.discover(BUNDLED_SKILLS_DIRECTORY);
   expect(registry.get("deepscan")?.metadata.description).toContain("Spawns a swarm of specialized agents");
   for (const skill of registry.all()) expect(skill.metadata.description).not.toMatch(/^[>|][+-]?$/);
+});
+
+test("an index too large for full lines drops tags and shortens descriptions before leaving a skill out", () => {
+  const registry = new SkillRegistry();
+  // Like the bundled set: too many skills for full lines, few enough for compact ones.
+  const count = 120;
+  for (let index = 0; index < count; index += 1) {
+    registry.register(parseSkillMarkdown(
+      `---\nname: skill-${index}\ndescription: ${"Handles one kind of task well. ".repeat(6).trim()}\ntags: [documents, data, research]\n---\nRun the skill.`,
+      `/virtual/skill-${index}/SKILL.md`,
+    ));
+  }
+
+  const index = registry.markdownIndex();
+  expect(Buffer.byteLength(index, "utf8")).toBeLessThanOrEqual(MAX_SKILL_INDEX_BYTES);
+  expect(index).not.toContain("more skills omitted");
+  for (let skill = 0; skill < count; skill += 1) expect(index).toContain(`  - skill-${skill}: `);
+  expect(index).not.toContain("[documents, data, research]");
+  // A small registry keeps full lines, tags included.
+  const small = new SkillRegistry();
+  small.register(parseSkillMarkdown(
+    "---\nname: xlsx\ndescription: Read and write spreadsheets.\ntags: [excel, spreadsheet]\n---\nUse XlsxReader.",
+    "/virtual/xlsx/SKILL.md",
+  ));
+  expect(small.markdownIndex()).toContain("  - xlsx: Read and write spreadsheets. [excel, spreadsheet]");
 });

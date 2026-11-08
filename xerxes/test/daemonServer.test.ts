@@ -4090,10 +4090,10 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     await client.next((frame) => frame.id === 1);
     expect((await client.next(eventFrame("init_done"))).params?.payload).toMatchObject({
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
 
     client.send({
@@ -4104,14 +4104,14 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect((await client.next((frame) => frame.id === 2)).result).toEqual({
       ok: true,
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
     expect(
       (await client.next(eventFrame("notification"))).params?.payload?.body,
-    ).toBe("YOLO mode OFF.");
+    ).toBe("YOLO mode ON.");
 
     client.send({
       jsonrpc: "2.0",
@@ -4125,7 +4125,7 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     // trust levels. The session's own mode is reported on status_update above.
     expect(
       (await client.next((frame) => frame.id === 3)).result?.permission_mode,
-    ).toBe("accept-all");
+    ).toBe("auto");
 
     client.send({
       jsonrpc: "2.0",
@@ -4135,14 +4135,14 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect((await client.next((frame) => frame.id === 4)).result).toEqual({
       ok: true,
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
     expect(
       (await client.next(eventFrame("notification"))).params?.payload?.body,
-    ).toBe("YOLO mode ON.");
+    ).toBe("YOLO mode OFF.");
 
     client.send({
       jsonrpc: "2.0",
@@ -4152,7 +4152,7 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect(
       (await client.next((frame) => frame.id === 5)).result?.permission_mode,
-    ).toBe("accept-all");
+    ).toBe("auto");
   } finally {
     client.close();
     await server.stop();
@@ -4254,7 +4254,7 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
         base_url: "https://native.example/v1",
         max_tokens: 512,
         model: "native-model",
-        permission_mode: "accept-all",
+        permission_mode: "auto",
         provider: "openai",
         temperature: 0.2,
         top_p: 0.8,
@@ -4400,6 +4400,168 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
     expect(
       (await client.next(eventFrame("notification"))).params?.payload,
     ).toMatchObject({ severity: "info", body: "Thinking: `high`." });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon /sampling leaves a Bonsai model's temperature and top_k to its published profile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-published-sampling-"));
+  const socketPath = join(directory, "daemon.sock");
+  const rebuiltSettings: Array<Readonly<Record<string, unknown>>> = [];
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    // What an older daemon materialized for every model.
+    runtimeSettings: {
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "ternary-bonsai-2-27b-mlx",
+      provider: "custom",
+      temperature: 0.6,
+      top_k: 64,
+    },
+    sessionDirectory: join(directory, "sessions"),
+    turnRunnerFactory: (settings) => {
+      rebuiltSettings.push({ ...settings });
+      return undefined;
+    },
+  });
+  const server = new DaemonServer({
+    socketPath,
+    profileStore: new ProfileStore(join(directory, "profiles.json")),
+    runtime,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "published-sampling", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/sampling reset" },
+    });
+    const reset = (await client.next((frame) => frame.id === 2)).result as {
+      readonly sampling: Record<string, unknown>;
+    };
+    expect(reset).toMatchObject({ ok: true });
+    expect(reset.sampling.temperature).toBeUndefined();
+    expect(reset.sampling.top_k).toBeUndefined();
+    expect(rebuiltSettings.at(-1)).not.toHaveProperty("temperature");
+    expect(rebuiltSettings.at(-1)).not.toHaveProperty("top_k");
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toBe("Restored Prism's model card sampling for ternary-bonsai-2-27b-mlx.");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/sampling" },
+    });
+    await client.next((frame) => frame.id === 3);
+    const shown = String(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    );
+    expect(shown).toContain("`temperature` = `(model profile)`");
+    expect(shown).toContain(
+      "Unset values follow Prism's model card for `ternary-bonsai-2-27b-mlx`: temperature 1, top_p 0.95, top_k 20",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon /bonsai shows the active model's card, the value in effect and what set it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-model-card-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: {
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "ternary-bonsai-2-27b-mlx",
+      provider: "custom",
+      temperature: 0.3,
+    },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    socketPath,
+    profileStore: new ProfileStore(join(directory, "profiles.json")),
+    runtime,
+    modelCardContext: () => ({ runtime: { prompt_profile: "full" }, env: {} }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "model-card", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "commands.catalog", params: {} });
+    const catalog = await client.next((frame) => frame.id === 2);
+    expect(catalog.result?.pairs).toContainEqual([
+      "/bonsai",
+      "Show the active model's settings card and what overrides it",
+    ]);
+
+    client.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/bonsai" } });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
+      ok: true,
+      card: "ternary-bonsai-2-27b",
+    });
+    const body = String((await client.next(eventFrame("notification"))).params?.payload?.body);
+    expect(body).toContain("Model card for `ternary-bonsai-2-27b-mlx`: Ternary Bonsai 2 27B (`ternary-bonsai-2-27b`)");
+    expect(body).toContain("| temperature 0.3; the rest from the card | settings |");
+    expect(body).toContain("| Output limit | 32,768 tokens | 32,768 tokens | card |");
+    expect(body).toContain("| Prompt and tools | lean | full | runtime.prompt_profile |");
+    expect(body).toContain("| Result checks and escalation | on | on | card |");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon /route reads routing from the config file, not only the environment", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-route-config-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    // As cli.ts seeds it: the config file's runtime section.
+    runtimeSettings: { model: "native-model", provider: "openai", routing: "rules" },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "route-config", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "slash", params: { command: "/route" } });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true, mode: "rules" });
+    expect(String((await client.next(eventFrame("notification"))).params?.payload?.body)).toContain("Routing: RULES");
   } finally {
     client.close();
     await server.stop();
@@ -8366,6 +8528,60 @@ test("auto_title off leaves the session untitled with no provider call", async (
     await rm(directory, { recursive: true, force: true });
     resetTitleAttempts();
   }
+});
+
+/** Runs one turn against a daemon whose provider is a loopback server and returns how many title requests reached it. */
+async function titleRequestsToLoopbackProvider(autoTitle: boolean | undefined): Promise<{ requests: number; title: unknown }> {
+  resetTitleAttempts();
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-autotitle-local-"));
+  const socketPath = join(directory, "daemon.sock");
+  let requests = 0;
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if ((await request.text()).includes("Write a very short title")) requests += 1;
+      return Response.json({ id: "t", object: "chat.completion", model: "test-model", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "Local title" } }] });
+    },
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "test-model",
+    baseUrl: `http://127.0.0.1:${provider.port}/v1`,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, ...(autoTitle === undefined ? {} : { autoTitle }) });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "local" } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({ jsonrpc: "2.0", id: 2, method: "turn.submit", params: { session_key: "local", text: "hello there" } });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true });
+    await client.next(eventFrame("turn_end"));
+    // The title call is background work; give it time to reach the server.
+    for (let waited = 0; waited < 1500 && requests === 0; waited += 50) await Bun.sleep(50);
+    return { requests, title: runtime.sessionStatus("local")?.metadata.title };
+  } finally {
+    client.close();
+    await server.stop();
+    provider.stop(true);
+    await rm(directory, { recursive: true, force: true });
+    resetTitleAttempts();
+  }
+}
+
+test("a loopback provider keeps the opening-prompt title and is not asked for a model-written one", async () => {
+  const result = await titleRequestsToLoopbackProvider(undefined);
+  expect(result.requests).toBe(0);
+  expect(result.title).toBe("Hello there");
+});
+
+test("an explicit autoTitle still asks a loopback provider for a title", async () => {
+  const result = await titleRequestsToLoopbackProvider(true);
+  expect(result.requests).toBeGreaterThan(0);
 });
 
 test("daemon.wipe_history removes the transcript store and reports counts while sessions stay live", async () => {

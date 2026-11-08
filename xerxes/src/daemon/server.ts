@@ -11,6 +11,12 @@ import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
 import { xerxesCommand, xerxesSyncCommand, XERXES_SUBCOMMANDS, LESSON_REVIEW_ACTIONS, listLearning, reviewLearning, type LearningServices } from './xerxesCommand.js';
+import { boundaryCommand, sourcesCommand } from './boundaryCommand.js';
+import { calibrationCommand, plansCommand, routeCommand } from './hybridCommands.js';
+import { PlanStore } from '../cortex/planStore.js';
+import { CalibrationStore, hardwareKey as calibrationHardwareKey } from '../runtime/calibration.js';
+import { probeHardware, systemHardwarePorts } from '../local/hardware.js';
+import { deriveDataTrust } from '../security/dataBoundary.js';
 import { sharedLessonsRpc } from './lessonSync.js';
 import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
@@ -27,6 +33,7 @@ import { FEATURES_GUIDE } from '../bridge/features.js';
 import { inspectSessionContext } from '../context/inspection.js';
 import { readContextControls, updateContextControls } from '../context/controls.js';
 import { parseTerminalOutputCursor } from '../runtime/terminalOutput.js';
+import { formatModelCardReport, modelCardReport } from "../runtime/modelCardReport.js";
 import { nativeSubagentWorktrees } from "../runtime/subagentWorktrees.js";
 import { parseTodoList, todosFromExecutions } from "../runtime/todoSnapshot.js";
 import { ModelCallBudget, withIndependentModelCallBudget, assertModelCallBudget, optionalModelCallAvailable, type ModelCallUsage } from "../llms/callBudget.js";
@@ -186,6 +193,9 @@ import {
 import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_K,
+  formatSamplingValues,
+  nativeSamplingDefaults,
+  publishedSamplingProfile,
 } from "../llms/samplingDefaults.js";
 import {
   closeLlmClient,
@@ -323,6 +333,12 @@ import {
   sanitizeModelDiscoveryError,
   type DiscoveredModel,
 } from "./modelDiscovery.js";
+import {
+  loopbackOrigin,
+  windowFor,
+  type LoadedWindows,
+  type ProbeLoadedWindowsInput,
+} from "../local/loadedWindow.js";
 import {
   ProviderProfileFlow,
   type ProviderFlowPrompt,
@@ -563,6 +579,7 @@ interface DaemonSlashCommand {
 const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "agents",
   "background",
+  "bonsai",
   "branch",
   "branches",
   "browser",
@@ -606,6 +623,11 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "delegate",
   "platforms",
   "plugins",
+  "boundary",
+  "sources",
+  "route",
+  "plans",
+  "calibration",
   "provider",
   "queue",
   "runs",
@@ -883,7 +905,9 @@ export interface DaemonServerOptions {
   readonly goalDrainLapseMs?: number;
   /**
    * Generate a model-written session title after the first exchange. Defaults
-   * on; a runtime setting of `auto_title` set to false disables it. Generation
+   * on; a runtime setting of `auto_title` set to false disables it. Left unset
+   * here and in the runtime settings, a session whose provider is a loopback
+   * model server keeps its opening-prompt title instead. Generation
    * is background and silent: a failure leaves the session untitled and never
    * surfaces in the turn.
    */
@@ -984,6 +1008,17 @@ export interface DaemonServerOptions {
   readonly agentSettingsDefaults?: unknown;
   /** Refresh provider-reported model capabilities after initialize. Host opt-in avoids ambient network calls. */
   readonly autoDiscoverModelCapabilities?: boolean;
+  /**
+   * Ask a loopback engine (LM Studio, llama-server) for the window it loaded,
+   * during model discovery for a profile whose base URL is on this machine.
+   * Their `/v1/models` does not report it. Absent, discovery is unchanged.
+   */
+  readonly localWindowProbe?: (input: ProbeLoadedWindowsInput) => Promise<LoadedWindows>;
+  /**
+   * The runtime settings and environment `/bonsai` resolves the prompt profile and
+   * escalation default from, as the host resolved them at start.
+   */
+  readonly modelCardContext?: () => { readonly runtime: Record<string, unknown>; readonly env: Record<string, string | undefined> };
   /** Optional host-owned model catalogue lookup for interactive `/provider` setup. */
   readonly providerModelDiscovery?: ProviderModelDiscoveryPort;
   readonly runtime?: DaemonRuntime;
@@ -1122,6 +1157,8 @@ export class DaemonServer {
   private readonly autoCompactDisabledWarned = new Set<string>();
   private readonly autoCompactThreshold: number;
   private readonly autoTitle: boolean;
+  /** The host passed `autoTitle`, so it applies to every provider, local ones included. */
+  private readonly autoTitleExplicit: boolean;
   private readonly titleClientFactory: TitleClientFactory | undefined;
   private readonly projectAgentClientFactory: DaemonServerOptions['projectAgentClientFactory'];
   private readonly reflectionClientFactory: DaemonServerOptions['reflectionClientFactory'];
@@ -1179,6 +1216,10 @@ export class DaemonServer {
     ProviderModelDiscoveryPort | undefined;
   private readonly discoveredContextLimits = new Map<string, number>();
   private readonly autoDiscoverModelCapabilities: boolean;
+  private readonly localWindowProbe: DaemonServerOptions["localWindowProbe"];
+  private readonly modelCardContext: DaemonServerOptions["modelCardContext"];
+  /** Last logged reason a local window probe failed, by profile, so a reason is logged once. */
+  private readonly localWindowProbeFailures = new Map<string, string>();
   private readonly modelCapabilityRefreshes = new Map<string, Promise<JsonRpcPayload | undefined>>();
   /** Per-model reasoning-level sets, so the picker does not refetch each open. */
   private readonly reasoningLevelCache = new Map<string, ReasoningLevelSet>();
@@ -1331,6 +1372,7 @@ export class DaemonServer {
     );
     this.compactionSettingsFile = options.compactionSettingsFile ?? compactionSettingsPath(xerxesHome());
     this.autoTitle = options.autoTitle ?? true;
+    this.autoTitleExplicit = options.autoTitle !== undefined;
     this.titleClientFactory = options.titleClientFactory;
     this.projectAgentClientFactory = options.projectAgentClientFactory;
     this.reflectionClientFactory = options.reflectionClientFactory;
@@ -1419,6 +1461,8 @@ export class DaemonServer {
     this.providerReadiness = options.providerReadiness;
     // Only the process-owning host opts in; embeddings remain network-silent.
     this.autoDiscoverModelCapabilities = options.autoDiscoverModelCapabilities ?? false;
+    this.localWindowProbe = options.localWindowProbe;
+    this.modelCardContext = options.modelCardContext;
     // What providers reported earlier (saved on each profile) is known to the
     // request builders from the start, before this run rediscovers it.
     for (const profile of this.profileStore.list()) {
@@ -5599,7 +5643,9 @@ export class DaemonServer {
         provider: profile.provider,
       });
       const models = catalog.map((model) => model.id);
-      if (models.length > 0) this.rememberDiscoveredContextLimits(profile, catalog);
+      if (models.length > 0) {
+        this.rememberDiscoveredContextLimits(profile, await this.withLoadedWindows(profile, catalog, apiKey));
+      }
       const cachedProfile = this.profileStore.get(profile.name) ?? profile;
       return models.length
         ? {
@@ -5805,6 +5851,55 @@ export class DaemonServer {
         warning: errorMessage(error),
       };
     }
+  }
+
+  /**
+   * Add the window a loopback engine actually loaded to the discovered
+   * catalog. LM Studio and llama-server list models without it, so their
+   * profiles otherwise lose the window `xerxes local setup` saved and the
+   * status bar reads "ctx unknown" until the server refuses a prompt. A failed
+   * probe changes nothing; its reason goes to the daemon log once.
+   */
+  private async withLoadedWindows(
+    profile: ProviderProfile,
+    catalog: readonly DiscoveredModel[],
+    apiKey: string,
+  ): Promise<readonly DiscoveredModel[]> {
+    if (!this.localWindowProbe || loopbackOrigin(profile.base_url) === undefined) return catalog;
+    const logOnce = (reason: string): void => {
+      const safe = sanitizeModelDiscoveryError(new Error(reason), { apiKey, baseUrl: profile.base_url });
+      if (this.localWindowProbeFailures.get(profile.name) === safe) return;
+      this.localWindowProbeFailures.set(profile.name, safe);
+      console.warn(`Local context window for profile ${profile.name} is unknown: ${safe}`);
+    };
+    let result: LoadedWindows;
+    try {
+      result = await this.localWindowProbe({ baseUrl: profile.base_url, ...(apiKey ? { apiKey } : {}) });
+    } catch (error) {
+      logOnce(errorMessage(error));
+      return catalog;
+    }
+    if (!result.ok) {
+      logOnce(result.reason);
+      return catalog;
+    }
+    const merged: DiscoveredModel[] = catalog.map((model) => {
+      const window = windowFor(result, model.id);
+      return window === undefined ? model : { ...model, contextLimit: window };
+    });
+    // llama-server answers to any model name and lists its file path, so the
+    // profile's own model id may be missing from the list it returned.
+    const own = profile.model.trim();
+    const ownWindow = own ? windowFor(result, own) : undefined;
+    if (own && ownWindow !== undefined && !merged.some((model) => model.id === own)) {
+      merged.push({ id: own, contextLimit: ownWindow });
+    }
+    if (own && ownWindow === undefined) {
+      logOnce(`${result.engine === "lmstudio" ? "LM Studio" : "llama-server"} has not loaded ${own}`);
+    } else {
+      this.localWindowProbeFailures.delete(profile.name);
+    }
+    return merged;
   }
 
   private rememberDiscoveredContextLimits(
@@ -6023,6 +6118,8 @@ export class DaemonServer {
         return this.showRuntimeConfig(connection);
       case "sampling":
         return this.configureSampling(connection, args);
+      case "bonsai":
+        return this.showModelCard(connection);
       case "reasoning":
         return this.configureReasoning(connection, args);
       case "fast":
@@ -6056,6 +6153,47 @@ export class DaemonServer {
         return this.listPlatforms(connection);
       case "plugins":
         return this.listPlugins(connection, args, session);
+      case "boundary": {
+        const result = boundaryCommand(args, {
+          cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
+          ...(session?.id ? { sessionId: session.id } : {}),
+          runtime: this.runtimeSettings(),
+          setMode: mode => { this.runtime.reload({ data_boundary: mode }); },
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "sources": {
+        const result = sourcesCommand(args, session?.id);
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "route": {
+        const result = routeCommand(args, {
+          cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
+          runtime: this.runtimeSettings(),
+          trustOf: name => {
+            const profile = this.profileStore.get(name);
+            return profile ? deriveDataTrust(profile) : undefined;
+          },
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "plans": {
+        const result = await plansCommand(args, { runtime: this.runtimeSettings(), store: new PlanStore() });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
+      case "calibration": {
+        const result = await calibrationCommand(args, {
+          runtime: this.runtimeSettings(),
+          store: new CalibrationStore(),
+          hardwareKey: async () => calibrationHardwareKey(await probeHardware(systemHardwarePorts())),
+        });
+        this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
+        return { ...result };
+      }
       case "xerxes": {
         const result = await xerxesCommand(args, session?.cwd ?? this.projectDirectory ?? process.cwd(), this.learning, session);
         this.emitSlash(connection, String(result.report ?? result.error ?? ''), result.ok === true ? 'info' : 'error');
@@ -7978,19 +8116,67 @@ export class DaemonServer {
     return { ok: false, error: `Unknown slash command: /${token}` };
   }
 
+  /**
+   * The runtime settings a slash command reads: the config file plus every
+   * reload, so `runtime.routing` or `runtime.hybrid_plans` in config.json is
+   * seen, not only the environment. Falls back to `status()` for a runtime
+   * that does not report its settings.
+   */
+  private runtimeSettings(): Record<string, unknown> {
+    return { ...(this.runtime.settings?.() ?? this.runtime.status()) };
+  }
+
+  /** `/bonsai`: the active model's card, and what each of its settings is in effect. */
+  private showModelCard(connection: DaemonTransportConnection): JsonRpcPayload {
+    const status = this.runtime.status();
+    const model = typeof status.model === "string" ? status.model : "";
+    if (!model) {
+      this.emitSlash(connection, "No model is selected. Choose one with `/provider` or `/model`.");
+      return { ok: false, error: "no model selected" };
+    }
+    const profile = this.profileStore.active();
+    const context = this.modelCardContext?.() ?? { runtime: {}, env: {} };
+    const loadedWindow = profile
+      ? this.discoveredContextLimits.get(discoveredContextKey(profile, model))
+      : undefined;
+    const report = modelCardReport({
+      model,
+      runtime: context.runtime,
+      env: context.env,
+      ...(profile ? { profile } : {}),
+      samplingSet: status,
+      ...(loadedWindow === undefined ? {} : { loadedWindow }),
+    });
+    this.emitSlash(connection, formatModelCardReport(report));
+    return {
+      ok: true,
+      card: report.card.id,
+      settings: report.settings.map((setting) => ({ ...setting })),
+    };
+  }
+
   private async configureSampling(
     connection: DaemonTransportConnection,
     raw: string,
   ): Promise<JsonRpcPayload> {
     const input = raw.trim();
     if (!input) {
-      const sampling = samplingConfig(this.runtime.status());
+      const status = this.runtime.status();
+      const sampling = samplingConfig(status);
+      const model = typeof status.model === "string" ? status.model : "";
+      const published = model ? publishedSamplingProfile(model) : undefined;
       const body = [
         "Native next-turn sampling:",
         ...NATIVE_SAMPLING_KEYS.map(
           (name) =>
-            `  \`${name}\` = \`${sampling[name] ?? "(provider default)"}\``,
+            `  \`${name}\` = \`${sampling[name] ?? (published ? "(model profile)" : "(provider default)")}\``,
         ),
+        ...(published
+          ? [
+              "",
+              `Unset values follow ${published.source} for \`${model}\`: ${formatSamplingValues(published.thinking)} when thinking; ${formatSamplingValues(published.instruct)} when not.`,
+            ]
+          : []),
         "",
         "Use `/sampling <key> <value>` or `/sampling reset`.",
       ].join("\n");
@@ -8002,10 +8188,12 @@ export class DaemonServer {
       const cleared = Object.fromEntries(
         NATIVE_SAMPLING_KEYS.map((key) => [key, null]),
       );
+      const status = this.runtime.status();
+      const model = typeof status.model === "string" ? status.model : "";
+      const published = model ? publishedSamplingProfile(model) : undefined;
       this.runtime.reload({
         ...cleared,
-        temperature: DEFAULT_TEMPERATURE,
-        top_k: DEFAULT_TOP_K,
+        ...nativeSamplingDefaults(model || undefined),
       });
       const active = this.profileStore.active();
       if (active) {
@@ -8013,7 +8201,9 @@ export class DaemonServer {
       }
       this.emitSlash(
         connection,
-        `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
+        published
+          ? `Restored ${published.source} sampling for ${model}.`
+          : `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
       );
       return { ok: true, sampling: samplingConfig(this.runtime.status()) };
     }
@@ -8615,6 +8805,12 @@ export class DaemonServer {
     // for new sessions, not a backfill of long-lived history.
     if (session.turnCount < 1 || session.turnCount > TITLE_RETRY_TURN_WINDOW) return;
 
+    // A small model on a local server pays for a title twice: the call itself,
+    // and a cold prompt cache on the next turn when the title prompt evicts the
+    // conversation from the server's slot. The opening-prompt title already
+    // names the session, so a loopback provider keeps it unless auto_title was
+    // set explicitly or the host supplied its own title client.
+    if (!Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && this.titleDefaultsOffForLocalModel(session)) return;
     const attempt = attemptSessionTitle(session.id, async () => {
       let profile: ProviderProfile | undefined;
       const local = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING);
@@ -8674,6 +8870,17 @@ export class DaemonServer {
     const setting = this.runtime.status().auto_title;
     if (typeof setting === "boolean") return setting;
     return this.autoTitle;
+  }
+
+  /** No explicit title choice was made and the title call would reach a loopback model server. */
+  private titleDefaultsOffForLocalModel(session: DaemonSession): boolean {
+    if (this.titleClientFactory || this.autoTitleExplicit) return false;
+    const status = this.runtime.status();
+    if (typeof status.auto_title === "boolean") return false;
+    let profile: ProviderProfile | undefined;
+    try { profile = this.sessionAuxiliaryProfile(session, session.model); } catch { return false; }
+    const baseUrl = profile ? undefined : stringValue(status.base_url);
+    return deriveDataTrust(profile ?? (baseUrl ? { base_url: baseUrl } : undefined)) === "local";
   }
 
   private warnAutoCompactDisabled(
@@ -13760,6 +13967,10 @@ function displayedRuntimeConfig(status: JsonRpcPayload): JsonRpcPayload {
 function samplingConfig(
   status: JsonRpcPayload,
 ): Record<string, boolean | number | string | undefined> {
+  const defaults: Readonly<Record<string, number | undefined>> =
+    nativeSamplingDefaults(
+      typeof status.model === "string" && status.model ? status.model : undefined,
+    );
   return Object.fromEntries(
     NATIVE_SAMPLING_KEYS.map((key) => {
       const value = status[key];
@@ -13769,15 +13980,7 @@ function samplingConfig(
         typeof value === "string"
           ? value
           : undefined;
-      return [
-        key,
-        configured ??
-          (key === "temperature"
-            ? DEFAULT_TEMPERATURE
-            : key === "top_k"
-              ? DEFAULT_TOP_K
-              : undefined),
-      ];
+      return [key, configured ?? defaults[key]];
     }),
   );
 }
@@ -13880,14 +14083,13 @@ function profileOverrides(
   if (!profile) {
     return {
       ...clearedSampling,
-      temperature: DEFAULT_TEMPERATURE,
-      top_k: DEFAULT_TOP_K,
+      ...nativeSamplingDefaults(undefined),
     };
   }
   return {
     ...clearedSampling,
-    temperature: DEFAULT_TEMPERATURE,
-    top_k: DEFAULT_TOP_K,
+    // None for a model with published sampling, which its client applies per request.
+    ...nativeSamplingDefaults(profile.model || undefined),
     ...profile.sampling,
     provider_profile: profile.name,
     model: profile.model,

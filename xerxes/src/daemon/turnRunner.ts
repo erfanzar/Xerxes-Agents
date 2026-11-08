@@ -18,6 +18,17 @@ import {
   renderTurnContext,
 } from '../context/assembly.js'
 import { evaluateBudget, measureLayers } from '../context/promptBudget.js'
+import { buildLeanSystemPrompt, localDay, readLeanProjectInstructions, selectLeanTools } from '../runtime/leanPrompt.js'
+import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
+import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
+import type { RunSafety } from '../runtime/runSafety.js'
+import type { RecoverEngine } from '../local/engineRecovery.js'
+import type { ReplyBudget } from '../runtime/replyBudget.js'
+import { localOnlyActive } from '../runtime/localOnly.js'
+import { gateLlmClient, type OutboundGateContext } from './outboundGate.js'
+import type { TurnRoute } from './turnRouting.js'
+import type { EscalationNotice } from './turnEscalation.js'
+import { DataBoundaryError } from '../security/boundaryTypes.js'
 import { ToolResultStorage } from '../context/toolResultStorage.js'
 import { isScreenshotToolResult } from '../context/screenshotSuperseder.js'
 import { DELEGATION_MODE_METADATA_KEY, delegationModeOf, delegationModePrompt } from '../agents/delegationMode.js'
@@ -77,6 +88,7 @@ import {
   type PermissionMode,
   type ToolPolicy,
 } from '../streaming/permissions.js'
+import type { BoundaryPermissionPort } from '../security/dataBoundary.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { COLLAB_KEY } from './collaboration.js'
 import { isHarnessOrigin, isXerxesActor, messageText, type HarnessOrigin, type XerxesInteractionRecord } from '../types/messages.js'
@@ -99,6 +111,16 @@ export interface TurnReflectionInput {
   readonly signal: AbortSignal
 }
 
+/** What a turn's route says to the prompt-profile hook. */
+export interface PromptProfileTurn {
+  /** The routed provider's window, else the runner's. */
+  readonly contextLimit?: number
+  /** The model this turn runs on (the route's, when policy routing chose one). */
+  readonly model: string
+  /** The routed profile, when policy routing chose a route. */
+  readonly profile?: string
+}
+
 export interface AgentTurnRunnerOptions {
   /**
    * How long a model question (AskUserQuestionTool, ask_user) waits for a person before it
@@ -110,7 +132,8 @@ export interface AgentTurnRunnerOptions {
   readonly lessonsForTurn?: (session: DaemonSession, userText: string, signal: AbortSignal) => Promise<string>
   /** Host owns provider authority, lifetime tracking, storage and session notification. */
   readonly reflection?: (input: TurnReflectionInput) => Promise<{ id: string; summary: string } | undefined>
-  readonly reflectionMode?: () => 'goals' | 'all' | 'off'
+  /** Per session: a host may narrow the mode for a session's provider. */
+  readonly reflectionMode?: (session?: DaemonSession) => 'goals' | 'all' | 'off'
   readonly remoteProviderBindings?: RemoteProviderBindings
   /** Retries for a turn served by the desktop's provider; its lapses wait for the desktop to bind again. Tests shorten it. */
   readonly localProviderRetryPolicy?: typeof DEFAULT_RETRY_POLICY
@@ -169,6 +192,72 @@ export interface AgentTurnRunnerOptions {
   readonly providerOverrides?: ProviderOverrides
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
+  /**
+   * The session's local/cloud data boundary port (`security/dataBoundary.ts`).
+   * Returning undefined, or a boundary in mode `off`, keeps today's behavior.
+   */
+  readonly dataBoundaryForSession?: (session: DaemonSession) => BoundaryPermissionPort | undefined
+  /**
+   * The session's safety floor (`runtime/runSafety.ts`): its output folder, locked
+   * inputs and command sandbox. The loop uses it in `auto` mode only.
+   */
+  readonly runSafetyForSession?: (session: DaemonSession, outputFolder: string) => Promise<RunSafety | undefined>
+  /**
+   * The crash-recovery hook for a route (`local/engineRecovery.ts`): reloads a
+   * local engine Xerxes started when it loses the model mid-turn. Undefined
+   * for a route that is not a loopback endpoint.
+   */
+  readonly recoverEngineFor?: (route: { readonly baseUrl: string | undefined; readonly model: string }) => RecoverEngine | undefined
+  /**
+   * The per-reply budget for a model (`runtime/replyBudget.ts`), read per
+   * turn so a config change applies to the next one; null turns it off.
+   * Absent: the model card's budget.
+   */
+  readonly replyBudgetFor?: (model: string) => ReplyBudget | null
+  /**
+   * Network retries before a turn gives up on an unreachable provider. Absent:
+   * the loop's default for a remote route.
+   */
+  readonly maxNetworkRetries?: number
+  /**
+   * The session's prompt profile. `lean` (a small local model) sends a terse
+   * system prompt and only the core tools; absent or `full` keeps today's
+   * prompt exactly. `turn` is this turn's route: its window, and the routed
+   * profile when policy routing chose one. Throwing fails the turn
+   * with the validation error.
+   */
+  readonly promptProfileForSession?: (session: DaemonSession, turn: PromptProfileTurn) => 'lean' | 'full'
+  /**
+   * Result checks after a finished turn (xlsx/csv validity, a claimed check
+   * that never ran). Absent or `off`: none run. `warn` only notifies the user.
+   */
+  readonly resultChecksForSession?: (session: DaemonSession) => 'off' | 'warn' | 'enforce'
+  /**
+   * The data boundary's outbound gate for this session and model. Absent, or
+   * returning undefined (boundary off), leaves every model call unchanged.
+   */
+  readonly outboundGateForSession?: (session: DaemonSession, model: string) => OutboundGateContext | undefined
+  /**
+   * Per-turn policy routing. Absent, or returning undefined (routing off),
+   * keeps the configured model. `ok: false` refuses the turn with its reason.
+   */
+  readonly routeForSession?: (session: DaemonSession, model: string, text: string) => TurnRoute | undefined
+  /**
+   * Feedback-driven escalation after result checks. Absent, or returning
+   * undefined (escalation off or nothing failed), keeps today's behavior.
+   */
+  readonly escalationForSession?: (session: DaemonSession, findings: readonly CheckFinding[]) => EscalationNotice | undefined
+  /**
+   * Consult the cloud advisor from code when escalation reaches `ask_advisor`,
+   * under the advisor's own budget and outbound gate. Returns its answer, or
+   * the reason it was not consulted. Absent: the model is told to call
+   * AskAdvisor itself.
+   */
+  readonly consultAdvisor?: (
+    session: DaemonSession,
+    request: { readonly question: string; readonly context: string },
+    signal: AbortSignal,
+  ) => Promise<string>
   /**
    * Relieve a mid-turn context overflow. The loop detects the overflow and can
    * retry the round, but owns no compaction policy — without this the turn can
@@ -372,11 +461,16 @@ export class AgentTurnRunner implements TurnRunner {
       try { await this.options.beforeTurn(session) } catch { /* bounded host preparation; never fails the turn */ }
       signal.throwIfAborted()
     }
-    const selectedModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
+    const configuredModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
     const requiresLocal = Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)
+    // Policy routing (off by default). A local provider binding is never
+    // rerouted. No allowed route refuses the turn instead of falling back.
+    const route = requiresLocal ? undefined : this.options.routeForSession?.(session, configuredModel, text)
+    if (route && !route.ok) throw new DataBoundaryError('DATA_BOUNDARY_NO_LOCAL_ROUTE', `Routing refused this turn: ${route.reason}`)
+    const selectedModel = route?.ok ? route.model : configuredModel
     const localClient = this.options.remoteProviderBindings?.client(session, selectedModel)
     if (requiresLocal && !localClient) throw new LocalProviderRelayError('grant_unavailable')
-    const routedProvider = localClient ? { llm: localClient } : this.options.resolveSessionProvider?.(session, selectedModel)
+    const routedProvider = route?.ok ? route.provider : localClient ? { llm: localClient } : this.options.resolveSessionProvider?.(session, selectedModel)
     // A local binding owns its provider settings on the local machine. This
     // host still owns tool/permission policy, but its provider defaults must
     // not enter local requests or pretend to describe the local context window.
@@ -416,6 +510,8 @@ export class AgentTurnRunner implements TurnRunner {
     this.states.set(session.id, state)
     this.liveStates.set(session.id, state)
     installMessageJournal(state, controls.journal)
+    // Result checks look only at what this turn ran, not the whole history.
+    const executionsBefore = state.toolExecutions.length
     const projectRoot = sessionProjectRoot(session)
     // Anchor the pre-mutation baseline before any tool runs. Non-blocking:
     // a whole-project typecheck costs seconds and read-only turns must not pay it.
@@ -438,7 +534,7 @@ export class AgentTurnRunner implements TurnRunner {
     if (this.options.agentDefinitions && !agent) {
       throw new ValidationError('agent_id', 'is not a registered agent profile', session.agentId)
     }
-    const model = agent?.model || session.model || this.options.model
+    const model = route?.ok ? route.model : agent?.model || session.model || this.options.model
     const modeAgent = interactionModeAgent(this.options.agentDefinitions, session.interactionMode)
     if (modeAgent === null) {
       throw new ValidationError(
@@ -460,7 +556,14 @@ export class AgentTurnRunner implements TurnRunner {
     const modeTools = toolsForAgent(selectedTools, modeAgent)
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'
-    const tools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
+    const surfaceTools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
+    // Lean prompt profile (off by default): core tools only, short descriptions.
+    const lean = this.options.promptProfileForSession?.(session, {
+      model,
+      ...(contextLimit === undefined ? {} : { contextLimit }),
+      ...(route?.ok ? { profile: route.profile } : {}),
+    }) === 'lean'
+    const tools = lean && surfaceTools ? selectLeanTools(surfaceTools) : surfaceTools
     // The session's own mode wins over the runner default, so the pin reaches
     // the permission broker rather than only the status line.
     const sessionPermissionMode = permissionModeValue(session.permissionMode) ?? this.options.permissionMode
@@ -469,6 +572,16 @@ export class AgentTurnRunner implements TurnRunner {
       ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
       : configuredPermissionMode
     state.metadata.permission_mode = permissionMode
+    let runSafety: RunSafety | undefined
+    try {
+      runSafety = await this.options.runSafetyForSession?.(session, projectRoot)
+    } catch (error) {
+      // Without the floor every write and command asks, as before; say why.
+      yield {
+        type: 'notification',
+        payload: { level: 'warning', message: `The safety floor did not start, so writes and commands ask: ${error instanceof Error ? error.message : String(error)}` },
+      }
+    }
     const promptAgent = modeAgent ?? agent
     // The prompt describes the always-loaded core; loaded deferred tools carry
     // their own schemas. Loading one must not re-render the system prompt.
@@ -476,12 +589,22 @@ export class AgentTurnRunner implements TurnRunner {
       ? new Set(this.options.toolRegistry.deferredCatalog(session.agentId).map(entry => entry.name))
       : new Set<string>()
     const coreTools = tools?.filter(tool => !deferrable.has(tool.function.name))
-    const bootstrapPrompt = await this.bootstrapSystemPrompt(
-      session,
-      model,
-      coreTools,
-      promptAgent?.name ?? session.agentId,
-    )
+    const bootstrapPrompt = lean
+      ? buildLeanSystemPrompt({
+        cwd: session.cwd,
+        model,
+        date: localDay(new Date()),
+        toolNames: (tools ?? []).map(tool => tool.function.name),
+        commandSandbox: (permissionMode === 'auto' || localOnlyActive()) && runSafety?.commandSandbox() !== undefined,
+        localOnly: localOnlyActive(),
+        projectInstructions: await readLeanProjectInstructions(session.cwd),
+      })
+      : await this.bootstrapSystemPrompt(
+        session,
+        model,
+        coreTools,
+        promptAgent?.name ?? session.agentId,
+      )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
     await captureUserWorkflowMemory(displayText, memory, { projectRoot })
     const contextControls = readContextControls(session.metadata)
@@ -536,7 +659,9 @@ export class AgentTurnRunner implements TurnRunner {
       ...(promptDay && promptDay !== today ? { dateChange: `Today's date is now ${today}.` } : {}),
       ...(goalChanged ? { goalStatus } : {}),
       contextDeltas: renderContextDeltas(contextDeltas),
-      ...(instructionUpdates ? { instructionUpdates } : {}),
+      // The lean prompt re-reads the instruction files every turn, within its
+      // budget; the update layer would resend whole files.
+      ...(instructionUpdates && !lean ? { instructionUpdates } : {}),
       memoryChanges: memoryState.changes,
       selfMemoryChanges: memoryState.selfChanges,
       recoveredSubagents: restoredSubagentCount
@@ -554,10 +679,13 @@ export class AgentTurnRunner implements TurnRunner {
     // when; the learning tools had only per-tool notes and were never called.
     const learningPolicy = this.snapshots.learningPolicy.get(session.id) ?? learningPolicyPrompt({
       tools: new Set((tools ?? []).map(tool => tool.function.name)),
-      reflection: this.options.reflectionMode?.() ?? 'all',
+      reflection: this.options.reflectionMode?.(session) ?? 'all',
     })
     this.snapshots.learningPolicy.set(session.id, learningPolicy)
-    const systemSegments = assembleContextLayers({
+    // Lean: the terse prompt is the whole system prompt (about 3K tokens with
+    // the core tool schemas). Turn context, goals and lessons still ride with
+    // the user message.
+    const systemSegments = lean ? [{ name: 'bootstrap', text: bootstrapPrompt }] : assembleContextLayers({
       learningPolicy,
       addendum: systemPromptAddendum(session),
       ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
@@ -710,11 +838,28 @@ export class AgentTurnRunner implements TurnRunner {
       const fallbackModel = requiresLocal ? undefined : this.options.fallbackModel
       const fallbackFactory = routedProvider?.providerOverrides ? routedProvider.createLlmForModel : this.options.createLlmForModel
       let attemptModel = model
-      let attemptLlm = routedProvider?.llm ?? this.options.llm
+      // Data boundary outbound gate (off by default): every model call of this
+      // turn is checked, approved when asked, and logged before it leaves.
+      const gateFor = (candidate: string): OutboundGateContext | undefined => {
+        const context = this.options.outboundGateForSession?.(session, candidate)
+        return context && route?.ok ? { ...context, trust: route.trust, provider: route.profile } : context
+      }
+      let attemptLlm = gateLlmClient(routedProvider?.llm ?? this.options.llm, gateFor(model))
       let fallbackAttempted = false
+      // The cascade: when escalation decides a failed check gets another
+      // attempt, the loop runs again inside this turn with the feedback as
+      // the next (harness) message, then checks again. The escalation ladder
+      // bounds it; MAX_CASCADE_ROUNDS is only a backstop.
+      let attemptMessage: MessageContent = userMessage
+      let cascadeRound = 0
       for (;;) {
         const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
         const retryPolicy = requiresLocal ? this.options.localProviderRetryPolicy ?? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
+        const routeBaseUrl = (routedProvider?.providerOverrides ?? this.options.providerOverrides)?.base_url
+        const recoverEngine: RecoverEngine | undefined = requiresLocal ? undefined : this.options.recoverEngineFor?.({
+          baseUrl: typeof routeBaseUrl === 'string' ? routeBaseUrl : undefined,
+          model: attemptModel,
+        })
         // An explicit off effort must cross the relay, otherwise absence
         // would correctly mean "use the local profile's thinking default".
         // Claude Code likewise thinks by default, so off has to be said.
@@ -729,12 +874,15 @@ export class AgentTurnRunner implements TurnRunner {
         model: attemptModel,
         sessionId: session.id,
         state,
-        userMessage,
-        ...(providerText === displayText ? {} : { userDisplayText: displayText }),
-        ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
-        ...(controls.actor ? { userActor: controls.actor } : {}),
+        userMessage: attemptMessage,
+        ...(cascadeRound > 0 ? { userOrigin: 'harness' as const } : {
+          ...(providerText === displayText ? {} : { userDisplayText: displayText }),
+          ...(harnessOrigin(controls) ? { userOrigin: harnessOrigin(controls)! } : {}),
+          ...(controls.actor ? { userActor: controls.actor } : {}),
+        }),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
+        ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(attemptModel) } : {}),
         permissionMode,
         ...(providerDefaults?.temperature !== undefined ? { temperature: providerDefaults.temperature } : {}),
         ...(providerDefaults?.serviceTier !== undefined ? { serviceTier: providerDefaults.serviceTier } : {}),
@@ -773,6 +921,8 @@ export class AgentTurnRunner implements TurnRunner {
         ...(!requiresLocal && this.options.resolveSessionProvider ? {
           refreshLlm: () => this.options.resolveSessionProvider?.(session, attemptModel)?.llm,
         } : {}),
+        // A local engine Xerxes started is reloaded once if it loses the model.
+        ...(recoverEngine ? { recoverEngine } : {}),
         // A plugin installed or removed mid-turn (by the user or, with
         // approval, the model) changes the tool list from the next step,
         // under the same agent, mode and delegation filters as at turn start.
@@ -788,6 +938,9 @@ export class AgentTurnRunner implements TurnRunner {
         ...((this.options.hookRunnerForSession || this.options.hookRunner) ? { hookRunner: this.options.hookRunnerForSession?.(session) ?? this.options.hookRunner } : {}),
         ...(permissionBroker ? { permissionBroker } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
+        ...dataBoundaryDependency(this.options.dataBoundaryForSession?.(session)),
+        ...(runSafety ? { runSafety } : {}),
+        ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         ...(toolExecutor ? { toolExecutor } : {}),
         ...(this.options.reduceContext ? { reduceContext: async (messages, signal) => {
           try {
@@ -926,6 +1079,55 @@ export class AgentTurnRunner implements TurnRunner {
               payload: { level: 'info', message: pluginSuggestionMessage(repeated), plugin_suggestion: { ...repeated } },
             }
           }
+          // Result checks: `warn` tells the user only; `enforce` also hands
+          // error findings to the model (as edit diagnostics are). A check
+          // that cannot run never fails a finished turn.
+          if (!signal.aborted && this.options.resultChecksForSession) {
+            // The shared cascade (runtime/cascade.ts): the same checks and
+            // ladder one-shot runs and the SDK use. A clean check resets the
+            // session's ladder.
+            const hooks: CascadeHooks = {
+              checks: () => this.options.resultChecksForSession!(session),
+              ...(this.options.escalationForSession ? { escalate: findings => this.options.escalationForSession!(session, findings) } : {}),
+              ...(this.options.consultAdvisor ? { consultAdvisor: (request, consultSignal) => this.options.consultAdvisor!(session, request, consultSignal) } : {}),
+              // Under accept-all the user chose to let the run change anything.
+              ...(runSafety && permissionMode !== 'accept-all' ? { inputFindings: () => runSafety.inputFindings() } : {}),
+            }
+            const check = await cascadeCheck(state, executionsBefore, projectRoot, hooks)
+            if (check.checkError !== undefined) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Result checks did not run: ${check.checkError}` } }
+            }
+            if (check.escalationError !== undefined) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Escalation did not run: ${check.escalationError}` } }
+            }
+            if (check.findings.length) {
+              yield {
+                type: 'notification',
+                payload: { level: 'warning', message: renderFindings(check.findings), result_checks: check.findings.map(finding => ({ ...finding })) },
+              }
+            }
+            const escalation = check.escalation
+            if (escalation) {
+              yield { type: 'notification', payload: { level: escalation.level, message: escalation.message, escalation: { action: escalation.action } } }
+            }
+            const next = await cascadeNext(check, hooks, signal)
+            if (next.advisor?.answered === true) {
+              yield { type: 'notification', payload: { level: 'info', message: 'Escalation: the advisor answered; the model retries with its advice.' } }
+            } else if (next.advisor?.answered === false) {
+              yield { type: 'notification', payload: { level: 'warning', message: `Advisor consult failed: ${next.advisor.error}` } }
+            }
+            if (next.feedback !== undefined) {
+              if (!signal.aborted && !turnErrored && cascadeRound < MAX_CASCADE_ROUNDS - 1) {
+                cascadeRound += 1
+                attemptMessage = next.feedback
+                continue
+              }
+              // Cancelled, failed or past the backstop: the model reads it next turn.
+              state.messages.push({ role: 'user', content: next.feedback, origin: 'harness' })
+            } else if (next.enforceMessage !== undefined) {
+              state.messages.push({ role: 'user', content: next.enforceMessage, origin: 'harness' })
+            }
+          }
           break
         }
         fallbackAttempted = true
@@ -937,7 +1139,7 @@ export class AgentTurnRunner implements TurnRunner {
         // Search backwards rather than assuming the message is last: a steer
         // drained at the round boundary may have been appended after it.
         const pushedIndex = state.messages.findLastIndex(
-          message => message.role === 'user' && message.content === userMessage,
+          message => message.role === 'user' && message.content === attemptMessage,
         )
         if (pushedIndex >= 0) {
           state.messages.splice(pushedIndex, 1)
@@ -947,7 +1149,7 @@ export class AgentTurnRunner implements TurnRunner {
         const nextModel = fallbackModel as string
         const nextFactory = fallbackFactory as (model: string) => LlmClient
         attemptModel = nextModel
-        attemptLlm = nextFactory(nextModel)
+        attemptLlm = gateLlmClient(nextFactory(nextModel), gateFor(nextModel))
         yield {
           type: 'notification',
           payload: {
@@ -1004,7 +1206,7 @@ export class AgentTurnRunner implements TurnRunner {
           // setting or snapshot must never turn a successful task into a failure.
           void Promise.resolve().then(() => {
             if (signal.aborted) return
-            const mode = this.options.reflectionMode?.() ?? 'all'
+            const mode = this.options.reflectionMode?.(completedSession) ?? 'all'
             if (mode === 'off') return
             const goalAfter = getGoal(completedSession.metadata, completedSession.id)
             const transitioned = goalAfter && (goalAfter.id !== goalBefore?.id || goalAfter.phase !== goalBefore?.phase)
@@ -1201,12 +1403,6 @@ function boundedToolResultPreview(toolName: string, content: string, path: strin
     : 'The full output was not retained.'
   return `<persisted-output ${attributes}>\n${compressed.compressed}\n${recovery}\n</persisted-output>`
 }
-
-/** Tools whose success means a file on disk changed and a checker could disagree. */
-const MUTATING_TOOL_NAMES = new Set([
-  'AppendFile', 'Edit', 'FileEditTool', 'NotebookEditTool', 'Write', 'WriteFile',
-  'append_file', 'edit_file', 'write_file',
-])
 
 /** True when this turn wrote to the workspace, so a diagnostics pass can earn its latency. */
 function turnMutatedFiles(state: AgentState): boolean {
@@ -1474,12 +1670,6 @@ function auditStreamEvent(
   }
 }
 
-function latestAssistantContent(state: AgentState): string {
-  const message = state.messages.slice().reverse().find(candidate => candidate.role === 'assistant')
-  if (!message) return ''
-  return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
-}
-
 interface SessionMemorySnapshot {
   readonly key: string
   readonly section: string
@@ -1497,13 +1687,6 @@ interface MemoryForTurn {
   readonly changes: string
   readonly selfChanges: string
   readonly sources: readonly MemorySourceText[]
-}
-
-/** The date as the bootstrap Environment line states it (YYYY-MM-DD Weekday). */
-function localDay(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date)
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekday}`
 }
 
 function systemPromptAddendum(session: DaemonSession): string {
@@ -1658,6 +1841,11 @@ function permissionModeValue(value: unknown): PermissionMode | undefined {
 }
 
 /** Match the effective delegated-policy ordering used by the native host. */
+/** The loop dependency for a session's data boundary; nothing when the host supplied none. */
+function dataBoundaryDependency(port: BoundaryPermissionPort | undefined): { readonly dataBoundary?: BoundaryPermissionPort } {
+  return port === undefined ? {} : { dataBoundary: port }
+}
+
 function permissionModeExceeds(candidate: PermissionMode, ceiling: PermissionMode): boolean {
   if (candidate === ceiling || ceiling === 'accept-all') return false
   if (ceiling === 'manual') return candidate !== 'manual'
@@ -1981,7 +2169,14 @@ function daemonEventFromStream(
 ): DaemonEvent {
   switch (event.type) {
     case 'provider_wait':
-      return { type: 'status_update', payload: { kind: event.active ? 'provider_wait' : 'provider_ready', text: event.active ? 'Waiting for model response…' : '' } }
+      return {
+        type: 'status_update',
+        payload: {
+          kind: event.active ? 'provider_wait' : 'provider_ready',
+          text: event.active ? 'Waiting for model response…' : '',
+          ...(event.active && event.promptTokens ? { prompt_tokens: event.promptTokens } : {}),
+        },
+      }
     case 'compaction':
       return { type: 'status_update', payload: { kind: event.active ? 'compressing' : 'compaction', text: event.active ? 'Compacting conversation…' : 'Compaction ended.' } }
     case 'text':

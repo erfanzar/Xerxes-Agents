@@ -45,13 +45,18 @@ const DIFF_DETAIL_MAX_LINES = 20
 const TOOL_RESULT_MAX_LINES = 12
 const TOOL_RESULT_COMPACT_CHARS = 180
 
+// One space either side, no blank line above or below, columns sized to their
+// content: a uniform `cellPadding: 1` at full width drew a 4-row table in 21
+// lines, pushing the tool call above it off a 36-row screen. Wide tables still
+// shrink to the terminal through the column fitter.
 const TABLE_OPTIONS = {
   borderStyle: 'rounded' as const,
   borders: true,
-  cellPadding: 1,
+  cellPaddingX: 1,
+  cellPaddingY: 0,
   columnFitter: 'balanced' as const,
   outerBorder: true,
-  widthMode: 'full' as const,
+  widthMode: 'content' as const,
   wrapMode: 'word' as const
 }
 
@@ -176,9 +181,12 @@ export function ledgerDuration(seconds: number): string {
   return `${Math.floor(whole / 3600)}h ${Math.floor((whole % 3600) / 60)}m`
 }
 
-function TurnLedger({ seconds, tools, t, outcome }: { seconds: number; tools: number; t: Theme; outcome?: TurnOutcomeReason }) {
+function TurnLedger({ checksFailing = 0, seconds, tools, t, outcome }: { checksFailing?: number; seconds: number; tools: number; t: Theme; outcome?: TurnOutcomeReason }) {
+  // "completed" alone read as success while the result still failed its checks.
+  const checksFact = checksFailing > 0 ? `${checksFailing} check${checksFailing === 1 ? '' : 's'} failing` : ''
   const facts = [
     turnOutcomeLabel(outcome),
+    checksFact,
     tools > 0 ? `${tools} tool${tools === 1 ? '' : 's'}` : '',
     seconds >= 0.05 ? ledgerDuration(seconds) : ''
   ].filter(Boolean)
@@ -192,7 +200,7 @@ function TurnLedger({ seconds, tools, t, outcome }: { seconds: number; tools: nu
         {facts.map((fact, index) => (
           <Span key={fact}>
             {index ? <Span color={t.ds.rule}>{` ${GLYPH.separator} `}</Span> : '  '}
-            <Span color={t.ds.caption}>{fact}</Span>
+            <Span color={fact === checksFact ? t.color.warn : t.ds.caption}>{fact}</Span>
           </Span>
         ))}
       </Text>
@@ -881,7 +889,7 @@ function MessageLineView({
   const hasSubagentCards = subagentsVisible && Boolean(msg.subagents?.length)
   const hasVisibleDetails = hasSubagentCards || messageHasVisibleDetails(msg, visibility)
 
-  if (msg.kind === 'outcome') return <TurnLedger outcome={msg.outcome} seconds={turnSeconds} tools={turnTools} t={t} />
+  if (msg.kind === 'outcome') return <TurnLedger checksFailing={msg.checksFailing} outcome={msg.outcome} seconds={turnSeconds} tools={turnTools} t={t} />
 
   if (msg.kind === 'intro') {
     return null

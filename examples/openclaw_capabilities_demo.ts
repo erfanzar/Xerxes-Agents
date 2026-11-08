@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-/** Demonstrate native plugins, skills, policy, hooks, context, and sandbox routing. */
+/** Demonstrate native plugins, skills, policy, hooks, and sandbox routing. */
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,12 +12,10 @@ import {
   PluginRegistry,
   PluginType,
   PolicyEngine,
-  PromptContextBuilder,
   SandboxMode,
   SandboxRouter,
   SkillRegistry,
   ToolPolicy,
-  createSystemPromptContextHost,
 } from '../xerxes/src/index.js'
 import { divider, runMain } from './native_demo_support.js'
 
@@ -71,15 +69,6 @@ export async function runOpenClawCapabilitiesDemo(): Promise<readonly string[]> 
   const result = { result: 'Contains Secret Data' }
   lines.push(`Hook arguments: ${JSON.stringify(hooks.run('before_tool_call', args))}`)
   lines.push(`Hook result: ${String(hooks.run('after_tool_call', result))}`)
-
-  const prompt = new PromptContextBuilder({
-    host: createSystemPromptContextHost({ xerxesVersion: 'native-demo' }),
-    hookRunner: hooks,
-    guardrails: ['Respect user privacy', 'Do not execute destructive operations'],
-    sandboxConfig: { mode: SandboxMode.WARN, sandboxedTools: ['execute_shell'] },
-  })
-  const prefix = await prompt.assembleSystemPromptPrefix({ agentId: 'demo_agent', toolNames: ['web_search', 'read_file', 'execute_shell'] })
-  lines.push(`Prompt context generated: ${prefix.includes('Guardrails') && prefix.includes('execute_shell')}`)
 
   const sandbox = new SandboxRouter({
     config: {

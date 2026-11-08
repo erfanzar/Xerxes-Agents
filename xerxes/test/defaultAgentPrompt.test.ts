@@ -31,7 +31,9 @@ test('default agent prompt uses only current conditional tool names and stays bo
   expect(prompt).toContain('${ROLE_ADDITIONAL}')
   expect(prompt).toContain('provider-supplied tool list')
   expect(prompt).toContain('`exec_command`')
-  expect(prompt).toContain('`write_stdin`')
+  // No entry point registers write_stdin, so the prompt must not name it.
+  expect(prompt).not.toContain('write_stdin')
+  expect(prompt).toContain('`pty_close`')
   expect(prompt).toContain('`FileEditTool`')
   expect(prompt).toContain('`TaskListTool`')
   expect(prompt).toContain('`TaskOutputTool`')

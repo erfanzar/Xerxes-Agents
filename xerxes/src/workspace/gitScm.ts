@@ -18,6 +18,7 @@ import { copyFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { assertNotLocalOnly } from '../runtime/localOnly.js'
 import { parseUnifiedDiff, type DiffLine } from './gitDiff.js'
 
 export type ScmFileStatus = 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' | '?'
@@ -449,16 +450,17 @@ export class GitScm {
   }
 
   fetch(): Promise<void> {
-    return this.mutate(async () => { await this.git(['fetch', '--prune'], 'Fetch failed', { timeoutMs: REMOTE_TIMEOUT_MS }) })
+    return this.mutate(async () => { assertNotLocalOnly('git fetch'); await this.git(['fetch', '--prune'], 'Fetch failed', { timeoutMs: REMOTE_TIMEOUT_MS }) })
   }
 
   /** Fast-forward only: a pull never creates a merge commit behind your back. */
   pull(): Promise<void> {
-    return this.mutate(async () => { await this.git(['pull', '--ff-only'], 'Pull failed', { timeoutMs: REMOTE_TIMEOUT_MS }) })
+    return this.mutate(async () => { assertNotLocalOnly('git pull'); await this.git(['pull', '--ff-only'], 'Pull failed', { timeoutMs: REMOTE_TIMEOUT_MS }) })
   }
 
   /** Push the current branch; the first push of a new branch sets its upstream. */
   async push(): Promise<void> {
+    assertNotLocalOnly('git push')
     const current = await this.status()
     if (current.detached || !current.branch) throw new ScmError('Check out a branch before pushing')
     const branch = current.branch

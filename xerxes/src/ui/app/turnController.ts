@@ -146,6 +146,8 @@ const clear = (t: Timer): null => {
 
 class TurnController {
   bufRef = ''
+  /** Problems the latest result check found; reset when a retry starts or a turn begins. */
+  checksFailing = 0
   completedToolIds = new Set<string>()
   interrupted = false
   lastStatusNote = ''
@@ -679,7 +681,9 @@ class TurnController {
       // Real turn end: surface any notice held back while busy.
       this.flushPendingNotice()
 
-      return { finalMessages, finalText: '', wasInterrupted: true }
+      this.checksFailing = 0
+
+      return { checksFailing: 0, finalMessages, finalText: '', wasInterrupted: true }
     }
 
     // OpenTUI renders markdown natively; the gateway's Rich-rendered ANSI
@@ -773,7 +777,11 @@ class TurnController {
     // Reaching the natural path means the daemon did not confirm an
     // interruption — even when Esc was pressed mid-flight, this turn_end
     // carries the turn's real ending and wins over the interrupt request.
-    return { finalMessages, finalText, wasInterrupted: false }
+    const checksFailing = this.checksFailing
+
+    this.checksFailing = 0
+
+    return { checksFailing, finalMessages, finalText, wasInterrupted: false }
   }
 
   recordMessageDelta({ text }: { rendered?: string; text?: string }) {
@@ -795,6 +803,61 @@ class TurnController {
     if (getUiState().streaming) {
       this.scheduleStreaming()
     }
+  }
+
+  /**
+   * A provider attempt failed. Before a retry, the runtime drops the attempt's
+   * partial reply from history (streaming/loop.ts) and the model starts over,
+   * so the live view drops it too: keeping it appended every attempt's partial
+   * text to one paragraph. A short system row says what happened. On the final
+   * failure the partial reply is kept as its own segment, so the error that
+   * follows starts on a new line instead of mid-sentence.
+   */
+  recordProviderRetry({ final, note }: { final: boolean; note: string }) {
+    if (this.interrupted) {
+      return
+    }
+
+    if (final) {
+      this.closeReasoningSegment()
+      this.flushStreamingSegment()
+
+      return
+    }
+
+    const discarded = this.visibleStreamingText().trim() || this.bufRef.trim()
+
+    this.streamTimer = clear(this.streamTimer)
+    this.bufRef = ''
+    this.resetLiveReasoningFilter()
+
+    if (discarded && note.trim()) {
+      this.pushSegment({ role: 'system', text: note.trim() })
+    }
+
+    patchTurnState({ streamSegments: this.segmentMessages, streaming: '' })
+  }
+
+  /**
+   * A harness step between model rounds (result checks, a retry request, an
+   * escalation decision). Like a steer, it is anchored where it happened, so
+   * the round before and the round after stay separate paragraphs.
+   */
+  recordHarnessNote({ failing, text }: { failing?: number; text: string }) {
+    if (failing !== undefined) {
+      this.checksFailing = failing
+    }
+
+    const value = text.trim()
+
+    if (this.interrupted || !value) {
+      return
+    }
+
+    this.closeReasoningSegment()
+    this.flushStreamingSegment()
+    this.pushSegment({ role: 'system', text: value })
+    patchTurnState({ streamSegments: this.segmentMessages })
   }
 
   /**
@@ -1039,6 +1102,7 @@ class TurnController {
     // session. A late rejection must not re-arm recording or overwrite the
     // status of a newer interrupt.
     this.interruptRequestId += 1
+    this.checksFailing = 0
     this.clearReasoning()
     this.clearStatusTimer()
     this.idle()
@@ -1200,6 +1264,8 @@ class TurnController {
   }
 
   startMessage() {
+    this.checksFailing = 0
+    patchTurnState({ providerPromptTokens: 0, providerStarted: false })
     this.endReasoningPhase()
     this.clearReasoning()
     this.activeTools = []

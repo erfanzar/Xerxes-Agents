@@ -3,11 +3,18 @@
 
 import { expect, test } from 'bun:test'
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { AcpAgentRunner } from '../src/acp/runner.js'
+import { createEscalationFactory } from '../src/daemon/turnEscalation.js'
+import { createOfficeZip } from '../src/skills/powerpoint/zip.js'
 import { AcpServer } from '../src/acp/server.js'
 import type { SubagentTurnCoordinator } from '../src/daemon/subagentCoordinator.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { RunSafety } from '../src/runtime/runSafety.js'
 import type { SpawnedAgentSnapshot } from '../src/operators/subagents.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
@@ -380,3 +387,63 @@ function completedAgent(sourceAgentId: string): SpawnedAgentSnapshot {
     updatedAt: '2026-01-01T00:00:01.000Z',
   }
 }
+
+test('an ACP prompt runs the cascade: a failed check is retried in the same prompt and reported as text', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-acp-cascade-'))
+  const floors: RunSafety[] = []
+  try {
+    const requests: CompletionRequest[] = []
+    const llm: LlmClient = {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        const last = request.messages.at(-1)
+        if (last?.role === 'tool') {
+          yield { content: 'Wrote out.xlsx.' }
+          return
+        }
+        const fix = String(last?.content ?? '').includes('failed these checks')
+        yield { toolCalls: [{ id: `w${requests.length}`, type: 'function', function: { name: 'WriteFile', arguments: { file_path: 'out.xlsx', content: fix ? 'workbook' : 'a,b\n1,2\n' } } }] }
+      },
+    }
+    const executor = {
+      async execute(call: { readonly function: { readonly arguments: Record<string, unknown> } }) {
+        const target = join(root, String(call.function.arguments.file_path))
+        if (call.function.arguments.content === 'workbook') {
+          await Bun.write(target, createOfficeZip([
+            { name: '[Content_Types].xml', data: new TextEncoder().encode('<Types/>') },
+            { name: 'xl/workbook.xml', data: new TextEncoder().encode('<workbook/>') },
+            { name: 'xl/worksheets/sheet1.xml', data: new TextEncoder().encode('<worksheet/>') },
+          ]))
+        } else {
+          await writeFile(target, String(call.function.arguments.content))
+        }
+        return 'written'
+      },
+    }
+    const escalate = createEscalationFactory<{ id: string; cwd: string }>({
+      runtime: () => ({ escalation: { mode: 'on' } }), env: {}, boundaryMode: () => 'off', advisorAvailable: () => false,
+    })
+    const runner = new AcpAgentRunner({
+      llm, model: 'gpt-4o', tools: [WRITE_FILE], toolExecutor: executor,
+      cascadeFor: sessionId => ({ hooks: { checks: () => 'warn', escalate: findings => escalate({ id: sessionId, cwd: root }, findings) } }),
+      // In auto, the floor lets the new out.xlsx be written without asking.
+      runSafetyFor: async (_sessionId, cwd) => {
+        const floor = await RunSafety.start({ outputFolder: cwd })
+        floors.push(floor)
+        return floor
+      },
+    })
+    const server = new AcpServer({ runner })
+    const session = server.sessions.get(String(server.openSession(root).session_id))
+    if (!session) throw new Error('expected ACP session')
+    const events: Record<string, unknown>[] = []
+    const summary = await runner.runPrompt({ session, text: 'Make a workbook.', emit: event => { events.push(event) } })
+    expect(summary.ok).toBe(true)
+    expect(requests).toHaveLength(4)
+    expect(JSON.stringify(events)).toContain('xlsx_is_text')
+    expect(JSON.stringify(events)).toContain('retrying locally')
+  } finally {
+    await Promise.all(floors.map(floor => floor.dispose()))
+    await rm(root, { recursive: true, force: true })
+  }
+})

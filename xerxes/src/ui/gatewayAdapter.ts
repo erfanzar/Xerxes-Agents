@@ -403,8 +403,18 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       ]
 
     case 'status_update': {
-      if (payload.kind === 'network_retry' || payload.kind === 'provider_wait' || payload.kind === 'provider_ready') {
-        return [{ type: 'status.update', payload: { kind: payload.kind, text: str(payload.text) } }]
+      if (payload.kind === 'network_retry') {
+        // The runtime drops a failed attempt's partial reply from history and
+        // starts the reply over; the live view has to drop it too.
+        const attempt = optionalNum(payload.attempt)
+        return [
+          { type: 'turn.retry', payload: { final: false, note: `Connection lost mid-reply · retry ${attempt ?? 1}` } },
+          { type: 'status.update', payload: { kind: payload.kind, text: str(payload.text) } }
+        ]
+      }
+      if (payload.kind === 'provider_wait' || payload.kind === 'provider_ready') {
+        const promptTokens = optionalNum(payload.prompt_tokens)
+        return [{ type: 'status.update', payload: { kind: payload.kind, text: str(payload.text), ...(promptTokens ? { prompt_tokens: promptTokens } : {}) } }]
       }
       if (payload.kind === 'compressing' || payload.kind === 'compaction') {
         return [{ type: 'status.update', payload: { kind: payload.kind, text: str(payload.text) } }]
@@ -653,7 +663,72 @@ function clarifyRequest(payload: Record<string, unknown>): AnyEvent {
   }
 }
 
+const BUN_FETCH_HINT = /\s*For more information, pass `?verbose: true`? in the second argument to fetch\(\)\.?/gi
+
+/**
+ * Result checks and escalation decisions change what the turn did, so they
+ * belong in the transcript at the point they happened, not in a toast that
+ * disappears. Returns undefined for any other notification.
+ */
+export function checkNoteEvents(payload: Record<string, unknown>): AnyEvent[] | undefined {
+  const findings = Array.isArray(payload.result_checks) ? payload.result_checks.map(asRecord) : undefined
+  if (findings?.length) {
+    const lines = findings.map(finding => {
+      const path = str(finding.path)
+      return `${path ? `${path}: ` : ''}${str(finding.message, str(finding.code, 'check failed'))}`
+    })
+    const head = `Checked the result: ${findings.length} problem${findings.length === 1 ? '' : 's'}`
+    const text = lines.length === 1 ? `${head}. ${lines[0]}` : `${head}:\n${lines.map(line => `- ${line}`).join('\n')}`
+    return [{ type: 'turn.checks', payload: { failing: findings.length, text } }]
+  }
+  const escalation = asRecord(payload.escalation)
+  const action = str(escalation.action)
+  if (!action) return undefined
+  const message = str(payload.message)
+  const count = message.match(/\((\d+) of (\d+)\)/)
+  const ofTotal = count ? ` (${count[1]} of ${count[2]})` : ''
+  switch (action) {
+    case 'retry_local':
+      // The next round is checked again; until then nothing is known to fail.
+      return [{ type: 'turn.checks', payload: { failing: 0, text: `Asked the model to fix it${ofTotal}.` } }]
+    case 'ask_advisor':
+      return [{ type: 'turn.checks', payload: { failing: 0, text: `Asking the advisor how to fix it${ofTotal}.` } }]
+    case 'change_model':
+      return [{ type: 'turn.checks', payload: { text: 'The checks keep failing. A stronger model may fix it: switch with /model.' } }]
+    case 'stop': {
+      const reason = message.match(/^Escalation stopped: (.+?)\.(?:\s|$)/)?.[1]
+      return [{ type: 'turn.checks', payload: { text: `Stopped retrying${reason ? `: ${reason}` : ''}. The problems above are still there.` } }]
+    }
+    default:
+      return undefined
+  }
+}
+
 function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
+  const checkEvents = checkNoteEvents(payload)
+  if (checkEvents) return checkEvents
+  const retry = asRecord(payload.retry)
+  if (typeof retry.final === 'boolean') {
+    // A provider attempt failed, or the reply budget stopped it. Before a retry
+    // the partial reply is dropped (the runtime drops it from history); on the
+    // final failure it is kept and the error starts on its own line.
+    const attempt = num(retry.attempt, 1)
+    const max = num(retry.maxAttempts)
+    const count = max > 1 ? ` of ${max - 1}` : ''
+    const note = retry.final ? ''
+      : retry.cause === 'reply_budget' ? `Reply stopped at its budget · asking again ${attempt}${count}`
+        : `Model request failed · retry ${attempt}${count}`
+    // The final failure's error is already in the transcript, worded for the
+    // user; a toast would repeat Bun's raw message. Mid-retry toasts keep the
+    // reason but lose Bun's note to the developer holding the fetch() call.
+    const message = retry.final ? '' : firstNonEmptyStr(payload.message).replace(BUN_FETCH_HINT, '').trim()
+    return [
+      { type: 'turn.retry', payload: { final: retry.final, note } },
+      ...(message
+        ? [{ type: 'notification.show', payload: { kind: 'ttl', level: severityToLevel(firstNonEmptyStr(payload.severity, payload.level)), text: message, ttl_ms: 8000 } }]
+        : [])
+    ]
+  }
   const category = str(payload.category)
   const kind = str(payload.type)
   // The bridge notification shape is `{category, title, body, severity}`, but

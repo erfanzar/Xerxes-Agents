@@ -159,6 +159,8 @@ export interface Msg {
   info?: SessionInfo
   kind?: 'config' | 'diff' | 'intro' | 'panel' | 'slash' | 'trail' | 'outcome'
   outcome?: TurnOutcomeReason
+  /** Problems the result checks still reported when the turn ended (outcome rows only). */
+  checksFailing?: number
   /** Wall-clock length of the turn an outcome row closes, when it was watched live. */
   durationMs?: number
   panelData?: PanelData

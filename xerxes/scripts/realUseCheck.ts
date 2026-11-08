@@ -25,8 +25,6 @@ import { calcCost } from '../src/llms/providerRegistry.js'
 import { checkPackage, type OSVFetch } from '../src/mcp/osv.js'
 import { buildAuthorizeUrl, generatePkcePair, OAuthToken } from '../src/mcp/oauth.js'
 import { ReconnectPolicy, reconnectWithBackoff } from '../src/mcp/reconnect.js'
-import { MCPToolServer } from '../src/mcp/server.js'
-import { HolographicProvider, Mem0Provider, type ExternalMemoryUpstream } from '../src/memory/plugins/index.js'
 import { createBrowserProviderRegistry, SUPPORTED_BROWSER_PROVIDERS } from '../src/operators/browserProviders.js'
 import { AuxiliaryClient } from '../src/runtime/auxiliaryClient.js'
 import { BackgroundSessionManager, BackgroundStatus } from '../src/runtime/backgroundSessions.js'
@@ -35,8 +33,6 @@ import { hasDoctorFailures, runAllDoctorChecks } from '../src/runtime/doctor.js'
 import { classifyError, ErrorKind } from '../src/runtime/errorClassifier.js'
 import { buildInsightsReport } from '../src/runtime/insights.js'
 import { InterruptToken } from '../src/runtime/interrupt.js'
-import { BudgetExhausted, IterationBudget } from '../src/runtime/iterationBudget.js'
-import { RateLimitTracker } from '../src/runtime/rateLimitTracker.js'
 import { ProcessRegistry } from '../src/runtime/processRegistry.js'
 import { runSetupWizard, writeSetupConfig } from '../src/runtime/setupWizard.js'
 import { checkBunPackageUpdate, planBunUpdate } from '../src/runtime/update.js'
@@ -49,7 +45,6 @@ import { ToolPolicy } from '../src/security/policy.js'
 import { redactString } from '../src/security/redact.js'
 import { SshSandboxAdapter } from '../src/security/sandboxBackends/ssh.js'
 import { checkUrl } from '../src/security/urlSafety.js'
-import { branchSession, sessionLineage } from '../src/session/branching.js'
 import { SessionRecord, TurnRecord } from '../src/session/models.js'
 import { SnapshotManager } from '../src/session/snapshots.js'
 import { FileSessionStore, SQLiteSessionStore } from '../src/session/store.js'
@@ -59,9 +54,6 @@ import { ResponsesEventTranslator } from '../src/streaming/responsesApi.js'
 import { parseSseStream } from '../src/streaming/sse.js'
 import { createAgentState } from '../src/streaming/events.js'
 import { deterministicToolCallId } from '../src/streaming/toolCallIds.js'
-import { BatchRunner } from '../src/training/batchRunner.js'
-import { builtinEnvironments, TinkerClient, TinkerRunConfig, RLRunStatus } from '../src/training/rl/index.js'
-import { TrajectoryCompressor } from '../src/training/trajectoryCompressor.js'
 import { clarify, StaticAsker } from '../src/tools/clarify.js'
 import { ImageGenerationRegistry } from '../src/tools/imageGeneration.js'
 import { OutboundMessageRegistry, sendMessage } from '../src/tools/sendMessage.js'
@@ -69,7 +61,6 @@ import { AgentAuthoredSkillStore } from '../src/tools/skillManage.js'
 import { VisionRegistry, visionImageFromBase64 } from '../src/tools/vision.js'
 import { VoiceModeController, type VoiceRecorder } from '../src/tools/voiceMode.js'
 import { WorkspaceMemoryStore } from '../src/tools/workspaceMemory.js'
-import { runSwarmIntegration } from './swarmIntegration.js'
 
 export type RealUseStatus = 'failed' | 'passed' | 'skipped'
 
@@ -166,16 +157,6 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       run: checkAgentAuthoredSkill,
     },
     {
-      plan: '05',
-      feature: 'External-memory plugin lifecycle uses an injected local upstream and preserves unavailable Mem0 state',
-      run: checkMemoryPlugins,
-    },
-    {
-      plan: '06',
-      feature: 'MCP tool server lists and executes a registered native tool in-process',
-      run: checkMcpToolServer,
-    },
-    {
       plan: '07',
       feature: 'MCP reconnect retries a local callback and redacts failed credential-like details',
       run: checkMcpReconnect,
@@ -238,23 +219,8 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
       run: checkParserMatrix,
     },
     {
-      plan: '15',
-      feature: 'RL Tinker client normalizes a local injected training lifecycle',
-      run: checkRlTraining,
-    },
-    {
-      plan: '16',
-      feature: 'Trajectory compressor writes native batch metrics and JSONL output',
-      run: checkTrajectoryCompression,
-    },
-    {
-      plan: '17',
-      feature: 'Batch runner records successful and failed local records in JSONL',
-      run: checkBatchRunner,
-    },
-    {
       plan: '18',
-      feature: 'SQLite session persistence, branching, and lineage',
+      feature: 'SQLite session persistence and search',
       run: checkSessions,
     },
     {
@@ -306,7 +272,7 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
     },
     {
       plan: '24',
-      feature: 'Error classification, rate-limit throttling, and injected auxiliary summarization',
+      feature: 'Error classification and injected auxiliary summarization',
       run: checkRuntimeRouting,
     },
     {
@@ -332,13 +298,8 @@ export function createRealUseChecks(): readonly RealUseCheck[] {
     },
     {
       plan: '28',
-      feature: 'Iteration budget, process registry, interrupt token, and deterministic tool IDs run natively',
+      feature: 'Process registry, interrupt token, and deterministic tool IDs run natively',
       run: checkRuntimePrimitives,
-    },
-    {
-      plan: '28',
-      feature: 'Native agent swarm exercises orchestration, execution, Cortex, and sandbox policy',
-      run: checkNativeSwarm,
     },
     {
       plan: '29',
@@ -562,73 +523,6 @@ async function checkAgentAuthoredSkill(context: RealUseContext): Promise<string>
     require(deleted.ok === true, 'agent-authored skill deletion failed')
     return 'agent-authored skill create/view/delete completed in a temporary directory'
   })
-}
-
-async function checkMemoryPlugins(): Promise<string> {
-  const entries: string[] = []
-  const upstream: ExternalMemoryUpstream = {
-    call(action, arguments_) {
-      if (action === 'add') {
-        const content = arguments_.content
-        if (typeof content !== 'string') throw new Error('missing content')
-        entries.push(content)
-        return { id: `entry-${entries.length}`, content }
-      }
-      if (action === 'search') {
-        const query = arguments_.query
-        if (typeof query !== 'string') throw new Error('missing query')
-        return entries.filter(content => content.includes(query)).map((content, index) => ({ id: `entry-${index + 1}`, content }))
-      }
-      return []
-    },
-  }
-  const holographic = new HolographicProvider({ environment: { get: () => undefined }, upstream })
-  const added = await holographic.handleToolCall({ name: 'holo_add', arguments: { content: 'user prefers linen tea cups' } })
-  const found = await holographic.handleToolCall({ name: 'holo_search', arguments: { query: 'linen' } })
-  require(added.ok === true, 'holographic provider did not add through its host upstream')
-  require(found.ok === true && Array.isArray(found.result) && found.result.length === 1, 'holographic provider did not search its host upstream')
-
-  const mem0 = new Mem0Provider({
-    environment: { get: () => undefined },
-    transport: { request: async () => ({ ok: true, status: 200, body: {} }) },
-  })
-  require(!(await mem0.isAvailable()), 'Mem0 reported available without explicit configuration')
-  return 'holographic add/search used an injected local upstream; unconfigured Mem0 remained unavailable'
-}
-
-async function checkMcpToolServer(): Promise<string> {
-  const registry = new ToolRegistry()
-  registry.register(
-    {
-      type: 'function',
-      function: {
-        name: 'upper',
-        description: 'Uppercase a string.',
-        parameters: {
-          type: 'object',
-          properties: { text: { type: 'string' } },
-          required: ['text'],
-          additionalProperties: false,
-        },
-      },
-    },
-    inputs => ({ value: String(inputs.text).toUpperCase() }),
-  )
-  const server = new MCPToolServer(registry)
-  const listed = resultOf(await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }))
-  const tools = listed.tools
-  require(Array.isArray(tools) && tools.length === 1, 'MCP tool list did not expose the registered tool')
-  const called = resultOf(await server.handle({
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/call',
-    params: { name: 'upper', arguments: { text: 'native' } },
-  }))
-  const content = called.content
-  require(Array.isArray(content), 'MCP tool call returned no content')
-  const first = content[0]
-  require(isRecord(first) && first.text === '{"value":"NATIVE"}', 'MCP tool call produced an unexpected result')
-  return 'registered tool listed and executed through MCP JSON-RPC'
 }
 
 async function checkMcpReconnect(): Promise<string> {
@@ -896,93 +790,6 @@ async function checkParserMatrix(): Promise<string> {
   return `parsed ${formats.length} provider wire formats through the native registry`
 }
 
-async function checkRlTraining(): Promise<string> {
-  const states = [
-    { status: 'running', iteration: 1, reward: 0.25 },
-    { status: 'succeeded', iteration: 2, reward: 1 },
-  ]
-  const client = new TinkerClient({
-    transport: {
-      createRun: payload => {
-        require(payload.env === 'xerxes-terminal-test', 'RL payload did not retain environment')
-        return { id: 'local-run-1' }
-      },
-      getRun: () => states.shift() ?? { status: 'succeeded', iteration: 2, reward: 1 },
-      cancelRun: () => true,
-    },
-  })
-  const runId = await client.start(new TinkerRunConfig({ model: 'local/model', env: 'xerxes-terminal-test', steps: 2 }))
-  const first = await client.status(runId)
-  const final = await client.status(runId)
-  require(first.status === RLRunStatus.RUNNING, 'RL client did not normalize a running state')
-  require(final.status === RLRunStatus.SUCCEEDED && final.reward === 1, 'RL client did not normalize a successful state')
-  require((await client.cancel(runId)) === true, 'RL client did not route cancellation through the host transport')
-  const environments = builtinEnvironments().listEnvironments()
-  require(environments.some(environment => environment.name === 'xerxes-terminal-test'), 'built-in RL environment catalog omitted terminal test')
-  return `injected Tinker transport completed running→succeeded lifecycle and accepted cancellation; ${environments.length} environments registered`
-}
-
-async function checkTrajectoryCompression(context: RealUseContext): Promise<string> {
-  return await context.withTemporaryDirectory('trajectories', async directory => {
-    const outputPath = join(directory, 'trajectories.jsonl')
-    const metricsPath = join(directory, 'metrics.json')
-    const compressor = new TrajectoryCompressor({
-      compressor: new ContextCompressor({
-        contextWindow: 4,
-        threshold: 0.5,
-        protectFirst: 1,
-        protectLast: 1,
-        summaryMinTokens: 1,
-        summarizer: naiveSummarizer,
-      }),
-    })
-    const run = await compressor.run([
-      {
-        id: 'trajectory-1',
-        messages: [
-          { role: 'user', content: 'start' },
-          { role: 'assistant', content: 'middle one' },
-          { role: 'user', content: 'middle two' },
-          { role: 'assistant', content: 'middle three' },
-          { role: 'user', content: 'finish' },
-        ],
-      },
-      { id: 'trajectory-2', messages: [{ role: 'user', content: 'short' }] },
-    ], { outPath: outputPath, metricsPath })
-    require(run.processed === 2 && run.errors.length === 0, 'trajectory compressor did not process both local trajectories')
-    const lines = (await readFile(outputPath, 'utf8')).trim().split(/\r?\n/)
-    require(lines.length === 2, 'trajectory compressor did not write JSONL output')
-    require((await Bun.file(metricsPath).exists()), 'trajectory compressor did not write metrics')
-    return `compressed ${run.processed} trajectories and wrote ${lines.length} JSONL record(s)`
-  })
-}
-
-async function checkBatchRunner(context: RealUseContext): Promise<string> {
-  return await context.withTemporaryDirectory('batch-runner', async directory => {
-    const outputPath = join(directory, 'results.jsonl')
-    const runner = new BatchRunner(async record => {
-      if (record.id === 'bad') throw new Error('simulated local failure')
-      return {
-        id: record.id,
-        response: `response:${record.prompt}`,
-        inputTokens: 10,
-        outputTokens: 5,
-        costUsd: 0.001,
-      }
-    }, 2)
-    const summary = await runner.run([
-      { id: 'one', prompt: 'one' },
-      { id: 'two', prompt: 'two' },
-      { id: 'three', prompt: 'three' },
-      { id: 'bad', prompt: 'bad' },
-    ], { outPath: outputPath })
-    require(summary.total === 4 && summary.succeeded === 3 && summary.failed === 1, 'batch runner summary changed')
-    const lines = (await readFile(outputPath, 'utf8')).trim().split(/\r?\n/)
-    require(lines.length === 4, 'batch runner did not write one JSONL line per record')
-    return `processed ${summary.total} batch records (${summary.succeeded} succeeded, ${summary.failed} failed)`
-  })
-}
-
 async function checkSessions(context: RealUseContext): Promise<string> {
   return await context.withTemporaryDirectory('sessions', async directory => {
     const store = new SQLiteSessionStore({ dbPath: join(directory, 'sessions.db') })
@@ -992,11 +799,9 @@ async function checkSessions(context: RealUseContext): Promise<string> {
         workspaceId: 'real-use',
         turns: [new TurnRecord({ turnId: 'turn-1', prompt: 'native session prompt', responseContent: 'native response' })],
       }))
-      const child = branchSession(store, { sourceSessionId: 'root', newSessionId: 'branch' })
-      require(child.turns.length === 1, 'branched session did not retain the source turn')
-      require(sessionLineage(store, 'branch').join(',') === 'branch,root', 'session lineage did not retain parentage')
+      require(store.loadSession('root')?.turns.length === 1, 'SQLite session store did not keep the turn')
       require(store.search('native session').length > 0, 'SQLite session search did not index the persisted turn')
-      return 'SQLite record persisted, indexed, branched, and traversed to its root'
+      return 'SQLite record persisted and indexed'
     } finally {
       store.close()
     }
@@ -1122,12 +927,6 @@ async function checkSkillsHub(context: RealUseContext): Promise<string> {
 
 async function checkRuntimeRouting(): Promise<string> {
   require(classifyError(new Error('HTTP 429 too many requests')).kind === ErrorKind.RATE_LIMIT, 'error classifier did not identify 429')
-  const rates = new RateLimitTracker({ throttleRatio: 0.1, now: () => 100 })
-  rates.update('openai', 'gpt-4o', {
-    'x-ratelimit-limit-requests': '100',
-    'x-ratelimit-remaining-requests': '3',
-  })
-  require(rates.shouldThrottle('openai', 'gpt-4o'), 'rate-limit tracker did not throttle a low budget')
   const auxiliary = new AuxiliaryClient({
     model: 'local-auxiliary',
     backend: request => ({ text: `summary:${request.messages.length}`, requestTokens: 3, responseTokens: 2 }),
@@ -1194,17 +993,6 @@ async function checkInteractiveRuntime(): Promise<string> {
 }
 
 async function checkRuntimePrimitives(): Promise<string> {
-  const budget = new IterationBudget(2)
-  require(budget.consume(2) === 2 && budget.exhausted, 'iteration budget did not charge its bounded capacity')
-  let exhausted = false
-  try {
-    budget.consume()
-  } catch (error) {
-    exhausted = error instanceof BudgetExhausted
-  }
-  require(exhausted, 'iteration budget did not raise BudgetExhausted')
-  require(budget.refund() === 1 && budget.remaining === 1, 'iteration budget did not refund one charge')
-
   const registry = new ProcessRegistry({ idFactory: () => 'process-real-use', now: () => 1 })
   const processHandle = Bun.spawn([process.execPath, '-e', 'process.exit(0)'], { stdout: 'ignore', stderr: 'ignore' })
   const processId = registry.register(processHandle, { name: 'quick-native-bun', command: 'bun -e process.exit(0)' })
@@ -1298,12 +1086,6 @@ async function checkCredentialStorage(context: RealUseContext): Promise<string> 
     require(await storage.remove('local'), 'temporary credential was not removed')
     return 'AES-GCM credential round-trip succeeded without writing plaintext tokens'
   })
-}
-
-async function checkNativeSwarm(): Promise<string> {
-  const report = await runSwarmIntegration()
-  require(report.ok, `native swarm failed ${report.failed} category check(s)`)
-  return `completed ${report.passed} native runtime categories (orchestration, executor, Cortex, security)`
 }
 
 async function checkStreaming(): Promise<string> {

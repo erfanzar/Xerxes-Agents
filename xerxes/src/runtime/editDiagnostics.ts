@@ -4,6 +4,8 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
+import { localOnlyActive } from './localOnly.js'
+
 import {
   analyzeWorkspaceChanges,
   changedWorkspacePaths,
@@ -88,6 +90,17 @@ const EMPTY_REPORT: EditDiagnosticsReport = Object.freeze({
   text: '',
   truncated: false,
 })
+
+/**
+ * In fully local mode a checker uses only what is installed: `bunx` installs
+ * nothing and `cargo` stays offline. A missing tool then means no report.
+ */
+function localOnlyCommand(command: readonly string[]): readonly string[] {
+  if (!localOnlyActive()) return command
+  if (command[0] === 'bunx') return ['bunx', '--no-install', ...command.slice(1)]
+  if (command[0] === 'cargo') return [...command, '--offline']
+  return command
+}
 
 /** Pick a checker from workspace markers; undefined means "no checker, stay silent". */
 export function detectChecker(cwd: string, fileExists: (path: string) => boolean = existsSync): CheckerSpec | undefined {
@@ -218,7 +231,7 @@ export class EditDiagnostics {
     try {
       // A nonzero exit is the normal shape of "there are errors", so it is not a failure;
       // only a throw (missing binary) means the checker could not answer.
-      const result = await this.#runner(checker.command, { cwd: this.cwd })
+      const result = await this.#runner(localOnlyCommand(checker.command), { cwd: this.cwd })
       const text = result.stdout + '\n' + (result.stderr ?? '')
       return parseDiagnostics(text, checker.source, this.cwd)
     } catch {

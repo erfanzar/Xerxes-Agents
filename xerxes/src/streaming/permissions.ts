@@ -10,12 +10,18 @@ export type PermissionMode = 'accept-all' | 'auto' | 'manual' | 'plan'
 export type PolicyAction = 'allow' | 'deny'
 export type PermissionDisposition = 'allow' | 'deny' | 'prompt'
 
-/** Xerxes starts in YOLO mode unless an embedding host explicitly chooses a stricter policy. */
-export const DEFAULT_PERMISSION_MODE: PermissionMode = 'accept-all'
+/**
+ * The mode when nothing chooses one: `auto` runs reads and read-only commands
+ * without asking and asks before anything else. With a run's safety floor
+ * (`runtime/runSafety.ts`) it also writes new files in the output folder and
+ * runs sandboxed commands without asking. `accept-all` stays available as an
+ * explicit setting.
+ */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = 'auto'
 
 /**
  * Tools that always require an explicit user approval, in every permission
- * mode including the default `accept-all` (YOLO) mode.
+ * mode, `accept-all` (YOLO) included.
  *
  * These calls have durable or externally visible side effects that outlive the
  * current turn: `send_message` delivers outbound channel messages and
@@ -43,6 +49,23 @@ export interface PermissionGateOptions {
    * Defaults to false; hosts must opt in consciously.
    */
   readonly bypassAlwaysApprove?: boolean
+  /**
+   * The data boundary's opinion on a call (see `security/dataBoundary.ts`).
+   * Consulted after a policy denial and before every mode shortcut, so it
+   * holds under `accept-all` too: `deny` wins, `prompt` beats an allow.
+   * `undefined` from the port means "no opinion". Absent = today's behavior.
+   */
+  readonly boundary?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
+  }
+  /**
+   * The run's safety floor (see `runtime/runSafety.ts`). Asked only in `auto`
+   * mode, after every rule that can deny or prompt: `allow` admits a write to a
+   * new file in the output folder, or a command that will run in the sandbox.
+   */
+  readonly runSafety?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>): 'allow' | undefined
+  }
 }
 
 export interface ToolPolicy {
@@ -70,9 +93,14 @@ interface DirectCommand {
   readonly workdir: string | undefined
 }
 
+/**
+ * `stdin` is text written to the program's standard input. It can carry a whole
+ * program for an interpreter or data for a writer, so a command that receives it
+ * is never auto-approved as read-only.
+ */
 type CommandInput =
-  | { readonly kind: 'argv'; readonly value: DirectCommand }
-  | { readonly kind: 'shell'; readonly value: string }
+  | { readonly kind: 'argv'; readonly value: DirectCommand; readonly stdin?: string }
+  | { readonly kind: 'shell'; readonly value: string; readonly stdin?: string }
 
 /**
  * Whether a shell command is read-only enough to auto-approve.
@@ -103,6 +131,9 @@ export function permissionDisposition(
   if (policy?.check(name, agentId) === 'deny') {
     return 'deny'
   }
+  const boundary = options?.boundary?.toolDisposition(call, agentId)
+  if (boundary === 'deny') return 'deny'
+  if (boundary === 'prompt') return 'prompt'
   // The always-approval tier is consulted before the mode shortcut, so these
   // tools prompt even under `accept-all`. See ALWAYS_APPROVAL_TOOLS.
   if (ALWAYS_APPROVAL_TOOLS.has(name) && options?.bypassAlwaysApprove !== true) {
@@ -134,7 +165,12 @@ export function permissionDisposition(
   if (mode === 'manual') {
     return 'prompt'
   }
-  if (SAFE_TOOLS.has(name)) {
+  if (mode === 'auto' && options?.runSafety?.toolDisposition(call) === 'allow') {
+    return 'allow'
+  }
+  // CSVProcessor reads, analyzes and converts in memory, but `write` creates or
+  // overwrites a file, so it is a write like WriteFile.
+  if (SAFE_TOOLS.has(name) && !(name === 'CSVProcessor' && stringInput(call.function.arguments, 'operation') === 'write')) {
     return 'allow'
   }
   const command = commandInput(name, call.function.arguments)
@@ -169,7 +205,10 @@ export function permissionDescription(call: Pick<ToolCall, 'function'>): string 
   const inputs = call.function.arguments
   const command = commandInput(name, inputs)
   if (command) {
-    return `Run: ${command.kind === 'argv' ? formatDirectCommand(command.value) : command.value}`
+    const run = `Run: ${command.kind === 'argv' ? formatDirectCommand(command.value) : command.value}`
+    if (command.stdin === undefined) return run
+    const lines = command.stdin.split('\n').length
+    return `${run} with ${lines} line${lines === 1 ? '' : 's'} on stdin:\n${command.stdin}`
   }
   if (name === 'Write' || name === 'WriteFile') {
     return `Write to: ${stringInput(inputs, 'file_path')}`
@@ -255,6 +294,8 @@ function commandInput(name: string, inputs: JsonObject): CommandInput | undefine
 function execCommandInput(inputs: JsonObject): CommandInput | undefined {
   const command = stringInput(inputs, 'cmd').trim()
   if (!command) return undefined
+  const stdinValue = optionalStringInput(inputs, 'stdin')
+  const stdin = stdinValue === undefined ? {} : { stdin: stdinValue }
 
   const argsValue = inputs.args
   if (argsValue !== undefined) {
@@ -266,6 +307,7 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
         args: argsValue,
         workdir: optionalStringInput(inputs, 'workdir'),
       },
+      ...stdin,
     }
   }
 
@@ -273,7 +315,7 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
   // operator uses one shell string. Preserve the shell parser whenever `cmd`
   // contains shell syntax or whitespace rather than trying to reinterpret it.
   if (/\s|[;&|`$()<>]/.test(command)) {
-    return { kind: 'shell', value: command }
+    return { kind: 'shell', value: command, ...stdin }
   }
   return {
     kind: 'argv',
@@ -282,10 +324,12 @@ function execCommandInput(inputs: JsonObject): CommandInput | undefined {
       args: [],
       workdir: optionalStringInput(inputs, 'workdir'),
     },
+    ...stdin,
   }
 }
 
 function isSafeCommandInput(input: CommandInput): boolean {
+  if (input.stdin !== undefined) return false
   return input.kind === 'shell' ? isSafeShellCommand(input.value) : isSafeDirectCommand(input.value)
 }
 

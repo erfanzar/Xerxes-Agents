@@ -8,11 +8,17 @@ import { formatSubagentResults } from '../daemon/turnRunner.js'
 import type { LlmClient } from '../llms/client.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import { createAgentState, type AgentState, type PermissionRequest, type StreamEvent } from '../streaming/events.js'
+import type { HookRunner } from '../extensions/hooks.js'
 import { EditFeedback } from '../runtime/editFeedback.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
+import { runCascadingTurn, type CascadeStep, type CascadingTurnOptions } from '../runtime/cascade.js'
+import { renderFindings } from '../runtime/resultChecks.js'
+import type { RunSafety } from '../runtime/runSafety.js'
 import { runTurn } from '../streaming/loop.js'
-import type { PermissionBroker, PermissionDecision, PermissionMode, ToolPolicy } from '../streaming/permissions.js'
+import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionDecision, type PermissionMode, type ToolPolicy } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
+import type { RecoverEngine } from '../local/engineRecovery.js'
+import type { ReplyBudget } from '../runtime/replyBudget.js'
 import { routePermission, type AcpPermissionBoard } from './permissions.js'
 import type { AcpSession } from './session.js'
 import type { AcpEventEmitter, AcpModelInfo, AcpPromptRequest, AcpWireEvent } from './types.js'
@@ -22,7 +28,14 @@ export interface AcpAgentRunnerOptions {
   readonly createEditFeedback?: (cwd: string) => EditFeedback
   readonly agentId?: string
   readonly defaultPermissionMode?: PermissionMode
+  /**
+   * The user's configured hooks for one session working directory, the same
+   * loader the daemon uses (`workspaceShellHooks`). Absent, no hooks run.
+   */
+  readonly hookRunnerForCwd?: (cwd: string) => HookRunner | undefined
   readonly llm: LlmClient
+  /** Network retries before a turn fails; see `defaultMaxNetworkRetries`. */
+  readonly maxNetworkRetries?: number
   readonly maxTokens?: number
   readonly model: string
   readonly modelListProvider?: () => readonly AcpModelInfo[]
@@ -35,6 +48,17 @@ export interface AcpAgentRunnerOptions {
   readonly tools?: readonly ToolDefinition[]
   readonly topK?: number
   readonly topP?: number
+  /**
+   * The cascade for one session (checks, escalation, advisor), as the daemon
+   * runs it. Absent: one attempt per prompt.
+   */
+  readonly cascadeFor?: (sessionId: string, cwd: string) => Pick<CascadingTurnOptions, 'hooks'> | undefined
+  /** The session's safety floor (`runtime/runSafety.ts`), used in `auto` mode only. */
+  readonly runSafetyFor?: (sessionId: string, cwd: string) => Promise<RunSafety | undefined>
+  /** Reloads a local engine Xerxes started when it loses the model (`local/engineRecovery.ts`). */
+  readonly recoverEngineFor?: (model: string) => RecoverEngine | undefined
+  /** The per-reply budget for a model (`runtime/replyBudget.ts`); null is off. Absent: the model card's. */
+  readonly replyBudgetFor?: (model: string) => ReplyBudget | null
 }
 
 interface ActivePrompt {
@@ -145,19 +169,47 @@ export class AcpAgentRunner {
     const state = this.states.get(session.sessionId) ?? createAgentState()
     this.states.set(session.sessionId, state)
     const model = session.modelOverride ?? this.options.model
-    const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? 'accept-all')
+    const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? DEFAULT_PERMISSION_MODE)
     state.metadata.permission_mode = permissionMode
+    const recoverEngine = this.options.recoverEngineFor?.(model)
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
     const subagentCohort = this.options.subagentCoordinator?.begin(session.sessionId)
     let pendingAgentEventSnapshots: readonly SpawnedAgentSnapshot[] = []
     const feedback = this.options.createEditFeedback?.(session.cwd)
     const executor = this.options.toolExecutor && feedback ? feedback.wrap(this.options.toolExecutor) : this.options.toolExecutor
+    const hookRunner = this.options.hookRunnerForCwd?.(session.cwd)
 
     try {
       const permissionBroker: PermissionBroker = {
         request: (permission, signal) => this.resolvePermission(session, permission, emit, signal),
       }
-      for await (const event of withActiveSession(session, runTurn({
+      let runSafety: RunSafety | undefined
+      let runSafetyNote: string | undefined
+      try {
+        runSafety = await this.options.runSafetyFor?.(session.sessionId, session.cwd)
+      } catch (error) {
+        runSafetyNote = `The safety floor did not start, so writes and commands ask: ${errorMessage(error)}`
+      }
+      const configured = this.options.cascadeFor?.(session.sessionId, session.cwd)
+      // Under accept-all the user chose to let the run change anything.
+      const cascade = configured && runSafety && permissionMode !== 'accept-all'
+        ? { hooks: { ...configured.hooks, inputFindings: () => runSafety.inputFindings() } }
+        : configured
+      // A checked attempt is shown as plain text, as the edit-diagnostics report is.
+      const reportStep = (step: CascadeStep): void => {
+        const lines = [
+          ...(step.findings.length ? [renderFindings(step.findings)] : []),
+          ...(step.escalation ? [step.escalation.message] : []),
+          ...(step.advisor?.answered === true ? ['Escalation: the advisor answered; the model retries with its advice.'] : []),
+          ...(step.advisor?.answered === false ? [`Advisor consult failed: ${step.advisor.error}`] : []),
+        ]
+        if (lines.length) cascadeReports.push(`\n\n${lines.join('\n')}\n\n`)
+      }
+      const cascadeReports: string[] = runSafetyNote ? [`${runSafetyNote}\n\n`] : []
+      const turn = (turnRequest: Parameters<typeof runTurn>[0], dependencies: Parameters<typeof runTurn>[1], turnSignal: AbortSignal) => cascade
+        ? runCascadingTurn(turnRequest, dependencies, { hooks: cascade.hooks, projectRoot: session.cwd, onStep: reportStep }, turnSignal)
+        : runTurn(turnRequest, dependencies, turnSignal)
+      for await (const event of withActiveSession(session, turn({
         model,
         state,
         userMessage: request.text,
@@ -169,6 +221,7 @@ export class AcpAgentRunner {
         ...(this.options.tools ? { tools: this.options.tools } : {}),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
+        ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(model) } : {}),
         permissionMode,
       }, {
         ...(subagentCohort ? {
@@ -184,10 +237,15 @@ export class AcpAgentRunner {
           },
         } : {}),
         llm: this.options.llm,
+        ...(hookRunner ? { hookRunner } : {}),
+        ...(this.options.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.options.maxNetworkRetries }),
         permissionBroker,
+        ...(runSafety ? { runSafety } : {}),
+        ...(recoverEngine ? { recoverEngine } : {}),
         ...(this.options.policy ? { policy: this.options.policy } : {}),
         ...(executor ? { toolExecutor: executor } : {}),
       }, controller.signal))) {
+        for (const text of cascadeReports.splice(0)) await emit(toAcpEvent({ type: 'text', text }).toWire())
         if (event.type === 'permission_request' || event.type === 'provider_wait') {
           continue
         }
@@ -201,6 +259,8 @@ export class AcpAgentRunner {
         await emit(toAcpEvent(event).toWire())
         updateSummary(summary, event)
       }
+      // The last attempt's check runs after its final event.
+      for (const text of cascadeReports.splice(0)) await emit(toAcpEvent({ type: 'text', text }).toWire())
     } catch (error) {
       return {
         ok: false,

@@ -1,0 +1,117 @@
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+
+import { resolve } from 'node:path'
+
+import type { DataTrust, OutboundGate, OutboundRequestSummary } from '../security/boundaryTypes.js'
+import {
+  boundaryPermissionPort,
+  DataBoundary,
+  parseDataBoundaryConfig,
+  type BoundaryPermissionPort,
+} from '../security/dataBoundary.js'
+import { DisclosureLog } from '../security/disclosureLog.js'
+import type { OutboundGateContext } from './outboundGate.js'
+
+/** What the daemon needs to know about a session to place it on the boundary. */
+export interface BoundarySession {
+  readonly id?: string
+  readonly cwd: string
+  readonly model?: string
+  readonly metadata: Record<string, unknown>
+}
+
+export interface SessionBoundaryOptions<S extends BoundarySession> {
+  /** The daemon's `runtime` settings (merged file + live settings). */
+  readonly runtime: () => Record<string, unknown>
+  readonly env?: Record<string, string | undefined>
+  /** Where the session's model sends data. Errors resolving it count as cloud. */
+  readonly trustOf: (session: S) => DataTrust
+}
+
+/**
+ * Build the per-session boundary port for the turn runner.
+ *
+ * One {@link DataBoundary} is kept per workspace root so taint survives
+ * across turns. Mode `off` returns undefined, which leaves the permission
+ * gate exactly as it is today. A malformed setting throws (fail closed): the
+ * turn fails with the validation error instead of running unprotected.
+ */
+export function createSessionBoundaryFactory<S extends BoundarySession>(
+  options: SessionBoundaryOptions<S>,
+): (session: S) => BoundaryPermissionPort | undefined {
+  const boundaries = new Map<string, { readonly key: string; readonly boundary: DataBoundary }>()
+  return session => {
+    const root = resolve(session.cwd)
+    const env = options.env ?? process.env
+    const runtime = options.runtime()
+    const config = parseDataBoundaryConfig(runtime, env, { root })
+    if (config.mode === 'off') return undefined
+    const key = JSON.stringify(config)
+    let entry = boundaries.get(root)
+    if (entry === undefined || entry.key !== key) {
+      entry = { key, boundary: new DataBoundary(config, root) }
+      boundaries.set(root, entry)
+    }
+    const trust = safeTrust(() => options.trustOf(session))
+    return boundaryPermissionPort(entry.boundary, () => trust)
+  }
+}
+
+function safeTrust(resolveTrust: () => DataTrust): DataTrust {
+  try {
+    return resolveTrust()
+  } catch {
+    return 'cloud'
+  }
+}
+
+export interface OutboundGateFactoryOptions<S extends BoundarySession> {
+  readonly runtime: () => Record<string, unknown>
+  readonly env?: Record<string, string | undefined>
+  /** Where the session's model sends data, and the provider name shown to the user. */
+  readonly routeOf: (session: S, model: string) => { readonly trust: DataTrust; readonly provider: string }
+  /** The approval card. Absent: every request that needs approval is refused (fail closed). */
+  readonly approve?: (summary: OutboundRequestSummary, signal?: AbortSignal) => Promise<boolean>
+  readonly log?: DisclosureLog
+}
+
+/**
+ * Build the per-session outbound gate for the turn runner. One gate per
+ * workspace root (and settings) so `approve_outbound: first` is remembered
+ * across turns. Mode `off` returns undefined: model calls are not wrapped.
+ */
+export function createOutboundGateFactory<S extends BoundarySession>(
+  options: OutboundGateFactoryOptions<S>,
+): (session: S, model: string) => OutboundGateContext | undefined {
+  const gates = new Map<string, { readonly key: string; readonly gate: OutboundGate }>()
+  let log = options.log
+  return (session, model) => {
+    const root = resolve(session.cwd)
+    const config = parseDataBoundaryConfig(options.runtime(), options.env ?? process.env, { root })
+    if (config.mode === 'off') return undefined
+    const key = JSON.stringify(config)
+    let entry = gates.get(root)
+    if (entry === undefined || entry.key !== key) {
+      log ??= new DisclosureLog()
+      entry = {
+        key,
+        gate: new DataBoundary(config, root).outboundGate({ approve: options.approve ?? (async () => false), log }),
+      }
+      gates.set(root, entry)
+    }
+    let route: { readonly trust: DataTrust; readonly provider: string }
+    try {
+      route = options.routeOf(session, model)
+    } catch {
+      route = { trust: 'cloud', provider: model }
+    }
+    return {
+      gate: entry.gate,
+      trust: route.trust,
+      provider: route.provider,
+      purpose: 'turn',
+      ...(session.id === undefined ? {} : { sessionId: session.id }),
+    }
+  }
+}

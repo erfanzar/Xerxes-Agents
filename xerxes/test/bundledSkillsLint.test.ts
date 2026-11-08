@@ -34,16 +34,16 @@ test('every bundled skill is discoverable and has zero lint findings without use
 })
 
 test('flattened bundled metadata preserves descriptions, tags, platform restrictions and configuration', async () => {
-  const notes = await bundledSkill('apple-notes')
-  expect(notes.metadata.platforms).toEqual(['macos'])
-  expect(notes.metadata.tags).toEqual(['Notes', 'Apple', 'macOS', 'note-taking'])
-  expect(notes.instructions).toContain('License: MIT')
-  expect(notes.instructions).toContain('Related skills: obsidian')
-  expect(notes.instructions).toContain('Prerequisite commands: memo')
+  const reminders = await bundledSkill('apple-reminders')
+  expect(reminders.metadata.platforms).toEqual(['macos'])
+  expect(reminders.metadata.tags).toEqual(['Reminders', 'tasks', 'todo', 'macOS', 'Apple'])
+  expect(reminders.instructions).toContain('License: MIT')
+  expect(reminders.instructions).toContain('Prerequisite commands: remindctl')
 
   const review = await bundledSkill('software-development/requesting-code-review')
   expect(review.metadata.description).toBe('Pre-commit verification pipeline — static security scan, baseline-aware quality gates, independent reviewer subagent, and auto-fix loop. Use after code changes and before committing, pushing, or opening a PR.')
   const wiki = await bundledSkill('research/llm-wiki')
+  expect(wiki.instructions).toContain('Related skills: obsidian, arxiv, agentic-research-ideas')
   expect(wiki.instructions).toContain('Key: `wiki.path`')
   expect(wiki.instructions).toContain('Default: `~/wiki`')
   expect(wiki.instructions).toContain('Prompt: Wiki directory path')

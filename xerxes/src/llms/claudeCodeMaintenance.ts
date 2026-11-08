@@ -68,6 +68,11 @@ export async function maintainClaudeCode(options: ClaudeCodeMaintenanceOptions):
       return /\bup to date\b/i.test(result.output) ? { action: 'current', output: lastLines(result.output) } : { action: 'updated', output: lastLines(result.output) }
     }
     if (platform === 'win32') return { action: 'skipped', reason: 'Claude Code is not installed; install it from https://docs.claude.com/en/docs/claude-code/setup' }
+    // The documented opt-out for installs (companionInstall.ts honours it too):
+    // turning updates on must not also mean installing an absent CLI.
+    if (/^(0|off|false|no)$/i.test(environment.XERXES_AUTO_INSTALL_CLAUDE_CODE?.trim() ?? '')) {
+      return { action: 'skipped', reason: 'Claude Code is not installed and automatic install is off (XERXES_AUTO_INSTALL_CLAUDE_CODE)' }
+    }
     const result = await run(['bash', '-c', `set -o pipefail; curl -fsSL ${CLAUDE_CODE_INSTALLER} | bash`], env, 300_000)
     return result.code === 0 ? { action: 'installed', output: lastLines(result.output) } : { action: 'failed', error: `Claude Code installer exited ${result.code}: ${lastLines(result.output)}` }
   } catch (error) {

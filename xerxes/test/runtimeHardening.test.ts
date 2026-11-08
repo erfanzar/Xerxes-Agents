@@ -4,7 +4,6 @@
 import { expect, test } from 'bun:test'
 
 import { ErrorKind, classifyError, reportedContextLimit } from '../src/runtime/errorClassifier.js'
-import { IterationBudget, iterationBudgetFromConfig } from '../src/runtime/iterationBudget.js'
 
 test('HTTP 400 with a context-overflow message classifies as context overflow, not bad request', () => {
   // OpenAI signals context overflow as HTTP 400 with this code in the body.
@@ -45,24 +44,4 @@ test('other status codes keep their status-driven classification', () => {
     .toMatchObject({ kind: ErrorKind.RATE_LIMIT, retryable: true })
   expect(classifyError({ status: 503, message: 'prompt is too long' }))
     .toMatchObject({ kind: ErrorKind.PROVIDER_DOWN, retryable: true })
-})
-
-test('present-but-invalid iteration budget configuration throws instead of silently disabling the budget', () => {
-  for (const invalid of ['abc', 0, -3, '0', '-7', '3.5', 1.5, Number.NaN, 'ten']) {
-    expect(() => iterationBudgetFromConfig({ max_tool_turns: invalid }))
-      .toThrow(RangeError)
-  }
-  // An invalid environment fallback is a configuration error too.
-  expect(() => iterationBudgetFromConfig({}, { environment: { XERXES_MAX_TOOL_TURNS: 'abc' } }))
-    .toThrow(RangeError)
-})
-
-test('absent iteration budget configuration falls back to the environment, then unbounded', () => {
-  expect(iterationBudgetFromConfig({}, { environment: {} })).toBeInstanceOf(IterationBudget)
-  expect(iterationBudgetFromConfig({}, { environment: {} }).maxIterations).toBeUndefined()
-  expect(iterationBudgetFromConfig({ max_tool_turns: '' }, { environment: { XERXES_MAX_TOOL_TURNS: '6' } })
-    .maxIterations).toBe(6)
-  expect(iterationBudgetFromConfig({ max_tool_turns: null }, { environment: {} }).maxIterations)
-    .toBeUndefined()
-  expect(iterationBudgetFromConfig({ max_tool_turns: '12' }).maxIterations).toBe(12)
 })

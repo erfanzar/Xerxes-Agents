@@ -11,7 +11,6 @@ import {
   COMPACTION_REFERENCE_PREFIX,
   ContextCompressor,
   ProviderTokenCounter,
-  RepoMapper,
   naiveSummarizer,
   pruneToolResult,
   repairToolMessageSequence,
@@ -122,19 +121,6 @@ test('compressor output is provider-safe without caller-side tool-pair repair', 
   expect(repairToolMessageSequence(result.messages)).toEqual(result.messages)
 })
 
-test('repo mapping caps extracted symbols per file at extraction and cache time', async () => {
-  await inTemporaryDirectory(async root => {
-    const declarations = Array.from({ length: 40 }, (_, index) => `export function symbol${index}() {}`).join('\n')
-    await writeFile(join(root, 'dense.ts'), declarations)
-    const mapper = new RepoMapper({ maxSymbolsPerFile: 5, tokenBudget: 4_000 })
-    const first = await mapper.build(root)
-    expect(first.symbolCount).toBe(5)
-    // The cached second build reuses the capped extraction instead of re-reading 40 symbols.
-    const second = await mapper.build(root)
-    expect(second.symbolCount).toBe(5)
-  })
-})
-
 test('compressor reports protectedFirst exactly for both prior-summary positions', () => {
   const priorSummary = { role: 'user', content: `${COMPACTION_REFERENCE_PREFIX}\n\nearlier state` }
   const options = {
@@ -177,17 +163,6 @@ test('token estimator weights punctuation runs and keeps the Google adjustment c
   const openai = ProviderTokenCounter.countTokensForProvider(prose, 'openai')
   expect(openai).toBeGreaterThan(0)
   expect(ProviderTokenCounter.countTokensForProvider(prose, 'google')).toBe(Math.ceil(openai * 1.1))
-})
-
-test('repo mapping stops scanning once maxFiles candidates are gathered', async () => {
-  await inTemporaryDirectory(async root => {
-    for (let index = 0; index < 30; index += 1) {
-      await writeFile(join(root, `file${String(index).padStart(2, '0')}.ts`), `export function fn${index}() {}\n`)
-    }
-    const result = await new RepoMapper({ maxFiles: 5, tokenBudget: 4_000 }).build(root)
-    expect(result.fileCount).toBe(5)
-    expect(result.symbolCount).toBeLessThanOrEqual(5)
-  })
 })
 
 async function inTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {

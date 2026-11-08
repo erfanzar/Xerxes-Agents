@@ -11,20 +11,6 @@ export * from './embedders.js'
 export * from './entityMemory.js'
 export * from './longTermMemory.js'
 export * from './provider.js'
-/**
- * Explicit external-memory provider registration entry point.
- *
- * Callers supply every environment, transport, and upstream dependency; the
- * memory subsystem never discovers credentials or starts external providers
- * during import.
- */
-export {
-  BUILTIN_MEMORY_PROVIDER_NAMES,
-  createBuiltinMemoryProviders,
-  registerBuiltinMemoryProviders,
-  type BuiltinMemoryProviderDependencies,
-  type BuiltinMemoryProviderName,
-} from './plugins/builtins.js'
 export * from './retrieval.js'
 export * from './shortTermMemory.js'
 export * from './storage.js'

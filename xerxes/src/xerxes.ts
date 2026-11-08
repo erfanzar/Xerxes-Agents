@@ -11,6 +11,7 @@ import type { AgentDefinition } from './agents/definitions.js'
 import { toolListAdmits } from './agents/toolPatterns.js'
 import type { AuditEmitter } from './audit/emitter.js'
 import { ConfigurationError } from './core/errors.js'
+import type { HookRunner } from './extensions/hooks.js'
 import { ToolRegistry } from './executors/toolRegistry.js'
 import { createLlmClient, requireConfiguredModel, type LlmClient } from './llms/client.js'
 import { ShortTermMemory, type Memory } from './memory/index.js'
@@ -26,6 +27,12 @@ import {
   type ToolPolicy,
 } from './streaming/permissions.js'
 import type { StreamEvent } from './streaming/events.js'
+import { createEscalationFactory } from './daemon/turnEscalation.js'
+import type { AdvisorRequest, CascadingTurnOptions, ResultChecksMode } from './runtime/cascade.js'
+import { defaultEscalationMode } from './runtime/escalationPolicy.js'
+import { automaticPromptProfile, buildLeanSystemPrompt, localDay, selectLeanTools, type LeanPromptSetting } from './runtime/leanPrompt.js'
+import type { RunSafety } from './runtime/runSafety.js'
+import { ADVISOR_TOOL_NAME } from './tools/advisorTool.js'
 import { SandboxRouter, SandboxedToolExecutor } from './security/sandbox.js'
 import { registerCoreTools, type CoreToolsOptions } from './tools/index.js'
 import type { ToolDefinition } from './types/toolCalls.js'
@@ -58,7 +65,17 @@ export interface XerxesOptions {
    */
   readonly coreTools?: CoreToolsOptions | false
   readonly enableMemory?: boolean
+  /**
+   * Hooks dispatched by every turn (before_tool_call, tool_permission_check,
+   * …). The facade never loads the user's `~/.xerxes` hook configuration on
+   * its own: an embedding host decides whether its process should run shell
+   * hooks, and passes e.g. `workspaceShellHooks({...})(cwd)` here. Absent,
+   * no hooks run.
+   */
+  readonly hookRunner?: HookRunner
   readonly llm?: LlmClient
+  /** Network retries before a turn fails; defaults to `defaultMaxNetworkRetries()`. */
+  readonly maxNetworkRetries?: number
   readonly memory?: Memory
   readonly memoryMinChars?: number
   readonly model?: string
@@ -70,6 +87,38 @@ export interface XerxesOptions {
   readonly systemPrompt?: string
   readonly toolRegistry?: ToolRegistry
   readonly workspaceRoot?: string
+  /**
+   * `lean` sends the terse prompt and the core tools (about 3K tokens). Default:
+   * lean for Bonsai models, full otherwise, as in the daemon and CLI.
+   */
+  readonly promptProfile?: LeanPromptSetting
+  /**
+   * Result checks and escalation around each turn: a failed check re-runs the
+   * model in the same turn, and once local retries are used up the advisor (a
+   * registered AskAdvisor tool, or `consultAdvisor`) is consulted. Needs
+   * `workspaceRoot` to read what the turn wrote. Default: on when
+   * `workspaceRoot` is set, with checks in `warn` mode and escalation on for
+   * Bonsai models; `false` turns it off.
+   */
+  readonly cascade?: false | XerxesCascadeOptions
+  /**
+   * The safety floor for `auto` mode, created by the host with
+   * `RunSafety.start({ outputFolder, sandbox })` (and `findCommandSandbox()` for
+   * the sandbox). With it, new files in the output folder and sandboxed
+   * commands run without asking and changed inputs fail the result checks.
+   * Without it, `auto` asks the permission broker before every write and
+   * command that is not read-only.
+   */
+  readonly runSafety?: RunSafety
+}
+
+export interface XerxesCascadeOptions {
+  /** Result checks: `warn` reports, `enforce` also tells the model. Default `warn`. */
+  readonly checks?: ResultChecksMode
+  /** As `runtime.escalation`: mode, max_local_retries, max_advisor_calls, … */
+  readonly escalation?: Record<string, unknown>
+  /** Consult a stronger model. Default: the registered AskAdvisor tool, when there is one. */
+  readonly consultAdvisor?: (request: AdvisorRequest, signal: AbortSignal) => Promise<string>
 }
 
 interface RegisteredAgent {
@@ -99,9 +148,15 @@ export class Xerxes {
   private readonly defaultPermissionMode: PermissionMode
   private readonly defaultSystemPrompt: string
   private readonly engines = new Map<string, QueryEngine>()
+  private readonly hookRunner: HookRunner | undefined
+  private readonly maxNetworkRetries: number | undefined
   private readonly memoryMinChars: number
   private readonly permissionBroker: PermissionBroker | undefined
   private readonly policy: ToolPolicy | undefined
+  private readonly workspaceRoot: string | undefined
+  private readonly runSafety: RunSafety | undefined
+  private readonly promptProfile: LeanPromptSetting | undefined
+  private readonly cascadeOptions: false | XerxesCascadeOptions | undefined
 
   constructor(options: XerxesOptions = {}) {
     const suppliedAgents = options.agents ? [...options.agents] : []
@@ -117,6 +172,12 @@ export class Xerxes {
     this.policy = options.policy
     this.sandboxRouter = options.sandboxRouter
     this.auditEmitter = options.auditEmitter
+    this.hookRunner = options.hookRunner
+    this.maxNetworkRetries = options.maxNetworkRetries
+    this.workspaceRoot = options.workspaceRoot ?? (options.coreTools ? options.coreTools.workspaceRoot : undefined)
+    this.runSafety = options.runSafety
+    this.promptProfile = options.promptProfile
+    this.cascadeOptions = options.cascade
 
     if (options.coreTools !== false) {
       const coreOptions = options.coreTools ?? {}
@@ -204,7 +265,15 @@ export class Xerxes {
       options.config?.model,
       this.defaultModel,
     ))
-    const systemPrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
+    const allowedTools = toolsForAgent(this.toolRegistry.definitions(agentId), agent)
+    // The daemon's rule: lean for Bonsai models unless told otherwise.
+    const lean = (this.promptProfile ?? automaticPromptProfile({ model })) === 'lean'
+    const tools = lean ? selectLeanTools(allowedTools) : allowedTools
+    const rolePrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
+    const systemPrompt = lean
+      ? [buildLeanSystemPrompt({ cwd: this.workspaceRoot ?? process.cwd(), model, date: localDay(new Date()), toolNames: tools.map(tool => tool.function.name), commandSandbox: this.defaultPermissionMode === 'auto' && this.runSafety?.commandSandbox() !== undefined }), rolePrompt].filter(Boolean).join('\n\n')
+      : rolePrompt
+    const cascade = this.cascadeFor(model, agentId)
     const permissionMode = options.permissionMode ?? options.config?.permissionMode ?? this.defaultPermissionMode
     const queryConfig: Partial<QueryEngineConfig> = {
       ...options.config,
@@ -220,11 +289,53 @@ export class Xerxes {
         : this.toolRegistry,
       ...(this.permissionBroker ? { permissionBroker: this.permissionBroker } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
+      ...(this.hookRunner ? { hookRunner: this.hookRunner } : {}),
+      ...(this.maxNetworkRetries === undefined ? {} : { maxNetworkRetries: this.maxNetworkRetries }),
+      ...(this.runSafety ? { runSafety: this.runSafety } : {}),
     }, {
       config: queryConfig,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-      tools: toolsForAgent(this.toolRegistry.definitions(agentId), agent),
+      tools,
+      ...(cascade ? { cascade } : {}),
     })
+  }
+
+  /**
+   * The cascade for one engine: its own escalation ladder over the shared
+   * checks. Reads no environment: an embedding host configures it explicitly.
+   */
+  private cascadeFor(model: string, agentId: string): Omit<CascadingTurnOptions, 'onStep'> | undefined {
+    if (this.cascadeOptions === false || this.workspaceRoot === undefined) return undefined
+    const settings = this.cascadeOptions ?? {}
+    const runtime: Record<string, unknown> = settings.escalation === undefined ? {} : { escalation: settings.escalation }
+    const registry = this.toolRegistry
+    const consultAdvisor = settings.consultAdvisor ?? (registry.get(ADVISOR_TOOL_NAME, agentId)
+      ? (request: AdvisorRequest, signal: AbortSignal) => registry.execute({
+        id: `escalation-advisor-${crypto.randomUUID()}`,
+        type: 'function',
+        function: { name: ADVISOR_TOOL_NAME, arguments: { question: request.question, context: request.context, kind: 'answer' } },
+      }, { agentId, metadata: {} }, signal)
+      : undefined)
+    const escalate = createEscalationFactory<{ readonly id: string; readonly cwd: string }>({
+      runtime: () => runtime,
+      env: {},
+      boundaryMode: () => 'off',
+      advisorAvailable: () => consultAdvisor !== undefined,
+      defaultMode: () => defaultEscalationMode({ runtime, env: {}, model, local: () => false }),
+    })
+    const session = { id: 'sdk', cwd: this.workspaceRoot }
+    // Inputs are checked only where the floor is in charge: not under accept-all.
+    const runSafety = this.defaultPermissionMode === 'accept-all' ? undefined : this.runSafety
+    const checks = settings.checks ?? 'warn'
+    return {
+      projectRoot: this.workspaceRoot,
+      hooks: {
+        checks: () => checks,
+        escalate: findings => escalate(session, findings),
+        ...(consultAdvisor ? { consultAdvisor } : {}),
+        ...(runSafety ? { inputFindings: () => runSafety.inputFindings() } : {}),
+      },
+    }
   }
 
   /** Run one prompt, preserving the selected agent's default conversation by default. */

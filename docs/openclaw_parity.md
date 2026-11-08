@@ -7,9 +7,9 @@ implementation, focused tests, and a verified entrypoint.
 | Capability | Native direction | Status rule |
 | --- | --- | --- |
 | Streaming agent turns | Async stream events and tool loop | Verify cancellation, tool pairing, and terminal errors. |
-| Durable sessions | Native store, search, replay, export | Verify persisted format and recovery. |
+| Durable sessions | Native store, search, export | Verify persisted format and recovery. |
 | Skills and plugins | Markdown skill registry and typed hooks | Verify discovery, guardrails, and lifecycle. |
-| Multi-agent orchestration | Cortex topology engine | Verify delegation and result aggregation. |
+| Multi-agent orchestration | Sub-agents through the daemon subagent host | Verify delegation and result aggregation. |
 | Chat channels | Configured adapter lifecycle | Verify each direct transport separately; relay/host ports are not direct parity. |
 | Browser and computer use | Explicit provider contracts | Require an injected real adapter; never simulate an action. |
 | External memory, media, training | Typed integration ports | Require explicit credentials, hardware, or provider client. |

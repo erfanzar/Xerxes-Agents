@@ -13,6 +13,7 @@
  */
 
 import { ConfigurationError } from '../core/errors.js'
+import { assertNotLocalOnly } from '../runtime/localOnly.js'
 import { claudeCodeEnvironment, resolveClaudeCode } from './claudeCode.js'
 import { REASONING_ON, type ReasoningLevelSet } from './reasoningLevels.js'
 
@@ -109,6 +110,8 @@ async function initializeThroughCli(argv: readonly string[], env: Record<string,
 
 /** Ask the local Claude Code which models this sign-in can use. */
 export async function discoverClaudeCodeModels(options: ClaudeCodeCatalogOptions = {}): Promise<ClaudeCodeModelInfo[]> {
+  // Claude Code is a cloud model, and its CLI makes its own requests.
+  assertNotLocalOnly('asking Claude Code for its models')
   const environment = options.environment ?? process.env
   const executable = options.executable ?? await resolveClaudeCode(environment)
   const argv = [executable, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',

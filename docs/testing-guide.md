@@ -21,7 +21,6 @@ bun run test:ui
 
 # Native integration-style local checks
 bun run real-use
-bun run swarm
 ```
 
 ## Test design

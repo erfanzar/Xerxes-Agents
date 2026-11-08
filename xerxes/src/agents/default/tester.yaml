@@ -13,9 +13,6 @@ agent:
     Use this agent to design, implement, and run focused tests for a bounded change, then return failures, coverage gaps, and exact verification results to the parent agent.
   allowed_tools:
     - exec_command
-    - write_stdin
-    - list_terminal_sessions
-    - close_terminal_session
     - check_command
     - list_commands
     - kill_command

@@ -179,6 +179,11 @@ const { createCliRenderer } = await import('@opentui/core')
 const { createRoot } = await import('@opentui/react')
 const { AppOpenTui } = await import('./app.js')
 
+// Process warnings belong in the log. Written to stderr they land on top of
+// OpenTUI's retained frame, over the composer, and stay until a full repaint.
+process.removeAllListeners('warning')
+process.on('warning', warning => recordParentLifecycle(`warning ${warning.name}: ${warning.message}`))
+
 try {
   $appearance.set(await loadAppearance())
 } catch {
@@ -206,6 +211,14 @@ const renderer = await createCliRenderer({
 // overlay geometry. Clip the root so that intermediate frames cannot draw
 // text outside the terminal's current allocation.
 renderer.root.overflow = 'hidden'
+
+// Each mounted component that tracks the terminal size or keys adds its own
+// listener; eleven at startup passed Node's default of ten and warned on every
+// launch. The cap still catches a real leak, just later.
+const LISTENER_CAP = 64
+renderer.setMaxListeners(LISTENER_CAP)
+renderer.keyInput.setMaxListeners(LISTENER_CAP)
+renderer._internalKeyInput.setMaxListeners(LISTENER_CAP)
 
 // Stash for imperative controller call sites.
 setActiveRenderer(renderer)

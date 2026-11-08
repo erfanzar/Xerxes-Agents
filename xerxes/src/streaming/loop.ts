@@ -12,9 +12,11 @@ import {
   type ToolExecutor,
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
+import { providerErrorText } from './providerErrorText.js'
 import type { ToolLoopBlockAuditInput } from '../audit/emitter.js'
 import { resolveToolPermission, type HookPoint, type HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, QuerySource, ThinkingRequest, TokenUsage } from '../llms/client.js'
+import { modelCard, type ReplyBudget } from '../llms/modelCards.js'
 import {
   DENIAL_LOOP_PATTERN,
   DenialBudget,
@@ -26,17 +28,22 @@ import {
   renderOutputLimitResumeDirective,
 } from '../runtime/interventions.js'
 import { classifyError, ErrorKind, isRecoverableNetworkError } from '../runtime/errorClassifier.js'
+import { defaultMaxNetworkRetries } from '../llms/providerRegistry.js'
+import { isEngineFailure, type RecoverEngine } from '../local/engineRecovery.js'
+import { localOnlyActive } from '../runtime/localOnly.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import { getGoal } from '../runtime/goalDomain.js'
+import type { RunSafetyPort } from '../runtime/runSafety.js'
 import { withoutXerxesAnnotations, type ChatMessage, type MessageContent, type HarnessOrigin, type XerxesActor } from '../types/messages.js'
 import { setTurnOutcome } from '../types/turnOutcome.js'
 import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { appendInjection } from './attachments.js'
 import { steerMessage, steerText, type SteerInput } from './steer.js'
+import { repairToolCall } from './toolCallRepair.js'
 export type { SteerInput } from './steer.js'
 import type {
   AgentState,
@@ -52,6 +59,8 @@ import {
   permissionDisposition,
   permissionDescription,
   type PermissionBroker,
+  type PermissionDisposition,
+  type PermissionGateOptions,
   type PermissionMode,
   type ToolPolicy,
 } from './permissions.js'
@@ -65,6 +74,25 @@ export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
 export const DEFAULT_RETRY_DELAYS = [10_000, 10_000, 10_000, 10_000] as const
 /** Generous default chunk-arrival budget before a provider stream is treated as stalled. */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
+/**
+ * Before the first chunk the model may still be reading the prompt, and a
+ * local server sends nothing while it does. Allow this much per estimated
+ * prompt token (20 tokens a second, slower than a laptop reads an uncached prompt).
+ */
+export const FIRST_CHUNK_MS_PER_PROMPT_TOKEN = 50
+/** However long the prompt, a stream silent for this long before its first chunk is stalled. */
+export const MAX_FIRST_CHUNK_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * The wait allowed for a provider stream's first chunk: the inactivity budget,
+ * or longer for a prompt big enough to take longer than that to read. A
+ * disabled watchdog stays disabled.
+ */
+export function firstChunkTimeoutMs(inactivityTimeoutMs: number, promptTokens: number): number {
+  if (!Number.isFinite(inactivityTimeoutMs) || inactivityTimeoutMs <= 0) return inactivityTimeoutMs
+  const forPrompt = Number.isFinite(promptTokens) && promptTokens > 0 ? promptTokens * FIRST_CHUNK_MS_PER_PROMPT_TOKEN : 0
+  return Math.max(inactivityTimeoutMs, Math.min(MAX_FIRST_CHUNK_TIMEOUT_MS, forPrompt))
+}
 /** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */
 export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
 /** Shorter event bursts measure transport batching rather than model decode. */
@@ -90,6 +118,65 @@ export const MAX_EMPTY_REPLY_NUDGES = 2
 export const EMPTY_REPLY_NUDGE = '[harness] Your last reply had no visible text and no tool call the harness could '
   + 'read, so nothing was run and nothing was answered. Continue the task: call the next tool in the exact tool-call '
   + 'form your instructions give, or, if the work is done, write your final answer as plain text.'
+/**
+ * Replies per turn the reply budget may stop and re-ask; the next one that runs
+ * past it ends the turn. Each stop already cost a full budget of waiting.
+ */
+export const MAX_REPLY_BUDGET_STOPS = 2
+/** The reply budget's token estimate: characters of reasoning per token, as for prompts. */
+export const REPLY_BUDGET_CHARS_PER_TOKEN = 4
+
+/**
+ * A reply that reasoned past its budget (`runtime/replyBudget.ts`) without a
+ * tool call or answer text. The loop stops the attempt with it and asks again.
+ */
+export class ReplyBudgetError extends Error {
+  readonly limit: 'tokens' | 'time'
+  readonly reasoningTokens: number
+  readonly seconds: number
+
+  constructor(limit: 'tokens' | 'time', reasoningTokens: number, seconds: number, budget: ReplyBudget) {
+    const spent = `about ${reasoningTokens.toLocaleString('en-US')} tokens over ${formatDuration(seconds)}`
+    const cap = limit === 'tokens'
+      ? `${budget.maxReasoningTokens.toLocaleString('en-US')} tokens`
+      : formatDuration(budget.maxSeconds)
+    super(`Reply stopped: it reasoned for ${spent} without a tool call or an answer (reply budget ${cap}).`)
+    this.name = 'ReplyBudgetError'
+    this.limit = limit
+    this.reasoningTokens = reasoningTokens
+    this.seconds = seconds
+  }
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} s`
+  const minutes = seconds / 60
+  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} min`
+}
+
+/** What the model reads after a stopped reply; its reasoning is not kept. */
+export function replyBudgetNudge(stopped: ReplyBudgetError): string {
+  return `[harness] Your last reply was stopped after about ${stopped.reasoningTokens.toLocaleString('en-US')} tokens `
+    + `(${formatDuration(stopped.seconds)}) of reasoning without a tool call or any answer text, and that reasoning was `
+    + 'not kept. Continue the task in short steps: make the next tool call now, or write your answer. Work that needs '
+    + 'long calculation or checking belongs in a tool call, not in your reasoning.'
+}
+
+/** The turn's last words when one more reply ran past the budget after the allowed stops. */
+export function replyBudgetStopText(stopped: ReplyBudgetError): string {
+  return `[Stopped: ${stopped.message} ${MAX_REPLY_BUDGET_STOPS} earlier replies this turn were stopped for the same `
+    + 'reason. Send a follow-up to continue, or change runtime.reply_budget.]'
+}
+
+/** The stop for a reply that is still reasoning, or undefined while it is within budget. */
+function replyBudgetExceeded(budget: ReplyBudget, reasoningChars: number, elapsedMs: number): ReplyBudgetError | undefined {
+  const tokens = Math.round(reasoningChars / REPLY_BUDGET_CHARS_PER_TOKEN)
+  const seconds = elapsedMs / 1_000
+  if (tokens > budget.maxReasoningTokens) return new ReplyBudgetError('tokens', tokens, seconds, budget)
+  if (seconds > budget.maxSeconds) return new ReplyBudgetError('time', tokens, seconds, budget)
+  return undefined
+}
+
 /**
  * Output ceiling used after a first `finish_reason: length`, when the caller
  * pinned no maxTokens of its own. A truncation means the model wanted more
@@ -209,6 +296,17 @@ export type ContextReducer = (
 ) => Promise<ContextReduction>
 
 /**
+ * Rough size of a request in tokens (characters ÷ 4), for telling the user how
+ * much the model must read before its first token. Not for budgeting.
+ */
+export function roughPromptTokens(messages: readonly ChatMessage[], tools: readonly unknown[] | undefined): number {
+  let chars = 0
+  for (const message of messages) chars += JSON.stringify(message).length
+  if (tools?.length) chars += JSON.stringify(tools).length
+  return Math.ceil(chars / 4)
+}
+
+/**
  * True when a tool result carries nothing a provider will accept as content.
  *
  * `[]` and `{}` are deliberately not empty: several tools return a truthful
@@ -268,6 +366,11 @@ export interface TurnRequest {
   /** Same prompt as `systemPrompt`, kept as named sources for prefix caching. */
   readonly systemSegments?: readonly SystemPromptSegment[]
   readonly temperature?: number
+  /**
+   * How long one reply may reason before it acts (`runtime/replyBudget.ts`);
+   * null turns it off. Absent, the model card's budget applies.
+   */
+  readonly replyBudget?: ReplyBudget | null
   /**
    * Per-turn extended-thinking directive; adapters map it to provider wire
    * fields. WHY a neutral ThinkingRequest type instead of extraBody: thinking
@@ -336,6 +439,14 @@ export interface TurnDependencies {
    */
   readonly refreshLlm?: () => LlmClient | undefined
   /**
+   * Reload a local engine Xerxes started when it lost the model mid-turn (see
+   * `local/engineRecovery.ts`). Asked at most once per turn, when a model
+   * request fails with a dropped or refused connection or the engine says the
+   * model is gone; a reload means the step is retried once, and the retry
+   * event says what was reloaded.
+   */
+  readonly recoverEngine?: RecoverEngine
+  /**
    * Re-read the tool list before each model step, given the one in use.
    * Return the same array when nothing changed (keeps the request byte-stable
    * for prompt caching). Lets a plugin installed mid-turn be called at once.
@@ -383,6 +494,22 @@ export interface TurnDependencies {
   readonly persistToolResult?: (toolName: string, content: string) => string
   readonly policy?: ToolPolicy
   /**
+   * The local/cloud data boundary (`security/dataBoundary.ts`). Absent, or a
+   * boundary whose mode is `off`, leaves every permission decision as it is
+   * today. `reason` explains a boundary denial to the model.
+   */
+  readonly dataBoundary?: {
+    toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
+    reason?(call: Pick<ToolCall, 'function'>, agentId?: string): string | undefined
+  }
+  /**
+   * The run's safety floor (`runtime/runSafety.ts`). Used only in `auto` mode:
+   * it allows writes of new files in the output folder and sandboxed commands
+   * without asking, gives exec_command its sandbox, and is told when the user
+   * approves a write to an input file.
+   */
+  readonly runSafety?: RunSafetyPort
+  /**
    * Relieve a context overflow once per overflowing round. Absent it the loop can only
    * report the overflow, because it has no compaction policy of its own.
    */
@@ -403,6 +530,13 @@ export interface TurnDependencies {
   readonly roundOutputRoom?: () => number | undefined
   readonly retryDelays?: readonly number[]
   /**
+   * How many times a refused, reset or unreachable connection is retried
+   * before the turn fails with an actionable error. Hosts pass
+   * `defaultMaxNetworkRetries(baseUrl)` (3 for a loopback endpoint, 6
+   * otherwise); absent, the remote default (6) applies.
+   */
+  readonly maxNetworkRetries?: number
+  /**
    * Ceiling for provider-suggested Retry-After waits (ms). Route-owned via the
    * provider registry; defaults to {@link MAX_SUGGESTED_RETRY_DELAY_MS}.
    */
@@ -411,7 +545,8 @@ export interface TurnDependencies {
    * Abort a provider attempt that yields no chunk within this budget (ms), so a
    * socket held open without data stalls one attempt instead of the whole turn.
    * Defaults to {@link DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS}; non-positive or
-   * non-finite values disable the watchdog.
+   * non-finite values disable the watchdog. The first chunk of each attempt
+   * may take longer, scaled to the prompt size ({@link firstChunkTimeoutMs}).
    */
   readonly streamInactivityTimeoutMs?: number
   /** Override parser behavior for an isolated diagnostic streaming surface. */
@@ -552,6 +687,10 @@ export async function* runTurn(
   // The client in use; swapped when a used-up account is replaced mid-turn.
   let llm = dependencies.llm
   let credentialSwitchAttempted = false
+  let engineRecoveryAttempted = false
+  const replyBudget = request.replyBudget === undefined ? modelCard(request.model).replyBudget : request.replyBudget ?? undefined
+  /** Replies the reply budget stopped this turn; see MAX_REPLY_BUDGET_STOPS. */
+  let replyBudgetStops = 0
   // The tools offered this step; refreshed between steps (see refreshTools).
   let turnTools = request.tools
   let outputLimitEscalations = 0
@@ -635,6 +774,10 @@ export async function* runTurn(
         let attemptCompleted = false
         let attemptStreamed = false
         let attemptRejected = false
+        // The reply budget counts reasoning until the reply acts: its first
+        // tool call or answer text. After that it is doing work, not stuck.
+        let replyActing = false
+        let replyReasoningChars = 0
         try {
           attemptSignal.controller.signal.throwIfAborted()
           if (dependencies.refreshLlm && !credentialSwitchAttempted) {
@@ -647,7 +790,8 @@ export async function* runTurn(
           roundFirstStreamTokenAt = undefined
           roundStreamedBytes = 0
           roundCompletedAt = 0
-          yield { type: 'provider_wait', active: true }
+          const promptTokens = roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools)
+          yield { type: 'provider_wait', active: true, promptTokens }
           let awaitingOutput = true
           try {
             for await (const delta of watchProviderStream(
@@ -663,6 +807,7 @@ export async function* runTurn(
               ),
               streamInactivityTimeoutMs,
               attemptSignal,
+              firstChunkTimeoutMs(streamInactivityTimeoutMs, promptTokens),
             )) {
               attemptStreamed = true
               const hasStreamToken = Boolean(delta.content || delta.thinking)
@@ -687,6 +832,20 @@ export async function* runTurn(
                 // not-yet-diverged replay prefix it must hold back — so retry
                 // replay suppression is unchanged.
                 for (const visible of textDeduper.push(part)) yield rememberVisible(visible)
+              }
+              if (replyBudget !== undefined && !replyActing) {
+                for (const part of parts) {
+                  if (part.type === 'thinking') replyReasoningChars += part.text.length
+                  else if (part.text.trim()) replyActing = true
+                }
+                if (delta.toolCalls?.length) replyActing = true
+                const stopped = replyActing || roundFirstStreamTokenAt === undefined
+                  ? undefined
+                  : replyBudgetExceeded(replyBudget, replyReasoningChars, now() - roundFirstStreamTokenAt)
+                if (stopped) {
+                  attemptSignal.controller.abort(stopped)
+                  throw stopped
+                }
               }
               if (delta.toolCalls) {
                 const merged = [...roundToolCalls]
@@ -734,6 +893,32 @@ export async function* runTurn(
           // successful-round usage as a complete total for the turn.
           usageComplete = false
           reasoningUsageComplete = false
+          // The reply budget stopped this reply. It did not fail, so it spends
+          // no retry: its reasoning is dropped (kept, it would make the next
+          // prompt as long as the runaway reply), the model is told why, and
+          // the step is asked again. Past MAX_REPLY_BUDGET_STOPS the turn ends.
+          if (error instanceof ReplyBudgetError && !signal?.aborted) {
+            persistUnfinishedRound = undefined
+            replyBudgetStops += 1
+            if (replyBudgetStops > MAX_REPLY_BUDGET_STOPS) {
+              yield { type: 'text', text: replyBudgetStopText(error) }
+              terminalProviderFailure = true
+              stopReason = 'output_limit'
+              break
+            }
+            yield {
+              type: 'provider_retry',
+              cause: 'reply_budget',
+              error: `${error.message} Asking again with a note (${replyBudgetStops} of ${MAX_REPLY_BUDGET_STOPS}).`,
+              attempt: replyBudgetStops,
+              maxAttempts: MAX_REPLY_BUDGET_STOPS + 1,
+              delay: 0,
+              final: false,
+            }
+            state.messages.push({ role: 'user', content: replyBudgetNudge(error), origin: 'harness' })
+            attempt -= 1
+            continue
+          }
           attemptRejected = !attemptStreamed && providerRejectedRequest(error)
           const classified = classifyError(error)
           await dispatchHook(hookRunner, 'on_error', {
@@ -808,10 +993,47 @@ export async function* runTurn(
               continue
             }
           }
+          // A local engine that lost its model fails every request until it
+          // is reloaded, so waiting out the network backoff does not help.
+          // Reload it once per turn and retry the step; a reload that fails
+          // is named in the retry event and the usual handling follows.
+          let engineRecoveryFailure: string | undefined
+          if (
+            !engineRecoveryAttempted
+            && dependencies.recoverEngine !== undefined
+            && signal?.aborted !== true
+            && isEngineFailure(error)
+          ) {
+            engineRecoveryAttempted = true
+            let reloaded: string | undefined
+            try {
+              reloaded = await dependencies.recoverEngine()
+            } catch (recoveryError) {
+              engineRecoveryFailure = `the engine could not be reloaded: ${errorMessage(recoveryError)}`
+            }
+            if (reloaded !== undefined && !signal?.aborted) {
+              yield {
+                type: 'provider_retry',
+                error: `${providerErrorText(error)}. ${reloaded}`,
+                attempt: attempt + 1,
+                maxAttempts: retryDelays.length + 1,
+                delay: 0,
+                final: false,
+              }
+              attempt -= 1
+              continue
+            }
+          }
           // Only transient failures earn another attempt. Auth, validation,
           // configuration, and other terminal errors fail the round at once.
+          // A refused or unreachable endpoint waits on its own backoff, but only
+          // `maxNetworkRetries` times: a dead local server used to retry until
+          // the user aborted the turn.
           const networkRetry = isRecoverableNetworkError(error)
+          const maxNetworkRetries = dependencies.maxNetworkRetries ?? defaultMaxNetworkRetries()
+          const networkRetriesExhausted = networkRetry && attempt >= maxNetworkRetries
           const final = (!networkRetry && attempt >= retryDelays.length)
+            || networkRetriesExhausted
             || error instanceof ModelCallBudgetError
             || error instanceof ModelTokenBudgetError
             || error instanceof ModelUsageCheckpointError
@@ -823,7 +1045,7 @@ export async function* runTurn(
           const delay = final ? 0 : Math.max(networkRetry ? Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5)) : (retryDelays[attempt] ?? 0), suggestedDelay)
           yield {
             type: 'provider_retry',
-            error: errorMessage(error),
+            error: engineRecoveryFailure === undefined ? errorMessage(error) : `${errorMessage(error)} — ${engineRecoveryFailure}`,
             attempt: attempt + 1,
             maxAttempts: networkRetry ? 0 : retryDelays.length + 1,
             delay,
@@ -851,7 +1073,12 @@ export async function* runTurn(
             const overflow = classified.kind === ErrorKind.CONTEXT_OVERFLOW
             yield {
               type: 'text',
-              text: overflow ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined)) : `[Error: ${errorMessage(error)}]`,
+              text: overflow
+                ? renderContextOverflowStopGuard(contextReductionFailure ?? (contextReductionAttempted ? 'the compacted conversation still did not fit' : undefined))
+                : networkRetriesExhausted
+                  ? `[Error: ${providerErrorText(error)} — gave up after ${maxNetworkRetries} network ${maxNetworkRetries === 1 ? 'retry' : 'retries'}. `
+                    + 'Check that the provider endpoint is running and reachable, then retry the prompt.]'
+                  : `[Error: ${providerErrorText(error)}]`,
             }
             terminalProviderFailure = true
             stopReason = overflow ? 'context_overflow' : 'provider_failed'
@@ -1197,25 +1424,35 @@ export async function* runTurn(
           decisions.push({ call, kind: 'truncated' })
           continue
         }
+        // Repaired before hooks and checks see it, so every gate judges the
+        // command that will run; a hook's own mutation is repaired the same way.
+        const repairedCall = repairToolCall(call)
         const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
-          arguments: call.function.arguments,
-          name: call.function.name,
+          arguments: repairedCall.function.arguments,
+          name: repairedCall.function.name,
           ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-          toolCallId: call.id,
+          toolCallId: repairedCall.id,
         })
-        const effectiveCall = applyToolArgumentsMutation(
-          call,
-          hookMutation(beforeResult, call.function.arguments),
-        )
+        const effectiveCall = repairToolCall(applyToolArgumentsMutation(
+          repairedCall,
+          hookMutation(beforeResult, repairedCall.function.arguments),
+        ))
         const permission = permissionDisposition(
           effectiveCall,
           permissionMode,
           dependencies.policy,
           request.agentId,
+          permissionGateOptions(dependencies, permissionMode),
         )
         if (permission === 'deny') {
-          decisions.push({ call, kind: 'denied', reason: 'policy_denied' })
+          const boundaryReason = dependencies.dataBoundary?.reason?.(effectiveCall, request.agentId)
+          decisions.push({
+            call,
+            kind: 'denied',
+            reason: 'policy_denied',
+            ...(boundaryReason === undefined ? {} : { detail: boundaryReason }),
+          })
           continue
         }
         if (permission === 'prompt') {
@@ -1233,6 +1470,7 @@ export async function* runTurn(
             decisions.push({ call, kind: 'denied', reason: 'permission_rejected' })
             continue
           }
+          dependencies.runSafety?.approved(effectiveCall)
         }
         if (hookRunner !== undefined) {
           const extensionPermission = await resolveToolPermission(hookRunner, {
@@ -1287,8 +1525,14 @@ export async function* runTurn(
         // The metadata object stays the same reference, so a lone call still
         // writes straight into the turn's shared record.
         const steerWakeSignal = dependencies.steerWake?.()
-        const roundContext: ToolExecutionContext = steerWakeSignal
-          ? { ...toolContext, wakeSignal: steerWakeSignal }
+        // Fully local mode sandboxes commands whatever the permission mode.
+        const commandSandbox = permissionMode === 'auto' || localOnlyActive() ? dependencies.runSafety?.commandSandbox() : undefined
+        const roundContext: ToolExecutionContext = steerWakeSignal || commandSandbox
+          ? {
+              ...toolContext,
+              ...(steerWakeSignal ? { wakeSignal: steerWakeSignal } : {}),
+              ...(commandSandbox ? { commandSandbox } : {}),
+            }
           : toolContext
         const outcomes = await Promise.all(group.map(async (decision, member) => {
           if (decision.kind !== 'allowed') return undefined
@@ -2130,16 +2374,20 @@ function linkAttemptSignal(signal: AbortSignal | undefined): AttemptSignal {
  * while waiting for the next chunk, so it cannot fire during tool execution,
  * and it is cleared on completion, error, and consumer-close paths.
  * Disabling the timer does not disable cancellation of an unresponsive stream.
+ * The first chunk gets `firstTimeoutMs`, which covers reading a long prompt.
  */
 async function* watchProviderStream(
   stream: AsyncIterable<LlmDelta>,
   timeoutMs: number,
   attempt: AttemptSignal,
+  firstTimeoutMs: number = timeoutMs,
 ): AsyncGenerator<LlmDelta> {
   const iterator = stream[Symbol.asyncIterator]()
+  let first = true
   try {
     while (true) {
-      const result = await nextDeltaWithTimeout(iterator, timeoutMs, attempt)
+      const result = await nextDeltaWithTimeout(iterator, first ? firstTimeoutMs : timeoutMs, attempt)
+      first = false
       if (result.done) {
         return
       }
@@ -2244,4 +2492,17 @@ function capabilitiesFor(
 ): { readonly concurrencySafe: boolean; readonly interruptBehavior: 'block' | 'cancel' } {
   return dependencies.capabilities?.(call.function.name, request.agentId, call.function.arguments)
     ?? { concurrencySafe: false, interruptBehavior: 'cancel' }
+}
+
+/**
+ * The permission gate's ports for one call: the data boundary whenever the host
+ * supplied one, and the run's safety floor in `auto` mode only.
+ */
+function permissionGateOptions(dependencies: TurnDependencies, mode: PermissionMode): PermissionGateOptions | undefined {
+  const runSafety = mode === 'auto' ? dependencies.runSafety : undefined
+  if (dependencies.dataBoundary === undefined && runSafety === undefined) return undefined
+  return {
+    ...(dependencies.dataBoundary === undefined ? {} : { boundary: dependencies.dataBoundary }),
+    ...(runSafety === undefined ? {} : { runSafety }),
+  }
 }

@@ -66,6 +66,9 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
       /too many tokens/i,
       /reduce.{0,8}messages/i,
       /prompt is too long/i,
+      // llama.cpp's server: "the request exceeds the available context size" (exceed_context_size_error).
+      /exceeds? the available context size/i,
+      /exceed_context_size/i,
       // Kimi / Moonshot: "Your request exceeded model token limit: 1048576 (requested: 1232443)".
       /exceeded.{0,32}model token limit/i,
     ],
@@ -81,6 +84,11 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
 ]
 
 const CONNECTION_CODES = new Set([
+  // Bun's fetch reports socket failures with its own codes rather than the
+  // errno names Node uses: a refused loopback port is `ConnectionRefused`.
+  'ConnectionRefused',
+  'ConnectionClosed',
+  'FailedToOpenSocket',
   'ECONNABORTED',
   'ECONNREFUSED',
   'ECONNRESET',
@@ -315,6 +323,7 @@ export function isRecoverableNetworkError(error: unknown, depth = 0): boolean {
   // for the network like a refused connection does, instead of failing the
   // task after five tries.
   return details.name === 'ConnectionError'
+    || details.name === 'ProviderConnectTimeoutError'
     || details.name === 'StreamInactivityError'
     || (details.code !== undefined && CONNECTION_CODES.has(details.code))
     || isFetchNetworkFailure(error, details.message)

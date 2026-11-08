@@ -4052,3 +4052,47 @@ test('a crash checkpoint after mid-turn compaction holds only the reply still be
     await rm(directory, { recursive: true, force: true })
   }
 }, 20_000)
+
+test('a sub-agent on a lean model gets the lean tools and prompt instead of the full bootstrap', async () => {
+  const tool = (name: string): ToolDefinition => ({
+    type: 'function',
+    function: { name, description: `${name} does one thing. A second sentence the lean profile drops.`, parameters: { type: 'object', properties: {} } },
+  })
+  const run = async (profile: 'lean' | 'full'): Promise<CompletionRequest> => {
+    const client = new ToolCapturingParentClient()
+    const registry = new ToolRegistry()
+    for (const name of ['ReadFile', 'WriteFile', 'GrepTool', 'TodoWriteTool', 'Workflow']) registry.register(tool(name), async () => '')
+    const seen: string[] = []
+    const host = createNativeSubagentHost({
+      agentDefinitions: BUILTIN_AGENTS,
+      cwd: process.cwd(),
+      eventBus: new DaemonSubagentEventBus(),
+      llm: client,
+      model: 'ternary-bonsai-2-27b',
+      permissionMode: 'accept-all',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+      promptProfileFor: model => { seen.push(model); return profile },
+    })
+    try {
+      const task = await host.managerPort.spawn({ message: 'Summarize the repo', promptProfile: 'coder', title: 'Lean child' })
+      await host.managerPort.wait([task.id], 1_000)
+      expect(seen).toContain('ternary-bonsai-2-27b')
+      return client.requests[0]!
+    } finally {
+      await host.manager.shutdown()
+    }
+  }
+  const system = (request: CompletionRequest): string => request.messages.filter(message => message.role === 'system').map(message => String(message.content)).join('\n')
+  const lean = await run('lean')
+  const leanTools = (lean.tools ?? []).map(entry => entry.function.name)
+  expect(system(lean)).toContain('You are Xerxes, an assistant for code and data work')
+  // The coder's own role prompt still rides along.
+  expect(system(lean)).toContain(BUILTIN_AGENTS.get('coder')!.systemPrompt.slice(0, 40))
+  expect(leanTools.every(name => ['ReadFile', 'WriteFile', 'GrepTool'].includes(name))).toBe(true)
+  expect(leanTools).not.toContain('TodoWriteTool')
+  for (const entry of lean.tools ?? []) expect(entry.function.description).not.toContain('second sentence')
+  const full = await run('full')
+  expect(system(full)).not.toContain('You are Xerxes, an assistant for code and data work')
+  expect(system(full).length).toBeGreaterThan(system(lean).length * 2)
+})

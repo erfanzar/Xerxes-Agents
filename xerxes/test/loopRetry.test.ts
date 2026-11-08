@@ -816,10 +816,14 @@ test('provider wait is visible before a silent request and cleared on failure', 
     })) events.push(event)
   })()
   await new Promise(resolve => setTimeout(resolve, 10))
-  expect(events.filter(event => event.type === 'provider_wait')).toEqual([{ type: 'provider_wait', active: true }])
+  // The wait carries a rough size of what the model must read first.
+  const waiting = { type: 'provider_wait' as const, active: true, promptTokens: expect.any(Number) as number }
+  expect(events.filter(event => event.type === 'provider_wait')).toEqual([waiting])
+  const firstWait = events.find(event => event.type === 'provider_wait')
+  expect(firstWait?.type === 'provider_wait' ? firstWait.promptTokens : 0).toBeGreaterThan(0)
   release.resolve()
   await pending
-  expect(events.filter(event => event.type === 'provider_wait')).toEqual([{ type: 'provider_wait', active: true }, { type: 'provider_wait', active: false }])
+  expect(events.filter(event => event.type === 'provider_wait')).toEqual([waiting, { type: 'provider_wait', active: false }])
 })
 
 test('a later overflow in the same turn is relieved again after a round completes', async () => {

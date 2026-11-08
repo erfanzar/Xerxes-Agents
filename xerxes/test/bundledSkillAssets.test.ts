@@ -33,7 +33,6 @@ const EXPECTED_BUNDLED_SKILLS = [
   "google-workspace",
   "grpo-rl-training",
   "ocr-and-documents",
-  "polymarket",
   "research-paper-writing",
   "youtube-content",
 ] as const;
@@ -183,16 +182,6 @@ test("build asset copier creates a discoverable native dist skill tree", async (
           "google-workspace",
           "references",
           "gmail-search-syntax.md",
-        ),
-      ),
-    ).toBeTrue();
-    expect(
-      existsSync(
-        join(
-          destinationDirectory,
-          "polymarket",
-          "references",
-          "api-endpoints.md",
         ),
       ),
     ).toBeTrue();

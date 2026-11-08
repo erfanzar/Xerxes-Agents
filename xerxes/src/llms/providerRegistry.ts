@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { modelsDev, type LiveCost } from './modelsDev.js'
-import { ConfigurationError } from '../core/errors.js'
+import { ConfigurationError, ValidationError } from '../core/errors.js'
 
 export type ProviderTransport = 'anthropic' | 'claude-code' | 'openai'
 
@@ -455,19 +455,160 @@ export function getProviderConfig(providerName: ProviderName): ProviderConfig {
   return PROVIDERS[providerName]
 }
 
-export function getApiKey(providerName: ProviderName, overrides: ProviderOverrides = {}, environment = process.env): string {
+/**
+ * The API key for a provider: an explicit `<provider>_api_key` override, else
+ * the provider's environment variable, else its placeholder default.
+ *
+ * `requestBaseUrl` is where the request will actually go. An environment key
+ * is ambient — the user exported it for that vendor — so it is attached only
+ * when the request goes to that provider's own registry host (or when no base
+ * URL override is given). A custom endpoint that merely falls back to the
+ * `openai` route therefore never receives `OPENAI_API_KEY`. Providers with no
+ * registry default (custom, azure, account-scoped gateways) name a variable
+ * that exists only for the user's chosen endpoint, so theirs is still sent.
+ * `XERXES_ALLOW_AMBIENT_KEY=1` restores the old behavior.
+ */
+export function getApiKey(
+  providerName: ProviderName,
+  overrides: ProviderOverrides = {},
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  requestBaseUrl?: string,
+): string {
   const configured = overrides[`${providerName}_api_key`]
   if (typeof configured === 'string' && configured) {
     return configured
   }
-  const providerConfig = PROVIDERS[providerName]
-  if (providerConfig.apiKeyEnv) {
+  const providerConfig: ProviderConfig = PROVIDERS[providerName]
+  if (providerConfig.apiKeyEnv && ambientApiKeyAllowed(providerName, requestBaseUrl, environment)) {
     const environmentValue = environment[providerConfig.apiKeyEnv]
     if (environmentValue) {
       return environmentValue
     }
   }
   return providerConfig.defaultApiKey ?? ''
+}
+
+/** Whether a provider's environment key may accompany a request to `requestBaseUrl`. */
+export function ambientApiKeyAllowed(
+  providerName: ProviderName,
+  requestBaseUrl: string | undefined,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  if (requestBaseUrl === undefined || !requestBaseUrl.trim()) return true
+  if (environment.XERXES_ALLOW_AMBIENT_KEY?.trim() === '1') return true
+  const own = (PROVIDERS[providerName] as ProviderConfig).baseUrl
+  if (!own) return true
+  const ownHost = httpHost(own)
+  return ownHost !== undefined && httpHost(requestBaseUrl) === ownHost
+}
+
+/**
+ * Why a request carries no key although one is exported: a one-line hint for
+ * a 401, or undefined when nothing was withheld.
+ */
+export function ambientApiKeyWithheldHint(
+  providerName: ProviderName,
+  requestBaseUrl: string | undefined,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string | undefined {
+  const variable = (PROVIDERS[providerName] as ProviderConfig).apiKeyEnv
+  if (!variable || !environment[variable]) return undefined
+  if (ambientApiKeyAllowed(providerName, requestBaseUrl, environment)) return undefined
+  const host = httpHost(requestBaseUrl ?? '') ?? 'this endpoint'
+  return `Xerxes withheld the ambient ${variable} from ${host} because it is not ${providerName}'s own host; `
+    + 'set an api_key on the profile or XERXES_ALLOW_AMBIENT_KEY=1.'
+}
+
+/** host[:port] of an http(s) URL, lowercased; undefined for anything else. */
+function httpHost(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.host.toLowerCase() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Default connect / response-headers timeout for a provider request. */
+export const DEFAULT_PROVIDER_CONNECT_TIMEOUT_MS = 15_000
+const MAX_PROVIDER_CONNECT_TIMEOUT_MS = 600_000
+const MAX_NETWORK_RETRIES_LIMIT = 100
+
+/** True for a base URL on this machine: localhost, 127.0.0.0/8, ::1, or a unix socket. */
+export function isLoopbackBaseUrl(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false
+  const trimmed = baseUrl.trim().toLowerCase()
+  if (trimmed.startsWith('unix:') || trimmed.startsWith('http+unix:')) return true
+  let hostname: string
+  try {
+    hostname = new URL(trimmed).hostname
+  } catch {
+    return false
+  }
+  hostname = hostname.replace(/^\[|\]$/g, '')
+  return hostname === 'localhost'
+    || hostname === '::1'
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+}
+
+/**
+ * How many times a turn retries a refused, reset or unreachable connection
+ * before it fails: a local server either answers or is down, so it gets 3;
+ * a remote route gets 6 (about a minute of backoff).
+ */
+export function defaultMaxNetworkRetries(baseUrl?: string): number {
+  return isLoopbackBaseUrl(baseUrl) ? 3 : 6
+}
+
+/** Parsed `runtime.provider` settings. */
+export interface ProviderNetworkConfig {
+  readonly connectTimeoutMs: number
+  /** Absent means {@link defaultMaxNetworkRetries} for the route's base URL. */
+  readonly maxNetworkRetries?: number
+}
+
+/**
+ * Parse `runtime.provider: { connect_timeout_ms, max_network_retries }`.
+ * `XERXES_PROVIDER_CONNECT_TIMEOUT_MS` / `XERXES_PROVIDER_MAX_NETWORK_RETRIES`
+ * win over the file. Invalid values throw a ValidationError naming the key.
+ */
+export function parseProviderNetworkConfig(
+  runtime: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ProviderNetworkConfig {
+  // `runtime.provider` is already the provider NAME in existing configs
+  // (runtimeConnection.ts reads it as a string), so the network settings live
+  // under `provider_network`. An object under `provider` is still accepted;
+  // a string there is the provider name and is ignored here, never an error.
+  const legacy = runtime.provider
+  const dedicated = runtime.provider_network
+  if (dedicated !== undefined && dedicated !== null && (typeof dedicated !== 'object' || Array.isArray(dedicated))) {
+    throw new ValidationError('provider_network', 'must be an object with connect_timeout_ms and/or max_network_retries', dedicated)
+  }
+  const legacySection = legacy !== null && typeof legacy === 'object' && !Array.isArray(legacy) ? legacy as Readonly<Record<string, unknown>> : {}
+  const file: Readonly<Record<string, unknown>> = { ...legacySection, ...((dedicated ?? {}) as Readonly<Record<string, unknown>>) }
+  const connectTimeoutMs = boundedInteger(
+    env.XERXES_PROVIDER_CONNECT_TIMEOUT_MS?.trim() || file.connect_timeout_ms,
+    env.XERXES_PROVIDER_CONNECT_TIMEOUT_MS?.trim() ? 'XERXES_PROVIDER_CONNECT_TIMEOUT_MS' : 'provider.connect_timeout_ms',
+    1,
+    MAX_PROVIDER_CONNECT_TIMEOUT_MS,
+  ) ?? DEFAULT_PROVIDER_CONNECT_TIMEOUT_MS
+  const maxNetworkRetries = boundedInteger(
+    env.XERXES_PROVIDER_MAX_NETWORK_RETRIES?.trim() || file.max_network_retries,
+    env.XERXES_PROVIDER_MAX_NETWORK_RETRIES?.trim() ? 'XERXES_PROVIDER_MAX_NETWORK_RETRIES' : 'provider.max_network_retries',
+    0,
+    MAX_NETWORK_RETRIES_LIMIT,
+  )
+  return { connectTimeoutMs, ...(maxNetworkRetries === undefined ? {} : { maxNetworkRetries }) }
+}
+
+function boundedInteger(raw: unknown, key: string, min: number, max: number): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  const value = typeof raw === 'string' ? Number(raw) : raw
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw new ValidationError(key, `must be an integer from ${min} to ${max}`, raw)
+  }
+  return value
 }
 
 export function providerDefaultHeaders(providerName: ProviderName): Record<string, string> {

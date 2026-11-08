@@ -859,3 +859,24 @@ test('Claude Code giving up on a dropped connection waits for the network, like 
   expect(isRecoverableNetworkError(claudeCodeFailure('API Error: 500 Internal server error', 500))).toBe(false)
   expect(isRecoverableNetworkError(claudeCodeFailure('Invalid API key'))).toBe(false)
 })
+
+test('an empty pre-calls wrapper the model writes is dropped, and the call after it still runs', () => {
+  const preOpen = '<' + 'pre_tool_calls>'
+  const preClose = '</' + 'pre_tool_calls>'
+  const blockOpen = '<' + 'tool_calls>'
+  const blockClose = '</' + 'tool_calls>'
+  // As one chunk, and split across chunks at every position.
+  const reply = `Checking the lanes.\n${preOpen} ${preClose}\n${blockOpen}\n<function=Bash>{"command":"ls"}</function>\n${blockClose}`
+  for (let split = 0; split <= reply.length; split += 1) {
+    const extractor = new FunctionCallExtractor()
+    const visible = extractor.push(reply.slice(0, split)) + extractor.push(reply.slice(split)) + extractor.finish()
+    expect({ split, visible: visible.trim(), calls: extractor.calls }).toEqual({ split, visible: 'Checking the lanes.', calls: [{ name: 'Bash', arguments: { command: 'ls' } }] })
+  }
+  // A wrapper with no calls after it leaves only the prose.
+  const bare = new FunctionCallExtractor()
+  expect((bare.push(`Done.\n${preOpen} ${preClose}\nMore text.`) + bare.finish()).replace(/\s+/g, ' ').trim()).toBe('Done. More text.')
+  expect(bare.calls).toEqual([])
+  // Quoted in backticks it is being written about, so it stays visible.
+  const quoted = new FunctionCallExtractor()
+  expect(quoted.push('The tag `' + preOpen + '` leaked.') + quoted.finish()).toBe('The tag `' + preOpen + '` leaked.')
+})

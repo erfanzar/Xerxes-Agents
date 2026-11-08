@@ -4,7 +4,7 @@ The native implementation is a Bun/TypeScript event pipeline. Every public surfa
 same serializable turn and protocol contracts rather than starting a second runtime.
 
 ```text
-CLI / OpenTUI / channel / HTTP API / ACP
+CLI / OpenTUI / channel / ACP
                 |
                 v
       bootstrap + session projection
@@ -28,8 +28,8 @@ CLI / OpenTUI / channel / HTTP API / ACP
 | Runtime | `runtime/` | Bootstrap, profiles, budgets, sessions, diagnostics, update/install planning. |
 | Executors and tools | `executors/`, `tools/` | Schema lookup, policy/permission gates, native operations, host ports. |
 | State | `session/`, `memory/`, `context/` | Durable transcripts, replay, retrieval, bounded prompt context. |
-| Services | `daemon/`, `api-server/`, `acp/`, `mcp/` | v35 local protocol, OpenAI-compatible API, ACP, MCP transports. |
-| Integrations | `channels/`, `extensions/`, `cortex/`, `skills/` | Channels, plugins, skills, topology orchestration, native skill modules. |
+| Services | `daemon/`, `api-server/`, `acp/`, `mcp/` | v35 local protocol, provider relay request parsing, ACP, MCP client transports. |
+| Integrations | `channels/`, `extensions/`, `cortex/`, `skills/` | Channels, plugins, skills, the hybrid execution planner, native skill modules. |
 | Terminal client | `xerxes/src/ui/` | React + OpenTUI renderer and v35 gateway client. |
 
 ## Turn lifecycle

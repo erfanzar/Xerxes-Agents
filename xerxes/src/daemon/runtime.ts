@@ -36,6 +36,7 @@ import {
 } from "../tools/fileState.js";
 import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
+import { DEFAULT_PERMISSION_MODE } from "../streaming/permissions.js";
 import { steerMessage, steerText, type SteerAuthor, type SteerInput } from "../streaming/steer.js";
 import type { XerxesActor } from "../types/messages.js";
 import { applyInteractionRecords, authorSummary } from "./collaboration.js";
@@ -430,6 +431,11 @@ export interface DaemonRuntime {
     options?: OpenSessionOptions,
   ): Promise<DaemonSession>;
   reload(overrides?: JsonRpcPayload): JsonRpcPayload;
+  /**
+   * The full runtime settings in effect: the config file's `runtime` section
+   * plus every reload since. `status()` reports only a fixed subset.
+   */
+  settings?(): JsonRpcPayload;
   setSessionMode(
     sessionKey: string,
     mode: string,
@@ -1290,6 +1296,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     }
   }
 
+  settings(): JsonRpcPayload {
+    return { ...this.runtimeSettings };
+  }
+
   reload(overrides: JsonRpcPayload = {}): JsonRpcPayload {
     if (overrides.reflection !== undefined && overrides.reflection !== null
       && !['goals', 'all', 'off'].includes(String(overrides.reflection))) {
@@ -1638,7 +1648,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       base_url: stringValue(this.runtimeSettings.base_url),
       provider: stringValue(this.runtimeSettings.provider),
       permission_mode:
-        stringValue(this.runtimeSettings.permission_mode) || "accept-all",
+        stringValue(this.runtimeSettings.permission_mode) || DEFAULT_PERMISSION_MODE,
       ...sampling,
       ...(typeof this.runtimeSettings.thinking === "boolean"
         ? { thinking: this.runtimeSettings.thinking }

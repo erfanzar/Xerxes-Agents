@@ -163,7 +163,7 @@ machine, open its folder with VS Code Remote-SSH; the extension runs there.
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Native OpenTUI         | React 19 interface with streaming Markdown, thinking, compact tool activity, queues, overlays, and keyboard-first input |
 | Bring your provider    | Provider profiles for hosted APIs, local backends, and custom OpenAI-compatible endpoints                               |
-| Permission modes       | YOLO by default, plus automatic, manual, plan, and explicit allow/deny workflows                                        |
+| Permission modes       | Automatic by default with locked inputs and a command sandbox, plus YOLO, manual, plan, and allow/deny workflows       |
 | Persistent sessions    | Resume, branch, compact, search, replay, snapshot, and roll back project-scoped work                                    |
 | Sub-agents             | YAML-defined specialists with inheritance, scoped tools, delegation, and live progress                                  |
 | Skills and MCP         | Recursive `SKILL.md` discovery plus explicit MCP server integration                                                     |
@@ -239,10 +239,15 @@ simple questions, one-step changes, and tightly coupled edits stay in the main a
 The same native delegation surface is available in the TUI, one-shot CLI, daemon, and
 ACP server.
 
-YOLO mode (`accept-all`) is the default permission mode and is shown beside the
-active model while enabled. Use `/yolo` to switch between YOLO and automatic
-approval routing, or `/permissions` to select `accept-all`, `auto`, `manual`, or
-`plan` explicitly. Static tool-policy denials still take precedence.
+`auto` is the default permission mode. Reads and read-only commands run without
+asking, and so do new files written in the working folder. Files that were already
+in the folder when the task started are inputs: editing one asks first. On macOS
+(Seatbelt) and Linux (bubblewrap), `exec_command` runs in a sandbox with no
+network that can't change those inputs, so commands run without asking too. One-shot
+runs refuse anything that would ask and say why. Use `/yolo` to switch to YOLO
+(`accept-all`), which runs everything unsandboxed and is shown beside the active
+model, or `/permissions` to select `accept-all`, `auto`, `manual`, or `plan`.
+Static tool-policy denials still take precedence.
 
 ## Configure a provider
 
@@ -327,11 +332,6 @@ xerxes export [session]
 # Invoke a skill without opening the TUI
 xerxes skill <skill> [arguments]
 ```
-
-The OpenAI-compatible HTTP server is an embeddable Bun handler rather than an implicit
-background command. Hosts inject their model client, model catalogue, authentication,
-CORS, and rate-limit policy before listening. See the
-[API reference](docs/api-reference.md).
 
 ## How it fits together
 
@@ -428,7 +428,6 @@ Container deployment is documented in the
 - [Desktop workspace](docs/desktop-workspace.md)
 - [Configuration](docs/configuration-guide.md)
 - [Deployment](docs/deployment-guide.md)
-- [API reference](docs/api-reference.md)
 - [System architecture](docs/system-architecture.md)
 - [Testing](docs/testing-guide.md)
 - [Contributing](docs/contributing.md)

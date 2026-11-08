@@ -74,17 +74,27 @@ import { messageText, messagesToOpenAi } from '../types/messages.js'
 import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
 import { isJsonObject, parseToolArguments } from '../types/toolCalls.js'
 import {
+  type ProviderConfig,
   type ProviderName,
   type ProviderOverrides,
+  ambientApiKeyWithheldHint,
   bareModel,
   getApiKey,
+  parseProviderNetworkConfig,
   getProviderConfig,
+  isLoopbackBaseUrl,
   isProviderName,
   providerDefaultHeaders,
   providerModel,
   resolveProvider,
 } from './providerRegistry.js'
-import { DEFAULT_TEMPERATURE } from './samplingDefaults.js'
+import { assertNotLocalOnly, localOnlyActive, localOnlyRefusal } from '../runtime/localOnly.js'
+import {
+  DEFAULT_TEMPERATURE,
+  publishedSampling,
+  publishedSamplingProfile,
+} from './samplingDefaults.js'
+import type { PublishedSampling } from './modelCards.js'
 import type { SystemPromptSegment } from '../streaming/promptCaching.js'
 
 export interface TokenUsage {
@@ -253,9 +263,127 @@ export interface LlmClient {
 
 export type FetchImplementation = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+/**
+ * A provider endpoint that did not answer a streamed request with response
+ * headers in time: a refused-but-silent, firewalled or hung server. Classified
+ * as a recoverable network failure, so the turn's capped network retries apply.
+ */
+export class ProviderConnectTimeoutError extends Error {
+  readonly host: string
+  readonly timeoutMs: number
+
+  constructor(host: string, timeoutMs: number, options?: { readonly cause?: unknown }) {
+    super(`cannot reach ${host} within ${formatTimeoutSeconds(timeoutMs)}`, options)
+    this.name = 'ProviderConnectTimeoutError'
+    this.host = host
+    this.timeoutMs = timeoutMs
+  }
+}
+
+function formatTimeoutSeconds(milliseconds: number): string {
+  const seconds = milliseconds / 1_000
+  return `${Number.isInteger(seconds) ? seconds : Number(seconds.toFixed(2))}s`
+}
+
+const connectTimeoutWrapped = new WeakSet<FetchImplementation>()
+
+/**
+ * The connect / response-headers timeout for this client: an explicit option
+ * (0 disables it), else a `connect_timeout_ms` override, else
+ * `XERXES_PROVIDER_CONNECT_TIMEOUT_MS`, else 15 s.
+ */
+export function resolveConnectTimeoutMs(
+  option?: number,
+  override?: unknown,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  if (option !== undefined) {
+    if (!Number.isFinite(option) || option < 0) {
+      throw new ConfigurationError('connect_timeout_ms', `must be a non-negative number of milliseconds, got ${String(option)}`)
+    }
+    return option
+  }
+  if (override !== undefined && override !== null) {
+    return parseProviderNetworkConfig({ provider: { connect_timeout_ms: override } }, {}).connectTimeoutMs
+  }
+  return parseProviderNetworkConfig({}, environment).connectTimeoutMs
+}
+
+/**
+ * Bound how long a streamed provider request may wait for response headers.
+ *
+ * Only streamed requests (`Accept: text/event-stream` or NDJSON) are bounded:
+ * a non-streaming completion legitimately sends its headers only once the
+ * whole reply is generated, and {@link completeLlm}'s deadline covers those.
+ * The caller's signal still aborts at once and is reported as the caller's
+ * abort, never as a timeout.
+ */
+export function withConnectTimeout(fetchImplementation: FetchImplementation, timeoutMs: number): FetchImplementation {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs) || connectTimeoutWrapped.has(fetchImplementation)) {
+    return fetchImplementation
+  }
+  const wrapped: FetchImplementation = async (input, init) => {
+    if (!expectsStreamedResponse(init)) return fetchImplementation(input, init)
+    const callerSignal = init?.signal ?? undefined
+    callerSignal?.throwIfAborted()
+    const timeout = new AbortController()
+    const signal = callerSignal ? AbortSignal.any([callerSignal, timeout.signal]) : timeout.signal
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new ProviderConnectTimeoutError(requestHost(input), timeoutMs)
+        timeout.abort(error)
+        reject(error)
+      }, timeoutMs)
+    })
+    // The race also bounds an injected fetch that ignores its signal.
+    expired.catch(() => undefined)
+    try {
+      return await Promise.race([fetchImplementation(input, { ...init, signal }), expired])
+    } catch (error) {
+      if (timeout.signal.aborted && callerSignal?.aborted !== true) {
+        const reason: unknown = timeout.signal.reason
+        throw reason instanceof ProviderConnectTimeoutError
+          ? reason
+          : new ProviderConnectTimeoutError(requestHost(input), timeoutMs, { cause: error })
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  connectTimeoutWrapped.add(wrapped)
+  return wrapped
+}
+
+function expectsStreamedResponse(init: RequestInit | undefined): boolean {
+  let accept = ''
+  try {
+    accept = new Headers(init?.headers ?? undefined).get('accept') ?? ''
+  } catch {
+    return false
+  }
+  return /text\/event-stream|ndjson/i.test(accept)
+}
+
+function requestHost(input: RequestInfo | URL): string {
+  try {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    return url.port ? url.host : `${url.hostname}:${url.protocol === 'http:' ? 80 : 443}`
+  } catch {
+    return 'the provider endpoint'
+  }
+}
+
 export interface OpenAiCompatibleClientOptions {
   readonly apiKey?: string
   readonly baseUrl?: string
+  /**
+   * Milliseconds a streamed request may wait for response headers before it
+   * fails as unreachable; 0 disables. Defaults to `connect_timeout_ms`,
+   * `XERXES_PROVIDER_CONNECT_TIMEOUT_MS`, then 15 s.
+   */
+  readonly connectTimeoutMs?: number
   readonly fetchImplementation?: FetchImplementation
   /** Enable Anthropic ephemeral prompt-cache breakpoints when that transport is selected. */
   readonly promptCaching?: boolean
@@ -342,13 +470,21 @@ export class OpenAiCompatibleClient implements LlmClient {
   private readonly resolveAuthHeaders:
     | ((signal?: AbortSignal, request?: CompletionRequest) => Promise<Record<string, string>>)
     | undefined
+  /** Appended to a 401 when an exported key was withheld from this host. */
+  private readonly ambientKeyHint: string | undefined
 
   constructor(options: OpenAiCompatibleClientOptions) {
     const providerConfig = getProviderConfig(options.providerName)
     this.providerName = options.providerName
-    this.apiKey = options.apiKey ?? getApiKey(options.providerName)
+    this.apiKey = options.apiKey ?? getApiKey(options.providerName, {}, process.env, options.baseUrl)
+    this.ambientKeyHint = options.apiKey === undefined && !options.resolveAuthHeaders
+      ? ambientApiKeyWithheldHint(options.providerName, options.baseUrl)
+      : undefined
     this.baseUrl = options.baseUrl ?? providerConfig.baseUrl ?? ''
-    this.fetchImplementation = options.fetchImplementation ?? fetch
+    this.fetchImplementation = withConnectTimeout(
+      options.fetchImplementation ?? fetch,
+      resolveConnectTimeoutMs(options.connectTimeoutMs),
+    )
     this.resolveAuthHeaders = options.resolveAuthHeaders
 
     if (!this.baseUrl) {
@@ -388,6 +524,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         this.providerName,
         `completion request failed (${response.status}): ${httpErrorBody(body)}`,
         response,
+        this.ambientKeyHint,
         request.model,
       )
     }
@@ -436,6 +573,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         this.providerName,
         `stream request failed (${response.status}): ${httpErrorBody(body)}`,
         response,
+        this.ambientKeyHint,
         request.model,
       )
     }
@@ -529,13 +667,21 @@ export class ResponsesApiClient implements LlmClient {
     | ((signal?: AbortSignal, request?: CompletionRequest) => Promise<Record<string, string>>)
     | undefined
   private readonly codexTransport: 'auto' | 'sse' | 'websocket' | 'websocket-cached' | undefined
+  /** Appended to a 401 when an exported key was withheld from this host. */
+  private readonly ambientKeyHint: string | undefined
 
   constructor(options: OpenAiCompatibleClientOptions) {
     const providerConfig = getProviderConfig(options.providerName)
     this.providerName = options.providerName
-    this.apiKey = options.apiKey ?? getApiKey(options.providerName)
+    this.apiKey = options.apiKey ?? getApiKey(options.providerName, {}, process.env, options.baseUrl)
+    this.ambientKeyHint = options.apiKey === undefined && !options.resolveAuthHeaders
+      ? ambientApiKeyWithheldHint(options.providerName, options.baseUrl)
+      : undefined
     this.baseUrl = options.baseUrl ?? providerConfig.baseUrl ?? ''
-    this.fetchImplementation = options.fetchImplementation ?? fetch
+    this.fetchImplementation = withConnectTimeout(
+      options.fetchImplementation ?? fetch,
+      resolveConnectTimeoutMs(options.connectTimeoutMs),
+    )
     this.resolveAuthHeaders = options.resolveAuthHeaders
     this.codexTransport = options.codexTransport
     if (!this.baseUrl) {
@@ -583,6 +729,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API completion request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        this.ambientKeyHint,
         request.model,
       )
     }
@@ -615,6 +762,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        this.ambientKeyHint,
         request.model,
       )
     }
@@ -777,6 +925,7 @@ export class ResponsesApiClient implements LlmClient {
         this.providerName,
         'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body),
         response,
+        this.ambientKeyHint,
         request.model,
       )
     }
@@ -825,7 +974,13 @@ function codexAssistantResponseItems(
 }
 
 /** Preserve HTTP retry metadata without mixing provider headers into user-facing messages. */
-function openAiHttpError(provider: ProviderName, message: string, response: Response, model?: string): ProviderError {
+function openAiHttpError(
+  provider: ProviderName,
+  message: string,
+  response: Response,
+  ambientKeyHint?: string,
+  model?: string,
+): ProviderError {
   const retryAfterSeconds = parseRetryAfterHeader(response.headers.get('retry-after'))
   // A provider refusing a request for its size usually states its window
   // (Kimi: "exceeded model token limit: 1048576"). Kept as what the provider
@@ -833,6 +988,8 @@ function openAiHttpError(provider: ProviderName, message: string, response: Resp
   // turn's threshold check fires before the window fills again.
   const contextLimit = model !== undefined && response.status === 400 ? reportedContextLimit(message) : undefined
   if (model !== undefined && contextLimit !== undefined) reportModelCapability(provider, model, { contextLimit })
+  // A 401 from a host the exported key was withheld from: say why, once.
+  if (response.status === 401 && ambientKeyHint) message = `${message}\n${ambientKeyHint}`
   return new ProviderError(provider, message, undefined, {
     status: response.status,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
@@ -860,6 +1017,8 @@ export function createLlmClient(
 ): LlmClient {
   model = requireConfiguredModel(model)
   const pluginProvider = selectedPluginProvider(model, overrides, options.pluginRegistry)
+  // A plugin provider runs its own transport, outside the local-only guard.
+  if (pluginProvider) assertNotLocalOnly(`plugin provider ${pluginProvider.name} for ${model}`)
   if (pluginProvider) {
     const client = pluginProvider.factory.createClient({
       model: bareModel(model),
@@ -886,7 +1045,21 @@ export function createLlmClient(
     : typeof overrides.custom_base_url === 'string'
       ? overrides.custom_base_url
       : options.baseUrl
+  // Fully local mode builds a client only for a model served on this machine.
+  // This also refuses Claude Code, Bedrock and Vertex, whose transports are
+  // not the guarded fetch.
+  if (localOnlyActive() && !isLoopbackBaseUrl(configuredBaseUrl ?? providerConfig.baseUrl)) {
+    throw localOnlyRefusal(`the model ${model} (provider ${providerName}), which is not served on this machine`)
+  }
   const subscriptionAuth = subscriptionAuthApplies(providerConfig.baseUrl, configuredApiKey, configuredBaseUrl)
+  // One connect / response-headers bound for every transport this factory
+  // builds, so a dead endpoint fails in seconds instead of hanging the turn.
+  const connectTimeoutMs = resolveConnectTimeoutMs(options.connectTimeoutMs, overrides.connect_timeout_ms)
+  options = {
+    ...options,
+    connectTimeoutMs,
+    fetchImplementation: withConnectTimeout(options.fetchImplementation ?? fetch, connectTimeoutMs),
+  }
   if (providerConfig.transport === 'anthropic') {
     // The subscription session is consulted per request; a missing session
     // falls back to the ordinary API-key path untouched (pi-ai resolution
@@ -897,8 +1070,19 @@ export function createLlmClient(
     const anthropicOAuth = providerConfig.name === 'anthropic' && subscriptionAuth
       ? options.anthropicOAuthSession ?? new AnthropicOAuthSession()
       : undefined
+    // The Anthropic adapter's own fallback reads ANTHROPIC_API_KEY whatever
+    // the host, so the key is resolved here: this provider's variable, and
+    // only toward its own host (or with XERXES_ALLOW_AMBIENT_KEY=1).
+    const anthropicKey = configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl)
+    if (!anthropicKey && !anthropicOAuth) {
+      const variable = (providerConfig as ProviderConfig).apiKeyEnv ?? `${providerName}_api_key`
+      throw new ConfigurationError(
+        variable,
+        ambientApiKeyWithheldHint(providerName, configuredBaseUrl) ?? `${providerName} API key not provided`,
+      )
+    }
     return new AnthropicMessagesClient({
-      ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
+      ...(anthropicKey ? { apiKey: anthropicKey } : {}),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
       ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
       ...(options.promptCaching === undefined ? {} : { promptCaching: options.promptCaching }),
@@ -1028,7 +1212,9 @@ export function createLlmClient(
   }
   if (providerName === 'mistral') {
     return new MistralClient({
-      ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
+      // Resolved here (MISTRAL_API_KEY only toward Mistral's own host); an
+      // empty key makes the adapter fail with its missing-key error.
+      apiKey: configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
       ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
     })
@@ -1150,8 +1336,11 @@ function routeMultiApiProvider(
   const entry = wireCapability({ provider: providerName, model, ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}) })
   if (!entry.api) return undefined
   const baseUrl = configuredBaseUrl ?? entry.apiBaseUrl ?? gatewayBaseUrl(providerName, entry.api)
+  // A catalog- or registry-derived URL is the gateway's own endpoint, so its
+  // environment key may go there; only a user override is checked by host.
+  const resolvedApiKey = configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl)
   const shared = {
-    ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
+    ...(resolvedApiKey ? { apiKey: resolvedApiKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
   }
@@ -1159,6 +1348,10 @@ function routeMultiApiProvider(
     case 'anthropic-messages':
       return new AnthropicMessagesClient({
         ...shared,
+        // The adapter's own fallback is ANTHROPIC_API_KEY, which belongs to
+        // Anthropic, not this gateway: resolve the gateway's key (only toward
+        // its own host) and pass it, even when empty, to stop that fallback.
+        apiKey: resolvedApiKey,
         ...(options.promptCaching === undefined ? {} : { promptCaching: options.promptCaching }),
       })
     case 'openai-responses':
@@ -1416,7 +1609,7 @@ export function getLlmModelInfo(
   return {
     provider: resolveProvider(model, overrides),
     model,
-    temperature: options.temperature ?? DEFAULT_TEMPERATURE,
+    temperature: options.temperature ?? publishedSampling(model, 'thinking')?.temperature ?? DEFAULT_TEMPERATURE,
     maxTokens: options.maxTokens ?? 2_048,
     ...(options.contextLimit === undefined ? {} : { maxModelLen: options.contextLimit }),
     stream: options.stream ?? false,
@@ -2083,6 +2276,11 @@ function addSampling(
       }
     }
   }
+  const published = publishedSamplingProfile(request.model)
+  if (published) {
+    addPublishedSampling(payload, request, providerName, published)
+    return
+  }
   if (!supportsExtendedSampling(providerName)) {
     return
   }
@@ -2095,6 +2293,47 @@ function addSampling(
   if (request.repetitionPenalty !== undefined) {
     payload.repetition_penalty = request.repetitionPenalty
   }
+}
+
+/**
+ * Send a model's whole published sampling profile, as its maker asks. MLX and
+ * llama.cpp servers (LM Studio included) do not read `generation_config.json`,
+ * so a field left out is the engine's own default, not the model's. Values
+ * the request or its extra body already set are kept. The non-thinking values
+ * apply only when this payload turns thinking off.
+ */
+function addPublishedSampling(
+  payload: Record<string, unknown>,
+  request: CompletionRequest,
+  providerName: ProviderName,
+  profile: PublishedSampling,
+): void {
+  const values = wireDisablesThinking(payload) ? profile.instruct : profile.thinking
+  if (
+    request.temperature === undefined
+    && payload.temperature === undefined
+    && supportsTemperature(providerName, request.model, values.temperature)
+  ) {
+    payload.temperature = values.temperature
+  }
+  payload.top_p ??= values.topP
+  payload.top_k ??= request.topK ?? values.topK
+  payload.min_p ??= request.minP ?? values.minP
+  payload.presence_penalty ??= values.presencePenalty
+  const repetition = request.repetitionPenalty ?? values.repetitionPenalty
+  // vLLM, MLX servers and OpenRouter read `repetition_penalty`; llama.cpp and
+  // LM Studio read `repeat_penalty`. Each ignores the other's name.
+  payload.repetition_penalty ??= repetition
+  payload.repeat_penalty ??= repetition
+}
+
+/** Whether this payload turns the model's thinking off, in any form an OpenAI-compatible server reads. */
+function wireDisablesThinking(payload: Readonly<Record<string, unknown>>): boolean {
+  if (payload.enable_thinking === false) return true
+  const kwargs = payload.chat_template_kwargs
+  if (typeof kwargs === 'object' && kwargs !== null && (kwargs as Record<string, unknown>).enable_thinking === false) return true
+  const thinking = payload.thinking
+  return typeof thinking === 'object' && thinking !== null && (thinking as Record<string, unknown>).type === 'disabled'
 }
 
 const OPENAI_COMPATIBLE_RESERVED_BODY_FIELDS = new Set([

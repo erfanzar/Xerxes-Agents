@@ -304,8 +304,10 @@ test('production core tools keep bootstrap prompt below its non-duplicated schem
   const tools = registry.definitions()
   const prompt = buildBootstrapSystemPrompt({ cwd: '/workspace' }, '', tools)
 
-  // Includes the validated repository setup authoring tool.
-  expect(tools).toHaveLength(33)
+  // Includes the validated repository setup authoring tool and the native
+  // XlsxWriter/XlsxReader pair. The math, text and system groups are off by
+  // default (runtime.extra_tools).
+  expect(tools).toHaveLength(23)
   // The ceiling guards against tool JSON Schemas leaking into the prompt, which
   // costs kilobytes per regression — not against doctrine or tool descriptions,
   // which are the prompt's actual job. Raise it deliberately when real content

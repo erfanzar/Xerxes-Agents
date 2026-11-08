@@ -41,8 +41,8 @@ export const DEFAULT_SETUP_STEPS: readonly SetupStep[] = Object.freeze([
   },
   {
     key: 'permission_mode',
-    prompt: 'Permission mode [accept-all/auto/manual]',
-    default: 'accept-all',
+    prompt: 'Permission mode [auto/accept-all/manual]',
+    default: 'auto',
   },
   {
     key: 'enable_voice',

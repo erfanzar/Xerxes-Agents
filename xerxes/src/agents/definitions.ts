@@ -317,7 +317,7 @@ function markdownTools(value: YamlValue | undefined, source: string): string[] {
     Bash: ['exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
       'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close'],
     Agent: ['AgentTool', 'SpawnAgents', 'TaskCreateTool'], Task: ['AgentTool', 'SpawnAgents', 'TaskCreateTool'],
-    Skill: ['SkillTool'], WebSearch: ['DuckDuckGoSearch'], WebFetch: ['URLAnalyzer'],
+    Skill: ['SkillTool'], WebSearch: ['DuckDuckGoSearch'], WebFetch: ['WebScraper'],
     TodoWrite: ['TodoWriteTool'], NotebookEdit: ['NotebookEditTool'],
   }
   return [...new Set(markdownList(value, source).flatMap(name => {
@@ -597,12 +597,12 @@ function basenameWithoutExtension(path: string): string {
 function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
   const standardTools = [
     'ReadFile', 'WriteFile', 'FileEditTool', 'GlobTool', 'GrepTool', 'ListDir',
-    'exec_command', 'write_stdin', 'list_terminal_sessions', 'close_terminal_session',
-    'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close',
-    'DuckDuckGoSearch', 'computer_use', 'AgentTool', 'PlanTool', 'SpawnAgents', 'Workflow', 'SendMessageTool',
+    'exec_command', 'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close',
+    'DuckDuckGoSearch', 'WebScraper', 'RSSReader', 'CSVProcessor', 'XlsxReader', 'XlsxWriter',
+    'computer_use', 'AgentTool', 'PlanTool', 'SpawnAgents', 'Workflow', 'SendMessageTool',
     'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',
-    'HandoffTool', 'AskUserQuestionTool', 'SetInteractionModeTool', 'get_goal',
+    'HandoffTool', 'AskUserQuestionTool', 'AskAdvisor', 'SetInteractionModeTool', 'get_goal',
     'create_goal', 'update_goal', 'SkillTool', 'TodoWriteTool', 'ToolSearchTool', 'create_project_setup',
     'session_search', 'NotebookEditTool',
   ]
@@ -685,7 +685,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
       systemPrompt: 'You are a research assistant focused on understanding codebases and providing evidence-based answers.',
       model: '',
       tools: [],
-      allowedTools: ['ReadFile', 'GlobTool', 'GrepTool', 'ListDir', 'DuckDuckGoSearch', 'SetInteractionModeTool'],
+      allowedTools: ['ReadFile', 'GlobTool', 'GrepTool', 'ListDir', 'DuckDuckGoSearch', 'WebScraper', 'SetInteractionModeTool'],
       excludeTools: [],
       source: 'built-in',
       maxDepth: 5,

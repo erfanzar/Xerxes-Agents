@@ -16,9 +16,6 @@ agent:
     Use this agent when the user gives a measurable outcome and expects the agent to keep trying until tests, benchmarks, or explicit acceptance criteria pass.
   tools:
     - exec_command
-    - write_stdin
-    - list_terminal_sessions
-    - close_terminal_session
     - check_command
     - list_commands
     - kill_command
@@ -62,9 +59,6 @@ agent:
     - agent_memory_journal
   allowed_tools:
     - exec_command
-    - write_stdin
-    - list_terminal_sessions
-    - close_terminal_session
     - ReadFile
     - WriteFile
     - FileEditTool
