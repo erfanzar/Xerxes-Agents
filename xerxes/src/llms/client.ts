@@ -81,11 +81,13 @@ import {
   getApiKey,
   parseProviderNetworkConfig,
   getProviderConfig,
+  isLoopbackBaseUrl,
   isProviderName,
   providerDefaultHeaders,
   providerModel,
   resolveProvider,
 } from './providerRegistry.js'
+import { assertNotLocalOnly, localOnlyActive, localOnlyRefusal } from '../runtime/localOnly.js'
 import {
   DEFAULT_TEMPERATURE,
   publishedSampling,
@@ -993,6 +995,8 @@ export function createLlmClient(
 ): LlmClient {
   model = requireConfiguredModel(model)
   const pluginProvider = selectedPluginProvider(model, overrides, options.pluginRegistry)
+  // A plugin provider runs its own transport, outside the local-only guard.
+  if (pluginProvider) assertNotLocalOnly(`plugin provider ${pluginProvider.name} for ${model}`)
   if (pluginProvider) {
     const client = pluginProvider.factory.createClient({
       model: bareModel(model),
@@ -1019,6 +1023,12 @@ export function createLlmClient(
     : typeof overrides.custom_base_url === 'string'
       ? overrides.custom_base_url
       : options.baseUrl
+  // Fully local mode builds a client only for a model served on this machine.
+  // This also refuses Claude Code, Bedrock and Vertex, whose transports are
+  // not the guarded fetch.
+  if (localOnlyActive() && !isLoopbackBaseUrl(configuredBaseUrl ?? providerConfig.baseUrl)) {
+    throw localOnlyRefusal(`the model ${model} (provider ${providerName}), which is not served on this machine`)
+  }
   const subscriptionAuth = subscriptionAuthApplies(providerConfig.baseUrl, configuredApiKey, configuredBaseUrl)
   // One connect / response-headers bound for every transport this factory
   // builds, so a dead endpoint fails in seconds instead of hanging the turn.

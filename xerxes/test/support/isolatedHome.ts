@@ -21,4 +21,7 @@ process.env.XERXES_HOME = home
 // Choosing Claude Code installs it when missing; a test must never reach the
 // network or the developer's Bun globals. Installer tests inject their runner.
 process.env.XERXES_AUTO_INSTALL_CLAUDE_CODE = '0'
+// A daemon started by a test (and its children) would otherwise run the
+// developer's `claude update` at every start.
+process.env.XERXES_CLAUDE_CODE_AUTOUPDATE = '0'
 process.on('exit', () => { rmSync(home, { recursive: true, force: true }) })

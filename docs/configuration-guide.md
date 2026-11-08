@@ -643,6 +643,7 @@ Useful process-level overrides include:
 | `XERXES_BASE_URL` | Runtime provider base URL. |
 | `XERXES_PERMISSION_MODE` | Runtime permission mode (`auto` by default; also `accept-all`, `manual`, or `plan`). |
 | `XERXES_EXTRA_TOOLS` | Comma-separated tool groups to turn on; wins over `runtime.extra_tools` (see below). |
+| `XERXES_LOCAL_ONLY` | `1` turns on fully local mode, `0` turns it off; wins over `runtime.local_only` (see below). |
 
 **Extra tool groups.** These tools are off by default. Code does their work, and every tool's
 schema is sent with every request. Turn groups on with `runtime.extra_tools` (a list) or
@@ -653,6 +654,31 @@ schema is sent with every request. Turn groups on with `runtime.extra_tools` (a 
 - `memory`: the older `save_memory` and `search_memory` store, next to the markdown memory.
 
 Run `bun run xerxes daemon --project-dir .` to use the native daemon with an explicit workspace.
+
+### Fully local mode
+
+`runtime.local_only: true` (or `XERXES_LOCAL_ONLY=1`) makes Xerxes reach only this machine. The
+daemon, one-shot runs, `--resume` and `xerxes acp` read it at start.
+- **Requests:** `fetch` and WebSockets reach only `localhost`, `127.0.0.0/8`, `::1` and unix
+  sockets. Anything else fails at once with `Configuration local_only: fully local mode refuses …`,
+  naming the address but not its path or query.
+- **Models:** a model client is built only for a model served on this machine. A cloud profile, a
+  sub-agent on a cloud model, the advisor, Claude Code, Bedrock and Vertex are refused before they
+  start, and sub-agents are offered only local profiles.
+- **Off in this mode:** the models.dev catalogue, Claude Code updates and installs, the web tools and
+  image generation, WebSocket monitors to other hosts, git fetch, pull and push, plugin clones,
+  and asking Claude Code for its models. Edit diagnostics use only installed tools
+  (`bunx --no-install`, `cargo --offline`).
+- **Remote MCP servers** over HTTP are refused; a loopback one still needs `allowPrivateNetwork`.
+- **Tested:** `test/localOnly.test.ts` starts the real one-shot CLI and daemon with this setting,
+  lists models and runs a turn, and fails if anything tried to reach another machine through
+  `fetch`, a WebSocket, a socket, DNS, or a `claude`, `curl` or git remote command.
+
+What this mode does not police:
+- **Commands the model runs.** In `auto` mode with a sandbox (see the safety floor below), they
+  have no network. Under `accept-all`, or without a sandbox, they can reach it.
+- **MCP servers started as local commands (stdio)** and plugin processes run as configured. A
+  plugin's own `fetch` is still limited to the hosts in its `permissions.network`.
 
 ### The safety floor
 

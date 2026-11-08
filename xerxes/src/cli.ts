@@ -59,6 +59,7 @@ import { createHybridPlacement } from './daemon/hybridPlanTool.js';
 import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, readLeanProjectInstructions, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
 import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
 import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
+import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
@@ -868,6 +869,7 @@ if (argument === "--help" || argument === "-h") {
   const config = loadSystemDaemonConfig({
     ...(projectDirectory ? { projectDirectory } : {}),
   });
+  applyLocalOnly(config);
   const socketPath =
     options.get("--socket") ?? daemonPaths(projectDirectory).socketPath;
   const pidPath = options.get("--pid-file") ?? (options.has("--socket") ? undefined : daemonPaths(projectDirectory).pidPath);
@@ -1582,6 +1584,14 @@ async function oneShotRunSafety(mode: PermissionMode, sessionId: string, workspa
   }
 }
 
+/**
+ * Fully local mode (`runtime/localOnly.ts`): turned on before any client,
+ * tool or MCP server is built, because clients keep the fetch they start with.
+ */
+function applyLocalOnly(config: DaemonConfig): void {
+  if (parseLocalOnlyConfig(config.runtime, process.env)) enableLocalOnly();
+}
+
 /** `xerxes bonsai [model]`: the settings card for the active model, or the one named. */
 function runBonsaiCommand(args: readonly string[]): number {
   if (args.length > 1 || args[0]?.startsWith("-")) {
@@ -2183,7 +2193,8 @@ function daemonRuntime(
       readOnlyRoots: [join(xerxesHome(), "tool-results")],
       backgroundCommands,
       ptySessions,
-      generateImageTool: generateImageToolOptions(workspaceRoot),
+      // Fully local mode: no web or image tools, which only reach other hosts.
+      ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
       ...(host.terminals === undefined ? {} : { terminals: host.terminals }),
       ...(host.monitors ? { completionWatch: (owner: string, terminalId: string) => host.monitors!.start(owner, {
         terminalId, trigger: "completion", durationMs: 86_400_000, maxEvents: 1,
@@ -2638,7 +2649,8 @@ function daemonRuntime(
         : { reasoningEffort: connection.reasoningEffort }),
       subagentCoordinator: subagentHost.turnCoordinator,
       delegationModels: session => renderDelegationModels(
-        profileStore.list(),
+        // Fully local mode offers sub-agents only models served on this machine.
+        localOnlyActive() ? profileStore.list().filter(profile => isLocalUrl(profile.base_url ?? "")) : profileStore.list(),
         typeof session.metadata.provider_profile === "string"
           ? canonicalProfileName(session.metadata.provider_profile)
           : profileStore.active()?.name,
@@ -3012,7 +3024,8 @@ async function acpServer(
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
-    generateImageTool: generateImageToolOptions(workspaceRoot),
+    // Fully local mode: no web or image tools, which only reach other hosts.
+    ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
     ...(acpComputerUseTool === undefined ? {} : { computerUseTool: acpComputerUseTool }),
     agentMemoryTools: {
       memory: new AgentMemory({ projectRoot: workspaceRoot }),
@@ -3177,6 +3190,7 @@ async function runAcp(args: readonly string[]): Promise<void> {
       ? { projectDirectory: options.projectDirectory }
       : {}),
   });
+  applyLocalOnly(config);
   const runtime = await acpServer(
     config,
     options.projectDirectory,
@@ -3219,6 +3233,7 @@ async function runOneShot(
   options: { readonly outputFormat?: OutputFormat; readonly noSave?: boolean } = {},
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
+  applyLocalOnly(config);
   const profileStore = new ProfileStore();
   const connection = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
   if (!connection) {
@@ -3249,7 +3264,8 @@ async function runOneShot(
     modelInventory: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
     workspaceRoot,
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
-    generateImageTool: generateImageToolOptions(workspaceRoot),
+    // Fully local mode: no web or image tools, which only reach other hosts.
+    ...(localOnlyActive() ? { includeWebTools: false } : { generateImageTool: generateImageToolOptions(workspaceRoot) }),
     ...(computerUseTool === undefined ? {} : { computerUseTool }),
     agentMemoryTools: {
       memory: agentMemory,
@@ -3571,6 +3587,7 @@ async function runResumedOneShot(
 ): Promise<void> {
   const projectDirectory = resolve(process.cwd());
   const config = loadSystemDaemonConfig({ projectDirectory });
+  applyLocalOnly(config);
   const mcpManager = new MCPManager();
   try {
   await startConfiguredMcpServers(mcpManager, mcpHostOptions(projectDirectory));
