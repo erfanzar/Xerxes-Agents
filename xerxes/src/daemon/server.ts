@@ -6131,7 +6131,7 @@ export class DaemonServer {
         const result = boundaryCommand(args, {
           cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
           ...(session?.id ? { sessionId: session.id } : {}),
-          runtime: { ...this.runtime.status() },
+          runtime: this.runtimeSettings(),
           setMode: mode => { this.runtime.reload({ data_boundary: mode }); },
         });
         this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
@@ -6145,7 +6145,7 @@ export class DaemonServer {
       case "route": {
         const result = routeCommand(args, {
           cwd: session?.cwd ?? this.projectDirectory ?? process.cwd(),
-          runtime: { ...this.runtime.status() },
+          runtime: this.runtimeSettings(),
           trustOf: name => {
             const profile = this.profileStore.get(name);
             return profile ? deriveDataTrust(profile) : undefined;
@@ -6155,13 +6155,13 @@ export class DaemonServer {
         return { ...result };
       }
       case "plans": {
-        const result = await plansCommand(args, { runtime: { ...this.runtime.status() }, store: new PlanStore() });
+        const result = await plansCommand(args, { runtime: this.runtimeSettings(), store: new PlanStore() });
         this.emitSlash(connection, result.report, result.ok ? 'info' : 'warning');
         return { ...result };
       }
       case "calibration": {
         const result = await calibrationCommand(args, {
-          runtime: { ...this.runtime.status() },
+          runtime: this.runtimeSettings(),
           store: new CalibrationStore(),
           hardwareKey: async () => calibrationHardwareKey(await probeHardware(systemHardwarePorts())),
         });
@@ -8088,6 +8088,16 @@ export class DaemonServer {
       "warning",
     );
     return { ok: false, error: `Unknown slash command: /${token}` };
+  }
+
+  /**
+   * The runtime settings a slash command reads: the config file plus every
+   * reload, so `runtime.routing` or `runtime.hybrid_plans` in config.json is
+   * seen, not only the environment. Falls back to `status()` for a runtime
+   * that does not report its settings.
+   */
+  private runtimeSettings(): Record<string, unknown> {
+    return { ...(this.runtime.settings?.() ?? this.runtime.status()) };
   }
 
   /** `/bonsai`: the active model's card, and what each of its settings is in effect. */

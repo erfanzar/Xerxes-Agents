@@ -4541,6 +4541,34 @@ test("daemon /bonsai shows the active model's card, the value in effect and what
   }
 });
 
+test("daemon /route reads routing from the config file, not only the environment", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-route-config-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    // As cli.ts seeds it: the config file's runtime section.
+    runtimeSettings: { model: "native-model", provider: "openai", routing: "rules" },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { session_key: "route-config", project_dir: directory } });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "slash", params: { command: "/route" } });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({ ok: true, mode: "rules" });
+    expect(String((await client.next(eventFrame("notification"))).params?.payload?.body)).toContain("Routing: RULES");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon routes approval and question replies through the active connection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replies-"));
   const socketPath = join(directory, "daemon.sock");

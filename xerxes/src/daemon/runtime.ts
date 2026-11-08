@@ -430,6 +430,11 @@ export interface DaemonRuntime {
     options?: OpenSessionOptions,
   ): Promise<DaemonSession>;
   reload(overrides?: JsonRpcPayload): JsonRpcPayload;
+  /**
+   * The full runtime settings in effect: the config file's `runtime` section
+   * plus every reload since. `status()` reports only a fixed subset.
+   */
+  settings?(): JsonRpcPayload;
   setSessionMode(
     sessionKey: string,
     mode: string,
@@ -1288,6 +1293,10 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         this.sessionIdClaims.delete(claimedId);
       }
     }
+  }
+
+  settings(): JsonRpcPayload {
+    return { ...this.runtimeSettings };
   }
 
   reload(overrides: JsonRpcPayload = {}): JsonRpcPayload {

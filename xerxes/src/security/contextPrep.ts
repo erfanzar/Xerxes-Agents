@@ -118,31 +118,8 @@ export const DEFAULT_RELEASE_RULES: readonly ReleaseRule[] = Object.freeze(
 // Config
 // ---------------------------------------------------------------------------
 
-function coerceMode(key: string, raw: string): RedactMode {
-  const value = raw.trim().toLowerCase()
-  if (value === 'off' || value === 'suggest' || value === 'auto') return value
-  throw new ValidationError(key, `must be one of off, suggest, auto (got ${JSON.stringify(raw)})`, raw)
-}
-
-/** `XERXES_BOUNDARY_REDACT` wins over `runtime.boundary.redact`; the default is `off`. */
-export function parseRedactConfig(
-  runtime: Record<string, unknown>,
-  env: Record<string, string | undefined>,
-): RedactMode {
-  const fromEnv = env.XERXES_BOUNDARY_REDACT
-  if (fromEnv !== undefined && fromEnv.trim() !== '') return coerceMode('XERXES_BOUNDARY_REDACT', fromEnv)
-  const boundary = runtime.boundary
-  if (boundary === undefined || boundary === null) return 'off'
-  if (typeof boundary !== 'object' || Array.isArray(boundary)) {
-    throw new ValidationError('boundary', 'must be an object', boundary)
-  }
-  const raw: unknown = Reflect.get(boundary, 'redact')
-  if (raw === undefined) return 'off'
-  if (typeof raw !== 'string') {
-    throw new ValidationError('boundary.redact', 'must be one of off, suggest, auto', raw)
-  }
-  return coerceMode('boundary.redact', raw)
-}
+// No setting turns redaction on yet: the engine below has no production
+// caller until the M4 data boundary wires it (see the M1 cut list).
 
 // ---------------------------------------------------------------------------
 // Detection

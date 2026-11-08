@@ -13,7 +13,8 @@ import type { DataBoundaryMode, DataTrust } from '../security/boundaryTypes.js'
 export type { DataBoundaryMode, DataTrust }
 
 /** `off` keeps today's fixed model selection exactly. */
-export type RoutingMode = 'off' | 'rules' | 'learned'
+/** A learned mode, choosing by recorded outcomes, returns when outcomes are recorded (M3). */
+export type RoutingMode = 'off' | 'rules'
 
 /** What kind of work a step or call is; rules and calibration key on it. */
 export type StepKind = 'plan' | 'tool_use' | 'analysis' | 'reasoning' | 'review' | 'summarize' | 'research'
@@ -46,8 +47,6 @@ export interface TaskRequirements {
   readonly estimatedOutputTokens?: number
   readonly needsTools: boolean
   readonly minTier?: 1 | 2 | 3
-  /** Workload tag for calibration, e.g. 'csv-reconcile', 'research-triage'. */
-  readonly workload?: string
   readonly placement?: Placement
 }
 
@@ -65,7 +64,7 @@ export type RouteDecision =
   | {
     readonly ok: true
     readonly route: RouteCandidate
-    readonly source: 'fixed' | 'rules' | 'learned'
+    readonly source: 'fixed' | 'rules'
     readonly reason: string
     readonly excluded: readonly RouteExclusion[]
     /** Time the decision itself took; routing overhead is counted, not hidden. */

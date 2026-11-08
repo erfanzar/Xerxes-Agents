@@ -6,7 +6,6 @@ import { describe, expect, test } from 'bun:test'
 import { ValidationError } from '../src/core/errors.js'
 import {
   detectSensitive,
-  parseRedactConfig,
   prepareOutboundContext,
   restorePseudonyms,
   type OutboundSegment,
@@ -24,36 +23,6 @@ function slice(text: string, index = 0): string {
   if (span === undefined) throw new Error(`no span ${index} in ${JSON.stringify(text)}`)
   return text.slice(span.start, span.end)
 }
-
-function validationField(run: () => unknown): string {
-  try {
-    run()
-  } catch (error) {
-    if (error instanceof ValidationError) return error.field
-    throw error
-  }
-  throw new Error('expected a ValidationError')
-}
-
-describe('parseRedactConfig', () => {
-  test('defaults to off', () => {
-    expect(parseRedactConfig({}, {})).toBe('off')
-    expect(parseRedactConfig({ boundary: {} }, {})).toBe('off')
-  })
-
-  test('reads runtime.boundary.redact and lets the env win', () => {
-    expect(parseRedactConfig({ boundary: { redact: 'suggest' } }, {})).toBe('suggest')
-    expect(parseRedactConfig({ boundary: { redact: 'suggest' } }, { XERXES_BOUNDARY_REDACT: 'auto' })).toBe('auto')
-    expect(parseRedactConfig({ boundary: { redact: 'auto' } }, { XERXES_BOUNDARY_REDACT: '  ' })).toBe('auto')
-  })
-
-  test('bad values throw a ValidationError naming the key', () => {
-    expect(validationField(() => parseRedactConfig({ boundary: { redact: 'sometimes' } }, {}))).toBe('boundary.redact')
-    expect(validationField(() => parseRedactConfig({ boundary: { redact: 3 } }, {}))).toBe('boundary.redact')
-    expect(validationField(() => parseRedactConfig({}, { XERXES_BOUNDARY_REDACT: 'yes' }))).toBe('XERXES_BOUNDARY_REDACT')
-    expect(validationField(() => parseRedactConfig({ boundary: 'auto' }, {}))).toBe('boundary')
-  })
-})
 
 describe('detectSensitive', () => {
   test('email', () => {

@@ -12,7 +12,6 @@ import type { HardwareProfile } from '../src/local/hardware.js'
 import {
   CalibrationStore,
   hardwareKey,
-  parseCalibrationConfig,
   recommend,
   renderCalibration,
 } from '../src/runtime/calibration.js'
@@ -35,24 +34,6 @@ afterEach(() => {
 function stat(strategy: string, over: Partial<StrategyStats> = {}): StrategyStats {
   return { strategy, runs: 5, accepted: 4, acceptRate: 0.8, medianWallMs: 1000, ...over }
 }
-
-describe('parseCalibrationConfig', () => {
-  test('defaults to off', () => {
-    expect(parseCalibrationConfig({}, {})).toBe('off')
-  })
-
-  test('reads the runtime setting and env wins', () => {
-    expect(parseCalibrationConfig({ calibration: 'record' }, {})).toBe('record')
-    expect(parseCalibrationConfig({ calibration: 'record' }, { XERXES_CALIBRATION: 'off' })).toBe('off')
-    expect(parseCalibrationConfig({}, { XERXES_CALIBRATION: ' RECORD ' })).toBe('record')
-  })
-
-  test('bad values throw ValidationError naming the key', () => {
-    expect(() => parseCalibrationConfig({ calibration: 'always' }, {})).toThrow(ValidationError)
-    expect(() => parseCalibrationConfig({ calibration: 3 }, {})).toThrow(ValidationError)
-    expect(() => parseCalibrationConfig({}, { XERXES_CALIBRATION: 'yes' })).toThrow(/XERXES_CALIBRATION/)
-  })
-})
 
 describe('hardwareKey', () => {
   test('mac unified memory buckets by system memory', () => {

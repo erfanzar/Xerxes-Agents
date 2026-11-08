@@ -24,7 +24,7 @@ export interface RoutingConfig {
   readonly routes: readonly ConfiguredRoute[]
 }
 
-const MODES: readonly RoutingMode[] = ['off', 'rules', 'learned']
+const MODES: readonly RoutingMode[] = ['off', 'rules']
 const TRUSTS: readonly DataTrust[] = ['local', 'cloud']
 const ROUTE_KEYS: ReadonlySet<string> = new Set([
   'id',

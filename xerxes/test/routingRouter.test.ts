@@ -7,10 +7,8 @@ import { ValidationError } from '../src/core/errors.js'
 import { parseRoutingConfig, type ConfiguredRoute } from '../src/routing/config.js'
 import { estimateCostUsd, PolicyRouter, renderRouteDecision, type PolicyRouterOptions } from '../src/routing/router.js'
 import type {
-  CalibrationLookup,
   RouteCandidate,
   RouteDecision,
-  StrategyStats,
   TaskRequirements,
 } from '../src/routing/types.js'
 
@@ -64,30 +62,16 @@ function refused(decision: RouteDecision): Extract<RouteDecision, { ok: false }>
   return decision
 }
 
-function stat(strategy: string, runs: number, acceptRate: number, medianWallMs: number, meanCostUsd?: number): StrategyStats {
-  const base = { strategy, runs, accepted: Math.round(runs * acceptRate), acceptRate, medianWallMs }
-  return meanCostUsd === undefined ? base : { ...base, meanCostUsd }
-}
-
-function lookup(stats: readonly StrategyStats[]): CalibrationLookup & { readonly calls: string[] } {
-  const calls: string[] = []
-  return {
-    calls,
-    stats(workload, hardwareKey) {
-      calls.push(`${workload}@${hardwareKey}`)
-      return stats
-    },
-  }
-}
-
 describe('parseRoutingConfig', () => {
   test('defaults to off with no routes', () => {
     expect(parseRoutingConfig({}, {})).toEqual({ mode: 'off', routes: [] })
   })
 
   test('env XERXES_ROUTING wins over the file', () => {
-    expect(parseRoutingConfig({ routing: 'rules' }, { XERXES_ROUTING: 'learned' }).mode).toBe('learned')
-    expect(parseRoutingConfig({ routing: 'learned' }, { XERXES_ROUTING: 'off' }).mode).toBe('off')
+    expect(parseRoutingConfig({ routing: 'off' }, { XERXES_ROUTING: 'rules' }).mode).toBe('rules')
+    expect(parseRoutingConfig({ routing: 'rules' }, { XERXES_ROUTING: 'off' }).mode).toBe('off')
+    // A learned mode returns when outcomes are recorded; until then it is refused.
+    expect(() => parseRoutingConfig({ routing: 'learned' }, {})).toThrow(ValidationError)
     expect(parseRoutingConfig({ routing: 'rules' }, {}).mode).toBe('rules')
   })
 
@@ -378,69 +362,6 @@ describe('PolicyRouter: estimate and timing', () => {
 
   test('default clock yields a non-negative decisionMs', () => {
     expect(accepted(router().decide(REQ)).decisionMs).toBeGreaterThanOrEqual(0)
-  })
-})
-
-describe('PolicyRouter: learned', () => {
-  const workload = 'csv-reconcile'
-  const hardwareKey = 'm3-max-64'
-  const req: TaskRequirements = { ...REQ, kind: 'reasoning', workload }
-
-  test('picks the highest acceptRate, then lower cost, then lower wall time', () => {
-    const stats = [
-      stat('local-small', 5, 0.6, 900),
-      stat('cloud-mid', 4, 0.9, 2000, 0.02),
-      stat('cloud-big', 4, 0.9, 3000, 0.05),
-    ]
-    const calibration = lookup(stats)
-    const decision = accepted(router({ mode: 'learned', calibration, hardwareKey }).decide(req))
-    expect(decision.source).toBe('learned')
-    expect(decision.route.id).toBe('cloud-mid')
-    expect(decision.reason).toContain('90%')
-    expect(calibration.calls).toEqual([`${workload}@${hardwareKey}`])
-
-    const sameCost = [stat('cloud-mid', 3, 0.8, 4000, 0.01), stat('cloud-big', 3, 0.8, 1000, 0.01)]
-    expect(accepted(router({ mode: 'learned', calibration: lookup(sameCost), hardwareKey }).decide(req)).route.id).toBe('cloud-big')
-
-    const unknownCost = [stat('cloud-mid', 3, 0.8, 1000), stat('cloud-big', 3, 0.8, 5000, 0.5)]
-    expect(accepted(router({ mode: 'learned', calibration: lookup(unknownCost), hardwareKey }).decide(req)).route.id).toBe('cloud-big')
-  })
-
-  test('only considers allowed routes, never one the filter excluded', () => {
-    const stats = [stat('cloud-big', 50, 1, 100, 0.001), stat('cloud-mid', 50, 0.95, 100, 0.001), stat('local-small', 3, 0.2, 5000)]
-    const decision = accepted(router({ mode: 'learned', calibration: lookup(stats), hardwareKey, boundaryMode: 'private' }).decide(req))
-    expect(decision.route.id).toBe('local-small')
-    expect(decision.source).toBe('learned')
-    expect(decision.excluded.map((item) => item.id)).toEqual(['cloud-mid', 'cloud-big'])
-  })
-
-  test('falls back to rules with a reason when no allowed route has 3 runs', () => {
-    const stats = [stat('cloud-big', 2, 1, 100), stat('cloud-mid', 2, 1, 100), stat('unknown-id', 99, 1, 1)]
-    const decision = accepted(router({ mode: 'learned', calibration: lookup(stats), hardwareKey }).decide(req))
-    expect(decision.source).toBe('rules')
-    expect(decision.route.id).toBe('cloud-big')
-    expect(decision.reason).toContain('not enough calibration data')
-  })
-
-  test('stats only for excluded routes also fall back to rules', () => {
-    const stats = [stat('cloud-big', 50, 1, 100)]
-    const decision = accepted(router({ mode: 'learned', calibration: lookup(stats), hardwareKey, boundaryMode: 'private' }).decide(req))
-    expect(decision.source).toBe('rules')
-    expect(decision.route.id).toBe('local-small')
-  })
-
-  test('falls back to rules without a workload, calibration or hardware key', () => {
-    const stats = [stat('cloud-mid', 10, 1, 100)]
-    const noWorkload = accepted(router({ mode: 'learned', calibration: lookup(stats), hardwareKey }).decide({ ...req, workload: undefined as never }))
-    expect(noWorkload.source).toBe('rules')
-    expect(accepted(router({ mode: 'learned', hardwareKey }).decide(req)).source).toBe('rules')
-    expect(accepted(router({ mode: 'learned', calibration: lookup(stats) }).decide(req)).source).toBe('rules')
-  })
-
-  test('no allowed route stays ok:false in learned mode', () => {
-    const stats = [stat('cloud-big', 50, 1, 100)]
-    const decision = refused(router({ mode: 'learned', routes: [CLOUD_BIG], calibration: lookup(stats), hardwareKey, boundaryMode: 'private' }).decide(req))
-    expect(decision.code).toBe('no_allowed_route')
   })
 })
 

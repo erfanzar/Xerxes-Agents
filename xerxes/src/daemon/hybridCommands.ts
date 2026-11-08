@@ -12,9 +12,8 @@ import { parseHybridPlansConfig } from '../cortex/hybridPlan.js'
 import { parseRoutingConfig } from '../routing/config.js'
 import { PolicyRouter, renderRouteDecision } from '../routing/router.js'
 import type { DataTrust, StepKind, TaskRequirements } from '../routing/types.js'
-import { parseCalibrationConfig, recommend, renderCalibration, type CalibrationStore } from '../runtime/calibration.js'
+import { recommend, renderCalibration, type CalibrationStore } from '../runtime/calibration.js'
 import { parseEscalationConfig } from '../runtime/escalationPolicy.js'
-import { parseRedactConfig } from '../security/contextPrep.js'
 import { parseDataBoundaryConfig } from '../security/dataBoundary.js'
 
 export interface HybridCommandResult {
@@ -30,9 +29,9 @@ const STEP_KINDS: readonly StepKind[] = ['plan', 'tool_use', 'analysis', 'reason
 export const ROUTE_USAGE = [
   'Usage:',
   '  /route                                   routing mode, configured routes and related M2 settings',
-  '  /route explain [kind] [--private] [--tokens N] [--workload W]',
+  '  /route explain [kind] [--private] [--tokens N]',
   `                                           which route a step would take and why (kind: ${STEP_KINDS.join('|')})`,
-  'Turn routing on with runtime.routing: rules|learned (or XERXES_ROUTING) and list routes in runtime.routing_routes.',
+  'Turn routing on with runtime.routing: rules (or XERXES_ROUTING) and list routes in runtime.routing_routes.',
 ].join('\n')
 
 function errorText(error: unknown): string {
@@ -56,7 +55,6 @@ export function routeCommand(
       const lines = [
         `Routing: ${routing.mode.toUpperCase()}${routing.mode === 'off' ? ' (the configured model is always used)' : ''}`,
         `Data boundary: ${boundary.mode}`,
-        `Context preparation (boundary.redact): ${parseRedactConfig(ports.runtime, env)}`,
         `Escalation: ${escalation.mode}${escalation.mode === 'on' ? ` (local retries ${escalation.maxLocalRetries}, model changes ${escalation.maxModelChanges}, advisor calls ${escalation.maxAdvisorCalls}, $${escalation.maxUsd})` : ''}`,
         `Routes (${routing.routes.length}):`,
         ...routing.routes.map(route => `  ${route.id}: ${route.profile}/${route.model} trust=${route.trust ?? ports.trustOf?.(route.profile) ?? 'cloud'}${route.tier === undefined ? '' : ` tier=${route.tier}`}`),
@@ -68,12 +66,10 @@ export function routeCommand(
     let kind: StepKind = 'analysis'
     let touchesPrivate = false
     let tokens = 4000
-    let workload: string | undefined
     for (let index = 1; index < words.length; index += 1) {
       const word = words[index]!
       if (word === '--private') touchesPrivate = true
       else if (word === '--tokens' && /^\d+$/.test(words[index + 1] ?? '')) { tokens = Number(words[index + 1]); index += 1 }
-      else if (word === '--workload' && words[index + 1]) { workload = words[index + 1]; index += 1 }
       else if ((STEP_KINDS as readonly string[]).includes(word)) kind = word as StepKind
       else return { ok: false, report: ROUTE_USAGE }
     }
@@ -88,7 +84,6 @@ export function routeCommand(
       touchesPrivate,
       estimatedInputTokens: tokens,
       needsTools: kind === 'tool_use',
-      ...(workload === undefined ? {} : { workload }),
     }
     const decision = router.decide(request)
     const prefix = routing.mode === 'off' ? 'Routing is OFF, so nothing is rerouted. With rules it would pick:\n' : ''
@@ -147,15 +142,9 @@ export async function calibrationCommand(
   args: string,
   ports: { readonly runtime: Record<string, unknown>; readonly env?: Env; readonly store: Pick<CalibrationStore, 'stats'>; readonly hardwareKey: () => Promise<string> },
 ): Promise<HybridCommandResult> {
-  const env = ports.env ?? process.env
   const workload = args.trim()
-  let mode: string
-  try {
-    mode = parseCalibrationConfig(ports.runtime, env)
-  } catch (error) {
-    return { ok: false, report: `calibration setting is invalid: ${errorText(error)}` }
-  }
-  const header = `Calibration recording: ${mode === 'record' ? 'ON' : 'OFF (set runtime.calibration: record or XERXES_CALIBRATION=record)'}`
+  // Nothing records outcomes yet; routing measurement arrives with M2.
+  const header = 'Calibration: shows outcomes stored for this machine. Xerxes does not record them yet.'
   if (!workload) return { ok: true, report: `${header}\nUsage: /calibration <workload>  (e.g. csv-reconcile)` }
   if (!/^[\w.:+-]{1,80}$/.test(workload)) return { ok: false, report: 'Workload names use letters, digits and . : + - _ (max 80).' }
   const key = await ports.hardwareKey()

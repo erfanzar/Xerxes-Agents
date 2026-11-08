@@ -14,7 +14,6 @@ import { ValidationError } from '../core/errors.js'
 import type { ConfiguredRoute } from './config.js'
 import type {
   BudgetState,
-  CalibrationLookup,
   DataBoundaryMode,
   DataTrust,
   RouteCandidate,
@@ -22,12 +21,8 @@ import type {
   RouteExclusion,
   RoutingMode,
   StepKind,
-  StrategyStats,
   TaskRequirements,
 } from './types.js'
-
-/** Minimum recorded runs of a route before the learned mode trusts its stats. */
-export const MIN_CALIBRATION_RUNS = 3
 
 const LOCAL_FIRST_KINDS: ReadonlySet<StepKind> = new Set<StepKind>(['tool_use', 'summarize', 'analysis'])
 const STRONG_FIRST_KINDS: ReadonlySet<StepKind> = new Set<StepKind>(['reasoning', 'review', 'plan'])
@@ -38,8 +33,6 @@ export interface PolicyRouterOptions {
   readonly routes: readonly ConfiguredRoute[]
   readonly boundaryMode: DataBoundaryMode
   readonly trustOf?: (profile: string) => DataTrust | undefined
-  readonly calibration?: CalibrationLookup
-  readonly hardwareKey?: string
   readonly now?: () => number
 }
 
@@ -92,15 +85,11 @@ export class PolicyRouter {
   private readonly mode: RoutingMode
   private readonly routes: readonly RouteCandidate[]
   private readonly boundaryMode: DataBoundaryMode
-  private readonly calibration: CalibrationLookup | undefined
-  private readonly hardwareKey: string | undefined
   private readonly now: () => number
 
   constructor(options: PolicyRouterOptions) {
     this.mode = options.mode
     this.boundaryMode = options.boundaryMode
-    this.calibration = options.calibration
-    this.hardwareKey = options.hardwareKey
     this.now = options.now ?? (() => performance.now())
     const seen = new Set<string>()
     this.routes = options.routes.map((route): RouteCandidate => {
@@ -125,13 +114,7 @@ export class PolicyRouter {
     }
     if (allowed.length === 0) return this.noRoute(excluded, elapsed(), this.routes.length === 0 ? 'no routes are configured' : undefined)
 
-    const rules = this.chooseByRules(allowed, req)
-    if (this.mode === 'learned') {
-      const learned = this.chooseByStats(allowed, req)
-      if (learned.kind === 'chosen') return this.chosen(learned.choice, 'learned', req, budget, excluded, elapsed())
-      return this.chosen({ route: rules.route, reason: `${learned.why}; ${rules.reason}` }, 'rules', req, budget, excluded, elapsed())
-    }
-    return this.chosen(rules, 'rules', req, budget, excluded, elapsed())
+    return this.chosen(this.chooseByRules(allowed, req), 'rules', req, budget, excluded, elapsed())
   }
 
   /**
@@ -219,38 +202,9 @@ export class PolicyRouter {
     return { route: pick.route, reason: `no placement preference for ${req.kind} work; ${pick.route.id} is the cheapest allowed route in declared order` }
   }
 
-  private chooseByStats(
-    allowed: readonly RouteCandidate[],
-    req: TaskRequirements,
-  ): { readonly kind: 'chosen'; readonly choice: Choice } | { readonly kind: 'insufficient'; readonly why: string } {
-    const need = `not enough calibration data (need ${MIN_CALIBRATION_RUNS} runs of an allowed route)`
-    if (!req.workload || !this.calibration || !this.hardwareKey) return { kind: 'insufficient', why: need }
-    const byId = new Map<string, StrategyStats>()
-    for (const stat of this.calibration.stats(req.workload, this.hardwareKey)) byId.set(stat.strategy, stat)
-    const candidates = allowed
-      .map((route, order) => ({ route, order, stat: byId.get(route.id) }))
-      .filter((item): item is { route: RouteCandidate; order: number; stat: StrategyStats } =>
-        item.stat !== undefined && item.stat.runs >= MIN_CALIBRATION_RUNS)
-    candidates.sort((a, b) =>
-      b.stat.acceptRate - a.stat.acceptRate
-      || compareCost(a.stat.meanCostUsd, b.stat.meanCostUsd)
-      || a.stat.medianWallMs - b.stat.medianWallMs
-      || a.order - b.order)
-    const best = candidates[0]
-    if (best === undefined) return { kind: 'insufficient', why: need }
-    const percent = Math.round(best.stat.acceptRate * 100)
-    return {
-      kind: 'chosen',
-      choice: {
-        route: best.route,
-        reason: `${best.route.id} has the best recorded outcome for ${req.workload} on this hardware (${percent}% accepted over ${best.stat.runs} runs)`,
-      },
-    }
-  }
-
   private chosen(
     choice: Choice,
-    source: 'fixed' | 'rules' | 'learned',
+    source: 'fixed' | 'rules',
     req: TaskRequirements,
     budget: BudgetState | undefined,
     excluded: readonly RouteExclusion[],

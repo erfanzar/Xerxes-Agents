@@ -15,7 +15,7 @@ import type { LlmClient } from '../llms/client.js'
 import type { ProviderOverrides } from '../llms/providerRegistry.js'
 import { parseRoutingConfig } from '../routing/config.js'
 import { PolicyRouter, renderRouteDecision } from '../routing/router.js'
-import type { CalibrationLookup, DataBoundaryMode, DataTrust, StepKind, TaskRequirements } from '../routing/types.js'
+import type { DataBoundaryMode, DataTrust, StepKind, TaskRequirements } from '../routing/types.js'
 import { deriveDataTrust } from '../security/dataBoundary.js'
 
 /** The provider half of a routed turn, the same shape `resolveSessionProvider` returns. */
@@ -54,8 +54,6 @@ export interface TurnRouterOptions<S extends TurnRoutingSession> {
   /** Whether this session's context already holds private data (boundary taint). */
   readonly touchesPrivate?: (session: S) => boolean
   readonly buildProvider: (profile: ProviderProfile, model: string) => RoutedProvider
-  readonly calibration?: CalibrationLookup
-  readonly hardwareKey?: () => string | undefined
 }
 
 const KIND_HINTS: readonly (readonly [StepKind, RegExp])[] = [
@@ -92,7 +90,6 @@ export function createTurnRouter<S extends TurnRoutingSession>(
   return (session, _model, text) => {
     const routing = parseRoutingConfig(options.runtime(), options.env ?? process.env)
     if (routing.mode === 'off') return undefined
-    const hardwareKey = options.hardwareKey?.()
     const router = new PolicyRouter({
       mode: routing.mode,
       routes: routing.routes,
@@ -101,17 +98,13 @@ export function createTurnRouter<S extends TurnRoutingSession>(
         const found = options.profiles.get(profile)
         return found ? deriveDataTrust(found) : undefined
       },
-      ...(options.calibration ? { calibration: options.calibration } : {}),
-      ...(hardwareKey ? { hardwareKey } : {}),
     })
     const kind = turnKind(text)
-    const workload = typeof session.metadata.workload === 'string' ? session.metadata.workload : undefined
     const request: TaskRequirements = {
       kind,
       touchesPrivate: options.touchesPrivate?.(session) ?? false,
       estimatedInputTokens: estimateTokens(session, text),
       needsTools: true,
-      ...(workload ? { workload } : {}),
     }
     const decision = router.decide(request)
     if (!decision.ok) return { ok: false, reason: renderRouteDecision(decision) }

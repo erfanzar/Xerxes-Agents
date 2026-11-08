@@ -18,9 +18,6 @@ import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
 import type { CalibrationLookup, CalibrationRecord, StrategyStats } from '../routing/types.js'
 
-export type CalibrationMode = 'off' | 'record'
-
-const MODES: readonly CalibrationMode[] = ['off', 'record']
 const NAME_PATTERN = /^[\w.:+-]{1,80}$/
 const MAX_READ_BYTES = 4 * 1024 * 1024
 const GIB = 1024 ** 3
@@ -34,24 +31,6 @@ const DEFAULT_SIMPLICITY_ORDER: readonly string[] = [
 ]
 /** A simpler strategy may be this much slower than the winner and still be kept. */
 const SIMPLER_WALL_SLACK = 1.2
-
-function parseMode(key: string, raw: unknown): CalibrationMode | undefined {
-  if (raw === undefined || raw === null) return undefined
-  if (typeof raw !== 'string') throw new ValidationError(key, `expected one of ${MODES.join('|')}`, raw)
-  const value = raw.trim().toLowerCase()
-  if (value === '') return undefined
-  const match = MODES.find(mode => mode === value)
-  if (match === undefined) throw new ValidationError(key, `expected one of ${MODES.join('|')}`, raw)
-  return match
-}
-
-/** `runtime.calibration` (env XERXES_CALIBRATION wins); default `off`. */
-export function parseCalibrationConfig(
-  runtime: Record<string, unknown>,
-  env: Record<string, string | undefined>,
-): CalibrationMode {
-  return parseMode('XERXES_CALIBRATION', env.XERXES_CALIBRATION) ?? parseMode('calibration', runtime.calibration) ?? 'off'
-}
 
 function memoryBucket(bytes: number): string {
   const gib = bytes / GIB

@@ -75,7 +75,7 @@ test('/calibration needs a workload and reports per-strategy stats', async () =>
   const ports = { runtime: {}, env: {}, store, hardwareKey: async () => 'hw-test' }
   const usage = await calibrationCommand('', ports)
   expect(usage.ok).toBe(true)
-  expect(usage.report).toContain('Calibration recording: OFF')
+  expect(usage.report).toContain('Xerxes does not record them yet')
   const report = await calibrationCommand('csv-reconcile', ports)
   expect(report.ok).toBe(true)
   expect(report.report).toContain('local-only')
