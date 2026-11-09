@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.33 — 2026-11-09
+
+### Permissions
+
+- **Accept all now applies immediately to running turns.** Switching from Auto to Accept all no longer leaves later tool calls waiting for approval.
+- **New sub-agents inherit the main runtime's live permission mode.** They no longer retain a stale Auto policy after the parent switches to Accept all.
+- Plan mode and explicit per-agent permission restrictions remain enforced.
+
 ## 0.8.32 — 2026-11-09
 
 - **Hub: reconnects no longer replay the same journal forever.** Live event batches are held back during explicit backfill, the subscription resumes at the caught-up cursor, and post-handshake failures keep their exponential backoff. Lesson sync has an online-trigger cooldown and health events are emitted only when visible health changes. This stops sustained relay traffic and workspace-event floods when a daemon has a large backlog.
