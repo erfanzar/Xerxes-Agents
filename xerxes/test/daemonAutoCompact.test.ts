@@ -1449,3 +1449,19 @@ test('compaction never stores an incomplete streamed summary', async () => {
   const port = compactionCompletionPort({ async *stream() { yield { content: 'partial summary', finishReason: 'length' }; } }, 'gpt-6-astra', 1000);
   await expect(port({ prompt: 'Summarize', maxTokens: 32, stream: false, temperature: 0 })).rejects.toThrow('summary did not finish');
 });
+
+test('compaction discards a truncated draft and regenerates once with a wider output window', async () => {
+  const budgets: (number | undefined)[] = [];
+  const port = compactionCompletionPort({
+    async *stream(request) {
+      budgets.push(request.maxTokens);
+      if (budgets.length === 1) {
+        yield { content: 'partial summary that must not be retained', finishReason: 'length' as const };
+        return;
+      }
+      yield { content: 'complete summary', finishReason: 'stop' as const };
+    },
+  }, 'k3.1-pro', 1000);
+  await expect(port({ prompt: 'Summarize', maxTokens: 32, stream: false, temperature: 0 })).resolves.toBe('complete summary');
+  expect(budgets).toEqual([32, 64_000]);
+});

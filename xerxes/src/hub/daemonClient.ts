@@ -28,6 +28,8 @@ export interface HubDaemonClientOptions {
   readonly retryMaxMs?: number
   readonly random?: () => number
   readonly maxFrameBytes?: number
+  /** Runtime pools reset backoff only after subscription/backfill succeeds, not after the transport handshake. */
+  readonly deferBackoffReset?: boolean
 }
 export class DaemonTransportError extends Error {
   constructor(message: string, readonly written: boolean, readonly reason: 'closed' | 'timeout' | 'aborted' | 'protocol' | 'unavailable') {
@@ -101,6 +103,8 @@ export class HubDaemonClient {
     return this.send(method, params, options)
   }
 
+  /** Mark the post-handshake setup as operational; only now is it safe to reset reconnect backoff. */
+  markOperational(): void { this.retries = 0 }
   /** Force a transport retry (for example a dead SSH master), without cancelling daemon work. */
   interrupt(error: Error = new Error('Daemon transport interrupted')): void {
     if (this.stopped) return
@@ -173,7 +177,8 @@ export class HubDaemonClient {
     this.lifetime.signal.throwIfAborted()
     if (!this.socket) throw new DaemonTransportError('Daemon disconnected during handshake', false, 'closed')
     const handshake = { initialized, status }
-    this.handshake = handshake; this.retries = 0
+    this.handshake = handshake
+    if (this.options.deferBackoffReset !== true) this.retries = 0
     this.announce('online')
     for (const listener of this.handshakes) listener(handshake)
     return handshake

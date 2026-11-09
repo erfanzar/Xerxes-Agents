@@ -56,12 +56,13 @@ function fakeBackend(workspaces = [project('a'), project('b')]) {
   }
   return { backend, calls, copies, respond(value: typeof handler) { handler = value } }
 }
-async function fixture(workspaces?: PoolLessonWorkspace[], environment: Readonly<Record<string, string | undefined>> = {}) {
+async function fixture(workspaces?: PoolLessonWorkspace[], environment: Readonly<Record<string, string | undefined>> = {}, onlineCooldownMs?: number) {
   const path = join(await tempDir('xh-lessons-'), 'hub.sqlite')
   const fake = fakeBackend(workspaces)
   const signer = testSigner()
   const errors: { message: string; context: string }[] = []
   const sync = new HubLessonSync({ databasePath: path, signer, backend: fake.backend, environment,
+    ...(onlineCooldownMs === undefined ? {} : { onlineCooldownMs }),
     onError: (error, context) => { errors.push({ message: String(error), context }) } })
   registerCleanup(() => sync.close())
   return { ...fake, path, signer, sync, errors }
@@ -326,8 +327,8 @@ test('malformed apply acknowledgements are reported and do not prevent a healthy
   }
 })
 
-test('concurrent syncNow calls share a pass; online arrivals coalesce into one serialized follow-up', async () => {
-  const t = await fixture([project('a')])
+test('concurrent syncNow calls share a pass; online arrivals coalesce into one cooldown-scheduled follow-up', async () => {
+  const t = await fixture([project('a')], {}, 20)
   let release!: () => void, waiting = true, active = 0, maxActive = 0
   const gate = new Promise<void>(resolve => { release = resolve })
   t.respond(async () => {
@@ -341,7 +342,14 @@ test('concurrent syncNow calls share a pass; online arrivals coalesce into one s
   t.sync.workspaceOnline(); t.sync.workspaceOnline()
   expect(t.calls).toHaveLength(1)
   waiting = false; release(); await first
+  // The follow-up is delayed by the cooldown, never started in the first pass's finally block.
+  expect(t.calls).toHaveLength(1)
   await until(() => t.calls.length === 2 && !t.sync.status().running)
+  const completed = t.calls.length
+  for (let index = 0; index < 20; index++) t.sync.workspaceOnline()
+  await Bun.sleep(5)
+  expect(t.calls).toHaveLength(completed)
+  await until(() => t.calls.length === completed + 1 && !t.sync.status().running)
   expect(maxActive).toBe(1)
 })
 

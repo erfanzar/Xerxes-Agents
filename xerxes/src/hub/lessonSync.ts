@@ -118,6 +118,8 @@ export interface HubLessonSyncOptions {
   readonly backend: HubLessonBackend
   readonly environment?: Readonly<Record<string, string | undefined>>
   readonly clock?: () => number
+  /** Cooldown between online-triggered passes; defaults to interval_ms. Test override keeps scheduler tests fast. */
+  readonly onlineCooldownMs?: number
   readonly onError?: (error: unknown, context: string) => void
 }
 export interface HubLessonSyncStatus {
@@ -157,12 +159,16 @@ export class HubLessonSync {
   private readonly store: HubLessonStore
   private readonly enabled: boolean
   private readonly intervalMs: number
+  private readonly onlineCooldownMs: number
   private readonly clock: () => number
   private readonly abort = new AbortController()
   private timer: ReturnType<typeof setInterval> | undefined
+  private onlineTimer: ReturnType<typeof setTimeout> | undefined
+  private onlineReadyAt = 0
   private inFlight: Promise<void> | undefined
   private pendingOnline = false
   private stopped = false
+  private seenWorkspace = false
   private lastRun: string | null = null
   private readonly conflicts = new Set<string>()
   private conflictLimitReached = false
@@ -174,6 +180,8 @@ export class HubLessonSync {
     const interval = Number(env.XERXES_HUB_LESSON_SYNC_MS ?? DEFAULT_INTERVAL_MS)
     this.intervalMs = Number.isSafeInteger(interval) && interval > 0 && interval <= MAX_INTERVAL_MS
       ? Math.max(MIN_INTERVAL_MS, interval) : DEFAULT_INTERVAL_MS
+    const cooldown = options.onlineCooldownMs ?? this.intervalMs
+    this.onlineCooldownMs = Number.isSafeInteger(cooldown) && cooldown >= 0 && cooldown <= MAX_INTERVAL_MS ? cooldown : this.intervalMs
     this.clock = options.clock ?? Date.now
     this.store = new HubLessonStore(options.databasePath)
   }
@@ -192,17 +200,30 @@ export class HubLessonSync {
     // Defer one microtask so inFlight is installed before any backend callback.
     const running = Promise.resolve().then(() => this.pass()).catch(error => this.report(error, 'pass')).finally(() => {
       this.inFlight = undefined
-      if (this.pendingOnline && !this.stopped) { this.pendingOnline = false; void this.syncNow() }
+      // A flapping lane can report online throughout a pass. Never let that turn into
+      // back-to-back downloads: the next online-triggered pass waits one cooldown.
+      this.onlineReadyAt = this.seenWorkspace ? this.clock() + this.onlineCooldownMs : 0
+      if (this.pendingOnline && !this.stopped) { this.pendingOnline = false; this.scheduleOnline() }
     })
     this.inFlight = running
     return running
   }
 
-  /** Online arrivals during a pass request at most one follow-up pass. */
+  /** Online arrivals coalesce and wait for the cooldown; they cannot form a tight sync loop. */
   workspaceOnline(): void {
     if (!this.enabled || this.stopped) return
     if (this.inFlight !== undefined) this.pendingOnline = true
-    else void this.syncNow()
+    else this.scheduleOnline()
+  }
+
+  private scheduleOnline(): void {
+    if (this.onlineTimer !== undefined || this.stopped || !this.enabled) return
+    const delay = Math.max(0, this.onlineReadyAt - this.clock())
+    this.onlineTimer = setTimeout(() => {
+      this.onlineTimer = undefined
+      if (!this.stopped) void this.syncNow()
+    }, delay)
+    this.onlineTimer.unref?.()
   }
 
   status(): HubLessonSyncStatus {
@@ -217,6 +238,7 @@ export class HubLessonSync {
     if (this.stopped) return
     this.stopped = true
     clearInterval(this.timer); this.timer = undefined
+    clearTimeout(this.onlineTimer); this.onlineTimer = undefined
     this.abort.abort()
     await this.inFlight
     this.store.close()
@@ -238,6 +260,7 @@ export class HubLessonSync {
     })
     // Gather from ALL machines before pushing: a retirement discovered on B can
     // retire A in this same pass, independent of workspace ordering.
+    if (workspaces.length > 0) this.seenWorkspace = true
     const snapshots: DaemonSnapshot[] = []
     await this.each(workspaces, async workspace => {
       const snapshot = await this.readSnapshot(workspace)

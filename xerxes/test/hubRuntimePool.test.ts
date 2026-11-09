@@ -62,6 +62,7 @@ async function fakeDaemon(runtimeId = 'r', socketOverride?: string) {
     text(value: string) { for (const socket of sockets) socket.write(value) },
     respond(handler: (frame: Frame) => Record<string, unknown> | undefined) { response = handler },
     silence(method: string) { silent.add(method) },
+    resume(method: string) { silent.delete(method) },
   }
 }
 function workspace(id: string, socketPath: string, projectDir = '/a'): PoolWorkspace { return { id, label: id, endpoint: { kind: 'local', socketPath }, projectDir, autoConnect: true } }
@@ -107,6 +108,55 @@ test('SSH loss marks stale, rebuilds tunnel, restores lease and resumes committe
   expect(daemon.requests.filter(row => row.method === 'events.subscribe').at(-1)?.params.after_cursor).toBe('c1')
   expect(daemon.requests.filter(row => row.method === 'connection.lease').some(row => row.params.token === 'lease')).toBe(true)
   expect(pool.projection('w')?.sessions.s0?.interrupted).toBe(true)
+})
+
+test('live event floods during configuration are caught up explicitly instead of overflowing the queued-event cap', async () => {
+  const daemon = await fakeDaemon('r')
+  let flooded = false
+  daemon.respond(frame => {
+    if (frame.method === 'session.active_list' && !flooded) {
+      flooded = true
+      daemon.push('event_batch', { subscription_id: 'sub', events: [], filler: 'x'.repeat(3_000) })
+    }
+    return undefined
+  })
+  const errors: Error[] = []
+  const pool = new HubRuntimePool({
+    sink: sink().port, clientOptions: retry, maxQueuedEventBytes: 2_000,
+    onSetupError: (_ids, error) => { errors.push(error) },
+  })
+  cleanup.push(() => pool.stop())
+  const starting = pool.start([workspace('a', daemon.socketPath)])
+  await starting
+  await until(() => pool.health('a')?.state === 'online')
+  expect(errors).toEqual([])
+  await pool.stop()
+})
+
+test('persistent post-handshake backfill failures increase reconnect backoff and report the setup error', async () => {
+  const daemon = await fakeDaemon('r')
+  const initializedAt: number[] = []
+  daemon.respond(frame => {
+    if (frame.method === 'initialize') initializedAt.push(Date.now())
+    if (frame.method === 'events.read') return { ok: true, events: [{ type: 'status_update' }], through_cursor: 'poison' }
+    return undefined
+  })
+  const errors: Error[] = []
+  const pool = new HubRuntimePool({
+    sink: sink().port,
+    clientOptions: { retryBaseMs: 40, retryMaxMs: 160, random: () => 1, requestTimeoutMs: 300 },
+    onSetupError: (_ids, error) => { errors.push(error) },
+  })
+  cleanup.push(() => pool.stop())
+  await pool.start([workspace('a', daemon.socketPath)])
+  await until(() => initializedAt.length >= 3 && errors.length >= 2, 4000)
+  const firstGap = initializedAt[1]! - initializedAt[0]!
+  const secondGap = initializedAt[2]! - initializedAt[1]!
+  // A successful transport handshake must not reset backoff before the same
+  // malformed journal event fails again: 40 ms, then 80 ms with this fixture.
+  expect(secondGap).toBeGreaterThan(firstGap * 1.5)
+  expect(errors[0]?.message).toContain('Malformed daemon journal event')
+  await pool.stop()
 })
 
 test('unsupported subscriptions and old runtimes degrade to bounded summary polling', async () => {
@@ -359,7 +409,9 @@ test('buffered deltas are never committed by a lost connection: the resubscribe 
   daemon.push('event_batch', { subscription_id: 'sub', events: [upstream(1), delta(2, 'text_part', 'never stored')] })
   await until(() => store.rows.length === 1)
   daemon.drop()
-  await until(() => daemon.requests.filter(row => row.method === 'events.subscribe').length === 2 && pool.health('w')?.state === 'online')
+  // The caught-up connection gets a second subscription when a cursor exists, then
+  // the reconnect repeats that sequence. No buffered delta may be committed early.
+  await until(() => daemon.requests.filter(row => row.method === 'events.subscribe').length === 3 && pool.health('w')?.state === 'online')
   expect(daemon.requests.filter(row => row.method === 'events.subscribe').at(-1)?.params.after_cursor).toBe('c1')
   await Bun.sleep(30)
   expect(store.rows.map(row => row.sequence)).toEqual([1])
