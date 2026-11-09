@@ -1100,8 +1100,20 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       ready,
       hardware: hardwareJson(hw),
       selection: entry === undefined ? { ok: false, reason: selectionError ?? 'no model' } : { ok: true, model: entry.id },
-      mlx_server: { found: binary !== undefined, ...(binary === undefined ? {} : { path: binary }), ...(version === undefined ? {} : { mlx_lm_version: version }) },
-      model: entry === undefined ? { id: null, present: false } : { id: entry.id, path: mlxDir(entry, cfg), files_verified: files.verified, files_total: files.total },
+      mlx_server: {
+        found: binary !== undefined,
+        ...(binary === undefined ? {} : { path: binary }),
+        ...(version === undefined ? {} : { mlx_lm_version: version }),
+        ...(versionCheck === undefined || binary === undefined ? {} : { new_enough: versionCheck.ok }),
+      },
+      model: entry === undefined ? { id: null, present: false } : {
+        id: entry.id,
+        label: entry.label,
+        path: mlxDir(entry, cfg),
+        files_verified: files.verified,
+        files_total: files.total,
+        ...(entry.mlx === undefined ? {} : { bytes: entry.mlx.files.reduce((sum, file) => sum + file.bytes, 0) }),
+      },
       server: statusJson(status),
     }
     if (args.json) {
@@ -1175,17 +1187,18 @@ export async function runLocalCommand(argv: string[], ports: LocalCommandPorts):
       const path = join(cfg.modelsDir, entry.fileName)
       if (entry.source === undefined) {
         const file = await useExistingModelFile(path).then(() => true, () => false)
-        model = { id: entry.id, path, present: file, verified: null, source_configured: false }
+        model = { id: entry.id, label: entry.label, path, present: file, verified: null, source_configured: false }
         modelReady = file
       } else {
         const check = await verifyModelFile(path, entry.source)
-        model = { id: entry.id, path, present: check.present, verified: check.verified, source_configured: true }
+        model = { id: entry.id, label: entry.label, path, present: check.present, verified: check.verified, source_configured: true, ...(entry.source.bytes === undefined ? {} : { bytes: entry.source.bytes }) }
         modelReady = check.verified
       }
     }
     const versionOk = entry?.minLlamaCpp === undefined || versionCheck?.ok === true
     const ready = selection.ok && binary !== undefined && modelReady && versionOk
     const payload = {
+      engine: 'llama-server',
       ready,
       hardware: hardwareJson(hw),
       selection: selection.ok

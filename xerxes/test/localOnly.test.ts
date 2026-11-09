@@ -16,7 +16,7 @@ import { runTurn } from '../src/streaming/loop.js'
 import { registerCoreTools } from '../src/tools/index.js'
 import { EXEC_COMMAND_DEFINITION } from '../src/tools/processTools.js'
 import { EditDiagnostics } from '../src/runtime/editDiagnostics.js'
-import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from '../src/runtime/localOnly.js'
+import { enableLocalOnly, environmentBeforeLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from '../src/runtime/localOnly.js'
 
 const CLI = join(import.meta.dir, '../src/cli.ts')
 
@@ -336,4 +336,17 @@ test('local mode hands commands the sandbox under accept-all too', async () => {
     restore()
   }
   expect(seen).toEqual([undefined, sandbox])
+})
+
+test('the launch environment is still readable after fully local mode sets its own switches', () => {
+  const env: Record<string, string | undefined> = { HOME: '/home/u', XERXES_MODELS_DEV: '1' }
+  const restore = enableLocalOnly(env)
+  try {
+    expect(env.XERXES_LOCAL_ONLY).toBe('1')
+    // The user never set XERXES_LOCAL_ONLY: the mode is the saved setting, not an override.
+    expect(environmentBeforeLocalOnly(env)).toEqual({ HOME: '/home/u', XERXES_MODELS_DEV: '1' })
+  } finally {
+    restore()
+  }
+  expect(environmentBeforeLocalOnly(env)).toEqual(env)
 })

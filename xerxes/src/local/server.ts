@@ -100,7 +100,10 @@ export interface ServerStatus {
   readonly model?: string
   readonly startedAt?: string
   readonly logPath?: string
-  /** The window the engine reports it loaded (LM Studio's `loaded_context_length`). */
+  /**
+   * The window: the one LM Studio reports it loaded (`loaded_context_length`),
+   * or the one Xerxes started llama-server or mlx_lm.server with.
+   */
   readonly contextLength?: number
 }
 
@@ -342,6 +345,7 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
       model: state.model,
       startedAt: state.startedAt,
       logPath: state.logPath,
+      ...(state.ctxSize === undefined ? {} : { contextLength: state.ctxSize }),
     }
   }
 

@@ -491,6 +491,30 @@ runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. `XERXES_AUT
 stops the install of a missing CLI but still lets an installed one update. The Codex provider needs no
 CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's saved sign-in.
 
+## Private, Hybrid and Cloud
+
+How new tasks run. The desktop app sets it under **Models & Providers**, and asks for it on first
+run. Each mode is a combination of settings the runtime already has:
+
+| Mode | Does the work | Settings |
+| --- | --- | --- |
+| Private | Bonsai on this machine | the worker is a local profile and `runtime.local_only: true` |
+| Hybrid | Bonsai, with a cloud advisor | the worker is a local profile; `runtime.advisor.profile` names a cloud profile, `runtime.escalation.max_usd` caps cloud spend per task ($1 by default) |
+| Cloud | a cloud model | the worker is a cloud profile |
+
+- **The worker** is the active provider profile. Nothing runs until one is chosen: the built-in
+  Claude Code profile is listed, but it is not used until you pick it.
+- **Setting up Bonsai from the app** runs the same steps as `xerxes local setup`, in the
+  runtime, with live progress. It can be cancelled; a partial download resumes next time.
+  Choosing Private or Hybrid before Bonsai is set up offers the setup first.
+- **Restart:** fully local mode and the advisor are read when the runtime starts. After a change
+  to either, the app restarts the runtime once no work is running.
+- **Environment:** `XERXES_LOCAL_ONLY` and `XERXES_ADVISOR_PROFILE` override the saved settings,
+  and the app says so.
+- **RPC:** `run_mode.get` and `run_mode.set` (`mode`, and optionally `worker_profile`,
+  `advisor_profile`, `budget_usd`); `local.status`, `local.setup` (optionally `then_mode`:
+  `private` or `hybrid`) and `local.setup.cancel`, with progress as `local_setup` events.
+
 ## Bonsai and the local cascade
 
 `xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
@@ -787,6 +811,10 @@ itself. Keep network, browser, media, accelerator, and remote-channel integratio
 explicit host port.
 
 ## Agent intelligence tiers
+
+The tiers sit under the mode: in Private, fully local mode refuses a tier pointed at a cloud
+provider, and the desktop app warns about it; in Hybrid, agents on a cloud tier send their task
+to that provider.
 
 `AgentTool`, `TaskCreateTool`, and each entry in `SpawnAgents.agents` accept an optional
 `intelligence` value: `light`, `balanced`, or `smart`. The parent model chooses a tier according

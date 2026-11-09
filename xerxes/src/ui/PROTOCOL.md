@@ -2743,3 +2743,43 @@ session `shared`, permanently. In a shared session the remembered `ALWAYS` appro
 `security/approvals.ts` never authorize a call (neither grants nor denials) and an
 "always" answer is remembered only for that session; once/session grants made inside the
 session are still honored.
+
+### Run modes and local setup (additive v35)
+
+Private, Hybrid and Cloud are combinations of existing settings, so these methods
+add no new runtime state. A daemon started without the host ports answers each
+with `{ ok: false, code: "unsupported" }`.
+
+- `run_mode.get` `{}` → `{ ok, mode, worker, advisor, local_only, budget_usd,
+  restart_pending, locked_by }`. `mode` is `private` (local worker, fully local mode
+  on), `hybrid` (local worker; `advisor` names the cloud advisor or is null) or
+  `cloud` (cloud worker), and null until a worker profile is chosen.
+  `worker` is `{ profile, model, local }`; `advisor` is `{ profile, model, found }`.
+  `restart_pending` says the saved settings differ from the ones the daemon started
+  with; `locked_by` lists environment variables that override them.
+- `run_mode.set` `{ mode, worker_profile?, advisor_profile?, budget_usd? }` → the
+  same fields plus `restart_required`. Without `worker_profile` it keeps the current
+  worker when it fits the mode, else uses `bonsai-local` for Private and Hybrid.
+  `advisor_profile: null` removes the advisor. Refusals carry a `code`:
+  `needs_local_setup`, `needs_cloud_profile`, `wrong_location`, `unknown_profile`,
+  `invalid_request` or `worker_not_selected`. The worker is selected as by
+  `provider_select` (emitting `InitDone`); the settings are written to the
+  `runtime` section of `daemon/config.json`.
+- `local.status` `{}` → `{ ok, status, job }`: `xerxes local doctor --json` as one
+  shape, `status: { ready, engine: { name, label, found, version, new_enough },
+  model: { id, label, bytes, downloaded }, server: { running, port, context_length },
+  memory_bytes, blocker }`, and the current or last setup job.
+- `local.setup` `{ then_mode? }` → `{ ok, job }` at once; the setup itself runs
+  `xerxes local setup --json` in the daemon. `then_mode` (`private` or `hybrid`) is
+  applied as `run_mode.set` when it succeeds. A second request while one runs
+  returns `{ ok: false, code: "busy", job }`.
+- `local.setup.cancel` `{}` → `{ ok, cancelled }`.
+
+`local_setup` (event, broadcast) `{ job }` reports every change to the job:
+`{ id, state, step, started_at }` with `percent` while `running`, and
+`finished_at` once `done` (with `result`), `failed` (with `error: { code,
+message }`) or `cancelled`.
+
+`provider_list` adds `active_chosen` (false while only the built-in Claude Code
+fallback is active, which nothing runs on) and a per-profile `local` flag (data
+trust local: a Private or Hybrid worker).

@@ -46,7 +46,7 @@ import {
   createDaemonChannelManager,
   daemonChannelWebhookOptions,
 } from "./daemon/channels.js";
-import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
+import { daemonConfigPath, loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
@@ -59,7 +59,7 @@ import { createHybridPlacement } from './daemon/hybridPlanTool.js';
 import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, readLeanProjectInstructions, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
 import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
 import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
-import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
+import { enableLocalOnly, environmentBeforeLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
@@ -130,6 +130,7 @@ import { LessonSharing } from './memory/lessonSharing.js';
 import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
+import { runtimeSettingsFile } from './daemon/runMode.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
 import { ReflectionProposalStore, reflectionModeFor, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
@@ -1256,6 +1257,13 @@ async function runDaemonOwned(
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
     providerReadiness: createSignInReadinessProbe(),
+    // The desktop's "On this Mac" setup: the same command as `xerxes local`, loaded on first use.
+    localSetup: async (argv, io) => {
+      const [{ runLocalCommand }, { systemLocalCommandPorts }] = await Promise.all([import("./local/command.js"), import("./local/cliEntry.js")]);
+      return runLocalCommand([...argv], systemLocalCommandPorts(io));
+    },
+    // The launch environment: fully local mode exports XERXES_LOCAL_ONLY itself, which is not the user's override.
+    modeSettings: { file: runtimeSettingsFile(daemonConfigPath(xerxesHome())), loaded: config.runtime, env: environmentBeforeLocalOnly() },
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
     autoSnapshotTurns: true,

@@ -57,6 +57,9 @@ import type {
   PlanState,
   ProviderRow,
   ProviderTypeRow,
+  LocalSetupView,
+  RunModeName,
+  RunModeView,
   QueueItem,
   SessionRow,
   SessionSearchHit,
@@ -68,6 +71,7 @@ import type {
   WorkspaceTab,
 } from './types.js'
 import { harnessOriginOf } from './types.js'
+import { localSetupJobView, localStatusView, runModeView } from './runModeView.js'
 import { withoutTurnContext } from './transcriptContent.js'
 
 export type Connection = 'connecting' | 'online' | 'offline'
@@ -503,6 +507,13 @@ export interface Snapshot {
   readonly modelsError: string | null
   readonly providerSwitching: string | null
   readonly providerSwitchError: string | null
+  /** Private, Hybrid or Cloud (`run_mode.get`); null until loaded or on a runtime without it. */
+  readonly runMode: RunModeView | null
+  readonly runModeError: string
+  /** A run_mode.set is in flight. */
+  readonly runModeSaving: boolean
+  /** Bonsai on the workspace host: engine, model and the setup job. */
+  readonly localSetup: LocalSetupView
   /** Model catalogs and editable capacities cached for each provider profile. */
   readonly providerModels: Readonly<Record<string, readonly CachedModel[]>>
   readonly providerModelLoading: readonly string[]
@@ -1029,6 +1040,10 @@ export class Store {
       modelsError: null,
       providerSwitching: null,
       providerSwitchError: null,
+      runMode: null,
+      runModeError: '',
+      runModeSaving: false,
+      localSetup: { status: null, job: null, error: '', loading: false },
       providerModels: {},
       providerModelLoading: [],
       providerModelWarnings: {},
@@ -1429,14 +1444,14 @@ export class Store {
     return this.restartDaemon(true, true)
   }
 
-  async restartDaemon(allowLegacy = true, force = false): Promise<void> {
+  async restartDaemon(allowLegacy = true, force = false, purpose: 'update' | 'mode' = 'update'): Promise<void> {
     if (this.updatingRuntime) return
     if (this.frame.daemonWarning?.startsWith('The app is older')) {
       this.patch({ runtimeUpdate: 'failed', runtimeUpdateMessage: 'Update and relaunch the desktop app. Its bundled runtime is older than the running runtime.' })
       return
     }
     this.updatingRuntime = true
-    this.patch({ runtimeUpdate: 'checking', runtimeUpdateMessage: force ? 'Stopping running work and restarting…' : 'Checking for running work…' })
+    this.patch({ runtimeUpdate: 'checking', runtimeUpdateMessage: force ? 'Stopping running work and restarting…' : purpose === 'mode' ? 'Applying the new mode: checking for running work…' : 'Checking for running work…' })
     const goalWasActive = force && parseGoal(this.frame.goal)?.phase === 'active'
     try {
       const result = await this.bridge.call('desktop.restartRuntime', { session_key: this.sessionKey, allow_legacy: allowLegacy, ...(force ? { force: true } : {}) })
@@ -1445,15 +1460,16 @@ export class Store {
           const blockers = Array.isArray(result.blockers) ? result.blockers.filter((item): item is string => typeof item === 'string') : []
           this.patch(result.waiting_for_goal_round === true
             ? { runtimeUpdate: 'waiting', runtimeBlockers: blockers, runtimeUpdateMessage: 'Update queued. It installs when the current goal round ends, and the goal continues after the restart.' }
-            : { runtimeUpdate: 'waiting', runtimeBlockers: blockers, runtimeUpdateMessage: 'Update queued. It will install automatically when all running work finishes.' })
+            : { runtimeUpdate: 'waiting', runtimeBlockers: blockers, runtimeUpdateMessage: purpose === 'mode' ? 'Mode saved. It applies when all running work finishes.' : 'Update queued. It will install automatically when all running work finishes.' })
           return
         }
         throw new Error(str(result.error) || 'This runtime cannot update automatically. Restart the workspace runtime from its terminal, then reopen the app.')
       }
-      this.patch({ runtimeUpdate: 'restarting', runtimeUpdateMessage: 'Reconnecting to the updated runtime…' })
+      this.patch({ runtimeUpdate: 'restarting', runtimeUpdateMessage: purpose === 'mode' ? 'Restarting the runtime with the new mode…' : 'Reconnecting to the updated runtime…' })
       await this.initialize(this.frame.currentId ? { resume_session_id: this.frame.currentId } : {})
       if (this.frame.daemonWarning) throw new Error('The runtime restarted, but its build still differs. Quit and relaunch the latest app; check any custom runtime path.')
       this.patch({ runtimeUpdate: undefined, runtimeUpdateMessage: undefined, runtimeBlockers: [] })
+      if (purpose === 'mode') { void this.loadRunMode(); void this.loadProviders() }
       // The old runtime could not carry the goal across; pick it back up.
       if (result.legacy_forced === true && goalWasActive) await this.submit('/goal resume')
     } catch (error) {
@@ -2249,6 +2265,8 @@ export class Store {
     this.patch({ settingsOpen: true, paletteOpen: false, ...(tab ? { settingsTab: tab } : {}) })
     this.loadModels()
     void this.loadProviders()
+    void this.loadRunMode()
+    if (tab === 'models') void this.loadLocalSetup()
     void this.loadAgentPresets()
     if (tab === 'channels') this.loadChannels()
     if (tab === 'terminals') this.loadTerminals()
@@ -2264,6 +2282,8 @@ export class Store {
     if (tab === 'models') {
       this.loadModels()
       void this.loadProviders()
+      void this.loadRunMode()
+      void this.loadLocalSetup()
     }
     if (tab === 'channels') this.loadChannels()
     if (tab === 'terminals') this.loadTerminals()
@@ -2986,6 +3006,93 @@ export class Store {
       })
   }
 
+  /** Private, Hybrid or Cloud, as the runtime reads its settings. A runtime without run_mode leaves it null. */
+  async loadRunMode(): Promise<void> {
+    try {
+      const result = await this.bridge.call('run_mode.get', {})
+      if (result.ok === false) {
+        this.patch({ runMode: null, runModeError: result.code === 'unsupported' || str(result.error).startsWith('Unknown method') ? '' : str(result.error) })
+        return
+      }
+      this.patch({ runMode: runModeView(result), runModeError: '' })
+    } catch (error) {
+      this.patch({ runModeError: desktopError(error) })
+    }
+  }
+
+  /**
+   * Choose a mode. Private and Hybrid need Bonsai set up (`needs_local_setup`),
+   * Cloud a cloud worker (`needs_cloud_profile`); the caller shows what to do.
+   * Fully local mode and the advisor apply after an idle restart, started here.
+   */
+  async setRunMode(mode: RunModeName, options: { workerProfile?: string; advisorProfile?: string | null; budgetUsd?: number } = {}): Promise<{ ok: boolean; code?: string }> {
+    if (this.frame.runModeSaving || this.frame.turnActive) return { ok: false, code: 'busy' }
+    this.patch({ runModeSaving: true, runModeError: '' })
+    try {
+      const result = await this.bridge.call('run_mode.set', {
+        mode,
+        ...(options.workerProfile === undefined ? {} : { worker_profile: options.workerProfile }),
+        ...(options.advisorProfile === undefined ? {} : { advisor_profile: options.advisorProfile }),
+        ...(options.budgetUsd === undefined ? {} : { budget_usd: options.budgetUsd }),
+      })
+      if (result.ok === false) {
+        const code = str(result.code)
+        // These two are steps the page offers next, not errors.
+        if (code !== 'needs_local_setup' && code !== 'needs_cloud_profile') this.patch({ runModeError: str(result.error) || 'The mode could not be changed.' })
+        return { ok: false, code }
+      }
+      const view = runModeView(result)
+      this.patch({ runMode: view })
+      void this.loadProviders()
+      this.loadModels(true)
+      if (view.restartPending) void this.restartDaemon(false, false, 'mode')
+      return { ok: true }
+    } catch (error) {
+      this.patch({ runModeError: desktopError(error) })
+      return { ok: false }
+    } finally {
+      this.patch({ runModeSaving: false })
+    }
+  }
+
+  /** The engine, model and server for Bonsai on this host, and any setup job. */
+  async loadLocalSetup(): Promise<void> {
+    this.patch({ localSetup: { ...this.frame.localSetup, loading: true } })
+    try {
+      const result = await this.bridge.call('local.status', {})
+      const job = localSetupJobView(result.job)
+      if (result.ok === false) {
+        const unsupported = result.code === 'unsupported' || str(result.error).startsWith('Unknown method')
+        this.patch({ localSetup: { ...this.frame.localSetup, job: job ?? this.frame.localSetup.job, error: unsupported ? '' : str(result.error), loading: false } })
+        return
+      }
+      this.patch({ localSetup: { status: localStatusView(result.status), job: job ?? this.frame.localSetup.job, error: '', loading: false } })
+    } catch (error) {
+      this.patch({ localSetup: { ...this.frame.localSetup, error: desktopError(error), loading: false } })
+    }
+  }
+
+  /** Download (if needed) and start Bonsai, then switch to `thenMode`. Progress arrives as `local_setup` events. */
+  async startLocalSetup(thenMode?: 'private' | 'hybrid'): Promise<void> {
+    try {
+      const result = await this.bridge.call('local.setup', thenMode === undefined ? {} : { then_mode: thenMode })
+      const job = localSetupJobView(result.job)
+      this.patch({ localSetup: { ...this.frame.localSetup, ...(job ? { job } : {}), error: result.ok === false ? str(result.error) || 'Setup could not start.' : '' } })
+    } catch (error) {
+      this.patch({ localSetup: { ...this.frame.localSetup, error: desktopError(error) } })
+    }
+  }
+
+  cancelLocalSetup(): void {
+    void this.bridge.call('local.setup.cancel', {}).catch(() => {})
+  }
+
+  private async localSetupFinished(): Promise<void> {
+    await Promise.all([this.loadLocalSetup(), this.loadProviders(), this.loadRunMode()])
+    this.loadModels(true)
+    if (this.frame.runMode?.restartPending) await this.restartDaemon(false, false, 'mode')
+  }
+
   async loadProviders(): Promise<void> {
     // "No saved provider profiles" is only true once provider_list has
     // answered; asserting it while in flight told a configured user they
@@ -3010,8 +3117,10 @@ export class Store {
               signsIn: row.signs_in === true,
               ...(row.ready === true ? { ready: true as boolean } : {}),
               model: str(row.model),
-              active: row.active === true,
+              // The built-in Claude Code fallback is "active" only until something is chosen; nothing runs on it.
+              active: row.active === true && result.active_chosen !== false,
               baseUrl: str(row.base_url),
+              ...(typeof row.local === 'boolean' ? { local: row.local } : {}),
             } satisfies ProviderRow
           })
           .filter((row): row is ProviderRow => row !== null)
@@ -4378,6 +4487,13 @@ export class Store {
         this.loadSkillSuggestions()
         this.loadCreatorTrace()
         void this.refreshSessions()
+        break
+      }
+      case 'local_setup': {
+        const job = localSetupJobView(payload.job)
+        if (!job) break
+        this.patch({ localSetup: { ...this.frame.localSetup, job } })
+        if (job.state === 'done') void this.localSetupFinished()
         break
       }
       default:

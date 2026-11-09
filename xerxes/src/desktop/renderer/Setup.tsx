@@ -61,7 +61,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
           <strong>Make yourself at home.</strong>
           {/* Only the unfinished steps are ever shown now, so naming them
               beats claiming there are "a few things" when there is one. */}
-          <p>{[!state.workspace && 'a folder', !state.runtime && 'a runtime connection', !state.model && 'a model'].filter(Boolean).join(' and ') || 'Almost there'} — then you can start.</p>
+          <p>{[!state.workspace && 'a folder', !state.runtime && 'a runtime connection', !state.model && 'how Xerxes runs'].filter(Boolean).join(' and ') || 'Almost there'} — then you can start.</p>
         </div>
         <button onClick={finish}>Later</button>
       </div>
@@ -84,10 +84,10 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
         </div>
         <div>
           <span>{state.model ? <Icon name="check" size={12} /> : '3'}</span>
-          <strong>Your model</strong>
-          <p>{snap.model || 'Use your own provider account or local endpoint.'}</p>
+          <strong>How Xerxes runs</strong>
+          <p>{snap.model || 'Private: Bonsai on this Mac. Hybrid: Bonsai with a cloud advisor. Cloud: a cloud model.'}</p>
           <button disabled={!state.runtime} onClick={() => store.openSettings('models')}>
-            {state.model ? 'Change model' : 'Connect a provider'}
+            {state.model ? 'Change mode' : 'Choose a mode'}
           </button>
         </div>
       </div>
