@@ -381,6 +381,12 @@ function loadReferencedSubagentDefinitions(
     const [creatorKey, creator] = entry
     const boundSubagents: Record<string, AgentSubagentSpec> = {}
     for (const [alias, reference] of Object.entries(creator.subagents ?? {})) {
+      // Statically-bound catalog entries (the asset-less built-in fallback)
+      // carry their profile already; there is no YAML file to load.
+      if (reference.resolvedProfile) {
+        boundSubagents[alias] = reference
+        continue
+      }
       try {
         const referenceKey = `${alias}\u0000${reference.path}`
         let profileKey = loadedPaths.get(referenceKey)
@@ -615,6 +621,16 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
       tools: standardTools,
       allowedTools: null,
       excludeTools: [],
+      // Mirror agent.yaml's catalog: the asset-less bundle has no YAML paths,
+      // so each child profile is bound statically by name.
+      subagents: {
+        coder: { path: '', description: 'Good at general software engineering tasks.', resolvedProfile: 'coder' },
+        researcher: { path: '', description: 'Fast codebase exploration with prompt-enforced read-only behavior.', resolvedProfile: 'researcher' },
+        planner: { path: '', description: 'Read-only implementation planning and architecture design.', resolvedProfile: 'planner' },
+        reviewer: { path: '', description: 'Independent read-only code review with prioritized findings.', resolvedProfile: 'reviewer' },
+        tester: { path: '', description: 'Focused test authoring and verification without recursive delegation.', resolvedProfile: 'tester' },
+        objective: { path: '', description: 'Hard-goal execution loop with verification gates.', resolvedProfile: 'objective' },
+      },
       source: 'built-in',
       maxDepth: 5,
       isolation: '',
@@ -739,6 +755,14 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
       tools: [],
       allowedTools: null,
       excludeTools: ['AskUserQuestionTool', 'SkillTool'],
+      // Mirror objective.yaml's catalog (statically bound, like default's above).
+      subagents: {
+        coder: { path: '', description: 'Focused implementation for a disjoint part of the objective.', resolvedProfile: 'coder' },
+        researcher: { path: '', description: 'Read-only evidence gathering for a bounded objective question.', resolvedProfile: 'researcher' },
+        planner: { path: '', description: 'Read-only planning for a complex objective phase.', resolvedProfile: 'planner' },
+        reviewer: { path: '', description: 'Independent read-only review when changed paths or diff context are supplied.', resolvedProfile: 'reviewer' },
+        tester: { path: '', description: 'Focused test authoring and verification for the current objective.', resolvedProfile: 'tester' },
+      },
       source: 'built-in',
       maxDepth: 5,
       isolation: '',
