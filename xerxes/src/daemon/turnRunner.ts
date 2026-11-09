@@ -571,6 +571,19 @@ export class AgentTurnRunner implements TurnRunner {
     const permissionMode = resumedSubagent
       ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
       : configuredPermissionMode
+    const permissionModeProvider = (): PermissionMode => {
+      const liveConfigured = permissionModeForInteraction(
+        session.interactionMode,
+        permissionModeValue(session.permissionMode) ?? sessionPermissionMode,
+      )
+      const live = resumedSubagent
+        ? permissionModeForResumedSubagent(liveConfigured, session.metadata)
+        : liveConfigured
+      // New sub-agents inherit this metadata, so they must see the live main
+      // runtime policy rather than the mode frozen when this turn began.
+      state.metadata.permission_mode = live
+      return live
+    }
     state.metadata.permission_mode = permissionMode
     let runSafety: RunSafety | undefined
     try {
@@ -884,6 +897,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(maxTokens === undefined ? {} : { maxTokens }),
         ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(attemptModel) } : {}),
         permissionMode,
+        permissionModeProvider,
         ...(providerDefaults?.temperature !== undefined ? { temperature: providerDefaults.temperature } : {}),
         ...(providerDefaults?.serviceTier !== undefined ? { serviceTier: providerDefaults.serviceTier } : {}),
         ...(thinkingRequest === undefined ? {} : { thinking: thinkingRequest }),
