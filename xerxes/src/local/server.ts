@@ -21,6 +21,7 @@ import { basename, dirname, join } from 'node:path'
 
 import { XerxesError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import { whichEngine } from './enginePath.js'
 import type { EngineRecovery, EngineTarget } from './engineRecovery.js'
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 180_000
@@ -503,7 +504,7 @@ function portIsInUse(port: number): Promise<boolean> {
 /** Real ports: detached child with stdout/stderr appended to the log file, argv-only (no shell). */
 export function systemServerPorts(): ServerPorts {
   return {
-    which: (name) => Bun.which(name) ?? undefined,
+    which: (name) => whichEngine(name),
     exists: (path) => Bun.file(path).exists(),
     spawn(argv, { logPath }) {
       const [command, ...args] = argv

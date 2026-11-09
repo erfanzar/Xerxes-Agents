@@ -511,8 +511,10 @@ llama-server.
    - **The 27B:** downloads the `Q2_0` GGUF (7.6 GB), which stock llama.cpp runs from build b11555
      (release v0.7.0). Prism's smaller `PQ2_0` and `PTQ1_0` packings still need its fork; pass one
      with `--model-file`.
-   - **Finding the binary:** `llama-server` is found on `PATH`. Set
-     `runtime.local.llama_server_path` (`XERXES_LOCAL_LLAMA_SERVER`) to use another.
+   - **Finding the binary:** `llama-server` is found on `PATH`, then in `/opt/homebrew/bin`,
+     `/usr/local/bin`, `~/.local/bin` and `~/.lmstudio/bin`, so the desktop app finds it when
+     opened from Finder. Set `runtime.local.llama_server_path` (`XERXES_LOCAL_LLAMA_SERVER`) to
+     use another.
 2. **`mlx`** (Apple silicon only): supervises mlx-lm's `mlx_lm.server`, installed with
    `uv tool install mlx-lm`.
    - **The 27B:** downloads the 2-bit MLX pack (8.6 GB) into a folder under the models directory.
