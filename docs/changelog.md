@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.32 — 2026-11-09
+
+- **Hub: reconnects no longer replay the same journal forever.** Live event batches are held back during explicit backfill, the subscription resumes at the caught-up cursor, and post-handshake failures keep their exponential backoff. Lesson sync has an online-trigger cooldown and health events are emitted only when visible health changes. This stops sustained relay traffic and workspace-event floods when a daemon has a large backlog.
+- **Compaction retries after an output-token cutoff.** A summary that ends with `finish_reason: length` is regenerated once with a 64K output window instead of failing auto-compaction. The truncated draft is discarded and never stored; repeated truncation still preserves the original history.
+
 ## 0.8.31 — 2026-11-08
 
 - **Automatic compaction frees room, and you choose when it runs.** An oversized last round used to be protected, so compaction removed a few hundred tokens, said "Nothing to compact" and the turn still failed. That round is now summarized. A new **Auto-compact** setting (Settings → General) picks when a task's history is summarized: **60% of the model's window by default** (earlier releases waited much longer), a token count such as `400k`, or `off`. The full history is archived first.
