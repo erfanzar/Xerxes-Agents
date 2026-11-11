@@ -199,6 +199,7 @@ test('responses additional-tools mode emits developer load items at the revealin
     name: 'ToolSearchTool',
     description: 'Search tools.',
     parameters: { type: 'object', properties: {} },
+    strict: false,
   }])
   expect(payload?.input).toEqual([
     { role: 'user', content: 'deploy it' },
@@ -212,6 +213,7 @@ test('responses additional-tools mode emits developer load items at the revealin
         name: 'deploy_service',
         description: 'Deploy a service.',
         parameters: DEFERRED.function.parameters,
+        strict: false,
       }],
     },
   ])
