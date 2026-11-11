@@ -1,12 +1,12 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { lstat, readdir, realpath, statfs } from 'node:fs/promises'
+import { realpath, statfs } from 'node:fs/promises'
 import { freemem, loadavg, totalmem, uptime } from 'node:os'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isAbsolute } from 'node:path'
+import { AnchoredWorkspaceFiles, OversizedObservationFile } from './anchoredFiles.js'
 
 const MAX_BYTES = 64 * 1024
-const MAX_FILE = 1024 * 1024
 const MAX_SCAN_FILES = 1000
 const MAX_SCAN_BYTES = 8 * 1024 * 1024
 const WIDTHS: ReadonlySet<number> = new Set([390, 768, 1280, 1440])
@@ -61,45 +61,29 @@ function integer(value: number, min: number, max: number, label: string): void {
 
 /** Workspace-local SEE implementation. Observations never grant mutation authority. */
 export class WorkspaceObservations {
-  constructor(private readonly root: string, private readonly hosts: ObservationHosts = {}) {}
+  private readonly files: AnchoredWorkspaceFiles
+  constructor(private readonly root: string, private readonly hosts: ObservationHosts = {}) {
+    this.files = new AnchoredWorkspaceFiles(root)
+  }
 
-  private async path(path: string): Promise<string> {
+  private path(path: string): string {
     if (path === '' || path.length > 4096 || /[\0\r\n]/.test(path) || isAbsolute(path) || PRIVATE.test(path)) throw new Error('Refused workspace path (secrets require owner confirmation)')
-    const root = await realpath(this.root)
-    const candidate = resolve(root, path)
-    const relativePath = relative(root, candidate)
-    if (relativePath === '..' || relativePath.startsWith(`..${sep}`)) throw new Error('Path escapes workspace')
-    // Refuse symlinks entirely: both directory traversal and leaf escapes are data-boundary violations.
-    let current = root
-    for (const part of relativePath.split(sep).filter(Boolean)) {
-      current = join(current, part)
-      if ((await lstat(current)).isSymbolicLink()) throw new Error('Symlink workspace paths are refused')
-    }
-    const canonical = await realpath(candidate)
-    if (canonical !== root && !canonical.startsWith(`${root}${sep}`)) throw new Error('Path escapes workspace')
-    return canonical
+    return path
   }
 
   async read(path: string, offset = 0, maxBytes = MAX_BYTES) {
     integer(offset, 0, Number.MAX_SAFE_INTEGER, 'offset'); integer(maxBytes, 1, MAX_BYTES, 'max_bytes')
-    const filePath = await this.path(path)
-    const info = await lstat(filePath)
-    if (!info.isFile()) throw new Error('Only regular files can be read')
-    if (info.size > MAX_FILE) throw new Error('File exceeds the 1 MiB observation limit')
-    const file = Bun.file(filePath)
-    const bytes = new Uint8Array(await file.slice(offset, offset + maxBytes).arrayBuffer())
+    const { bytes, totalBytes } = await this.files.read(this.path(path), offset, maxBytes)
     if (bytes.includes(0)) throw new Error('Refused binary file')
-    return { text: new TextDecoder().decode(bytes), offset, next_offset: offset + bytes.length < info.size ? offset + bytes.length : null,
-      total_bytes: info.size, untrusted: true }
+    return { text: new TextDecoder().decode(bytes), offset, next_offset: offset + bytes.length < totalBytes ? offset + bytes.length : null,
+      total_bytes: totalBytes, untrusted: true }
   }
 
   async list(path = '.', offset = 0, limit = 200) {
     integer(offset, 0, Number.MAX_SAFE_INTEGER, 'offset'); integer(limit, 1, 200, 'limit')
-    const dir = await this.path(path)
-    const entries = (await readdir(dir, { withFileTypes: true })).filter(entry => !PRIVATE.test(entry.name))
+    const entries = (await this.files.list(this.path(path))).filter(entry => !PRIVATE.test(entry.name))
       .sort((a, b) => a.name.localeCompare(b.name))
-    return { entries: entries.slice(offset, offset + limit).map(entry => ({ name: entry.name,
-      kind: entry.isSymbolicLink() ? 'symlink' : entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other' })),
+    return { entries: entries.slice(offset, offset + limit),
       next_offset: offset + limit < entries.length ? offset + limit : null, untrusted: true }
   }
 
@@ -111,18 +95,20 @@ export class WorkspaceObservations {
     const visit = async (path: string, depth: number): Promise<void> => {
       signal?.throwIfAborted()
       if (depth > 20 || files >= MAX_SCAN_FILES || scannedBytes >= MAX_SCAN_BYTES || hits.length > limit) { truncated = true; return }
-      const dir = await this.path(path)
-      for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      for (const entry of (await this.files.list(this.path(path))).sort((a, b) => a.name.localeCompare(b.name))) {
         signal?.throwIfAborted()
         const child = path === '.' ? entry.name : `${path}/${entry.name}`
-        if (PRIVATE.test(child) || entry.isSymbolicLink()) continue
-        if (entry.isDirectory()) { await visit(child, depth + 1); continue }
-        if (!entry.isFile()) continue
+        if (PRIVATE.test(child) || entry.kind === 'symlink') continue
+        if (entry.kind === 'directory') { await visit(child, depth + 1); continue }
+        if (entry.kind !== 'file') continue
         if (files >= MAX_SCAN_FILES || scannedBytes >= MAX_SCAN_BYTES || hits.length > limit) { truncated = true; return }
-        const filePath = await this.path(child)
-        const info = await lstat(filePath); files++
-        if (info.size > MAX_BYTES || scannedBytes + info.size > MAX_SCAN_BYTES) { truncated = true; continue }
-        const bytes = new Uint8Array(await Bun.file(filePath).arrayBuffer()); scannedBytes += bytes.length
+        files++
+        let opened: Awaited<ReturnType<AnchoredWorkspaceFiles['read']>>
+        try { opened = await this.files.read(this.path(child), 0, Math.min(MAX_BYTES, MAX_SCAN_BYTES - scannedBytes)) }
+        catch (error) { if (error instanceof OversizedObservationFile) { truncated = true; continue } throw error }
+        const { bytes, totalBytes } = opened
+        scannedBytes += bytes.length
+        if (totalBytes > bytes.length) { truncated = true; continue }
         if (bytes.includes(0)) continue
         const lines = new TextDecoder().decode(bytes).split('\n')
         for (let line = 0; line < lines.length; line++) {
@@ -138,9 +124,11 @@ export class WorkspaceObservations {
   }
 
   async git(view: 'status' | 'log' | 'diff', signal?: AbortSignal) {
-    const args = view === 'status' ? ['status', '--short', '--untracked-files=no']
-      : view === 'log' ? ['log', '-30', '--format=%h %s']
-        : view === 'diff' ? ['diff', '--no-ext-diff', '--no-textconv', '--', '.', ':!.env*', ':!**/.env*'] : undefined
+    const exclusions = ['.env*', 'credentials*', 'id_rsa*', 'id_ed25519*', '.ssh/**', '.git/**', 'node_modules/**']
+      .map(pattern => `:(exclude,glob,icase)**/${pattern}`)
+    const args = view === 'status' ? ['status', '--short', '--untracked-files=no', '--', '.']
+      : view === 'log' ? ['log', '-30', '--format=%h %s', '--', '.']
+        : view === 'diff' ? ['diff', '--no-ext-diff', '--no-textconv', '--', '.', ...exclusions] : undefined
     if (args === undefined) throw new Error('Unknown git observation')
     const result = await readCommand(['git', '--no-pager', '-c', 'core.fsmonitor=false', ...args], await realpath(this.root), signal)
     return { ...result, untrusted: true }

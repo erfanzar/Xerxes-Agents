@@ -65,3 +65,23 @@ test('injected screenshot host receives only approved Xerxes widths', async () =
   expect(await observer.screenshot(1280)).toEqual({ artifact: 'xerxes-ui.png', width: 1280 })
   expect(widths).toEqual([1280])
 })
+
+test('Git observations stay in the workspace subtree and exclude credential diffs', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'project-a')); await mkdir(join(root, 'project-b'))
+  await writeFile(join(root, 'project-a', 'safe.txt'), 'before')
+  await writeFile(join(root, 'project-a', 'credentials.json'), 'old credential')
+  await writeFile(join(root, 'project-b', 'hidden.txt'), 'before')
+  for (const args of [['init', '-q', '--template='], ['add', '.']]) {
+    const result = Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+    expect(result.exitCode).toBe(0)
+  }
+  await writeFile(join(root, 'project-a', 'safe.txt'), 'after')
+  await writeFile(join(root, 'project-a', 'credentials.json'), 'DO-NOT-DISCLOSE')
+  await writeFile(join(root, 'project-b', 'hidden.txt'), 'sibling change')
+  const observer = new WorkspaceObservations(join(root, 'project-a'))
+  expect((await observer.git('status')).text).not.toContain('hidden.txt')
+  const diff = (await observer.git('diff')).text
+  expect(diff).toContain('safe.txt')
+  expect(diff).not.toContain('DO-NOT-DISCLOSE')
+})
