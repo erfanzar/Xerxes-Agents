@@ -158,6 +158,9 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
     async showSourceControl() { await vscode.commands.executeCommand('workbench.view.scm'); return true },
     // PanelHost has already limited the link to http, https and mailto.
     async openExternal(url) { return vscode.env.openExternal(vscode.Uri.parse(url, true)) },
+    // PanelHost has already resolved the path inside the task folder and refused launchable files.
+    async openWithSystem(path) { return await vscode.env.openExternal(vscode.Uri.file(path)) ? '' : 'the system did not open it' },
+    async revealInOS(path) { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(path)) },
     setStyle,
   }
   const post = (frame: ResultFrame | PushFrame): void => { void webview.postMessage(frame) }

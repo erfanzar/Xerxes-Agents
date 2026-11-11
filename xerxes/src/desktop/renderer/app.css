@@ -1632,3 +1632,54 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 }
 .railrow--static button:hover { border-color: var(--x-focus); color: var(--x-title); }
 .raillist__cap--standalone { margin-top: 18px; }
+
+/* ── Files panel: rich previews (FilePreview.tsx) ─────────────────────────
+   Tables, workbooks, Word documents, images, PDFs and web pages. Each view
+   fills the preview area and scrolls inside it; headers and row numbers stay
+   put while the cells scroll. */
+.file-browser__action { white-space: nowrap; }
+.file-browser__action-error { flex: 1 1 100%; font: var(--ui-small) var(--sans); color: var(--x-failed-text, var(--x-failed)); }
+.file-preview-note { flex: none; margin: 6px 10px; font: var(--ui-small)/1.45 var(--sans); color: var(--x-meta); }
+.file-preview-empty { margin: 16px; font: var(--ui-small)/1.5 var(--sans); color: var(--x-meta); }
+.file-preview-unavailable { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; flex: 1; min-height: 160px; padding: 24px; text-align: center; }
+.file-preview-unavailable p { max-width: 42ch; margin: 0; font: var(--ui-font)/1.5 var(--sans); color: var(--x-secondary); }
+.file-preview-unavailable button { border: 1px solid var(--x-hairline); }
+
+.file-grid-view { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.file-grid { flex: 1; min-height: 0; overflow: auto; font: var(--ui-small)/1.4 var(--sans); color: var(--x-prose); }
+.file-grid:focus-visible { outline: 2px solid var(--x-focus); outline-offset: -2px; }
+.file-grid table { border-collapse: separate; border-spacing: 0; min-width: 100%; }
+.file-grid th, .file-grid td { padding: 4px 10px; border-right: 1px solid var(--x-hairline); border-bottom: 1px solid var(--x-hairline); text-align: left; vertical-align: top; white-space: pre; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; }
+.file-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--x-chrome, var(--x-card)); color: var(--x-title); font-weight: 600; white-space: nowrap; }
+.file-grid .file-grid__index { position: sticky; left: 0; z-index: 1; min-width: 3ch; background: var(--x-chrome, var(--x-card)); color: var(--x-meta); font-weight: 400; text-align: right; font-variant-numeric: tabular-nums; }
+.file-grid thead .file-grid__index { z-index: 3; }
+.file-grid--sheet thead th:not(.file-grid__index) { text-align: center; font-weight: 500; color: var(--x-meta); }
+.file-grid td.is-number { text-align: right; font-variant-numeric: tabular-nums; }
+.file-grid tbody tr:hover td { background: var(--x-selected); }
+
+.file-sheet-tabs { display: flex; flex: none; gap: 2px; overflow-x: auto; padding: 6px 8px 0; border-bottom: 1px solid var(--x-hairline); }
+.file-sheet-tabs button { flex: none; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 12px; border: 1px solid transparent; border-bottom: 0; border-radius: var(--r-sm) var(--r-sm) 0 0; background: transparent; font: var(--ui-small) var(--sans); color: var(--x-secondary); cursor: pointer; }
+.file-sheet-tabs button:hover { color: var(--x-title); background: var(--x-selected); }
+.file-sheet-tabs button[aria-selected="true"] { border-color: var(--x-hairline); background: var(--x-card); color: var(--x-title); margin-bottom: -1px; }
+.file-sheet-tabs button.is-hidden { font-style: italic; opacity: .7; }
+.file-sheet-tabs button:focus-visible { outline: 2px solid var(--x-focus); outline-offset: -2px; }
+
+.file-docx .file-docx__paragraph { white-space: pre-wrap; tab-size: 4; }
+.file-docx .file-docx__list { list-style: none; margin: 0 0 10px; padding: 0; }
+.file-docx .file-docx__list li { display: block; position: relative; margin: 2px 0; white-space: pre-wrap; }
+.file-docx .file-docx__list li::before { content: none; }
+.file-docx .file-docx__marker { display: inline-block; min-width: 1.6em; margin-left: -1.6em; padding-right: .4em; color: var(--x-meta); font-variant-numeric: tabular-nums; }
+.file-docx .md__table td { white-space: pre-wrap; vertical-align: top; }
+
+.file-image { flex: 1; min-height: 0; overflow: auto; display: flex; }
+.file-image__frame { display: grid; place-items: center; flex: 1; min-width: 0; margin: 0; padding: 16px; border: 0; background:
+  repeating-conic-gradient(color-mix(in srgb, var(--x-title) 7%, transparent) 0 25%, transparent 0 50%) 0 0 / 16px 16px; cursor: zoom-in; }
+.file-image__frame img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.file-image.is-actual .file-image__frame { place-items: start; cursor: zoom-out; }
+.file-image.is-actual .file-image__frame img { max-width: none; max-height: none; }
+.file-image__frame:focus-visible { outline: 2px solid var(--x-focus); outline-offset: -2px; }
+
+.file-pdf { flex: 1; min-height: 0; width: 100%; border: 0; background: #525659; }
+.file-html { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+/* Pages are drawn on white, as a browser would, whatever the app theme. */
+.file-html__frame { flex: 1; min-height: 0; width: 100%; border: 0; border-top: 1px solid var(--x-hairline); background: #fff; color-scheme: light; }

@@ -22,7 +22,7 @@ import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
-import { previewWorkspaceFile, writeWorkspaceFile } from './filePreview.js'
+import { previewOptionsOf, previewWorkspaceFile, previewWorkspaceFileRich, writeWorkspaceFile } from './filePreview.js'
 import { collectGitDiff } from '../workspace/gitDiff.js'
 import type { PtySessionManager } from '../operators/pty.js'
 
@@ -2633,7 +2633,8 @@ export class DaemonServer {
     if (method === "workspace.filePreview") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (!session) return { ok: false, error: "Select a session before previewing workspace files" };
-      return await previewWorkspaceFile(session.cwd, params.path);
+      const options = previewOptionsOf(params);
+      return options ? await previewWorkspaceFileRich(session.cwd, params.path, options) : await previewWorkspaceFile(session.cwd, params.path);
     }
     if (method === "workspace.fileWrite") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));

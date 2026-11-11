@@ -16,6 +16,7 @@ import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
 import type { MacPermissionAction, MacPermissionsState } from '../macPermissionsShared.js'
 import type { HubHealthAction, HubHealthState } from '../hubHealthShared.js'
 import type { ChatImageRequestWire, ChatImageResult } from '../chatMediaShared.js'
+import type { FileAction, FileActionResult } from '../fileActionShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -90,6 +91,8 @@ export interface XerxesBridge {
   openExternal?(url: string): Promise<boolean>
   /** An image file the chat shows, read by the host and returned as a data URL, or the reason it cannot be. */
   imageData?(request: ChatImageRequestWire): Promise<ChatImageResult>
+  /** Open a workspace file in its default app (`open`) or show it in Finder (`reveal`); see fileActionShared.ts. */
+  fileAction?(action: FileAction, path: string, cwd: string): Promise<FileActionResult>
 }
 
 declare global {

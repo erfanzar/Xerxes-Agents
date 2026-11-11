@@ -51,3 +51,16 @@ export class UnsupportedOfficeZipError extends OfficePackageError {
     this.name = 'UnsupportedOfficeZipError'
   }
 }
+
+/** One archive entry would inflate past the caller's byte limit, so it was not inflated. */
+export class OfficeZipEntryTooLargeError extends UnsupportedOfficeZipError {
+  readonly entry: string
+  readonly limit: number
+
+  constructor(entry: string, limit: number) {
+    super(`ZIP entry ${entry} is larger than ${limit} bytes`)
+    this.name = 'OfficeZipEntryTooLargeError'
+    this.entry = entry
+    this.limit = limit
+  }
+}

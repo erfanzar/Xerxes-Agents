@@ -3,7 +3,7 @@
 
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 
-import { UnsupportedOfficeZipError } from './errors.js'
+import { OfficeZipEntryTooLargeError, UnsupportedOfficeZipError } from './errors.js'
 import { normalizeOfficePartName } from './package.js'
 
 const CENTRAL_DIRECTORY_SIGNATURE = 0x0201_4b50
@@ -92,6 +92,58 @@ export function createOfficeZip(entries: readonly OfficeZipEntry[]): Uint8Array 
 
 /** Read stored and Deflate entries from a regular (non-ZIP64, non-encrypted) OOXML archive. */
 export function readOfficeZip(archive: Uint8Array): ReadonlyMap<string, Uint8Array> {
+  const zip = openOfficeZip(archive)
+  const entries = new Map<string, Uint8Array>()
+  for (const name of zip.names) entries.set(name, zip.read(name)!)
+  return entries
+}
+
+/** An archive whose entries are inflated one at a time, only when asked for. */
+export interface OfficeZipReader {
+  /** Normalized part names of the file entries, in central-directory order. */
+  readonly names: readonly string[]
+  /**
+   * Inflate one entry, or undefined when the archive has none by that name.
+   * With `maxBytes`, an entry that would inflate past it throws
+   * OfficeZipEntryTooLargeError before (or while) inflating, never after.
+   */
+  read(name: string, maxBytes?: number): Uint8Array | undefined
+}
+
+/**
+ * Index an archive without inflating anything. Reading only the parts a
+ * caller needs, each under a byte limit, keeps a small file that inflates to
+ * gigabytes (a ZIP bomb) from exhausting memory.
+ */
+export function openOfficeZip(archive: Uint8Array): OfficeZipReader {
+  const directory = readCentralDirectory(archive)
+  // OPC part names compare case-insensitively; writers mostly agree on case, not always.
+  const folded = new Map<string, DirectoryEntry>()
+  for (const [name, entry] of directory) if (!folded.has(name.toLowerCase())) folded.set(name.toLowerCase(), entry)
+  return {
+    names: [...directory.keys()],
+    read(name, maxBytes) {
+      const normalized = normalizeOfficePartName(name)
+      const entry = directory.get(normalized) ?? folded.get(normalized.toLowerCase())
+      if (entry === undefined) return undefined
+      if (maxBytes !== undefined && entry.uncompressedLength > maxBytes) throw new OfficeZipEntryTooLargeError(entry.name, maxBytes)
+      const data = readLocalEntry(archive, entry.localOffset, entry.method, entry.compressedLength, entry.uncompressedLength, maxBytes === undefined ? undefined : { entry: entry.name, limit: maxBytes })
+      if (crc32(data) !== entry.crc) throw new UnsupportedOfficeZipError(`ZIP CRC mismatch for ${entry.name}`)
+      return data
+    },
+  }
+}
+
+interface DirectoryEntry {
+  readonly compressedLength: number
+  readonly crc: number
+  readonly localOffset: number
+  readonly method: number
+  readonly name: string
+  readonly uncompressedLength: number
+}
+
+function readCentralDirectory(archive: Uint8Array): ReadonlyMap<string, DirectoryEntry> {
   const endOffset = findEndOfCentralDirectory(archive)
   const disk = u16(archive, endOffset + 4)
   const centralDisk = u16(archive, endOffset + 6)
@@ -103,7 +155,7 @@ export function readOfficeZip(archive: Uint8Array): ReadonlyMap<string, Uint8Arr
     throw new UnsupportedOfficeZipError('Multi-disk ZIP archives are not supported')
   }
   if (centralOffset + centralLength > archive.byteLength) throw new UnsupportedOfficeZipError('ZIP central directory is truncated')
-  const entries = new Map<string, Uint8Array>()
+  const entries = new Map<string, DirectoryEntry>()
   let cursor = centralOffset
   for (let index = 0; index < totalEntries; index += 1) {
     if (u32(archive, cursor) !== CENTRAL_DIRECTORY_SIGNATURE) throw new UnsupportedOfficeZipError('Invalid central directory entry')
@@ -124,9 +176,7 @@ export function readOfficeZip(archive: Uint8Array): ReadonlyMap<string, Uint8Arr
     if (name.endsWith('/')) continue
     const normalizedName = normalizeOfficePartName(name)
     if (entries.has(normalizedName)) throw new UnsupportedOfficeZipError(`ZIP has duplicate entry: ${normalizedName}`)
-    const data = readLocalEntry(archive, localOffset, method, compressedLength, uncompressedLength)
-    if (crc32(data) !== crc) throw new UnsupportedOfficeZipError(`ZIP CRC mismatch for ${normalizedName}`)
-    entries.set(normalizedName, data)
+    entries.set(normalizedName, { compressedLength, crc, localOffset, method, name: normalizedName, uncompressedLength })
   }
   return entries
 }
@@ -191,6 +241,7 @@ function readLocalEntry(
   method: number,
   compressedLength: number,
   uncompressedLength: number,
+  bound?: { readonly entry: string; readonly limit: number },
 ): Uint8Array {
   if (localOffset + 30 > archive.byteLength || u32(archive, localOffset) !== LOCAL_FILE_SIGNATURE) {
     throw new UnsupportedOfficeZipError('ZIP local file header is invalid')
@@ -206,8 +257,12 @@ function readLocalEntry(
     data = compressed
   } else if (method === ZIP_DEFLATE_METHOD) {
     try {
-      data = new Uint8Array(inflateRawSync(compressed))
+      // The declared size can lie; the inflater's own cap is what holds.
+      data = new Uint8Array(bound === undefined ? inflateRawSync(compressed) : inflateRawSync(compressed, { maxOutputLength: Math.max(1, bound.limit) }))
     } catch (error) {
+      if (bound !== undefined && typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw new OfficeZipEntryTooLargeError(bound.entry, bound.limit)
+      }
       throw new UnsupportedOfficeZipError(`Could not inflate ZIP entry: ${error instanceof Error ? error.message : String(error)}`)
     }
   } else {
