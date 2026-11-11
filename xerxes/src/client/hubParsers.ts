@@ -359,9 +359,10 @@ export function parseSupervisorMessage(raw: unknown): SupervisorMessage | undefi
 export type SupervisorStepState = 'running' | 'done' | 'error'
 
 /**
- * One live step of a running XERXES turn (`supervisor.thread_event.step`):
- * a line XERXES says before it acts, or one tool call. Steps are not stored
- * on the Hub; a tool's `running` and `done` events share one id.
+ * One step of a XERXES turn (`supervisor.thread_event.step` or thread.open):
+ * a line XERXES says before it acts, or one tool call. A tool's `running`
+ * and `done` records share one id; the Hub retains only a bounded,
+ * audience-scoped recent-turn projection.
  */
 export interface SupervisorStep {
   readonly id: string

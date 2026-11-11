@@ -840,6 +840,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
       }
       void supervisorConfigGet()
       void loadAutopilot()
+      restoreSupervisorSteps('shared', result.steps)
       void loadWatches()
     } catch (error) {
       if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
@@ -897,6 +898,12 @@ export function createHubController(options: HubControllerOptions): HubControlle
    * `unsupported` and `hidden` stay as the Hub answered them.
    */
   async function refreshThreads(): Promise<void> {
+  function restoreSupervisorSteps(thread: 'shared' | 'autopilot', value: unknown): void {
+    for (const raw of arr(value)) {
+      const step = parseSupervisorStep(raw)
+      if (step) store.dispatch({ type: 'supervisorStep', thread, step })
+    }
+  }
     const snapshot = store.getSnapshot()
     const jobs: Promise<void>[] = []
     if (snapshot.supervisor.phase === 'ready' || snapshot.supervisor.phase === 'error') {
@@ -912,6 +919,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
           if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
           // Otherwise keep what is shown; the next reconnect tries again.
         }
+          restoreSupervisorSteps('shared', result.steps)
       })())
     }
     const self = snapshot.selfUserId
@@ -929,6 +937,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
           if (error instanceof HubRequestError && (error.code === 'not_found' || error.code === 'forbidden' || error.code === 'unsupported' || error.code === 'invalid_request')) {
             store.dispatch({ type: 'autopilotThread', patch: { phase: 'hidden' } })
           }
+          restoreSupervisorSteps('autopilot', result.steps)
         }
       })())
     }

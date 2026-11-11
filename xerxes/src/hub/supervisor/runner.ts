@@ -8,7 +8,7 @@ import type { ToolCall, ToolDefinition } from '../../types/toolCalls.js'
 import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, type DigestSummarizer, type DigestSummaryInput } from './digests.js'
 import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
-import { MAX_MESSAGE_CHARS, messageToWire, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
+import { MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
 /**
  * Runs supervisor turns on an injected, explicitly configured model.
@@ -361,12 +361,15 @@ export class SupervisorRunner {
       else this.replyTo.set(threadId, inReplyTo)
       const tools = registry.definitions()
       let turnTokens = 0
-      // Live steps go only to the person this turn answers: tool arguments can name tasks
-      // other people in a shared thread may not read. They are not stored; the reply is.
+      // Steps go only to the person this turn answers: tool arguments can name
+      // tasks other people may not read. Keep a bounded copy with that same
+      // audience so reopening the thread can show the finished turn's work.
       const turnId = `turn-${this.clock().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       let stepSeq = 0
-      const step = (payload: Readonly<Record<string, unknown>>): void => {
-        threads.emit(threadId, 'supervisor.thread_event', { step: { turn_id: turnId, at: new Date(this.clock()).toISOString(), ...payload } }, [requester.id])
+      const step = (payload: SupervisorStepDraft): void => {
+        const record = { turnId, at: new Date(this.clock()).toISOString(), ...payload }
+        threads.recordStep(threadId, record, [requester.id])
+        threads.emit(threadId, 'supervisor.thread_event', { step: stepToWire(record) }, [requester.id])
       }
 
       for (;;) {

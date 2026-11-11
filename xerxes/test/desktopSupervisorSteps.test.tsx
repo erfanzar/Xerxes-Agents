@@ -6,7 +6,9 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { parseSupervisorStep, type SupervisorMessage, type SupervisorStep } from '../src/client/hubParsers.js'
-import { initialHubState, reduceHub, withStep } from '../src/client/hubStore.js'
+import { createHubStore, initialHubState, reduceHub, withStep } from '../src/client/hubStore.js'
+import { createHubController } from '../src/client/hubController.js'
+import type { HubConnection } from '../src/client/hubConnection.js'
 import { liveSteps, stepPhrase, stepsFinished } from '../src/client/supervisorSteps.js'
 import { LiveSteps, ThreadMessages } from '../src/desktop/renderer/SupervisorThread.js'
 
@@ -90,6 +92,27 @@ test('finished: the steps fold above the reply that ended them, as "Ran N steps"
   // While the turn still runs, nothing folds into the thread.
   const running = plain(renderToStaticMarkup(createElement(ThreadMessages, { messages: messages.slice(0, 1), steps, now: Date.parse(at(30)), label: 'Conversation' })))
   expect(running).not.toContain('Ran 2 steps')
+})
+
+test('thread.open restores finished steps so a revisit keeps the work history', async () => {
+  const store = createHubStore()
+  const connection = {
+    request: async (method: string) => method === 'supervisor.thread.open' ? {
+      thread_id: 'shared', busy: false, confirmations: [],
+      messages: [{ id: 'r', role: 'xerxes', text: 'Done.', at: at(9), source: 'text' }],
+      steps: [{ id: 's1', turn_id: 't1', kind: 'tool', tool: 'workspace_list', text: 'Listing workspaces', state: 'done', at: at(1) }],
+    } : {},
+  } as unknown as HubConnection
+  const controller = createHubController({ connection, store })
+  await controller.supervisorOpen()
+  expect(store.getSnapshot().supervisor.steps).toEqual([step('s1', { state: 'done', tool: 'workspace_list' })])
+  const html = plain(renderToStaticMarkup(createElement(ThreadMessages, {
+    messages: store.getSnapshot().supervisor.messages,
+    steps: store.getSnapshot().supervisor.steps,
+    now: Date.parse(at(30)), label: 'Conversation',
+  })))
+  expect(html).toContain('<summary>Ran 1 step</summary>')
+  expect(html).toContain('Listing workspaces')
 })
 
 test('step text from the Hub is rendered as text, never HTML', () => {

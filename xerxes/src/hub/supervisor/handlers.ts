@@ -5,7 +5,7 @@ import type { AuthenticatedContext } from '../identityPort.js'
 import { HubProtocolError, readId, type HubMethod } from '../protocol.js'
 import type { HubMethodContext, HubMethodHandler } from '../server.js'
 import { actionToWire, type ActionService } from './actions.js'
-import { MAX_MESSAGE_CHARS, autopilotThreadId, messageToWire, type MessageSource, type SupervisorThreads, type ThreadMessage, type ThreadRecord, type UserPrincipal } from './threads.js'
+import { MAX_MESSAGE_CHARS, autopilotThreadId, messageToWire, stepToWire, type MessageSource, type SupervisorThreads, type ThreadMessage, type ThreadRecord, type UserPrincipal } from './threads.js'
 
 /**
  * The four `supervisor.*` Hub methods. Request and response shapes match what
@@ -24,7 +24,7 @@ import { MAX_MESSAGE_CHARS, autopilotThreadId, messageToWire, type MessageSource
 export type SupervisorHandlers = Readonly<Partial<Record<HubMethod, HubMethodHandler>>>
 
 export interface SupervisorHandlerCore {
-  readonly threads: Pick<SupervisorThreads, 'ensureShared' | 'privateFor' | 'access' | 'messagesFor' | 'participants' | 'isWorking'>
+  readonly threads: Pick<SupervisorThreads, 'ensureShared' | 'privateFor' | 'access' | 'messagesFor' | 'stepsFor' | 'participants' | 'isWorking'>
     & Partial<Pick<SupervisorThreads, 'autopilotFor'>>
   readonly actions: Pick<ActionService, 'cardsFor' | 'respond' | 'status'>
   /** The model id shown in the thread; a function so a hot-swapped model shows at once. */
@@ -56,6 +56,7 @@ function snapshot(core: SupervisorHandlerCore, thread: ThreadRecord, principal: 
     kind: thread.kind,
     title: thread.title,
     messages: core.threads.messagesFor(thread.id, principal.id).map(messageToWire),
+    steps: core.threads.stepsFor(thread.id, principal.id).map(stepToWire),
     confirmations: core.actions.cardsFor(thread.id).map(actionToWire),
     participants: thread.kind === 'shared' ? core.threads.participants(thread.id).map(person => ({ id: person.id, name: person.displayName })) : [],
     model: typeof core.modelId === 'function' ? core.modelId() : core.modelId,

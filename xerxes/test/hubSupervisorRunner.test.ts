@@ -266,7 +266,14 @@ describe('supervisor runner', () => {
     expect(new Set(payloads.map(p => p.turn_id)).size).toBe(1)
     expect(payloads[1]!.id).toBe(payloads[2]!.id)
     expect(payloads[1]!.id).not.toBe(payloads[3]!.id)
-    // Steps are live only: the thread keeps the person's message and the reply.
+    // Reopening restores the same five steps for the requester, but never for
+    // another participant; messages retain their existing visibility rules.
+    expect(world.threads.stepsFor('shared', 'alice').map(step => [step.kind, step.state, step.text])).toEqual([
+      ['say', 'done', 'Checking every workspace first.'],
+      ['tool', 'done', 'Listing workspaces'],
+      ['tool', 'done', 'Searching every task for “shader”'],
+    ])
+    expect(world.threads.stepsFor('shared', 'owner')).toEqual([])
     expect(world.threads.messagesFor('shared', 'alice').map(message => message.role)).toEqual(['user', 'xerxes'])
   })
 

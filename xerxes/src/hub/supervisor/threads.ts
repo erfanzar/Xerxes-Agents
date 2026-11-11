@@ -90,6 +90,42 @@ export interface ThreadParticipant {
   readonly lastSeenAt: number
 }
 
+/** One bounded, audience-scoped XERXES work step, retained for thread reopen. */
+export interface SupervisorStepRecord {
+  readonly id: string
+  readonly turnId: string
+  readonly kind: 'say' | 'tool'
+  readonly text: string
+  readonly tool?: string
+  readonly state: 'running' | 'done' | 'error'
+  readonly at: string
+}
+
+export type SupervisorStepDraft = Omit<SupervisorStepRecord, 'turnId' | 'at'>
+
+interface StepRow {
+  seq: number; id: string; thread_id: string; turn_id: string; kind: string; tool: string | null
+  text: string; state: string; audience: string; created_at: number
+}
+
+function toStep(row: StepRow): SupervisorStepRecord & { readonly threadId: string; readonly audience: readonly string[] } {
+  return {
+    id: row.id, threadId: row.thread_id, turnId: row.turn_id,
+    kind: row.kind === 'say' ? 'say' : 'tool', text: row.text,
+    ...(row.tool === null ? {} : { tool: row.tool }),
+    state: row.state === 'running' || row.state === 'error' ? row.state : 'done',
+    at: new Date(row.created_at).toISOString(), audience: JSON.parse(row.audience) as string[],
+  }
+}
+
+/** Wire form shared with the live event and the client's parser. */
+export function stepToWire(step: SupervisorStepRecord): Record<string, unknown> {
+  return {
+    id: step.id, turn_id: step.turnId, kind: step.kind, text: step.text,
+    ...(step.tool === undefined ? {} : { tool: step.tool }), state: step.state, at: step.at,
+  }
+}
+
 export type SupervisorEventType = 'supervisor.thread_event' | 'supervisor.confirmation'
 
 export interface SupervisorEventSink {
@@ -202,6 +238,11 @@ export class SupervisorThreads {
       CREATE UNIQUE INDEX IF NOT EXISTS hub_supervisor_messages_client
         ON hub_supervisor_messages(thread_id, author_id, client_message_id) WHERE client_message_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS hub_supervisor_messages_thread ON hub_supervisor_messages(thread_id, seq);
+      CREATE TABLE IF NOT EXISTS hub_supervisor_steps (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        kind TEXT NOT NULL, tool TEXT, text TEXT NOT NULL, state TEXT NOT NULL, audience TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS hub_supervisor_steps_thread ON hub_supervisor_steps(thread_id, seq);
     `)
     // Databases created before Watch have no `origin` column; add it once.
     const columns = this.db.query<{ name: string }, []>('PRAGMA table_info(hub_supervisor_messages)').all()
@@ -392,6 +433,25 @@ export class SupervisorThreads {
     const rows = this.db.query<MessageRow, [string, number]>('SELECT * FROM hub_supervisor_messages WHERE thread_id = ? ORDER BY seq DESC LIMIT ?')
       .all(threadId, limit * 2)
     return rows.map(toMessage).filter(message => message.audience === undefined || message.audience.includes(viewerId)).slice(0, limit).reverse()
+  }
+
+  /** Persist one live step for exactly the people allowed to receive it. */
+  recordStep(threadId: string, step: SupervisorStepRecord, audience: readonly string[]): void {
+    if (audience.length === 0) return
+    this.db.query(`INSERT INTO hub_supervisor_steps (id, thread_id, turn_id, kind, tool, text, state, audience, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+      text = excluded.text, state = excluded.state, audience = excluded.audience, created_at = excluded.created_at`)
+      .run(step.id, threadId, step.turnId, step.kind, step.tool ?? null, step.text, step.state, JSON.stringify(audience), Date.parse(step.at))
+    // Steps are a recent-turn projection, not another unbounded event log.
+    this.db.query('DELETE FROM hub_supervisor_steps WHERE thread_id = ? AND seq NOT IN (SELECT seq FROM hub_supervisor_steps WHERE thread_id = ? ORDER BY seq DESC LIMIT 240)')
+      .run(threadId, threadId)
+  }
+
+  /** Latest visible steps, oldest first; another participant cannot read them. */
+  stepsFor(threadId: string, viewerId: string, limit = 60): SupervisorStepRecord[] {
+    const rows = this.db.query<StepRow, [string, number]>('SELECT * FROM hub_supervisor_steps WHERE thread_id = ? ORDER BY seq DESC LIMIT ?')
+      .all(threadId, limit * 2)
+    return rows.map(toStep).filter(step => step.audience.includes(viewerId)).slice(0, limit).reverse()
   }
 
   // ── delivery ───────────────────────────────────────────────────────
