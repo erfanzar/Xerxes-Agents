@@ -109,7 +109,9 @@ test('the swap restores the old app if the new one cannot be moved in, then rela
 test('the prompt asks before installing and falls back to the release page when it cannot', () => {
   const asked = renderToStaticMarkup(createElement(AppUpdatePrompt, { update: appUpdateView({ phase: 'available', installable: true, release: { version: '0.6.7', notes: '- Faster agents', pageUrl: 'https://github.com/x' } }) }))
   expect(asked).toContain('Xerxes Agents 0.6.7 is available')
-  expect(asked).toContain('May I download and install it?')
+  expect(asked).toContain('It installs in the background, then restarts the app')
+  // A banner, never a dialog over the task.
+  expect(asked).not.toContain('aria-modal')
   expect(asked).toContain('Install and restart')
   expect(asked).toContain('Skip this version')
   expect(asked).toContain('Faster agents')
@@ -118,7 +120,7 @@ test('the prompt asks before installing and falls back to the release page when 
   expect(blocked).toContain('Open release page')
   const downloading = renderToStaticMarkup(createElement(AppUpdatePrompt, { update: appUpdateView({ phase: 'downloading', received: 52_428_800, total: 104_857_600, release: { version: '0.6.7' } }) }))
   expect(downloading).toContain('50%')
-  expect(downloading).not.toContain('Not now')
+  expect(downloading).not.toContain('Later')
   expect(appUpdateView({ phase: 'idle' })).toBeNull()
 })
 

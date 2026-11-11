@@ -47,26 +47,29 @@ export interface HubHealthNoticeProps {
   readonly onDismiss: (kind: HubNoticeKind) => void
 }
 
-/** The non-blocking notice; nothing when the Hub is fine, unknown, or the person opted out. */
+/**
+ * The non-blocking notice, for a Hub someone set up that stopped answering.
+ * Nothing when the Hub is fine, unknown, or the person opted out, and nothing
+ * when no Hub was ever set up: most people never need one, and setting one up
+ * lives in Settings › Hub & phone.
+ */
 export function HubHealthNoticeView(props: HubHealthNoticeProps): ReactElement | null {
   const { state } = props
   if (!state || props.hidden) return null
   const kind = hubNoticeKind(state)
-  if (kind === null) return null
-  const title = kind === 'not_configured' ? 'No Hub is set up.' : 'The Hub is not reachable.'
-  const body = kind === 'not_configured'
-    ? 'The phone app, the XERXES supervisor and relays for SSH workspaces need a Hub. Set one up in Settings › Hub & phone.'
-    : `${state.origin ?? state.target ?? 'The saved Hub'} did not answer${state.detail ? ` (${state.detail})` : ''}. The phone app, XERXES and Hub relays are offline until it is back. Your workspaces keep running.`
+  if (kind === null || kind === 'not_configured') return null
+  const title = 'The Hub is not reachable.'
+  const body = `${state.origin ?? state.target ?? 'The saved Hub'} did not answer${state.detail ? ` (${state.detail})` : ''}. The phone app, XERXES and Hub relays are offline until it is back. Your workspaces keep running.`
   return (
     <div className="macperm-notice hub-notice" role="status" aria-live="polite" data-kind={kind}>
       <div className="macperm-notice__text">
         <strong>{title}</strong>
         <span>{body}</span>
-        {kind === 'unreachable' && state.target && <span className="hub-notice__target">Hub host: <code>{state.target}</code>{state.checked_at ? ` · checked ${new Date(state.checked_at).toLocaleTimeString()}` : ''}</span>}
+        {state.target && <span className="hub-notice__target">Hub host: <code>{state.target}</code>{state.checked_at ? ` · checked ${new Date(state.checked_at).toLocaleTimeString()}` : ''}</span>}
       </div>
       <div className="macperm-notice__actions">
-        <button className="btn btn--solid" onClick={props.onSettings}>{kind === 'not_configured' ? 'Set up a Hub' : 'Hub settings'}</button>
-        {kind === 'unreachable' && <button className="btn" disabled={props.checking} onClick={props.onRecheck}>{props.checking ? 'Checking…' : 'Re-check'}</button>}
+        <button className="btn btn--solid" onClick={props.onSettings}>Hub settings</button>
+        <button className="btn" disabled={props.checking} onClick={props.onRecheck}>{props.checking ? 'Checking…' : 'Re-check'}</button>
         <button className="btn btn--ghost" onClick={props.onLater}>Not now</button>
         <button className="btn btn--ghost" onClick={() => props.onDismiss(kind)}>Don't remind me</button>
       </div>

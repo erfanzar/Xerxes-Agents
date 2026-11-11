@@ -253,7 +253,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       <SettingsModal snap={snap} />
       <AppUpdatePrompt update={snap.appUpdate} />
       {/* Startup notices share one corner and stack instead of overlapping. */}
-      <div className="notice-stack"><HubHealthNotice /><MacPermissionsNotice /></div>
+      <div className="notice-stack"><HubHealthNotice /><MacPermissionsNotice wanted={snap.computerUseWanted} /></div>
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
           focus effect) must never share a fiber with a closed render. */}

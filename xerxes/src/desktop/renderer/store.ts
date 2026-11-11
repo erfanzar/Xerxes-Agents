@@ -367,6 +367,8 @@ export interface Snapshot {
   readonly mcpStatus: Readonly<Record<string, McpServerStatus>>
   readonly models: readonly ModelChoice[]
   readonly contextTokens: number | null
+  /** A task in this window tried to use the computer, so its macOS permissions are worth asking for. */
+  readonly computerUseWanted: boolean
   readonly contextMax: number | null
   /** Session-average provider time to first output token. */
   readonly ttftMs: number | null
@@ -964,6 +966,7 @@ export class Store {
       mcpStatus: {},
       models: [],
       contextTokens: null,
+      computerUseWanted: false,
       contextMax: null,
       ttftMs: null,
       tokensPerSecond: null,
@@ -4203,6 +4206,8 @@ export class Store {
         this.notify()
         break
       case 'tool_call': {
+        // The first computer-use step is when its macOS permissions matter.
+        if (payload.name === 'computer_use' && !this.frame.computerUseWanted) this.patch({ computerUseWanted: true })
         const stats = editStatsOf(payload.name, payload.arguments)
         if (stats) this.foldChange(stats, parseArgs(payload.arguments), str(payload.name))
         this.builder.push(type, payload)
