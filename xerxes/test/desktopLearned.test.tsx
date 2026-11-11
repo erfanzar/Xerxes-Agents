@@ -191,6 +191,10 @@ test('lessons are grouped Pending then Approved and tool evidence is distinct fr
   const html = renderToStaticMarkup(createElement(LearnedLessons, { snap, actions: store }))
   expect(html.indexOf('Pending')).toBeLessThan(html.indexOf('Approved'))
   expect(html.indexOf('Before delivery')).toBeLessThan(html.indexOf('Before editing'))
+  expect(html).toContain('<h3 id="learned-pending-title">Pending</h3>')
+  expect(html).toContain('aria-labelledby="learned-pending-title"')
+  expect(html).toContain('1 lesson awaiting review')
+  expect(html).not.toContain('<h3>Pending<button')
   expect(html).toContain('ReadFile — Read the current source'); expect(html).toContain('Test (reported): bun test')
 })
 
@@ -306,4 +310,75 @@ test('the preload bridge accepts both learning methods and forwards the broadcas
   const payload = { workspace: '/repo', counts: { pending_proposals: 1, pending_lessons: 2 } }
   handlers.get('daemon:event')!({ type: 'learning_changed', payload })
   expect(received).toEqual([{ type: 'learning_changed', payload }])
+})
+
+test('approve all snapshots pending lessons, excludes proposals, and keeps partial failures visible', async () => {
+  const { store, bridge } = await setup()
+  const second: Lesson = { ...lesson, id: 'l2', cue: 'Before merging' }
+  bridge.response = method => method === 'learning.list'
+    ? { ...list(), lessons: [lesson, second], counts: { pending_proposals: 1, pending_lessons: 2 } }
+    : { ok: true }
+  await store.refreshLearning()
+  bridge.response = (method, params) => {
+    if (method === 'learning.review') {
+      if (params.id === 'l2') return { ok: false, error: 'Changed before review' }
+      return { ok: true, report: `Approved ${String(params.id)}.` }
+    }
+    if (method === 'learning.list') return { ok: true, workspace: '/repo', proposals: [], lessons: [], counts: { pending_proposals: 0, pending_lessons: 0 } }
+    return { ok: true }
+  }
+  const result = await store.reviewAllLearning('lesson')
+  expect(result).toEqual({ approved: 1, failed: 1 })
+  expect(bridge.calls.filter(call => call.method === 'learning.review').map(call => call.params.id)).toEqual(['l1', 'l2'])
+  expect(bridge.calls.filter(call => call.method === 'learning.review').every(call => call.params.target === 'lesson')).toBe(true)
+  expect(store.getSnapshot().learningResults?.['lesson:l2']?.error).toBe('Changed before review')
+  expect(store.getSnapshot().learningReviewBusy).toBe(false)
+  expect(store.getSnapshot().learningError).toContain('1 approved; 1 failed')
+})
+
+test('proposals have a compact Approve all counted from loaded pending items, not broadcast counts', async () => {
+  const { store, bridge } = await setup()
+  const snap = { ...store.getSnapshot(), learningCounts: { pending_proposals: 99, pending_lessons: 0 } }
+  const html = renderToStaticMarkup(createElement(LearnedPanel, { snap, actions: store }))
+  expect(html).toContain('Approve all (1)')
+  expect(html).toContain('learned-group__approve')
+  expect(bridge.calls.filter(call => call.method === 'learning.review')).toHaveLength(0)
+})
+
+test('proposal batch approvals preserve per-item partial outcomes and never include lessons or terminal proposals', async () => {
+  const { store, bridge } = await setup()
+  bridge.response = method => method === 'learning.list' ? { ...list(), proposals: ['p1', 'p2', 'p3', 'p4'].map(id => ({ ...proposal, id })).concat({ ...proposal, id: 'done', status: 'applied' }) } : { ok: true }
+  await store.refreshLearning()
+  bridge.response = (method, params) => {
+    if (method === 'learning.review') {
+      if (params.id === 'p2') return { ok: false, report: 'Lint findings', error: 'Refused' }
+      if (params.id === 'p3') throw new Error('Connection lost')
+      if (params.id === 'p4') return { ok: true }
+      return { ok: true, report: 'Applied p1' }
+    }
+    return { ...list(), proposals: [] }
+  }
+  expect(await store.reviewAllLearning('proposal')).toEqual({ approved: 1, failed: 3 })
+  expect(bridge.calls.filter(call => call.method === 'learning.review').map(call => [call.params.target, call.params.id])).toEqual([['proposal', 'p1'], ['proposal', 'p2'], ['proposal', 'p3'], ['proposal', 'p4']])
+  expect(store.getSnapshot().learningResults?.['proposal:p2']).toEqual({ report: 'Lint findings', error: 'Refused' })
+  const html = renderToStaticMarkup(createElement(LearnedPanel, { snap: store.getSnapshot(), actions: store }))
+  expect(html).toContain('Applied p1')
+  expect(html).toContain('Connection lost')
+})
+
+test('proposal batches ignore duplicate clicks and stop remaining writes after a workspace switch', async () => {
+  const { store, bridge } = await setup()
+  bridge.response = () => ({ ...list(), proposals: [proposal, { ...proposal, id: 'p2' }] })
+  await store.refreshLearning()
+  const pending = Promise.withResolvers<Record<string, unknown>>()
+  bridge.response = method => method === 'learning.review' ? pending.promise : { ...list() }
+  const first = store.reviewAllLearning('proposal')
+  expect(await store.reviewAllLearning('proposal')).toEqual({ approved: 0, failed: 0 })
+  bridge.response = method => method === 'initialize' ? { ok: true, session_id: 's2', cwd: '/other', session: { id: 's2', key: 'desktop-other', cwd: '/other' } } : method === 'learning.list' ? { ...list(), workspace: '/other', proposals: [], lessons: [] } : { ok: true, sessions: [] }
+  await store.openSession('s2')
+  pending.resolve({ ok: true, report: 'Old workspace result' })
+  await first
+  expect(bridge.calls.filter(call => call.method === 'learning.review')).toHaveLength(1)
+  expect(store.getSnapshot().learningResults).toEqual({})
+  expect(store.getSnapshot().learningReviewBusy).toBe(false)
 })

@@ -1096,6 +1096,15 @@ test("agents page exposes its project scope and workspace switch", () => {
   expect(html).toContain("/work/project-a")
   expect(html).toContain("Change workspace…")
   expect(html).toContain('aria-label="Agents"')
+  expect(html).toContain('class="specialists"')
+  expect(html).toContain('Bring in the right mind.')
+  expect(html).toContain('simurgh-mark')
+})
+
+test('opening any session resets independent pages to Tasks, including the same session', async () => {
+  const app = await Bun.file(new URL('../src/desktop/renderer/App.tsx', import.meta.url)).text()
+  expect(app).toContain('[snap.cwd, snap.currentId, snap.sessionOpenRevision]')
+  expect(app).not.toContain('[snap.cwd, snap.sessionKey]')
 })
 
 test('navigation remains available while a turn starts, streams, fails, or completes', () => {

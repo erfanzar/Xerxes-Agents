@@ -1181,6 +1181,19 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().contextMax).toBeNull()
   })
 
+  test('the daemon cache rate is not diluted by all-time uncached input', () => {
+    bridge.push('status_update', {
+      cache_hit_rate: 0.9985,
+      cache_read_tokens: 31_329_384,
+      cache_creation_tokens: 930_704,
+      total_input_tokens: 4_778_179,
+      total_output_tokens: 487_320,
+    })
+    expect(store.getSnapshot().cacheHitRate).toBe(0.9985)
+    expect(store.getSnapshot().cacheReadTokens).toBe(31_329_384)
+    expect(store.getSnapshot().cacheWriteTokens).toBe(930_704)
+  })
+
   test('initialize adopts the workspace git branch from the daemon', async () => {
     store.openTaskModal()
     await store.startTask('', false) // fresh initialize without a submit

@@ -214,7 +214,10 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
   }
-  useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.sessionKey])
+  // Tasks, Agents and XERXES are independent destinations. Every explicit
+  // session open returns to Tasks, including reopening the current session;
+  // the desktop connection's sessionKey does not change between sessions.
+  useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.currentId, snap.sessionOpenRevision])
   useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
@@ -446,7 +449,7 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
   }
   return (
     <div className="backdrop">
-      <div className="modal taskmodal" role="dialog" aria-modal="true" aria-label="New task">
+      <div className="modal taskmodal" role="dialog" aria-modal="true" aria-label="New task" onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); event.stopPropagation(); store.closeTaskModal() } }}>
         <div className="modal__main">
           <h2 className="modal__title">New task</h2>
           <p className="modal__sub">Choose how you want to work, then describe your task.</p>
@@ -2311,7 +2314,7 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
     const onKey = (event: KeyboardEvent): void => {
       // A native modal owns keyboard focus, including Escape. Reading output
       // must never cancel the running task underneath it.
-      if (event.defaultPrevented || document.querySelector('dialog[open]')) return
+      if (event.defaultPrevented || document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')) return
       const meta = event.metaKey || event.ctrlKey
       if (meta && event.key === ',') {
         event.preventDefault()

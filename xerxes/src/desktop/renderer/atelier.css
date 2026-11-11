@@ -290,7 +290,14 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .catalog-page>header{flex:none}
 .catalog-page>.studio-sheet-content{display:flex;flex:1;min-height:0;overflow:hidden}
 .catalog-page .catalog-form{display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;overflow:hidden;box-sizing:border-box}
-.catalog-form>.studio-tabs,.catalog-form>.catalog-search,.catalog-form>.studio-progress,.catalog-form>.studio-error{flex:none}
+.catalog-form>.studio-tabs,.catalog-form>.catalog-actions,.catalog-form>.studio-progress,.catalog-form>.studio-error{flex:none}
+.catalog-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
+.catalog-actions .catalog-search{flex:1 1 220px;min-width:0;width:auto;margin:0}
+.catalog-actions>.btn{flex:none;width:auto;white-space:nowrap}
+.studio-tabs.catalog-tabs{align-self:flex-start;display:inline-flex;gap:2px;flex-wrap:wrap;padding:3px;border:1px solid var(--x-hairline);border-radius:9px;background:var(--mac-control);max-width:100%}
+.studio-tabs.catalog-tabs button{min-height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:var(--t-body);white-space:nowrap}
+.studio-tabs.catalog-tabs button:hover{background:var(--x-selected);color:var(--x-title)}
+.studio-tabs.catalog-tabs button.is-selected{background:var(--x-screen);color:var(--x-title);box-shadow:0 0 0 1px var(--x-hairline)}
 .catalog-page .catalog-browser{flex:1;min-height:0;grid-template-rows:minmax(0,1fr);overflow:hidden}
 .catalog-page .catalog-browser>nav,.catalog-page .catalog-browser>section{min-height:0;overflow:auto;overscroll-behavior:contain}
 .catalog-page .catalog-browser>section{border-left:1px solid var(--x-hairline)}
@@ -3094,24 +3101,72 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .msg__images a{display:block;line-height:0;max-width:100%}
 .atelier .msg__images img{display:block;max-width:min(100%,540px);max-height:360px;width:auto;height:auto;border-radius:10px;border:1px solid var(--x-divider);object-fit:contain;background:var(--x-screen)}
 
-/* Human-reviewed learning uses the same card, source and feedback surfaces as Activity. */
-.learned-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;padding:1px 5px;margin-left:7px;border-radius:9px;background:var(--x-accent-soft);color:var(--x-accent);font:var(--ui-small)/1.4 var(--mono)}
-.learned-panel{min-width:0;overflow-wrap:anywhere}
-.learned-card{margin:12px 0;min-width:0;overflow-wrap:anywhere}
-.learned-card h3{font:var(--t-title);margin:8px 0}
-.learned-card h4{font:var(--t-caption);color:var(--x-secondary);margin:14px 0 6px}
-.learned-card .railcard__head{flex-wrap:wrap}
+/* Human-reviewed learning: a quiet reading column, explicit section bars and
+   compact evidence cards. The bulk action is deliberately outside the heading;
+   long cues and review forms wrap within the panel's actual inline size. */
+.learned-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;padding:1px 5px;border-radius:9px;background:var(--x-accent-soft);color:var(--x-accent);font:var(--ui-small)/1.4 var(--mono)}
+.catalog-form--plugins .learned-panel{width:min(100%,960px);margin:0 auto}
+.learned-panel{min-width:0;overflow-wrap:anywhere;container-type:inline-size}
+.learned-panel__intro{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--s-4)}
+.learned-panel__intro h2{margin:0;color:var(--x-title);font:600 20px/1.3 var(--sans);letter-spacing:-.02em}
+.learned-panel__intro p{max-width:620px;margin:6px 0 0;color:var(--x-secondary);font:var(--t-body);line-height:1.55}
+.learned-panel .studio-muted{padding:0}
+.learned-panel__summary{flex:none;padding:4px 9px;border:1px solid var(--x-hairline);border-radius:999px;background:var(--mac-control);color:var(--x-meta);font:var(--t-caption);white-space:nowrap}
+.learned-panel__toolbar{display:flex;align-items:center;justify-content:space-between;gap:var(--s-3);margin:20px 0 24px}
+.learned-panel__tabs{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--x-hairline);border-radius:9px;background:var(--mac-control)}
+.learned-panel__tabs button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:var(--t-body);cursor:pointer}
+.learned-panel__tabs button:hover{background:var(--x-selected);color:var(--x-title)}
+.learned-panel__tabs button.is-selected{background:var(--x-screen);color:var(--x-title);box-shadow:0 0 0 1px var(--x-hairline)}
+.learned-panel__tabs .learned-badge{margin:0}
+.learned-panel__refresh{flex:none}
+.learned-panel>.studio-progress{padding:12px 0}
+.learned-lessons{display:grid;gap:28px}
+.learned-group{min-width:0}
+.learned-group__head{display:flex;align-items:center;justify-content:space-between;gap:var(--s-4);min-height:36px;margin-bottom:12px}
+.learned-group__heading{min-width:0}
+.learned-group__heading h3{margin:0;color:var(--x-title);font:600 16px/1.35 var(--sans);letter-spacing:-.01em}
+.learned-group__heading p{margin:3px 0 0;color:var(--x-meta);font:var(--t-caption)}
+.learned-group__approve{flex:none;white-space:nowrap}
+.learned-group__items{display:grid;gap:12px}
+.learned-card{margin:0 0 12px;min-width:0;padding:16px;overflow-wrap:anywhere;border-radius:12px;box-shadow:none}
+.learned-group__items .learned-card{margin:0}
+.learned-card .railcard__head{align-items:flex-start;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}
+.learned-card .railcard__title{flex:1 1 260px;min-width:0;color:var(--x-title);font:600 14px/1.45 var(--sans)}
+.learned-card .railcard__meta{flex:none;margin-left:0;padding:2px 7px;border-radius:6px;background:var(--mac-control);font:var(--t-caption);color:var(--x-meta);white-space:nowrap}
+.learned-card h3{margin:0 0 8px;color:var(--x-title);font:600 14px/1.45 var(--sans)}
+.learned-card h4{margin:14px 0 6px;color:var(--x-secondary);font:600 11.5px/1.4 var(--sans)}
+.learned-card p{margin:0 0 12px;color:var(--x-prose);font:var(--t-body);line-height:1.65}
 .learning-prose{white-space:pre-wrap}
-.learning-preview>summary{cursor:pointer;padding:10px 0;outline-offset:3px;font:var(--t-body)}
-.learning-review{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-top:12px}
-.learning-reason{display:flex;align-items:flex-end;gap:8px;flex:1;min-width:180px}
-.learning-reason label{flex:1;min-width:0;margin:0!important;font:var(--ui-small)/1.5 var(--sans)}
-.learning-reason input{display:block;box-sizing:border-box;width:100%;margin-top:5px;border:1px solid var(--x-hairline);border-radius:6px;padding:7px 9px;background:var(--x-screen);color:var(--x-title);font:var(--ui-font)/1.5 var(--sans)}
-.learned-notice{border-left:3px solid var(--x-accent);padding:14px;color:var(--x-secondary)}
+.learned-card .studio-source{box-sizing:border-box;max-width:100%;max-height:240px;margin:0;padding:10px 12px;overflow:auto;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-screen);color:var(--x-secondary);white-space:pre-wrap;overflow-wrap:anywhere;font:400 12px/1.6 var(--mono)}
+.learning-preview{margin-top:12px;border-top:1px solid var(--x-hairline)}
+.learning-preview>summary{cursor:pointer;padding:10px 0 0;outline-offset:3px;color:var(--x-secondary);font:var(--t-caption)}
+.learning-preview>section{margin-top:12px}
+.learning-review{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--x-hairline)}
+.learning-review__approve{flex:none}
+.learning-reason{display:flex;align-items:flex-end;gap:8px;flex:1;min-width:220px}
+.learning-reason label{flex:1;min-width:0;margin:0!important;font:var(--t-caption)}
+.learning-reason label .studio-muted{color:var(--x-meta);font:var(--t-caption)}
+.learning-reason input{display:block;box-sizing:border-box;width:100%;min-height:30px;margin-top:5px;border:1px solid var(--x-hairline);border-radius:6px;padding:6px 9px;background:var(--x-screen);color:var(--x-title);font:var(--t-body)}
+.learning-reason>.btn{flex:none}
+.learned-notice{border-left:3px solid var(--x-accent);color:var(--x-secondary)}
 .learned-notice .studio-source{margin:10px 0}
-.learned-card .studio-source{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
-.learning-report{font-size:var(--ui-font)}
-@media(max-width:500px){.catalog-form>.studio-tabs{flex-wrap:wrap}.learning-reason{flex-basis:100%}}
+.learned-card .learning-report{margin-top:12px;font-size:var(--ui-font)}
+.learned-group .studio-empty,.learned-panel>section>.studio-empty{padding:20px;border:1px dashed var(--x-hairline);border-radius:10px;color:var(--x-meta);font:var(--t-body);line-height:1.6;text-align:left}
+@container(max-width:560px){
+  .learned-panel__intro{align-items:flex-start;flex-direction:column;gap:10px}
+  .learned-panel__summary{align-self:flex-start}
+}
+@container(max-width:430px){
+  .learned-panel__toolbar{align-items:stretch;flex-direction:column}
+  .learned-panel__tabs{box-sizing:border-box;width:100%}
+  .learned-panel__tabs button{flex:1;padding-inline:8px}
+  .learned-panel__refresh{align-self:flex-end}
+  .learned-group__head{align-items:stretch;flex-direction:column;gap:10px}
+  .learned-group__approve{align-self:flex-start}
+  .learning-review,.learning-reason{align-items:stretch;flex-direction:column;min-width:0}
+  .learning-review .btn{width:100%}
+}
+@media(max-width:500px){.catalog-form>.studio-tabs{flex-wrap:wrap}}
 
 /* XERXES tab, Hub & phone settings and the model chooser. */
 .visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
@@ -3443,3 +3498,36 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .agent-menu__title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px/1.3 var(--sans);color:var(--x-title)}
 .atelier .agent-menu__sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11.5px/1.3 var(--sans);color:var(--x-meta)}
 .atelier .agent-menu__more{margin:6px 10px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+/* The Simurgh identity is shared by XERXES and the specialist roster. */
+.xmsg__avatar{background:var(--x-accent-soft);color:var(--x-accent);border:1px solid var(--x-accent-soft)}
+.xmsg__avatar .simurgh-mark{display:block}
+.xempty__mark{color:var(--x-accent);background:var(--x-accent-soft);border-color:color-mix(in srgb,var(--x-accent) 20%,var(--x-hairline))}
+.xempty__mark .simurgh-mark{display:block}
+
+/* Specialists: an intentional landing page rather than another Settings sheet. */
+.specialists{position:relative;isolation:isolate;min-height:100%;padding:22px 0 0;box-sizing:border-box;background:radial-gradient(ellipse 70% 45% at 88% 0%,color-mix(in srgb,var(--x-accent) 12%,transparent),transparent 72%),radial-gradient(ellipse 45% 35% at 0% 42%,color-mix(in srgb,var(--x-working) 5%,transparent),transparent 76%)}
+.agents-hero{position:relative;display:flex;align-items:center;justify-content:space-between;gap:28px;min-height:190px;margin:0 var(--panel-inset) 18px;padding:26px 30px;box-sizing:border-box;overflow:hidden;border:1px solid color-mix(in srgb,var(--x-accent) 16%,var(--x-hairline));border-radius:16px;background:linear-gradient(120deg,color-mix(in srgb,var(--x-card) 92%,var(--x-accent) 8%),var(--x-card));box-shadow:0 18px 50px color-mix(in srgb,var(--x-accent) 5%,transparent)}
+.agents-hero::after{content:"";position:absolute;inset:auto -60px -95px auto;width:280px;height:280px;border:1px solid color-mix(in srgb,var(--x-accent) 12%,transparent);border-radius:50%;pointer-events:none}
+.agents-hero__copy{position:relative;z-index:1;max-width:690px}
+.agents-hero__eyebrow{display:block;margin-bottom:8px;color:var(--x-accent);font:600 10.5px/1.3 var(--sans);letter-spacing:.1em;text-transform:uppercase}
+.agents-hero h2{margin:0 0 8px;color:var(--x-title);font:600 26px/1.2 var(--sans);letter-spacing:-.55px}
+.agents-hero__copy>p{max-width:590px;margin:0;color:var(--x-secondary);font:400 13px/1.55 var(--sans)}
+.agents-hero__facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px;color:var(--x-meta);font:400 11.5px/1.4 var(--sans)}
+.agents-hero__facts span{display:inline-flex;align-items:center;gap:5px}
+.agents-hero__facts span::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--x-accent);opacity:.7}
+.agents-hero__facts strong{color:var(--x-title);font-size:13px}
+.agents-hero__mark{position:relative;flex:0 0 142px;display:grid;place-items:center;width:142px;height:142px;color:var(--x-accent);filter:drop-shadow(0 12px 22px color-mix(in srgb,var(--x-accent) 20%,transparent))}
+.agents-hero__mark .simurgh-mark{position:relative;z-index:1}
+.agents-hero__orbit{position:absolute;inset:0;border:1px solid color-mix(in srgb,var(--x-accent) 18%,transparent);border-radius:38% 62% 58% 42%/48% 38% 62% 52%;transform:rotate(-12deg);background:color-mix(in srgb,var(--x-accent) 6%,transparent)}
+.specialists .agents-workspace{margin:0 var(--panel-inset);padding:12px 2px;border-bottom:0;color:var(--x-meta)}
+.specialists .studio-split,.specialists .agents-empty-layout{position:relative;margin:0 var(--panel-inset);border:1px solid var(--x-hairline);border-radius:12px;background:color-mix(in srgb,var(--x-card) 94%,transparent);overflow:hidden}
+.specialists .studio-split>nav{padding:12px 8px;border-right:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-screen) 70%,transparent)}
+.specialists .studio-split>nav button{border-radius:7px;color:var(--x-secondary)}
+.specialists .studio-split>nav button.is-selected{background:var(--x-accent-soft);color:var(--x-accent)}
+.specialists .agent-detail{padding:22px 24px}
+.agent-detail__heading{display:flex;align-items:center;gap:11px;margin-bottom:16px}
+.agent-detail__heading h3{margin:0}
+.agent-detail__avatar{display:grid;place-items:center;flex:none;width:42px;height:42px;border:1px solid color-mix(in srgb,var(--x-accent) 20%,var(--x-hairline));border-radius:12px;background:var(--x-accent-soft);color:var(--x-accent)}
+.specialists>.studio-actions{margin:14px var(--panel-inset) 24px}
+.specialists>.studio-actions .studio-primary{box-shadow:0 5px 16px color-mix(in srgb,var(--x-accent) 16%,transparent)}
+@media(max-width:700px){.agents-hero{min-height:0;padding:22px}.agents-hero__mark{flex-basis:84px;width:84px;height:84px}.agents-hero__mark .simurgh-mark{width:70px;height:70px}.agents-hero__facts span:nth-child(n+2){display:none}.agents-hero h2{font-size:22px}}

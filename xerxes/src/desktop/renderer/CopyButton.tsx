@@ -20,8 +20,20 @@ import { Icon } from './Icon.js'
  * that a button relying on it alone reports "Copy failed" for content that
  * copies fine. Try it, then fall back to the synchronous path.
  */
-export function copyToClipboard(text: string): boolean {
-  void navigator.clipboard?.writeText(text).catch(() => {})
+export async function copyToClipboard(text: string, write?: (text: string) => Promise<unknown>): Promise<boolean> {
+  if (write) {
+    try {
+      await write(text)
+      return true
+    } catch { /* Use the browser paths below when the host is unavailable. */ }
+  }
+  if (typeof navigator === 'object' && typeof navigator.clipboard?.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch { /* file:// renderers may require the selection fallback below. */ }
+  }
+  if (typeof document === 'undefined') return false
   const area = document.createElement('textarea')
   area.value = text
   area.setAttribute('readonly', '')
@@ -40,7 +52,7 @@ export function copyToClipboard(text: string): boolean {
 }
 
 /** `icon`: a bare copy glyph (a tick once copied), for message action rows. */
-export function CopyButton({ text, label = 'Copy', icon = false }: { text: string; label?: string; icon?: boolean }): ReactElement {
+export function CopyButton({ text, label = 'Copy', icon = false, write }: { text: string; label?: string; icon?: boolean; write?: (text: string) => Promise<unknown> }): ReactElement {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(timer.current), [])
@@ -53,9 +65,11 @@ export function CopyButton({ text, label = 'Copy', icon = false }: { text: strin
       onClick={event => {
         event.stopPropagation()
         event.preventDefault()
-        setState(copyToClipboard(text) ? 'copied' : 'failed')
-        clearTimeout(timer.current)
-        timer.current = setTimeout(() => setState('idle'), 1400)
+        void copyToClipboard(text, write).then(copied => {
+          setState(copied ? 'copied' : 'failed')
+          clearTimeout(timer.current)
+          timer.current = setTimeout(() => setState('idle'), 1400)
+        })
       }}
       aria-label={state === 'copied' ? 'Copied' : label}
       title={state === 'failed' ? 'Copy failed — select and press ⌘C' : label}

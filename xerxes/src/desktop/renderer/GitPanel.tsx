@@ -522,11 +522,13 @@ function BranchList({ scm, onDone }: { scm: ReturnType<typeof useScm>; onDone: (
   )
 }
 
-function History({ scm, head, selected, onSelect, onPreselect }: { scm: ReturnType<typeof useScm>; head: string; selected: ScmSelection | null; onSelect: (selection: ScmSelection) => void; onPreselect: (selection: ScmSelection) => void }): ReactElement {
+export function History({ scm, head, selected, onSelect, onPreselect }: { scm: ReturnType<typeof useScm>; head: string; selected: ScmSelection | null; onSelect: (selection: ScmSelection) => void; onPreselect: (selection: ScmSelection) => void }): ReactElement {
   const [commits, setCommits] = useState<ScmCommit[] | null>(null)
   const [open, setOpen] = useState('')
   const [detail, setDetail] = useState<{ commit: ScmCommitDetail; files: ScmFile[] } | null>(null)
   const [error, setError] = useState('')
+  const requestEpoch = useRef(0)
+  useEffect(() => () => { requestEpoch.current++ }, [head, scm.call])
   useEffect(() => {
     let current = true
     if (!head) { setCommits([]); return }
@@ -534,17 +536,19 @@ function History({ scm, head, selected, onSelect, onPreselect }: { scm: ReturnTy
     return () => { current = false }
   }, [head, scm.call])
   const toggle = (commit: ScmCommit): void => {
-    if (open === commit.hash) { setOpen(''); return }
+    const epoch = ++requestEpoch.current
+    if (open === commit.hash) { setOpen(''); setDetail(null); setError(''); return }
     setOpen(commit.hash); setDetail(null); setError('')
     void scm.call('git.show', { commit: commit.hash })
       .then(result => {
+        if (epoch !== requestEpoch.current) return
         const shown = { commit: result.commit as ScmCommitDetail, files: Array.isArray(result.files) ? result.files as ScmFile[] : [] }
         setDetail(shown)
         // Opening a commit shows its first file straight away, like the editor does.
         const first = shown.files[0]
         if (first) onPreselect({ path: first.path, group: 'commit', commit: { hash: commit.hash, short: commit.short, ...(first.origPath ? { origPath: first.origPath } : {}) } })
       })
-      .catch(failure => setError(failure instanceof Error ? failure.message : String(failure)))
+      .catch(failure => { if (epoch === requestEpoch.current) setError(failure instanceof Error ? failure.message : String(failure)) })
   }
   if (commits === null) return <p className="studio-muted scm__history-note">Loading…</p>
   if (commits.length === 0) return <p className="studio-muted scm__history-note">No commits yet.</p>

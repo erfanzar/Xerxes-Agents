@@ -1632,3 +1632,15 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 }
 .railrow--static button:hover { border-color: var(--x-focus); color: var(--x-title); }
 .raillist__cap--standalone { margin-top: 18px; }
+
+/* Confirmations belong to the viewport, never the bottom of a scrolling settings list. */
+.action-dialog-layer { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; }
+.action-dialog-scrim { position: absolute; inset: 0; background: color-mix(in srgb, var(--x-backdrop) 76%, transparent); }
+.action-dialog { position: relative; width: min(100%, 520px); max-height: calc(100dvh - 40px); overflow: auto; box-sizing: border-box; border: 1px solid var(--x-focus); border-radius: var(--r-lg, 10px); padding: 22px; background: var(--x-card); color: var(--x-prose); box-shadow: 0 18px 70px color-mix(in srgb, var(--x-backdrop) 80%, transparent); }
+.action-dialog header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.action-dialog h2 { margin: 0; font: 600 18px/1.4 var(--sans); color: var(--x-title); overflow-wrap: anywhere; }
+.action-dialog__body { margin: 18px 0; overflow-wrap: anywhere; }
+.action-dialog__body p { margin: 0 0 12px; }
+.action-dialog footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.action-dialog .btn { width: auto; min-height: 36px; flex: 0 0 auto; }
+@media (max-width: 480px) { .action-dialog-layer { padding: 12px; } .action-dialog { padding: 18px; max-height: calc(100dvh - 24px); } }

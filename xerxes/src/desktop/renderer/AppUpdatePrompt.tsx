@@ -9,7 +9,8 @@
  * unwritable Applications folder) it says why and offers the release page.
  */
 
-import type { ReactElement } from 'react'
+import { useRef, type KeyboardEvent, type ReactElement } from 'react'
+import { useDialogFocus } from './dialogFocus.js'
 
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
@@ -20,10 +21,17 @@ function megabytes(bytes: number | undefined): string {
 }
 
 export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): ReactElement | null {
+  const root = useRef<HTMLDivElement>(null)
+  useDialogFocus(root, Boolean(update && update.phase !== 'checking'))
+  const ownsKeys = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape') return
+    event.stopPropagation(); event.preventDefault()
+    if (update?.phase !== 'downloading' && update?.phase !== 'restarting') void store.appUpdateAction('dismiss')
+  }
   if (!update || update.phase === 'checking') return null
   if (update.phase === 'current') {
     return (
-      <div className="appupdate" role="dialog" aria-modal="true" aria-labelledby="appupdate-title">
+      <div ref={root} className="appupdate" role="dialog" aria-modal="true" aria-labelledby="appupdate-title" tabIndex={-1} onKeyDown={ownsKeys}>
         <div className="appupdate__scrim" onClick={() => void store.appUpdateAction('dismiss')} />
         <section className="appupdate__card">
           <header className="appupdate__head">
@@ -44,7 +52,7 @@ export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): R
   const busy = update.phase === 'downloading' || update.phase === 'restarting'
   const percent = update.total ? Math.min(100, Math.round(((update.received ?? 0) / update.total) * 100)) : 0
   return (
-    <div className="appupdate" role="dialog" aria-modal="true" aria-labelledby="appupdate-title">
+    <div ref={root} className="appupdate" role="dialog" aria-modal="true" aria-labelledby="appupdate-title" tabIndex={-1} onKeyDown={ownsKeys}>
       <div className="appupdate__scrim" onClick={() => { if (!busy) void store.appUpdateAction('dismiss') }} />
       <section className="appupdate__card">
         <header className="appupdate__head">

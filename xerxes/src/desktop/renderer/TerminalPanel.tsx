@@ -18,7 +18,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { Terminal as XTerm, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 
-import { desktopCall, text, type RpcRecord } from './desktopRpc.js'
+import { desktopCall, desktopError, text, type RpcRecord } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { userShells, type ShellRow } from './terminalShells.js'
 import { openTerminalLink } from './terminalLinks.js'
@@ -114,13 +114,40 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
     return () => { current = false }
   }, [call, focus?.id, focus?.revision])
 
-  // The tab goes at once; the shell shuts down in the background. Waiting on
-  // the kill made closing feel laggy.
+  const pendingCloses = useRef(new Set<string>())
+  const [closing, setClosing] = useState<ReadonlySet<string>>(new Set())
+  const [closeErrors, setCloseErrors] = useState<Readonly<Record<string, string>>>({})
+  const closeContext = useRef({ call })
+  if (closeContext.current.call !== call) closeContext.current = { call }
+  useEffect(() => () => { closeContext.current = { ...closeContext.current } }, [])
+  useEffect(() => {
+    if (shells?.length && !shells.some(row => row.id === active)) setActive(shells.at(-1)!.id)
+  }, [shells, active])
+
+  // Keep the shell attached until the runtime acknowledges closing it. A
+  // failed kill is not success and must leave the tab recoverable.
   const close = (id: string): void => {
-    const next = (shells ?? []).filter(row => row.id !== id)
-    setShells(next)
-    if (active === id) setActive(next.at(-1)?.id ?? '')
-    void call('terminal.control', { terminal_id: id, action: 'kill' }).catch(() => { /* already gone */ })
+    if (pendingCloses.current.has(id)) return
+    const context = closeContext.current
+    const forget = () => {
+      setShells(current => (current ?? []).filter(row => row.id !== id))
+      setActive(current => current === id ? '' : current)
+    }
+    if (shells?.find(row => row.id === id)?.running === false) { forget(); return }
+    pendingCloses.current.add(id)
+    setClosing(new Set(pendingCloses.current))
+    setCloseErrors(current => ({ ...current, [id]: '' }))
+    void call('terminal.control', { terminal_id: id, action: 'kill' }).then(() => {
+      if (closeContext.current === context) forget()
+    }).catch(failure => {
+      if (closeContext.current !== context) return
+      const message = desktopError(failure)
+      if (message === 'this terminal has already exited') forget()
+      else setCloseErrors(current => ({ ...current, [id]: message }))
+    }).finally(() => {
+      pendingCloses.current.delete(id)
+      if (closeContext.current === context) setClosing(new Set(pendingCloses.current))
+    })
   }
 
   const markExited = useCallback((id: string) => {
@@ -135,11 +162,12 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
             <button role="tab" aria-selected={row.id === active} onClick={() => setActive(row.id)} title={row.running ? 'Shell' : 'Exited'}>
               <Icon name="terminal" size={12} /><span>Shell {index + 1}</span>
             </button>
-            <button className="term-tab__close" aria-label={`Close shell ${index + 1}`} title="Close shell" onClick={() => close(row.id)}><Icon name="close" size={10} /></button>
+            <button className="term-tab__close" aria-label={closing.has(row.id) ? `Closing shell ${index + 1}` : `Close shell ${index + 1}`} title="Close shell" disabled={closing.has(row.id)} onClick={() => close(row.id)}>{closing.has(row.id) ? 'Closing…' : <Icon name="close" size={10} />}</button>
           </span>
         ))}
         <button className="term__new" aria-label="New shell" title="New shell" disabled={opening} onClick={() => void open()}><Icon name="plus" size={13} /></button>
       </div>
+      {(shells ?? []).map((row, index) => closeErrors[row.id] && <div key={row.id} className="term__error" role="alert"><span>Could not close shell {index + 1}: {closeErrors[row.id]}</span><button className="btn" disabled={closing.has(row.id)} onClick={() => close(row.id)}>Retry close</button></div>)}
       {error && <div className="term__error" role="alert"><span>{error}</span><button className="btn" onClick={() => { started.current = false; setAttempt(value => value + 1) }}>Try again</button></div>}
       {shells !== null && shells.length === 0 && !opening && !error && (
         <div className="term__empty"><Icon name="terminal" size={22} /><p>No shell open.</p><button className="btn" onClick={() => void open()}>Open a shell</button></div>

@@ -6,7 +6,7 @@ import { store, type Snapshot, type Store } from './store.js'
 import { proposalKindLabel, proposalPreview, type LearningTarget, type Lesson, type ReflectionNotice, type StoredReflectionProposal } from './learning.js'
 import { Icon } from './Icon.js'
 
-type Actions = Pick<Store, 'refreshLearning' | 'reviewLearning' | 'openLearning'>
+type Actions = Pick<Store, 'refreshLearning' | 'reviewLearning' | 'reviewAllLearning' | 'openLearning'>
 interface ReviewProps { readonly snap: Snapshot; readonly actions: Actions }
 
 export function LearnedBadge({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -20,7 +20,7 @@ export function LearningReviewControls({ target, id, approved = false, disabled 
   const action = approved ? 'rollback' : 'reject'
   const label = approved ? 'Roll back' : 'Reject'
   return <div className="learning-review">
-    {!approved && <button className="btn" disabled={busy} onClick={() => void actions.reviewLearning(target, id, 'approve')}>Approve</button>}
+    {!approved && <button className="btn btn--solid learning-review__approve" disabled={busy} onClick={() => void actions.reviewLearning(target, id, 'approve')}>Approve</button>}
     <form className="learning-reason" onSubmit={event => {
       event.preventDefault()
       const input = event.currentTarget.elements.namedItem('reason') as HTMLInputElement | null
@@ -58,6 +58,7 @@ export function LessonCard({ lesson, snap, actions }: ReviewProps & { lesson: Le
   return <article className="railcard learned-card" aria-label={`Lesson: ${lesson.cue}`}>
     <div className="railcard__head"><strong className="railcard__title">{lesson.cue}</strong><span className="railcard__meta">Confidence {Math.round(lesson.confidence * 100)}%</span></div>
     <p className="learning-prose">{lesson.lesson}</p>
+    <h4>Evidence</h4>
     <pre className="studio-source">{evidence.kind === 'shared' ? `Shared from ${evidence.host} via ${evidence.source} — ${evidence.summary}` : evidence.kind === 'tool_call' ? `${evidence.toolName} — ${evidence.summary}` : `Test (reported): ${evidence.command}\nexit code ${evidence.exitCode} — ${evidence.summary}`}</pre>
     <ReviewResult target="lesson" id={lesson.id} snap={snap} />
     {(lesson.reviewStatus === 'pending' || lesson.reviewStatus === 'approved') && <LearningReviewControls target="lesson" id={lesson.id} approved={lesson.reviewStatus === 'approved'} snap={snap} actions={actions} />}
@@ -65,9 +66,23 @@ export function LessonCard({ lesson, snap, actions }: ReviewProps & { lesson: Le
 }
 
 export function LearnedLessons({ snap, actions }: ReviewProps): ReactElement {
-  return <section aria-label="Lessons">{(['pending', 'approved'] as const).map(status => {
+  return <section className="learned-lessons" aria-label="Lessons">{(['pending', 'approved'] as const).map(status => {
     const lessons = snap.learning?.lessons.filter(lesson => lesson.reviewStatus === status) ?? []
-    return <section key={status}><h3>{status === 'pending' ? 'Pending' : 'Approved'}</h3>{lessons.map(lesson => <LessonCard key={lesson.id} lesson={lesson} snap={snap} actions={actions} />)}{snap.learning && !lessons.length && <div className="studio-empty">{status === 'pending' ? 'No pending lessons. Evidence-backed cues and lessons recorded during work appear here for approval.' : 'No approved lessons. Approve a pending lesson to keep it; approved lessons can be rolled back with a reason.'}</div>}</section>
+    const title = status === 'pending' ? 'Pending' : 'Approved'
+    const headingId = `learned-${status}-title`
+    return <section className="learned-group" key={status} aria-labelledby={headingId}>
+      <div className="learned-group__head">
+        <div className="learned-group__heading">
+          <h3 id={headingId}>{title}</h3>
+          <p>{lessons.length === 1 ? '1 lesson' : `${lessons.length} lessons`}{status === 'pending' ? ' awaiting review' : ' in this workspace'}</p>
+        </div>
+        {status === 'pending' && lessons.length > 0 && <button className="btn btn--solid learned-group__approve" disabled={snap.learningReviewBusy || snap.learningLoading || snap.connection !== 'online'} onClick={() => void actions.reviewAllLearning('lesson')}>Approve all ({lessons.length})</button>}
+      </div>
+      <div className="learned-group__items">
+        {lessons.map(lesson => <LessonCard key={lesson.id} lesson={lesson} snap={snap} actions={actions} />)}
+        {snap.learning && !lessons.length && <div className="studio-empty">{status === 'pending' ? 'No pending lessons. Evidence-backed cues and lessons recorded during work appear here for approval.' : 'No approved lessons. Approve a pending lesson to keep it; approved lessons can be rolled back with a reason.'}</div>}
+      </div>
+    </section>
   })}</section>
 }
 
@@ -98,19 +113,33 @@ export function LearnedPanel({ snap, actions = store }: { snap: Snapshot; action
       card.scrollIntoView({ block: 'center' }); card.focus({ preventScroll: true })
     }
   }, [snap.learningOpenRevision, snap.learning, tab])
+  const pendingTotal = pendingProposals + pendingLessons
+  const loadedPendingProposals = snap.learning?.proposals.filter(proposal => proposal.status === 'pending').length ?? 0
   return <div ref={root} className="learned-panel">
-    <p className="studio-muted">What Xerxes learned from its work. Proposals and lessons stay pending; nothing changes without your approval.</p>
-    <div className="studio-tabs" role="group" aria-label="Learned views">
-      <button className={tab === 'proposals' ? 'is-selected' : ''} aria-pressed={tab === 'proposals'} onClick={() => choose('proposals')}>Proposals{pendingProposals ? <span className="learned-badge" aria-label={`${pendingProposals} pending proposals`}>{pendingProposals}</span> : null}</button>
-      <button className={tab === 'lessons' ? 'is-selected' : ''} aria-pressed={tab === 'lessons'} onClick={() => choose('lessons')}>Lessons{pendingLessons ? <span className="learned-badge" aria-label={`${pendingLessons} pending lessons`}>{pendingLessons}</span> : null}</button>
-      <button disabled={snap.learningLoading || snap.learningReviewBusy || snap.connection !== 'online'} onClick={() => void actions.refreshLearning()}>Refresh</button>
+    <div className="learned-panel__intro">
+      <div>
+        <h2>Learned</h2>
+        <p className="studio-muted">Review what Xerxes learned from its work. Nothing changes without your approval.</p>
+      </div>
+      <span className="learned-panel__summary">{pendingTotal === 0 ? 'Nothing awaiting review' : `${pendingTotal} ${pendingTotal === 1 ? 'item' : 'items'} awaiting review`}</span>
+    </div>
+    <div className="learned-panel__toolbar">
+      <div className="learned-panel__tabs" role="group" aria-label="Learned views">
+        <button className={tab === 'proposals' ? 'is-selected' : ''} aria-pressed={tab === 'proposals'} onClick={() => choose('proposals')}>Proposals{pendingProposals ? <span className="learned-badge" aria-label={`${pendingProposals} pending proposals`}>{pendingProposals}</span> : null}</button>
+        <button className={tab === 'lessons' ? 'is-selected' : ''} aria-pressed={tab === 'lessons'} onClick={() => choose('lessons')}>Lessons{pendingLessons ? <span className="learned-badge" aria-label={`${pendingLessons} pending lessons`}>{pendingLessons}</span> : null}</button>
+      </div>
+      <button className="btn btn--ghost learned-panel__refresh" disabled={snap.learningLoading || snap.learningReviewBusy || snap.connection !== 'online'} onClick={() => void actions.refreshLearning()}>Refresh</button>
     </div>
     {snap.learningLoading && <p className="studio-progress" role="status">Loading learned items…</p>}
     {snap.learningReviewBusy && <p className="studio-progress" role="status">Reviewing…</p>}
     {snap.learningError && <p className="studio-error" role="alert">{snap.learningError}</p>}
-    {/* Reviewed/expired lessons leave learning.list; their reports must not vanish with the card. */}
-    {Object.entries(snap.learningResults ?? {}).filter(([key]) => key.startsWith('lesson:') && !snap.learning?.lessons.some(lesson => key === `lesson:${lesson.id}`)).map(([key, result]) => <div key={key}>{result.report && <pre className="studio-source" role="status">{result.report}</pre>}{result.error && <p className="studio-error" role="alert">{result.error}</p>}</div>)}
+    {/* Reviewed items may leave learning.list; their outcome must not vanish with the card. */}
+    {Object.entries(snap.learningResults ?? {}).filter(([key]) => key.startsWith('lesson:') ? !snap.learning?.lessons.some(lesson => key === `lesson:${lesson.id}`) : key.startsWith('proposal:') && !snap.learning?.proposals.some(proposal => key === `proposal:${proposal.id}`)).map(([key, result]) => <div key={key}>{result.report && <pre className="studio-source" role="status">{result.report}</pre>}{result.error && <p className="studio-error" role="alert">{result.error}</p>}</div>)}
     {tab === 'proposals' ? <section aria-label="Reflection proposals">
+      <div className="learned-group__head">
+        <div className="learned-group__heading"><h3>Proposals</h3><p>{loadedPendingProposals} awaiting review</p></div>
+        {loadedPendingProposals > 0 && <button className="btn btn--solid learned-group__approve" disabled={snap.learningReviewBusy || snap.learningLoading || snap.connection !== 'online'} onClick={() => void actions.reviewAllLearning('proposal')}>Approve all ({loadedPendingProposals})</button>}
+      </div>
       {snap.learning?.proposals.map(stored => <ProposalCard key={stored.id} stored={stored} snap={snap} actions={actions} />)}
       {snap.learning && !snap.learning.proposals.length && <div className="studio-empty">No proposals yet. After a goal or substantial work, Xerxes may suggest a skill, agent update, or plugin idea with quoted evidence. Nothing is applied without approval.</div>}
     </section> : <LearnedLessons snap={snap} actions={actions} />}

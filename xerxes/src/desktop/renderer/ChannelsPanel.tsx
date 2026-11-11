@@ -18,7 +18,7 @@ import { Icon } from './Icon.js'
 
 export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
   // Statuses are point-in-time daemon state, not pushed on open.
-  useEffect(() => { store.loadChannels() }, [])
+  useEffect(() => { store.loadChannels() }, [snap.sessionKey])
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
   const channels = snap.channels
@@ -34,11 +34,12 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Channels</h2>
-      {error && <p className="studio-error" role="alert">{error}</p>}
+      {(error || snap.channelsError) && <p className="studio-error" role="alert">{error || snap.channelsError}</p>}
+      {snap.channelsLoading && <p role="status">Refreshing channels…</p>}
       <p className="modal__sub">
         Messaging gateways the daemon answers chats through — telegram, discord, slack, whatsapp, email, signal. Credentials live outside this app; a gateway only runs when the daemon found its config at boot.
       </p>
-      {!snap.channelsAvailable && (
+      {!snap.channelsLoading && !snap.channelsError && !snap.channelsAvailable && (
         <div className="row">
           <span className="dot dot--idle" />
           <div className="row__main">
@@ -76,7 +77,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
               role="switch"
               aria-checked={row.enabled}
               aria-label={`${row.enabled ? 'Disable' : 'Enable'} ${row.name}`}
-              disabled={busy !== null || snap.connection !== 'online'}
+              disabled={busy !== null || snap.channelsLoading || snap.connection !== 'online'}
               aria-busy={busy === row.name}
               onClick={() => toggle(row)}
             />
@@ -84,7 +85,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
         ))}
       </div>
       <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn btn--ghost" onClick={() => store.loadChannels()}><Icon name="retry" size={13} /> Refresh</button>
+        <button className="btn btn--ghost" disabled={snap.channelsLoading || busy !== null || snap.connection !== 'online'} onClick={() => { setError(''); store.loadChannels() }}><Icon name="retry" size={13} /> {snap.channelsLoading ? 'Refreshing…' : 'Refresh'}</button>
       </div>
     </>
   )

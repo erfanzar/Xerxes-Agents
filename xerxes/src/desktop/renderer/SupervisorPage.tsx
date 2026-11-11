@@ -18,6 +18,7 @@ import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { ModelChooser } from './ModelChooser.js'
 import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
+import { SimurghMark } from './SimurghMark.js'
 import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
 import { isOpenCard } from '../../client/supervisorRecords.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
@@ -370,7 +371,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               {!ready ? <p className="xempty xempty--wait" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
               {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
                 <div className="xempty">
-                  <span className="xempty__mark" aria-hidden="true">X</span>
+                  <span className="xempty__mark" aria-hidden="true"><SimurghMark size={29} /></span>
                   <strong>Ask XERXES about your work</strong>
                   <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
                   <div className="xempty__try" role="group" aria-label="Try asking">

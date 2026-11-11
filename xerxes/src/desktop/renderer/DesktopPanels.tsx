@@ -4,6 +4,7 @@
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
 import { pageIsBackground } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
+import { SimurghMark } from './SimurghMark.js'
 import { DiffPreview } from './DiffPreview.js'
 import { WorkspaceReview } from "./WorkspaceReview.js"
 import { CommandActivity } from './CommandActivity.js'
@@ -40,9 +41,11 @@ import { Icon, type IconName } from './Icon.js'
 import { GitPanel } from './GitPanel.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
-import { useDialogFocus } from './dialogFocus.js'
+import { handleDialogEscape, useDialogFocus } from './dialogFocus.js'
 import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
+import { trustAllSkills } from './catalogBulk.js'
+import { ActionDialog } from './ActionDialog.js'
 
 export type DesktopPanel =
   | 'artifacts'
@@ -213,11 +216,7 @@ export function DesktopSheet({
   useDialogFocus(ref)
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        event.stopImmediatePropagation()
-        close()
-      }
+      handleDialogEscape(event, close, ref.current?.contains(document.activeElement) ?? false)
     }
     document.addEventListener('keydown', key, true)
     return () => {
@@ -355,6 +354,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
     })
   return (
     <div
+      className="specialists"
       onKeyDown={(event) => {
         if (
           event.key.toLowerCase() === 'g' &&
@@ -368,6 +368,15 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
       }}
     >
       <Feedback {...request} />
+      <section className="agents-hero" aria-label="Specialist overview">
+        <div className="agents-hero__copy">
+          <span className="agents-hero__eyebrow">Specialist roster</span>
+          <h2>Bring in the right mind.</h2>
+          <p>Purpose-built agents for the work that benefits from a second pair of eyes—ready in this workspace when you need them.</p>
+          <div className="agents-hero__facts"><span><strong>{loaded ? rows.length : '—'}</strong> workspace specialists</span><span>Project-scoped instructions</span><span>Delegate from any conversation</span></div>
+        </div>
+        <div className="agents-hero__mark" aria-hidden="true"><span className="agents-hero__orbit" /><SimurghMark size={104} /></div>
+      </section>
       <div className="agents-workspace"><span title={snap.cwd}>{snap.cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~')}</span><button disabled={request.busy} onClick={() => store.chooseWorkspace()}>Change workspace…</button></div>
       {mode === 'generate' ? (
         <div className="studio-form">
@@ -440,7 +449,7 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
             <section className="agent-detail">
               {active ? (
                 <>
-                  <h3>{active.id}</h3>
+                  <div className="agent-detail__heading"><span className="agent-detail__avatar" aria-hidden="true"><SimurghMark size={27} /></span><h3>{active.id}</h3></div>
                   <div className="studio-label">When to delegate</div>
                   <p>{active.description}</p>
                   {active.error && <p role="alert">{active.error}</p>}
@@ -500,6 +509,8 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
     [path, setPath] = useState(''),
     [plugins, setPlugins] = useState<RpcRecord[]>([]),
     [confirmUninstall, setConfirmUninstall] = useState(''),
+    [trustReview, setTrustReview] = useState<readonly string[] | null>(null),
+    [trustSummary, setTrustSummary] = useState(''),
     [secretDrafts, setSecretDrafts] = useState<Record<string, { secret: string; value: string }>>({})
   useEffect(() => { if (snap.learningOpen) setTab('learned') }, [snap.learningOpenRevision])
   useEffect(() => {
@@ -528,7 +539,7 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <div className={"studio-form catalog-form" + (tab === "plugins" || tab === "learned" ? " catalog-form--plugins" : "")}>
       {catalogError && <p className="studio-error" role="alert">This runtime returned a {tab} catalog this app build does not understand. {catalogError}</p>}
-      <div className="studio-tabs">
+      <div className="studio-tabs catalog-tabs" role="group" aria-label="Catalog views">
         {(['skills', 'tools', 'plugins', 'learned'] as const).map((name) => (
           <button
             className={name === tab ? 'is-selected' : ''}
@@ -538,6 +549,8 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
               setDetail('')
               setSelectedSkill('')
               setNeedle('')
+              setTrustReview(null)
+              setTrustSummary('')
               if (name === 'learned') store.openLearning()
             }}
             aria-pressed={name === tab}
@@ -689,7 +702,21 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
         </>
       ) : (
         <>
-          <input className="catalog-search" aria-label="Search skills and tools" placeholder={'Search all ' + list.length + ' ' + tab + '…'} value={needle} onChange={event => setNeedle(event.target.value)} />
+          <div className="catalog-actions" role="group" aria-label={tab === 'skills' ? 'Skill actions' : 'Tool search'}>
+            <input className="catalog-search" aria-label="Search skills and tools" placeholder={'Search all ' + list.length + ' ' + tab + '…'} value={needle} onChange={event => setNeedle(event.target.value)} />
+            {tab === 'skills' && list.length > 0 && <button className="btn" disabled={request.busy} title="Review trusting all discovered skills after their security scans" onClick={() => setTrustReview(list.map(row => text(row.name)).filter(Boolean))}>Trust all…</button>}
+          </div>
+          {trustReview && <ActionDialog title={`Trust ${trustReview.length} skills?`} confirmLabel="Trust reviewed skills" busyLabel="Scanning and trusting…" busy={request.busy} onCancel={() => setTrustReview(null)} onConfirm={() => {
+            const names = trustReview
+            void request.run(async () => {
+              const result = await trustAllSkills(names, async name => request.call('slash', { command: '/skills trust ' + pluginArgument(name) }))
+              if (request.alive.current) {
+                setTrustSummary(`Trusted ${result.trusted.length} of ${names.length} skills.${result.failed.length ? ' Failed: ' + result.failed.map(row => `${row.name} (${row.error})`).join('; ') : ''}`)
+                setTrustReview(null)
+              }
+            })
+          }}><p>Each skill’s current contents must pass its security scan. Skills discovered after this review are not included.</p><details><summary>Skills included ({trustReview.length})</summary><pre className="studio-source">{trustReview.join('\n')}</pre></details></ActionDialog>}
+          {trustSummary && <p className="studio-muted" role="status">{trustSummary}</p>}
           {catalog && !list.length && <Empty>No {tab} are available in this session.</Empty>}
           <div className="studio-split catalog-browser"><nav aria-label="Installed catalog">
           {list.filter(row => [text(row.name), text(row.description), text(row.source)].join(' ').toLowerCase().includes(needle.toLowerCase())).map(row => (
@@ -1256,7 +1283,7 @@ function lastUnsavedPath(cwd: string): string {
   return path
 }
 
-function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
+export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'>; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
   const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : lastUnsavedPath(snap.cwd))
   const [source, setSource] = useState(false)
   const [file, setFile] = useState<OpenFile | null>(() => unsavedFile(snap.cwd, selected)?.file ?? null)
@@ -1264,6 +1291,11 @@ function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void
   const [previewError, setPreviewError] = useState('')
   const [save, setSave] = useState<{ state: 'idle' | 'saving' | 'saved' } | { state: 'error'; message: string; conflict: boolean }>({ state: 'idle' })
   const [reload, setReload] = useState(0)
+  const selection = useRef({ path: selected, sessionKey: snap.sessionKey, cwd: snap.cwd })
+  if (selection.current.path !== selected || selection.current.sessionKey !== snap.sessionKey || selection.current.cwd !== snap.cwd) {
+    selection.current = { path: selected, sessionKey: snap.sessionKey, cwd: snap.cwd }
+  }
+  useEffect(() => () => { selection.current = { ...selection.current } }, [])
   const dirty = file !== null && draft !== file.content
   /** Leaving a file with unsaved edits asks first. */
   const setSelected = (path: string): void => {
@@ -1301,14 +1333,17 @@ function FilesPanel({ snap, close, target }: { snap: Snapshot; close: () => void
   const saveFile = async (): Promise<void> => {
     if (!file || !editable || !dirty || save.state === 'saving') return
     const content = draft
+    const savingSelection = selection.current
     setSave({ state: 'saving' })
     try {
       const result = await desktopCall(window.xerxes, snap.sessionKey, 'workspace.fileWrite', { path: file.path, content, base_version: file.version })
+      if (selection.current !== savingSelection) return
       if (result.ok === true && typeof result.version === 'string') {
         setFile({ ...file, content, version: result.version })
         setSave({ state: 'saved' })
       } else setSave({ state: 'error', message: text(result.error) || 'The file could not be saved.', conflict: result.conflict === true })
     } catch (error) {
+      if (selection.current !== savingSelection) return
       setSave({ state: 'error', message: desktopError(error), conflict: false })
     }
   }

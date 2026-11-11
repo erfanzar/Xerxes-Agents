@@ -15,6 +15,7 @@ import {
   watchCardRows, watchFacts, watchReviewOptions, watchStateText,
 } from '../../client/watch.js'
 import { Icon } from './Icon.js'
+import { ActionFeedback } from './ActionFeedback.js'
 import { ChipChoice, ListChoice, type ChoiceOption } from './XChoice.js'
 
 /**
@@ -153,11 +154,12 @@ export function WatchEditor({ row, live, saving, onSave, onDone }: {
   )
 }
 
-function WatchLine({ row, canEdit, live, saving, editing, onEdit, onSave }: {
+function WatchLine({ row, canEdit, live, saving, editing, error, onEdit, onSave }: {
   readonly row: WatchRow
   readonly canEdit: boolean
   readonly live: boolean
   readonly saving: boolean
+  readonly error?: string | undefined
   readonly editing: boolean
   readonly onEdit: (open: boolean) => void
   readonly onSave: (input: WatchInput) => Promise<boolean>
@@ -184,6 +186,7 @@ function WatchLine({ row, canEdit, live, saving, editing, onEdit, onSave }: {
           </>
         ) : null}
       </div>
+      <ActionFeedback busy={saving} error={error} />
       {canEdit && editing ? <WatchEditor row={row} live={live} saving={saving} onSave={onSave} onDone={() => onEdit(false)} /> : null}
     </li>
   )
@@ -242,13 +245,17 @@ export interface WatchPanelProps {
 
 export function WatchPanel({ watch, tasks, workspaces, live, onSave, onRetry }: WatchPanelProps): ReactElement {
   const [editing, setEditing] = useState<string | undefined>(undefined)
+  const [saveTarget, setSaveTarget] = useState<string>()
+  const save = (input: WatchInput): Promise<boolean> => { setSaveTarget(watchKey(input.workspaceId, input.taskId)); return onSave(input) }
   const enabled = watch.rows.filter(row => row.enabled)
+  const targetInList = saveTarget !== undefined && enabled.some(row => watchKey(row.workspaceId, row.taskId) === saveTarget)
   const watched = new Set(enabled.map(row => watchKey(row.workspaceId, row.taskId)))
   const candidates = tasks.filter(task => !watched.has(watchKey(task.workspaceId, task.id))).slice(0, 100)
   const savingNew = watch.savingKey !== undefined && !watched.has(watch.savingKey)
   return (
     <section className="xwatch" aria-label="Watch">
       <p className="modal__sub">{WATCH_EXPLANATION}</p>
+      {!targetInList && <ActionFeedback busy={savingNew} error={watch.saveError} />}
       {watch.phase === 'loading' && watch.rows.length === 0 ? <p role="status" aria-busy="true" className="xap__meta">Reading Watch settings…</p> : null}
       {watch.phase === 'error' ? (
         <div role="alert" className="notice is-error">
@@ -262,7 +269,7 @@ export function WatchPanel({ watch, tasks, workspaces, live, onSave, onRetry }: 
           {watch.canEdit ? (
             <>
               <div className="cap xap__cap">Watch a task</div>
-              <StartWatch candidates={candidates} workspaces={workspaces} live={live} saving={savingNew} onSave={onSave} />
+              <StartWatch candidates={candidates} workspaces={workspaces} live={live} saving={savingNew} onSave={save} />
             </>
           ) : null}
           <div className="cap xap__cap">Watching</div>
@@ -277,9 +284,10 @@ export function WatchPanel({ watch, tasks, workspaces, live, onSave, onRetry }: 
                     canEdit={watch.canEdit}
                     live={live}
                     saving={watch.savingKey === key}
+                    error={saveTarget === key ? watch.saveError : undefined}
                     editing={editing === key}
                     onEdit={open => setEditing(open ? key : undefined)}
-                    onSave={onSave}
+                    onSave={save}
                   />
                 )
               })}
@@ -287,7 +295,6 @@ export function WatchPanel({ watch, tasks, workspaces, live, onSave, onRetry }: 
           )}
         </>
       ) : null}
-      {watch.saveError === undefined ? null : <p role="alert" className="action-card__error">{watch.saveError}</p>}
     </section>
   )
 }

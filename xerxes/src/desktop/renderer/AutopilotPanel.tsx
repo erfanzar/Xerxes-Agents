@@ -12,6 +12,7 @@ import { AUTOPILOT_INSTRUCTION_LIMIT, type AutopilotInput } from '../../client/h
 import type { AutopilotState } from '../../client/hubStore.js'
 import type { AutopilotRow } from '../../client/hubTypes.js'
 import { ChipChoice } from './XChoice.js'
+import { ActionFeedback } from './ActionFeedback.js'
 
 /**
  * The Autopilot tab of the XERXES controls dialog. On top, one card for "All
@@ -138,11 +139,12 @@ export function AutopilotEditor({ row, live, saving, onSave, onDone }: {
   )
 }
 
-function AllCard({ row, canEdit, live, saving, onSave }: {
+function AllCard({ row, canEdit, live, saving, error, onSave }: {
   readonly row: AutopilotRow
   readonly canEdit: boolean
   readonly live: boolean
   readonly saving: boolean
+  readonly error?: string | undefined
   readonly onSave: (input: AutopilotInput) => Promise<boolean>
 }): ReactElement {
   return (
@@ -166,15 +168,17 @@ function AllCard({ row, canEdit, live, saving, onSave }: {
           />
         </div>
       ) : null}
+      <ActionFeedback busy={saving} error={error} />
     </div>
   )
 }
 
-function Line({ row, canEdit, live, saving, editing, onEdit, onSave }: {
+function Line({ row, canEdit, live, saving, editing, error, onEdit, onSave }: {
   readonly row: AutopilotRow
   readonly canEdit: boolean
   readonly live: boolean
   readonly saving: boolean
+  readonly error?: string | undefined
   readonly editing: boolean
   readonly onEdit: (open: boolean) => void
   readonly onSave: (input: AutopilotInput) => Promise<boolean>
@@ -195,6 +199,7 @@ function Line({ row, canEdit, live, saving, editing, onEdit, onSave }: {
           </>
         ) : null}
       </div>
+      <ActionFeedback busy={saving} error={error} />
       {canEdit && editing ? <AutopilotEditor row={row} live={live} saving={saving} onSave={onSave} onDone={() => onEdit(false)} /> : null}
     </li>
   )
@@ -203,9 +208,13 @@ function Line({ row, canEdit, live, saving, editing, onEdit, onSave }: {
 export function AutopilotPanel({ autopilot, live, onSave, onRetry }: AutopilotPanelProps): ReactElement {
   const [editing, setEditing] = useState<string | undefined>(undefined)
   const all = autopilot.all
+  const [saveTarget, setSaveTarget] = useState<string>()
+  const save = (input: AutopilotInput): Promise<boolean> => { setSaveTarget(input.workspaceId); return onSave(input) }
+  const hasTarget = saveTarget !== undefined && (all?.workspaceId === saveTarget || autopilot.rows.some(row => row.workspaceId === saveTarget))
   return (
     <section className="xap" aria-label="Autopilot">
       <p className="modal__sub">{AUTOPILOT_EXPLANATION}</p>
+      {!hasTarget && <ActionFeedback error={autopilot.saveError} />}
       {autopilot.phase === 'loading' && autopilot.rows.length === 0 ? <p role="status" aria-busy="true" className="xap__meta">Reading Autopilot settings…</p> : null}
       {autopilot.phase === 'error' ? (
         <div role="alert" className="notice is-error">
@@ -217,7 +226,7 @@ export function AutopilotPanel({ autopilot, live, onSave, onRetry }: AutopilotPa
         <>
           {!autopilot.canEdit ? <p role="status" className="xap__meta">{AUTOPILOT_READ_ONLY_NOTE}</p> : null}
           {all === undefined ? null : (
-            <AllCard row={all} canEdit={autopilot.canEdit} live={live} saving={autopilot.savingId === all.workspaceId} onSave={onSave} />
+            <AllCard row={all} canEdit={autopilot.canEdit} live={live} saving={autopilot.savingId === all.workspaceId} error={saveTarget === all.workspaceId ? autopilot.saveError : undefined} onSave={save} />
           )}
           <div className="cap xap__cap">Workspaces</div>
           {autopilot.rows.length === 0 ? <p role="status" className="notice">No workspace is linked to this Hub yet.</p> : (
@@ -229,16 +238,16 @@ export function AutopilotPanel({ autopilot, live, onSave, onRetry }: AutopilotPa
                   canEdit={autopilot.canEdit}
                   live={live}
                   saving={autopilot.savingId === row.workspaceId}
+                  error={saveTarget === row.workspaceId ? autopilot.saveError : undefined}
                   editing={editing === row.workspaceId}
                   onEdit={open => setEditing(open ? row.workspaceId : undefined)}
-                  onSave={onSave}
+                  onSave={save}
                 />
               ))}
             </ul>
           )}
         </>
       ) : null}
-      {autopilot.saveError === undefined ? null : <p role="alert" className="action-card__error">{autopilot.saveError}</p>}
     </section>
   )
 }

@@ -110,7 +110,7 @@ export function MacPermissionsView(props: MacPermissionsViewProps): ReactElement
     <section aria-labelledby="macperm-title">
       <h2 className="modal__title" id="macperm-title">macOS permissions</h2>
       {!available ? <p role="status" className="notice">macOS permissions are only checked in the Xerxes desktop app.</p>
-        : !state ? <p role="status">Checking permissions…</p>
+        : !state ? <>{error ? <p role="alert" className="studio-error">{error}</p> : <p role="status">Checking permissions…</p>}{error && <button className="btn" disabled={busy !== null} onClick={props.onRecheck}>{busy === 'recheck' ? 'Checking…' : 'Retry'}</button>}</>
         : state.platform !== 'darwin' ? <p role="status" className="notice">These permissions only exist on macOS; nothing to turn on here.</p>
         : (
           <>
@@ -141,6 +141,8 @@ export interface MacPermissionsNoticeProps {
   readonly state: MacPermissionsState | undefined
   /** "Not now" for this window only. */
   readonly hidden: boolean
+  readonly busy?: MacPermissionsViewProps['busy']
+  readonly error?: string | undefined
   readonly onOpen: (id: MacPermissionId) => void
   readonly onLater: () => void
   readonly onDismiss: () => void
@@ -167,13 +169,15 @@ export function MacPermissionsNoticeView(props: MacPermissionsNoticeProps): Reac
         <strong>Computer use needs Accessibility and Screen Recording for {state.app_label}.</strong>
         <span> {names} {missing.length > 1 ? 'are' : 'is'} off. Turn {missing.length > 1 ? 'them' : 'it'} on in System Settings › Privacy &amp; Security.{screen ? ` macOS often needs ${state.app_label} relaunched after Screen Recording is turned on.` : ''}</span>
       </div>
+      {props.error && <p role="alert" className="studio-error">{props.error}</p>}
+      {props.busy && <p role="status">Working…</p>}
       <div className="macperm-notice__actions">
-        <button className="btn btn--solid" onClick={() => props.onOpen(first.id)}>Open settings</button>
-        {missing.length > 1 && missing.slice(1).map(item => <button key={item.id} className="btn" onClick={() => props.onOpen(item.id)}>Open {item.label}</button>)}
-        {screen && <button className="btn" onClick={props.onRelaunch}>Relaunch now</button>}
+        <button className="btn btn--solid" disabled={Boolean(props.busy)} onClick={() => props.onOpen(first.id)}>Open settings</button>
+        {missing.length > 1 && missing.slice(1).map(item => <button key={item.id} className="btn" disabled={Boolean(props.busy)} onClick={() => props.onOpen(item.id)}>Open {item.label}</button>)}
+        {screen && <button className="btn" disabled={Boolean(props.busy)} onClick={props.onRelaunch}>Relaunch now</button>}
         <button className="btn btn--ghost" onClick={props.onDetails}>Details</button>
         <button className="btn btn--ghost" onClick={props.onLater}>Not now</button>
-        <button className="btn btn--ghost" onClick={props.onDismiss}>Don't remind me</button>
+        <button className="btn btn--ghost" disabled={Boolean(props.busy)} onClick={props.onDismiss}>Don't remind me</button>
       </div>
     </div>
   )
@@ -190,17 +194,20 @@ function useMacPermissions(api: MacPermissionsApi | undefined): {
   const [busy, setBusy] = useState<MacPermissionId | 'recheck' | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   const alive = useRef(true)
+  const pending = useRef(false)
   useEffect(() => {
     alive.current = true
     return () => { alive.current = false }
   }, [])
   const run = useCallback(async (action: MacPermissionAction, params?: Record<string, unknown>, mark?: MacPermissionId | 'recheck'): Promise<void> => {
-    if (api === undefined) return
-    if (mark !== undefined) setBusy(mark)
+    if (api === undefined || pending.current) return
+    pending.current = true
+    setBusy(mark ?? 'recheck')
     setError(undefined)
     const result = await macPermissionsCall(api, action, params)
+    pending.current = false
     if (!alive.current) return
-    if (mark !== undefined) setBusy(null)
+    setBusy(null)
     if (result.ok) setState(result.state)
     else setError(result.message)
   }, [api])
@@ -235,14 +242,16 @@ export function MacPermissionsCard(): ReactElement {
 /** The startup notice, wired to the main process. Renders nothing outside the desktop app or off macOS. */
 export function MacPermissionsNotice(): ReactElement | null {
   const [api] = useState(() => windowMacPermissionsApi())
-  const { state, run } = useMacPermissions(api)
+  const { state, busy, error, run } = useMacPermissions(api)
   const [hidden, setHidden] = useState(false)
   if (api === undefined) return null
   return (
     <MacPermissionsNoticeView
       state={state}
       hidden={hidden}
-      onOpen={id => { void run('open', { id }) }}
+      busy={busy}
+      error={error}
+      onOpen={id => { void run('open', { id }, id) }}
       onLater={() => setHidden(true)}
       onDismiss={() => { void run('dismiss') }}
       onRelaunch={() => { void run('relaunch') }}

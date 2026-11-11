@@ -337,6 +337,8 @@ export interface Snapshot {
   readonly channels: readonly ChannelRow[]
   readonly channelsAvailable: boolean
   readonly channelsConfigured: boolean
+  readonly channelsLoading?: boolean
+  readonly channelsError?: string
   /** Daemon-tracked terminals from `terminal.list` (owner: the bound session). */
   readonly terminals: readonly TerminalRow[]
   readonly terminalsLoading: boolean
@@ -881,6 +883,7 @@ export class Store {
   private heartbeat: NodeJS.Timeout | null = null
   private updatingRuntime = false
   private terminalsLoadVersion = 0
+  private channelsLoadVersion = 0
   private learningLoadVersion = 0
   private learningReviewToken: object | null = null
   /** In-flight agent-family tool calls; the fleet poll lives while any do. */
@@ -1100,6 +1103,53 @@ export class Store {
         if (current()) { this.learningReviewToken = null; this.patch({ learningReviewBusy: false }) }
       }
     }
+  }
+
+  /** Approve a fixed snapshot of one kind; never broaden a human's batch after the click. */
+  async reviewAllLearning(target: LearningTarget): Promise<{ approved: number; failed: number }> {
+    if (this.learningReviewToken || this.frame.learningLoading || this.frame.connection !== 'online') return { approved: 0, failed: 0 }
+    const pending = target === 'lesson'
+      ? this.frame.learning?.lessons.filter(lesson => lesson.reviewStatus === 'pending') ?? []
+      : this.frame.learning?.proposals.filter(proposal => proposal.status === 'pending') ?? []
+    if (!pending.length) return { approved: 0, failed: 0 }
+    const token = {}, key = this.sessionKey, revision = this.frame.sessionOpenRevision
+    this.learningReviewToken = token
+    const current = () => token === this.learningReviewToken && key === this.sessionKey && revision === this.frame.sessionOpenRevision
+    const results: Record<string, LearningResult> = { ...this.frame.learningResults }
+    let approved = 0, failed = 0
+    this.patch({ learningReviewBusy: true, learningError: '' })
+    try {
+      for (const item of pending) {
+        if (!current()) break
+        const resultKey = `${target}:${item.id}`
+        try {
+          const result = await this.bridge.call('learning.review', { session_key: key, target, id: item.id, action: 'approve' })
+          if (result.ok !== true || typeof result.report !== 'string') {
+            failed += 1
+            results[resultKey] = { report: text(result.report), error: text(result.error) || 'The approval was not accepted.' }
+          } else {
+            approved += 1
+            results[resultKey] = { report: result.report, error: '' }
+          }
+        } catch (error) {
+          failed += 1
+          results[resultKey] = { report: '', error: desktopError(error) }
+        }
+      }
+      if (current()) this.patch({ learningResults: results })
+    } finally {
+      if (current()) {
+        await this.refreshLearning()
+        if (current()) {
+          this.learningReviewToken = null
+          this.patch({
+            learningReviewBusy: false,
+            learningError: failed ? `${approved} approved; ${failed} failed. Review the individual outcomes below.` : '',
+          })
+        }
+      }
+    }
+    return { approved, failed }
   }
 
   start(bridge?: XerxesLike): void {
@@ -2821,10 +2871,18 @@ export class Store {
 
   /** Load gateway status; flags stay truthful even when the manager is absent (`ok:false`). */
   loadChannels(): void {
-    void this.bridge
-      .call('channel.list', {})
-      .then(result => this.applyChannelStatus(channelStatusFrom(result)))
-      .catch(error => this.fail(error))
+    const version = ++this.channelsLoadVersion, key = this.sessionKey
+    const current = () => version === this.channelsLoadVersion && key === this.sessionKey
+    this.patch({ channelsLoading: true, channelsError: '' })
+    void this.bridge.call('channel.list', {}).then(result => {
+      if (!current()) return
+      if (!Array.isArray(result.channels) || typeof result.channels_available !== 'boolean') throw new Error(text(result.error) || 'The runtime returned an invalid channel list.')
+      this.applyChannelStatus(channelStatusFrom(result))
+    }).catch(error => {
+      if (current()) this.patch({ channelsError: desktopError(error) })
+    }).finally(() => {
+      if (current()) this.patch({ channelsLoading: false })
+    })
   }
 
   private applyChannelStatus(status: ChannelStatus): void {
@@ -4235,12 +4293,16 @@ export class Store {
         const cumulativeInputTokens = num(payload.total_input_tokens) ?? num(payload.input_tokens)
         if (cacheReadTokens !== null) patch.cacheReadTokens = cacheReadTokens
         if (cacheWriteTokens !== null) patch.cacheWriteTokens = cacheWriteTokens
-        // Writes count: a step that rewrote the cached prefix is a miss.
-        const promptTokens = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0) + (cumulativeInputTokens ?? 0)
-        if ((cacheReadTokens !== null || cacheWriteTokens !== null) && cumulativeInputTokens !== null && promptTokens > 0) {
-          patch.cacheHitRate = (cacheReadTokens ?? 0) / promptTokens
-        } else if (typeof payload.cache_hit_rate === 'number' && Number.isFinite(payload.cache_hit_rate)) {
+        // The daemon's rate uses only cache-instrumented calls. total_input_tokens
+        // also includes uncached/unknown calls, so recomputing with it understates
+        // the provider's reported cache hit rate on long sessions.
+        if (typeof payload.cache_hit_rate === 'number' && Number.isFinite(payload.cache_hit_rate)) {
           patch.cacheHitRate = Math.max(0, Math.min(1, payload.cache_hit_rate))
+        } else {
+          const promptTokens = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0) + (cumulativeInputTokens ?? 0)
+          if ((cacheReadTokens !== null || cacheWriteTokens !== null) && cumulativeInputTokens !== null && promptTokens > 0) {
+            patch.cacheHitRate = (cacheReadTokens ?? 0) / promptTokens
+          }
         }
         // Live cost estimate rides the same echo the ctx counter uses.
         if (typeof payload.cost_usd === 'number') patch.costUsd = payload.cost_usd
