@@ -99,7 +99,12 @@ export class SupervisorWakes {
         const count = this.db.query<{ n: number }, []>('SELECT COUNT(*) AS n FROM hub_superagent_event_receipts').get()?.n ?? 0
         if (count >= 100000) throw new Error('Event receipt budget exhausted; owner maintenance required')
         // Receipt and wake are one transaction: failure to enqueue never loses an event silently.
-        this.schedule(sub, { at: this.options.clock(), reason: `${event.kind}: ${event.digest}` })
+        let reason = `${event.kind}: `
+        for (const character of event.digest) {
+          if (Buffer.byteLength(reason + character) > 2000) break
+          reason += character
+        }
+        this.schedule(sub, { after: 0, reason })
         this.db.query('INSERT INTO hub_superagent_event_receipts VALUES (?,?)').run(sub.id, event.id)
       }).immediate()
     }

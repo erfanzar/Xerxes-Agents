@@ -55,3 +55,16 @@ test('disk subscriptions only wake above their configured threshold and cancelle
     expect(wakes.cancel(scope, pending.id)).toBe(true)
   } finally { wakes.dispose(); db.close() }
 })
+
+test('event wakes tolerate an advancing clock and UTF-8 event reasons within a byte budget', async () => {
+  const db = new Database(':memory:'); let now = 1000; const reasons: string[] = []
+  const wakes = new SupervisorWakes(db, { clock: () => now++, paused: () => false, authorized: () => true,
+    deliver: async wake => { reasons.push(wake.reason) } })
+  try {
+    wakes.subscribe({ owner: 'o', thread: 't', workspace: 'w' }, { kind: 'tests_failing' })
+    await wakes.observe({ id: 'unicode', workspace: 'w', kind: 'tests_failing', digest: '文'.repeat(1000) })
+    now += 100; await wakes.drain()
+    expect(reasons).toHaveLength(1)
+    expect(Buffer.byteLength(reasons[0]!)).toBeLessThanOrEqual(2000)
+  } finally { wakes.dispose(); db.close() }
+})
