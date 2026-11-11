@@ -105,6 +105,7 @@ export interface SupervisorThreadsOptions {
   readonly db: Database
   readonly identity: Pick<HubIdentityPort, 'grantsFor'> & Partial<Pick<HubIdentityPort, 'onRevoked'>>
   readonly clock?: () => number
+  readonly isHubOwner?: (userId: string) => boolean
   /** Whether a person may take part in the shared thread at all (they can see something on this Hub). */
   readonly eligible?: (principal: UserPrincipal, grants: readonly HubGrant[]) => boolean
   /** Participants not seen for this long no longer narrow what the shared thread may show. Default 12 hours. */
@@ -339,12 +340,15 @@ export class SupervisorThreads {
 
   /** Read scope of the thread: the intersection over everyone who can see it, inside the agent ceiling. */
   scopeReader(thread: ThreadRecord, live: UserPrincipal): ScopeReader {
-    const now = this.clock()
-    const readers = this.readers(thread, live).map(principal => ({ principal, grants: this.options.identity.grantsFor(principal.id) }))
     const scopes = (target: AccessTarget): ReadonlySet<HubScope> => {
+      // A turn can await a model while grants, membership, ownership or time changes.
+      const current = this.get(thread.id)
+      if (current === undefined || (current.kind === 'private' && current.ownerId !== live.id)) return new Set()
+      const now = this.clock()
       let shared: Set<HubScope> | undefined
-      for (const reader of readers) {
-        const own = delegatedScopes(reader.principal, reader.grants, target, now)
+      for (const captured of this.readers(current, live)) {
+        const principal = this.options.isHubOwner === undefined ? captured : { ...captured, hubOwner: this.options.isHubOwner(captured.id) }
+        const own = delegatedScopes(principal, this.options.identity.grantsFor(principal.id), target, now)
         shared = shared === undefined ? new Set(own) : new Set([...shared].filter(scope => own.has(scope)))
       }
       return shared ?? new Set()

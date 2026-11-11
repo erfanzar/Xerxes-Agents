@@ -6,6 +6,7 @@ import type { JsonObject } from '../../types/toolCalls.js'
 import { resolveSessionKey, type CommandBackend } from '../commandRouter.js'
 import { isRecord, utf8ByteLength } from '../protocol.js'
 import type { HubWorkspaceView } from '../server.js'
+import type { HubEventStore } from '../eventStore.js'
 import { ACTION_TOOLS, SupervisorDenied, isActionTool, type ActionService } from './actions.js'
 import { displayOption, type PendingInteractions } from './autopilot.js'
 import type { DigestService } from './digests.js'
@@ -87,6 +88,7 @@ export interface SupervisorToolDeps {
   readonly push?: SupervisorPushPort
   readonly autopilot?: SupervisorAutopilotPort
   readonly abilities?: Pick<SuperagentAbilities, 'execute'>
+  readonly journal?: Pick<HubEventStore, 'readLatest'>
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -228,6 +230,29 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
         ...(typeof args.max_age_seconds === 'number' ? { maxAgeSeconds: args.max_age_seconds } : {}),
         ...(signal === undefined ? {} : { signal }),
       })
+    },
+
+    'task.records': (args, turn, signal) => {
+      signal?.throwIfAborted()
+      const workspaceId = str(args, 'workspace_id')!
+      const taskId = str(args, 'task_id')!
+      readable(turn, workspaceId, taskId)
+      if (deps.journal === undefined) throw new Error('Retained task records are unavailable on this Hub')
+      // One bounded scan per request, not an unbounded search loop. Empty filtered pages still advance.
+      const page = deps.journal.readLatest(str(args, 'before'), { workspaceIds: [workspaceId], sessionIds: [taskId] },
+        typeof args.limit === 'number' ? args.limit : 100, 48 * 1024)
+      signal?.throwIfAborted()
+      readable(turn, workspaceId, taskId)
+      const kind = str(args, 'kind') ?? 'all'
+      const messageTypes = ['text_part', 'text_delta', 'message', 'assistant', 'user', 'user_message', 'assistant_message']
+      const resultTypes = ['tool_call', 'tool_result', 'turn_error', 'error', 'turn_end']
+      const query = str(args, 'query')?.toLowerCase()
+      const allowed = kind === 'messages' ? messageTypes : kind === 'results' ? resultTypes : [...messageTypes, ...resultTypes]
+      const visible = page.events.filter(event => allowed.includes(event.type))
+      const records = visible.filter(event => query === undefined || JSON.stringify(event).toLowerCase().includes(query))
+      return { source: 'retained_hub_journal', coverage: 'retained_only', retention_gap: page.retentionGap,
+        truncated_records: visible.filter(event => event.payload.truncated === true).length,
+        scanned: page.events.length, records, has_more: page.hasMore, ...(page.before === undefined ? {} : { before: page.before }) }
     },
 
     'task.tail': async (args, turn, signal) => {

@@ -25,7 +25,7 @@ import { createSupervisorHandlers, type SupervisorHandlers } from './handlers.js
 import {
   DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW, SupervisorRunner, createModelDigestSummarizer, type SupervisorModelPort, type SupervisorQuotas,
 } from './runner.js'
-import { createSupervisorToolRegistry } from './tools.js'
+import { createSupervisorToolRegistry, type SupervisorToolDeps } from './tools.js'
 import { SuperagentAbilities } from './abilities/service.js'
 import { SuperagentControl } from './abilities/control.js'
 import { SubscriptionEvents } from './abilities/events.js'
@@ -100,6 +100,8 @@ export interface HubSupervisorOptions {
   readonly diskPolling?: { readonly intervalMs?: number }
   /** Journal for digests; observers feed attention. */
   readonly events?: DigestEventSource & { onEvents?(observer: (events: readonly WatchEvent[]) => void): () => void }
+  /** Bounded reverse reads of retained task records; separate from summary/digest event fakes. */
+  readonly journal?: SupervisorToolDeps['journal']
   readonly model: SupervisorModelPort
   /** Whether XERXES has a model to run on; `unconfigured` makes `supervisor.message.submit` refuse. */
   readonly configStatus?: () => { readonly status: string; readonly message?: string }
@@ -163,7 +165,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     workspaces.list().some(workspace =>
       canSeeWorkspace(principal, grants, workspace.id, clock()) || grantedSessionIds(principal, grants, workspace.id, clock()).length > 0)
 
-  const threads = new SupervisorThreads({ db, identity, clock, eligible, onError: report })
+  const threads = new SupervisorThreads({ db, identity, clock, eligible, onError: report,
+    ...(options.isHubOwner === undefined ? {} : { isHubOwner: options.isHubOwner }) })
   threads.ensureShared()
 
   const autopilot = new AutopilotSettings({
@@ -465,6 +468,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     digests,
     actions,
     threads,
+    ...(options.journal === undefined ? {} : { journal: options.journal }),
     ...(options.sendPush === undefined ? {} : { push: (userId: string, message: { title: string; body: string; url: string }) => options.sendPush!(userId, message) }),
     autopilot: { pending: pendingOf, answer: answerQuestion },
     onError: report,

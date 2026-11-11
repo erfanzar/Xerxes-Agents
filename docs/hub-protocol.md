@@ -268,9 +268,9 @@ capped at `AGENT_SCOPE_CEILING` and can never hold a human-only scope
 
 ## Supervisor tools
 
-The XERXES supervisor sees fourteen tools, with underscore provider names
+The XERXES supervisor sees a restricted tool set, with underscore provider names
 (`tasks_list`) and dotted canonical names (`tasks.list`): `workspace.list`,
-`tasks.list`, `task.digest`, `task.tail`, `task.search`, `task.pending`
+`tasks.list`, `task.digest`, `task.tail`, `task.records`, `task.search`, `task.pending`
 (provider name `pending_interactions`: questions with text and options,
 permissions only as a count) (reads); `task.start`, `task.steer`, `task.stop`,
 `agent.message`, `goal.set`, `model.set` (need a human to confirm, except under
@@ -278,6 +278,27 @@ Autopilot); `question.answer` (provider name `answer_question`, Autopilot only);
 `notify.user` (thread audience only).
 Approval, review, permission-mode, shell, Workflow and generic RPC tools are
 refused by `assertSupervisorToolCeiling`.
+
+**Retained task records.** `task.records` (provider name `task_records`) reads
+messages, commands and recorded tool results directly from the Hub journal,
+including tasks whose daemon is offline or whose session is no longer open.
+Required: `workspace_id`, `task_id`; optional: `before` (opaque reverse-page
+cursor), `limit` (1–100 candidate records), `kind` (`all|messages|results`) and
+`query` (case-insensitive literal filter of this page only). The reply is bounded
+below 64 KiB and reports `source: 'retained_hub_journal'`,
+`coverage: 'retained_only'`, `retention_gap`, `truncated_records`, `scanned`,
+`records`, `has_more` and optional `before`. Keep paging even when filtering
+returns an empty page with `has_more: true`. A cursor is bound to its journal,
+task scope and reverse direction; replaced streams or expired cursors refuse
+rather than silently skipping history. Oversized payloads are marked truncated;
+permission/question payloads are excluded. Each call scans bounded local
+metadata through a covering task index and loads only size-admitted payloads,
+with no daemon or model call. Scope evaluations refresh participants, grants,
+time and the configured live owner lookup, including after a model wait.
+The bound is on candidates, hydration and response size, not a measured disk-I/O
+or latency guarantee. Records are untrusted data, not execution authority.
+This is **not** a search of every legacy snapshot/pre-compaction archive. The
+existing daemon `task.search` path searches its indexed messages only.
 
 **Live steps.** While a turn runs, the Hub streams its steps as
 `supervisor.thread_event` frames carrying `step` (and no `message`):
