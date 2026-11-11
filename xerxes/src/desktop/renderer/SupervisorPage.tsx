@@ -7,7 +7,9 @@ import type { ConnectionStatus } from '../../client/bridge.js'
 import { HubConnection } from '../../client/hubConnection.js'
 import { AUTOPILOT_COMPOSER_HINT, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput, type WatchInput } from '../../client/hubController.js'
-import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, orderTasks, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
+import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, isHubOwner, orderTasks, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
+import { SuperagentControlPanel } from '../../client/SuperagentControlPanel.js'
+import type { SuperagentControlClient } from '../../client/superagentControl.js'
 import { watchChipText } from '../../client/watch.js'
 import { ActionConfirmationCard } from './ActionConfirmationCard.js'
 import { AgentOrb } from './AgentOrb.js'
@@ -148,6 +150,7 @@ export function SignInFailed({ message, denied, onRetry, onSignInAgain, onOpenSe
 
 export interface SupervisorViewProps {
   readonly state: HubState
+  readonly controlClient?: SuperagentControlClient
   readonly hubLabel: string
   readonly now: number
   readonly onSend: (text: string) => Promise<boolean>
@@ -201,17 +204,21 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const live = state.connection.state === 'live'
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
+  const [safetyOpen, setSafetyOpen] = useState(false)
+  const safetyAvailable = props.controlClient !== undefined && isHubOwner(state)
   const unconfigured = config.status === 'unconfigured'
   // An unconfigured XERXES keeps its chooser in the page; everything else opens the controls dialog.
   const inlineChooser = unconfigured && supervisor.phase !== 'unsupported'
-  const controlsTab: ControlsTab | undefined = showAutopilot ? 'autopilot' : showWatch ? 'watch'
+  const controlsTab: ControlsTab | undefined = safetyOpen && safetyAvailable ? 'safety' : showAutopilot ? 'autopilot' : showWatch ? 'watch'
     : props.chooserOpen && !inlineChooser && supervisor.phase !== 'unsupported' ? 'model' : undefined
   const controlTabs: ControlsTabEntry[] = [
     ...(autopilotAvailable ? [{ id: 'autopilot' as const, label: 'Autopilot', hint: autopilotChip?.replace(/^Autopilot /, '') ?? 'Off' }] : []),
     ...(watchAvailable ? [{ id: 'watch' as const, label: 'Watch', hint: watchChip ?? 'Nothing watched' }] : []),
     { id: 'model', label: 'Model', hint: modelChipText(config) },
+    ...(safetyAvailable ? [{ id: 'safety' as const, label: 'Safety', hint: 'Owner controls' }] : []),
   ]
   const openTab = (tab: ControlsTab): void => {
+    setSafetyOpen(tab === 'safety')
     if (tab !== 'autopilot' && props.autopilotOpen) props.onAutopilotChange?.(false)
     if (tab !== 'watch' && props.watchOpen) props.onWatchChange?.(false)
     if (tab !== 'model' && props.chooserOpen) props.onChooserChange(false)
@@ -220,6 +227,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     if (tab === 'model' && !props.chooserOpen) props.onChooserChange(true)
   }
   const closeControls = (): void => {
+    setSafetyOpen(false)
     if (props.autopilotOpen) props.onAutopilotChange?.(false)
     if (props.watchOpen) props.onWatchChange?.(false)
     if (props.chooserOpen) props.onChooserChange(false)
@@ -295,6 +303,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               expanded={controlsTab === 'watch'} onClick={() => openTab('watch')} />
           ) : null}
           <ControlPill name="Model" value={modelChipText(config)} tone={modelTone(config)} expanded={controlsTab === 'model' || inlineChooser} onClick={() => openTab('model')} />
+          {safetyAvailable ? <ControlPill name="Safety" value="Owner controls" tone="off" expanded={controlsTab === 'safety'} onClick={() => openTab('safety')} /> : null}
         </div>
         <span className="xbar__sep" aria-hidden="true" />
         <span className="supervisor__hub" title={`Hub: ${hubLabel}${live ? '' : ' (not connected)'}`}>
@@ -310,7 +319,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           onTab={openTab}
           onClose={closeControls}
         >
-          {controlsTab === 'autopilot' ? (
+          {controlsTab === 'safety' && props.controlClient !== undefined ? <SuperagentControlPanel client={props.controlClient} online={live} /> : controlsTab === 'autopilot' ? (
             <AutopilotPanel
               autopilot={autopilot}
               live={live}
@@ -468,6 +477,7 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
   return (
     <SupervisorView
       state={state}
+      controlClient={session.controller.superagentControl}
       hubLabel={hubLabelFor(origin)}
       now={now}
       onSend={text => session.controller.supervisorSend(text, 'text')}

@@ -91,7 +91,7 @@ export interface PoolDerivedWorkspace {
 /** Internal RPC ceiling, not an authorization substitute. No shell/slash/provider/config/shutdown passthrough. */
 export const HUB_DAEMON_METHODS = [
   'runtime.status', 'session.active_list', 'session.list', 'session.status', 'session.history', 'session.search',
-  'usage.report', 'subagent.inspect', 'session.open', 'turn.submit', 'turn.steer', 'turn.cancel',
+  'usage.report', 'subagent.inspect', 'superagent.observe', 'session.open', 'turn.submit', 'turn.steer', 'turn.cancel',
   'permission_response', 'question_response', 'session.goal', 'set_model', 'subagent.steer',
 ] as const
 export type HubDaemonMethod = (typeof HUB_DAEMON_METHODS)[number]
@@ -129,8 +129,8 @@ function cleanDirectory(value: unknown): string | undefined {
   return trimmed === '' || trimmed === '/' ? undefined : trimmed
 }
 const METHODS: ReadonlySet<string> = new Set(HUB_DAEMON_METHODS)
-const READS: ReadonlySet<string> = new Set(['runtime.status', 'session.active_list', 'session.list', 'session.status', 'session.history', 'session.search', 'usage.report', 'subagent.inspect'])
-const UNSCOPED: ReadonlySet<string> = new Set(['runtime.status', 'session.active_list', 'session.list', 'session.search'])
+const READS: ReadonlySet<string> = new Set(['runtime.status', 'session.active_list', 'session.list', 'session.status', 'session.history', 'session.search', 'usage.report', 'subagent.inspect', 'superagent.observe'])
+const UNSCOPED: ReadonlySet<string> = new Set(['runtime.status', 'session.active_list', 'session.list', 'session.search', 'superagent.observe'])
 const SUMMARIES: ReadonlySet<string> = new Set(['session.active_list', 'session.status', 'session.open', 'session.list'])
 /** Opening a session only attaches a lane; everything else outside READS changes daemon state. */
 const ATTACH_ONLY: ReadonlySet<string> = new Set(['session.open'])

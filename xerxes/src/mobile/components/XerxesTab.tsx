@@ -8,7 +8,9 @@ import { newCommandId } from '../../client/bridge.js'
 import { relativeTime } from '../../client/format.js'
 import { watchChipText } from '../../client/watch.js'
 import type { ConfirmationState, SupervisorConfirmation, SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
-import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable } from '../../client/hubStore.js'
+import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, isHubOwner } from '../../client/hubStore.js'
+import { SuperagentControlPanel } from '../../client/SuperagentControlPanel.js'
+import { Sheet } from './Sheet.js'
 import { liveSteps, stepPhrase } from '../../client/supervisorSteps.js'
 import { splitCards, withRecords } from '../../client/supervisorRecords.js'
 import { useHubState, useNow, useServices } from '../context.js'
@@ -178,6 +180,7 @@ export function XerxesTab(): ReactElement {
   const [autopilotSheet, setAutopilotSheet] = useState(false)
   const [threadView, setThreadView] = useState(false)
   const [watchSheet, setWatchSheet] = useState(false)
+  const [safetySheet, setSafetySheet] = useState(false)
   const autopilotChip = autopilotChipText(activeAutopilotRows(state), state.autopilot.all)
   const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
@@ -240,6 +243,10 @@ export function XerxesTab(): ReactElement {
     <section aria-labelledby="xerxes-title">
       <CallPill />
       <h1 id="xerxes-title" className="page-title">{supervisorHeading(config.config)}</h1>
+      {isHubOwner(state) ? <div className="config-row"><button type="button" className="btn" aria-haspopup="dialog" aria-expanded={safetySheet} onClick={() => setSafetySheet(true)}>Safety</button></div> : null}
+      {safetySheet && isHubOwner(state) ? <Sheet title="Superagent safety" onClose={() => setSafetySheet(false)}>
+        <SuperagentControlPanel client={controller.superagentControl} online={live} />
+      </Sheet> : null}
       {supervisor.phase === 'unsupported' ? (
         <div role="status" className="empty-state">
           <h2>{SUPERVISOR_UNAVAILABLE}</h2>
@@ -286,7 +293,7 @@ export function XerxesTab(): ReactElement {
               <ModelChooser />
             </div>
           ) : null}
-          <p className="summary">Ask XERXES about your tasks. It looks across every workspace and acts for you at once: it starts, steers and stops tasks, answers their questions and decides permission requests. With anyone else in the thread, its actions wait for your Confirm.</p>
+          <p className="summary">Ask XERXES about your tasks. It looks across authorized workspaces, starts, steers and stops tasks, and answers their questions. Permissions stay human-only; risky actions always need the owner’s Confirm. With anyone else in the thread, actions wait for your Confirm.</p>
           {showThread ? <AutopilotThreadBody /> : null}
           {showThread ? null : <>
           {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}

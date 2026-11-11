@@ -260,7 +260,7 @@ export type HubMethodPolicy =
   | { readonly kind: 'refused'; readonly reason: string }
 
 const READ_METHODS = new Set([
-  'session.open', 'session.history', 'session.active_list', 'session.list', 'goal.inspect',
+  'session.open', 'session.history', 'session.active_list', 'session.list', 'goal.inspect', 'superagent.observe',
   'learning.list', 'lessons.shared.list', 'runtime.status', 'subagent.inspect', 'events.subscribe', 'events.read', 'events.unsubscribe',
 ])
 

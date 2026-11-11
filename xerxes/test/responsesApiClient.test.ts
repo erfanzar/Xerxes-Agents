@@ -78,6 +78,23 @@ test('Responses API client maps request tools and streamed events into neutral d
   ])
 })
 
+test('Responses function tools preserve optional arguments instead of silently enabling strict required fields', async () => {
+  let payload: Record<string, unknown> | undefined
+  const parameters = { type: 'object', additionalProperties: false, properties: {
+    workspace_id: { type: 'string' }, at: { type: 'string' }, after_seconds: { type: 'integer' }, reason: { type: 'string' },
+  }, required: ['workspace_id', 'reason'] }
+  const client = new ResponsesApiClient({ providerName: 'openai', apiKey: 'test-key', baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([{ type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } } }])
+    } })
+  for await (const _delta of client.stream({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Schedule after one second.' }], tools: [
+    { type: 'function', function: { name: 'schedule_wakeup', description: 'Exactly one deadline.', parameters } },
+  ] })) { /* Consume the native outbound request. */ }
+  expect(payload).toMatchObject({ tools: [{ name: 'schedule_wakeup', strict: false, parameters }] })
+  expect(parameters.required).toEqual(['workspace_id', 'reason'])
+})
+
 test('Responses API replays encrypted reasoning items with store disabled', async () => {
   let payload: Record<string, unknown> | undefined
   const reasoningItem = {

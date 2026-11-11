@@ -89,13 +89,13 @@ export class PublicWebClient {
 
   async fetch(url: string, init: RequestInit = {}, options: PublicFetchOptions = {}): Promise<PublicFetchResponse> {
     enforceDomainAllowlist(url, options.allowedDomains)
-    let currentUrl = await assertPublicHttpUrl(url, this.urlSafety)
     const { signal: initSignal, ...requestBase } = init
     const signal = options.signal ?? initSignal ?? undefined
     const timeoutMs = boundedInteger(options.timeoutMs ?? this.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
-    // One deadline for the whole exchange — every redirect hop and the body
-    // read that follows — not a fresh budget per request.
+    // One deadline includes URL/DNS validation, every redirect and the body.
+    // A cancelled or stalled resolver must never resume into a late fetch.
     const deadline = Date.now() + timeoutMs
+    let currentUrl = await runWithTimeout(() => assertPublicHttpUrl(url, this.urlSafety), Math.max(1, deadline - Date.now()), signal)
     const method = (requestBase.method ?? 'GET').toUpperCase()
     let redirectCount = 0
     let currentOrigin = new URL(currentUrl).origin
@@ -124,6 +124,7 @@ export class PublicWebClient {
         return { response, url: currentUrl }
       }
       if (redirectCount >= this.maxRedirects) {
+        void response.body?.cancel().catch(() => {})
         throw new ClientError('web', `redirect limit of ${this.maxRedirects} exceeded`)
       }
       const previousProtocol = new URL(currentUrl).protocol
@@ -133,7 +134,7 @@ export class PublicWebClient {
       void response.body?.cancel().catch(() => {})
       const nextUrl = new URL(location, currentUrl).toString()
       enforceDomainAllowlist(nextUrl, options.allowedDomains)
-      currentUrl = await assertPublicHttpUrl(nextUrl, this.urlSafety)
+      currentUrl = await runWithTimeout(() => assertPublicHttpUrl(nextUrl, this.urlSafety), Math.max(1, deadline - Date.now()), signal)
       if (previousProtocol === 'https:' && new URL(currentUrl).protocol === 'http:') {
         throw new ClientError('web', 'refusing to follow an HTTPS to HTTP redirect downgrade')
       }

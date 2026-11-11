@@ -35,9 +35,10 @@ describe('supervisor tool ceiling', () => {
     }
     const world = makeWorld()
     const names = world.registry.definitions().map(definition => definition.function.name)
-    expect(names).toHaveLength(16)
+    expect(names).toHaveLength(17)
     expect(names).toContain('answer_permission')
     expect(names).toContain('tasks_search')
+    expect(names).toContain('task_records')
     for (const name of ['permission_response', 'permission.respond', 'question.respond']) expect(names).not.toContain(name)
     for (const name of SUPERVISOR_FORBIDDEN_TOOLS) expect(names).not.toContain(name)
     expect(world.registry.get('permission_response')).toBeUndefined()
@@ -77,7 +78,7 @@ describe('supervisor runner', () => {
     expect(result.stop).toBe('completed')
     expect(result.reply?.text).toBe('Two tasks; one is working.')
     expect(scripted.requests[0]!.system).toContain('test persona')
-    expect(scripted.requests[0]!.tools).toHaveLength(16)
+    expect(scripted.requests[0]!.tools).toHaveLength(17)
     expect(world.threads.messagesFor('shared', 'alice').at(-1)).toMatchObject({ role: 'xerxes', text: 'Two tasks; one is working.' })
   })
 

@@ -217,6 +217,15 @@ export class DaemonRpc extends EventEmitter {
       this.silentCloses = 0
       const recheckMs = result.waiting_for_goal_round === true ? REMOTE_GOAL_ROUND_RECHECK_MS : REMOTE_BUSY_RECHECK_MS
       this.remoteBusy = result.ok !== true && result.busy === true ? { result, until: Date.now() + recheckMs } : undefined
+      // During an update SSH may accept a socket that never reaches a daemon.
+      // The host callback can finish before that transient socket's FIN is
+      // delivered, so ensure() would otherwise reuse it and the next read EPIPEs.
+      // Discard only an unverified attachment; never replay any pending call.
+      if (result.ok === true && this.socket && !this.heardSinceAttach) {
+        const transient = this.socket
+        await new Promise<void>(resolve => { transient.once('close', resolve); transient.destroy() })
+        await this.ensure()
+      }
       return result
     }
     if (this.externalSocket) return { ok: false, error: 'Update the runtime on the remote machine, then reconnect this workspace.' }

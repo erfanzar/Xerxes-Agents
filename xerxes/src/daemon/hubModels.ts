@@ -19,6 +19,7 @@ import type { ChatMessage, MessageContent } from '../types/messages.js'
 import { isJsonObject, parseToolArguments, type JsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import { profileDiscoveryApiKey, sanitizeModelDiscoveryError } from './modelDiscovery.js'
 import { profileAcceptsModel } from './sessionProvider.js'
+import { validateCaptureImage } from '../hub/supervisor/abilities/captureImage.js'
 
 /**
  * Model access for the Hub's XERXES supervisor (`hub_models_v1`).
@@ -58,6 +59,8 @@ export interface HubModelsOptions {
   /** Test seam: replaces the provider client built from the stored profile. */
   readonly clientFactory?: (model: string, profile: ProviderProfile) => LlmClient
   readonly timeoutMs?: number
+  /** Host verifies configured vision support and source/destination policy on these exact multimodal messages. */
+  readonly authorizeImages?: (request: CompletionRequest, profile: ProviderProfile, signal?: AbortSignal) => Promise<boolean>
 }
 
 class InvalidRequest extends Error {}
@@ -74,11 +77,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function parseContent(raw: unknown, where: string, required: boolean): MessageContent {
+function parseContent(raw: unknown, where: string, required: boolean, allowImages = false): MessageContent {
   if (raw === undefined && !required) return ''
   if (typeof raw === 'string') return raw
   if (Array.isArray(raw)) {
     return raw.map((part, index) => {
+      if (allowImages && isRecord(part) && part.type === 'image_url') {
+        try {
+          if (Object.keys(part).some(key => key !== 'type' && key !== 'image_url') || !isRecord(part.image_url)
+            || Object.keys(part.image_url).some(key => key !== 'url') || typeof part.image_url.url !== 'string'
+            || !part.image_url.url.startsWith('data:image/png;base64,') || part.image_url.url.length > 349550) throw new Error('unsupported')
+          const base64 = part.image_url.url.slice('data:image/png;base64,'.length)
+          const bytes = Buffer.from(base64, 'base64')
+          const image = validateCaptureImage({ kind: 'xerxes-ui-capture/v1', view_id: '0'.repeat(32), mime: 'image/png',
+            width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), captured_at: 0,
+            sha256: new Bun.CryptoHasher('sha256').update(bytes).digest('hex'), png_base64: base64 })
+          return { type: 'image_url' as const, image_url: { url: image.imageUrl } }
+        } catch { throw new InvalidRequest(`${where}.content[${index}] must be a bounded inline workspace PNG`) }
+      }
       if (!isRecord(part) || part.type !== 'text' || typeof part.text !== 'string') {
         throw new InvalidRequest(`${where}.content[${index}] must be a text part`)
       }
@@ -115,7 +131,7 @@ function parseMessage(raw: unknown, index: number): ChatMessage {
     case 'system':
       return { role: 'system', content: parseContent(raw.content, where, true) }
     case 'user':
-      return { role: 'user', content: parseContent(raw.content, where, true) }
+      return { role: 'user', content: parseContent(raw.content, where, true, true) }
     case 'assistant': {
       const calls = raw.tool_calls === undefined ? undefined : parseToolCalls(raw.tool_calls, where)
       return { role: 'assistant', content: parseContent(raw.content, where, calls === undefined), ...(calls?.length ? { tool_calls: calls } : {}) }
@@ -305,7 +321,6 @@ export class HubModelService {
           if (directive) thinking = { budgetTokens: directive.budgetTokens, effort: directive.effort }
         }
       }
-      client = (this.settings.clientFactory ?? ((model, stored) => this.host.createClient(model, stored)))(request.model, profile)
       const completionRequest: CompletionRequest = {
         model: request.model,
         messages: [{ role: 'system', content: request.system }, ...request.messages],
@@ -314,6 +329,15 @@ export class HubModelService {
         ...(request.tools.length ? { tools: request.tools } : {}),
         ...(thinking === undefined ? {} : { thinking }),
       }
+      const images = completionRequest.messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(part => part.type === 'image_url') : [])
+      if (images.length > 0) {
+        const bytes = images.reduce((total, image) => total + Buffer.from(image.image_url.url.slice('data:image/png;base64,'.length), 'base64').length, 0)
+        if (images.length > 4 || bytes > 512 * 1024) return failure('invalid_request', 'Capture image request budget exceeded')
+        if (this.settings.authorizeImages === undefined || await this.settings.authorizeImages(completionRequest, profile, controller.signal) !== true)
+          return failure('invalid_request', 'Configured vision support and capture disclosure admission are required')
+        controller.signal.throwIfAborted()
+      }
+      client = (this.settings.clientFactory ?? ((model, stored) => this.host.createClient(model, stored)))(request.model, profile)
       const completion = await completeLlm(client, completionRequest, controller.signal, { timeoutMs: this.timeoutMs })
       return {
         ok: true,

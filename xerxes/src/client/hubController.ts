@@ -15,6 +15,7 @@ import type { PreparedImage } from './imagePrep.js'
 import { arr, rec, str } from './parse.js'
 import { usageExtrasFromResult, usageFromResult } from './usageMerge.js'
 import { EMPTY_TAIL, foldSessionEvent } from './sessionFold.js'
+import { createSuperagentControlClient, type SuperagentControlClient } from './superagentControl.js'
 
 /**
  * Wires one HubConnection to one HubStore: loads the Inbox (watermark, then
@@ -29,6 +30,7 @@ export type PresenceState = 'viewing' | 'typing' | 'idle'
 export interface HubController {
   /** Whether the connected Hub accepts image attachments on turn.submit / turn.steer. */
   readonly imagesSupported: boolean
+  readonly superagentControl: SuperagentControlClient
   start(): void
   dispose(): void
   refreshInbox(): Promise<void>
@@ -224,6 +226,10 @@ export function createHubController(options: HubControllerOptions): HubControlle
   }
 
   const live = (): boolean => connection.status().state === 'live'
+  const superagentControl = createSuperagentControlClient({
+    allowed: () => live() && isHubOwner(store.getSnapshot()),
+    request: (method, params) => connection.request(method, params),
+  })
   const selected = () => store.getSnapshot().selected
   // The cockpit methods are newer than some Hubs; the Hub answers `unsupported`/`invalid_request` for the ones it lacks.
   const call = (method: string, params: Readonly<Record<string, unknown>> = {}): Promise<Readonly<Record<string, unknown>>> =>
@@ -826,6 +832,9 @@ export function createHubController(options: HubControllerOptions): HubControlle
     // `unsupported` is a property of this Hub, not a transient failure: do not ask again on every tab visit.
     if (phase === 'ready' || phase === 'loading' || phase === 'unsupported') return
     store.dispatch({ type: 'supervisor', patch: { phase: 'loading' } })
+    // Emergency owner controls must not depend on the conversational thread opening.
+    void loadAutopilot()
+    void loadWatches()
     try {
       const result = await connection.request('supervisor.thread.open', {})
       supervisorThread = str(result.thread_id)
@@ -840,8 +849,6 @@ export function createHubController(options: HubControllerOptions): HubControlle
         if (known.status !== 'invalid') store.dispatch({ type: 'supervisorConfig', patch: { status: known.status } })
       }
       void supervisorConfigGet()
-      void loadAutopilot()
-      void loadWatches()
     } catch (error) {
       if (error instanceof HubRequestError && error.code === 'unsupported') store.dispatch({ type: 'supervisor', patch: { phase: 'unsupported' } })
       else store.dispatch({ type: 'supervisor', patch: { phase: 'error', error: failureMessage(error) } })
@@ -1381,6 +1388,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
   }
 
   function dispose(): void {
+    superagentControl.dispose()
     stopSelected()
     typingTimer = clearTimer(typingTimer)
     inboxRetryTimer = clearTimer(inboxRetryTimer)
@@ -1397,7 +1405,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
   }
 
   return {
-    imagesSupported,
+    imagesSupported, superagentControl,
     start, dispose, refreshInbox, openSession, closeSession, loadOlder, loadAgents, inspectAgent, closeAgent, resync,
     reconnectNow: () => { connection.reconnectNow() },
     submit, steer, stopTurn, decide, answerQuestion,

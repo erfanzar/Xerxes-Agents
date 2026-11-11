@@ -413,6 +413,8 @@ export function createHubService(options: HubServiceOptions): HubService {
             onError: report,
           })
           const control = modelControl
+          const journal = store
+          if (journal === undefined) throw new Error('Hub journal is unavailable')
           supervisor = createHubSupervisor({
             databasePath: options.paths.databasePath,
             identity,
@@ -424,13 +426,16 @@ export function createHubService(options: HubServiceOptions): HubService {
               projection: id => runtimePool.projection(id),
             },
             backend,
+            journal,
             events: {
-              read: (after, filter, limit, maxBytes, through) => (store as HubEventStore).read(after, filter, limit, maxBytes, through),
-              watermark: () => (store as HubEventStore).watermark(),
-              onEvents: observer => (store as HubEventStore).onEvents(observer),
+              read: (after, filter, limit, maxBytes, through) => journal.read(after, filter, limit, maxBytes, through),
+              watermark: () => journal.watermark(),
+              onEvents: observer => journal.onEvents(observer),
             },
             model: control.port,
             configStatus: () => control.describe(),
+            // Native sampling is model-free and does no RPC until an owner subscribes.
+            diskPolling: {},
             // A default token bound per 24 h window applies unless the operator configured one.
             quotas: withDefaultSpendBound(supervisorConfig?.kind === 'configured' ? supervisorConfig.quotas : undefined),
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.persona === undefined ? {} : { persona: supervisorConfig.persona }),

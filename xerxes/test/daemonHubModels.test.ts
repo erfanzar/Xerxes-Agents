@@ -16,6 +16,7 @@ import type { JsonRpcPayload } from '../src/protocol/jsonRpc.js'
 import { paramsHash, signHubAuth, type HubAuthClaims } from '../src/security/hubAuthEnvelope.js'
 import { HubIdentityVerifier, enrollHub } from '../src/security/hubIdentityVerifier.js'
 import { clearModelsDev, seedModelsDev } from './fixtures/modelsDev.js'
+import { captureEnvelope } from './support/captureImage.js'
 
 const API_KEY = 'sk-test-secret-key-1234567890abcdef'
 const BASE_URL = 'https://api.openai.com/v1'
@@ -123,7 +124,7 @@ interface Rig {
   stop(): Promise<void>
 }
 
-async function rig(options: { timeoutMs?: number } = {}): Promise<Rig> {
+async function rig(options: { timeoutMs?: number; authorizeImages?: (request: CompletionRequest, profile: ProviderProfile, signal?: AbortSignal) => Promise<boolean> } = {}): Promise<Rig> {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-hub-models-'))
   directories.push(root)
   const pair = generateKeyPairSync('ed25519')
@@ -138,6 +139,7 @@ async function rig(options: { timeoutMs?: number } = {}): Promise<Rig> {
     socketPath: join(root, 'daemon.sock'), projectDirectory: root, runtime, autoTitle: false, autoSnapshotTurns: false,
     eventJournal: { directory: join(root, 'events') }, hubEnrollmentPath: enrollments, profileStore: profiles,
     hubModelClientFactory: (_model: string, _profile: ProviderProfile) => fake,
+    ...(options.authorizeImages === undefined ? {} : { hubModelAuthorizeImages: options.authorizeImages }),
     ...(options.timeoutMs === undefined ? {} : { hubModelTimeoutMs: options.timeoutMs }),
   })
   await server.start()
@@ -160,6 +162,32 @@ async function rig(options: { timeoutMs?: number } = {}): Promise<Rig> {
 
 const completion = (over: JsonRpcPayload = {}): JsonRpcPayload => ({
   profile: 'work', model: 'gpt-5.1', system: 'You are XERXES.', messages: [{ role: 'user', content: 'Alice: what is running?' }], tools: [], ...over,
+})
+
+test('a configured image admission passes bounded actual PNG parts through the Hub model relay', async () => {
+  let admitted = 0
+  const r = await rig({ authorizeImages: async (request, profile) => {
+    expect(profile.name).toBe('work')
+    expect(request.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))).toBe(true)
+    admitted += 1; return true
+  } })
+  try {
+    const url = `data:image/png;base64,${captureEnvelope().png_base64}`
+    const result = await r.client.call('hub.model.complete', completion({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url } }] }] }))
+    expect(result.ok).toBe(true); expect(admitted).toBe(1)
+    expect(r.fake.requests[0]?.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))).toBe(true)
+  } finally { await r.stop() }
+})
+
+test('the model relay refuses images without configured admission and never fetches remote image URLs', async () => {
+  const r = await rig()
+  try {
+    for (const url of [`data:image/png;base64,${captureEnvelope().png_base64}`, 'https://elsewhere.invalid/private.png']) {
+      const result = await r.client.call('hub.model.complete', completion({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url } }] }] }))
+      expect(result.ok).toBe(false)
+    }
+    expect(r.fake.requests).toHaveLength(0)
+  } finally { await r.stop() }
 })
 
 test('the catalog lists profiles without any credential, endpoint or token', async () => {

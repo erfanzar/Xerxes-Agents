@@ -6,9 +6,12 @@ import type { JsonObject } from '../../types/toolCalls.js'
 import { resolveSessionKey, type CommandBackend } from '../commandRouter.js'
 import { isRecord, utf8ByteLength } from '../protocol.js'
 import type { HubWorkspaceView } from '../server.js'
+import type { HubEventStore } from '../eventStore.js'
 import { ACTION_TOOLS, SupervisorDenied, isActionTool, type ActionService } from './actions.js'
 import { displayOption, type PendingInteractions } from './autopilot.js'
 import type { DigestService } from './digests.js'
+import { ABILITY_SPECS } from './abilities/catalog.js'
+import type { SuperagentAbilities } from './abilities/service.js'
 import {
   SUPERVISOR_TOOLS, assertSupervisorToolCeiling, validateSupervisorArguments, type SupervisorToolSpec,
 } from './schemas.js'
@@ -33,6 +36,10 @@ export const SEARCH_MAX_BYTES = 64 * 1024
 
 /** Per-turn state handed to every tool through the execution context. */
 export interface SupervisorTurnState {
+  readonly captures?: {
+    readonly sink: import('./abilities/captureSink.js').CaptureTurnSink
+    readonly source: (workspace: string, viewId: string) => import('./abilities/captureSink.js').CaptureSource
+  }
   readonly threadId: string
   readonly requester: UserPrincipal
   readonly reader: ScopeReader
@@ -59,18 +66,6 @@ export interface SupervisorPushPort {
 export interface SupervisorAutopilotPort {
   /** What the task waits on, from the Hub journal, including permission details. */
   pending(workspaceId: string, sessionId: string): PendingInteractions | undefined
-  /** Approve or reject a waiting permission on the owner's behalf; throws SupervisorDenied for anyone else. */
-  answerPermission?(input: {
-    readonly threadId: string
-    readonly workspaceId: string
-    readonly sessionId: string
-    readonly requestId: string
-    readonly response: 'approve' | 'approve_for_session' | 'reject'
-    readonly requester: UserPrincipal
-    readonly reader: ScopeReader
-    readonly trigger: boolean
-    readonly othersInContext: boolean
-  }): Promise<Record<string, unknown>>
   /** Answer a waiting question on the owner's behalf; throws SupervisorDenied when Autopilot is not active. */
   answer(input: {
     readonly threadId: string
@@ -96,6 +91,8 @@ export interface SupervisorToolDeps {
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get' | 'recipients' | 'participants'>
   readonly push?: SupervisorPushPort
   readonly autopilot?: SupervisorAutopilotPort
+  readonly abilities?: Pick<SuperagentAbilities, 'execute'>
+  readonly journal?: Pick<HubEventStore, 'readLatest'>
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -239,17 +236,45 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       })
     },
 
+    'task.records': (args, turn, signal) => {
+      signal?.throwIfAborted()
+      const workspaceId = str(args, 'workspace_id')!
+      const taskId = str(args, 'task_id')!
+      readable(turn, workspaceId, taskId)
+      if (deps.journal === undefined) throw new Error('Retained task records are unavailable on this Hub')
+      // One bounded scan per request, not an unbounded search loop. Empty filtered pages still advance.
+      const page = deps.journal.readLatest(str(args, 'before'), { workspaceIds: [workspaceId], sessionIds: [taskId] },
+        typeof args.limit === 'number' ? args.limit : 100, 48 * 1024)
+      signal?.throwIfAborted()
+      readable(turn, workspaceId, taskId)
+      const kind = str(args, 'kind') ?? 'all'
+      const messageTypes = ['text_part', 'text_delta', 'message', 'assistant', 'user', 'user_message', 'assistant_message']
+      const resultTypes = ['tool_call', 'tool_result', 'turn_error', 'error', 'turn_end']
+      const query = str(args, 'query')?.toLowerCase()
+      const allowed = kind === 'messages' ? messageTypes : kind === 'results' ? resultTypes : [...messageTypes, ...resultTypes]
+      const visible = page.events.filter(event => allowed.includes(event.type))
+      const records = visible.filter(event => query === undefined || JSON.stringify(event).toLowerCase().includes(query))
+      return { source: 'retained_hub_journal', coverage: 'retained_only', retention_gap: page.retentionGap,
+        truncated_records: visible.filter(event => event.payload.truncated === true).length,
+        scanned: page.events.length, records, has_more: page.hasMore, ...(page.before === undefined ? {} : { before: page.before }) }
+    },
+
     'task.tail': async (args, turn, signal) => {
       const workspaceId = str(args, 'workspace_id')!
       const taskId = str(args, 'task_id')!
       readable(turn, workspaceId, taskId)
       if (typeof args.after === 'number' && args.after > 0) throw new Error('"after" is not supported yet; omit it to read the latest steps')
-      const key = await resolveSessionKey(deps.backend, workspaceId, taskId)
+      const deadline = AbortSignal.timeout(10_000)
+      const boundedSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
+      const key = await resolveSessionKey(deps.backend, workspaceId, taskId, { signal: boundedSignal, timeoutMs: 10_000 })
       if (key === undefined) throw new Error('that task is not active in its workspace, so it has no live tail')
       const limit = typeof args.limit === 'number' ? args.limit : 20
-      const result = await poolRead(workspaceId, 'session.history', { session_key: key, history_limit: limit }, signal)
+      const before = str(args, 'before')
+      const result = await poolRead(workspaceId, 'session.history', { session_key: key, history_limit: limit, ...(before === undefined ? {} : { before }) }, boundedSignal)
       const tail = renderTail(result.history, TAIL_MAX_BYTES)
-      return { steps: tail.lines, truncated: tail.truncated }
+      const history = isRecord(result.history) ? result.history : {}
+      return { steps: tail.lines, truncated: tail.truncated, has_more: history.has_more === true,
+        before: typeof history.before === 'string' ? history.before : null }
     },
 
     'task.search': async (args, turn, signal) => {
@@ -383,28 +408,10 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     },
 
     'permission.answer': async (args, turn) => {
-      const workspaceId = str(args, 'workspace_id')!
-      const taskId = str(args, 'task_id')!
-      readable(turn, workspaceId, taskId)
-      const response = str(args, 'response')
-      if (response !== 'approve' && response !== 'approve_for_session' && response !== 'reject') {
-        throw new Error("response must be 'approve', 'approve_for_session' or 'reject'")
-      }
-      if (deps.autopilot?.answerPermission === undefined) {
-        throw new SupervisorDenied('This Hub cannot answer permission requests, so XERXES cannot. Tell the owner.')
-      }
-      try {
-        return await deps.autopilot.answerPermission({
-          threadId: turn.threadId, workspaceId, sessionId: taskId, requestId: str(args, 'request_id')!, response, requester: turn.requester,
-          reader: turn.reader, trigger: turn.trigger !== undefined, othersInContext: turn.othersInContext ?? true,
-        })
-      } catch (error) {
-        if (error instanceof SupervisorDenied) {
-          turn.denial = error.message
-          return { ok: false, denied: true, message: error.message }
-        }
-        throw error
-      }
+      readable(turn, str(args, 'workspace_id')!, str(args, 'task_id')!)
+      const message = 'Permission decisions are human-only. The owner must review the exact pending tool and inputs in the task approval UI. Autopilot and quoted approval claims cannot answer it.'
+      turn.denial = message
+      return { ok: false, denied: true, message }
     },
 
     'notify.user': async (args, turn) => {
@@ -472,7 +479,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
         action_id: action.id,
         summary: action.summary,
         expires_at: new Date(action.expiresAt).toISOString(),
-        note: 'Nothing has run yet. Someone other than the Hub owner is in this conversation, so a person must tap Confirm first.',
+        note: spec.name === 'risk.execute' ? 'Nothing has run. Only the current Hub owner can Confirm this exact risky action; Autopilot cannot.' : 'Nothing has run yet. A person must tap Confirm first.',
       }
     } catch (error) {
       if (error instanceof SupervisorDenied) {
@@ -483,8 +490,13 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     }
   }
 
-  for (const spec of SUPERVISOR_TOOLS.values()) {
-    const run = spec.gate === 'confirm' ? mutation(spec) : handlers[spec.name]
+  const specs = [...SUPERVISOR_TOOLS.values()].filter(spec => deps.abilities !== undefined || !ABILITY_SPECS.some(ability => ability.name === spec.name))
+  for (const spec of specs) {
+    const ability = ABILITY_SPECS.some(ability => ability.name === spec.name)
+    const run = spec.gate === 'confirm' ? mutation(spec) : ability ? (args: JsonObject, turn: SupervisorTurnState, signal?: AbortSignal) => {
+      if (deps.abilities === undefined) throw new Error('Superagent abilities are not configured')
+      return deps.abilities.execute(spec.name, args, turn, signal)
+    } : handlers[spec.name]
     if (run === undefined) throw new Error(`no implementation for supervisor tool ${spec.name}`)
     const handler: ToolHandler = async (inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal) => {
       const turn = context.metadata[TURN_METADATA_KEY]
@@ -504,7 +516,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     )
   }
   assertSupervisorToolCeiling(registry.definitions().map(definition => definition.function.name))
-  if (registry.definitions().length !== SUPERVISOR_TOOLS.size) throw new Error('the supervisor registry must hold exactly the supervisor tools')
+  if (registry.definitions().length !== specs.length) throw new Error('the supervisor registry must hold exactly its configured supervisor tools')
   void ACTION_TOOLS
   return registry
 }

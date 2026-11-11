@@ -1215,6 +1215,17 @@ with bounded conflict details. No automatic reversal runs after process death.
 
 ### Runtime tool inventory
 
+`superagent.observe` is an additive session-less read route for the Hub supervisor.
+It accepts `{project_dir,ability,...fields}` for the registered workspace. The Hub pool pins
+`project_dir`; model tools cannot choose it. `ability` is one of `workspace.read`,
+`workspace.ls`, `workspace.grep`, `workspace.git`, `machine.health`, `github.read`, or
+`ui.screenshot`; each has a closed schema. Replies are `{ok:true,observation:{...}}`,
+bounded to 60 KiB. File/list/search use descriptor-anchored reads and refuse secret,
+symlink and escaping paths. Git is read-only and subtree-scoped. Missing GitHub,
+accelerator or UI screenshot hosts remain explicitly unsupported. Signed callers
+need `session.read`; the Hub additionally requires whole-workspace thread readability,
+not a session-only grant. This route never runs arbitrary commands or edits files.
+
 `workspace.filePreview` accepts `{session_key,path}` for an active session and returns
 `{ok:true,path,content,truncated}`. Paths resolve inside that session's workspace;
 canonical paths outside it (including symlinks) and non-regular files are rejected.

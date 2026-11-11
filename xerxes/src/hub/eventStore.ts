@@ -3,7 +3,7 @@
 
 import { Database } from 'bun:sqlite'
 
-import { cursorScopeKey, encodeCursor, type CursorScope } from './cursor.js'
+import { cursorScopeKey, encodeCursor, resolveClientCursor, type CursorScope } from './cursor.js'
 import { HUB_LIMITS, HubProtocolError, isRecord, readId, readIdList, utf8ByteLength, type HubActor, type HubEvent } from './protocol.js'
 
 /** Committed journal data deliberately has no cursor: cursors belong to readers. */
@@ -62,6 +62,14 @@ export interface HubEventRead {
   readonly bytes: number
   readonly hasMore: boolean
   readonly gap?: 'retention'
+}
+
+export interface HubEventReverseRead {
+  readonly events: readonly HubEvent[]
+  readonly before?: string
+  readonly hasMore: boolean
+  readonly retentionGap: boolean
+  readonly bytes: number
 }
 
 export class HubEventStoreError extends Error {
@@ -124,6 +132,7 @@ export class HubEventStore {
           UNIQUE(runtime_id, upstream_stream_id, upstream_sequence)
         );
         CREATE INDEX IF NOT EXISTS events_workspace_sequence ON events(workspace_id, sequence);
+        CREATE INDEX IF NOT EXISTS events_workspace_session_metadata ON events(workspace_id, session_id, sequence, event_id, type, occurred_at, bytes);
         CREATE INDEX IF NOT EXISTS events_occurred_at ON events(occurred_at);
       `)
       this.db.transaction(() => {
@@ -238,6 +247,56 @@ export class HubEventStore {
       }
       const hasMore = rows.length > consumed
       return { events, throughSequence: hasMore ? events.at(-1)!.sequence : Math.max(afterSequence, watermark), watermark, oldestSequence, bytes, hasMore }
+    })
+  }
+
+  /** One bounded reverse page. Oversized JSON stays in SQLite, never hydrated just to discard it. */
+  readLatest(before: string | undefined, filter: CursorScope, limit = 100, maxBytes = 48 * 1024): HubEventReverseRead {
+    const workspaceIds = readIdList(filter.workspaceIds, 'workspaceIds', { required: true })
+    const sessionIds = filter.sessionIds === undefined ? undefined : readIdList(filter.sessionIds, 'sessionIds')
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HubProtocolError('invalid_request', 'invalid reverse event limit')
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 2 || maxBytes > HUB_LIMITS.normalFrameBytes) throw new HubProtocolError('invalid_request', 'invalid reverse event byte limit')
+    return this.persist('read latest', () => {
+      const scopeKey = `reverse:${cursorScopeKey(filter)}`
+      const cursor = resolveClientCursor(before, { streamId: this.streamId, scopeKey })
+      if (cursor.kind === 'stream_replaced') throw new HubProtocolError('invalid_request', 'journal cursor stream was replaced; restart without before')
+      const watermark = this.sequenceMeta('watermark')
+      const position = cursor.kind === 'start' ? watermark + 1 : cursor.sequence
+      if (position > watermark + 1) throw new HubProtocolError('invalid_request', 'journal cursor exceeds the stream')
+      const retentionGap = this.sequenceMeta('retained_after') > 0
+      if (cursor.kind === 'after' && retentionGap && position <= this.oldestRow()) throw new HubProtocolError('invalid_request', 'journal cursor is outside retained history (retention)')
+      const events: HubEvent[] = []
+      let bytes = 2
+      let hasMore = false
+      if (workspaceIds.length !== 0 && sessionIds?.length !== 0) {
+        const workspaceSql = workspaceIds.map(() => '?').join(',')
+        const sessionSql = sessionIds === undefined ? '' : ` AND session_id IN (${sessionIds.map(() => '?').join(',')})`
+        // Metadata lives in a covering index: reading its size never walks an oversized payload/actor record.
+        const statement = this.db.prepare<Omit<EventRow, 'payload' | 'actor'>, (string | number)[]>(`SELECT sequence, event_id, workspace_id, session_id, type, occurred_at, bytes
+          FROM events INDEXED BY events_workspace_session_metadata WHERE sequence < ? AND workspace_id IN (${workspaceSql})${sessionSql}
+          ORDER BY sequence DESC LIMIT ?`)
+        try {
+          for (const metadata of statement.iterate(position, ...workspaceIds, ...(sessionIds ?? []), limit + 1)) {
+            if (events.length === limit) { hasMore = true; break }
+            const row = metadata.bytes > maxBytes ? { ...metadata, payload: '{}', actor: null }
+              : this.db.query<EventRow, [number]>('SELECT * FROM events WHERE sequence = ?').get(metadata.sequence)
+            if (row === null) throw new HubEventStoreError('read latest record disappeared', undefined)
+            let event: HubEvent = { ...fromRow(row), cursor: encodeCursor({ streamId: this.streamId, sequence: row.sequence, scopeKey }) }
+            let eventBytes = utf8ByteLength(JSON.stringify(event))
+            if (row.bytes > maxBytes || eventBytes + 2 > maxBytes) {
+              event = { ...event, payload: { truncated: true, original_bytes: row.bytes } }
+              eventBytes = utf8ByteLength(JSON.stringify(event))
+            }
+            if (eventBytes + 2 > maxBytes) throw new HubProtocolError('frame_too_large', 'event metadata cannot fit the requested byte limit')
+            const nextBytes = bytes + eventBytes + (events.length === 0 ? 0 : 1)
+            if (nextBytes > maxBytes) { hasMore = true; break }
+            events.push(event); bytes = nextBytes
+          }
+        } finally { statement.finalize() }
+      }
+      const next = events.at(-1)?.sequence
+      return { events: events.reverse(), hasMore, retentionGap, bytes,
+        ...(hasMore && next !== undefined ? { before: encodeCursor({ streamId: this.streamId, sequence: next, scopeKey }) } : {}) }
     })
   }
 

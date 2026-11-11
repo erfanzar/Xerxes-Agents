@@ -59,6 +59,9 @@ export const HUB_METHODS = [
   'supervisor.autopilot.set',
   'supervisor.watch.list',
   'supervisor.watch.set',
+  /** Human owner control; never a model tool or an agent command. */
+  'supervisor.control.get',
+  'supervisor.control.set',
   /** A task's subagents (`session.read`). */
   'agents.list',
   /** One subagent's steps (`session.read`), bounded by the frame budget. */

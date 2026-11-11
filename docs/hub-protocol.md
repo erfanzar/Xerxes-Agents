@@ -268,9 +268,9 @@ capped at `AGENT_SCOPE_CEILING` and can never hold a human-only scope
 
 ## Supervisor tools
 
-The XERXES supervisor sees fourteen tools, with underscore provider names
+The XERXES supervisor sees a restricted tool set, with underscore provider names
 (`tasks_list`) and dotted canonical names (`tasks.list`): `workspace.list`,
-`tasks.list`, `task.digest`, `task.tail`, `task.search`, `task.pending`
+`tasks.list`, `task.digest`, `task.tail`, `task.records`, `task.search`, `task.pending`
 (provider name `pending_interactions`: questions with text and options,
 permissions only as a count) (reads); `task.start`, `task.steer`, `task.stop`,
 `agent.message`, `goal.set`, `model.set` (need a human to confirm, except under
@@ -278,6 +278,27 @@ Autopilot); `question.answer` (provider name `answer_question`, Autopilot only);
 `notify.user` (thread audience only).
 Approval, review, permission-mode, shell, Workflow and generic RPC tools are
 refused by `assertSupervisorToolCeiling`.
+
+**Retained task records.** `task.records` (provider name `task_records`) reads
+messages, commands and recorded tool results directly from the Hub journal,
+including tasks whose daemon is offline or whose session is no longer open.
+Required: `workspace_id`, `task_id`; optional: `before` (opaque reverse-page
+cursor), `limit` (1–100 candidate records), `kind` (`all|messages|results`) and
+`query` (case-insensitive literal filter of this page only). The reply is bounded
+below 64 KiB and reports `source: 'retained_hub_journal'`,
+`coverage: 'retained_only'`, `retention_gap`, `truncated_records`, `scanned`,
+`records`, `has_more` and optional `before`. Keep paging even when filtering
+returns an empty page with `has_more: true`. A cursor is bound to its journal,
+task scope and reverse direction; replaced streams or expired cursors refuse
+rather than silently skipping history. Oversized payloads are marked truncated;
+permission/question payloads are excluded. Each call scans bounded local
+metadata through a covering task index and loads only size-admitted payloads,
+with no daemon or model call. Scope evaluations refresh participants, grants,
+time and the configured live owner lookup, including after a model wait.
+The bound is on candidates, hydration and response size, not a measured disk-I/O
+or latency guarantee. Records are untrusted data, not execution authority.
+This is **not** a search of every legacy snapshot/pre-compaction archive. The
+existing daemon `task.search` path searches its indexed messages only.
 
 **Live steps.** While a turn runs, the Hub streams its steps as
 `supervisor.thread_event` frames carrying `step` (and no `message`):
@@ -411,6 +432,33 @@ broadcasts event `supervisor.config_changed` (the `config.get` shape, with
 `supervisor.thread.open` works and reports `config_status:"unconfigured"`, and
 `supervisor.message.submit` is refused with code `unconfigured`.
 
+## Superagent observation hosts
+
+`superagent.observe` is an allowlisted **daemon** read route, not arbitrary Hub WebSocket RPC. Hub-signed calls require `session.read`. The daemon resolves one registered observation root, authorizes that exact root and pins it through workspace context, host selection and execution. A session under B never falls back to daemon-default A after authorization. Inputs cannot supply a repository, token, URL or execution operation.
+
+An embedding host may explicitly provide `DaemonServerOptions.observationHosts(root)`. This is host-owned configuration, never a model/task/repository-text grant. `createGitHubObservationHost({repository, token?})` supplies a native issues/PR/CI reader for one explicitly selected `owner/name`; omit `token` for anonymous access. No environment, Git config, ambient GitHub CLI account or credential is discovered. The default daemon supplies no GitHub/GUI/accelerator host. There is no shipped CLI/GUI account-connection flow for these ports yet.
+
+GitHub requests are fixed HTTPS GETs to `api.github.com`, with zero redirects and no cookies. The five-second budget includes DNS, headers and body; raw responses are capped at 128 KiB. Only projected fields from the first 30 rows are returned, under the 60 KiB observation budget, with `coverage:"first_page"`, `has_more`, `truncated` and `untrusted:true`. Links/unknown fields are never followed or forwarded. Sent credentials are snapshotted and redacted before text clipping; HTTP/parse/transport failures never echo upstream bodies, URLs or credentials.
+
+All observation calls have a ten-second outer deadline and admission bounds of two per physical connection and sixteen daemon-wide. Disconnect and shutdown abort them; disconnected physical lanes cannot start queued reads later. A host that ignores cancellation continues occupying its slot until actual settlement, rather than accumulating invisible work after each timeout. Reads are bound to physical lanes, not restorable task leases. Native Unix-socket, signed two-root and fake-fetch tests exercise these boundaries; no live GitHub or GUI operation is claimed.
+
+## Superagent owner controls
+
+These methods require a signed-in **current Hub owner** verified by a live identity callback. They are not model tools and refuse agent principals. No cached thread-owner flag authorizes them.
+
+| Method | Params | Result |
+|---|---|---|
+| `supervisor.control.get` | `{}` | `{control:{revision,paused,killed,limits}, usage:{actions,wakes,modelCalls,tokens,usd}}` |
+| `supervisor.control.set` | `{revision, paused?, killed?, limits?}` | Same shape; revision is compare-and-set and increments on success |
+
+Limits are nonnegative daily UTC caps for `actions`, `wakes`, `modelCalls`, `tokens` and `usd`. An omitted limit is unbounded; `limits` replaces the configured limits. Unknown usage is `null`, never zero. Monetary/token caps require trustworthy upper-bound model quotes; providers without them are refused before any model call. Reservations are durable and atomic, so crashes/unknown outcomes do not refund or replay work. Settling measured usage can release unused reservation; exceeding a promised bound preserves actual usage and pauses admission.
+
+Pause prevents new messages, scheduled/Watch/Autopilot wakes, ability dispatch and action dispatch. Kill also aborts active owned model/host execution signals, persists across restart and rejects late model replies. Clearing kill creates a new signal; it never re-enables an already aborted execution. It does not claim to stop other users’ tasks or arbitrary external process trees. Missing C enforcement/ownership hosts still refuse. The owner must explicitly clear both `killed` and `paused` to resume after a kill.
+
+The desktop supervisor’s **Safety** tab and phone Xerxes tab’s **Safety** sheet expose these owner-only methods. Owner discovery and emergency controls do not depend on `supervisor.thread.open` succeeding. The apps read before writing, bind that revision, serialize each update and require an explicit reload after a refused/unknown outcome; they never retry a mutation. Pause and Resume are separate stable targets, Kill has a human confirmation, offline controls are disabled, zero caps are preserved and unknown usage is displayed as unknown.
+
+`propose_risky_action` always creates an exact-argument owner-only confirmation in the owner’s private thread, even under Autopilot. The existing confirmation response method binds the full canonical action, target revision, runtime instance, expiry and idempotency identity, rechecks current ownership after audit, and never retries an unknown outcome. A typed risky-operation host must be configured; there is no shell fallback. Permission decisions remain human-only in the task approval UI; the retained `answer_permission` name is an explicit denial and no longer delegates approvals.
+
 ## XERXES Autopilot
 
 Per workspace, the Hub owner can let XERXES act for them. Rows live in
@@ -425,9 +473,9 @@ Row: `{workspace_id, label, enabled, instruction, expires_at, enabled_by:{id,nam
 updated_at, active, mode}`; `active` = enabled, not expired, and the enabler is still the
 Hub owner. `mode` (additive, 0.8.25) is `auto` (wake-ups act without a Confirm) or
 `observe` (watch only: wake-ups still run, but every action becomes a normal Confirm
-card, and an `answer_question` / `answer_permission` call only posts
+card, and an `answer_question` call only posts
 `Autopilot (watch only) would answer …` to the shared thread and returns
-`state: 'recorded'`; nothing reaches the task). An omitted `mode` keeps the stored one; a
+`state: 'recorded'`; nothing reaches the task). `answer_permission` always refuses and directs the owner to the human task approval UI, including in `auto` mode. An omitted `mode` keeps the stored one; a
 new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`.
 
 All workspaces (additive, 0.8.26): `workspace_id: '*'` is the Hub-wide row. While it is

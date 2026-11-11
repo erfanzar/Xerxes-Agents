@@ -7,6 +7,8 @@ import type { ChatMessage } from '../../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../../types/toolCalls.js'
 import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, type DigestSummarizer, type DigestSummaryInput } from './digests.js'
 import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
+import { ABILITY_SPECS } from './abilities/catalog.js'
+import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abilities/captureSink.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
 import { MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
@@ -79,14 +81,23 @@ export interface SupervisorModelPort {
   readonly id: string
   /** Whether `usage.costUsd` is reported. A cost quota needs it. */
   readonly reportsCost: boolean
+  /** Explicit configured vision route and source-policy bindings; absent means screenshots refuse. */
+  readonly captures?: {
+    readonly destination: CaptureDestination
+    readonly createSink: (input: { readonly threadId: string; readonly requester: UserPrincipal }) => CaptureTurnSink
+    readonly source: (workspace: string, viewId: string) => CaptureSource
+  } | undefined
+  /** Trustworthy upper bound, not a guessed price. A configured daily token/USD cap refuses absent bounds. */
+  quote?(request: SupervisorModelRequest): { readonly tokens?: number; readonly usd?: number }
   complete(request: SupervisorModelRequest): Promise<SupervisorModelResponse>
 }
 
 /** Adapt a provider client. Housekeeping query source: this is never the user's main loop. */
-export function createLlmModelPort(client: LlmClient, model: string, options: { readonly timeoutMs?: number } = {}): SupervisorModelPort {
+export function createLlmModelPort(client: LlmClient, model: string, options: { readonly timeoutMs?: number; readonly captures?: SupervisorModelPort['captures'] } = {}): SupervisorModelPort {
   return {
     id: model,
     reportsCost: false,
+    ...(options.captures === undefined ? {} : { captures: options.captures }),
     async complete(request) {
       const completion = await completeLlm(client, {
         model,
@@ -170,6 +181,9 @@ export interface SupervisorRunnerOptions {
   readonly persona: string
   readonly quotas?: Partial<SupervisorQuotas>
   readonly scopeReader: (threadId: string, requester: UserPrincipal) => SupervisorTurnState['reader']
+  readonly notebookContext?: (threadId: string, requester: UserPrincipal) => string
+  /** Runs after queue ownership is installed, before any context/model work. */
+  readonly beforeTurn?: (input: Parameters<SupervisorRunner['enqueue']>[0]) => Promise<void>
   readonly clock?: () => number
   readonly onStopped?: (info: SupervisorStoppedInfo) => void
   readonly onError?: (error: unknown, context: string) => void
@@ -191,7 +205,7 @@ const STEP_LABELS: Readonly<Record<string, string>> = {
   task_tail: 'Reading a task’s latest steps',
   pending_interactions: 'Checking what tasks are waiting on',
   answer_question: 'Answering a question',
-  answer_permission: 'Deciding a permission request',
+  answer_permission: 'Refusing a human-only permission request',
   task_start: 'Starting a task',
   task_steer: 'Steering a task',
   task_stop: 'Stopping a task',
@@ -237,7 +251,9 @@ export class SupervisorRunner {
     // The ceiling is checked here, not left to the caller: a registry with a forbidden or extra tool never runs.
     const names = options.registry.definitions().map(definition => definition.function.name)
     assertSupervisorToolCeiling(names)
-    if (names.length !== SUPERVISOR_TOOLS.size) throw new Error('the supervisor registry must hold exactly the supervisor tools')
+    const coreSize = SUPERVISOR_TOOLS.size - ABILITY_SPECS.length
+    const includesAbilities = ABILITY_SPECS.some(spec => names.includes(spec.providerName))
+    if (names.length !== (includesAbilities ? SUPERVISOR_TOOLS.size : coreSize)) throw new Error('the supervisor registry must hold exactly its configured supervisor tools')
     if (this.quotas.maxCostUsdPerWindow !== undefined && !options.model.reportsCost) {
       throw new Error('a cost quota needs a model port that reports cost; unknown cost is never counted as zero')
     }
@@ -330,9 +346,18 @@ export class SupervisorRunner {
     // setTimeout(Infinity) fires at once, so an unbounded turn gets no timer at all.
     const timer = Number.isFinite(this.quotas.maxTurnMs) ? setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs) : undefined
     threads.setWorking(threadId, true)
+    let captureSink: CaptureTurnSink | undefined
+    const captureRoute = model.captures
     try {
+      try { await this.options.beforeTurn?.(input) } catch {
+        if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
+        return this.finishWith(threadId, requester, 'quota', counts, 'superagent admission is paused, killed or over its daily budget')
+      }
+      if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
       const stored = threads.messagesFor(threadId, requester.id, CONTEXT_MESSAGES)
+      captureSink = captureRoute?.createSink({ threadId, requester })
       const state: SupervisorTurnState = {
+        ...(captureSink === undefined || captureRoute === undefined ? {} : { captures: { sink: captureSink, source: captureRoute.source } }),
         threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined,
         ...(input.trigger === undefined ? {} : { trigger: input.trigger.kind }),
         ...(input.trigger?.target === undefined ? {} : { target: input.trigger.target }),
@@ -342,6 +367,8 @@ export class SupervisorRunner {
         othersInContext: stored.some(message => message.role === 'user' && message.authorId !== requester.id),
       }
       const messages: ChatMessage[] = stored.map(toChat)
+      const notebook = this.options.notebookContext?.(threadId, requester)
+      if (notebook) messages.push({ role: 'user', content: notebook })
       // Hub-authored wake text; anything copied from a task inside it is already fenced.
       if (input.trigger !== undefined) {
         let text: string
@@ -380,6 +407,7 @@ export class SupervisorRunner {
         let response: Awaited<ReturnType<SupervisorModelPort['complete']>>
         counts.modelCalls += 1
         try {
+          if (captureSink !== undefined && captureRoute !== undefined) messages.push(...captureSink.drain(captureRoute.destination))
           response = await model.complete({ system: this.options.persona, messages, tools, maxTokens: this.quotas.maxOutputTokens, signal: controller.signal })
         } catch (error) {
           if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
@@ -428,6 +456,7 @@ export class SupervisorRunner {
             failed = true
             content = error instanceof Error ? error.message : String(error)
           }
+          if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
           step({ id: stepId, kind: 'tool', tool: call.function.name, text: label, state: failed ? 'error' : 'done' })
           messages.push({
             role: 'tool', name: call.function.name, tool_call_id: call.id,
@@ -438,6 +467,7 @@ export class SupervisorRunner {
         }
       }
     } finally {
+      captureSink?.close()
       clearTimeout(timer)
       this.active.delete(threadId)
       this.replyTo.delete(threadId)

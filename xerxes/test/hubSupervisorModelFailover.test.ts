@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import type { AuthenticatedContext } from '../src/hub/identityPort.js'
 import type { PoolCallResult, PoolMachine } from '../src/hub/runtimePool.js'
 import { SupervisorModelControl, SupervisorModelStore } from '../src/hub/supervisor/modelControl.js'
-import type { SupervisorModelRequest } from '../src/hub/supervisor/runner.js'
+import type { SupervisorModelRequest, SupervisorModelPort } from '../src/hub/supervisor/runner.js'
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -53,6 +53,7 @@ async function fixture(
   initial: readonly PoolMachine[],
   respond: (call: ModelCall) => PoolCallResult | Promise<PoolCallResult> = () => accepted(),
   onFailover?: (change: FailoverChange) => void,
+  fallback?: SupervisorModelPort,
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'xh-model-failover-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
@@ -67,6 +68,7 @@ async function fixture(
   const errors: { error: unknown; context: string }[] = []
   const control = new SupervisorModelControl({
     databasePath,
+    ...(fallback === undefined ? {} : { fallback }),
     signer: { hubId: 'hub-x', sign: claims => ({ claims }) as never },
     audit: async () => {},
     machines: {
@@ -84,6 +86,30 @@ async function fixture(
   cleanups.push(() => control.close())
   return { control, calls, broadcasts, changes, errors, setMachines: (next: readonly PoolMachine[]) => { rows = next } }
 }
+
+test('the live model control forwards capture bindings only for the exact configured destination', async () => {
+  const fallback: SupervisorModelPort = { id: 'same-model', reportsCost: false,
+    complete: async () => ({ text: '', toolCalls: [] }), captures: {
+      destination: { machine: 'mac', profile: 'work', model: 'same-model', revision: 'owner-selected' },
+      source: () => { throw new Error('unused') }, createSink: () => { throw new Error('unused') },
+    } }
+  const t = await fixture([machine('mac', 'Mac')], undefined, undefined, fallback)
+  expect(t.control.port.captures).toBe(fallback.captures)
+  const captures = fallback.captures
+  if (captures === undefined) throw new Error('Missing test capture bindings')
+  const mismatch = { ...fallback, captures: { ...captures, destination: { ...captures.destination, machine: 'elsewhere' } } }
+  const wrong = await fixture([machine('mac', 'Mac')], undefined, undefined, mismatch)
+  expect(wrong.control.port.captures).toBeUndefined()
+})
+
+test('image requests never fail over beyond the explicitly selected destination', async () => {
+  const request: SupervisorModelRequest = { ...REQUEST, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] }] }
+  for (const health of ['offline', 'online'] as const) {
+    const t = await fixture([machine('mac', 'Mac', health), machine('server', 'Server')], call => call.machineId === 'mac' ? rejected('unavailable') : accepted())
+    await expect(t.control.port.complete(request)).rejects.toThrow('image failover is disabled')
+    expect(t.calls.some(call => call.machineId === 'server')).toBe(false)
+  }
+})
 
 describe('supervisor model machine failover', () => {
   test('an offline configured machine uses the same profile/model/effort elsewhere and announces the change once', async () => {

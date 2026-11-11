@@ -94,3 +94,21 @@ test('failed setup can retry the same task in a fresh checkout while preserving 
     expect(await Bun.file(join(failedPath, 'failed-marker')).text()).toBe('keep')
   } finally { await manager?.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('sandbox-bound worktree allocation disables repository setup and never parses its command policy', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-setup-disabled-')))
+  try {
+    for (const args of [['init', '--template='], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture']]) {
+      expect(Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0)
+    }
+    const config = join(root, 'setup-policy.json')
+    await Bun.write(config, JSON.stringify({ workspaces: { [root]: { command: [process.execPath, '-e', 'await Bun.write("UNSANDBOXED-SETUP","forbidden")'] } } }))
+    const port = nativeSubagentWorktrees(root, { setupConfigPath: config, setupPolicy: 'disabled' })
+    const tree = await port.create({ taskId: 'scoped-execution', taskName: 'sandbox worktree' })
+    expect(await Bun.file(join(tree.path, 'UNSANDBOXED-SETUP')).exists()).toBe(false)
+    expect(await port.isClean(tree)).toBe(true)
+    await Bun.write(config, 'invalid policy must not even be parsed')
+    const second = await port.create({ taskId: 'second-scoped-execution', taskName: 'sandbox worktree' })
+    expect(await port.isClean(second)).toBe(true)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
