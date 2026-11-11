@@ -430,6 +430,16 @@ broadcasts event `supervisor.config_changed` (the `config.get` shape, with
 `supervisor.thread.open` works and reports `config_status:"unconfigured"`, and
 `supervisor.message.submit` is refused with code `unconfigured`.
 
+## Superagent observation hosts
+
+`superagent.observe` is an allowlisted **daemon** read route, not arbitrary Hub WebSocket RPC. Hub-signed calls require `session.read`. The daemon resolves one registered observation root, authorizes that exact root and pins it through workspace context, host selection and execution. A session under B never falls back to daemon-default A after authorization. Inputs cannot supply a repository, token, URL or execution operation.
+
+An embedding host may explicitly provide `DaemonServerOptions.observationHosts(root)`. This is host-owned configuration, never a model/task/repository-text grant. `createGitHubObservationHost({repository, token?})` supplies a native issues/PR/CI reader for one explicitly selected `owner/name`; omit `token` for anonymous access. No environment, Git config, ambient GitHub CLI account or credential is discovered. The default daemon supplies no GitHub/GUI/accelerator host. There is no shipped CLI/GUI account-connection flow for these ports yet.
+
+GitHub requests are fixed HTTPS GETs to `api.github.com`, with zero redirects and no cookies. The five-second budget includes DNS, headers and body; raw responses are capped at 128 KiB. Only projected fields from the first 30 rows are returned, under the 60 KiB observation budget, with `coverage:"first_page"`, `has_more`, `truncated` and `untrusted:true`. Links/unknown fields are never followed or forwarded. Sent credentials are snapshotted and redacted before text clipping; HTTP/parse/transport failures never echo upstream bodies, URLs or credentials.
+
+All observation calls have a ten-second outer deadline and admission bounds of two per physical connection and sixteen daemon-wide. Disconnect and shutdown abort them; disconnected physical lanes cannot start queued reads later. A host that ignores cancellation continues occupying its slot until actual settlement, rather than accumulating invisible work after each timeout. Reads are bound to physical lanes, not restorable task leases. Native Unix-socket, signed two-root and fake-fetch tests exercise these boundaries; no live GitHub or GUI operation is claimed.
+
 ## Superagent owner controls
 
 These methods require a signed-in **current Hub owner** verified by a live identity callback. They are not model tools and refuse agent principals. No cached thread-owner flag authorizes them.

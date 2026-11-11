@@ -6,7 +6,8 @@ import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
 import { TransportEventJournal, type TransportEventJournalOptions } from './transportEventJournal.js';
 import { EventSubscriptions } from './eventSubscriptions.js';
-import { observeWorkspace } from './superagentObservation.js';
+import { WorkspaceObservationCalls } from './observationCalls.js';
+import type { ObservationHosts } from '../hub/supervisor/abilities/observations.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
@@ -856,6 +857,8 @@ export interface DaemonToolCatalogPort {
 }
 
 export interface DaemonServerOptions {
+  /** Host-owned opt-in ports pinned by verified workspace; never resolved from model arguments. */
+  readonly observationHosts?: (root: string) => ObservationHosts;
   /** Shared with lesson/reflection model tools; absent hosts refuse review, never fake it. */
   readonly learning?: LearningServices;
   /** Must be the same instance used by the native runner. Hosts opt in only
@@ -1241,6 +1244,7 @@ export class DaemonServer {
   private desktopRestartPending = false;
   private stopPromise: Promise<void> | undefined;
   private readonly projectDirectory: string | undefined;
+  private readonly observations: WorkspaceObservationCalls;
   private readonly sessionArchiveDirectory: string;
   /** True when a host named the transcript directory, so archives are unconditional. */
   private readonly sessionArchiveDirectoryConfigured: boolean;
@@ -1345,6 +1349,7 @@ export class DaemonServer {
     this.agentSettingsDefaults = options.agentSettingsDefaults;
     this.workspaceResources = options.workspaceResources;
     this.workspaceRelease = options.workspaceRelease;
+    this.observations = new WorkspaceObservationCalls(options.observationHosts);
     this.socketPath = options.socketPath;
     this.pidPath = options.pidPath;
     // Never fall back to the socket's own folder: a socket may live inside a
@@ -1878,6 +1883,7 @@ export class DaemonServer {
   }
 
   private async stopOnce(): Promise<void> {
+    this.observations.close();
     this.reflectionLifetime.abort();
     for (const unsubscribe of this.learningSubscriptions) unsubscribe();
     this.stoppingGoalWakes = true;
@@ -2329,11 +2335,14 @@ export class DaemonServer {
       connection = this.connectionLeases.owner(connection);
       const session = this.runtime.sessionStatus(sessionKey(connection, request.params));
       const opening = request.method === 'initialize' || request.method === 'session.open' || request.method === 'lessons.shared.list' || request.method === 'lessons.shared.apply' || request.method === 'superagent.observe';
-      const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
+      const selectedCwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory;
+      if (request.method === 'superagent.observe' && !selectedCwd) throw new ValidationError('project_dir', 'a registered workspace is required', request.params.project_dir);
+      const cwd = selectedCwd ? (request.method === 'superagent.observe' ? resolveProjectDirectory(selectedCwd) : selectedCwd) : process.cwd();
       const resources = await this.workspaceResources?.(cwd);
       if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
-      // Event subscriptions belong to a physical lane, never to its restorable turn lease.
-      const dispatchConnection = request.method.startsWith('events.') ? responseConnection : connection;
+      // Subscriptions and observations belong to a physical lane, never a restorable turn lease.
+      const physicalRead = request.method.startsWith('events.') || request.method === 'superagent.observe';
+      const dispatchConnection = physicalRead ? responseConnection : connection;
       // A request carrying hub_auth is verified and authorized BEFORE anything runs; a failure
       // is a JSON-RPC error and never degrades to an anonymous local human.
       let dispatchRequest = request;
@@ -2344,6 +2353,8 @@ export class DaemonServer {
         dispatchRequest = { ...request, params: bareParams };
         this.noteHubParticipant(hub, request, session, connection);
       }
+      // Pin execution to the exact root just authorized, not the daemon default.
+      if (request.method === 'superagent.observe') dispatchRequest = { ...dispatchRequest, params: { ...dispatchRequest.params, project_dir: cwd } };
       const dispatchOnce = (): Promise<JsonRpcPayload> => hub
         ? this.hubContexts.run(hub, () => this.dispatch(dispatchConnection, dispatchRequest))
         : this.dispatch(dispatchConnection, dispatchRequest);
@@ -2633,9 +2644,9 @@ export class DaemonServer {
       return { ok: true, sessions: sessions.map(savedSessionPayload) };
     }
     if (method === 'superagent.observe') {
-      const root = optionalString(params.project_dir) || this.projectDirectory;
+      const root = optionalString(params.project_dir);
       if (!root) throw new ValidationError('project_dir', 'a registered workspace is required', params.project_dir);
-      return { ok: true, observation: await observeWorkspace(root, params) };
+      return { ok: true, observation: await this.observations.read(connection, root, params) };
     }
     if (method === "workspace.filePreview") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -12472,6 +12483,7 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
+    this.observations.cancel(connection);
     this.eventSubscriptions.disconnect(connection);
     // A completion nobody can receive any more must stop spending tokens.
     this.hubModels.abortConnection(connection);
