@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Database } from 'bun:sqlite'
@@ -27,6 +27,7 @@ import {
 } from './runner.js'
 import { createSupervisorToolRegistry } from './tools.js'
 import { SuperagentAbilities } from './abilities/service.js'
+import { SuperagentControl } from './abilities/control.js'
 import { SubscriptionEvents } from './abilities/events.js'
 import { WatchService, type WatchEvent } from './watch.js'
 import {
@@ -190,6 +191,13 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
   })
 
   const isOwner = options.isHubOwner ?? ((userId: string) => threads.principalOrStored(userId)?.hubOwner === true)
+  // New privileged controls require a live identity port, never a cached participant flag.
+  const controlOwner = options.isHubOwner ?? (() => false)
+  const control = new SuperagentControl({ db, clock, isOwner: controlOwner,
+    audit: event => identity.audit({ actor: event.ownerId === undefined ? supervisorActor(SUPERVISOR_PRINCIPAL_ID)
+      : { principal_kind: 'user', principal_id: event.ownerId, display_name: threads.principalOrStored(event.ownerId)?.displayName ?? 'Hub owner' },
+      action: `superagent.control.${event.kind}`, requestHash: event.hash, decision: 'allowed', outcome: 'n/a' }) })
+  const controlledModel = control.model(options.model)
 
   /**
    * XERXES is the Hub owner's personal agent. When the owner is the one talking to it (or a Hub
@@ -244,7 +252,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
   const digests = new DigestService({
     workspaces,
     ...(options.events === undefined ? {} : { events: options.events }),
-    summarizer: createModelDigestSummarizer(options.model),
+    summarizer: createModelDigestSummarizer(controlledModel),
     clock,
   })
 
@@ -269,7 +277,9 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     identity,
     targets,
     execute: options.execute,
-    ...(options.risk === undefined ? {} : { risk: { ...options.risk, isOwner } }),
+    beforeDispatch: async action => { await control.reserve(action.tool === 'risk.execute' ? 'risk' : 'command', action.id); control.assertActive() },
+    ...(options.risk === undefined ? {} : { risk: { ...options.risk, isOwner: controlOwner,
+      execute: (action, owner) => { control.assertActive(); return options.risk!.execute(action, owner, control.signal) } } }),
     overlay: options.overlay,
     access: (threadId, principal) => { threads.access(threadId, principal) },
     clock,
@@ -409,109 +419,9 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     }
   }
 
-  /** The owner's XERXES: approve or reject one waiting PERMISSION request on the owner's behalf. */
-  const answerPermission = async (input: {
-    readonly threadId: string; readonly workspaceId: string; readonly sessionId: string; readonly requestId: string
-    readonly response: 'approve' | 'approve_for_session' | 'reject'; readonly requester: UserPrincipal
-    readonly reader: ScopeReader; readonly trigger: boolean; readonly othersInContext: boolean
-  }): Promise<Record<string, unknown>> => {
-    const { workspaceId, sessionId, requestId, response } = input
-    const watched = observedAnswer(input, 'permission request', response)
-    if (watched !== undefined) return watched
-    const grant = autopilotGrant(input)
-    if (grant === undefined) {
-      throw new SupervisorDenied('XERXES answers a permission request only for the Hub owner, in a conversation with nobody else in it. Ask the owner to answer it.')
-    }
-    const target = { workspaceId, sessionId }
-    // The same shared-scope check as questions: everyone this thread speaks for must be able to answer.
-    if (!input.reader.canRead(target) || !input.reader.scopes(target).has('permission.delegated')) {
-      throw new SupervisorDenied('permission.delegated is required on this task for everyone in this thread, so XERXES cannot answer it here.')
-    }
-    if (requestId.length === 0 || requestId.length > 200) throw new Error('request_id must be 1 to 200 characters')
-    const pending = pendingOf(workspaceId, sessionId)
-    if (pending === undefined) throw new Error('waiting permission requests cannot be read on this Hub, so XERXES will not answer blind')
-    if (!pending.permissionIds.includes(requestId)) throw new Error('no such waiting permission request in this task; read pending_interactions again')
-    const owner = grant.owner
-    const scopes = delegatedScopes(owner, identity.grantsFor(owner.id), target, clock())
-    if (!scopes.has('permission.delegated')) throw new SupervisorDenied(`${owner.displayName} cannot answer permission requests in this task, so XERXES cannot either.`)
-
-    const actionId = `perm-${crypto.randomUUID()}`
-    const actor = supervisorActor(owner.id, owner.id)
-    const requestHash = supervisorRequestHash('permission.answer', workspaceId, sessionId, { request_id: requestId, response })
-    const entry = (stage: 'dispatch' | 'outcome', outcome: 'accepted' | 'rejected' | 'unknown' | 'n/a') => ({
-      stage, actor, actionId, tool: 'permission.answer', workspaceId, sessionId, requestHash, decision: 'allowed' as const, outcome,
-    })
-    try {
-      await supervisorAudit.record(entry('dispatch', 'n/a'))
-    } catch (error) {
-      report(error, 'supervisor audit permission')
-      throw new Error('the audit log is unavailable; nothing was answered')
-    }
-    const delegated: HubGrant[] = [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource: { type: 'session', workspaceId, sessionId }, effect: 'allow', scopes: [...scopes] }]
-    const principal: HubPrincipal = { kind: 'agent', id: SUPERVISOR_PRINCIPAL_ID, displayName: SUPERVISOR_DISPLAY_NAME, onBehalfOf: owner.id }
-    const context: AuthenticatedContext = { principal, grants: delegated, browserSessionId: `supervisor:${actionId}`, actor }
-    const params = {
-      workspace_id: workspaceId, session_id: sessionId,
-      command_id: `ap:${requestId}`.slice(0, 200),
-      action: 'permission.answer', args: { request_id: requestId, response },
-    }
-    let state: 'accepted' | 'rejected' | 'unknown'
-    let message: string | undefined
-    try {
-      const result = await options.overlay.run(delegated, () => options.execute(context, params))
-      state = result.state === 'accepted' || result.state === 'rejected' ? result.state : 'unknown'
-      message = result.error?.message
-    } catch (error) {
-      if (error instanceof HubProtocolError) { state = 'rejected'; message = error.message } else {
-        report(error, 'supervisor permission dispatch')
-        state = 'unknown'
-        message = 'The answer may have been sent; its outcome is unknown.'
-      }
-    }
-    await supervisorAudit.recordBestEffort(entry('outcome', state))
-    const tool = pending.permissions?.find(row => row.request_id === requestId)?.tool ?? 'a tool'
-    const rawTitle = workspaces.projection(workspaceId)?.sessions[sessionId]?.title ?? sessionId
-    const title = rawTitle.replace(/\s+/g, ' ').trim().slice(0, 80)
-    const verb = response === 'reject' ? 'rejected' : response === 'approve_for_session' ? 'approved for the session' : 'approved'
-    try {
-      postShared(workspaceId, sessionId, owner.id, state === 'accepted'
-        ? `XERXES ${verb} ${tool} in “${title}” for ${owner.displayName}.`
-        : `XERXES could not answer a permission request in “${title}”${message === undefined ? '' : ` (${message.slice(0, 200)})`}.`)
-    } catch (error) {
-      report(error, 'supervisor permission notice')
-    }
-    // The owner's own record: a system message in their private Autopilot thread, plus a push.
-    // The push text is minimal (no tool or command); the task link opens it.
-    try {
-      const own = threads.autopilotFor(owner.id)
-      if (own.id !== input.threadId) {
-        const { message: note } = threads.append({
-          threadId: own.id, role: 'system',
-          text: state === 'accepted'
-            ? `XERXES ${verb} ${tool} in “${title}” on your behalf.`
-            : `XERXES could not answer a permission request in “${title}”${message === undefined ? '' : ` (${message.slice(0, 200)})`}.`,
-        })
-        threads.emit(own.id, 'supervisor.thread_event', { message: messageToWire(note) })
-      }
-    } catch (error) {
-      report(error, 'supervisor permission autopilot notice')
-    }
-    void options.sendPush?.(owner.id, {
-      title: 'XERXES',
-      body: state === 'accepted'
-        ? (response === 'reject' ? 'XERXES rejected a permission request for you.' : 'XERXES approved a permission request for you.')
-        : 'XERXES could not answer a permission request. It needs you.',
-      url: `/w/${encodeURIComponent(workspaceId)}/s/${encodeURIComponent(sessionId)}`,
-    })?.catch(error => report(error, 'supervisor permission push'))
-    return {
-      state, request_id: requestId, response, on_behalf_of: owner.displayName,
-      ...(message === undefined ? {} : { message }),
-      note: state === 'accepted' ? 'Answered.' : state === 'rejected' ? 'Not answered.' : 'The outcome is unknown. Do not retry.',
-    }
-  }
-
   const abilities = new SuperagentAbilities({
     db, clock, backend: options.backend,
+    paused: () => { const state = control.status(); return state.paused || state.killed },
     authorized: (ownerId, workspaceId) => {
       const principal = threads.principalOrStored(ownerId)
       return principal !== undefined && (options.isHubOwner?.(ownerId) ?? principal.hubOwner)
@@ -542,14 +452,15 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     actions,
     threads,
     ...(options.sendPush === undefined ? {} : { push: (userId: string, message: { title: string; body: string; url: string }) => options.sendPush!(userId, message) }),
-    autopilot: { pending: pendingOf, answer: answerQuestion, answerPermission },
+    autopilot: { pending: pendingOf, answer: answerQuestion },
     onError: report,
   })
 
   const runner = new SupervisorRunner({
     threads,
     registry,
-    model: options.model,
+    model: controlledModel,
+    beforeTurn: async input => { control.assertActive(); if (input.trigger !== undefined) await control.reserve('wake', `wake-${randomUUID()}`); control.assertActive() },
     persona: options.persona ?? loadSupervisorPersona(),
     notebookContext: (threadId, requester) => {
       const thread = threads.access(threadId, requester)
@@ -587,7 +498,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     pending: pendingOf,
     ...(options.sendPush === undefined ? {} : { push: options.sendPush }),
     // Only a configured, reachable model: not unconfigured, machine_offline or invalid.
-    ready: () => options.configStatus === undefined || options.configStatus().status === 'configured',
+    ready: () => !control.status().paused && !control.status().killed && (options.configStatus === undefined || options.configStatus().status === 'configured'),
     clock,
     ...(options.autopilot?.checkInMs === undefined ? {} : { checkInMs: options.autopilot.checkInMs }),
     ...(options.autopilot?.cooldownMs === undefined ? {} : { cooldownMs: options.autopilot.cooldownMs }),
@@ -628,7 +539,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     post: (workspaceId, taskId, ownerId, text) => postShared(workspaceId, taskId, ownerId, text),
     ...(options.sendPush === undefined ? {} : { push: options.sendPush }),
     autopilot: workspaceId => autopilot.active(workspaceId),
-    ready: () => options.configStatus === undefined || options.configStatus().status === 'configured',
+    ready: () => !control.status().paused && !control.status().killed && (options.configStatus === undefined || options.configStatus().status === 'configured'),
     clock,
     ...(options.watch?.stallMs === undefined ? {} : { stallMs: options.watch.stallMs }),
     ...(options.watch?.maxAnomalyWakesPerHour === undefined ? {} : { maxAnomalyWakesPerHour: options.watch.maxAnomalyWakesPerHour }),
@@ -660,6 +571,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
   waker.start()
 
   const submit = (principal: UserPrincipal, input: { threadId: string; text: string; source: MessageSource; clientMessageId: string }): { message: ThreadMessage; duplicate: boolean } => {
+    control.assertActive()
     const thread = threads.access(input.threadId, principal)
     const { message, duplicate } = threads.append({
       threadId: thread.id,
@@ -681,6 +593,19 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     threads, actions, modelId: () => options.model.id, usage: () => runner.usageSnapshot(), submit,
     ...(options.configStatus === undefined ? {} : { configStatus: options.configStatus }),
   })
+
+  const controlHandlers: SupervisorHandlers = {
+    'supervisor.control.get': (ctx, params) => {
+      if (ctx.context.principal.kind !== 'user' || !controlOwner(ctx.context.principal.id)) throw new HubProtocolError('forbidden', 'Only the current Hub owner can inspect superagent controls')
+      if (Object.keys(params).length !== 0) throw new HubProtocolError('invalid_request', 'Control get accepts no parameters')
+      return { control: control.status(), usage: control.usage() }
+    },
+    'supervisor.control.set': async (ctx, params) => {
+      if (ctx.context.principal.kind !== 'user' || !controlOwner(ctx.context.principal.id)) throw new HubProtocolError('forbidden', 'Only the current Hub owner can configure superagent controls')
+      const state = await control.configure(ctx.context.principal.id, params)
+      return { control: state, usage: control.usage() }
+    },
+  }
 
   const principalOf = (actor: HubActor): UserPrincipal | undefined => {
     if (actor.principal_kind !== 'user') return undefined
@@ -721,11 +646,13 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
 
   let closed = false
   return {
-    handlers: { ...handlers, ...autopilot.handlers, ...watch.handlers }, voice, threads, actions, attention, digests, runner, autopilot, waker, watch,
+    handlers: { ...handlers, ...autopilot.handlers, ...watch.handlers, ...controlHandlers }, voice, threads, actions, attention, digests, runner, autopilot, waker, watch,
     attachSink: sink => threads.setSink(sink),
     close() {
       if (closed) return
       closed = true
+      actions.dispose()
+      control.dispose()
       clearInterval(sweeper)
       abilities.dispose()
       waker.stop()

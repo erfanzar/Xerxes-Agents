@@ -409,6 +409,21 @@ broadcasts event `supervisor.config_changed` (the `config.get` shape, with
 `supervisor.thread.open` works and reports `config_status:"unconfigured"`, and
 `supervisor.message.submit` is refused with code `unconfigured`.
 
+## Superagent owner controls
+
+These methods require a signed-in **current Hub owner** verified by a live identity callback. They are not model tools and refuse agent principals. No cached thread-owner flag authorizes them.
+
+| Method | Params | Result |
+|---|---|---|
+| `supervisor.control.get` | `{}` | `{control:{revision,paused,killed,limits}, usage:{actions,wakes,modelCalls,tokens,usd}}` |
+| `supervisor.control.set` | `{revision, paused?, killed?, limits?}` | Same shape; revision is compare-and-set and increments on success |
+
+Limits are nonnegative daily UTC caps for `actions`, `wakes`, `modelCalls`, `tokens` and `usd`. An omitted limit is unbounded; `limits` replaces the configured limits. Unknown usage is `null`, never zero. Monetary/token caps require trustworthy upper-bound model quotes; providers without them are refused before any model call. Reservations are durable and atomic, so crashes/unknown outcomes do not refund or replay work. Settling measured usage can release unused reservation; exceeding a promised bound preserves actual usage and pauses admission.
+
+Pause prevents new messages, scheduled/Watch/Autopilot wakes, ability dispatch and action dispatch. Kill also aborts active owned model/host execution signals, persists across restart and rejects late model replies. Clearing kill creates a new signal; it never re-enables an already aborted execution. It does not claim to stop other users’ tasks or arbitrary external process trees. Missing C enforcement/ownership hosts still refuse. The owner must explicitly clear both `killed` and `paused` to resume after a kill.
+
+`propose_risky_action` always creates an exact-argument owner-only confirmation in the owner’s private thread, even under Autopilot. The existing confirmation response method binds the full canonical action, target revision, runtime instance, expiry and idempotency identity, rechecks current ownership after audit, and never retries an unknown outcome. A typed risky-operation host must be configured; there is no shell fallback. Permission decisions remain human-only in the task approval UI; the retained `answer_permission` name is an explicit denial and no longer delegates approvals.
+
 ## XERXES Autopilot
 
 Per workspace, the Hub owner can let XERXES act for them. Rows live in
@@ -423,9 +438,9 @@ Row: `{workspace_id, label, enabled, instruction, expires_at, enabled_by:{id,nam
 updated_at, active, mode}`; `active` = enabled, not expired, and the enabler is still the
 Hub owner. `mode` (additive, 0.8.25) is `auto` (wake-ups act without a Confirm) or
 `observe` (watch only: wake-ups still run, but every action becomes a normal Confirm
-card, and an `answer_question` / `answer_permission` call only posts
+card, and an `answer_question` call only posts
 `Autopilot (watch only) would answer …` to the shared thread and returns
-`state: 'recorded'`; nothing reaches the task). An omitted `mode` keeps the stored one; a
+`state: 'recorded'`; nothing reaches the task). `answer_permission` always refuses and directs the owner to the human task approval UI, including in `auto` mode. An omitted `mode` keeps the stored one; a
 new row and a row from an older Hub are `auto`. Clients treat a row without `mode` as `auto`.
 
 All workspaces (additive, 0.8.26): `workspace_id: '*'` is the Hub-wide row. While it is

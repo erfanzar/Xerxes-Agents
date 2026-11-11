@@ -80,6 +80,8 @@ export interface SupervisorModelPort {
   readonly id: string
   /** Whether `usage.costUsd` is reported. A cost quota needs it. */
   readonly reportsCost: boolean
+  /** Trustworthy upper bound, not a guessed price. A configured daily token/USD cap refuses absent bounds. */
+  quote?(request: SupervisorModelRequest): { readonly tokens?: number; readonly usd?: number }
   complete(request: SupervisorModelRequest): Promise<SupervisorModelResponse>
 }
 
@@ -172,6 +174,8 @@ export interface SupervisorRunnerOptions {
   readonly quotas?: Partial<SupervisorQuotas>
   readonly scopeReader: (threadId: string, requester: UserPrincipal) => SupervisorTurnState['reader']
   readonly notebookContext?: (threadId: string, requester: UserPrincipal) => string
+  /** Runs after queue ownership is installed, before any context/model work. */
+  readonly beforeTurn?: (input: Parameters<SupervisorRunner['enqueue']>[0]) => Promise<void>
   readonly clock?: () => number
   readonly onStopped?: (info: SupervisorStoppedInfo) => void
   readonly onError?: (error: unknown, context: string) => void
@@ -335,6 +339,11 @@ export class SupervisorRunner {
     const timer = Number.isFinite(this.quotas.maxTurnMs) ? setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs) : undefined
     threads.setWorking(threadId, true)
     try {
+      try { await this.options.beforeTurn?.(input) } catch {
+        if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
+        return this.finishWith(threadId, requester, 'quota', counts, 'superagent admission is paused, killed or over its daily budget')
+      }
+      if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
       const stored = threads.messagesFor(threadId, requester.id, CONTEXT_MESSAGES)
       const state: SupervisorTurnState = {
         threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined,

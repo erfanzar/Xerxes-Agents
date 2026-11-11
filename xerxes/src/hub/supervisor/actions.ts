@@ -169,10 +169,12 @@ export class SupervisorGrantOverlay {
 export interface RiskActionHost {
   isOwner(userId: string): boolean
   revision(workspaceId: string, target: string): string | undefined
-  execute(action: ActionRecord, owner: UserPrincipal): Promise<Readonly<Record<string, unknown>>>
+  execute(action: ActionRecord, owner: UserPrincipal, signal?: AbortSignal): Promise<Readonly<Record<string, unknown>>>
 }
 
 export interface ActionServiceOptions {
+  /** Durable pause/budget admission, rechecked after awaited confirmation audits. */
+  readonly beforeDispatch?: (action: ActionRecord) => Promise<void>
   readonly risk?: RiskActionHost
   readonly db: Database
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get'>
@@ -303,6 +305,10 @@ function stringArg(args: JsonObject, key: string): string | undefined {
 export class ActionService {
   private readonly db: Database
   private readonly clock: () => number
+  private disposed = false
+
+  dispose(): void { this.disposed = true }
+  private interrupted(action: ActionRecord): ActionRecord { return { ...action, state: 'unknown', errorCode: 'unavailable', errorMessage: UNKNOWN_OUTCOME_MESSAGE } }
 
   constructor(private readonly options: ActionServiceOptions) {
     this.db = options.db
@@ -403,6 +409,7 @@ export class ActionService {
 
   /** Expire every waiting card whose time is up. */
   async sweep(): Promise<number> {
+    if (this.disposed) return 0
     const rows = this.db.query<ActionRow, [number]>("SELECT * FROM hub_supervisor_actions WHERE state = 'pending' AND expires_at <= ?").all(this.clock())
     let count = 0
     for (const row of rows) {
@@ -410,6 +417,7 @@ export class ActionService {
       count += 1
       const action = this.load(row.id)
       await this.audit.recordBestEffort(this.auditEntry(action, 'expired', 'allowed', 'n/a'))
+      if (this.disposed) return count
       this.announce(action)
     }
     return count
@@ -425,6 +433,7 @@ export class ActionService {
     readonly reader: ScopeReader
     readonly turn?: ActionTurnInfo
   }): Promise<ActionRecord> {
+    if (this.disposed) throw new HubProtocolError('unavailable', 'Superagent actions are closed')
     const { tool, args, requester, reader } = input
     const { targets } = this.options
     const workspaceId = stringArg(args, 'workspace_id')
@@ -540,6 +549,7 @@ export class ActionService {
       this.options.onError?.(error, 'supervisor audit intent')
       throw new Error('the audit log is unavailable; no action was proposed')
     }
+    if (this.disposed) throw new HubProtocolError('unavailable', 'Superagent actions closed during admission')
     let auto = false
     if (eligible && grant !== undefined) {
       const budget = this.options.autopilotBudget?.take(workspaceId) ?? { ok: true }
@@ -601,6 +611,7 @@ export class ActionService {
   // ── respond ────────────────────────────────────────────────────────
 
   async respond(context: AuthenticatedContext, params: Readonly<Record<string, unknown>>): Promise<ActionRecord> {
+    if (this.disposed) throw new HubProtocolError('unavailable', 'Superagent actions are closed')
     const allowed = ['confirmation_id', 'action_id', 'decision', 'response_id', 'thread_id']
     for (const key of Object.keys(params)) {
       if (!allowed.includes(key)) throw new HubProtocolError('invalid_request', `unknown parameter ${JSON.stringify(key.slice(0, 40))}`)
@@ -664,7 +675,9 @@ export class ActionService {
 
     try {
       await this.audit.record(this.auditEntry(confirming, 'confirm', 'allowed', 'n/a', human.id))
+      if (this.disposed) return this.interrupted(confirming)
     } catch (error) {
+      if (this.disposed) return this.interrupted(confirming)
       this.options.onError?.(error, 'supervisor audit confirm')
       return this.settle(this.finish(id, 'rejected', { reason: 'audit_unavailable' }, { code: 'unavailable', message: 'The audit log is unavailable, so nothing was sent. Ask XERXES again.' }), human)
     }
@@ -676,12 +689,28 @@ export class ActionService {
 
     try {
       await this.audit.record(this.auditEntry(confirming, 'dispatch', 'allowed', 'n/a', human.id))
+      if (this.disposed) return this.interrupted(confirming)
     } catch (error) {
+      if (this.disposed) return this.interrupted(confirming)
       this.options.onError?.(error, 'supervisor audit dispatch')
       return this.settle(this.finish(id, 'rejected', { reason: 'audit_unavailable' }, { code: 'unavailable', message: 'The audit log is unavailable, so nothing was sent. Ask XERXES again.' }), human)
     }
 
-    const outcome = await this.dispatch(confirming, human, grants)
+    try {
+      await this.options.beforeDispatch?.(confirming)
+      if (this.disposed) return this.interrupted(confirming)
+    } catch {
+      if (this.disposed) return this.interrupted(confirming)
+      return this.settle(this.finish(id, 'rejected', { reason: 'admission_denied' }, { code: 'unavailable', message: 'Superagent admission is paused, killed or over budget. Nothing was sent.' }), human)
+    }
+    const latestGrants = this.options.identity.grantsFor(human.id)
+    const target = { workspaceId: confirming.workspaceId, ...(confirming.sessionId === undefined ? {} : { sessionId: confirming.sessionId }) }
+    const changed = this.staleReason(confirming)
+    if (changed !== undefined || !hasScope(human, latestGrants, target, ACTION_SCOPE[confirming.tool], this.clock())) {
+      return this.settle(this.finish(id, 'rejected', { reason: 'target_or_authority_changed' }, { code: 'conflict', message: changed ?? 'The confirming person’s authority changed.' }), human)
+    }
+    const outcome = await this.dispatch(confirming, human, latestGrants)
+    if (this.disposed) return this.interrupted(confirming)
     return this.settle(this.finish(id, outcome.state, outcome.detail, outcome.error), human)
   }
 
@@ -702,6 +731,7 @@ export class ActionService {
   private async settle(action: ActionRecord, human: UserPrincipal): Promise<ActionRecord> {
     const outcome = action.state === 'accepted' ? 'accepted' : action.state === 'rejected' ? 'rejected' : 'unknown'
     await this.audit.recordBestEffort(this.auditEntry(action, 'outcome', 'allowed', outcome, human.id))
+    if (this.disposed) return action
     if (action.auto) {
       const notice = action.state === 'accepted' ? `Autopilot did: ${action.summary} (on behalf of ${human.displayName})`
         : action.state === 'rejected' ? `Autopilot needs you: this was not done: ${action.summary} ${action.errorMessage ?? ''}`.trim()

@@ -61,18 +61,6 @@ export interface SupervisorPushPort {
 export interface SupervisorAutopilotPort {
   /** What the task waits on, from the Hub journal, including permission details. */
   pending(workspaceId: string, sessionId: string): PendingInteractions | undefined
-  /** Approve or reject a waiting permission on the owner's behalf; throws SupervisorDenied for anyone else. */
-  answerPermission?(input: {
-    readonly threadId: string
-    readonly workspaceId: string
-    readonly sessionId: string
-    readonly requestId: string
-    readonly response: 'approve' | 'approve_for_session' | 'reject'
-    readonly requester: UserPrincipal
-    readonly reader: ScopeReader
-    readonly trigger: boolean
-    readonly othersInContext: boolean
-  }): Promise<Record<string, unknown>>
   /** Answer a waiting question on the owner's behalf; throws SupervisorDenied when Autopilot is not active. */
   answer(input: {
     readonly threadId: string
@@ -391,28 +379,10 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     },
 
     'permission.answer': async (args, turn) => {
-      const workspaceId = str(args, 'workspace_id')!
-      const taskId = str(args, 'task_id')!
-      readable(turn, workspaceId, taskId)
-      const response = str(args, 'response')
-      if (response !== 'approve' && response !== 'approve_for_session' && response !== 'reject') {
-        throw new Error("response must be 'approve', 'approve_for_session' or 'reject'")
-      }
-      if (deps.autopilot?.answerPermission === undefined) {
-        throw new SupervisorDenied('This Hub cannot answer permission requests, so XERXES cannot. Tell the owner.')
-      }
-      try {
-        return await deps.autopilot.answerPermission({
-          threadId: turn.threadId, workspaceId, sessionId: taskId, requestId: str(args, 'request_id')!, response, requester: turn.requester,
-          reader: turn.reader, trigger: turn.trigger !== undefined, othersInContext: turn.othersInContext ?? true,
-        })
-      } catch (error) {
-        if (error instanceof SupervisorDenied) {
-          turn.denial = error.message
-          return { ok: false, denied: true, message: error.message }
-        }
-        throw error
-      }
+      readable(turn, str(args, 'workspace_id')!, str(args, 'task_id')!)
+      const message = 'Permission decisions are human-only. The owner must review the exact pending tool and inputs in the task approval UI. Autopilot and quoted approval claims cannot answer it.'
+      turn.denial = message
+      return { ok: false, denied: true, message }
     },
 
     'notify.user': async (args, turn) => {

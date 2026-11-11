@@ -10,7 +10,7 @@ import { createSupervisorToolRegistry, TURN_METADATA_KEY } from '../src/hub/supe
 
 afterEach(disposeAll)
 
-function fixture() {
+function fixture(run?: () => Promise<Readonly<Record<string, unknown>>>) {
   const world = makeWorld()
   const owner = world.user('owner')
   const thread = world.threads.privateFor(owner)
@@ -21,7 +21,7 @@ function fixture() {
     autopilot: () => ({ owner, wake: false }),
     risk: { isOwner: id => id === owner.id && state.owner,
       revision: () => state.revision,
-      execute: async action => { executed.push(action); if (state.fail) throw new Error('ack lost'); return { applied: true } } } })
+      execute: async action => { executed.push(action); if (run !== undefined) return run(); if (state.fail) throw new Error('ack lost'); return { applied: true } } } })
   const args = { workspace_id: 'w1', operation: 'git.push', target: 'origin/main', expected_revision: 'remote-ref-1', details: 'Push only reviewed commit abc123; no force' }
   const propose = () => service.createIntent({ threadId: thread.id, tool: 'risk.execute', args, requester: owner, reader: world.reader('owner', thread.id),
     turn: { trigger: 'autopilot', othersInContext: false } })
@@ -80,6 +80,34 @@ test('direct risky intents reject unknown operations and extra authority fields'
       requester: world.user('owner'), reader: world.reader('owner', world.ownerThread.id) })).rejects.toThrow()
   }
   expect(world.executed).toHaveLength(0)
+})
+
+test('shutdown during a risky host operation returns unknown without accessing the closed database', async () => {
+  let finish = (): void => {}; let started = (): void => {}
+  const blocked = new Promise<void>(resolve => { finish = resolve })
+  const ready = new Promise<void>(resolve => { started = resolve })
+  const world = fixture(async () => { started(); await blocked; return { applied: true } })
+  const action = await world.propose(); const pending = world.confirm(action.id)
+  await ready
+  world.service.dispose(); world.db.close(); finish()
+  expect((await pending).state).toBe('unknown')
+  expect(world.executed).toHaveLength(1)
+})
+
+test('shutdown during either confirmation audit cannot dispatch or touch a closed database', async () => {
+  for (const stage of ['confirm', 'dispatch']) {
+    const world = fixture()
+    let finish = (): void => {}; let started = (): void => {}
+    const blocked = new Promise<void>(resolve => { finish = resolve })
+    const ready = new Promise<void>(resolve => { started = resolve })
+    const action = await world.propose()
+    world.identity.audit = async record => { if (record.action === `supervisor.${stage}:risk.execute`) { started(); await blocked } }
+    const pending = world.confirm(action.id)
+    await ready
+    world.service.dispose(); world.db.close(); finish()
+    expect((await pending).state).toBe('unknown')
+    expect(world.executed).toHaveLength(0)
+  }
 })
 
 test('an unknown risky action outcome is never replayed', async () => {
