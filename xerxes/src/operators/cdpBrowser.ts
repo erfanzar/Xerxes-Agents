@@ -42,10 +42,18 @@ interface CdpResponseError {
   readonly message?: unknown
 }
 
-interface CdpResponseFrame {
-  readonly error?: CdpResponseError
-  readonly id?: unknown
-  readonly result?: unknown
+/** A protocol notification, distinct from a command's response. */
+export interface CdpEvent {
+  readonly method: string
+  readonly params: Readonly<Record<string, unknown>>
+  readonly sessionId?: string
+}
+
+/** Opt-in controls for a scoped caller; legacy browser attachment stays unchanged. */
+export interface CdpConnectionOptions {
+  readonly signal?: AbortSignal
+  readonly maxMessageBytes?: number
+  readonly onEvent?: (event: CdpEvent) => void
 }
 
 /** Minimal transport boundary for a Chromium DevTools Protocol connection. */
@@ -60,7 +68,7 @@ export interface CdpConnection {
 
 /** Injectable connection factory used by the adapter and deterministic tests. */
 export interface CdpConnectionFactory {
-  connect(endpoint: string): Promise<CdpConnection>
+  connect(endpoint: string, options?: CdpConnectionOptions): Promise<CdpConnection>
 }
 
 /** Explicit HTTP boundary used only to discover a browser-level CDP WebSocket URL. */
@@ -463,12 +471,18 @@ export function redactedCdpEndpoint(value: string): string {
 
 /** Bun's native WebSocket client behind the injectable CDP transport boundary. */
 export class BunCdpConnectionFactory implements CdpConnectionFactory {
-  async connect(endpoint: string): Promise<CdpConnection> {
+  constructor(private readonly createSocket: (endpoint: string) => WebSocket = endpoint => new WebSocket(endpoint)) {}
+
+  async connect(endpoint: string, options: CdpConnectionOptions = {}): Promise<CdpConnection> {
+    options.signal?.throwIfAborted()
+    if (options.maxMessageBytes !== undefined && (!Number.isSafeInteger(options.maxMessageBytes) || options.maxMessageBytes < 1 || options.maxMessageBytes > 64 * 1024 * 1024)) {
+      throw new ValidationError('browser.cdp_max_message_bytes', 'must be an integer between 1 and 67108864', options.maxMessageBytes)
+    }
     const url = cdpEndpointUrl(endpoint)
     if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
       throw new ValidationError('browser.cdp_url', 'CDP transport must use ws:// or wss://', endpoint)
     }
-    return BunCdpConnection.connect(url.toString())
+    return BunCdpConnection.connect(url.toString(), { ...options }, this.createSocket)
   }
 }
 
@@ -477,50 +491,51 @@ class BunCdpConnection implements CdpConnection {
   #closed = false
   #nextId = 1
 
-  private constructor(private readonly socket: WebSocket) {
+  private readonly abort = (): void => { this.fail(new ClientError('cdp', 'caller cancelled browser connection')) }
+
+  private constructor(private readonly socket: WebSocket, private readonly options: CdpConnectionOptions) {
+    // Synchronous, bounded decoding preserves wire order without an async Blob backlog.
+    socket.binaryType = 'arraybuffer'
     socket.addEventListener('message', event => {
-      void messageText(event.data).then(text => this.receive(text), error => this.fail(error))
+      if (this.#closed) return
+      try { this.receive(messageText(event.data, options.maxMessageBytes)) }
+      catch (error) { this.fail(error) }
     })
     socket.addEventListener('error', event => this.fail(new ClientError('cdp', 'WebSocket error', event)))
     socket.addEventListener('close', event => {
       if (!this.#closed) this.fail(new ClientError('cdp', `WebSocket closed (${event.code})`))
     })
+    options.signal?.addEventListener('abort', this.abort, { once: true })
+    if (options.signal?.aborted) this.abort()
   }
 
-  static async connect(endpoint: string): Promise<BunCdpConnection> {
+  static async connect(endpoint: string, options: CdpConnectionOptions, createSocket: (endpoint: string) => WebSocket): Promise<BunCdpConnection> {
+    options.signal?.throwIfAborted()
     return new Promise((resolveConnection, rejectConnection) => {
       let socket: WebSocket
       try {
-        socket = new WebSocket(endpoint)
+        socket = createSocket(endpoint)
       } catch (error) {
         rejectConnection(new ClientError('cdp', 'could not create WebSocket', error))
         return
       }
       let settled = false
-      const timer = setTimeout(() => {
+      const cleanup = (): void => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort) }
+      const refuse = (error: Error): void => {
         if (settled) return
-        settled = true
-        socket.close()
-        rejectConnection(new ClientError('cdp', `connection timed out after ${CDP_CONNECT_TIMEOUT}ms`))
-      }, CDP_CONNECT_TIMEOUT)
+        settled = true; cleanup(); socket.close(); rejectConnection(error)
+      }
+      const abort = (): void => { refuse(new ClientError('cdp', 'caller cancelled browser attachment')) }
+      const timer = setTimeout(() => refuse(new ClientError('cdp', `connection timed out after ${CDP_CONNECT_TIMEOUT}ms`)), CDP_CONNECT_TIMEOUT)
+      options.signal?.addEventListener('abort', abort, { once: true })
+      if (options.signal?.aborted) abort()
       socket.addEventListener('open', () => {
         if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolveConnection(new BunCdpConnection(socket))
+        settled = true; cleanup()
+        resolveConnection(new BunCdpConnection(socket, options))
       }, { once: true })
-      socket.addEventListener('error', event => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        rejectConnection(new ClientError('cdp', 'WebSocket could not connect', event))
-      }, { once: true })
-      socket.addEventListener('close', event => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        rejectConnection(new ClientError('cdp', `WebSocket closed before opening (${event.code})`))
-      }, { once: true })
+      socket.addEventListener('error', event => { refuse(new ClientError('cdp', 'WebSocket could not connect', event)) }, { once: true })
+      socket.addEventListener('close', event => { refuse(new ClientError('cdp', `WebSocket closed before opening (${event.code})`)) }, { once: true })
     })
   }
 
@@ -556,17 +571,24 @@ class BunCdpConnection implements CdpConnection {
   }
 
   close(): void {
-    if (this.#closed) return
-    this.#closed = true
-    this.socket.close()
-    this.rejectPending(new ClientError('cdp', 'browser connection closed'))
+    this.fail(new ClientError('cdp', 'browser connection closed'))
   }
 
   private receive(text: string): void {
-    let frame: CdpResponseFrame
+    if (this.#closed) return
+    let raw: unknown
     try {
-      frame = JSON.parse(text) as CdpResponseFrame
+      raw = JSON.parse(text)
     } catch {
+      if (this.options.maxMessageBytes !== undefined || this.options.onEvent) throw new ClientError('cdp', 'malformed protocol frame')
+      return
+    }
+    const frame = recordValue(raw)
+    if (this.options.onEvent && frame.method !== undefined) {
+      if (typeof frame.method !== 'string' || !frame.method || frame.id !== undefined
+        || (frame.sessionId !== undefined && (typeof frame.sessionId !== 'string' || !frame.sessionId))) throw new ClientError('cdp', 'malformed lifecycle routing')
+      if (frame.params !== undefined && (typeof frame.params !== 'object' || frame.params === null || Array.isArray(frame.params))) throw new ClientError('cdp', 'malformed lifecycle event')
+      this.options.onEvent({ method: frame.method, params: recordValue(frame.params), ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}) })
       return
     }
     if (typeof frame.id !== 'number') return
@@ -575,7 +597,7 @@ class BunCdpConnection implements CdpConnection {
     this.#pending.delete(frame.id)
     clearTimeout(pending.timer)
     if (frame.error) {
-      pending.reject(new ClientError('cdp', cdpErrorMessage(frame.error), frame.error))
+      pending.reject(new ClientError('cdp', cdpErrorMessage(recordValue(frame.error)), frame.error))
       return
     }
     pending.resolve(frame.result ?? {})
@@ -584,6 +606,8 @@ class BunCdpConnection implements CdpConnection {
   private fail(error: unknown): void {
     if (this.#closed) return
     this.#closed = true
+    this.options.signal?.removeEventListener('abort', this.abort)
+    this.socket.close()
     this.rejectPending(error instanceof Error ? error : new ClientError('cdp', String(error)))
   }
 
@@ -818,11 +842,13 @@ function recordValue(value: unknown): Record<string, unknown> {
     : {}
 }
 
-async function messageText(value: unknown): Promise<string> {
+function messageText(value: unknown, maxBytes?: number): string {
+  const size = typeof value === 'string' ? Buffer.byteLength(value) : value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? value.byteLength : undefined
+  if (size === undefined) throw new ClientError('cdp', 'WebSocket delivered an unsupported frame')
+  if (maxBytes !== undefined && size > maxBytes) throw new ClientError('cdp', 'WebSocket frame exceeded the caller byte limit')
   if (typeof value === 'string') return value
   if (value instanceof ArrayBuffer) return new TextDecoder().decode(value)
   if (ArrayBuffer.isView(value)) return new TextDecoder().decode(value)
-  if (value instanceof Blob) return value.text()
   throw new ClientError('cdp', 'WebSocket delivered an unsupported frame')
 }
 
