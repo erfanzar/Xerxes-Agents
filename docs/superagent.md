@@ -52,6 +52,10 @@ Use Bun-native tests from `xerxes/` so isolated-home preload applies. Write fail
 
 6. The subsequent full checkpoint gate at `16068ab7` passed: runtime 6621 pass / 3 skip / 0 fail, UI 1571 pass, mobile 647 pass; checks, build and diff validation all passed. Logs: `.xerxes/review/superagent-phase1-gate/checkpoint-16068ab7/`. This gate predates the new D confirmation increment; a new full gate is required after integration.
 
+7. Owner Safety UI checkpoint `51f33a11`: desktop tab and phone sheet share strict snapshots, revision-bound serialized updates, explicit Kill confirmation and daily caps. Emergency owner discovery/access is independent of conversational-thread failures. Fresh root gate for that source: runtime 6674 pass / 3 skip / 0 fail, UI 1571 pass, mobile 651 pass; all checks, build and diff validation passed with matching source fingerprints. Desktop bundle also built. Logs: `.xerxes/review/superagent-phase1-gate/checkpoint-91647ebd-app-controls-01/`. Interactive/visual behavior is not verified.
+
+8. Offline adversarial regressions assume the model follows injected task/file/web/notebook text, then exercise the real registry, runner and action service. Forged authority cannot dispatch, raw confirmation/shell handlers are absent, permission decisions refuse and risky work remains an exact owner card. Separate generic/risky host counters and an explicit fake-owner positive control prevent vacuous no-op claims. These are enforced tool-layer tests, not evidence of live-model immunity, native C execution or safe arbitrary delegation.
+
 ### Explicit remaining capability limits
 
 - Real GitHub, GPU/TPU and Xerxes UI screenshot adapters are not yet configured by production composition. Tools refuse unsupported hosts rather than fabricate observations. No external account or GUI action has been exercised.

@@ -294,8 +294,8 @@ const BY_PROVIDER_NAME: ReadonlyMap<string, SupervisorToolSpec> = new Map(ALL_SP
  * routes are human-only or unbounded.
  */
 export const SUPERVISOR_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
-  // The human routes stay forbidden; the owner's XERXES uses answer_permission / answer_question,
-  // which dispatch only under the owner's delegated scopes.
+  // Human routes stay forbidden. answer_question may use delegated question scope;
+  // the retained answer_permission tool only refuses and never dispatches approvals.
   'permission_response',
   'permission.respond',
   'question.respond',

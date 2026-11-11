@@ -197,7 +197,7 @@ const STEP_LABELS: Readonly<Record<string, string>> = {
   task_tail: 'Reading a task’s latest steps',
   pending_interactions: 'Checking what tasks are waiting on',
   answer_question: 'Answering a question',
-  answer_permission: 'Deciding a permission request',
+  answer_permission: 'Refusing a human-only permission request',
   task_start: 'Starting a task',
   task_steer: 'Steering a task',
   task_stop: 'Stopping a task',
