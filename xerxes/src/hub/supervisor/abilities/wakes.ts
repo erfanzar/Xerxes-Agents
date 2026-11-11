@@ -136,9 +136,12 @@ export class SupervisorWakes {
         // A claimed wake after a crash remains visibly claimed; it is never replayed as a side effect.
         try {
           await this.options.deliver({ ...row, state: 'claimed' })
+          // Shutdown may close SQLite while delivery awaits the runner. Keep
+          // the durable claim (unknown outcome), never touch the closed host.
+          if (this.disposed) return
           this.db.query("UPDATE hub_superagent_wakes SET state='delivered' WHERE id=?").run(row.id)
         } catch (error) {
-          this.db.query("UPDATE hub_superagent_wakes SET state='failed' WHERE id=?").run(row.id)
+          if (!this.disposed) this.db.query("UPDATE hub_superagent_wakes SET state='failed' WHERE id=?").run(row.id)
           this.options.onError?.(error)
         }
       }

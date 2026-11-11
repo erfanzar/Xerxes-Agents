@@ -68,3 +68,21 @@ test('event wakes tolerate an advancing clock and UTF-8 event reasons within a b
     expect(Buffer.byteLength(reasons[0]!)).toBeLessThanOrEqual(2000)
   } finally { wakes.dispose(); db.close() }
 })
+
+test('disposed wakes never write a closed database after an in-flight delivery settles', async () => {
+  for (const fail of [false, true]) {
+    const db = new Database(':memory:')
+    const completion = Promise.withResolvers<void>()
+    const errors: unknown[] = []
+    const failure = new Error('delivery stopped during shutdown')
+    const wakes = new SupervisorWakes(db, { clock: () => 1000, paused: () => false, authorized: () => true,
+      deliver: async () => completion.promise, onError: error => { errors.push(error) } })
+    wakes.schedule({ owner: 'o', thread: 't', workspace: 'w' }, { after: 0, reason: 'shutdown race' })
+    const draining = wakes.drain()
+    wakes.dispose(); db.close()
+    if (fail) completion.reject(failure)
+    else completion.resolve()
+    await expect(draining).resolves.toBeUndefined()
+    expect(errors).toEqual(fail ? [failure] : [])
+  }
+})
