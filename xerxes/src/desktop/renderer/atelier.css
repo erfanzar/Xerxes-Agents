@@ -20,6 +20,9 @@
      product. Do not retune these in isolation — theme.ts is the source. */
   --x-working:#6ea8fe;--x-activity:#b39cf0;--x-accent:#6ea8fe;--x-accent-soft:#6ea8fe1c;
   --x-structure:#56c8d8;
+  /* Where a task ran: on this machine or in the cloud. A lightness gap keeps
+     the pair apart under protan, deutan and tritan vision (OKLab ΔE ≥ 12). */
+  --x-local:#6ea8fe;--x-cloud:#8b6ad8;
   --x-done:#57ca85;--x-needs:#d8ae58;--x-focus:#6ea8fe;--x-chip:#1f242e;
   --x-failed:#f47067;--x-failed-text:#e39a94;--x-failed-bg:#f4706714;--x-failed-border:#f4706733;
   --x-needs-text:#e4c37e;--x-needs-bg:#d8ae5818;--x-needs-border:#d8ae5833;
@@ -71,6 +74,7 @@
   /* Derafsh light variants, from `src/ui/theme.ts`. */
   --x-working:#1f64b5;--x-activity:#7047b5;--x-accent:#1f64b5;--x-accent-soft:#1f64b514;
   --x-structure:#276b78;
+  --x-local:#1f64b5;--x-cloud:#9a7fe0;
   --x-done:#1b6f45;--x-needs:#8a5a12;--x-focus:#1f64b5;--x-chip:#e9ecf1;
   --x-failed:#c02f27;--x-failed-text:#a82a23;--x-failed-bg:#c02f270a;--x-failed-border:#c02f2726;
   --x-needs-text:#8a5a12;--x-needs-bg:#8a5a1210;--x-needs-border:#8a5a1226;
@@ -2923,6 +2927,47 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .usage-model__cost[data-unknown]{font:var(--t-caption);color:var(--x-meta)}
 .atelier .usage-model__meta{font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .atelier .usage__note{margin:0;font:var(--t-caption);color:var(--x-meta)}
+
+/* Where a task ran, by tokens: the composer chip (Hybrid) and the split at
+   the top of Usage. Blue is this Mac, purple the cloud; text stays in text
+   colours and every segment has a label beside it, so colour never carries
+   the meaning alone. */
+.atelier .cchip.modelsplit{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
+.atelier .modelsplit__bar{display:inline-flex;flex:none;gap:2px;width:28px;height:6px}
+.atelier .modelsplit__spend{color:var(--x-meta)}
+/* A narrow chat keeps the bar and drops the words; the label and tooltip still say it. */
+@container(max-width:640px){.atelier .cchip.modelsplit>span:not(.modelsplit__bar){display:none}}
+.atelier .tasksplit{display:grid;gap:var(--s-2);padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+.atelier .tasksplit__bar{display:flex;gap:2px;height:8px}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>span{min-width:3px;border-radius:4px}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>[data-where='local'],
+.atelier [data-where='local']>.tasksplit__swatch,.atelier .tasksplit__swatch[data-where='local']{background:var(--x-local)}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>[data-where='cloud'],
+.atelier [data-where='cloud']>.tasksplit__swatch,.atelier .tasksplit__swatch[data-where='cloud']{background:var(--x-cloud)}
+.atelier .tasksplit__legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0;padding:0;list-style:none;font:var(--t-caption);color:var(--x-secondary);font-variant-numeric:tabular-nums}
+.atelier .tasksplit__legend li{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.atelier .tasksplit__legend b{font-weight:600;color:var(--x-title)}
+.atelier .tasksplit__swatch{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%;background:var(--x-meta)}
+.atelier .taskmodel__name{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.atelier .taskadvisor{padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+
+/* Outputs: every file the task wrote. A row previews in Files; Open and Show
+   appear when the host offers them. */
+.atelier .outputs{display:grid;gap:var(--s-5)}
+.atelier .output-list{display:grid;gap:0;margin:0;padding:0;list-style:none;border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card);overflow:hidden}
+.atelier .output-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0;padding:6px var(--s-2) 6px var(--s-3)}
+.atelier .output-row+.output-row{border-top:1px solid var(--x-hairline)}
+.atelier .output-row__main{display:flex;flex:1;align-items:center;gap:var(--s-2);min-width:0;padding:2px 0;border:0;background:transparent;color:var(--x-secondary);text-align:left;cursor:pointer}
+.atelier .output-row__main:hover .output-row__name{color:var(--x-accent);text-decoration:underline}
+.atelier .output-row__main:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px;border-radius:var(--r-sm)}
+.atelier .output-row__text{display:grid;gap:1px;min-width:0}
+.atelier .output-row__name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-body);font-weight:500;color:var(--x-title)}
+.atelier .output-row__meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums}
+.atelier .output-row__actions{display:inline-flex;flex:none;gap:2px}
+.atelier .output-row__actions .btn{padding:2px 8px;font:var(--t-caption)}
+.atelier .output-row__error{flex-basis:100%;margin:0;font:var(--t-caption);color:var(--x-failed-text)}
+.atelier .md__link--code{text-decoration:none}
+.atelier .md__link--code code{text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--x-accent) 45%,transparent);text-underline-offset:2px;cursor:pointer}
 .atelier .field__optional{margin-left:6px;font:var(--t-caption);font-weight:400;color:var(--x-meta)}
 
 /* Floating surfaces over a see-through window. With a background or the

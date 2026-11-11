@@ -112,6 +112,16 @@ test('a Bonsai request that turns thinking off gets the non-thinking profile', a
   expect(payload).toMatchObject({ temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.5 })
 })
 
+test('thinking off reaches Bonsai as its chat-template switch, with the non-thinking profile', async () => {
+  const off = await payloadFor({ model: 'ternary-bonsai-2-27b', thinking: { effort: 'off' } })
+  expect(off).toMatchObject({ chat_template_kwargs: { enable_thinking: false }, temperature: 0.7, top_p: 0.8, presence_penalty: 1.5 })
+  // Thinking left on, or never mentioned, sends no switch.
+  expect(await payloadFor({ model: 'ternary-bonsai-2-27b', thinking: { effort: 'high' } })).not.toHaveProperty('chat_template_kwargs')
+  expect(await payloadFor({ model: 'ternary-bonsai-2-27b' })).not.toHaveProperty('chat_template_kwargs')
+  // A model without a published card is left alone.
+  expect(await payloadFor({ model: 'qwen3-27b', thinking: { effort: 'off' } })).not.toHaveProperty('chat_template_kwargs')
+})
+
 test('other models on a custom endpoint still get no non-standard sampling fields', async () => {
   const payload = await payloadFor({ model: 'qwen3-27b', topK: 64, minP: 0.05, repetitionPenalty: 1.1 })
   expect(payload).not.toHaveProperty('top_k')

@@ -11,15 +11,15 @@ import type { RunModeName } from './types.js'
 const MODE_ICONS: Record<RunModeName, IconName> = { private: 'shield', hybrid: 'spark', cloud: 'cloud' }
 
 /**
- * How new tasks run: Private (Bonsai on this Mac, nothing leaves), Hybrid
- * (Bonsai plus a cloud advisor within a budget) or Cloud. Below the choice,
- * what the chosen mode needs: Bonsai set up on this Mac, a cloud advisor, or a
- * cloud provider to do the work. The provider profiles stay listed beneath.
+ * How new tasks run: Private (Bonsai on this Mac, nothing leaves), Hybrid (a
+ * cloud model leads and Bonsai does the file work here) or Cloud. Below the
+ * choice, what the chosen mode needs: Bonsai set up on this Mac, and for Hybrid
+ * and Cloud the cloud model that leads or does the work. The provider profiles
+ * stay listed beneath.
  */
 export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | null {
   /** A mode the person picked that still needs a step (setup, or a cloud provider) before it applies. */
   const [pending, setPending] = useState<RunModeName | null>(null)
-  const [budget, setBudget] = useState('')
   const view = snap.runMode
   // Once the mode it waited for is in use (setup finished, a provider chosen), nothing is pending.
   useEffect(() => { if (pending !== null && view?.mode === pending) setPending(null) }, [pending, view?.mode])
@@ -66,7 +66,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           )
         })}
       </div>
-      {view?.mode === null && !pending && <p className="row__s">Nothing runs until you choose a mode.</p>}
+      {view?.mode === null && !pending && <p className="row__s">{view.worker ? 'Your current settings match none of these modes. Choose one to apply it.' : 'Nothing runs until you choose a mode.'}</p>}
       {view && view.lockedBy.length > 0 && (
         <p className="row__s">{view.lockedBy.join(' and ')} {view.lockedBy.length === 1 ? 'is' : 'are'} set in the environment and override{view.lockedBy.length === 1 ? 's' : ''} this choice.</p>
       )}
@@ -83,7 +83,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           <div className="localpanel__head">
             <Icon name="laptop" size={15} />
             <strong>On this Mac</strong>
-            <span className="row__s">does the work</span>
+            <span className="row__s">{shown === 'hybrid' ? 'does the file work' : 'does the work'}</span>
             {local.status?.server.running
               ? <span className="provcard__badge provcard__badge--accent">Running</span>
               : local.status ? <span className="provcard__badge provcard__badge--quiet">Stopped</span> : null}
@@ -126,26 +126,22 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
         </div>
       )}
 
-      {shown === 'hybrid' && view?.mode === 'hybrid' && (
+      {shown === 'hybrid' && (
         <div className="localpanel">
-          <div className="localpanel__head"><Icon name="cloud" size={15} /><strong>Cloud advisor</strong><span className="row__s">plans and helps when Bonsai is stuck</span></div>
-          <label className="field">
-            <span>Advisor</span>
-            <select value={view.advisor?.profile ?? ''} disabled={busy} onChange={event => void store.setRunMode('hybrid', { advisorProfile: event.target.value || null })}>
-              <option value="">None: Bonsai works alone</option>
-              {cloudProfiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.model ? ` · ${profile.model}` : ''}</option>)}
-            </select>
-          </label>
-          {view.advisor && !view.advisor.found && <p role="alert" className="studio-error">The advisor profile {view.advisor.profile} no longer exists. Choose another.</p>}
-          <label className="field">
-            <span>Cloud budget per task (USD)</span>
-            <span className="runmode__budget">
-              <input type="number" min="0.1" max="1000" step="0.1" inputMode="decimal" value={budget || String(view.budgetUsd)} onChange={event => setBudget(event.target.value)} />
-              <button className="btn" disabled={busy || !budget || Number(budget) === view.budgetUsd || !(Number(budget) > 0)}
-                onClick={() => void store.setRunMode('hybrid', { budgetUsd: Number(budget) }).then(result => { if (result.ok) setBudget('') })}>Save</button>
-            </span>
-          </label>
-          <p className="row__s">When the budget is spent, Bonsai continues alone or stops and asks.</p>
+          <div className="localpanel__head"><Icon name="cloud" size={15} /><strong>Cloud lead</strong><span className="row__s">plans, splits the work and checks it; cannot read your files</span></div>
+          {cloudProfiles.length === 0
+            ? <p className="row__s">Add a provider below: an API key or a sign-in.</p>
+            : (
+              <label className="field">
+                <span>Lead</span>
+                <select value={view?.mode === 'hybrid' ? view.worker?.profile ?? '' : ''} disabled={busy}
+                  onChange={event => { if (event.target.value) void store.setRunMode('hybrid', { workerProfile: event.target.value }).then(result => { if (result.ok) setPending(null) }) }}>
+                  <option value="" disabled>Choose the cloud model that leads</option>
+                  {cloudProfiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.model ? ` · ${profile.model}` : ''}</option>)}
+                </select>
+              </label>
+            )}
+          <p className="row__s">Light and balanced agents run on Bonsai and answer directly; smart agents run on the lead. Change this under Agent intelligence.</p>
         </div>
       )}
 

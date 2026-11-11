@@ -30,8 +30,8 @@ class FakeBridge implements XerxesLike {
 }
 
 const hybrid = {
-  ok: true, mode: 'hybrid', worker: { profile: 'bonsai-local', model: 'ternary-bonsai-2-27b', local: true },
-  advisor: { profile: 'claude-code', model: 'claude-code/opus', found: true }, local_only: false, budget_usd: 1, restart_pending: false, locked_by: [],
+  ok: true, mode: 'hybrid', worker: { profile: 'claude-code', model: 'claude-code/opus', local: false },
+  local_only: false, restart_pending: false, locked_by: [],
 }
 const localStatus = {
   ready: true,
@@ -42,8 +42,8 @@ const localStatus = {
   blocker: null,
 }
 const profiles = [
-  { name: 'bonsai-local', label: 'bonsai-local', provider: 'custom', model: 'ternary-bonsai-2-27b', active: true, local: true },
-  { name: 'claude-code', label: 'Claude Code', provider: 'claude-code', model: '', active: false, local: false },
+  { name: 'bonsai-local', label: 'bonsai-local', provider: 'custom', model: 'ternary-bonsai-2-27b', active: false, local: true },
+  { name: 'claude-code', label: 'Claude Code', provider: 'claude-code', model: 'claude-code/opus', active: true, local: false },
 ]
 
 function connectedStore(respond: Responder): { store: Store; bridge: FakeBridge } {
@@ -60,10 +60,9 @@ function connectedStore(respond: Responder): { store: Store; bridge: FakeBridge 
 
 test('run mode, local status and setup jobs are read from the wire without inventing values', () => {
   expect(runModeView(hybrid)).toEqual({
-    mode: 'hybrid', worker: { profile: 'bonsai-local', model: 'ternary-bonsai-2-27b', local: true },
-    advisor: { profile: 'claude-code', model: 'claude-code/opus', found: true }, budgetUsd: 1, restartPending: false, lockedBy: [],
+    mode: 'hybrid', worker: { profile: 'claude-code', model: 'claude-code/opus', local: false }, restartPending: false, lockedBy: [],
   })
-  expect(runModeView({ ok: true, mode: 'remote', restart_required: true })).toMatchObject({ mode: null, worker: null, advisor: null, restartPending: true })
+  expect(runModeView({ ok: true, mode: 'remote', restart_required: true })).toMatchObject({ mode: null, worker: null, restartPending: true })
   expect(localStatusView(localStatus)).toMatchObject({ engine: { label: 'llama.cpp', newEnough: true }, model: { bytes: 7_626_008_928, downloaded: false } })
   expect(localStatusView(undefined)).toBeNull()
   expect(localSetupJobView({ id: 'j', state: 'running', step: 'Downloading: 5% (0.4 GiB / 7.1 GiB)', percent: 5 })).toEqual({ id: 'j', state: 'running', step: 'Downloading: 5% (0.4 GiB / 7.1 GiB)', percent: 5, error: null })
@@ -105,11 +104,11 @@ test('setup progress events update the job, and a finished setup reloads the mod
   expect(store.getSnapshot().runMode?.mode).toBe('hybrid')
 })
 
-test('the Models page leads with the three modes and says what Hybrid needs on this Mac', async () => {
+test('the Models page leads with the three modes and says what Hybrid needs: Bonsai on this Mac and a cloud lead', async () => {
   const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status: localStatus, job: null } : method === 'provider_list' ? { ok: true, profiles } : { ok: true })
   await Promise.all([store.loadRunMode(), store.loadLocalSetup(), store.loadProviders()])
   const html = renderToStaticMarkup(createElement(RunModeSection, { snap: store.getSnapshot() }))
-  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'On this Mac', 'Ternary Bonsai 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up Bonsai', 'Cloud advisor', 'Claude Code']) {
+  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary Bonsai 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up Bonsai', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
     expect(html).toContain(words)
   }
   expect(html).toContain('aria-checked="true"')

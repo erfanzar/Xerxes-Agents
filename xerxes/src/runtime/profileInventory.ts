@@ -8,7 +8,7 @@ import { reportedModelReasoning, type ProfileStore, type ProviderProfile } from 
 import { claudeCodeCatalog, claudeCodeReasoningLevels } from '../llms/claudeCodeCatalog.js'
 import type { RuntimeConnection } from '../daemon/runtimeConnection.js'
 import { discoverModelCatalog, profileDiscoveryApiKey, sanitizeModelDiscoveryError } from '../daemon/modelDiscovery.js'
-import { catalogReasoningLevels, fallbackReasoningLevels, liveReasoningLevels, providerReasoningLevels, selectableEfforts } from '../llms/reasoningLevels.js'
+import { cardReasoningLevels, catalogReasoningLevels, fallbackReasoningLevels, liveReasoningLevels, providerReasoningLevels, selectableEfforts } from '../llms/reasoningLevels.js'
 import { modelsDev, reportModelCapability, type LiveReasoning } from '../llms/modelsDev.js'
 import { getApiKey, getProviderConfig, isProviderName, resolveProvider } from '../llms/providerRegistry.js'
 import { DEFAULT_RADIUS_GATEWAY, loadRadiusGatewayConfig, normalizeRadiusGatewayUrl } from '../llms/radiusGateway.js'
@@ -137,7 +137,7 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
         await modelsDev.load()
         const levels = live?.reasoningLevels.length ? providerReasoningLevels(live.reasoningLevels.map(level => ({ effort: level.effort, ...(level.description === undefined ? {} : { description: level.description }) })), live.defaultReasoningLevel)
           : profile.provider === 'claude-code' ? claudeCodeReasoningLevels(claudeCodeCatalog.find(model))
-          : liveReasoningLevels(reportedReasoning.get(JSON.stringify([profile.name, model])) ?? reportedModelReasoning(profile, model), 'provider') ?? catalogReasoningLevels(model, provider, profile.base_url) ?? fallbackReasoningLevels(provider)
+          : liveReasoningLevels(reportedReasoning.get(JSON.stringify([profile.name, model])) ?? reportedModelReasoning(profile, model), 'provider') ?? catalogReasoningLevels(model, provider, profile.base_url) ?? cardReasoningLevels(model) ?? fallbackReasoningLevels(provider)
         return { efforts: selectableEfforts(levels), source: levels.provenance ?? 'unknown', shape: levels.shape, ...(levels.defaultEffort === undefined ? {} : { defaultEffort: levels.defaultEffort }) }
       },
     })

@@ -1176,6 +1176,8 @@ export class Store {
       () => {
         void this.refreshGoal()
         void this.refreshSessions()
+        // The composer shows where a Hybrid task ran, so the mode is needed before Settings opens.
+        void this.loadRunMode()
       },
       error => this.wentOffline(error),
     )
@@ -3016,24 +3018,25 @@ export class Store {
       }
       this.patch({ runMode: runModeView(result), runModeError: '' })
     } catch (error) {
-      this.patch({ runModeError: desktopError(error) })
+      // A runtime from before run modes has no run_mode.get: nothing to show, not an error.
+      const message = desktopError(error)
+      this.patch({ runModeError: /unknown method/i.test(message) ? '' : message })
     }
   }
 
   /**
    * Choose a mode. Private and Hybrid need Bonsai set up (`needs_local_setup`),
-   * Cloud a cloud worker (`needs_cloud_profile`); the caller shows what to do.
-   * Fully local mode and the advisor apply after an idle restart, started here.
+   * Hybrid and Cloud a cloud model to lead or work (`needs_cloud_profile`); the
+   * caller shows what to do. Fully local mode and the data boundary apply after
+   * an idle restart, started here.
    */
-  async setRunMode(mode: RunModeName, options: { workerProfile?: string; advisorProfile?: string | null; budgetUsd?: number } = {}): Promise<{ ok: boolean; code?: string }> {
+  async setRunMode(mode: RunModeName, options: { workerProfile?: string } = {}): Promise<{ ok: boolean; code?: string }> {
     if (this.frame.runModeSaving || this.frame.turnActive) return { ok: false, code: 'busy' }
     this.patch({ runModeSaving: true, runModeError: '' })
     try {
       const result = await this.bridge.call('run_mode.set', {
         mode,
         ...(options.workerProfile === undefined ? {} : { worker_profile: options.workerProfile }),
-        ...(options.advisorProfile === undefined ? {} : { advisor_profile: options.advisorProfile }),
-        ...(options.budgetUsd === undefined ? {} : { budget_usd: options.budgetUsd }),
       })
       if (result.ok === false) {
         const code = str(result.code)

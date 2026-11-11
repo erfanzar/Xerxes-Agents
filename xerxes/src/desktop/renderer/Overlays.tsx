@@ -885,7 +885,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                 <span className="provcard__name">{name}</span>
                 {row.chip ? <span className={`provcard__badge provcard__badge--${tone}`}>{row.chip}</span> : null}
                 {provider.local !== undefined && <span className="provcard__badge provcard__badge--quiet">{provider.local ? 'on this machine' : 'cloud'}</span>}
-                {snap.runMode?.advisor?.profile === provider.name && snap.runMode.mode === 'hybrid' && <span className="provcard__badge provcard__badge--quiet">advisor</span>}
+                {snap.runMode?.mode === 'hybrid' && snap.runMode.worker?.profile === provider.name && <span className="provcard__badge provcard__badge--quiet">Hybrid lead</span>}
               </span>
               <span className="provcard__model">{provider.model || 'Model chosen when used'}</span>
               <span className="provcard__meta">{provider.provider} · {row.status}</span>

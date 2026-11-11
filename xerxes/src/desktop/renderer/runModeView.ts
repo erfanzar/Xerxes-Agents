@@ -6,7 +6,7 @@ import type { LocalSetupJobView, LocalStatusView, RunModeName, RunModeView } fro
 /** What each mode means, in the product plan's words: who does the work and what may leave. */
 export const RUN_MODE_CHOICES: ReadonlyArray<{ readonly mode: RunModeName; readonly label: string; readonly summary: string; readonly boundary: string }> = [
   { mode: 'private', label: 'Private', summary: 'Bonsai on this Mac does all the work.', boundary: 'Nothing leaves during a run.' },
-  { mode: 'hybrid', label: 'Hybrid', summary: 'Bonsai does the work; a cloud advisor plans and helps when it is stuck.', boundary: 'Only what the advisor is asked leaves, within your budget.' },
+  { mode: 'hybrid', label: 'Hybrid', summary: 'A cloud model plans and checks; Bonsai does the file work on this Mac.', boundary: 'Your files stay here. Plans and short summaries go to the cloud.' },
   { mode: 'cloud', label: 'Cloud', summary: 'A cloud model does the work.', boundary: 'Task context may leave.' },
 ]
 
@@ -25,12 +25,9 @@ function count(value: unknown): number | null {
 export function runModeView(result: Readonly<Record<string, unknown>>): RunModeView {
   const mode = result.mode === 'private' || result.mode === 'hybrid' || result.mode === 'cloud' ? result.mode : null
   const worker = record(result.worker)
-  const advisor = record(result.advisor)
   return {
     mode,
     worker: text(worker.profile) === null ? null : { profile: text(worker.profile)!, model: text(worker.model) ?? '', local: worker.local === true },
-    advisor: text(advisor.profile) === null ? null : { profile: text(advisor.profile)!, model: text(advisor.model), found: advisor.found === true },
-    budgetUsd: count(result.budget_usd) ?? 1,
     restartPending: result.restart_pending === true || result.restart_required === true,
     lockedBy: Array.isArray(result.locked_by) ? result.locked_by.filter((name): name is string => typeof name === 'string') : [],
   }

@@ -51,7 +51,7 @@ import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
-import { createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
+import { BoundaryRegistry, createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
 import { outboundApprovalPort } from './daemon/outboundGate.js';
 import { createTurnRouter } from './daemon/turnRouting.js';
 import { createEscalationFactory } from './daemon/turnEscalation.js';
@@ -2136,6 +2136,8 @@ function daemonRuntime(
     },
   };
   const subagentHosts = new Map<string, ReturnType<typeof createNativeSubagentHost>>();
+  // One data boundary per workspace for the main conversation and its subagents.
+  const boundaryRegistry = new BoundaryRegistry();
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
   // One for the host's lifetime: settings changes rebuild runners, and each
@@ -2372,6 +2374,18 @@ function daemonRuntime(
         if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
         return session.cwd;
       },
+      dataBoundaryFor: (root: string) => boundaryRegistry.boundaryFor(root, { ...config.runtime, ...settings }),
+      trustOfProfile: (profile: string | undefined, _model: string) => {
+        const named = profile ? profileStore.get(profile) : undefined;
+        return deriveDataTrust(named ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
+      },
+      sourceTrust: (sourceId: string) => {
+        const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
+        return session ? sessionDataTrust(session) : 'cloud';
+      },
+      // A child works under its conversation's safety floor: same output
+      // folder, same locked inputs, same command sandbox.
+      runSafetyFor: (sourceId: string, outputFolder: string) => runSafetyRegistry.forSession(sourceId, outputFolder),
       restoreModelCallScopes: (snapshot: SpawnedAgentSnapshot) =>
         restoreRecoveredModelCallScopes(snapshot.modelCallBindings, snapshot.sourceAgentId, {
           readSession: (id) => runtime?.listSessions().find(session => session.id === id),
@@ -2576,6 +2590,7 @@ function daemonRuntime(
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         trustOf: sessionDataTrust,
+        registry: boundaryRegistry,
       }),
       maxNetworkRetries: daemonMaxNetworkRetries,
       // Lean prompt (off by default): the session's profile field wins, then

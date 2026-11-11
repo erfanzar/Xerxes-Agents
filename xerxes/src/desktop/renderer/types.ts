@@ -393,11 +393,10 @@ export interface ProviderRow {
 export type RunModeName = 'private' | 'hybrid' | 'cloud'
 
 export interface RunModeView {
-  /** Null until a worker profile is chosen. */
+  /** Null until a main profile is chosen, or when the settings match no mode. */
   readonly mode: RunModeName | null
+  /** The main agent: Bonsai in Private, the cloud lead in Hybrid, the cloud model in Cloud. */
   readonly worker: { readonly profile: string; readonly model: string; readonly local: boolean } | null
-  readonly advisor: { readonly profile: string; readonly model: string | null; readonly found: boolean } | null
-  readonly budgetUsd: number
   /** Saved, but the runtime applies it only after a restart. */
   readonly restartPending: boolean
   /** Environment variables that override the saved mode. */

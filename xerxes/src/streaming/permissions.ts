@@ -180,10 +180,14 @@ export function permissionDisposition(
   if (command) {
     return isSafeCommandInput(command) ? 'allow' : 'prompt'
   }
+  // Stopping a task only ends work this conversation started (a subagent or
+  // a background command): a lead that cuts a stalled worker short should not
+  // have to wait for a click to do it.
   return name === 'Agent'
     || name === 'AgentTool'
     || name === 'SendMessage'
     || name === 'SendMessageTool'
+    || name === 'TaskStopTool'
     || name === 'MemorySave'
     ? 'allow'
     : 'prompt'

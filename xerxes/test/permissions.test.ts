@@ -127,6 +127,9 @@ test('auto mode recognizes registered single-agent tool names but still prompts 
   expect(checkPermission(call('AgentTool', { prompt: 'inspect this' }), 'auto')).toBe(true)
   expect(checkPermission(call('SendMessageTool', { target: 'reviewer', message: 'check tests' }), 'auto')).toBe(true)
   expect(checkPermission(call('SpawnAgents', {}), 'auto')).toBe(false)
+  // Stopping a task this conversation started needs no click in auto mode.
+  expect(checkPermission(call('TaskStopTool', { task_id: 'subagent_1' }), 'auto')).toBe(true)
+  expect(checkPermission(call('TaskStopTool', { task_id: 'subagent_1' }), 'manual')).toBe(false)
   expect(checkPermission(call('AgentTool', { prompt: 'inspect this' }), 'plan')).toBe(false)
 })
 

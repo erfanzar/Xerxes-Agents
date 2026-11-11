@@ -4,6 +4,7 @@
 import type { ProfileStore } from '../bridge/profiles.js'
 import type { ToolRegistry } from '../executors/toolRegistry.js'
 import { createLlmClient } from '../llms/client.js'
+import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 import { AdvisorBudget, parseAdvisorConfig } from '../runtime/advisorBudget.js'
 import type { OutboundGate, OutboundRequestSummary } from '../security/boundaryTypes.js'
 import { DataBoundary, deriveDataTrust, parseDataBoundaryConfig } from '../security/dataBoundary.js'
@@ -62,6 +63,17 @@ export function registerConfiguredAdvisor(tools: ToolRegistry, options: AdvisorW
     client: createAdvisorClientFromLlm(llm, model, ADVISOR_MAX_OUTPUT_TOKENS),
     gate,
     trust: deriveDataTrust(profile),
+    // Each consult is charged to its task in the usage record, so Hybrid can
+    // show how much of a task ran on the cloud advisor and what it sent.
+    onConsult: record => recordModelUsage({
+      model: record.model,
+      profile: profile.name,
+      ...(record.sessionId ? { session: record.sessionId } : {}),
+      role: 'advisor',
+      inputTokens: record.inputTokens,
+      outputTokens: record.outputTokens,
+      bytesSent: record.bytes,
+    }),
     budgetFor: sessionId => {
       let budget = budgets.get(sessionId)
       if (!budget) {

@@ -2277,6 +2277,15 @@ function addSampling(
     }
   }
   const published = publishedSamplingProfile(request.model)
+  // A model whose card publishes thinking and thinking-off settings switches
+  // with its chat template (Qwen-style templates on llama.cpp, MLX and LM
+  // Studio). Off reaches it only as `chat_template_kwargs`; without this a
+  // turn asked to answer directly still reasoned for hundreds of tokens.
+  if (published && request.thinking !== undefined && !thinkingEnabled && canDisable
+    && payload.thinking === undefined && payload.enable_thinking === undefined && !wireDisablesThinking(payload)) {
+    const kwargs = payload.chat_template_kwargs
+    payload.chat_template_kwargs = { ...(typeof kwargs === 'object' && kwargs !== null && !Array.isArray(kwargs) ? kwargs as Record<string, unknown> : {}), enable_thinking: false }
+  }
   if (published) {
     addPublishedSampling(payload, request, providerName, published)
     return

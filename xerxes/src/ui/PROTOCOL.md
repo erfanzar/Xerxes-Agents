@@ -244,8 +244,9 @@ params fall back to per-connection defaults.
 
 | Method                  | Params                                                      | Result                                                     | Notes                                                                                                                                              |
 | ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session.usage`         | `{ session_key? }`                                           | `{ ok, ... }` or `{ ok: false }`                            | Token/telemetry totals for one session, with the resolved context limit.                                                                           |
-| `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. `cost_basis: "subscription"` (on `session`, each `models[]` row, `status_update`, session payloads and the `/cost` result) marks calls a plan pays for (Claude Code, Codex, Copilot, keyless Anthropic): `cost_usd` is then only what API prices would charge, clients show "Included in plan" and leave it out of spend totals. Absent means per-token billing. |
+| `outputs.list`          | `{ session_key? }`                                           | `{ ok, cwd, outputs[] }` or `{ ok: false }`                 | Every file the task wrote, by any tool or script, recorded at the end of each turn: `outputs[]` rows are `{ path, turn, size, modified_at }`, `path` relative to `cwd`, newest first. Hidden files and bytecode caches are left out; a file deleted since drops out. |
+| `session.usage`         | `{ session_key? }`                                           | `{ ok, ..., models?, advisor? }` or `{ ok: false }`         | Token/telemetry totals for one session, with the resolved context limit. `models[]` and `advisor` are described under "Per-task model usage".      |
+| `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. `cost_basis: "subscription"` (on `session`, each `models[]` row, `status_update`, session payloads and the `/cost` result) marks calls a plan pays for (Claude Code, Codex, Copilot, keyless Anthropic): `cost_usd` is then only what API prices would charge, clients show "Included in plan" and leave it out of spend totals. Absent means per-token billing. Each `models[]` row also carries `local` (true on this machine, false in the cloud, null when the profile is unknown), and `session` carries the task's own `models[]` and `advisor` (see "Per-task model usage"). |
 | `plugins.secret.set`    | `{ plugin, name, value, session_key? }`                      | `{ ok, plugin, name, stored }` or `{ ok: false, error }`    | Store one secret a managed or project plugin declares in `permissions.secrets`. The value goes straight to the encrypted store (mode 0600) and never appears in a reply, notification, transcript or log; empty or over-16 KB values are refused. Clients send it from a password field, never a slash command. |
 | `plugins.secret.status` | `{ plugin, session_key? }`                                   | `{ ok, plugin, declared[], set[] }`                         | Secret names a plugin declares and which of them have a stored value. Never returns values. |
 | `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the named (default: attached) session; also emits `session_title`. Like `session.save`, `session.undo`, `session.compress`, `changes.undo` and `workspace.worktree`, it never re-binds the connection to `session_key`. |
@@ -2744,27 +2745,49 @@ session `shared`, permanently. In a shared session the remembered `ALWAYS` appro
 "always" answer is remembered only for that session; once/session grants made inside the
 session are still honored.
 
+### Per-task model usage (additive v35)
+
+`session.usage` and the `session` object of `usage.report` carry which models
+the task used, from the daemon's usage ledger (absent when the daemon keeps
+none):
+
+- `models[]`: one row per model, profile and role, most tokens first:
+  `model`, `profile?`, `role?` (`worker`, `advisor` or `subagent`), `local`
+  (true on this machine, false in the cloud, null when the profile is unknown
+  or deleted), `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`, `bytes_sent?` (measured for advisor calls), `cost_usd?`
+  (only when a published price exists) and `cost_basis?`.
+- `advisor`: `{ profile, max_calls, max_usd }`, the advisor's per-task limits
+  as the runtime loaded them, present when an advisor is configured.
+
+A subagent's rounds count toward the task that started it. Rounds recorded
+before this field existed belong to no task and appear only in the machine
+totals. Clients compute shares by tokens processed (input, output and cache).
+
 ### Run modes and local setup (additive v35)
 
 Private, Hybrid and Cloud are combinations of existing settings, so these methods
 add no new runtime state. A daemon started without the host ports answers each
 with `{ ok: false, code: "unsupported" }`.
 
-- `run_mode.get` `{}` → `{ ok, mode, worker, advisor, local_only, budget_usd,
-  restart_pending, locked_by }`. `mode` is `private` (local worker, fully local mode
-  on), `hybrid` (local worker; `advisor` names the cloud advisor or is null) or
-  `cloud` (cloud worker), and null until a worker profile is chosen.
-  `worker` is `{ profile, model, local }`; `advisor` is `{ profile, model, found }`.
+- `run_mode.get` `{}` → `{ ok, mode, worker, local_only, restart_pending,
+  locked_by }`. `mode` is `private` (local main profile, fully local mode on),
+  `hybrid` (cloud main profile leading, `data_boundary: hybrid`) or `cloud` (cloud
+  main profile), and null until a main profile is chosen or when the settings
+  match no mode. `worker` is the main profile `{ profile, model, local }`.
   `restart_pending` says the saved settings differ from the ones the daemon started
   with; `locked_by` lists environment variables that override them.
-- `run_mode.set` `{ mode, worker_profile?, advisor_profile?, budget_usd? }` → the
-  same fields plus `restart_required`. Without `worker_profile` it keeps the current
-  worker when it fits the mode, else uses `bonsai-local` for Private and Hybrid.
-  `advisor_profile: null` removes the advisor. Refusals carry a `code`:
-  `needs_local_setup`, `needs_cloud_profile`, `wrong_location`, `unknown_profile`,
-  `invalid_request` or `worker_not_selected`. The worker is selected as by
-  `provider_select` (emitting `InitDone`); the settings are written to the
-  `runtime` section of `daemon/config.json`.
+- `run_mode.set` `{ mode, worker_profile? }` → the same fields plus
+  `restart_required`. Without `worker_profile` it keeps the current main profile
+  when it fits the mode, else uses `bonsai-local` for Private; Hybrid and Cloud
+  need a cloud profile. Private and Hybrid need `bonsai-local`. Refusals carry a
+  `code`: `needs_local_setup`, `needs_cloud_profile`, `wrong_location`,
+  `unknown_profile`, `invalid_request` or `worker_not_selected`. The main profile is
+  selected as by `provider_select` (emitting `InitDone`); the settings are written to
+  the `runtime` section of `daemon/config.json`, and the Agent intelligence tiers
+  are saved as `agent.settings.save` would (all on Bonsai in Private; light and
+  balanced on Bonsai with `reasoning_effort: off` and smart on the lead in Hybrid;
+  none in Cloud).
 - `local.status` `{}` → `{ ok, status, job }`: `xerxes local doctor --json` as one
   shape, `status: { ready, engine: { name, label, found, version, new_enough },
   model: { id, label, bytes, downloaded }, server: { running, port, context_length },

@@ -77,49 +77,57 @@ test('a fresh install has no mode, and the built-in Claude Code fallback is not 
     const rows = listed.profiles as Array<{ name: string; local: boolean }>
     expect(rows.find(row => row.name === 'bonsai-local')?.local).toBe(true)
     expect(rows.find(row => row.name === 'claude-code')?.local).toBe(false)
-    expect(await call('run_mode.get', {})).toMatchObject({ ok: true, mode: null, worker: null, advisor: null, budget_usd: 1, restart_pending: false })
+    expect(await call('run_mode.get', {})).toMatchObject({ ok: true, mode: null, worker: null, restart_pending: false })
   })
 })
 
-test('Hybrid needs Bonsai set up first; then it selects Bonsai and saves the cloud advisor for the next start', async () => {
+test('Hybrid needs Bonsai and a cloud lead; then the lead runs the task, the boundary is saved and Bonsai takes the subagent tiers', async () => {
   await withDaemon({ openrouter }, {}, async call => {
     expect(await call('run_mode.set', { mode: 'hybrid' })).toMatchObject({ ok: false, code: 'needs_local_setup' })
   })
   await withDaemon({ 'bonsai-local': bonsai, openrouter }, {}, async (call, { configPath, store }) => {
-    expect(await call('run_mode.set', { mode: 'hybrid', advisor_profile: 'bonsai-local' })).toMatchObject({ ok: false, code: 'wrong_location' })
-    const set = await call('run_mode.set', { mode: 'hybrid', advisor_profile: 'openrouter', budget_usd: 2 })
-    expect(set).toMatchObject({
-      ok: true, mode: 'hybrid', restart_required: true, budget_usd: 2,
-      worker: { profile: 'bonsai-local', local: true },
-      advisor: { profile: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', found: true },
+    store.setActive('bonsai-local')
+    // Bonsai is chosen, so no cloud model is there to lead yet.
+    expect(await call('run_mode.set', { mode: 'hybrid' })).toMatchObject({ ok: false, code: 'needs_cloud_profile' })
+    expect(await call('run_mode.set', { mode: 'hybrid', worker_profile: 'bonsai-local' })).toMatchObject({ ok: false, code: 'wrong_location' })
+    const set = await call('run_mode.set', { mode: 'hybrid', worker_profile: 'openrouter' })
+    expect(set).toMatchObject({ ok: true, mode: 'hybrid', restart_required: true, worker: { profile: 'openrouter', local: false } })
+    expect(store.chosenActive()).toBe('openrouter')
+    // The task the request came from moves to the lead, as with provider_select.
+    expect(((await call('session.status', {})).session as Record<string, unknown>).model).toBe('deepseek/deepseek-v4.1-flash')
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ runtime: { data_boundary: 'hybrid', boundary: { private_paths: ['**'], cloud_results: 'summary', approve_outbound: 'off' } } })
+    const tiers = (await call('agent.settings.get', {})).settings as Record<string, unknown>
+    expect(tiers).toMatchObject({
+      default: 'balanced',
+      balanced: { model: 'ternary-bonsai-2-27b', provider_profile: 'bonsai-local', reasoning_effort: 'off' },
+      smart: { model: 'deepseek/deepseek-v4.1-flash', provider_profile: 'openrouter' },
     })
-    expect(store.chosenActive()).toBe('bonsai-local')
-    // The task the request came from moves to the worker, as with provider_select.
-    expect(((await call('session.status', {})).session as Record<string, unknown>).model).toBe('ternary-bonsai-2-27b')
-    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ runtime: { advisor: { profile: 'openrouter' }, escalation: { max_usd: 2 } } })
     expect((await call('provider_list', {})).active_chosen).toBe(true)
   })
 })
 
-test('an advisor with no model takes the first one its provider reports, or is refused with the reason', async () => {
+test('a cloud lead that reports no model is refused with the reason, and nothing is saved', async () => {
   // A cloud profile whose endpoint refuses connections: it reports no models.
   const unreachable = { name: 'unreachable', provider: 'openai', base_url: 'http://127.0.0.1:9/v1', api_key: 'k', model: '', data_trust: 'cloud', model_capabilities: {}, sampling: {} }
   await withDaemon({ 'bonsai-local': bonsai, unreachable }, {}, async (call, { configPath, store }) => {
-    const refused = await call('run_mode.set', { mode: 'hybrid', advisor_profile: 'unreachable' })
-    expect(refused).toMatchObject({ ok: false, code: 'advisor_no_model' })
+    const refused = await call('run_mode.set', { mode: 'hybrid', worker_profile: 'unreachable' })
+    expect(refused).toMatchObject({ ok: false, code: 'worker_not_selected' })
     expect(String(refused.error)).toContain('Check its sign-in')
     expect(store.get('unreachable')?.model).toBe('')
     expect(await readFile(configPath, 'utf8').catch(() => 'absent')).toBe('absent')
   })
 })
 
-test('Private turns fully local mode on; Cloud needs a cloud worker and turns it off', async () => {
-  await withDaemon({ 'bonsai-local': bonsai, openrouter }, { loaded: { local_only: true } }, async (call, { configPath }) => {
+test('Private turns fully local mode on; Cloud needs a cloud model and leaves every tier on it', async () => {
+  await withDaemon({ 'bonsai-local': bonsai, openrouter }, { loaded: { local_only: true } }, async (call, { configPath, store }) => {
+    store.setActive('bonsai-local')
     expect(await call('run_mode.set', { mode: 'private' })).toMatchObject({ ok: true, mode: 'private', local_only: true, restart_required: false })
+    expect((await call('agent.settings.get', {})).settings).toMatchObject({ smart: { provider_profile: 'bonsai-local' } })
     expect(await call('run_mode.set', { mode: 'cloud' })).toMatchObject({ ok: false, code: 'needs_cloud_profile' })
     expect(await call('run_mode.set', { mode: 'cloud', worker_profile: 'bonsai-local' })).toMatchObject({ ok: false, code: 'wrong_location' })
     expect(await call('run_mode.set', { mode: 'cloud', worker_profile: 'openrouter' })).toMatchObject({ ok: true, mode: 'cloud', local_only: false, restart_required: true })
     expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({ runtime: {} })
+    expect((await call('agent.settings.get', {})).settings).toEqual({})
     expect(await call('run_mode.set', { mode: 'remote' })).toMatchObject({ ok: false, code: 'invalid_request' })
   })
 })
@@ -141,7 +149,7 @@ test('a local setup started from the app reports progress and applies the chosen
     store = context.store
     expect(await call('local.status', {})).toMatchObject({ ok: true, status: { engine: { name: 'llama-server', found: true }, model: { downloaded: false } }, job: null })
     expect(await call('local.setup', { then_mode: 'cloud' })).toMatchObject({ ok: false, code: 'invalid_request' })
-    expect(await call('local.setup', { then_mode: 'hybrid' })).toMatchObject({ ok: true, job: { state: 'running' } })
+    expect(await call('local.setup', { then_mode: 'private' })).toMatchObject({ ok: true, job: { state: 'running' } })
     const deadline = Date.now() + 5000
     let job: Record<string, unknown> | undefined
     while (Date.now() < deadline) {
@@ -152,7 +160,7 @@ test('a local setup started from the app reports progress and applies the chosen
     expect(job).toMatchObject({ state: 'done', result: { context_length: 32768 } })
     const steps = context.events.filter(event => event.type === 'local_setup').map(event => (event.payload.job as Record<string, unknown>).step)
     expect(steps).toContain('Downloading ternary-bonsai-2-27b: 50% (3.5 GiB / 7.1 GiB)')
-    expect(await call('run_mode.get', {})).toMatchObject({ mode: 'hybrid', worker: { profile: 'bonsai-local' } })
+    expect(await call('run_mode.get', {})).toMatchObject({ mode: 'private', worker: { profile: 'bonsai-local' } })
   })
 })
 

@@ -40,6 +40,7 @@ import { Icon, type IconName } from './Icon.js'
 import { GitPanel } from './GitPanel.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
+import { OutputsList, OutputsPanel } from './OutputsPanel.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
@@ -55,6 +56,7 @@ export type DesktopPanel =
   | 'review'
   | 'terminal'
   | 'usage'
+  | 'outputs'
   | 'workspace'
   | 'snapshots'
   | null
@@ -66,16 +68,16 @@ export const PAGE_TITLES: Readonly<Record<DesktopPageName, string>> = {
 const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> = {
   agents: 'Specialists you can bring into a conversation.',
   extensions: 'Instructions and tools available in this workspace.',
-  artifacts: 'Files this task changed, and its exportable transcript.',
+  artifacts: 'Files this task wrote or changed, and its exportable transcript.',
   schedules: 'Jobs that run on their own in this workspace.',
 }
 /** Views that open in the task-context rail beside the conversation. */
-export type RailPanel = 'files' | 'review' | 'terminal' | 'activity' | 'usage'
-export const RAIL_PANELS: readonly RailPanel[] = ['files', 'review', 'terminal', 'activity', 'usage']
+export type RailPanel = 'files' | 'outputs' | 'review' | 'terminal' | 'activity' | 'usage'
+export const RAIL_PANELS: readonly RailPanel[] = ['files', 'outputs', 'review', 'terminal', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
@@ -187,12 +189,13 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     return () => observer.disconnect()
   }, [panel])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
+      {panel === 'outputs' && <OutputsPanel snap={snap} />}
       {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
     </div>
   </aside>
@@ -235,6 +238,7 @@ export function DesktopSheet({
     review: 'Git',
     terminal: 'Terminal',
     usage: 'Usage',
+    outputs: 'Outputs',
     workspace: 'Workspace',
     snapshots: 'Snapshots',
   }
@@ -277,6 +281,7 @@ export function DesktopSheet({
           {panel === 'review' && <GitPanel snap={snap} expanded />}
           {panel === 'terminal' && <TerminalPanel snap={snap} />}
           {panel === 'usage' && <UsagePanel snap={snap} />}
+          {panel === 'outputs' && <OutputsPanel snap={snap} />}
           {panel === 'files' && <FilesPanel snap={snap} close={close} />}
           {panel === 'workspace' && <WorkspacePanel snap={snap} />}
         </div>
@@ -291,6 +296,7 @@ function ArtifactsPanel({ snap }: { snap: Snapshot }): ReactElement {
   return <div className="studio-form">
     <Feedback {...request} />
     <button className="btn btn--ghost" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
+    <OutputsList snap={snap} />
     {snap.changes.map(file => <div className="studio-item" key={file.path}><div><strong>{file.path}</strong><p>+{file.adds} −{file.dels}</p></div><button onClick={() => open('review', file.path)}>Review changes <Icon name="arrow" size={12} /></button></div>)}
     {!snap.changes.length && <p className="studio-muted">No files changed in this session yet.</p>}
   </div>

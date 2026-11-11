@@ -77,7 +77,7 @@ import {
   fallbackReasoningLevels,
   providerReasoningLevels,
   REASONING_OFF,
-  catalogReasoningLevels,
+  cardReasoningLevels, catalogReasoningLevels,
   liveReasoningLevels,
   reasoningUnreported,
   reasoningShapeNote,
@@ -131,6 +131,8 @@ import {
 import { CronScheduler, type JobClock } from "../cron/scheduler.js";
 import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, resumeGoal, GoalError } from "../runtime/goalDomain.js";
 import { classifyError } from "../runtime/errorClassifier.js";
+import { parseAdvisorConfig } from "../runtime/advisorBudget.js";
+import { taskOutputFiles, taskOutputsOf, taskOutputsPayload } from "./taskOutputs.js";
 import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
 import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
@@ -366,7 +368,7 @@ import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
 import { HubModelService } from './hubModels.js';
 import type { SignInReadiness, SignInReadinessProbe } from './providerReadiness.js';
 import { createLocalSetupJobs, localSetupJobPayload, localStatusPayload, type LocalCommandRunner, type LocalSetupJobs } from './localSetup.js';
-import { applyRunMode, isLocalProfile, parseRunMode, readRunMode, runModePayload, type RunMode, type RunModeState, type RuntimeSettingsFile } from './runMode.js';
+import { applyRunMode, isLocalProfile, parseRunMode, readRunMode, runModePayload, runModeTiers, type RunMode, type RunModeState, type RuntimeSettingsFile } from './runMode.js';
 import { LOCAL_PROFILE_NAME } from '../local/command.js';
 import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities, localProviderSelections, type LocalProviderSelection } from './remoteProviderBindings.js';
@@ -500,6 +502,7 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   "git.commitMessage",
   // Provider quota endpoints: slow networks must not stall the client's queue.
   "usage.report",
+  "outputs.list",
   "git.fetch",
   "git.pull",
   "git.push",
@@ -2718,6 +2721,13 @@ export class DaemonServer {
       // desktop Usage tab and the TUI's /usage view.
       return this.usageReportView(this.runtime.sessionStatus(sessionKey(connection, params)) ?? undefined, params.refresh === true);
     }
+    if (method === "outputs.list") {
+      // Every file the task wrote, by any tool or script (recorded at the end
+      // of each turn), with its size and time read now.
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "no active session" };
+      return taskOutputsPayload(session.cwd, await taskOutputFiles(session.cwd, taskOutputsOf(session.metadata))) as JsonRpcPayload;
+    }
     if (method === "session.usage") {
       const session = this.runtime.sessionStatus(
         sessionKey(connection, params),
@@ -2726,6 +2736,7 @@ export class DaemonServer {
         ? {
             ok: true,
             ...sessionUsagePayload(session, this.contextLimit(session.model, session)),
+            ...this.taskModelsPayload(session),
           }
         : { ok: false, error: "no active session" };
     }
@@ -4733,7 +4744,49 @@ export class DaemonServer {
       ...sessionRuntimeTelemetryPayload(session.extra.runtime_telemetry),
       ...(() => { const cost = session.model ? this.sessionCost(session, session.model) : undefined; return cost === undefined ? {} : { cost_usd: cost }; })(),
       ...(this.sessionCostBasis(session) ? { cost_basis: this.sessionCostBasis(session) } : {}),
+      ...this.taskModelsPayload(session),
     };
+  }
+
+  /**
+   * Which models one task used and how much: the worker, the cloud advisor and
+   * subagents, each marked on this machine or in the cloud, priced like the
+   * machine totals. With an advisor configured, its per-task limits too, so
+   * Hybrid can show calls and spend against them. Empty on a daemon that
+   * records no usage.
+   */
+  private taskModelsPayload(session: DaemonSession): JsonRpcPayload {
+    const ledger = modelUsageLedger();
+    if (!ledger) return {};
+    const models = ledger.sessionTotals(session.id).map(row => {
+      const profile = row.profile ? this.profileStore.get(row.profile) : undefined;
+      const cost = this.priceTokens(profile, row.model, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens);
+      return {
+        model: row.model,
+        ...(row.profile ? { profile: row.profile } : {}),
+        ...(row.role ? { role: row.role } : {}),
+        // null: the profile is unknown or gone, so where it ran cannot be said.
+        local: profile ? isLocalProfile(profile) : null,
+        calls: row.rounds,
+        input_tokens: row.inputTokens,
+        output_tokens: row.outputTokens,
+        cache_read_tokens: row.cacheReadTokens,
+        cache_write_tokens: row.cacheWriteTokens,
+        ...(row.bytesSent > 0 ? { bytes_sent: row.bytesSent } : {}),
+        ...(cost === undefined ? {} : { cost_usd: cost }),
+        ...(profileCostBasis(profile) ? { cost_basis: profileCostBasis(profile) } : {}),
+      };
+    });
+    let advisor: JsonRpcPayload | undefined;
+    if (this.modeSettings) {
+      try {
+        const config = parseAdvisorConfig(this.modeSettings.loaded, this.modeSettings.env ?? process.env);
+        if (config.profile) advisor = { profile: config.profile, max_calls: config.maxCalls, max_usd: config.maxUsd };
+      } catch {
+        // An advisor setting the runtime refused at start registered no advisor.
+      }
+    }
+    return { models: models as unknown as JsonRpcPayload[], ...(advisor ? { advisor } : {}) };
   }
 
   private async usageReportView(session: DaemonSession | undefined, refresh: boolean): Promise<JsonRpcPayload> {
@@ -4761,6 +4814,7 @@ export class DaemonServer {
       return {
         model: row.model,
         ...(row.profile ? { profile: row.profile } : {}),
+        local: profile ? isLocalProfile(profile) : null,
         calls: row.rounds,
         input_tokens: row.inputTokens,
         output_tokens: row.outputTokens,
@@ -6968,7 +7022,7 @@ export class DaemonServer {
     // model, else models.dev, else nothing (no ladder is ever invented).
     const reported = liveReasoningLevels(reportedModelReasoning(profile, model), "provider");
     await modelsDev.load();
-    const catalog = reported ?? catalogReasoningLevels(model, providerName, profile?.base_url);
+    const catalog = reported ?? catalogReasoningLevels(model, providerName, profile?.base_url) ?? cardReasoningLevels(model);
     if (providerName !== "openai-codex") {
       return catalog ?? fallbackReasoningLevels(providerName);
     }
@@ -11074,7 +11128,6 @@ export class DaemonServer {
       loaded: settings?.loaded ?? {},
       env: settings?.env ?? process.env,
       worker: chosen === undefined ? undefined : this.profileStore.get(chosen),
-      profile: name => this.profileStore.get(name),
     });
   }
 
@@ -11090,63 +11143,46 @@ export class DaemonServer {
     let mode: RunMode;
     try { mode = parseRunMode(params.mode); }
     catch (error) { return { ok: false, code: "invalid_request", error: errorMessage(error) }; }
-    const onThisMachine = mode !== "cloud";
+    // Private runs Bonsai itself; Hybrid and Cloud are led by a cloud model.
+    const mainIsLocal = mode === "private";
+    const local = this.profileStore.get(LOCAL_PROFILE_NAME);
+    if (mode !== "cloud" && !local) return { ok: false, code: "needs_local_setup", error: "Set up Bonsai on this machine first." };
     const chosen = this.profileStore.chosenActive();
     const current = chosen === undefined ? undefined : this.profileStore.get(chosen);
     const requested = optionalString(params.worker_profile);
     const workerName = requested
-      ?? (current && isLocalProfile(current) === onThisMachine ? current.name : undefined)
-      ?? (onThisMachine && this.profileStore.get(LOCAL_PROFILE_NAME) ? LOCAL_PROFILE_NAME : undefined);
+      ?? (current && isLocalProfile(current) === mainIsLocal ? current.name : undefined)
+      ?? (mainIsLocal ? LOCAL_PROFILE_NAME : undefined);
     if (!workerName) {
-      return onThisMachine
-        ? { ok: false, code: "needs_local_setup", error: "Set up Bonsai on this machine first." }
-        : { ok: false, code: "needs_cloud_profile", error: "Choose the cloud provider that does the work." };
+      return { ok: false, code: "needs_cloud_profile", error: mode === "hybrid" ? "Choose the cloud model that leads." : "Choose the cloud provider that does the work." };
     }
     const worker = this.profileStore.get(workerName);
     if (!worker) return { ok: false, code: "unknown_profile", error: `No provider profile named ${workerName}` };
-    if (isLocalProfile(worker) !== onThisMachine) {
-      return { ok: false, code: "wrong_location", error: onThisMachine
-        ? `${workerName} is a cloud provider; ${mode === "private" ? "Private" : "Hybrid"} mode does the work on this machine.`
-        : `${workerName} runs on this machine; Cloud mode does the work with a cloud provider.` };
-    }
-    let advisorProfile: string | null | undefined;
-    if (params.advisor_profile === null) advisorProfile = null;
-    else if (params.advisor_profile !== undefined) {
-      const name = optionalString(params.advisor_profile);
-      const advisor = name === undefined ? undefined : this.profileStore.get(name);
-      if (!name || !advisor) return { ok: false, code: "unknown_profile", error: `No provider profile named ${String(params.advisor_profile)}` };
-      if (isLocalProfile(advisor)) return { ok: false, code: "wrong_location", error: `${name} runs on this machine; the advisor is a cloud model.` };
-      if (!advisor.model.trim()) {
-        // A sign-in profile carries no model until used: take the first one it reports, as provider_select does.
-        const found = await this.fetchModels({ profile_name: name });
-        const first = Array.isArray(found.models) ? String(found.models[0] ?? "").trim() : "";
-        if (!first) {
-          return { ok: false, code: "advisor_no_model", error: `${name} reported no models${typeof found.warning === "string" ? ` (${found.warning})` : ""}. Check its sign-in, then choose it again.` };
-        }
-        this.profileStore.save({ name, provider: advisor.provider, apiKey: advisor.api_key, baseUrl: advisor.base_url, model: first, setActive: false });
-      }
-      advisorProfile = name;
-    }
-    if (params.budget_usd !== undefined && typeof params.budget_usd !== "number") {
-      return { ok: false, code: "invalid_request", error: "budget_usd must be a number of dollars." };
+    if (isLocalProfile(worker) !== mainIsLocal) {
+      return { ok: false, code: "wrong_location", error: mainIsLocal
+        ? `${workerName} is a cloud provider; Private mode does the work on this machine.`
+        : `${workerName} runs on this machine; ${mode === "hybrid" ? "Hybrid is led" : "Cloud mode does the work"} with a cloud provider.` };
     }
     let next: Record<string, unknown>;
     try {
-      next = applyRunMode(settings.file.read(), {
-        mode,
-        ...(advisorProfile === undefined ? {} : { advisorProfile }),
-        ...(typeof params.budget_usd === "number" ? { budgetUsd: params.budget_usd } : {}),
-      });
+      next = applyRunMode(settings.file.read(), mode);
     } catch (error) {
       return { ok: false, code: "invalid_request", error: errorMessage(error) };
     }
     if (workerName !== chosen) {
-      // As provider_select: the asking window's task moves to the worker too. A
-      // window that has gone (a setup finishing later) only changes the default.
+      // As provider_select: the asking window's task moves to the main profile
+      // too, and a sign-in profile without a model takes the first it reports.
       const selected = await this.selectProvider(connection, workerName);
       if (selected.ok !== true) return { ...selected, code: "worker_not_selected" };
     }
+    const main = this.profileStore.get(workerName);
+    // Where subagents run in this mode, saved where the Agent intelligence page reads and edits it.
+    let tiers;
+    try { tiers = runModeTiers(mode, local, main); }
+    catch (error) { return { ok: false, code: "invalid_request", error: errorMessage(error) }; }
+    this.agentSettingsStore.save(tiers, this.agentSettingsStore.read().revision);
     settings.file.write(next);
+    this.runtime.reload({});
     const state = this.runModeState();
     return { ok: true, ...runModePayload(state), restart_required: state.restartPending };
   }

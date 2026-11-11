@@ -496,24 +496,71 @@ CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's sa
 How new tasks run. The desktop app sets it under **Models & Providers**, and asks for it on first
 run. Each mode is a combination of settings the runtime already has:
 
-| Mode | Does the work | Settings |
-| --- | --- | --- |
-| Private | Bonsai on this machine | the worker is a local profile and `runtime.local_only: true` |
-| Hybrid | Bonsai, with a cloud advisor | the worker is a local profile; `runtime.advisor.profile` names a cloud profile, `runtime.escalation.max_usd` caps cloud spend per task ($1 by default) |
-| Cloud | a cloud model | the worker is a cloud profile |
+| Mode | Main agent | Subagents (Agent intelligence tiers) | Settings |
+| --- | --- | --- | --- |
+| Private | Bonsai on this machine | all on Bonsai | `runtime.local_only: true` |
+| Hybrid | a cloud model that plans, splits the work and checks it | light and balanced on Bonsai with thinking off; smart on the lead | `runtime.data_boundary: hybrid` with `boundary: { private_paths: ["**"], cloud_results: summary, approve_outbound: off }` |
+| Cloud | a cloud model | all on the main model | none |
 
-- **The worker** is the active provider profile. Nothing runs until one is chosen: the built-in
+- **The main agent** is the active provider profile. Nothing runs until one is chosen: the built-in
   Claude Code profile is listed, but it is not used until you pick it.
+- **Hybrid in practice:** the [data boundary](#data-boundary) keeps every workspace file away from
+  the cloud lead, so it hands the file work to Bonsai agents on this machine and gets back their
+  replies cut to 8 KB. In a test on five spreadsheet and document tasks it got 4 right, with no input
+  file lines reaching the cloud except quoted answers; Bonsai alone got 2, Claude alone 5. A step on
+  Bonsai takes seconds to minutes, so a Hybrid task takes minutes where Cloud takes seconds, and work
+  that needs reading free text (invoices in many layouts) can still fail.
+- **Choosing a mode** also sets the Agent intelligence tiers in the table; adjust them afterwards
+  under Agent intelligence. The cloud advisor is no longer part of a mode: choosing one clears
+  `runtime.advisor.profile` (set it yourself to use the advisor).
 - **Setting up Bonsai from the app** runs the same steps as `xerxes local setup`, in the
   runtime, with live progress. It can be cancelled; a partial download resumes next time.
   Choosing Private or Hybrid before Bonsai is set up offers the setup first.
-- **Restart:** fully local mode and the advisor are read when the runtime starts. After a change
-  to either, the app restarts the runtime once no work is running.
-- **Environment:** `XERXES_LOCAL_ONLY` and `XERXES_ADVISOR_PROFILE` override the saved settings,
-  and the app says so.
-- **RPC:** `run_mode.get` and `run_mode.set` (`mode`, and optionally `worker_profile`,
-  `advisor_profile`, `budget_usd`); `local.status`, `local.setup` (optionally `then_mode`:
+- **Restart:** fully local mode and the data boundary are read when the runtime starts. After a
+  change to either, the app restarts the runtime once no work is running.
+- **Environment:** `XERXES_LOCAL_ONLY` and `XERXES_DATA_BOUNDARY` override the saved settings, and
+  the app says so.
+- **Seeing where a task ran:** every provider round is charged to its task: the main agent's,
+  each subagent's and each advisor call (with the bytes it sent). In Hybrid the desktop composer
+  shows the split ("35% on this Mac"), and **Usage** opens with the task model by model: role, on
+  this Mac or in the cloud, calls, tokens and cloud cost. The terminal UI's `/usage` prints the
+  same lines. Shares are by tokens processed.
+- **RPC:** `run_mode.get` and `run_mode.set` (`mode`, and optionally `worker_profile`: the main
+  profile, which is the lead in Hybrid); `local.status`, `local.setup` (optionally `then_mode`:
   `private` or `hybrid`) and `local.setup.cancel`, with progress as `local_setup` events.
+
+## Data boundary
+
+`runtime.data_boundary` (`off` by default, or `private`, `hybrid`, `cloud`; `XERXES_DATA_BOUNDARY`
+wins) keeps chosen files away from cloud models. A profile is local when its base URL is loopback
+or a unix socket, or when its `data_trust` says so; anything else is cloud.
+
+| `runtime.boundary` key | Default | What it does |
+| --- | --- | --- |
+| `private_paths` | none | Globs relative to the project (the project's `.xerxes/data-policy.yaml` can add more). A cloud model may not read, search or run commands on them; a local agent that does is marked as having read private data. |
+| `read_only_inputs` | on when a mode is set | Existing files may not be changed and private paths may not be written, except under `output_dir`, which stays writable even when it falls under `private_paths`. |
+| `output_dir` | `out` | Where results are written. |
+| `approve_outbound` | `first` in `hybrid`, else `off` | Ask before a cloud model request: `off`, `first` or `every`. |
+| `cloud_results` | `withhold` | What a cloud conversation gets back from a local agent that read private data: nothing, or (`summary`) its reply cut to `summary_max_bytes` and marked as such. |
+| `summary_max_bytes` | `8000` | 256 to 65536. |
+
+- **Subagents** are held to the same rules as the conversation that started them: each one's tool
+  calls are judged by where its own model runs, and its reply is filtered before a cloud parent
+  sees it. Where the boundary would ask before a command on private files, a local subagent (which
+  has nobody to ask) follows the normal permission mode instead; what it read is still recorded.
+  Refusals, such as changing an input file, apply to every agent.
+- **A cloud model as lead:** with `hybrid`, private paths and a cloud model running the
+  conversation, the model is told to hand the file work to local agents (a local
+  [Agent intelligence](#agent-intelligence-tiers) tier) and to ask them for counts, totals and check
+  results rather than contents. For example, to keep every file in the workspace on this machine:
+
+  ```json
+  { "runtime": {
+    "data_boundary": "hybrid",
+    "boundary": { "private_paths": ["**"], "cloud_results": "summary", "approve_outbound": "off" },
+    "agent_intelligence": { "default": "balanced",
+      "balanced": { "model": "ternary-bonsai-2-27b", "provider_profile": "bonsai-local" } } } }
+  ```
 
 ## Bonsai and the local cascade
 

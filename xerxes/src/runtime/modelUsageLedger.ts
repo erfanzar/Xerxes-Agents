@@ -22,10 +22,18 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+/** Who spent the tokens in a task: the model doing the work, the cloud advisor, or a subagent. */
+export type ModelUsageRole = 'worker' | 'advisor' | 'subagent'
+
 export interface ModelUsageRound {
   readonly model: string
   /** Provider profile that served the round, when the caller knows it. */
   readonly profile?: string | undefined
+  /** The task (session id) the round belongs to; a subagent's is its parent task. */
+  readonly session?: string | undefined
+  readonly role?: ModelUsageRole | undefined
+  /** UTF-8 bytes the request carried, when the caller measured them (the advisor does). */
+  readonly bytesSent?: number | undefined
   readonly inputTokens: number
   readonly outputTokens: number
   readonly cacheReadTokens?: number | undefined
@@ -44,6 +52,14 @@ export interface ModelUsageTotal {
   readonly cacheWriteTokens: number
   readonly lastAt: number
 }
+
+/** One task's totals per (model, profile, role). */
+export interface ModelUsageSessionTotal extends ModelUsageTotal {
+  readonly role: ModelUsageRole | ''
+  readonly bytesSent: number
+}
+
+const ROLES: ReadonlySet<string> = new Set(['worker', 'advisor', 'subagent'])
 
 const whole = (value: number | undefined): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0
@@ -65,6 +81,13 @@ export class ModelUsageLedger {
       cache_write_tokens INTEGER NOT NULL DEFAULT 0
     )`)
     this.db.run('CREATE INDEX IF NOT EXISTS rounds_at ON rounds (at)')
+    // Added later: which task a round belongs to and in what role. Rows from
+    // before keep '' and count toward the machine totals only.
+    const columns = new Set((this.db.query('PRAGMA table_info(rounds)').all() as Array<{ name: string }>).map(column => column.name))
+    if (!columns.has('session_id')) this.db.run("ALTER TABLE rounds ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+    if (!columns.has('role')) this.db.run("ALTER TABLE rounds ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+    if (!columns.has('bytes_sent')) this.db.run('ALTER TABLE rounds ADD COLUMN bytes_sent INTEGER NOT NULL DEFAULT 0')
+    this.db.run('CREATE INDEX IF NOT EXISTS rounds_session ON rounds (session_id)')
   }
 
   record(round: ModelUsageRound): void {
@@ -74,9 +97,37 @@ export class ModelUsageLedger {
     const output = whole(round.outputTokens)
     const cacheRead = whole(round.cacheReadTokens)
     const cacheWrite = whole(round.cacheWriteTokens)
-    if (!input && !output && !cacheRead && !cacheWrite) return
-    this.db.query('INSERT INTO rounds (at, model, profile, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(round.at ?? Date.now(), model, round.profile?.trim() ?? '', input, output, cacheRead, cacheWrite)
+    const bytes = whole(round.bytesSent)
+    // An advisor call whose provider reported no tokens still happened: the bytes it sent say so.
+    if (!input && !output && !cacheRead && !cacheWrite && !bytes) return
+    const role = round.role !== undefined && ROLES.has(round.role) ? round.role : ''
+    this.db.query(`INSERT INTO rounds (at, model, profile, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, session_id, role, bytes_sent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(round.at ?? Date.now(), model, round.profile?.trim() ?? '', input, output, cacheRead, cacheWrite, round.session?.trim() ?? '', role, bytes)
+  }
+
+  /** One task's totals per (model, profile, role), most tokens first. */
+  sessionTotals(sessionId: string): ModelUsageSessionTotal[] {
+    if (!sessionId.trim()) return []
+    const rows = this.db.query(`SELECT model, profile, role, COUNT(*) AS rounds,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
+        SUM(bytes_sent) AS bytes_sent, MAX(at) AS last_at
+      FROM rounds WHERE session_id = ? GROUP BY model, profile, role
+      ORDER BY SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`)
+      .all(sessionId.trim()) as Array<Record<string, number | string>>
+    return rows.map(row => ({
+      model: String(row.model),
+      profile: String(row.profile ?? ''),
+      role: ROLES.has(String(row.role)) ? String(row.role) as ModelUsageRole : '',
+      rounds: Number(row.rounds),
+      inputTokens: Number(row.input_tokens),
+      outputTokens: Number(row.output_tokens),
+      cacheReadTokens: Number(row.cache_read_tokens),
+      cacheWriteTokens: Number(row.cache_write_tokens),
+      bytesSent: Number(row.bytes_sent),
+      lastAt: Number(row.last_at),
+    }))
   }
 
   /** Totals per (model, profile) since `since`, most expensive in tokens first. */
