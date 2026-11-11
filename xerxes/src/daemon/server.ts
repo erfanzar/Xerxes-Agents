@@ -1248,7 +1248,7 @@ export class DaemonServer {
   private readonly providerReadiness: SignInReadinessProbe | undefined;
   private readonly localSetupJobs: LocalSetupJobs | undefined;
   /** The mode to apply when the running local setup succeeds, and who asked. */
-  private localSetupIntent: { readonly connection: DaemonTransportConnection; readonly mode: RunMode } | undefined;
+  private localSetupIntent: { readonly connection: DaemonTransportConnection; readonly mode: RunMode; readonly workerProfile?: string } | undefined;
   private readonly modeSettings: DaemonServerOptions["modeSettings"];
   private readonly agentSettingsStore: AgentSettingsStore;
   private readonly agentSettingsDefaults: unknown;
@@ -1489,7 +1489,7 @@ export class DaemonServer {
         const intent = this.localSetupIntent;
         this.localSetupIntent = undefined;
         if (!intent) return;
-        const applied = await this.setRunMode(intent.connection, { mode: intent.mode });
+        const applied = await this.setRunMode(intent.connection, { mode: intent.mode, ...(intent.workerProfile === undefined ? {} : { worker_profile: intent.workerProfile }) });
         if (applied.ok !== true) throw new Error(optionalString(applied.error) ?? "the mode could not be applied");
       },
     });
@@ -4007,9 +4007,20 @@ export class DaemonServer {
         catch (error) { return { ok: false, code: "invalid_request", error: errorMessage(error) }; }
         if (then === "cloud") return { ok: false, code: "invalid_request", error: "Cloud mode does not run on this machine." };
       }
+      // The cloud lead someone picked for Hybrid while Bonsai was not set up yet,
+      // applied with the mode once setup succeeds instead of being asked for again.
+      let lead: string | undefined;
+      if (params.then_worker_profile !== undefined) {
+        if (then !== "hybrid") return { ok: false, code: "invalid_request", error: "then_worker_profile applies to then_mode hybrid only." };
+        if (typeof params.then_worker_profile !== "string" || !params.then_worker_profile.trim()) return { ok: false, code: "invalid_request", error: "then_worker_profile must be a profile name." };
+        const profile = this.profileStore.get(params.then_worker_profile);
+        if (!profile) return { ok: false, code: "unknown_profile", error: `No provider profile named ${params.then_worker_profile}` };
+        if (isLocalProfile(profile)) return { ok: false, code: "wrong_location", error: `${profile.name} runs on this machine; Hybrid is led with a cloud provider.` };
+        lead = profile.name;
+      }
       const started = jobs.start();
       if (!started.ok) return { ok: false, code: started.code, error: "A local setup is already running.", job: localSetupJobPayload(started.job) };
-      this.localSetupIntent = then === undefined ? undefined : { connection, mode: then };
+      this.localSetupIntent = then === undefined ? undefined : { connection, mode: then, ...(lead === undefined ? {} : { workerProfile: lead }) };
       return { ok: true, job: localSetupJobPayload(started.job) };
     }
     if (method === "provider_list") {

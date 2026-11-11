@@ -2837,9 +2837,12 @@ with `{ ok: false, code: "unsupported" }`.
   shape, `status: { ready, engine: { name, label, found, version, new_enough },
   model: { id, label, bytes, downloaded }, server: { running, port, context_length },
   memory_bytes, blocker }`, and the current or last setup job.
-- `local.setup` `{ then_mode? }` → `{ ok, job }` at once; the setup itself runs
-  `xerxes local setup --json` in the daemon. `then_mode` (`private` or `hybrid`) is
-  applied as `run_mode.set` when it succeeds. A second request while one runs
+- `local.setup` `{ then_mode?, then_worker_profile? }` → `{ ok, job }` at once; the
+  setup itself runs `xerxes local setup --json` in the daemon. `then_mode` (`private`
+  or `hybrid`) is applied as `run_mode.set` when it succeeds. `then_worker_profile`,
+  with `then_mode: "hybrid"` only, is the cloud lead picked before Bonsai existed; it
+  is applied as that `run_mode.set`'s `worker_profile`. An unknown profile returns
+  `unknown_profile`, a local one `wrong_location`. A second request while one runs
   returns `{ ok: false, code: "busy", job }`.
 - `local.setup.cancel` `{}` → `{ ok, cancelled }`.
 

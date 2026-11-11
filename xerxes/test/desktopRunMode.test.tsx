@@ -6,6 +6,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { RunModeSection } from '../src/desktop/renderer/RunModeSection.js'
+import { setupTodo } from '../src/desktop/renderer/Setup.js'
 import { localSetupJobView, localStatusView, runModeView } from '../src/desktop/renderer/runModeView.js'
 import { Store, type XerxesLike } from '../src/desktop/renderer/store.js'
 import type { DaemonEvent } from '../src/desktop/renderer/types.js'
@@ -118,4 +119,22 @@ test('the Models page leads with the three modes and says what Hybrid needs: Bon
   await unknown.loadRunMode()
   // An older runtime without modes shows nothing here rather than a broken choice.
   expect(renderToStaticMarkup(createElement(RunModeSection, { snap: unknown.getSnapshot() }))).toBe('')
+})
+
+test('setup carries the Hybrid lead picked before Bonsai existed, and only for Hybrid', async () => {
+  const { store, bridge } = connectedStore(() => ({ ok: true, job: { id: 'j1', state: 'running', step: 'Starting' } }))
+  await store.startLocalSetup('hybrid', 'claude-code')
+  await store.startLocalSetup('private', 'claude-code')
+  await store.startLocalSetup('hybrid', '')
+  expect(bridge.calls.filter(call => call.method === 'local.setup').map(call => call.params)).toEqual([
+    { then_mode: 'hybrid', then_worker_profile: 'claude-code' },
+    { then_mode: 'private' },
+    { then_mode: 'hybrid' },
+  ])
+})
+
+test('the first-run card names what is left as a sentence', () => {
+  expect(setupTodo({ workspace: true, runtime: true, model: false })).toBe('Choose how Xerxes runs')
+  expect(setupTodo({ workspace: false, runtime: true, model: false })).toBe('Choose a folder and how Xerxes runs')
+  expect(setupTodo({ workspace: true, runtime: true, model: true })).toBe('Almost there')
 })

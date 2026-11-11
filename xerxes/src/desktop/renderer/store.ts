@@ -3078,10 +3078,15 @@ export class Store {
     }
   }
 
-  /** Download (if needed) and start Bonsai, then switch to `thenMode`. Progress arrives as `local_setup` events. */
-  async startLocalSetup(thenMode?: 'private' | 'hybrid'): Promise<void> {
+  /**
+   * Download (if needed) and start Bonsai, then switch to `thenMode`, led in
+   * Hybrid by `lead` when one was picked before setup. Progress arrives as
+   * `local_setup` events.
+   */
+  async startLocalSetup(thenMode?: 'private' | 'hybrid', lead?: string): Promise<void> {
     try {
-      const result = await this.bridge.call('local.setup', thenMode === undefined ? {} : { then_mode: thenMode })
+      const params = thenMode === undefined ? {} : { then_mode: thenMode, ...(thenMode === 'hybrid' && lead ? { then_worker_profile: lead } : {}) }
+      const result = await this.bridge.call('local.setup', params)
       const job = localSetupJobView(result.job)
       this.patch({ localSetup: { ...this.frame.localSetup, ...(job ? { job } : {}), error: result.ok === false ? str(result.error) || 'Setup could not start.' : '' } })
     } catch (error) {

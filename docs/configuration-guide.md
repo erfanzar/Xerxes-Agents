@@ -527,7 +527,8 @@ run. Each mode is a combination of settings the runtime already has:
   same lines. Shares are by tokens processed.
 - **RPC:** `run_mode.get` and `run_mode.set` (`mode`, and optionally `worker_profile`: the main
   profile, which is the lead in Hybrid); `local.status`, `local.setup` (optionally `then_mode`:
-  `private` or `hybrid`) and `local.setup.cancel`, with progress as `local_setup` events.
+  `private` or `hybrid`, and with Hybrid `then_worker_profile`, the lead picked before setup) and
+  `local.setup.cancel`, with progress as `local_setup` events.
 
 ## Data boundary
 

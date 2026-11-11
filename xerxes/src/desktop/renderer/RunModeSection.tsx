@@ -20,6 +20,8 @@ const MODE_ICONS: Record<RunModeName, IconName> = { private: 'shield', hybrid: '
 export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | null {
   /** A mode the person picked that still needs a step (setup, or a cloud provider) before it applies. */
   const [pending, setPending] = useState<RunModeName | null>(null)
+  /** The cloud lead picked for Hybrid before Bonsai was set up; setup applies it with the mode. */
+  const [lead, setLead] = useState('')
   const view = snap.runMode
   // Once the mode it waited for is in use (setup finished, a provider chosen), nothing is pending.
   useEffect(() => { if (pending !== null && view?.mode === pending) setPending(null) }, [pending, view?.mode])
@@ -115,7 +117,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           )}
           {local.status && !local.status.blocker && !settingUp && !(local.status.server.running && view?.mode === shown) && (
             <div className="localpanel__actions">
-              <button className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown)}>
+              <button className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown, shown === 'hybrid' ? lead : undefined)}>
                 {local.status.model.downloaded
                   ? `Start Bonsai and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
                   : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up Bonsai`}
@@ -134,8 +136,14 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
             : (
               <label className="field">
                 <span>Lead</span>
-                <select value={view?.mode === 'hybrid' ? view.worker?.profile ?? '' : ''} disabled={busy}
-                  onChange={event => { if (event.target.value) void store.setRunMode('hybrid', { workerProfile: event.target.value }).then(result => { if (result.ok) setPending(null) }) }}>
+                <select value={view?.mode === 'hybrid' ? view.worker?.profile ?? '' : lead} disabled={busy}
+                  onChange={event => {
+                    const name = event.target.value
+                    if (!name) return
+                    // Kept while Bonsai still needs setting up, so the setup button applies it.
+                    setLead(name)
+                    void store.setRunMode('hybrid', { workerProfile: name }).then(result => { if (result.ok) setPending(null) })
+                  }}>
                   <option value="" disabled>Choose the cloud model that leads</option>
                   {cloudProfiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.model ? ` · ${profile.model}` : ''}</option>)}
                 </select>

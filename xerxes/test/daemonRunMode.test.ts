@@ -164,6 +164,38 @@ test('a local setup started from the app reports progress and applies the chosen
   })
 })
 
+test('a cloud lead picked for Hybrid before Bonsai was set up is applied when setup succeeds', async () => {
+  let store: ProfileStore | undefined
+  const run: LocalCommandRunner = async (argv, io) => {
+    if (argv[0] === 'doctor') {
+      io.stdout(JSON.stringify({ ok: true, engine: 'llama-server', ready: false, selection: { ok: true }, llama_server: { found: true, version: '0.9.0', new_enough: true }, model: { id: 'ternary-bonsai-2-27b', present: true, verified: true }, server: { running: false } }) + '\n')
+      return 1
+    }
+    new ProfileStore(store!.filePath).save({ name: 'bonsai-local', baseUrl: bonsai.base_url, apiKey: '', model: bonsai.model, provider: 'custom', dataTrust: 'local', setActive: false })
+    io.stdout(JSON.stringify({ ok: true, engine: 'llama-server', profile: 'bonsai-local', context_length: 32768 }) + '\n')
+    return 0
+  }
+  await withDaemon({ openrouter }, { localSetup: run }, async (call, context) => {
+    store = context.store
+    // Picking the lead first is not an error: it waits for Bonsai.
+    expect(await call('run_mode.set', { mode: 'hybrid', worker_profile: 'openrouter' })).toMatchObject({ ok: false, code: 'needs_local_setup' })
+    // A lead only goes with Hybrid, must exist and must be a cloud provider.
+    expect(await call('local.setup', { then_mode: 'private', then_worker_profile: 'openrouter' })).toMatchObject({ ok: false, code: 'invalid_request' })
+    expect(await call('local.setup', { then_mode: 'hybrid', then_worker_profile: 42 })).toMatchObject({ ok: false, code: 'invalid_request' })
+    expect(await call('local.setup', { then_mode: 'hybrid', then_worker_profile: 'nobody' })).toMatchObject({ ok: false, code: 'unknown_profile' })
+    expect(await call('local.setup', { then_mode: 'hybrid', then_worker_profile: 'openrouter' })).toMatchObject({ ok: true, job: { state: 'running' } })
+    const deadline = Date.now() + 5000
+    let job: Record<string, unknown> | undefined
+    while (Date.now() < deadline) {
+      job = (await call('local.status', {})).job as Record<string, unknown> | undefined
+      if (job?.state !== 'running') break
+      await Bun.sleep(10)
+    }
+    expect(job).toMatchObject({ state: 'done' })
+    expect(await call('run_mode.get', {})).toMatchObject({ mode: 'hybrid', worker: { profile: 'openrouter', local: false } })
+  })
+})
+
 test('a daemon without the ports says so instead of pretending', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-run-mode-bare-'))
   try {
