@@ -618,7 +618,8 @@ function csvCell(value: JsonValue | undefined): string {
   return typeof value === 'string' ? value : JSON.stringify(value)
 }
 
-function parseCsv(text: string, delimiter: string): string[][] {
+/** RFC-4180 rows of `text`; one unbalanced quote fails the whole parse. Shared with XlsxConvert. */
+export function parseCsv(text: string, delimiter: string): string[][] {
   const rows: string[][] = []
   let row: string[] = []
   let field = ''
@@ -662,7 +663,8 @@ function parseCsv(text: string, delimiter: string): string[][] {
   return rows
 }
 
-function stringifyCsv(rows: string[][], delimiter: string): string {
+/** `rows` as RFC-4180 text with LF endings and a trailing newline. Shared with XlsxConvert. */
+export function stringifyCsv(rows: string[][], delimiter: string): string {
   return rows.map(row => row.map(cell => csvEscape(cell, delimiter)).join(delimiter)).join('\n') + '\n'
 }
 

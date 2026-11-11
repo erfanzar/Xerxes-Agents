@@ -539,7 +539,7 @@ or a unix socket, or when its `data_trust` says so; anything else is cloud.
 | `runtime.boundary` key | Default | What it does |
 | --- | --- | --- |
 | `private_paths` | none | Globs relative to the project (the project's `.xerxes/data-policy.yaml` can add more). A cloud model may not read, search or run commands on them; a local agent that does is marked as having read private data. |
-| `read_only_inputs` | on when a mode is set | Existing files may not be changed and private paths may not be written, except under `output_dir`, which stays writable even when it falls under `private_paths`. |
+| `read_only_inputs` | on when a mode is set | Existing files may not be changed and private paths may not be written, except under `output_dir`, which stays writable even when it falls under `private_paths`. This covers the file tools and the Excel writers (`XlsxWriter`, and `XlsxConvert`'s `output_path`). |
 | `output_dir` | `out` | Where results are written. |
 | `approve_outbound` | `first` in `hybrid`, else `off` | Ask before a cloud model request: `off`, `first` or `every`. |
 | `cloud_results` | `withhold` | What a cloud conversation gets back from a local agent that read private data: nothing, or (`summary`) its reply cut to `summary_max_bytes` and marked as such. |
@@ -664,10 +664,10 @@ With either engine:
   - **A failed reload** is named in the retry message, and the failure is then handled as before.
   - **Older starts:** a llama-server started before this release has no recorded window, so it is
     not restarted. Run `xerxes local stop` and `start` once.
-- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 12 tools and terse
-  rules, at most 3K tokens with a full instruction block, instead of about 29K. The tools are
+- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 13 tools and terse
+  rules, at most about 3.1K tokens with a full instruction block, instead of about 29K. The tools are
   ReadFile, WriteFile, FileEditTool, GlobTool, GrepTool, exec_command, check_command, CSVProcessor,
-  XlsxReader, XlsxWriter, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
+  XlsxReader, XlsxWriter, XlsxConvert, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
   It includes the project's instruction files (`XERXES.md`, `AGENTS.md`, `CLAUDE.md` and their
   `.local.md` overlays, found the same way as for the full prompt) in at most 1,500 characters. A
@@ -812,7 +812,7 @@ permission mode. In `auto`, each session gets a safety floor for its working fol
   - A result check reports any input that changed anyway, once.
   - `.git`, `node_modules` and virtual environments are never written without asking.
 - **Outputs:** a new file in the folder, or one the session created, is written
-  without asking: `WriteFile`, `XlsxWriter`, `CSVProcessor` writes and edits.
+  without asking: `WriteFile`, `XlsxWriter`, `XlsxConvert`, `CSVProcessor` writes and edits.
 - **Commands:** `exec_command` runs in an OS sandbox without asking. The sandbox
   reads anything and writes only the folder and a per-session temp folder (its
   `TMPDIR`). It can't change, delete or rename inputs, and has no network.

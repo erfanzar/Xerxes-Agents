@@ -39,6 +39,7 @@ const FILE_WRITERS: Readonly<Record<string, string>> = {
   Edit: 'file_path',
   FileEditTool: 'file_path',
   XlsxWriter: 'path',
+  XlsxConvert: 'output_path',
 }
 
 export interface RunSafetyOptions {

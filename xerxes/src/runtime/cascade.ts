@@ -23,7 +23,7 @@ export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /** Tools whose output file the result checks inspect, on top of {@link MUTATING_TOOL_NAMES}. */
-const CHECKED_OUTPUT_TOOL_NAMES: ReadonlySet<string> = new Set(['XlsxWriter'])
+const CHECKED_OUTPUT_TOOL_NAMES: ReadonlySet<string> = new Set(['XlsxWriter', 'XlsxConvert'])
 
 /**
  * Backstop on re-runs within one turn. The escalation ladder (local retries,
@@ -109,7 +109,8 @@ export async function turnResultFindings(
   for (const execution of executions) {
     const failed = !execution.permitted || execution.result.startsWith('Tool execution failed')
     if (!failed && (MUTATING_TOOL_NAMES.has(execution.name) || CHECKED_OUTPUT_TOOL_NAMES.has(execution.name))) {
-      const path = execution.inputs.file_path ?? execution.inputs.path
+      // XlsxConvert reads `path` and writes `output_path`.
+      const path = execution.inputs.file_path ?? execution.inputs.output_path ?? execution.inputs.path
       if (typeof path === 'string' && path) changedFiles.push(path)
     }
     let ok = !failed

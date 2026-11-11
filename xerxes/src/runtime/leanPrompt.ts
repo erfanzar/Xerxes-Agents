@@ -30,6 +30,7 @@ export const LEAN_CORE_TOOL_NAMES: readonly string[] = Object.freeze([
   'CSVProcessor',
   'XlsxWriter',
   'XlsxReader',
+  'XlsxConvert',
   'AskUserQuestionTool',
   'AskAdvisor',
 ])
@@ -183,7 +184,11 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     lines.push('- A command still running at its timeout keeps running in the background. Read it with check_command and the proc_id it returned.')
   }
   if (has('XlsxWriter')) {
-    lines.push('- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')
+    lines.push(has('XlsxConvert')
+      ? '- Write .xlsx with XlsxWriter (WriteFile stores plain text). Python may lack openpyxl: for a script, convert .xlsx to CSV and back with XlsxConvert.'
+      : '- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')
+  } else if (has('XlsxConvert')) {
+    lines.push('- Python may lack openpyxl: for a script, convert .xlsx to CSV and back with XlsxConvert.')
   }
   if (has('AskUserQuestionTool')) {
     lines.push('- If the request is unclear in a way that changes the result, ask with AskUserQuestionTool.')

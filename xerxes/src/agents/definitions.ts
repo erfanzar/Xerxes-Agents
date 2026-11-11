@@ -598,7 +598,7 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
   const standardTools = [
     'ReadFile', 'WriteFile', 'FileEditTool', 'GlobTool', 'GrepTool', 'ListDir',
     'exec_command', 'check_command', 'list_commands', 'kill_command', 'pty_open', 'pty_write', 'pty_list', 'pty_close',
-    'DuckDuckGoSearch', 'WebScraper', 'RSSReader', 'CSVProcessor', 'XlsxReader', 'XlsxWriter',
+    'DuckDuckGoSearch', 'WebScraper', 'RSSReader', 'CSVProcessor', 'XlsxReader', 'XlsxWriter', 'XlsxConvert',
     'computer_use', 'AgentTool', 'PlanTool', 'SpawnAgents', 'Workflow', 'SendMessageTool',
     'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',

@@ -284,7 +284,9 @@ interface ShellSegment {
 }
 
 const SHELL_TOOLS = new Set(['exec_command', 'ExecuteShell', 'Bash', 'shell', 'pty_open', 'pty_write'])
-const WRITE_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'MultiEdit', 'AppendFile', 'NotebookEdit'])
+const WRITE_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'MultiEdit', 'AppendFile', 'NotebookEdit', 'XlsxWriter', 'XlsxConvert'])
+/** The argument naming the file a write tool writes, where it is not `file_path` or `notebook_path`. */
+const WRITE_TARGET_KEYS: Readonly<Record<string, string>> = { XlsxWriter: 'path', XlsxConvert: 'output_path' }
 const CONTENT_SEARCH_TOOLS = new Set(['GrepTool', 'Grep'])
 const NAME_GLOB_TOOLS = new Set(['GlobTool', 'Glob'])
 const PATH_KEYS = ['file_path', 'path', 'directory_path', 'notebook_path'] as const
@@ -423,7 +425,7 @@ export class DataBoundary {
       '# Data boundary: you lead, local agents do the file work',
       `You run on a cloud model. These paths stay on this machine and you cannot read, search or run commands on them: ${this.config.privatePaths.join(', ')}.`,
       'Hand every step that touches them to local agents (AgentTool or SpawnAgents with a local intelligence tier). Give each one a complete brief: which files, the exact output path and format, and the checks to run before reporting. Tell them to keep names, labels and IDs as the input spells them.',
-      'Local agents have a small context window and are slow. Give each one a small piece (a few files, or one calculation), and tell it to work on data files with a script (python3) that prints only short results, never reading a whole data file into its own context.',
+      'Local agents have a small context window and are slow. Give each one a small piece (a few files, or one calculation), and tell it to work on data files with a script (python3) that prints only short results, never reading a whole data file into its own context. Python here may lack openpyxl and pandas: have it convert an .xlsx input to CSV with XlsxConvert first, and a CSV result to .xlsx the same way, so scripts need only the standard library.',
       'Wait at most a few minutes at a time. If an agent is still busy, read its progress; if it repeats itself or stalls, stop it and send the work again in smaller pieces with a sharper brief.',
       `Ask them to reply with what you need to decide: row counts, totals, check results and the paths they wrote. ${results}`,
       'You know the files only from what local agents report. Never state a fact about them that no agent reported, such as how the input spells a value, which currency or unit it uses, or why an output looks as it does; ask a local agent to check it, or say you do not know.',
@@ -590,7 +592,10 @@ export class DataBoundary {
   }
 
   private writeVerdict(name: string, inputs: JsonObject): BoundaryToolVerdict | undefined {
-    const raw = typeof inputs.file_path === 'string' ? inputs.file_path : typeof inputs.notebook_path === 'string' ? inputs.notebook_path : undefined
+    const key = WRITE_TARGET_KEYS[name]
+    const named = key === undefined ? undefined : inputs[key]
+    const raw = key !== undefined ? (typeof named === 'string' ? named : undefined)
+      : typeof inputs.file_path === 'string' ? inputs.file_path : typeof inputs.notebook_path === 'string' ? inputs.notebook_path : undefined
     if (!raw?.trim()) return undefined
     const absolute = resolve(this.root, expandHome(raw))
     // The output folder holds the run's results: it stays writable even when

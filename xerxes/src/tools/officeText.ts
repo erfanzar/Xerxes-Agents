@@ -32,7 +32,7 @@ export function binaryFileHint(path: string): string {
   switch (extname(path).toLowerCase()) {
     case '.xlsx':
     case '.xlsm':
-      return 'is an Excel workbook; read it with XlsxReader'
+      return 'is an Excel workbook; read it with XlsxReader, or convert it to CSV with XlsxConvert'
     case '.pdf':
       return 'is a PDF; ReadFile has no PDF text extraction, so use a PDF tool or skill if one is listed, or say it cannot be read here'
     case '.doc':

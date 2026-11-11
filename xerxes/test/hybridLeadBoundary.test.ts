@@ -55,6 +55,8 @@ test('only a cloud conversation that may not open private paths is told to lead'
   expect(text).toContain('keep names, labels and IDs as the input spells them')
   expect(text).toContain('Never state a fact about them that no agent reported')
   expect(text).toContain('which currency or unit it uses')
+  // Local Python may have no openpyxl: the lead routes workbooks through CSV.
+  expect(text).toContain('XlsxConvert')
   expect(boundary.leadInstruction('local')).toBe('')
   expect(new DataBoundary(parseDataBoundaryConfig({ data_boundary: 'hybrid' }, {}), '/work').leadInstruction('cloud')).toBe('')
   expect(new DataBoundary(parseDataBoundaryConfig({ ...lead, data_boundary: 'cloud' }, {}), '/work').leadInstruction('cloud')).toBe('')
@@ -184,5 +186,11 @@ test('with every path private, the output folder stays writable and nothing else
     expect(write('out/draft.csv')).toBeUndefined()
     expect(write('scripts/new.py')).toBe('deny')
     expect(write('bank.csv')).toBe('deny')
+    // The Excel tools are writes too, each naming its target its own way.
+    const excel = (name: string, inputs: Record<string, unknown>) => boundary.toolDisposition({ function: { name, arguments: inputs as never } }, { agentId: 'child', trust: 'local' })
+    expect(excel('XlsxWriter', { path: 'bank.csv', sheets: [], overwrite: true })).toBe('deny')
+    expect(excel('XlsxWriter', { path: 'out/summary.xlsx', sheets: [] })).toBeUndefined()
+    expect(excel('XlsxConvert', { path: 'bank.csv', output_path: 'out/bank.xlsx' })).toBeUndefined()
+    expect(excel('XlsxConvert', { path: 'out/draft.csv', output_path: 'bank.csv', overwrite: true })).toBe('deny')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

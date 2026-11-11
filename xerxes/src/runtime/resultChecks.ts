@@ -345,7 +345,7 @@ const NEGATION = /\b(?:not|never|no|without|unable to|cannot|can't|couldn't|didn
 const CHECK_COMMAND = /\b(?:bun\s+(?:run\s+)?test|vitest|jest|pytest|mocha|go\s+test|cargo\s+test|(?:npm|pnpm|yarn)\s+(?:run\s+)?test|tsc|eslint|ruff|mypy|lint|validate|validator|verify|check)\b/iu
 
 const WRITE_TOOLS: ReadonlySet<string> = new Set([
-  'WriteFile', 'FileEditTool', 'XlsxWriter', 'AppendFile', 'MultiEdit', 'Write', 'Edit', 'NotebookEdit', 'apply_patch',
+  'WriteFile', 'FileEditTool', 'XlsxWriter', 'XlsxConvert', 'AppendFile', 'MultiEdit', 'Write', 'Edit', 'NotebookEdit', 'apply_patch',
 ])
 const READ_BACK_TOOLS: ReadonlySet<string> = new Set(['XlsxReader', 'CSVProcessor'])
 

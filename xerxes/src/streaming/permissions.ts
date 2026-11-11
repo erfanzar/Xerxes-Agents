@@ -77,7 +77,7 @@ export interface PermissionBroker {
 }
 
 export const SAFE_TOOLS = new Set([
-  'ReadFile', 'GlobTool', 'GrepTool', 'ListDir', 'APIClient', 'RSSReader', 'URLAnalyzer', 'DuckDuckGoSearch', 'SystemInfo',
+  'ReadFile', 'XlsxReader', 'GlobTool', 'GrepTool', 'ListDir', 'APIClient', 'RSSReader', 'URLAnalyzer', 'DuckDuckGoSearch', 'SystemInfo',
   'skills_list', 'skill_view', 'session_search', 'search_memory', 'get_memory_statistics', 'consolidate_agent_memories',
   'agent_memory_read', 'agent_memory_list', 'agent_memory_search', 'agent_memory_status', 'TaskListTool', 'TaskGetTool',
   'TaskOutputTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ToolSearchTool', 'AskUserQuestionTool',

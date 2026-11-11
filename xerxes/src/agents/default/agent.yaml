@@ -25,6 +25,7 @@ agent:
     - CSVProcessor
     - XlsxReader
     - XlsxWriter
+    - XlsxConvert
     - computer_use
     - agent_memory_status
     - agent_memory_read

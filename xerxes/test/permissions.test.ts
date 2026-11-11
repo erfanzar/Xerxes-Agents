@@ -64,6 +64,10 @@ test('environment dumping commands always prompt instead of auto-approving', () 
 
 test('permission modes preserve read-only and write behavior', () => {
   expect(checkPermission(call('ReadFile', {}), 'auto')).toBe(true)
+  // Reading a workbook is a read like ReadFile: a local agent has nobody to ask.
+  expect(checkPermission(call('XlsxReader', { path: 'out/summary.xlsx' }), 'auto')).toBe(true)
+  // Converting writes a file, so it is not on the read-only list.
+  expect(checkPermission(call('XlsxConvert', { path: 'a.csv', output_path: 'a.xlsx' }), 'auto')).toBe(false)
   expect(checkPermission(call('WriteFile', { file_path: 'a.txt' }), 'auto')).toBe(false)
   expect(checkPermission(call('exec_command', { cmd: 'git status' }), 'plan')).toBe(true)
   expect(checkPermission(call('exec_command', { cmd: 'touch a.txt' }), 'plan')).toBe(false)
