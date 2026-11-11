@@ -58,6 +58,7 @@ export class SuperagentAbilities {
     if (!turn.reader.canRead({ workspaceId: workspace })) throw new Error('not found, or you cannot read this workspace')
     const spec = ABILITY_SPECS.find(item => item.name === name || item.providerName === name)
     if (spec === undefined) throw new Error('Unknown ability')
+    if (spec.tier === 'D') throw new Error('Risky actions require the exact owner confirmation path')
     const scope = { owner: turn.requester.id, thread: turn.threadId, workspace }
     if (this.options.paused?.()) throw new Error('Superagent is globally paused')
     if (spec.tier === 'B' && !this.options.authorized(scope.owner, workspace)) throw new Error('Only the current authorized Hub owner can use persistent abilities')

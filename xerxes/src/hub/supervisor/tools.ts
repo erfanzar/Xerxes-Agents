@@ -480,7 +480,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
         action_id: action.id,
         summary: action.summary,
         expires_at: new Date(action.expiresAt).toISOString(),
-        note: 'Nothing has run yet. Someone other than the Hub owner is in this conversation, so a person must tap Confirm first.',
+        note: spec.name === 'risk.execute' ? 'Nothing has run. Only the current Hub owner can Confirm this exact risky action; Autopilot cannot.' : 'Nothing has run yet. A person must tap Confirm first.',
       }
     } catch (error) {
       if (error instanceof SupervisorDenied) {
@@ -494,10 +494,10 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
   const specs = [...SUPERVISOR_TOOLS.values()].filter(spec => deps.abilities !== undefined || !ABILITY_SPECS.some(ability => ability.name === spec.name))
   for (const spec of specs) {
     const ability = ABILITY_SPECS.some(ability => ability.name === spec.name)
-    const run = ability ? (args: JsonObject, turn: SupervisorTurnState, signal?: AbortSignal) => {
+    const run = spec.gate === 'confirm' ? mutation(spec) : ability ? (args: JsonObject, turn: SupervisorTurnState, signal?: AbortSignal) => {
       if (deps.abilities === undefined) throw new Error('Superagent abilities are not configured')
       return deps.abilities.execute(spec.name, args, turn, signal)
-    } : spec.gate === 'confirm' ? mutation(spec) : handlers[spec.name]
+    } : handlers[spec.name]
     if (run === undefined) throw new Error(`no implementation for supervisor tool ${spec.name}`)
     const handler: ToolHandler = async (inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal) => {
       const turn = context.metadata[TURN_METADATA_KEY]

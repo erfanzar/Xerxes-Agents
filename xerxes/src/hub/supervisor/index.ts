@@ -14,7 +14,7 @@ import type { HubIdentityPort } from '../identityPort.js'
 import type { HubActor } from '../protocol.js'
 import type { HubWorkspaceView } from '../server.js'
 import type { SupervisorThreadStatus, SupervisorVoiceBridge } from '../voice/supervisorBridge.js'
-import { ActionService, SupervisorDenied, SupervisorGrantOverlay, type ActionExecutor, type ActionTargets, type AutopilotGrant } from './actions.js'
+import { ActionService, SupervisorDenied, SupervisorGrantOverlay, type ActionExecutor, type ActionTargets, type AutopilotGrant, type RiskActionHost } from './actions.js'
 import { AttentionQueue, attentionToWire, type AttentionItem } from './attention.js'
 import { SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID, SupervisorAudit, supervisorActor, supervisorRequestHash } from './audit.js'
 import {
@@ -91,6 +91,8 @@ export interface HubSupervisorOptions {
   readonly overlay: SupervisorGrantOverlay
   /** Runs a confirmed command through `HubCommandRouter.execute`. */
   readonly execute: ActionExecutor
+  /** Optional typed risky operations. Ownership always comes from the live identity service, never this port or model text. */
+  readonly risk?: Omit<RiskActionHost, 'isOwner'>
   readonly workspaces: Pick<HubWorkspaceView, 'list' | 'projection' | 'health'>
   readonly backend: Pick<CommandBackend, 'call'>
   /** Explicit opt-in to native disk sampling; no reads without an authorized disk subscription. */
@@ -267,6 +269,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     identity,
     targets,
     execute: options.execute,
+    ...(options.risk === undefined ? {} : { risk: { ...options.risk, isOwner } }),
     overlay: options.overlay,
     access: (threadId, principal) => { threads.access(threadId, principal) },
     clock,

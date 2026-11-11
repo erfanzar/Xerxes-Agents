@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { Database } from 'bun:sqlite'
 
 import { canonicalJson } from '../../security/hubAuthEnvelope.js'
+import { validateAbilityInput } from './abilities/catalog.js'
 import { hasScope, type HubGrant, type HubPrincipal, type HubScope } from '../../security/principal.js'
 import type { JsonObject } from '../../types/toolCalls.js'
 import type { AuthenticatedContext, HubIdentityPort } from '../identityPort.js'
@@ -38,7 +39,7 @@ import {
  * An outcome of `unknown` is never retried by anything in this module.
  */
 
-export const ACTION_TOOLS = ['task.start', 'task.steer', 'task.stop', 'agent.message', 'goal.set', 'model.set'] as const
+export const ACTION_TOOLS = ['task.start', 'task.steer', 'task.stop', 'agent.message', 'goal.set', 'model.set', 'risk.execute'] as const
 export type ActionTool = (typeof ACTION_TOOLS)[number]
 
 export function isActionTool(name: string): name is ActionTool {
@@ -53,6 +54,7 @@ export const ACTION_SCOPE: Readonly<Record<ActionTool, HubScope>> = Object.freez
   'agent.message': 'session.steer',
   'goal.set': 'goal.write',
   'model.set': 'session.configure',
+  'risk.execute': 'session.submit',
 })
 
 export const UNKNOWN_OUTCOME_MESSAGE = 'Could not confirm whether this was applied. Check the task before trying again. XERXES will not retry it.'
@@ -163,7 +165,15 @@ export class SupervisorGrantOverlay {
   }
 }
 
+/** Host-owned typed risky operations; never an arbitrary shell or ambient authority. */
+export interface RiskActionHost {
+  isOwner(userId: string): boolean
+  revision(workspaceId: string, target: string): string | undefined
+  execute(action: ActionRecord, owner: UserPrincipal): Promise<Readonly<Record<string, unknown>>>
+}
+
 export interface ActionServiceOptions {
+  readonly risk?: RiskActionHost
   readonly db: Database
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get'>
   readonly identity: Pick<HubIdentityPort, 'grantsFor' | 'audit'>
@@ -432,7 +442,18 @@ export class ActionService {
     }
     if (sessionId !== undefined && isSupervisorThreadId(sessionId)) throw new Error('refused: that is a supervisor thread, not a task')
     if (sessionId !== undefined && targets.revision(workspaceId, sessionId) === undefined) throw new Error(`no such task ${JSON.stringify(sessionId)} in this workspace`)
-    if (sessionId === undefined && tool !== 'task.start') throw new Error('task_id is required')
+    if (sessionId === undefined && tool !== 'task.start' && tool !== 'risk.execute') throw new Error('task_id is required')
+    if (tool === 'risk.execute') {
+      const checked = validateAbilityInput(tool, args)
+      if (!checked.ok) throw new Error(checked.error)
+      const host = this.options.risk
+      const thread = this.options.threads.get(input.threadId)
+      if (host === undefined) throw new Error('Risky action host is not configured')
+      if (!host.isOwner(requester.id) || thread?.kind !== 'private' || thread.ownerId !== requester.id) throw new SupervisorDenied('Risky actions require the current Hub owner in their private thread')
+      const target = stringArg(args, 'target')
+      const expected = stringArg(args, 'expected_revision')
+      if (!target || !expected || host.revision(workspaceId, target) !== expected) throw new Error('Risky action target revision is stale or unavailable')
+    }
 
     const scope = ACTION_SCOPE[tool]
     const accessTarget = { workspaceId, ...(sessionId === undefined ? {} : { sessionId }) }
@@ -489,7 +510,7 @@ export class ActionService {
       auto: false,
     }
     // XERXES Autopilot: decide before anything is stored whether this runs without a Confirm tap.
-    const grant = this.options.autopilot?.({
+    const grant = tool === 'risk.execute' ? undefined : this.options.autopilot?.({
       workspaceId, threadId: input.threadId, requester,
       // Any Hub-started turn counts as a wake: it can never fall into the "owner alone" rule.
       trigger: input.turn?.trigger !== undefined, othersInContext: input.turn?.othersInContext ?? true,
@@ -597,6 +618,7 @@ export class ActionService {
       throw new HubProtocolError('forbidden', 'only a signed-in person can confirm or cancel an action')
     }
     const human = context.principal
+    if (action.tool === 'risk.execute' && !this.options.risk?.isOwner(human.id)) throw new HubProtocolError('forbidden', 'Only the current Hub owner may respond to a risky action')
     this.options.access(action.threadId, human)
     if (typeof params.thread_id === 'string' && params.thread_id !== action.threadId) throw new HubProtocolError('not_found', 'no such confirmation')
 
@@ -702,6 +724,13 @@ export class ActionService {
     if (this.clock() >= action.expiresAt) return 'This confirmation expired.'
     if (!targets.online(action.workspaceId)) return 'The workspace is not online. Nothing was sent. Ask XERXES again when it is back.'
     if (targets.instanceId(action.workspaceId) !== action.instanceId) return 'The workspace runtime restarted since this was proposed. Nothing was sent. Ask XERXES again.'
+    if (action.tool === 'risk.execute') {
+      const host = this.options.risk
+      const target = stringArg(action.args, 'target')
+      const expected = stringArg(action.args, 'expected_revision')
+      if (host === undefined || !target || !expected || host.revision(action.workspaceId, target) !== expected) return 'The exact risky action target changed or became unavailable.'
+      if (supervisorRequestHash(action.tool, action.workspaceId, action.sessionId, action.args) !== action.argsHash) return 'The exact risky action arguments changed.'
+    }
     if (action.sessionId !== undefined) {
       const revision = targets.revision(action.workspaceId, action.sessionId)
       if (revision === undefined) return 'The task no longer exists. Nothing was sent.'
@@ -720,6 +749,22 @@ export class ActionService {
   // ── dispatch ───────────────────────────────────────────────────────
 
   private async dispatch(action: ActionRecord, confirmer: UserPrincipal, confirmerGrants: readonly HubGrant[]): Promise<DispatchOutcome> {
+    if (action.tool === 'risk.execute') {
+      const host = this.options.risk
+      // Recheck after both awaited audits. Autopilot and quoted source text
+      // can never supply the missing human confirmation or current ownership.
+      if (action.auto || host === undefined || !host.isOwner(confirmer.id)) return { state: 'rejected', detail: { reason: 'owner_confirmation_required' } }
+      const stale = this.staleReason(action)
+      if (stale !== undefined) return { state: 'rejected', detail: { reason: 'stale' }, error: { code: 'conflict', message: stale } }
+      try {
+        const result = await host.execute(action, confirmer)
+        if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) throw new Error('Risk outcome exceeds bound')
+        return { state: 'accepted', detail: { result } }
+      } catch (error) {
+        this.options.onError?.(error, 'risky action outcome unknown')
+        return { state: 'unknown', detail: { reason: 'execution_outcome_unknown' } }
+      }
+    }
     const target = { workspaceId: action.workspaceId, ...(action.sessionId === undefined ? {} : { sessionId: action.sessionId }) }
     const scopes = delegatedScopes(confirmer, confirmerGrants, target, this.clock())
     const resource = action.sessionId === undefined
@@ -837,6 +882,7 @@ function summarize(tool: ActionTool, args: JsonObject, title: string | undefined
   const task = title === undefined ? 'the task' : `“${clip(title, 60)}”`
   const text = clip(stringArg(args, 'text') ?? '', 160)
   switch (tool) {
+    case 'risk.execute': return `Owner confirmation required for this exact risky action: ${canonicalJson(args)}`
     case 'task.start': return args.task_id === undefined ? `Start a new task: ${text}` : `Start a new turn in ${task}: ${text}`
     case 'task.steer': return `Steer ${task}: ${text}`
     case 'task.stop': return `Pause the goal and stop the current turn of ${task}${args.cascade === true ? ' and ask its agents to stop' : ''}.`
