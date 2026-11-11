@@ -35,6 +35,8 @@ export interface CodexLoginOptions {
   readonly fetchImplementation?: OAuthFetch
   /** Called with the authorize URL; defaults to opening the default browser. */
   readonly openUrl?: (url: string) => void
+  /** Publishes a copyable URL before callback setup can fail. */
+  readonly onAuthorizationUrl?: (url: string) => void
   readonly port?: number
   readonly signal?: AbortSignal
   readonly timeoutMs?: number
@@ -64,6 +66,7 @@ export async function loginWithChatGpt(options: CodexLoginOptions = {}): Promise
   const authorizeUrl = withCodexAuthorizeParams(
     buildAuthorizeUrl(config, { state, codeChallenge: challenge }),
   )
+  options.onAuthorizationUrl?.(authorizeUrl)
 
   const callback = awaitAuthorizationCode({
     expectedState: state,
@@ -105,64 +108,68 @@ interface CallbackOptions {
 
 /** Serve the loopback callback exactly until one authorization code arrives. */
 function awaitAuthorizationCode(options: CallbackOptions): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    let settled = false
-    const server = Bun.serve({
-      hostname: '127.0.0.1',
-      port: options.port,
-      fetch(request) {
-        const url = new URL(request.url)
-        if (url.pathname !== CODEX_CALLBACK_PATH) {
-          return new Response('not found', { status: 404 })
-        }
+  let resolveCode!: (code: string) => void
+  let rejectCode!: (error: Error) => void
+  const result = new Promise<string>((resolve, reject) => { resolveCode = resolve; rejectCode = reject })
+  let settled = false
+  // Bind before loginWithChatGpt opens the browser. A failed bind must never
+  // send the user to an authorize URL whose callback has no listener.
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: options.port,
+    fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname !== CODEX_CALLBACK_PATH) {
+        return new Response('not found', { status: 404 })
+      }
 
-        const error = url.searchParams.get('error')
-        if (error) {
-          const description = url.searchParams.get('error_description') ?? ''
-          finish(undefined, new ProviderError(CODEX_PROVIDER, `ChatGPT sign-in failed: ${error} ${description}`.trim()))
-          return htmlResponse('Sign-in failed. You can close this tab and try again.', 400)
-        }
+      const error = url.searchParams.get('error')
+      if (error) {
+        const description = url.searchParams.get('error_description') ?? ''
+        finish(undefined, new ProviderError(CODEX_PROVIDER, `ChatGPT sign-in failed: ${error} ${description}`.trim()))
+        return htmlResponse('Sign-in failed. You can close this tab and try again.', 400)
+      }
 
-        const code = url.searchParams.get('code') ?? ''
-        const state = url.searchParams.get('state') ?? ''
-        // A mismatched state is a cross-site request forgery attempt against
-        // the callback, so the code that came with it is not ours to use.
-        if (!constantTimeEquals(state, options.expectedState)) {
-          finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in returned a mismatched OAuth state'))
-          return htmlResponse('Sign-in state mismatch. Nothing was saved.', 400)
-        }
-        if (!code) {
-          finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in returned no authorization code'))
-          return htmlResponse('Sign-in returned no authorization code.', 400)
-        }
+      const code = url.searchParams.get('code') ?? ''
+      const state = url.searchParams.get('state') ?? ''
+      // A mismatched state is a cross-site request forgery attempt against
+      // the callback, so the code that came with it is not ours to use.
+      if (!constantTimeEquals(state, options.expectedState)) {
+        finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in returned a mismatched OAuth state'))
+        return htmlResponse('Sign-in state mismatch. Nothing was saved.', 400)
+      }
+      if (!code) {
+        finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in returned no authorization code'))
+        return htmlResponse('Sign-in returned no authorization code.', 400)
+      }
 
-        finish(code, undefined)
-        return htmlResponse('Signed in to Xerxes. You can close this tab.', 200)
-      },
-    })
-
-    const timer = setTimeout(() => {
-      finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in timed out before the browser returned'))
-    }, options.timeoutMs)
-
-    const onAbort = () => {
-      finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in was cancelled'))
-    }
-    options.signal?.addEventListener('abort', onAbort, { once: true })
-
-    function finish(code: string | undefined, error: Error | undefined): void {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      options.signal?.removeEventListener('abort', onAbort)
-      // Stop listening before settling: the loopback port stays bound until
-      // the server is closed, and a second `xerxes auth login` would then
-      // fail to bind rather than starting a fresh flow.
-      void server.stop(true)
-      if (error) reject(error)
-      else resolve(code as string)
-    }
+      finish(code, undefined)
+      return htmlResponse('Signed in to Xerxes. You can close this tab.', 200)
+    },
   })
+
+  const timer = setTimeout(() => {
+    finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in timed out before the browser returned'))
+  }, options.timeoutMs)
+
+  const onAbort = () => {
+    finish(undefined, new ProviderError(CODEX_PROVIDER, 'ChatGPT sign-in was cancelled'))
+  }
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+
+  function finish(code: string | undefined, error: Error | undefined): void {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onAbort)
+    // Stop accepting new connections, but let the callback response finish.
+    // stop(true) here reset the browser connection before Safari could read it.
+    void server.stop(false)
+    if (error) rejectCode(error)
+    else resolveCode(code as string)
+  }
+  if (options.signal?.aborted) onAbort()
+  return result
 }
 
 function htmlResponse(message: string, status: number): Response {

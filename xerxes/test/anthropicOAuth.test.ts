@@ -66,6 +66,27 @@ test('authorization input parses URLs, code#state pairs, query strings, and bare
   expect(parseAnthropicAuthorizationInput('')).toEqual({})
 })
 
+test('Anthropic publishes the copyable URL even when its callback port is occupied', async () => {
+  await inTemporaryHome(async home => {
+    const blocker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('occupied') })
+    try {
+      const callbackPort = blocker.port
+      if (callbackPort === undefined) throw new Error('Test callback port was not assigned')
+      const urls: string[] = []
+      let opened = 0
+      const session = new AnthropicOAuthSession({ xerxesHome: home, environment: {} })
+      await expect(session.login({
+        callbackPort,
+        onAuthorizationUrl: url => { urls.push(url) },
+        openUrl: () => { opened += 1 },
+      })).rejects.toThrow()
+      expect(urls).toHaveLength(1)
+      expect(urls[0]).toContain('https://')
+      expect(opened).toBe(0)
+    } finally { blocker.stop(true) }
+  })
+})
+
 test('code exchange posts the exact pi-ai wire shape and derives the expiry', async () => {
   await inTemporaryHome(async home => {
     const requests: { url: string; init?: RequestInit }[] = []

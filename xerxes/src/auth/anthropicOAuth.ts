@@ -157,6 +157,8 @@ export interface AnthropicLoginOptions {
   readonly timeoutMs?: number
   /** Overrides the default browser open (tests). */
   readonly openUrl?: (url: string) => void
+  /** Publishes a copyable URL before callback setup can fail. */
+  readonly onAuthorizationUrl?: (url: string) => void
   readonly callbackHost?: string
   readonly callbackPort?: number
   /**
@@ -189,6 +191,7 @@ async function loginWithBrowserFlow(
   })
 
   const authorizeUrl = `${ANTHROPIC_AUTHORIZE_URL}?${authParams.toString()}`
+  options.onAuthorizationUrl?.(authorizeUrl)
 
   let settled = false
   let callbackCode: string | undefined
