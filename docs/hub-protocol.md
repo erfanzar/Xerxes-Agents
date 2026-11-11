@@ -286,9 +286,11 @@ refused by `assertSupervisorToolCeiling`.
 one call with a Hub-written label (arguments are never copied, except a search
 query clipped to 60 characters). A tool's `running` and final event share one
 `id`; a new `turn_id` starts a new list. Steps go only to the person the turn
-answers (the requester), are not stored, and are not replayed by
-`supervisor.thread.open`; the turn's reply or `XERXES stopped: …` notice ends
-them. Clients that do not know `step` ignore it.
+answers (the requester). The Hub retains a bounded, audience-scoped recent-step
+projection and returns it in `supervisor.thread.open.steps`; reopening restores
+that requester's work history without exposing it to other thread participants.
+The turn's reply or `XERXES stopped: …` notice ends the live group. Clients that
+do not know `step` or `steps` ignore these additive fields.
 
 ## Machines and project discovery
 

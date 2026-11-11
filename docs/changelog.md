@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.34 — 2026-11-11
+
+- **OpenAI API output budgets work on the next request.** OpenAI and selected OpenAI-compatible routes default to 32,768 output tokens; `/sampling max_tokens -1` removes the user-set cap while retaining model, context and authorized relay ceilings. Changes apply after a tool completes in an existing turn. Pinned sessions use their own provider for validation, and one-shot/ACP defaults no longer expand to the model's maximum. Codex subscriptions keep their existing behavior.
+- **Desktop action reviews stay in view.** Shared viewport-bound confirmation dialogs keep keyboard focus and nested Escape ownership with the active review. Late document, history and terminal responses no longer overwrite a different selection, and panel/clipboard failures stay visible. Reviewed learning and skill batches use a fixed snapshot and report individual failures.
+- **XERXES work history survives reopening a thread.** The Hub retains a bounded record of supervisor steps for exactly the requester who could see them live, and desktop/phone clients restore those steps on revisit.
+- **OAuth callback reliability.** Copyable authorization URLs remain available when a callback port is occupied; Codex binds before opening the browser and finishes the callback page before closing its listener.
+- **Read-only knowledge curator.** A dedicated preset audits skills and lessons, checks evidence, and proposes keep/update/merge/retire recommendations without editing or approving knowledge.
+
 ## 0.8.33 — 2026-11-09
 
 ### Permissions
