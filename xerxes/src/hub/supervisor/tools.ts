@@ -9,6 +9,8 @@ import type { HubWorkspaceView } from '../server.js'
 import { ACTION_TOOLS, SupervisorDenied, isActionTool, type ActionService } from './actions.js'
 import { displayOption, type PendingInteractions } from './autopilot.js'
 import type { DigestService } from './digests.js'
+import { ABILITY_SPECS } from './abilities/catalog.js'
+import type { SuperagentAbilities } from './abilities/service.js'
 import {
   SUPERVISOR_TOOLS, assertSupervisorToolCeiling, validateSupervisorArguments, type SupervisorToolSpec,
 } from './schemas.js'
@@ -96,6 +98,7 @@ export interface SupervisorToolDeps {
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get' | 'recipients' | 'participants'>
   readonly push?: SupervisorPushPort
   readonly autopilot?: SupervisorAutopilotPort
+  readonly abilities?: Pick<SuperagentAbilities, 'execute'>
   readonly onError?: (error: unknown, context: string) => void
 }
 
@@ -488,8 +491,13 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     }
   }
 
-  for (const spec of SUPERVISOR_TOOLS.values()) {
-    const run = spec.gate === 'confirm' ? mutation(spec) : handlers[spec.name]
+  const specs = [...SUPERVISOR_TOOLS.values()].filter(spec => deps.abilities !== undefined || !ABILITY_SPECS.some(ability => ability.name === spec.name))
+  for (const spec of specs) {
+    const ability = ABILITY_SPECS.some(ability => ability.name === spec.name)
+    const run = ability ? (args: JsonObject, turn: SupervisorTurnState, signal?: AbortSignal) => {
+      if (deps.abilities === undefined) throw new Error('Superagent abilities are not configured')
+      return deps.abilities.execute(spec.name, args, turn, signal)
+    } : spec.gate === 'confirm' ? mutation(spec) : handlers[spec.name]
     if (run === undefined) throw new Error(`no implementation for supervisor tool ${spec.name}`)
     const handler: ToolHandler = async (inputs: JsonObject, context: ToolExecutionContext, signal?: AbortSignal) => {
       const turn = context.metadata[TURN_METADATA_KEY]
@@ -509,7 +517,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
     )
   }
   assertSupervisorToolCeiling(registry.definitions().map(definition => definition.function.name))
-  if (registry.definitions().length !== SUPERVISOR_TOOLS.size) throw new Error('the supervisor registry must hold exactly the supervisor tools')
+  if (registry.definitions().length !== specs.length) throw new Error('the supervisor registry must hold exactly its configured supervisor tools')
   void ACTION_TOOLS
   return registry
 }

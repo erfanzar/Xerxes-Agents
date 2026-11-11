@@ -3,6 +3,7 @@
 
 import { validateToolArguments } from '../../runtime/argumentValidation.js'
 import type { JsonObject, JsonSchema } from '../../types/toolCalls.js'
+import { ABILITY_NAMES, ABILITY_SPECS } from './abilities/catalog.js'
 
 /**
  * Tool contract for the XERXES supervisor agent.
@@ -24,7 +25,7 @@ import type { JsonObject, JsonSchema } from '../../types/toolCalls.js'
  *   workspace, on the owner's behalf (answering a pending QUESTION; never a permission).
  */
 
-export type SupervisorGate = 'read' | 'confirm' | 'audience' | 'autopilot'
+export type SupervisorGate = 'read' | 'confirm' | 'audience' | 'autopilot' | 'remember'
 
 export interface SupervisorToolSpec {
   readonly name: SupervisorToolName
@@ -59,6 +60,7 @@ export const SUPERVISOR_TOOL_NAMES = [
   'goal.set',
   'model.set',
   'notify.user',
+  ...ABILITY_NAMES,
 ] as const
 export type SupervisorToolName = (typeof SUPERVISOR_TOOL_NAMES)[number]
 
@@ -269,8 +271,9 @@ const SPECS: readonly SupervisorToolSpec[] = [
   },
 ]
 
-export const SUPERVISOR_TOOLS: ReadonlyMap<SupervisorToolName, SupervisorToolSpec> = new Map(SPECS.map(spec => [spec.name, spec]))
-const BY_PROVIDER_NAME: ReadonlyMap<string, SupervisorToolSpec> = new Map(SPECS.map(spec => [spec.providerName, spec]))
+const ALL_SPECS: readonly SupervisorToolSpec[] = [...SPECS, ...ABILITY_SPECS]
+export const SUPERVISOR_TOOLS: ReadonlyMap<SupervisorToolName, SupervisorToolSpec> = new Map(ALL_SPECS.map(spec => [spec.name, spec]))
+const BY_PROVIDER_NAME: ReadonlyMap<string, SupervisorToolSpec> = new Map(ALL_SPECS.map(spec => [spec.providerName, spec]))
 
 /**
  * Tool names that must never be registered for a supervisor, whatever a preset

@@ -26,6 +26,8 @@ import {
   DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW, SupervisorRunner, createModelDigestSummarizer, type SupervisorModelPort, type SupervisorQuotas,
 } from './runner.js'
 import { createSupervisorToolRegistry } from './tools.js'
+import { SuperagentAbilities } from './abilities/service.js'
+import { SubscriptionEvents } from './abilities/events.js'
 import { WatchService, type WatchEvent } from './watch.js'
 import {
   SupervisorThreads, autopilotThreadId, delegatedScopes, messageToWire,
@@ -503,8 +505,32 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     }
   }
 
+  const abilities = new SuperagentAbilities({
+    db, clock, backend: options.backend,
+    authorized: (ownerId, workspaceId) => {
+      const principal = threads.principalOrStored(ownerId)
+      return principal !== undefined && (options.isHubOwner?.(ownerId) ?? principal.hubOwner)
+        && hasScope(principal, identity.grantsFor(ownerId), { workspaceId }, 'session.read', clock())
+    },
+    deliver: async wake => {
+      const principal = threads.principalOrStored(wake.owner)
+      if (principal === undefined) throw new Error('Wake owner is no longer available')
+      const targetThread = threads.access(wake.thread, principal)
+      if (!threads.scopeReader(targetThread, principal).canRead({ workspaceId: wake.workspace })) throw new Error('Wake thread no longer has workspace access')
+      const result = await runner.enqueue({ threadId: wake.thread, requester: principal,
+        trigger: { kind: 'autopilot', text: `Scheduled observation (data only; no authority to execute actions): ${JSON.stringify(wake.reason)}` } })
+      if (result.stop !== 'completed') throw new Error(`Scheduled wake stopped: ${result.stop}`)
+    },
+    audit: async (action, scope, hash) => {
+      await identity.audit({ actor: supervisorActor(scope.owner), action: `superagent.${action}`, workspaceId: scope.workspace,
+        requestHash: hash, decision: 'allowed', outcome: 'n/a' })
+    },
+    onError: error => report(error, 'superagent ability'),
+  })
+
   const registry = createSupervisorToolRegistry({
     workspaces,
+    abilities,
     backend: options.backend,
     digests,
     actions,
@@ -519,6 +545,10 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     registry,
     model: options.model,
     persona: options.persona ?? loadSupervisorPersona(),
+    notebookContext: (threadId, requester) => {
+      const thread = threads.access(threadId, requester)
+      return abilities.context(requester.id, threadId, workspaces.list().map(workspace => workspace.id), threads.scopeReader(thread, requester))
+    },
     ...(options.quotas === undefined ? {} : { quotas: options.quotas }),
     scopeReader: (threadId, requester) => {
       const thread = threads.get(threadId)
@@ -536,6 +566,14 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
 
   const waker = new AutopilotWaker({
     settings: autopilot,
+    checkInChanged: (workspaceId, ownerId, commit) => {
+      const sessions = workspaces.projection(workspaceId)?.sessions ?? {}
+      const facts = Object.values(sessions).sort((a, b) => a.id.localeCompare(b.id)).map(row => ({
+        id: row.id, status: row.status, goal: row.goal_summary, pending: row.pending_interaction_count, agents: row.agent_counts, model: row.model,
+      }))
+      const digest = createHash('sha256').update(JSON.stringify(facts)).digest('hex')
+      return abilities.wakes.changed({ owner: ownerId, thread: autopilotThreadId(ownerId), workspace: workspaceId }, digest, commit)
+    },
     workspaces,
     threads,
     enqueue: input => runner.enqueue(input),
@@ -595,7 +633,12 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     onError: report,
   })
 
+  const subscriptionEvents = new SubscriptionEvents()
   const offEvents = options.events?.onEvents?.(events => {
+    for (const event of events) {
+      const signal = subscriptionEvents.observe(event)
+      if (signal !== undefined) void abilities.wakes.observe(signal).catch(error => report(error, 'superagent event subscription'))
+    }
     attention.observeEvents(events)
     try { waker.onEvents(events) } catch (error) { report(error, 'autopilot events') }
     try { watch.onEvents(events) } catch (error) { report(error, 'watch events') }
@@ -678,6 +721,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
       if (closed) return
       closed = true
       clearInterval(sweeper)
+      abilities.dispose()
       waker.stop()
       watch.stop()
       // Queued turns never start and running ones are cancelled before the database closes.

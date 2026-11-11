@@ -43,7 +43,16 @@ Use Bun-native tests from `xerxes/` so isolated-home preload applies. Write fail
 ## Implementation checkpoints
 
 1. Map and tiered design posted. Separate local worktree created from default branch.
-2. Pending: bounded/cancellable transcript reads and Phase 1 abilities.
-3. Pending: scoped execution and locks.
-4. Pending: mandatory gates and operational controls.
-5. Pending: final integration, verification and report.
+2. Phase 1 in progress: summary-only/cancellable tail resolution and opaque history cursors; scoped notebook; durable single-shot wakes/event receipts; task/goal/question/test event adapter; fixed-width screenshot/GitHub host contracts; bounded native file/list/grep/git/health observations; Hub registry/daemon composition; model-free unchanged-check-in suppression. Native file traversal is descriptor-anchored on macOS/Linux, with actual read caps and private-file exclusions. Git reads are subtree-scoped and exclude credential diffs. Independent narrow reviews found and drove clock/UTF-8, Git scope/secret and filesystem race/cap fixes.
+3. Pending: scoped execution and shared running-task locks. Existing default local sandbox host only probes and refuses execution; capability detection is NOT an enforceable execution host. Do not expose a subprocess fallback.
+4. Pending: mandatory D confirmations, global pause/kill, daily action/model budgets and end-to-end injection tests. Existing automatic delegated permission approvals have NOT yet been replaced; the branch is not ready for deployment.
+5. Pending: clean full root gate, final safety review and report. Focused coverage passed 276 tests across 22 files. Root check (all configured type checks), build and diff check passed. The second runtime run reported 6611 pass / 3 skip / 1 fail: a desktop remote-update EPIPE race that also reproduced alone. The narrow fix passed all 30 desktop transport tests and desktop TypeScript. UI separately passed 1571 tests / 155 files; mobile passed 647 tests / 39 files. These separate results are not a clean complete gate; rerun after the transport fix.
+
+### Explicit remaining capability limits
+
+- Real GitHub, GPU/TPU and Xerxes UI screenshot adapters are not yet configured by production composition. Tools refuse unsupported hosts rather than fabricate observations. No external account or GUI action has been exercised.
+- Descriptor-anchored reads have been exercised on macOS. Linux implementation and Windows host support are not verified; Windows requires a secure native host rather than a pathname-only fallback.
+- Tail pagination is bounded, but archives are still hydrated by the daemon history route and only active tasks resolve there. Additional journal-backed/archived transcript and detailed test/build-result work remains.
+- Disk subscriptions consume typed health events; an always-on native disk event source is still to be wired. Scheduling callbacks are data-only, but the policy/kill/budget layer must be installed before C/D abilities are exposed.
+- A broad review timed out without a usable report. Only the two completed narrow reviews count as review evidence.
+- Local dependency setup uses an untracked `xerxes/node_modules` symlink. It is not an implementation artifact and must never be committed.

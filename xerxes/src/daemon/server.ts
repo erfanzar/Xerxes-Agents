@@ -6,6 +6,7 @@ import { readTurnOutcome, turnOutcomeLabel } from '../types/turnOutcome.js';
 import { ConnectionLeases } from './connectionLease.js';
 import { TransportEventJournal, type TransportEventJournalOptions } from './transportEventJournal.js';
 import { EventSubscriptions } from './eventSubscriptions.js';
+import { observeWorkspace } from './superagentObservation.js';
 import { historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
@@ -522,6 +523,7 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
 const HUB_SESSIONLESS_METHODS: ReadonlySet<string> = new Set([
   "permission_response",
   "question_response",
+  "superagent.observe",
   "runtime.status",
   "session.active_list",
   "session.list",
@@ -2326,7 +2328,7 @@ export class DaemonServer {
       }
       connection = this.connectionLeases.owner(connection);
       const session = this.runtime.sessionStatus(sessionKey(connection, request.params));
-      const opening = request.method === 'initialize' || request.method === 'session.open' || request.method === 'lessons.shared.list' || request.method === 'lessons.shared.apply';
+      const opening = request.method === 'initialize' || request.method === 'session.open' || request.method === 'lessons.shared.list' || request.method === 'lessons.shared.apply' || request.method === 'superagent.observe';
       const cwd = (opening ? optionalString(request.params.project_dir) : undefined) || session?.cwd || this.projectDirectory || process.cwd();
       const resources = await this.workspaceResources?.(cwd);
       if (resources) this.workspaceCatalog.set(resolveProjectDirectory(cwd), resources);
@@ -2629,6 +2631,11 @@ export class DaemonServer {
         : listed;
       const sessions = query && limit > 0 ? matched.slice(0, limit) : matched;
       return { ok: true, sessions: sessions.map(savedSessionPayload) };
+    }
+    if (method === 'superagent.observe') {
+      const root = optionalString(params.project_dir) || this.projectDirectory;
+      if (!root) throw new ValidationError('project_dir', 'a registered workspace is required', params.project_dir);
+      return { ok: true, observation: await observeWorkspace(root, params) };
     }
     if (method === "workspace.filePreview") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));

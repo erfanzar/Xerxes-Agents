@@ -317,6 +317,11 @@ describe('Autopilot wake-ups', () => {
     expect(t.supervisor.waker.checkIn()).toBe(0)
     await until(() => t.scripted.requests.length === 1)
     await t.idle()
+    const before = t.texts().length
+    t.time.now += 20 * 60 * 1000
+    expect(t.supervisor.waker.checkIn()).toBe(0)
+    expect(t.texts()).toHaveLength(before)
+    expect(t.scripted.requests).toHaveLength(1)
   })
 
   test('a waiting permission is announced to the owner at once and never wakes XERXES to decide it', async () => {

@@ -515,6 +515,8 @@ export interface AutopilotWakerOptions {
   readonly clock?: () => number
   /** 0 disables the check-in. */
   readonly checkInMs?: number
+  /** Durable model-free change gate. Commit only after a wake was actually admitted. */
+  readonly checkInChanged?: (workspaceId: string, ownerId: string, commit: boolean) => boolean
   readonly cooldownMs?: number
   readonly maxWakesPerHour?: number
   readonly onError?: (error: unknown, context: string) => void
@@ -662,7 +664,11 @@ export class AutopilotWaker {
         .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || a.id.localeCompare(b.id))
       const first = sessions[0]
       if (first === undefined) continue
-      if (this.wake(active.workspaceId, first.id, 'check_in', { otherTasks: sessions.slice(1, 10).map(row => row.id) })) woke += 1
+      if (this.options.checkInChanged?.(active.workspaceId, active.ownerId, false) === false) continue
+      if (this.wake(active.workspaceId, first.id, 'check_in', { otherTasks: sessions.slice(1, 10).map(row => row.id) })) {
+        this.options.checkInChanged?.(active.workspaceId, active.ownerId, true)
+        woke += 1
+      }
     }
     return woke
   }

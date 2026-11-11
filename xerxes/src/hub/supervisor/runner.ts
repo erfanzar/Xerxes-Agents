@@ -7,6 +7,7 @@ import type { ChatMessage } from '../../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../../types/toolCalls.js'
 import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, type DigestSummarizer, type DigestSummaryInput } from './digests.js'
 import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
+import { ABILITY_SPECS } from './abilities/catalog.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
 import { MAX_MESSAGE_CHARS, messageToWire, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
@@ -170,6 +171,7 @@ export interface SupervisorRunnerOptions {
   readonly persona: string
   readonly quotas?: Partial<SupervisorQuotas>
   readonly scopeReader: (threadId: string, requester: UserPrincipal) => SupervisorTurnState['reader']
+  readonly notebookContext?: (threadId: string, requester: UserPrincipal) => string
   readonly clock?: () => number
   readonly onStopped?: (info: SupervisorStoppedInfo) => void
   readonly onError?: (error: unknown, context: string) => void
@@ -237,7 +239,9 @@ export class SupervisorRunner {
     // The ceiling is checked here, not left to the caller: a registry with a forbidden or extra tool never runs.
     const names = options.registry.definitions().map(definition => definition.function.name)
     assertSupervisorToolCeiling(names)
-    if (names.length !== SUPERVISOR_TOOLS.size) throw new Error('the supervisor registry must hold exactly the supervisor tools')
+    const coreSize = SUPERVISOR_TOOLS.size - ABILITY_SPECS.length
+    const includesAbilities = ABILITY_SPECS.some(spec => names.includes(spec.providerName))
+    if (names.length !== (includesAbilities ? SUPERVISOR_TOOLS.size : coreSize)) throw new Error('the supervisor registry must hold exactly its configured supervisor tools')
     if (this.quotas.maxCostUsdPerWindow !== undefined && !options.model.reportsCost) {
       throw new Error('a cost quota needs a model port that reports cost; unknown cost is never counted as zero')
     }
@@ -342,6 +346,8 @@ export class SupervisorRunner {
         othersInContext: stored.some(message => message.role === 'user' && message.authorId !== requester.id),
       }
       const messages: ChatMessage[] = stored.map(toChat)
+      const notebook = this.options.notebookContext?.(threadId, requester)
+      if (notebook) messages.push({ role: 'user', content: notebook })
       // Hub-authored wake text; anything copied from a task inside it is already fenced.
       if (input.trigger !== undefined) {
         let text: string
