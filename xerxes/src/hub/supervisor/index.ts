@@ -277,6 +277,9 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     identity,
     targets,
     execute: options.execute,
+    isHubOwner: isOwner,
+    dispatchFence: () => control.assertActive(),
+    dispatchSignal: () => control.signal,
     beforeDispatch: async action => { await control.reserve(action.tool === 'risk.execute' ? 'risk' : 'command', action.id); control.assertActive() },
     ...(options.risk === undefined ? {} : { risk: { ...options.risk, isOwner: controlOwner,
       execute: (action, owner) => { control.assertActive(); return options.risk!.execute(action, owner, control.signal) } } }),
@@ -328,6 +331,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     readonly reader: ScopeReader; readonly trigger: boolean; readonly othersInContext: boolean
     readonly target?: { readonly workspaceId: string; readonly sessionId: string }
   }): Promise<Record<string, unknown>> => {
+    control.assertActive()
+    const signal = control.signal
     const { workspaceId, sessionId, requestId } = input
     const watched = observedAnswer(input, 'question', Object.values(input.answers).join('; '))
     if (watched !== undefined) return watched
@@ -344,7 +349,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     const pending = pendingOf(workspaceId, sessionId)
     if (pending === undefined) throw new Error('waiting questions cannot be read on this Hub, so XERXES will not answer blind')
     if (pending.permissionIds.includes(requestId)) {
-      throw new Error('That is a permission request, not a question; decide it with answer_permission.')
+      throw new Error('That is a permission request, not a question; the human owner must decide it in the task approval UI.')
     }
     const question = pending.questions.find(row => row.request_id === requestId)
     if (question === undefined) throw new Error('no such waiting question in this task; read pending_interactions again')
@@ -358,7 +363,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
       answers[key] = exact ?? value
     }
     const owner = grant.owner
-    const scopes = delegatedScopes(owner, identity.grantsFor(owner.id), target, clock())
+    let scopes = delegatedScopes(owner, identity.grantsFor(owner.id), target, clock())
     if (!scopes.has('question.delegated')) throw new SupervisorDenied(`${owner.displayName} cannot answer questions in this task, so XERXES cannot either.`)
 
     const actionId = `ans-${crypto.randomUUID()}`
@@ -374,6 +379,15 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
       report(error, 'autopilot audit answer')
       throw new Error('the audit log is unavailable; nothing was answered')
     }
+    signal.throwIfAborted()
+    await control.reserve('command', `answer-${createHash('sha256').update(JSON.stringify([workspaceId, sessionId, requestId])).digest('hex')}`)
+    signal.throwIfAborted()
+    control.assertActive()
+    if (!isOwner(owner.id) || autopilotGrant(input)?.owner.id !== owner.id) throw new SupervisorDenied('The current owner or question-answer authority changed')
+    const liveOwner = { ...owner, hubOwner: isOwner(owner.id) }
+    scopes = delegatedScopes(liveOwner, identity.grantsFor(owner.id), target, clock())
+    const current = pendingOf(workspaceId, sessionId)?.questions.find(row => row.request_id === requestId)
+    if (!scopes.has('question.delegated') || current === undefined || JSON.stringify(current) !== JSON.stringify(question)) throw new SupervisorDenied('The question or effective authority changed; nothing was answered')
     const delegated: HubGrant[] = [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource: { type: 'session', workspaceId, sessionId }, effect: 'allow', scopes: [...scopes] }]
     const principal: HubPrincipal = { kind: 'agent', id: SUPERVISOR_PRINCIPAL_ID, displayName: SUPERVISOR_DISPLAY_NAME, onBehalfOf: owner.id }
     const context: AuthenticatedContext = { principal, grants: delegated, browserSessionId: `supervisor:${actionId}`, actor }

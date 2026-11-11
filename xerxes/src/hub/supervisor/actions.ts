@@ -175,6 +175,11 @@ export interface RiskActionHost {
 export interface ActionServiceOptions {
   /** Durable pause/budget admission, rechecked after awaited confirmation audits. */
   readonly beforeDispatch?: (action: ActionRecord) => Promise<void>
+  /** Synchronous liveness check immediately before each individual executor call. */
+  readonly dispatchFence?: () => void
+  /** Capture once; re-enable must never revive a dispatch killed in an older generation. */
+  readonly dispatchSignal?: () => AbortSignal
+  readonly isHubOwner?: (userId: string) => boolean
   readonly risk?: RiskActionHost
   readonly db: Database
   readonly threads: Pick<SupervisorThreads, 'append' | 'emit' | 'get'>
@@ -308,6 +313,9 @@ export class ActionService {
   private disposed = false
 
   dispose(): void { this.disposed = true }
+  private currentHuman(human: UserPrincipal): UserPrincipal {
+    return { ...human, hubOwner: this.options.isHubOwner?.(human.id) ?? this.options.risk?.isOwner(human.id) ?? false }
+  }
   private interrupted(action: ActionRecord): ActionRecord { return { ...action, state: 'unknown', errorCode: 'unavailable', errorMessage: UNKNOWN_OUTCOME_MESSAGE } }
 
   constructor(private readonly options: ActionServiceOptions) {
@@ -628,7 +636,7 @@ export class ActionService {
       await this.audit.recordBestEffort({ ...this.auditEntry(action, 'denied', 'denied', 'rejected'), actor: context.actor })
       throw new HubProtocolError('forbidden', 'only a signed-in person can confirm or cancel an action')
     }
-    const human = context.principal
+    const human = this.currentHuman(context.principal)
     if (action.tool === 'risk.execute' && !this.options.risk?.isOwner(human.id)) throw new HubProtocolError('forbidden', 'Only the current Hub owner may respond to a risky action')
     this.options.access(action.threadId, human)
     if (typeof params.thread_id === 'string' && params.thread_id !== action.threadId) throw new HubProtocolError('not_found', 'no such confirmation')
@@ -664,6 +672,7 @@ export class ActionService {
    * dispatch under the confirmer's delegated scopes, settle. Never retries `unknown`.
    */
   private async confirmAndDispatch(id: string, human: UserPrincipal, grants: readonly HubGrant[], responseId: string | undefined, auto: boolean): Promise<ActionRecord> {
+    const signal = this.options.dispatchSignal?.()
     // Only one confirmer wins this compare-and-set; everyone else sees the winner's state.
     if (!this.transition(id, ['pending'], 'confirming', { confirmedBy: human.id, confirmedByName: human.displayName, ...(responseId === undefined ? {} : { responseId }), auto })) {
       const lost = this.load(id)
@@ -697,19 +706,22 @@ export class ActionService {
     }
 
     try {
+      signal?.throwIfAborted()
       await this.options.beforeDispatch?.(confirming)
       if (this.disposed) return this.interrupted(confirming)
+      signal?.throwIfAborted()
     } catch {
       if (this.disposed) return this.interrupted(confirming)
       return this.settle(this.finish(id, 'rejected', { reason: 'admission_denied' }, { code: 'unavailable', message: 'Superagent admission is paused, killed or over budget. Nothing was sent.' }), human)
     }
     const latestGrants = this.options.identity.grantsFor(human.id)
+    const liveHuman = this.currentHuman(human)
     const target = { workspaceId: confirming.workspaceId, ...(confirming.sessionId === undefined ? {} : { sessionId: confirming.sessionId }) }
     const changed = this.staleReason(confirming)
-    if (changed !== undefined || !hasScope(human, latestGrants, target, ACTION_SCOPE[confirming.tool], this.clock())) {
+    if ((auto && liveHuman.hubOwner !== true) || changed !== undefined || !hasScope(liveHuman, latestGrants, target, ACTION_SCOPE[confirming.tool], this.clock())) {
       return this.settle(this.finish(id, 'rejected', { reason: 'target_or_authority_changed' }, { code: 'conflict', message: changed ?? 'The confirming person’s authority changed.' }), human)
     }
-    const outcome = await this.dispatch(confirming, human, latestGrants)
+    const outcome = await this.dispatch(confirming, liveHuman, signal)
     if (this.disposed) return this.interrupted(confirming)
     return this.settle(this.finish(id, outcome.state, outcome.detail, outcome.error), human)
   }
@@ -778,7 +790,7 @@ export class ActionService {
 
   // ── dispatch ───────────────────────────────────────────────────────
 
-  private async dispatch(action: ActionRecord, confirmer: UserPrincipal, confirmerGrants: readonly HubGrant[]): Promise<DispatchOutcome> {
+  private async dispatch(action: ActionRecord, confirmer: UserPrincipal, signal?: AbortSignal): Promise<DispatchOutcome> {
     if (action.tool === 'risk.execute') {
       const host = this.options.risk
       // Recheck after both awaited audits. Autopilot and quoted source text
@@ -796,20 +808,21 @@ export class ActionService {
       }
     }
     const target = { workspaceId: action.workspaceId, ...(action.sessionId === undefined ? {} : { sessionId: action.sessionId }) }
-    const scopes = delegatedScopes(confirmer, confirmerGrants, target, this.clock())
-    const resource = action.sessionId === undefined
-      ? ({ type: 'workspace', workspaceId: action.workspaceId } as const)
-      : ({ type: 'session', workspaceId: action.workspaceId, sessionId: action.sessionId } as const)
-    const delegated: HubGrant[] = [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource, effect: 'allow', scopes: [...scopes] }]
     const principal: HubPrincipal = { kind: 'agent', id: SUPERVISOR_PRINCIPAL_ID, displayName: SUPERVISOR_DISPLAY_NAME, onBehalfOf: action.requestedBy }
-    const context: AuthenticatedContext = {
-      principal,
-      grants: delegated,
-      browserSessionId: `supervisor:${action.id}`,
-      actor: supervisorActor(action.requestedBy, confirmer.id),
-    }
     let step = 0
     const send = async (command: HubCommandAction, sessionId: string | undefined, args: Record<string, unknown>): Promise<StepResult> => {
+      if (this.disposed) return { state: 'rejected', error: { code: 'unavailable', message: 'Superagent actions are closed' } }
+      try { signal?.throwIfAborted(); this.options.dispatchFence?.() } catch { return { state: 'rejected', error: { code: 'unavailable', message: 'Superagent dispatch is paused or killed' } } }
+      const target = { workspaceId: action.workspaceId, ...(sessionId === undefined ? {} : { sessionId }) }
+      const resource = sessionId === undefined
+        ? ({ type: 'workspace', workspaceId: action.workspaceId } as const)
+        : ({ type: 'session', workspaceId: action.workspaceId, sessionId } as const)
+      const live = this.currentHuman(confirmer)
+      const liveGrants = this.options.identity.grantsFor(confirmer.id)
+      if ((action.auto && live.hubOwner !== true) || !hasScope(live, liveGrants, target, ACTION_SCOPE[action.tool], this.clock())) return { state: 'rejected', error: { code: 'forbidden', message: 'The confirmer’s current authority changed' } }
+      const scopes = delegatedScopes(live, liveGrants, target, this.clock())
+      const delegated: HubGrant[] = [{ principalId: SUPERVISOR_PRINCIPAL_ID, resource, effect: 'allow', scopes: [...scopes] }]
+      const context: AuthenticatedContext = { principal, grants: delegated, browserSessionId: `supervisor:${action.id}`, actor: supervisorActor(action.requestedBy, confirmer.id) }
       const params = {
         workspace_id: action.workspaceId,
         ...(sessionId === undefined ? {} : { session_id: sessionId }),
@@ -863,7 +876,7 @@ export class ActionService {
       case 'task.stop': {
         // Pause goal continuation first so the stop is not undone by the next round.
         let paused = false
-        if (scopes.has('goal.write')) {
+        if (delegatedScopes(this.currentHuman(confirmer), this.options.identity.grantsFor(confirmer.id), target, this.clock()).has('goal.write')) {
           const pause = await send('goal.set', action.sessionId, { input: 'pause' })
           paused = pause.state === 'accepted'
         }

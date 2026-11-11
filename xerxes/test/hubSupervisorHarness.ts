@@ -100,6 +100,7 @@ export function makeWorld(options: { modelSetSessionOnly?: boolean; expiryMs?: n
   }
   const actions = new ActionService({
     db, threads, identity, targets, execute, overlay,
+    isHubOwner: id => { const principal = identity.users.get(id)?.principal; return principal?.kind === 'user' && principal.hubOwner === true },
     access: (threadId, principal) => { threads.access(threadId, principal) },
     clock,
     ...(options.expiryMs === undefined ? {} : { expiryMs: options.expiryMs }),

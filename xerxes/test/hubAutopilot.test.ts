@@ -460,7 +460,8 @@ describe('Autopilot questions', () => {
     permission.events.push('approval_request', { id: 'p1', request_id: 'p1', description: 'rm -rf' })
     await permission.enable()
     await permission.supervisor.runner.enqueue({ threadId: 'shared', requester: permission.user('owner') })
-    expect(permission.toolResults()).toContain('answer_permission')
+    expect(permission.toolResults()).toContain('human owner must decide')
+    expect(permission.execCalls).toHaveLength(0)
 
     const other = await setup({ responses: [calls(['answer_question', answer('nightly')]), reply('x')] })
     other.events.push('question_request', question)

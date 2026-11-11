@@ -63,7 +63,7 @@ export class SuperagentControl {
   dispose(): void { this.disposed = true; this.controller.abort(new Error('Superagent control disposed')) }
   /** Wraps every model path (including digest calls) in the same durable budget and kill fence. */
   model(port: SupervisorModelPort): SupervisorModelPort {
-    return { id: port.id, reportsCost: port.reportsCost,
+    return { get id() { return port.id }, get reportsCost() { return port.reportsCost },
       ...(port.quote === undefined ? {} : { quote: request => port.quote!(request) }),
       complete: async request => {
         const signal = request.signal === undefined ? this.signal : AbortSignal.any([request.signal, this.signal])

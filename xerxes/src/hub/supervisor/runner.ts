@@ -440,6 +440,7 @@ export class SupervisorRunner {
             failed = true
             content = error instanceof Error ? error.message : String(error)
           }
+          if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
           step({ id: stepId, kind: 'tool', tool: call.function.name, text: label, state: failed ? 'error' : 'done' })
           messages.push({
             role: 'tool', name: call.function.name, tool_call_id: call.id,
