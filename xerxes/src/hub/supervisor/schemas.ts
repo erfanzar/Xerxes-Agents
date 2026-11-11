@@ -95,12 +95,13 @@ const SPECS: readonly SupervisorToolSpec[] = [
     name: 'task.tail',
     providerName: 'task_tail',
     gate: 'read',
-    description: 'Read the latest user-visible steps of one task, bounded to 64 KiB.',
+    description: 'Read a bounded page of task steps (64 KiB). Omit before for the latest page; pass the returned before cursor to read older pages. A workspace that is offline returns an error rather than waiting indefinitely.',
     parameters: object(
       {
         workspace_id: WORKSPACE_ID,
         task_id: TASK_ID,
         after: { type: 'integer', minimum: 0 },
+        before: { type: 'string', minLength: 1, maxLength: 1024 },
         limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
       },
       ['workspace_id', 'task_id'],

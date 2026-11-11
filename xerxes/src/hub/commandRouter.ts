@@ -322,8 +322,9 @@ function rowToResult(row: CommandRow): HubCommandResult {
 }
 
 /** Find the daemon session key for a session id; the key, not the id, addresses daemon RPCs. */
-export async function resolveSessionKey(backend: Pick<CommandBackend, 'call'>, workspaceId: string, sessionId: string): Promise<string | undefined> {
-  const listed = await backend.call(workspaceId, 'session.active_list', {})
+export async function resolveSessionKey(backend: Pick<CommandBackend, 'call'>, workspaceId: string, sessionId: string, options: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {}): Promise<string | undefined> {
+  options.signal?.throwIfAborted()
+  const listed = await backend.call(workspaceId, 'session.active_list', { history_limit: 0 }, options)
   if (listed.state !== 'accepted') {
     throw new HubProtocolError('unavailable', 'workspace is not available; try again when it is online')
   }

@@ -244,12 +244,17 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
       const taskId = str(args, 'task_id')!
       readable(turn, workspaceId, taskId)
       if (typeof args.after === 'number' && args.after > 0) throw new Error('"after" is not supported yet; omit it to read the latest steps')
-      const key = await resolveSessionKey(deps.backend, workspaceId, taskId)
+      const deadline = AbortSignal.timeout(10_000)
+      const boundedSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
+      const key = await resolveSessionKey(deps.backend, workspaceId, taskId, { signal: boundedSignal, timeoutMs: 10_000 })
       if (key === undefined) throw new Error('that task is not active in its workspace, so it has no live tail')
       const limit = typeof args.limit === 'number' ? args.limit : 20
-      const result = await poolRead(workspaceId, 'session.history', { session_key: key, history_limit: limit }, signal)
+      const before = str(args, 'before')
+      const result = await poolRead(workspaceId, 'session.history', { session_key: key, history_limit: limit, ...(before === undefined ? {} : { before }) }, boundedSignal)
       const tail = renderTail(result.history, TAIL_MAX_BYTES)
-      return { steps: tail.lines, truncated: tail.truncated }
+      const history = isRecord(result.history) ? result.history : {}
+      return { steps: tail.lines, truncated: tail.truncated, has_more: history.has_more === true,
+        before: typeof history.before === 'string' ? history.before : null }
     },
 
     'task.search': async (args, turn, signal) => {
