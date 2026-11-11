@@ -1688,6 +1688,9 @@ function responsesToolDefinition(
     name: tool.function.name,
     description: tool.function.description,
     parameters: tool.function.parameters,
+    // Responses defaults to strict schema normalization, which makes optional
+    // alternatives required. Native tool validation still enforces the schema.
+    strict: false,
     ...(deferLoading ? { defer_loading: true } : {}),
   }
 }
