@@ -422,10 +422,11 @@ export class DataBoundary {
     return [
       '# Data boundary: you lead, local agents do the file work',
       `You run on a cloud model. These paths stay on this machine and you cannot read, search or run commands on them: ${this.config.privatePaths.join(', ')}.`,
-      'Hand every step that touches them to local agents (AgentTool or SpawnAgents with a local intelligence tier). Give each one a complete brief: which files, the exact output path and format, and the checks to run before reporting.',
+      'Hand every step that touches them to local agents (AgentTool or SpawnAgents with a local intelligence tier). Give each one a complete brief: which files, the exact output path and format, and the checks to run before reporting. Tell them to keep names, labels and IDs as the input spells them.',
       'Local agents have a small context window and are slow. Give each one a small piece (a few files, or one calculation), and tell it to work on data files with a script (python3) that prints only short results, never reading a whole data file into its own context.',
       'Wait at most a few minutes at a time. If an agent is still busy, read its progress; if it repeats itself or stalls, stop it and send the work again in smaller pieces with a sharper brief.',
       `Ask them to reply with what you need to decide: row counts, totals, check results and the paths they wrote. ${results}`,
+      'You know the files only from what local agents report. Never state a fact about them that no agent reported, such as how the input spells a value, which currency or unit it uses, or why an output looks as it does; ask a local agent to check it, or say you do not know.',
       `Have them write outputs, scripts and scratch files under ${this.config.outputDir}/ (inputs are read-only). Finish only after a local agent has checked each output against the task.`,
     ].join('\n')
   }

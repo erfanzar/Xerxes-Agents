@@ -51,6 +51,10 @@ test('only a cloud conversation that may not open private paths is told to lead'
   expect(text).toContain('secret/**')
   expect(text).toContain('local agents')
   expect(text).toContain('300 bytes')
+  // The lead passes the spelling rule on, and states nothing about the files it was not told.
+  expect(text).toContain('keep names, labels and IDs as the input spells them')
+  expect(text).toContain('Never state a fact about them that no agent reported')
+  expect(text).toContain('which currency or unit it uses')
   expect(boundary.leadInstruction('local')).toBe('')
   expect(new DataBoundary(parseDataBoundaryConfig({ data_boundary: 'hybrid' }, {}), '/work').leadInstruction('cloud')).toBe('')
   expect(new DataBoundary(parseDataBoundaryConfig({ ...lead, data_boundary: 'cloud' }, {}), '/work').leadInstruction('cloud')).toBe('')

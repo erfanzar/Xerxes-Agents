@@ -117,6 +117,8 @@ test('buildLeanSystemPrompt states the rules, adapts to tools, and clips project
   expect(withAdvisor).toContain('Read a file before you edit it')
   expect(withAdvisor).toContain('read-only')
   expect(withAdvisor).toContain('Never say you checked')
+  // Grouping case variants must not rewrite the labels a person will read.
+  expect(withAdvisor).toContain('Keep names, labels and IDs as the input spells them')
   expect(withAdvisor).toContain('AskAdvisor')
   expect(withAdvisor).toContain('XlsxWriter')
 

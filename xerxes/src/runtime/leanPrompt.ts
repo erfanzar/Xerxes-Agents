@@ -167,6 +167,7 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     '- Read a file before you edit it. Make the smallest change that does the task.',
     '- Input files are read-only unless the user asks you to change them. Write results to a new file.',
     '- Do not guess file contents or paths. Use the tools to look.',
+    '- Keep names, labels and IDs as the input spells them. To group values that differ only in case or spaces, match on a cleaned key but write the input\'s own spelling, never the cleaned key.',
     '- Check your result by running a check (a test, a validator, or reading the output back) before you say it is done.',
     '- Never say you checked or validated something you did not run. If you could not check, say so.',
   ]
