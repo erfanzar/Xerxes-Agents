@@ -47,7 +47,7 @@ export interface ManagedAgentWorktrees extends SubagentWorktreePort {
 }
 
 /** Git-only isolation adapter. No shared-checkout fallback and no automatic commits. */
-export function nativeSubagentWorktrees(repository: string, options: { setupConfigPath?: string } = {}): ManagedAgentWorktrees {
+export function nativeSubagentWorktrees(repository: string, options: { setupConfigPath?: string; setupPolicy?: 'configured' | 'disabled' } = {}): ManagedAgentWorktrees {
   const cwd = resolve(repository)
   const gitEnvironment: Record<string, string | undefined> = { ...Bun.env, GIT_OPTIONAL_LOCKS: '0' }
   for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX']) delete gitEnvironment[name]
@@ -197,7 +197,10 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
       if (source && selectedRef) throw new Error('worktree_source and worktree_ref are mutually exclusive')
       const ref = selectedRef ?? 'HEAD'
       const base = await allocateGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`])
-      const setup = await loadWorkspaceSetup(await allocateGit(['rev-parse', '--show-toplevel']), options.setupConfigPath)
+      // Sandboxed execution hosts must never run an owner/repository setup
+      // command on the host before their enforced execution boundary exists.
+      const setup = options.setupPolicy === 'disabled' ? undefined
+        : await loadWorkspaceSetup(await allocateGit(['rev-parse', '--show-toplevel']), options.setupConfigPath)
       const root = await storage()
       const id = crypto.randomUUID()
       const record: Ownership = { id, taskId: request.taskId, path: join(root, id), branch: `xerxes/agent-${id}`, base }
