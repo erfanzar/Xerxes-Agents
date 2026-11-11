@@ -75,6 +75,9 @@ agent:
     tester:
       path: ./tester.yaml
       description: "Focused test authoring and verification without recursive delegation."
+    knowledge-curator:
+      path: ./knowledge-curator.yaml
+      description: "Read-only audit of skills and lessons with evidence-based keep, update, merge, and retire recommendations."
     objective:
       path: ./objective.yaml
       description: "Hard-goal execution loop with verification gates."
