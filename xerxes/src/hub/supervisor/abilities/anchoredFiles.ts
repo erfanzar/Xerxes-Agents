@@ -3,7 +3,6 @@
 
 import { dlopen, FFIType, ptr, toArrayBuffer } from 'bun:ffi'
 import { closeSync, constants, fstatSync, openSync, read as readFd } from 'node:fs'
-import { lstat, realpath } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 
 export class OversizedObservationFile extends Error {}
@@ -28,16 +27,17 @@ export class AnchoredWorkspaceFiles {
     if (isAbsolute(path) || path.includes('\\') || /[\0\r\n]/.test(path) || path.length > 4096) throw new Error('Invalid anchored path')
     const parts = path === '.' ? [] : path.split('/')
     if (parts.some(part => part === '' || part === '.' || part === '..')) throw new Error('Invalid anchored path')
-    const canonical = await realpath(this.root)
-    const expected = await lstat(canonical)
-    let fd = openSync(canonical, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    if (!isAbsolute(this.root) || this.root.includes('\\') || /[\0\r\n]/.test(this.root)) throw new Error('Invalid workspace anchor root')
+    const rootParts = this.root === '/' ? [] : this.root.slice(1).split('/')
+    if (rootParts.some(part => part === '' || part === '.' || part === '..')) throw new Error('Workspace anchor root must be canonical')
+    const components = [...rootParts, ...parts]
+    // Walk the registered root itself from / as well: realpath(root) would
+    // silently authorize a replacement symlink or a changed ancestor target.
+    let fd = openSync('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     try {
-      const actual = fstatSync(fd)
-      if (!actual.isDirectory() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error('Workspace anchor changed during open')
-      native ??= loadNative()
-      for (let index = 0; index < parts.length; index++) {
-        const name = Buffer.from(`${parts[index]}\0`)
-        const isDirectory = directory || index < parts.length - 1
+      for (let index = 0; index < components.length; index++) {
+        const name = Buffer.from(`${components[index]}\0`)
+        const isDirectory = index < rootParts.length || directory || index < components.length - 1
         const next = native.symbols.openat(fd, ptr(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | (isDirectory ? constants.O_DIRECTORY : 0))
         if (next < 0) throw new Error('Secure workspace anchor refused a symlink or inaccessible component')
         closeSync(fd); fd = next

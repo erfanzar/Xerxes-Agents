@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { observeWorkspace } from '../src/daemon/superagentObservation.js'
@@ -10,7 +10,7 @@ import { HUB_DAEMON_METHODS } from '../src/hub/runtimePool.js'
 import { hubMethodPolicy } from '../src/security/hubIdentityVerifier.js'
 
 test('daemon observation dispatcher uses a pinned root, a closed operation set and bounded JSON', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'xerxes-native-observe-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-native-observe-')))
   try {
     await writeFile(join(root, 'hello.txt'), 'hello')
     expect(await observeWorkspace(root, { ability: 'workspace.read', path: 'hello.txt' })).toMatchObject({ text: 'hello' })
