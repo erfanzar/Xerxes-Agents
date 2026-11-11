@@ -197,11 +197,11 @@ import {
   nativeSamplingDefaults,
   publishedSamplingProfile,
 } from "../llms/samplingDefaults.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../llms/outputTokens.js";
+import { openAiOutputTokens } from "./runtimeConnection.js";
 import {
   closeLlmClient,
   completeLlm,
-import { DEFAULT_MAX_OUTPUT_TOKENS } from "../llms/outputTokens.js";
-import { openAiOutputTokens } from "./runtimeConnection.js";
   createLlmClient,
   requireConfiguredModel,
   type LlmClient,
@@ -8162,6 +8162,14 @@ export class DaemonServer {
     raw: string,
   ): Promise<JsonRpcPayload> {
     const input = raw.trim();
+    const session = this.runtime.sessionStatus(connection.activeSessionKey);
+    const pinned = this.pinnedProfileName(session);
+    const ownProfile = pinned ? this.profileStore.get(pinned) : undefined;
+    const route = {
+      ...(session?.model ? { model: session.model } : {}),
+      ...(ownProfile ? { provider: ownProfile.provider, base_url: ownProfile.base_url } : {}),
+    };
+    const status = { ...this.runtime.status(), ...route };
     if (!input) {
       const sampling = samplingConfig(status);
       const model = typeof status.model === "string" ? status.model : "";
@@ -8180,14 +8188,6 @@ export class DaemonServer {
           : []),
         "",
         "Use `/sampling <key> <value>` or `/sampling reset`.",
-    const session = this.runtime.sessionStatus(connection.activeSessionKey);
-    const pinned = this.pinnedProfileName(session);
-    const ownProfile = pinned ? this.profileStore.get(pinned) : undefined;
-    const route = {
-      ...(session?.model ? { model: session.model } : {}),
-      ...(ownProfile ? { provider: ownProfile.provider, base_url: ownProfile.base_url } : {}),
-    };
-    const status = { ...this.runtime.status(), ...route };
       ].join("\n");
       this.emitSlash(connection, body);
       return { ok: true, sampling };
@@ -14003,6 +14003,7 @@ function parseNativeSamplingValue(
   key: NativeSamplingKey,
   raw: string,
   reasoningEfforts: readonly string[],
+  openAiLimits: boolean,
 ): boolean | number | string | undefined {
   if (key === "thinking") {
     if (["on", "true", "1"].includes(raw.toLowerCase())) return true;
@@ -14022,13 +14023,15 @@ function parseNativeSamplingValue(
     return ["auto", "default", "flex", "priority"].includes(tier) ? tier : undefined;
   }
   const value = Number(raw);
-  openAiLimits: boolean,
   if (!Number.isFinite(value)) return undefined;
   if (key === "temperature") {
     return value >= 0 && value <= 2 ? value : undefined;
   }
   if (key === "top_p") {
     return value >= 0 && value <= 1 ? value : undefined;
+  }
+  if (key === "max_tokens" && openAiLimits) {
+    return Number.isSafeInteger(value) && (value === -1 || (value >= 1 && value <= 1_000_000)) ? value : undefined;
   }
   if (key === "max_tokens" || key === "top_k" || key === "thinking_budget") {
     return Number.isInteger(value) && value >= 0 && value <= 100_000
@@ -14041,7 +14044,11 @@ function parseNativeSamplingValue(
 function invalidSamplingMessage(
   key: NativeSamplingKey,
   reasoningEfforts: readonly string[],
+  openAiLimits: boolean,
 ): string {
+  if (key === "max_tokens" && openAiLimits) {
+    return "`max_tokens` must be a positive integer from 1 to 1000000, or `-1` for no user-set output cap. `0` is not a valid output budget.";
+  }
   if (key === "temperature") {
     return "`temperature` must be a finite number from 0 to 2.";
   }
@@ -14049,9 +14056,6 @@ function invalidSamplingMessage(
     return "`top_p` must be a finite number from 0 to 1.";
   }
   if (key === "thinking") {
-  if (key === "max_tokens" && openAiLimits) {
-    return Number.isSafeInteger(value) && (value === -1 || (value >= 1 && value <= 1_000_000)) ? value : undefined;
-  }
     return "`thinking` must be `on` or `off`.";
   }
   if (key === "reasoning_effort") {
@@ -14063,11 +14067,7 @@ function invalidSamplingMessage(
     return "`service_tier` must be one of: auto, default, flex, priority.";
   }
   return `\`${key}\` must be a valid finite numeric value.`;
-  openAiLimits: boolean,
 }
-  if (key === "max_tokens" && openAiLimits) {
-    return "`max_tokens` must be a positive integer from 1 to 1000000, or `-1` for no user-set output cap. `0` is not a valid output budget.";
-  }
 
 function agentDefinitionPayload(definition: AgentDefinition): JsonRpcPayload {
   return {

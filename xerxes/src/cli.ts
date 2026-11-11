@@ -2654,6 +2654,13 @@ function daemonRuntime(
         }),
       }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
+      // The runner checks the actual attempt route, not the daemon's startup
+      // provider, before reading this live OpenAI-only setting.
+      maxTokensProvider: (model: string, session: DaemonSession) => {
+        const profile = session.metadata.provider_profile ? sessionProvider(profileStore, session, model) : profileStore.active();
+        const value = (runtime?.settings() ?? settings).max_tokens ?? profile?.sampling.max_tokens;
+        return typeof value === "number" ? value : undefined;
+      },
       maxOutputTokens,
       model: connection.model,
       permissionMode: connection.permissionMode,
@@ -2675,13 +2682,6 @@ function daemonRuntime(
       ...(connection.thinking === undefined ? {} : { thinking: connection.thinking }),
       ...(connection.thinkingBudget === undefined
         ? {}
-      // The runner checks the actual attempt route, not the daemon's startup
-      // provider, before reading this live OpenAI-only setting.
-      maxTokensProvider: (model: string, session: DaemonSession) => {
-        const profile = session.metadata.provider_profile ? sessionProvider(profileStore, session, model) : profileStore.active();
-        const value = (runtime?.settings() ?? settings).max_tokens ?? profile?.sampling.max_tokens;
-        return typeof value === "number" ? value : undefined;
-      },
         : { thinkingBudget: connection.thinkingBudget }),
       ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),

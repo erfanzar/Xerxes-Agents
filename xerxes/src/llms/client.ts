@@ -1607,9 +1607,9 @@ export function getLlmModelInfo(
   options: LlmModelInfoOptions = {},
   overrides: ProviderOverrides = {},
 ): LlmModelInfo {
+  const provider = resolveProvider(model, overrides)
   return {
     provider,
-  const provider = resolveProvider(model, overrides)
     model,
     temperature: options.temperature ?? publishedSampling(model, 'thinking')?.temperature ?? DEFAULT_TEMPERATURE,
     maxTokens: options.maxTokens ?? (isOpenAiOutputTokenProvider(provider) ? DEFAULT_MAX_OUTPUT_TOKENS : 2_048),

@@ -112,15 +112,15 @@ export function runtimeConnection(
   }
 }
 
-export function runtimePermissionMode(value: unknown): RuntimeConnection['permissionMode'] | undefined {
-  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan' ? value : undefined
-}
 /** Whether this route uses the OpenAI token-limit settings, never the Codex subscription path. */
 export function openAiOutputTokens(model: string, overrides: Readonly<Record<string, unknown>>): boolean {
   try { return isOpenAiOutputTokenProvider(resolveProvider(model, overrides)) }
   catch { return false } // Unconfigured models still report their normal routing error at generation.
 }
 
+export function runtimePermissionMode(value: unknown): RuntimeConnection['permissionMode'] | undefined {
+  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan' ? value : undefined
+}
 
 function numberSetting(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
