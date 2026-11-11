@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WorkspaceObservations } from '../src/hub/supervisor/abilities/observations.js'
@@ -10,7 +10,7 @@ import { WorkspaceObservations } from '../src/hub/supervisor/abilities/observati
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'xerxes-observe-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-observe-'))); roots.push(root)
   await writeFile(join(root, 'a.txt'), 'first\nsecond needle\nthird\n')
   await mkdir(join(root, 'nested')); await writeFile(join(root, 'nested', 'b.txt'), 'needle again\n')
   return { root, observer: new WorkspaceObservations(root) }
@@ -84,4 +84,40 @@ test('Git observations stay in the workspace subtree and exclude credential diff
   const diff = (await observer.git('diff')).text
   expect(diff).toContain('safe.txt')
   expect(diff).not.toContain('DO-NOT-DISCLOSE')
+})
+
+test('Git observations refuse repository clean filters before executing their commands', async () => {
+  const { root, observer } = await fixture()
+  const marker = join(root, 'FILTER-EXECUTED')
+  for (const args of [['init', '-q', '--template='], ['add', 'a.txt'],
+    ['config', 'filter.trap.clean', `touch '${marker}'; cat`]]) {
+    expect(Bun.spawnSync(['git', ...args], { cwd: root, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0)
+  }
+  await writeFile(join(root, '.gitattributes'), 'a.txt filter=trap\n')
+  await writeFile(join(root, 'a.txt'), 'changed content forces a worktree clean filter invocation\n')
+  await expect(observer.git('diff')).rejects.toThrow('repository configuration')
+  expect(await Bun.file(marker).exists()).toBe(false)
+})
+
+test('Git observations never lazy-fetch missing blobs or execute a configured SSH helper', async () => {
+  const { root, observer } = await fixture()
+  const marker = join(root, 'SSH-EXECUTED')
+  const shim = join(root, 'ssh-fixture.sh')
+  await writeFile(shim, `#!/bin/sh\nprintf triggered > '${marker}'\nexit 1\n`)
+  const environment = { PATH: '/usr/bin:/bin' }
+  for (const args of [['init', '-q', '--template='], ['add', 'a.txt'],
+    ['config', 'extensions.partialClone', 'origin'], ['config', 'remote.origin.promisor', 'true'],
+    ['config', 'remote.origin.url', 'ssh://fixture.invalid/repo'], ['config', 'core.sshCommand', `/bin/sh '${shim}'`]]) {
+    expect(Bun.spawnSync(['git', ...args], { cwd: root, env: environment, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0)
+  }
+  const blob = Bun.spawnSync(['git', 'rev-parse', ':a.txt'], { cwd: root, env: environment, stdout: 'pipe', stderr: 'pipe' }).stdout.toString().trim()
+  if (!/^[a-f0-9]{40}$/.test(blob)) throw new Error('Expected fixture blob identity')
+  await rm(join(root, '.git', 'objects', blob.slice(0, 2), blob.slice(2)))
+  await writeFile(join(root, 'a.txt'), 'changed file forces access to the missing indexed blob\n')
+  // Positive control: ordinary Git calls only our offline failing shim, never SSH/network.
+  expect(Bun.spawnSync(['git', 'diff', '--', 'a.txt'], { cwd: root, env: environment, stdout: 'pipe', stderr: 'pipe' }).exitCode).not.toBe(0)
+  expect(await Bun.file(marker).exists()).toBe(true)
+  await rm(marker)
+  await expect(observer.git('diff')).rejects.toThrow('Read command failed')
+  expect(await Bun.file(marker).exists()).toBe(false)
 })

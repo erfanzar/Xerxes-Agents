@@ -1,9 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { realpath, statfs } from 'node:fs/promises'
-import { freemem, loadavg, totalmem, uptime } from 'node:os'
-import { isAbsolute } from 'node:path'
+import { mkdtemp, mkdir, realpath, rm, statfs, symlink } from 'node:fs/promises'
+import { freemem, loadavg, tmpdir, totalmem, uptime } from 'node:os'
+import { isAbsolute, join, relative } from 'node:path'
 import { AnchoredWorkspaceFiles, OversizedObservationFile } from './anchoredFiles.js'
 
 const MAX_BYTES = 64 * 1024
@@ -19,12 +19,13 @@ export interface ObservationHosts {
 }
 
 /** Fixed read-only argv only. No shell, pager, repository hooks, external diff or textconv. */
-async function readCommand(argv: readonly string[], cwd: string, signal?: AbortSignal) {
+async function readCommand(argv: readonly string[], cwd: string, signal?: AbortSignal, allowNoMatch = false) {
   signal?.throwIfAborted()
   const deadline = AbortSignal.timeout(5000)
   const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
   const process = Bun.spawn([...argv], { cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
-    env: { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' } })
+    env: { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
+      GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '', GIT_SSH_COMMAND: '/usr/bin/false', GIT_ASKPASS: '/usr/bin/false', LC_ALL: 'C' } })
   const abort = () => { process.kill('SIGKILL') }
   bounded.addEventListener('abort', abort, { once: true })
   if (bounded.aborted) abort()
@@ -45,9 +46,9 @@ async function readCommand(argv: readonly string[], cwd: string, signal?: AbortS
     return Buffer.concat(chunks).toString('utf8')
   }
   try {
-    const [stdout, stderr, exit] = await Promise.all([consume(process.stdout), consume(process.stderr), process.exited])
+    const [stdout, , exit] = await Promise.all([consume(process.stdout), consume(process.stderr), process.exited])
     bounded.throwIfAborted()
-    if (exit !== 0 && !truncated) throw new Error(`Read command failed (${exit}): ${stderr.slice(0, 500)}`)
+    if (exit !== 0 && !(allowNoMatch && exit === 1) && !truncated) throw new Error(`Read command failed (${exit}); repository or host diagnostics were withheld to avoid exposing credentials`)
     return { text: stdout, truncated }
   } finally {
     bounded.removeEventListener('abort', abort)
@@ -130,8 +131,53 @@ export class WorkspaceObservations {
       : view === 'log' ? ['log', '-30', '--format=%h %s', '--', '.']
         : view === 'diff' ? ['diff', '--no-ext-diff', '--no-textconv', '--', '.', ...exclusions] : undefined
     if (args === undefined) throw new Error('Unknown git observation')
-    const result = await readCommand(['git', '--no-pager', '-c', 'core.fsmonitor=false', ...args], await realpath(this.root), signal)
-    return { ...result, untrusted: true }
+    const root = await realpath(this.root)
+    const safeGit = ['git', '--no-pager', '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', '-c', 'core.sshCommand=/usr/bin/false', '-c', 'core.askPass=/usr/bin/false', '-c', 'credential.helper=']
+    // Config listing does not evaluate clean filters. Do not echo values: even
+    // read-only status/diff can execute repository-defined clean/process filters.
+    const config = await readCommand([...safeGit, 'config', '--no-includes', '--null', '--name-only', '--get-regexp', '^(filter\\..*|include\\..*|includeif\\..*)$'], root, signal, true)
+    if (config.truncated || config.text !== '') throw new Error('Git observation refused unsafe repository configuration (filters/includes)')
+    const metadata = await readCommand([...safeGit, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--absolute-git-dir', '--git-common-dir', '--show-object-format'], root, signal)
+    const parts = metadata.text.trim().split('\n')
+    const [top, gitDirectory, commonDirectory, format] = parts
+    if (metadata.truncated || parts.length !== 4 || !top || !gitDirectory || !commonDirectory || (format !== 'sha1' && format !== 'sha256')) throw new Error('Git repository identity is unavailable')
+    const subtree = relative(top, root)
+    if (isAbsolute(subtree) || subtree === '..' || subtree.startsWith('../')) throw new Error('Workspace is outside its Git repository')
+    const head = await readCommand([...safeGit, 'rev-parse', '--verify', '--quiet', 'HEAD'], root, signal, true)
+    const revision = head.text.trim()
+    if (revision && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision)) throw new Error('Invalid Git HEAD identity')
+    // Config refusal is defense in depth, not the isolation boundary: a writer
+    // could change it after inspection. Run reads against a private metadata
+    // view with no repository config, hooks, info/attributes or helper commands.
+    const temporary = await mkdtemp(join(tmpdir(), 'xerxes-git-observation-'))
+    try {
+      await mkdir(join(temporary, 'refs'))
+      await symlink(join(commonDirectory, 'objects'), join(temporary, 'objects'), 'dir')
+      await Bun.write(join(temporary, 'HEAD'), revision ? `${revision}\n` : 'ref: refs/heads/unborn\n')
+      await Bun.write(join(temporary, 'config'), `[core]\nrepositoryformatversion = ${format === 'sha256' ? 1 : 0}\nbare = false\n${format === 'sha256' ? '[extensions]\nobjectformat = sha256\n' : ''}`)
+      const index = Bun.file(join(gitDirectory, 'index'))
+      if (await index.exists()) {
+        if (index.size > 64 * 1024 * 1024) throw new Error('Git index exceeds observation budget')
+        const writer = Bun.file(join(temporary, 'index')).writer()
+        const reader = index.stream().getReader()
+        let bytes = 0
+        try {
+          while (true) {
+            signal?.throwIfAborted()
+            const chunk = await reader.read()
+            if (chunk.done) break
+            bytes += chunk.value.byteLength
+            if (bytes > 64 * 1024 * 1024) throw new Error('Git index exceeds observation budget')
+            writer.write(chunk.value)
+          }
+        } finally {
+          try { await reader.cancel() } finally { reader.releaseLock(); await writer.end() }
+        }
+      }
+      const cwd = subtree ? join(top, subtree) : top
+      const result = await readCommand([...safeGit, `--git-dir=${temporary}`, `--work-tree=${top}`, ...args], cwd, signal)
+      return { ...result, untrusted: true }
+    } finally { await rm(temporary, { recursive: true, force: true }) }
   }
 
   async health(signal?: AbortSignal) {
