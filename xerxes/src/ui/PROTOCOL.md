@@ -1224,6 +1224,51 @@ files return errors. This read-only operation does not append messages, execute 
 tool, or call a provider. Older daemons may report an unsupported method. A preview of
 a whole file (not `truncated`) also carries `version`, the SHA-256 of its bytes.
 
+#### Rich file previews (additive)
+
+A client that can draw more than text adds `kinds`: the preview kinds it renders, from
+`table`, `image`, `pdf`, `sheet`, `document` and `html` (at most 16 names; names a
+daemon does not know are ignored, so newer clients stay compatible). Without `kinds` the
+request and reply are exactly as above. With `kinds`, the file's extension picks its
+kind; when that kind is not in `kinds`, the reply is the text preview above plus
+`kind:"text"` and `size` (bytes on disk). A client shows a file's source by leaving its
+rendered kind out (a CSV's `table`, an SVG's `image`, a page's `html`).
+
+Every rich reply is `{ok:true,path,kind,size,...}`:
+
+| Extensions | `kind` | Fields |
+| --- | --- | --- |
+| `.csv` `.tsv` `.tab` | `table` | `delimiter` (sniffed for `.csv`: `,` `;` tab `\|`), `encoding` (`utf-8`, `utf-16le`, `utf-16be` or `windows-1252`), `header` (first record), `rows` (data records), `total_rows` (data records in the file), `total_columns` (widest record), `truncated` |
+| `.xlsx` `.xlsm` | `sheet` | `sheets` (`[{name,hidden}]` in workbook order), `sheet` (zero-based index shown), `rows` (dense cells from A1), `total_rows`, `total_columns` (last row and column holding a value), `truncated`, optional `notice` (why a sheet has no cells, e.g. a chart sheet) |
+| `.docx` `.docm` | `document` | `blocks`, `truncated` |
+| `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` | `image` | `media_type` (`image/png`, `image/jpeg`, `image/gif`, `image/webp` or `image/svg+xml`, decided by the bytes for raster images), `data` (base64) |
+| `.pdf` | `pdf` | `media_type:"application/pdf"`, `data` (base64) |
+| `.html` `.htm` `.xhtml` | `html` | `content` (UTF-8 text), `truncated:false`, and `version` when the page fits the 128 KiB editor |
+
+`sheet` (integer 0–4095, default 0) picks the workbook sheet; an index past the last
+sheet shows the last one, and the reply's `sheet` says which. Sheet cells are strings as
+Excel displays them: shared and inline strings, `TRUE`/`FALSE`, error codes, numbers under
+their number format (percent, decimals, grouping, currency literals), dates and times as
+ISO `YYYY-MM-DD` / `HH:MM[:SS]`; a formula without a cached value shows as `=FORMULA`.
+`blocks` are `{type:"heading",level,text}`, `{type:"paragraph",runs}`,
+`{type:"list_item",ordered,level,marker,runs}` (the marker Word prints, such as `2.` or
+`1.a)`) and `{type:"table",rows}`, where `runs` are `[{text,bold?,italic?,underline?}]`.
+Tracked deletions, hidden text and field codes are left out.
+
+Tables and sheets carry at most 1,000 rows, 100 columns, 1,000 characters per cell and
+2 MiB of cell text; documents at most 5,000 blocks and 2 MiB of text. `truncated` is true
+when anything was left out, and the totals still count the whole file. Files larger than
+a kind's limit are not read: images and PDFs 10 MiB (one reply must fit a 16 MiB frame),
+HTML 4 MiB, tables, workbooks and documents 32 MiB, with no single archive part inflated
+past 64 MiB.
+
+A file that cannot be shown is a typed reply, not an RPC error:
+`{ok:false,path,reason,error,size}` where `reason` is `too_large` (also `limit`, in
+bytes), `unsupported` (not text and no kind the client renders) or `unreadable` (the
+bytes do not match the extension, a damaged archive, or a password-protected or legacy
+binary Office file). Invalid `path`, containment failures, and invalid `kinds` or `sheet`
+remain RPC errors. Clients must treat an unknown `kind` as unsupported.
+
 `workspace.fileWrite` accepts `{session_key,path,content,base_version}` and saves an
 edit made by the person in a client (it is not a tool call and appends nothing to the
 conversation). The path follows the same containment rules as `workspace.filePreview`

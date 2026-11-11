@@ -17,6 +17,24 @@ export function xmlLocalName(name: string): string {
   return separator < 0 ? name : name.slice(separator + 1)
 }
 
+/** Decode the five predefined entities and character references; anything else stays as written. */
+export function decodeXmlEntities(value: string): string {
+  if (!value.includes('&')) return value
+  return value.replace(/&(#x[0-9a-fA-F]+|#\d+|lt|gt|amp|quot|apos);/gu, (whole, entity: string) => {
+    switch (entity) {
+      case 'lt': return '<'
+      case 'gt': return '>'
+      case 'amp': return '&'
+      case 'quot': return '"'
+      case 'apos': return "'"
+      default: {
+        const code = entity[1] === 'x' ? Number.parseInt(entity.slice(2), 16) : Number.parseInt(entity.slice(1), 10)
+        return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole
+      }
+    }
+  })
+}
+
 /** Escape text placed into a freshly-created XML attribute. */
 export function escapeXmlAttribute(value: string): string {
   return value

@@ -354,6 +354,12 @@ export interface TurnRequest {
   /** Optional maximum retries for objective-mode text-only stopping attempts. */
   readonly objectiveGuardMaxRetries?: number
   readonly permissionMode?: PermissionMode
+  /**
+   * Live session permission resolver, checked before every tool call. The
+   * daemon uses this so switching an in-flight turn to accept-all takes effect
+   * immediately instead of leaving the turn on the mode captured at its start.
+   */
+  readonly permissionModeProvider?: () => PermissionMode
   /** Why this completion is being made; drives cost attribution and retry policy. */
   readonly querySource?: QuerySource
   readonly sessionId?: string
@@ -1440,7 +1446,7 @@ export async function* runTurn(
         ))
         const permission = permissionDisposition(
           effectiveCall,
-          permissionMode,
+          request.permissionModeProvider?.() ?? permissionMode,
           dependencies.policy,
           request.agentId,
           permissionGateOptions(dependencies, permissionMode),

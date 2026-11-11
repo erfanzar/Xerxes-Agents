@@ -24,6 +24,7 @@ import {
   IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, asChatImageResult, chatImageRequestOf, chatImageWire, externalUrlOf,
   type ChatImageResult,
 } from './chatMediaShared.js'
+import { FILE_ACTION_CHANNEL, asFileActionResult, fileActionRequestOf, type FileActionResult } from './fileActionShared.js'
 
 /** How the bridge reaches its host: request/response by channel, and pushed events. */
 export interface BridgeTransport {
@@ -359,6 +360,21 @@ export function createBridge(transport: BridgeTransport) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return { ok: false, error: message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '').slice(0, 300) || 'the image could not be read' }
+    }
+  },
+
+  /**
+   * Open a workspace file in its default app (`open`) or show it in Finder
+   * (`reveal`). The host resolves the path inside `cwd` again. Never rejects.
+   */
+  async fileAction(action: unknown, path: unknown, cwd: unknown): Promise<FileActionResult> {
+    const request = fileActionRequestOf({ action, path, cwd })
+    if ('error' in request) return { ok: false, error: request.error }
+    try {
+      return asFileActionResult(await transport.invoke(FILE_ACTION_CHANNEL, { action: request.action, path: request.path, cwd: request.cwd }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '').slice(0, 300) || 'the file could not be opened' }
     }
   },
 

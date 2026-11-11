@@ -138,6 +138,8 @@ export const READ_ONLY_MESSAGE = 'This workspace runs a Xerxes version that cann
 export interface HubRuntimePoolOptions {
   readonly sink: HubEventSink
   readonly clientOptions?: Omit<HubDaemonClientOptions, 'socketPath' | 'resolveSocketPath' | 'projectDir' | 'sessionKey'>
+  /** Bound queued live frames while a lane is behind; tests inject a small value. */
+  readonly maxQueuedEventBytes?: number
   readonly pollIntervalMs?: number
   /** Metadata is shared; bounded, lazy session lanes keep interaction ownership independent. */
   readonly maxSessionConnections?: number
@@ -146,6 +148,8 @@ export interface HubRuntimePoolOptions {
   readonly onProjection?: (workspaceId: string, projection: WorkspaceProjection) => void
   readonly onGap?: (notice: PoolGapNotice) => void
   readonly onInterrupted?: (notice: PoolInterruptedNotice) => void
+  /** Setup/backfill failures, which otherwise look like plain reconnects. */
+  readonly onSetupError?: (workspaceIds: readonly string[], error: Error) => void
   /** How often a machine on a fallback route checks whether a better route is back (default 30 s). */
   readonly betterRouteProbeMs?: number
   /** Live text/thinking deltas of one session are merged for up to this long before they are stored (default 150 ms). */
@@ -222,6 +226,8 @@ interface Lane {
   tunnel: HubTunnel | undefined
   generation: number
   queuedEventBytes: number
+  /** Live delivery is ignored while explicit backfill owns the journal cursor. */
+  configuring: boolean
   /**
    * Text/thinking deltas received but not stored yet. Their cursor is not committed, so a
    * reconnect drops the buffer and the daemon replays them from the committed cursor.
@@ -355,7 +361,7 @@ export class HubRuntimePool {
     const abort = new AbortController()
     let lane: Lane
     const routed = (workspace.routes?.length ?? 0) > 0
-    const client = new HubDaemonClient({ ...this.options.clientOptions, projectDir: workspace.projectDir,
+    const client = new HubDaemonClient({ ...this.options.clientOptions, deferBackoffReset: true, projectDir: workspace.projectDir,
       ...(workspace.endpoint.kind === 'local' && !routed ? { socketPath: workspace.endpoint.socketPath } : {
         resolveSocketPath: async () => {
           if (routed) return this.pickRoute(lane, workspace, abort.signal)
@@ -368,7 +374,7 @@ export class HubRuntimePool {
     lane = { client, controls: new Map(), socketPath: workspace.endpoint.kind === 'local' && !routed ? workspace.endpoint.socketPath : undefined,
       workspaces: new Map([[workspace.id, workspace]]), abort, endpointKeys: new Set([endpointKey]), active: true,
       everOnline: false, runtimeId: `unverified:${workspace.id}`, verified: false, signedCommands: false, modelsSupported: false, lessonsSupported: false, health: undefined, subscribedKey: undefined, instanceId: undefined, subscriptionId: undefined, streamId: undefined,
-      degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0,
+      degraded: true, tail: Promise.resolve(), poll: undefined, tunnel: undefined, generation: 0, queuedEventBytes: 0, configuring: false,
       deltas: undefined, deltaTimer: undefined,
       entry: workspace, routeIndex: 0, routeConfirmed: true, badRoutes: new Map(), betterProbeAt: 0 }
     this.lanes.add(lane); this.endpoints.set(endpointKey, lane); this.owners.set(workspace.id, lane)
@@ -376,6 +382,7 @@ export class HubRuntimePool {
       if (!lane.active || this.stopped) return
       if (state === 'online') return // setup, journal resume and snapshot must finish before admission
       lane.generation++
+      lane.configuring = false
       clearTimeout(lane.poll); lane.poll = undefined; lane.subscriptionId = undefined
       // Uncommitted deltas come back from the committed cursor after the reconnect.
       this.dropDeltas(lane)
@@ -390,8 +397,11 @@ export class HubRuntimePool {
     })
     client.onEvent((type, payload) => {
       if (type !== 'event_batch' && type !== 'event_gap') return
+      // The daemon starts live delivery as soon as it subscribes. During setup those
+      // batches queue behind backfill and can never drain; explicit reads own catch-up.
+      if (lane.configuring) return
       const generation = lane.generation, bytes = Buffer.byteLength(JSON.stringify(payload))
-      if (lane.queuedEventBytes + bytes > 4 * HUB_LIMITS.maxFrameBytes) {
+      if (lane.queuedEventBytes + bytes > (this.options.maxQueuedEventBytes ?? 4 * HUB_LIMITS.maxFrameBytes)) {
         client.interrupt(new Error('Hub upstream event queue exceeded its byte limit; resuming from the committed cursor'))
         return
       }
@@ -399,7 +409,7 @@ export class HubRuntimePool {
       this.enqueue(lane, async () => {
         try {
           if (generation !== lane.generation || payload.subscription_id !== lane.subscriptionId) return
-          if (type === 'event_gap') { await this.gap(lane, payload); await this.backfill(lane, typeof payload.watermark === 'string' ? payload.watermark : undefined) }
+          if (type === 'event_gap') { await this.gap(lane, payload); await this.configure(lane) }
           else await this.ingest(lane, payload)
         } finally { lane.queuedEventBytes -= bytes }
       })
@@ -543,7 +553,11 @@ export class HubRuntimePool {
 
   private enqueue(lane: Lane, operation: () => Promise<void>): void {
     lane.tail = lane.tail.then(async () => { if (lane.active && !this.stopped) await operation() }).catch((error: unknown) => {
-      if (lane.active && !this.stopped) lane.client.interrupt(error instanceof Error ? error : new Error(String(error)))
+      if (lane.active && !this.stopped) {
+        const failure = error instanceof Error ? error : new Error(String(error))
+        this.options.onSetupError?.([...lane.workspaces.keys()], failure)
+        lane.client.interrupt(failure)
+      }
     })
   }
   private async handshake(lane: Lane, handshake: DaemonHandshake): Promise<void> {
@@ -591,6 +605,10 @@ export class HubRuntimePool {
   }
   private async configure(lane: Lane): Promise<void> {
     if (!lane.active || !lane.client.online) return
+    lane.configuring = true
+    try { await this.configureLane(lane) } finally { lane.configuring = false }
+  }
+  private async configureLane(lane: Lane): Promise<void> {
     clearTimeout(lane.poll); lane.poll = undefined
     // Resubscribing resumes from the committed cursor: store buffered deltas first so none is received twice.
     await this.flushDeltas(lane)
@@ -616,14 +634,26 @@ export class HubRuntimePool {
         lane.subscriptionId = subscribed.subscription_id; lane.streamId = subscribed.stream_id
         if (subscribed.reset_required === true) await this.gap(lane, { ...subscribed, reason: 'stream_replaced' })
         const after = subscribed.reset_required === true ? subscribed.watermark : cursor
-        await this.backfill(lane, typeof after === 'string' ? after : undefined)
+        const caughtUp = await this.backfill(lane, typeof after === 'string' ? after : undefined)
+        if (caughtUp !== undefined) {
+          // events.read does not necessarily move the live subscription's cursor. Replace
+          // it after catch-up, otherwise its pump replays the whole backlog a second time.
+          const previous = lane.subscriptionId!
+          lane.subscriptionId = undefined
+          await lane.client.call('events.unsubscribe', { subscription_id: previous })
+          const resumed = await lane.client.call('events.subscribe', { project_dirs: dirs, detail: 'conversation', max_batch_bytes: HUB_LIMITS.normalFrameBytes, after_cursor: caughtUp })
+          if (resumed.ok !== true || typeof resumed.subscription_id !== 'string' || typeof resumed.stream_id !== 'string' || resumed.reset_required === true) {
+            throw new Error('Daemon could not resume the event subscription after catch-up')
+          }
+          lane.subscriptionId = resumed.subscription_id; lane.streamId = resumed.stream_id
+        }
       }
     }
-    lane.everOnline = true; lane.routeConfirmed = true; this.setLaneHealth(lane, 'online')
+    lane.everOnline = true; lane.routeConfirmed = true; lane.client.markOperational(); this.setLaneHealth(lane, 'online')
     this.schedulePoll(lane)
   }
-  private async backfill(lane: Lane, after: string | undefined): Promise<void> {
-    if (!lane.subscriptionId) return
+  private async backfill(lane: Lane, after: string | undefined): Promise<string | undefined> {
+    if (!lane.subscriptionId) return undefined
     let cursor = after
     // Byte-bounded pages and a bounded catch-up budget. If the journal keeps
     // growing faster than the sink, reconnect from the committed cursor rather
@@ -639,7 +669,7 @@ export class HubRuntimePool {
         continue
       }
       await this.ingest(lane, backfill)
-      if (backfill.has_more !== true) return
+      if (backfill.has_more !== true) return cursor
       const next = backfill.next_cursor ?? backfill.through_cursor
       if (typeof next !== 'string' || next === cursor) throw new Error('Daemon backfill did not advance its cursor')
       cursor = next
@@ -916,7 +946,10 @@ export class HubRuntimePool {
   private setHealth(id: string, health: PoolHealth): void {
     const before = this.healthByWorkspace.get(id)
     this.healthByWorkspace.set(id, health)
-    if (JSON.stringify(before) !== JSON.stringify(health)) this.options.onHealth?.(id, health)
+    // Error messages and runtime/instance ids change on reconnect attempts even when the
+    // visible health did not change. Persisting those as fresh online transitions caused
+    // event-store floods and continuously retriggered lesson synchronization.
+    if (before?.state !== health.state || before.degraded !== health.degraded) this.options.onHealth?.(id, health)
   }
   private setLaneHealth(lane: Lane, state: WorkspaceHealth, message?: string): void {
     const health: PoolHealth = { state, degraded: lane.degraded,

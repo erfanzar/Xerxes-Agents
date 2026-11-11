@@ -52,6 +52,9 @@ export {
  */
 export const COMPACTION_COMPLETION_TIMEOUT_MS = 180_000;
 
+/** One wider regeneration after an output-token truncation; partial summaries are never retained. */
+export const COMPACTION_OUTPUT_RETRY_MAX_TOKENS = 64_000;
+
 /**
  * Summary token budgets tried in order: the default, then a half, then a
  * quarter. A compaction call that overflows the window is the one failure a
@@ -124,45 +127,47 @@ export function compactionCompletionPort(
     const thinking = levels.shape === 'effort' && levels.levels.some(level => level.effort === 'low')
       ? { effort: 'low' } : undefined;
     const completionSignal = combinedCompletionSignal(timeoutMs, signal)
-    const completion = isFiniteDeadline(timeoutMs)
-      ? completeLlm(
-        client,
-        {
-          model,
-          messages: [{ role: "user", content: request.prompt }],
-          maxTokens: request.maxTokens,
-          temperature: request.temperature,
-          ...(thinking ? { thinking } : {}),
-        },
-        completionSignal,
-        { timeoutMs, preferStream: true },
-      )
-      : completeLlm(
-        client,
-        {
-          model,
-          messages: [{ role: "user", content: request.prompt }],
-          maxTokens: request.maxTokens,
-          temperature: request.temperature,
-          ...(thinking ? { thinking } : {}),
-        },
-        completionSignal,
-        { preferStream: true },
-      )
-    let result: Awaited<typeof completion>;
-    try {
-      result = await withCompletionDeadline(
-        completion,
-        timeoutMs,
-        signal,
-      );
-    } catch (error) {
-      // Keep the compaction port's established timeout contract even when
-      // completeLlm's internal deadline wins the race.
-      if (error instanceof CompletionDeadlineError) {
-        throw compactionTimeoutError(timeoutMs);
+    const complete = async (maxTokens: number) => {
+      const completion = isFiniteDeadline(timeoutMs)
+        ? completeLlm(
+          client,
+          {
+            model,
+            messages: [{ role: "user", content: request.prompt }],
+            maxTokens,
+            temperature: request.temperature,
+            ...(thinking ? { thinking } : {}),
+          },
+          completionSignal,
+          { timeoutMs, preferStream: true },
+        )
+        : completeLlm(
+          client,
+          {
+            model,
+            messages: [{ role: "user", content: request.prompt }],
+            maxTokens,
+            temperature: request.temperature,
+            ...(thinking ? { thinking } : {}),
+          },
+          completionSignal,
+          { preferStream: true },
+        )
+      try {
+        return await withCompletionDeadline(completion, timeoutMs, signal);
+      } catch (error) {
+        // Keep the compaction port's established timeout contract even when
+        // completeLlm's internal deadline wins the race.
+        if (error instanceof CompletionDeadlineError) throw compactionTimeoutError(timeoutMs);
+        throw error;
       }
-      throw error;
+    };
+    let result = await complete(request.maxTokens);
+    if (result.finishReason === 'length' && request.maxTokens < COMPACTION_OUTPUT_RETRY_MAX_TOKENS) {
+      // Do not continue a severed summary or persist its prefix. Regenerate from the
+      // original prompt with the same wider output window the turn loop uses.
+      throwIfCancelled(signal)
+      result = await complete(COMPACTION_OUTPUT_RETRY_MAX_TOKENS);
     }
     throwIfCancelled(signal)
     if (result.finishReason && !['stop', 'completed', 'end_turn'].includes(result.finishReason)) {

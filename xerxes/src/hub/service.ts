@@ -362,6 +362,7 @@ export function createHubService(options: HubServiceOptions): HubService {
           onHealth,
           onGap: notice => { for (const id of notice.workspaceIds) append(id, { gap_reason: notice.reason }) },
           onInterrupted: notice => { for (const id of notice.workspaceIds) append(id, { interrupted: true }) },
+          onSetupError: (workspaceIds, error) => report(error, `workspace setup ${workspaceIds.join(',')}`),
         })
         pool = runtimePool
         lessonSync = new HubLessonSync({

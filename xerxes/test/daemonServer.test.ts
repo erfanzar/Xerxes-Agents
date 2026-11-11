@@ -264,6 +264,14 @@ test("workspace file preview RPC reads only active-session workspace text withou
     expect(runtime.sessionStatus("preview")?.turnCount).toBe(0);
     client.send({ jsonrpc: "2.0", id: 4, method: "workspace.filePreview", params: { session_key: "preview", path: "missing.ts" } });
     expect((await client.next(frame => frame.id === 4)).error).toBeDefined();
+    // A client naming the kinds it renders gets parsed previews; the reply says which kind.
+    await Bun.write(join(directory, "out.csv"), "a,b\n1,2\n");
+    client.send({ jsonrpc: "2.0", id: 7, method: "workspace.filePreview", params: { session_key: "preview", path: "out.csv", kinds: ["table", "pdf"] } });
+    expect((await client.next(frame => frame.id === 7)).result).toMatchObject({ ok: true, kind: "table", header: ["a", "b"], rows: [["1", "2"]], total_rows: 1 });
+    client.send({ jsonrpc: "2.0", id: 8, method: "workspace.filePreview", params: { session_key: "preview", path: "out.csv" } });
+    expect((await client.next(frame => frame.id === 8)).result).toEqual({ ok: true, path: "out.csv", content: "a,b\n1,2\n", truncated: false, version: expect.any(String) });
+    client.send({ jsonrpc: "2.0", id: 9, method: "workspace.filePreview", params: { session_key: "preview", path: "out.csv", kinds: "table" } });
+    expect((await client.next(frame => frame.id === 9)).error?.message).toContain("kinds");
   } finally { client.close(); await server.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -3600,7 +3608,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.8.31",
+      daemon_version: "0.8.33",
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
     await client.next(eventFrame("init_done"));
