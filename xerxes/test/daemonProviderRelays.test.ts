@@ -198,12 +198,36 @@ test('local profile defaults stay local, are snapshotted at consent, and allow b
   } finally { await host.close() }
 })
 
+test('OpenAI relay profile -1 is valid but cannot remove the separately authorized output ceiling', async () => {
+  const received: CompletionRequest[] = []
+  const host = await fixture({ async *stream(request) { received.push(request); yield { content: 'reply' } } })
+  try {
+    host.profiles.updateSampling('local', { max_tokens: -1 })
+    const owner = await host.open()
+    const grant = await owner.request('provider.relay.authorize', consent())
+    expect(grant).toMatchObject({ ok: true })
+    await owner.request('provider.relay.next', { id: grantId(grant), frame })
+    expect(received[0]?.maxTokens).toBe(1024)
+  } finally { await host.close() }
+})
+
+test('OpenAI relay default is 32k without raising an owner-authorized cap', async () => {
+  const received: CompletionRequest[] = []
+  const host = await fixture({ async *stream(request) { received.push(request); yield { content: 'reply' } } })
+  try {
+    const owner = await host.open()
+    const grant = await owner.request('provider.relay.authorize', { ...consent(), max_output_tokens: 65_536 })
+    await owner.request('provider.relay.next', { id: grantId(grant), frame })
+    expect(received[0]?.maxTokens).toBe(32_768)
+  } finally { await host.close() }
+})
+
 test('invalid local sampling refuses consent without calling a provider', async () => {
   let calls = 0
   const host = await fixture({ async *stream() { calls++; } })
   try {
     const owner = await host.open()
-    for (const sampling of [{ max_tokens: -1 }, { top_p: 2 }, { temperature: 'synthetic-secret' }]) {
+    for (const sampling of [{ max_tokens: -2 }, { max_tokens: 0 }, { top_p: 2 }, { temperature: 'synthetic-secret' }]) {
       host.profiles.save({ name: 'local', provider: 'openai', apiKey: 'synthetic-private-credential', baseUrl: 'https://provider.invalid/v1', model: 'gpt-4o', sampling })
       expect(await owner.request('provider.relay.authorize', consent())).toMatchObject({ ok: false, code: 'invalid_request' })
     }

@@ -589,6 +589,16 @@ With either engine:
     extra body wins. `/sampling` lists the profile's values, and `/sampling reset` returns to them.
   - Other models keep Xerxes's defaults (temperature 0.6, top_k 64), and a custom endpoint still
     gets no `top_k`, `min_p` or repetition penalty for them.
+- **OpenAI output budget:** OpenAI API and local OpenAI-compatible routes (`openai`, `custom`,
+  `lmstudio`, `ollama`) default to **32,768 output tokens**. Use `/sampling max_tokens 32768`
+  to choose a positive cap, or `/sampling max_tokens -1` for no user-set cap. With `-1`, a known
+  model ceiling and remaining context still apply; otherwise the OpenAI output-limit field is
+  omitted and the server chooses its limit. Zero is not a valid budget. `/sampling reset` restores
+  the 32,768 default. A changed output budget applies at the **next model request**, including
+  after a tool finishes in an already-running turn; it does not cancel a response in flight.
+  Codex subscriptions and other native provider adapters retain their existing behavior.
+  A locally shared SSH provider still uses the local profile snapshot authorized for its grant;
+  `-1` never removes that grant's separately approved output ceiling.
 - **Output limit:** Ternary Bonsai 2 27B's replies are capped at 32,768 tokens, the limit Prism's own
   agent demo uses. Without it, a local engine lets a runaway reply run until the turn's time limit.
   It applies only when nothing else sets one (`max_tokens`, a profile's `max_output_tokens`, or the

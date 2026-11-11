@@ -42,7 +42,7 @@ test('native LLM configuration keeps validated defaults and explicit sampling co
     model: 'gpt-4',
     temperature: 0.6,
     topK: 64,
-    maxTokens: 2_048,
+    maxTokens: 32_768,
     enableStreaming: true,
   })
 
@@ -70,7 +70,8 @@ test('native LLM configuration keeps validated defaults and explicit sampling co
   })
 
   expect(() => new LLMConfig({ model: '' }, {})).toThrow('llm.model')
-  expect(() => new LLMConfig({ max_tokens: -1 }, {})).toThrow('llm.maxTokens')
+  expect(new LLMConfig({ max_tokens: -1 }, {}).maxTokens).toBe(-1)
+  expect(() => new LLMConfig({ max_tokens: -2 }, {})).toThrow('llm.maxTokens')
   expect(new LLMConfig({ max_tokens: 1_000_000 }, {}).maxTokens).toBe(1_000_000)
   expect(() => new LLMConfig({ max_tokens: 1_000_001 }, {})).toThrow('llm.maxTokens')
   expect(() => new LLMConfig({ top_p: 0 }, {})).not.toThrow()
@@ -170,6 +171,7 @@ test('OpenAI-compatible native completion requests do not require SSE and normal
     model: 'gpt-4o-mini',
     messages: [{ role: 'user', content: 'Read the README.' }],
     stream: false,
+    max_tokens: 32_768,
   })
   expect(completion).toEqual({
     content: 'I will read it.',

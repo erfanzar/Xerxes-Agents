@@ -63,6 +63,8 @@ import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
 import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
+import { resolveMaxOutputTokens } from '../llms/outputTokens.js'
+import { openAiOutputTokens } from './runtimeConnection.js'
 import { DEFAULT_RETRY_POLICY, type ProviderOverrides, retryPolicyForModel } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
 import { DEFAULT_MAX_GOAL_ROUNDS, GOAL_CHANGES_KEY, getGoal, type GoalView } from '../runtime/goalDomain.js'
@@ -175,6 +177,8 @@ export interface AgentTurnRunnerOptions {
   readonly contextLimit?: number
   /** Explicit runtime/profile request cap; wins over model metadata. */
   readonly maxTokens?: number
+  /** Live OpenAI output-cap resolver, sampled at each provider request boundary. */
+  readonly maxTokensProvider?: (model: string, session: DaemonSession) => number | undefined
   /** Per-turn model fallback used when maxTokens is not explicitly configured. */
   readonly maxOutputTokens?: (model: string) => number | undefined
   readonly model: string
@@ -866,7 +870,14 @@ export class AgentTurnRunner implements TurnRunner {
       let attemptMessage: MessageContent = userMessage
       let cascadeRound = 0
       for (;;) {
-        const maxTokens = requiresLocal ? undefined : this.options.maxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
+        const openAi = openAiOutputTokens(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides ?? {})
+        const configuredMaxTokens = this.options.maxTokens === -1 && !openAi ? undefined : this.options.maxTokens
+        const maxTokens = requiresLocal ? undefined : configuredMaxTokens ?? (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel)
+        const liveMaxTokens = openAi ? this.options.maxTokensProvider : undefined
+        const maxTokensProvider = !requiresLocal && liveMaxTokens ? () => resolveMaxOutputTokens(
+          liveMaxTokens(attemptModel, session),
+          (routedProvider?.maxOutputTokens ?? this.options.maxOutputTokens)?.(attemptModel),
+        ) : undefined
         const retryPolicy = requiresLocal ? this.options.localProviderRetryPolicy ?? DEFAULT_RETRY_POLICY : retryPolicyForModel(attemptModel, routedProvider?.providerOverrides ?? this.options.providerOverrides)
         const routeBaseUrl = (routedProvider?.providerOverrides ?? this.options.providerOverrides)?.base_url
         const recoverEngine: RecoverEngine | undefined = requiresLocal ? undefined : this.options.recoverEngineFor?.({
@@ -895,6 +906,7 @@ export class AgentTurnRunner implements TurnRunner {
         }),
         querySource: 'main',
         ...(maxTokens === undefined ? {} : { maxTokens }),
+        ...(maxTokensProvider ? { maxTokensProvider } : {}),
         ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(attemptModel) } : {}),
         permissionMode,
         permissionModeProvider,

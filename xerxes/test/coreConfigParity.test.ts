@@ -61,7 +61,7 @@ test('LLM configuration honors explicit credentials and environment construction
     apiKey: 'explicit-key',
     temperature: 0.6,
     topK: 64,
-    maxTokens: 2048,
+    maxTokens: 32_768,
   })
 
   const fromEnvironment = XerxesConfig.fromEnv({

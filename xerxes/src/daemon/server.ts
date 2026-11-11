@@ -200,6 +200,8 @@ import {
 import {
   closeLlmClient,
   completeLlm,
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../llms/outputTokens.js";
+import { openAiOutputTokens } from "./runtimeConnection.js";
   createLlmClient,
   requireConfiguredModel,
   type LlmClient,
@@ -8161,7 +8163,6 @@ export class DaemonServer {
   ): Promise<JsonRpcPayload> {
     const input = raw.trim();
     if (!input) {
-      const status = this.runtime.status();
       const sampling = samplingConfig(status);
       const model = typeof status.model === "string" ? status.model : "";
       const published = model ? publishedSamplingProfile(model) : undefined;
@@ -8179,6 +8180,14 @@ export class DaemonServer {
           : []),
         "",
         "Use `/sampling <key> <value>` or `/sampling reset`.",
+    const session = this.runtime.sessionStatus(connection.activeSessionKey);
+    const pinned = this.pinnedProfileName(session);
+    const ownProfile = pinned ? this.profileStore.get(pinned) : undefined;
+    const route = {
+      ...(session?.model ? { model: session.model } : {}),
+      ...(ownProfile ? { provider: ownProfile.provider, base_url: ownProfile.base_url } : {}),
+    };
+    const status = { ...this.runtime.status(), ...route };
       ].join("\n");
       this.emitSlash(connection, body);
       return { ok: true, sampling };
@@ -8188,14 +8197,13 @@ export class DaemonServer {
       const cleared = Object.fromEntries(
         NATIVE_SAMPLING_KEYS.map((key) => [key, null]),
       );
-      const status = this.runtime.status();
       const model = typeof status.model === "string" ? status.model : "";
       const published = model ? publishedSamplingProfile(model) : undefined;
       this.runtime.reload({
         ...cleared,
         ...nativeSamplingDefaults(model || undefined),
       });
-      const active = this.profileStore.active();
+      const active = ownProfile ?? this.profileStore.active();
       if (active) {
         this.profileStore.updateSampling(active.name, cleared);
       }
@@ -8205,7 +8213,7 @@ export class DaemonServer {
           ? `Restored ${published.source} sampling for ${model}.`
           : `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
       );
-      return { ok: true, sampling: samplingConfig(this.runtime.status()) };
+      return { ok: true, sampling: samplingConfig({ ...this.runtime.status(), ...route }) };
     }
 
     const [rawName, rawValue, ...extra] = input.split(/\s+/);
@@ -8218,25 +8226,26 @@ export class DaemonServer {
       );
       return { ok: false, error: "invalid sampling command" };
     }
-    const efforts = selectableEfforts(await this.reasoningLevels());
-    const value = parseNativeSamplingValue(name, rawValue, efforts);
+    const efforts = name === "reasoning_effort" ? selectableEfforts(await this.reasoningLevels()) : [];
+    const openAiLimits = openAiOutputTokens(typeof status.model === "string" ? status.model : "", status);
+    const value = parseNativeSamplingValue(name, rawValue, efforts, openAiLimits);
     if (value === undefined) {
-      this.emitSlash(connection, invalidSamplingMessage(name, efforts), "warning");
+      this.emitSlash(connection, invalidSamplingMessage(name, efforts, openAiLimits), "warning");
       return { ok: false, error: `invalid ${name}` };
     }
 
     this.runtime.reload({ [name]: value });
-    const active = this.profileStore.active();
+    const active = ownProfile ?? this.profileStore.active();
     if (active) {
       this.profileStore.updateSampling(active.name, { [name]: value });
     }
     const sampling = {
-      ...samplingConfig(this.runtime.status()),
+      ...samplingConfig({ ...this.runtime.status(), ...route }),
       [name]: value,
     };
     this.emitSlash(
       connection,
-      `Native next-turn sampling \`${name}\` = \`${value}\`.`,
+      `${name === "max_tokens" && openAiLimits ? "OpenAI next-request" : "Native next-turn"} sampling \`${name}\` = \`${value}\`.${name === "max_tokens" && openAiLimits && value === -1 ? " No user-set output cap; provider/model limits still apply." : ""}`,
     );
     return { ok: true, sampling };
   }
@@ -13967,10 +13976,11 @@ function displayedRuntimeConfig(status: JsonRpcPayload): JsonRpcPayload {
 function samplingConfig(
   status: JsonRpcPayload,
 ): Record<string, boolean | number | string | undefined> {
-  const defaults: Readonly<Record<string, number | undefined>> =
-    nativeSamplingDefaults(
-      typeof status.model === "string" && status.model ? status.model : undefined,
-    );
+  const model = typeof status.model === "string" && status.model ? status.model : undefined;
+  const defaults: Readonly<Record<string, number | undefined>> = {
+    ...nativeSamplingDefaults(model),
+    ...(openAiOutputTokens(model ?? "", status) ? { max_tokens: DEFAULT_MAX_OUTPUT_TOKENS } : {}),
+  };
   return Object.fromEntries(
     NATIVE_SAMPLING_KEYS.map((key) => {
       const value = status[key];
@@ -14012,6 +14022,7 @@ function parseNativeSamplingValue(
     return ["auto", "default", "flex", "priority"].includes(tier) ? tier : undefined;
   }
   const value = Number(raw);
+  openAiLimits: boolean,
   if (!Number.isFinite(value)) return undefined;
   if (key === "temperature") {
     return value >= 0 && value <= 2 ? value : undefined;
@@ -14038,6 +14049,9 @@ function invalidSamplingMessage(
     return "`top_p` must be a finite number from 0 to 1.";
   }
   if (key === "thinking") {
+  if (key === "max_tokens" && openAiLimits) {
+    return Number.isSafeInteger(value) && (value === -1 || (value >= 1 && value <= 1_000_000)) ? value : undefined;
+  }
     return "`thinking` must be `on` or `off`.";
   }
   if (key === "reasoning_effort") {
@@ -14049,7 +14063,11 @@ function invalidSamplingMessage(
     return "`service_tier` must be one of: auto, default, flex, priority.";
   }
   return `\`${key}\` must be a valid finite numeric value.`;
+  openAiLimits: boolean,
 }
+  if (key === "max_tokens" && openAiLimits) {
+    return "`max_tokens` must be a positive integer from 1 to 1000000, or `-1` for no user-set output cap. `0` is not a valid output budget.";
+  }
 
 function agentDefinitionPayload(definition: AgentDefinition): JsonRpcPayload {
   return {

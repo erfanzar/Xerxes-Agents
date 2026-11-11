@@ -7,6 +7,7 @@ import { extname, join, resolve, sep } from 'node:path'
 import { ConfigurationError } from './errors.js'
 import { xerxesSubdirFor } from './paths.js'
 import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../llms/outputTokens.js'
 
 export const LogLevel = {
   DEBUG: 'DEBUG',
@@ -385,6 +386,8 @@ export class LLMConfig {
   readonly enableCaching: boolean
 
   constructor(input: unknown = {}, environment: ConfigEnvironment = process.env) {
+    const openAi = (plainRecord(input, 'llm').provider ?? LLMProvider.OPENAI) === LLMProvider.OPENAI
+    const outputTokens = numberField(openAi ? DEFAULT_MAX_OUTPUT_TOKENS : 2_048, 1, 1_000_000, ['max_tokens'], true)
     const values = parseFields<LLMValues>(input, 'llm', {
       provider: enumField(LLMProvider, 'openai'),
       model: stringField('gpt-4'),
@@ -392,7 +395,7 @@ export class LLMConfig {
       apiKeyEnvVar: stringField('OPENAI_API_KEY', ['api_key_env_var']),
       baseUrl: optionalStringField(['base_url']),
       temperature: numberField(DEFAULT_TEMPERATURE, 0, 2),
-      maxTokens: numberField(2_048, 1, 1_000_000, ['max_tokens'], true),
+      maxTokens: { ...outputTokens, parse: (value, path) => openAi && value === -1 ? -1 : outputTokens.parse(value, path) },
       topP: numberField(0.95, 0, 1, ['top_p']),
       topK: numberField(DEFAULT_TOP_K, 0, 100, ['top_k'], true),
       frequencyPenalty: numberField(0, -2, 2, ['frequency_penalty']),

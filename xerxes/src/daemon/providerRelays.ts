@@ -8,6 +8,7 @@ import { LocalProviderEndpoint } from '../security/localProviderEndpoint.js'
 import { LocalProviderRelay, LocalProviderRelayError, type LocalProviderDefaults, type LocalProviderGrant, type LocalProviderGrantView, type RelayPeer } from '../security/localProviderRelay.js'
 import { nativeSamplingDefaults } from '../llms/samplingDefaults.js'
 import { resolveProvider, type ProviderName } from '../llms/providerRegistry.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS, isOpenAiOutputTokenProvider } from '../llms/outputTokens.js'
 import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
 import { providerRouteIdentity } from './agentProvider.js'
 import { profileAcceptsModel } from './sessionProvider.js'
@@ -169,7 +170,11 @@ function profileDefaults(profile: ProviderProfile): LocalProviderDefaults {
     return value
   }
   const budgetTokens = numeric('thinking_budget', 1, Infinity, true)
-  const maxTokens = numeric('max_tokens', 1, Infinity, true)
+  const openAi = isOpenAiOutputTokenProvider(relayProvider(profile, profile.model) ?? '')
+  // -1 removes only the saved sampling cap. The separately consented relay
+  // policy still supplies and enforces its positive output ceiling.
+  const maxTokens = openAi && sampling.max_tokens === -1 ? undefined
+    : numeric('max_tokens', 1, Infinity, true) ?? (openAi ? DEFAULT_MAX_OUTPUT_TOKENS : undefined)
   const topP = numeric('top_p', 0, 1)
   const thinking = resolveTurnThinking({ prompt: '', ultraMode: false, defaults: {
     ...(typeof sampling.thinking === 'boolean' ? { enabled: sampling.thinking } : {}),

@@ -4,6 +4,8 @@
 import { claudeExecutable } from '../auth/claudeCodeLogin.js'
 import type { ProviderProfile } from '../bridge/profiles.js'
 import { nativeSamplingDefaults } from '../llms/samplingDefaults.js'
+import { isOpenAiOutputTokenProvider } from '../llms/outputTokens.js'
+import { resolveProvider } from '../llms/providerRegistry.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../streaming/permissions.js'
 import type { DaemonConfig } from './config.js'
 
@@ -62,8 +64,13 @@ export function runtimeConnection(
   const baseUrl = stringSetting(runtime.base_url) || useProfile?.base_url
   const apiKey = stringSetting(runtime.api_key) || useProfile?.api_key
   const provider = stringSetting(runtime.provider) || useProfile?.provider
-  const maxTokens = numberSetting(runtime.max_tokens)
-    ?? numberSetting(useProfile?.sampling.max_tokens)
+  const openAi = openAiOutputTokens(model, { ...(provider ? { provider } : {}), ...(baseUrl ? { base_url: baseUrl } : {}) })
+  const runtimeMaxTokens = numberSetting(runtime.max_tokens)
+  const profileMaxTokens = numberSetting(useProfile?.sampling.max_tokens)
+  // Leave defaults at the adapter boundary, rather than pinning an OpenAI
+  // default onto sessions using another provider. Never leak its -1 sentinel.
+  const maxTokens = (runtimeMaxTokens === -1 && !openAi ? undefined : runtimeMaxTokens)
+    ?? (profileMaxTokens === -1 && !openAi ? undefined : profileMaxTokens)
   // Unset for a model whose maker publishes its sampling: the provider client
   // applies that profile per request (see nativeSamplingDefaults).
   const nativeDefaults = nativeSamplingDefaults(model)
@@ -108,6 +115,12 @@ export function runtimeConnection(
 export function runtimePermissionMode(value: unknown): RuntimeConnection['permissionMode'] | undefined {
   return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan' ? value : undefined
 }
+/** Whether this route uses the OpenAI token-limit settings, never the Codex subscription path. */
+export function openAiOutputTokens(model: string, overrides: Readonly<Record<string, unknown>>): boolean {
+  try { return isOpenAiOutputTokenProvider(resolveProvider(model, overrides)) }
+  catch { return false } // Unconfigured models still report their normal routing error at generation.
+}
+
 
 function numberSetting(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined

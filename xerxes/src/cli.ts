@@ -68,7 +68,8 @@ import { runCascadingTurn, type CascadeHooks, type CascadeStep } from './runtime
 import { deriveDataTrust, parseDataBoundaryConfig } from './security/dataBoundary.js';
 import { RemoteProviderBindings } from "./daemon/remoteProviderBindings.js";
 import { DEFAULT_PERMISSION_MODE, type PermissionBroker, type PermissionMode } from "./streaming/permissions.js";
-import { runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
+import { openAiOutputTokens, runtimeConnection, runtimePermissionMode, type RuntimeConnection } from "./daemon/runtimeConnection.js";
+import { resolveMaxOutputTokens } from "./llms/outputTokens.js";
 import { InMemoryDaemonRuntime, type DaemonSession } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
 import { compactionCompletionPort } from "./daemon/server.js";
@@ -2674,6 +2675,13 @@ function daemonRuntime(
       ...(connection.thinking === undefined ? {} : { thinking: connection.thinking }),
       ...(connection.thinkingBudget === undefined
         ? {}
+      // The runner checks the actual attempt route, not the daemon's startup
+      // provider, before reading this live OpenAI-only setting.
+      maxTokensProvider: (model: string, session: DaemonSession) => {
+        const profile = session.metadata.provider_profile ? sessionProvider(profileStore, session, model) : profileStore.active();
+        const value = (runtime?.settings() ?? settings).max_tokens ?? profile?.sampling.max_tokens;
+        return typeof value === "number" ? value : undefined;
+      },
         : { thinkingBudget: connection.thinkingBudget }),
       ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),
@@ -3067,7 +3075,9 @@ async function acpServer(
   const maxTokens = connection.maxTokens;
   const maxOutputTokens = (candidate: string): number | undefined =>
     resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
-  const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
+  const effectiveMaxTokens = openAiOutputTokens(model, { provider: connection.provider, base_url: connection.baseUrl })
+    ? resolveMaxOutputTokens(maxTokens, maxOutputTokens(model))
+    : (maxTokens === -1 ? undefined : maxTokens) ?? maxOutputTokens(model);
   const acpProviderNetwork = parseProviderNetworkConfig(config.runtime);
   const llm = createLlmClient(connection.model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
@@ -3317,7 +3327,9 @@ async function runOneShot(
   const maxTokens = connection.maxTokens;
   const maxOutputTokens = (candidate: string): number | undefined =>
     resolvedProfileMaxOutputTokens(profileStore.active(), candidate);
-  const effectiveMaxTokens = maxTokens ?? maxOutputTokens(model);
+  const effectiveMaxTokens = openAiOutputTokens(model, { provider: connection.provider, base_url: connection.baseUrl })
+    ? resolveMaxOutputTokens(maxTokens, maxOutputTokens(model))
+    : (maxTokens === -1 ? undefined : maxTokens) ?? maxOutputTokens(model);
   const llm = createLlmClient(model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),

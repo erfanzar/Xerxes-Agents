@@ -149,16 +149,19 @@ test('Responses API client supports a native non-streaming completion response',
     },
   })
 
+  // This is a response-shape fixture, not a catalog-capacity test. Keep its
+  // model unreported so another file's gpt-4o discovery cannot change the cap.
   const completion = await client.complete({
-    model: 'gpt-4o',
+    model: 'response-shape-fixture',
     messages: [{ role: 'user', content: 'Read the README.' }],
   })
 
   expect(payload).toEqual({
-    model: 'gpt-4o',
+    model: 'response-shape-fixture',
     input: [{ role: 'user', content: 'Read the README.' }],
     stream: false,
     store: true,
+    max_output_tokens: 32_768,
   })
   expect(completion).toEqual({
     content: 'I will read it.',

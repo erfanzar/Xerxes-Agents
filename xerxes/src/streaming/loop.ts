@@ -350,6 +350,8 @@ export interface TurnRequest {
   /** Hard cap on model rounds, including continuations after truncated output. */
   readonly maxModelTurns?: number
   readonly maxTokens?: number
+  /** Read immediately before each model request; changes do not cancel an in-flight response. */
+  readonly maxTokensProvider?: () => number | undefined
   readonly model: string
   /** Optional maximum retries for objective-mode text-only stopping attempts. */
   readonly objectiveGuardMaxRetries?: number
@@ -1225,7 +1227,7 @@ export async function* runTurn(
       // partial arguments into a well-formed object (half a file's content),
       // so that call is answered with an error instead of run.
       const truncatedCall = finishReason === 'length' ? providerToolCalls.at(-1) : undefined
-      if (truncatedCall && request.maxTokens === undefined) outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
+      if (truncatedCall && configuredMaxTokens(request) === undefined) outputTokenOverride = OUTPUT_LIMIT_RETRY_MAX_TOKENS
       if (finishReason === 'length' && providerToolCalls.length === 0) {
         if (toolTurn + 1 >= maxModelTurns) break
         if (outputLimitEscalations >= MAX_OUTPUT_LIMIT_ESCALATIONS) {
@@ -1245,7 +1247,7 @@ export async function* runTurn(
         // work, so charging it to the tool budget would shorten the turn the
         // model is trying to finish. Same bookkeeping as an appended agent event.
         if (toolTurn + 1 >= turnLimit) turnLimit += 1
-        if (outputLimitEscalations === 1 && request.maxTokens === undefined) {
+        if (outputLimitEscalations === 1 && configuredMaxTokens(request) === undefined) {
           // First truncation with no caller-pinned ceiling: the provider default
           // was simply too small. Regenerate the round with a real window rather
           // than asking the model to continue from a sentence it cut in half.
@@ -1949,6 +1951,10 @@ function reportDenialLoop(
   }
 }
 
+function configuredMaxTokens(request: TurnRequest): number | undefined {
+  return request.maxTokensProvider ? request.maxTokensProvider() : request.maxTokens
+}
+
 function completionRequest(
   request: TurnRequest,
   messages: readonly ChatMessage[],
@@ -1958,9 +1964,11 @@ function completionRequest(
 ) {
   // The override only exists when the caller pinned nothing, so a user-chosen
   // ceiling is never silently widened by truncation recovery.
-  const ceiling = request.maxTokens ?? maxTokensOverride
+  const ceiling = configuredMaxTokens(request) ?? maxTokensOverride
+  // -1 is an explicit no-user-cap sentinel, not a negative allowance. A known
+  // context remainder still bounds the request; otherwise the adapter omits it.
   const maxTokens = ceiling !== undefined && outputRoom !== undefined && outputRoom > 0
-    ? Math.min(ceiling, Math.floor(outputRoom))
+    ? ceiling === -1 ? Math.floor(outputRoom) : Math.min(ceiling, Math.floor(outputRoom))
     : ceiling
   return {
     model: request.model,

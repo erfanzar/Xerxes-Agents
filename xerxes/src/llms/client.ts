@@ -3,6 +3,7 @@
 
 import { httpErrorBody } from './httpErrorBody.js'
 import { assertOutputTokenLimit, type OutputTokenBound } from './outputTokenLimit.js'
+import { DEFAULT_MAX_OUTPUT_TOKENS, isOpenAiOutputTokenProvider, resolveMaxOutputTokens } from './outputTokens.js'
 import { createHash } from 'node:crypto'
 import { credentialFingerprint } from './credentialFingerprint.js'
 import { chargeModelCall } from './callBudget.js'
@@ -22,7 +23,7 @@ import { KimiCodingOAuthSession } from '../auth/kimiCodingOAuth.js'
 import { OpenRouterOAuthSession } from '../auth/openrouterOAuth.js'
 import { XaiOAuthSession } from '../auth/xaiOAuth.js'
 import { isGradedEffort } from './reasoningLevels.js'
-import { ConfigurationError, ProviderError, StreamFrameError, StreamTruncatedError } from '../core/errors.js'
+import { ConfigurationError, ProviderError, StreamFrameError, StreamTruncatedError, ValidationError } from '../core/errors.js'
 import { isPluginLlmProviderFactory } from '../extensions/plugins.js'
 import type {
   PluginLlmProviderFactory,
@@ -1607,10 +1608,11 @@ export function getLlmModelInfo(
   overrides: ProviderOverrides = {},
 ): LlmModelInfo {
   return {
-    provider: resolveProvider(model, overrides),
+    provider,
+  const provider = resolveProvider(model, overrides)
     model,
     temperature: options.temperature ?? publishedSampling(model, 'thinking')?.temperature ?? DEFAULT_TEMPERATURE,
-    maxTokens: options.maxTokens ?? 2_048,
+    maxTokens: options.maxTokens ?? (isOpenAiOutputTokenProvider(provider) ? DEFAULT_MAX_OUTPUT_TOKENS : 2_048),
     ...(options.contextLimit === undefined ? {} : { maxModelLen: options.contextLimit }),
     stream: options.stream ?? false,
   }
@@ -2180,7 +2182,17 @@ function addResponsesSampling(
   if (request.temperature !== undefined && supportsTemperature(providerName, request.model, request.temperature)) {
     payload.temperature = request.temperature
   }
-  if (request.maxTokens !== undefined) {
+  if (isOpenAiOutputTokenProvider(providerName)) {
+    const modelLimit = wireCapability({ provider: providerName, model: request.model }).maxOutputTokens
+    const maxTokens = resolveMaxOutputTokens(request.maxTokens, modelLimit)
+    if (maxTokens !== -1) {
+      const wireLimit = Math.max(16, maxTokens)
+      if (resolveMaxOutputTokens(wireLimit, modelLimit) !== wireLimit) {
+        throw new ValidationError('max_tokens', 'model output ceiling is below the Responses minimum of 16', request.maxTokens)
+      }
+      payload.max_output_tokens = wireLimit
+    }
+  } else if (request.maxTokens !== undefined) {
     payload.max_output_tokens = Math.max(16, request.maxTokens)
   }
   if (request.topP !== undefined) {
@@ -2202,7 +2214,10 @@ function addSampling(
   if (request.temperature !== undefined && supportsTemperature(providerName, request.model, request.temperature)) {
     payload.temperature = request.temperature
   }
-  if (request.maxTokens !== undefined) {
+  if (isOpenAiOutputTokenProvider(providerName)) {
+    const maxTokens = resolveMaxOutputTokens(request.maxTokens, wireCapability({ provider: providerName, model: request.model }).maxOutputTokens)
+    if (maxTokens !== -1) payload.max_tokens = maxTokens
+  } else if (request.maxTokens !== undefined) {
     payload.max_tokens = request.maxTokens
   }
   if (request.topP !== undefined) {
