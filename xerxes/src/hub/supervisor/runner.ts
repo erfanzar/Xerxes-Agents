@@ -8,6 +8,7 @@ import type { ToolCall, ToolDefinition } from '../../types/toolCalls.js'
 import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, type DigestSummarizer, type DigestSummaryInput } from './digests.js'
 import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
 import { ABILITY_SPECS } from './abilities/catalog.js'
+import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abilities/captureSink.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
 import { MAX_MESSAGE_CHARS, messageToWire, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
@@ -80,16 +81,23 @@ export interface SupervisorModelPort {
   readonly id: string
   /** Whether `usage.costUsd` is reported. A cost quota needs it. */
   readonly reportsCost: boolean
+  /** Explicit configured vision route and source-policy bindings; absent means screenshots refuse. */
+  readonly captures?: {
+    readonly destination: CaptureDestination
+    readonly createSink: (input: { readonly threadId: string; readonly requester: UserPrincipal }) => CaptureTurnSink
+    readonly source: (workspace: string, viewId: string) => CaptureSource
+  } | undefined
   /** Trustworthy upper bound, not a guessed price. A configured daily token/USD cap refuses absent bounds. */
   quote?(request: SupervisorModelRequest): { readonly tokens?: number; readonly usd?: number }
   complete(request: SupervisorModelRequest): Promise<SupervisorModelResponse>
 }
 
 /** Adapt a provider client. Housekeeping query source: this is never the user's main loop. */
-export function createLlmModelPort(client: LlmClient, model: string, options: { readonly timeoutMs?: number } = {}): SupervisorModelPort {
+export function createLlmModelPort(client: LlmClient, model: string, options: { readonly timeoutMs?: number; readonly captures?: SupervisorModelPort['captures'] } = {}): SupervisorModelPort {
   return {
     id: model,
     reportsCost: false,
+    ...(options.captures === undefined ? {} : { captures: options.captures }),
     async complete(request) {
       const completion = await completeLlm(client, {
         model,
@@ -338,6 +346,8 @@ export class SupervisorRunner {
     // setTimeout(Infinity) fires at once, so an unbounded turn gets no timer at all.
     const timer = Number.isFinite(this.quotas.maxTurnMs) ? setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs) : undefined
     threads.setWorking(threadId, true)
+    let captureSink: CaptureTurnSink | undefined
+    const captureRoute = model.captures
     try {
       try { await this.options.beforeTurn?.(input) } catch {
         if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
@@ -345,7 +355,9 @@ export class SupervisorRunner {
       }
       if (this.closed || controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
       const stored = threads.messagesFor(threadId, requester.id, CONTEXT_MESSAGES)
+      captureSink = captureRoute?.createSink({ threadId, requester })
       const state: SupervisorTurnState = {
+        ...(captureSink === undefined || captureRoute === undefined ? {} : { captures: { sink: captureSink, source: captureRoute.source } }),
         threadId, requester, reader: this.options.scopeReader(threadId, requester), denial: undefined,
         ...(input.trigger === undefined ? {} : { trigger: input.trigger.kind }),
         ...(input.trigger?.target === undefined ? {} : { target: input.trigger.target }),
@@ -392,6 +404,7 @@ export class SupervisorRunner {
         let response: Awaited<ReturnType<SupervisorModelPort['complete']>>
         counts.modelCalls += 1
         try {
+          if (captureSink !== undefined && captureRoute !== undefined) messages.push(...captureSink.drain(captureRoute.destination))
           response = await model.complete({ system: this.options.persona, messages, tools, maxTokens: this.quotas.maxOutputTokens, signal: controller.signal })
         } catch (error) {
           if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
@@ -451,6 +464,7 @@ export class SupervisorRunner {
         }
       }
     } finally {
+      captureSink?.close()
       clearTimeout(timer)
       this.active.delete(threadId)
       this.replyTo.delete(threadId)

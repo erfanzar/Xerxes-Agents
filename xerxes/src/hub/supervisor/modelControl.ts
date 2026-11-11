@@ -186,6 +186,12 @@ export class SupervisorModelControl {
     const self = this
     this.port = {
       get id() { return self.modelId() },
+      get captures() {
+        const captures = options.fallback?.captures; const selected = self.current
+        if (selected !== undefined && (captures?.destination.machine !== selected.machineId
+          || captures.destination.profile !== selected.profile || captures.destination.model !== selected.model)) return undefined
+        return captures
+      },
       reportsCost: false,
       complete: request => self.complete(request),
     }
@@ -296,6 +302,8 @@ export class SupervisorModelControl {
       }
       if (outcome.error.code !== 'unavailable') throw new Error(refusalMessage(outcome))
     }
+    if (request.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url')))
+      throw new Error('The configured capture destination is unavailable; image failover is disabled.')
     const preferred = this.failover?.machineId
     const candidates = machines.filter(row => row.id !== stored.machineId && row.health === 'online' && row.modelsSupported)
       .sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred) || a.label.localeCompare(b.label))

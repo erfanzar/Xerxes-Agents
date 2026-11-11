@@ -5,6 +5,11 @@ import { expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
 import { CaptureTurnSink, type CaptureDisclosure } from '../src/hub/supervisor/abilities/captureSink.js'
 import { captureEnvelope, png } from './support/captureImage.js'
+import { SuperagentAbilities } from '../src/hub/supervisor/abilities/service.js'
+import { SupervisorRunner } from '../src/hub/supervisor/runner.js'
+import { createSupervisorToolRegistry } from '../src/hub/supervisor/tools.js'
+import { makeWorld, toolCall } from './hubSupervisorHarness.js'
+import { SuperagentControl } from '../src/hub/supervisor/abilities/control.js'
 
 const source = { workspace: 'B', machine: 'source-machine', policyRevision: 'p1', viewId: 'a'.repeat(32) }
 const destination = { machine: 'model-machine', profile: 'vision', model: 'fixture-model', revision: 'm1' }
@@ -14,6 +19,33 @@ function rig() {
     disclose: async () => { admitted += 1 } })
   return { sink, revoke: () => { live = false }, admitted: () => admitted }
 }
+
+test('supervisor screenshot tool delivers actual image parts on the next model call, never textual base64', async () => {
+  const world = makeWorld(); let calls = 0; let sawImage = false
+  const control = new SuperagentControl({ db: world.db, clock: world.clock, isOwner: () => true, audit: async () => {} })
+  const raw = captureEnvelope()
+  world.backendBehavior.run = () => ({ state: 'accepted', result: raw })
+  const abilities = new SuperagentAbilities({ db: world.db, clock: world.clock, backend: world.backend,
+    authorized: () => true, deliver: async () => {}, audit: async () => {} })
+  const registry = createSupervisorToolRegistry({ workspaces: world.workspaces, backend: world.backend, digests: world.digests,
+    actions: world.actions, threads: world.threads, abilities })
+  const sink = new CaptureTurnSink({ owner: world.user('alice').id, thread: 'shared', destination, current: () => true, disclose: async () => {} })
+  const runner = new SupervisorRunner({ threads: world.threads, registry, scopeReader: () => world.reader('alice'), persona: 'Inspect the workspace image.',
+    model: control.model({ id: 'fixture-model', reportsCost: false, captures: { destination, createSink: () => sink,
+      source: workspace => ({ ...source, workspace }) },
+      async complete(request) {
+        if (calls++ === 0) return { text: '', toolCalls: [toolCall('ui_screenshot', { workspace_id: 'w1', width: 390 })] }
+        sawImage = request.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))
+        const tool = request.messages.find(message => message.role === 'tool')
+        expect(JSON.stringify(tool)).not.toContain(raw.png_base64)
+        return { text: sawImage ? 'I can inspect the workspace pixels.' : 'No image received.', toolCalls: [] }
+      } }) })
+  try {
+    const result = await runner.enqueue({ threadId: 'shared', requester: world.user('alice') })
+    expect(result.stop).toBe('completed'); expect(sawImage).toBe(true)
+    expect(result.reply?.text).toBe('I can inspect the workspace pixels.')
+  } finally { runner.shutdown(); abilities.dispose() }
+})
 
 test('turn images remain outside textual results and are drained once as real untrusted image parts', async () => {
   const r = rig(); const raw = captureEnvelope()

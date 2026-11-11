@@ -33,6 +33,7 @@ export async function observeWorkspace(root: string, input: Readonly<Record<stri
     case 'ui.screenshot': result = await observer.screenshot(number('width', 1280), signal); break
     default: throw new Error('Only Tier A observation abilities may run on this daemon route')
   }
-  if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) throw new Error('Observation exceeds 60 KiB; reduce max_bytes or limit and page the result')
+  const maxBytes = ability === 'ui.screenshot' ? 384 * 1024 : 60 * 1024
+  if (Buffer.byteLength(JSON.stringify(result)) > maxBytes) throw new Error('Observation exceeds its byte budget; reduce max_bytes or limit and page the result')
   return result
 }

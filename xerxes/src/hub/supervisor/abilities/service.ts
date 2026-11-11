@@ -86,13 +86,18 @@ export class SuperagentAbilities {
         ...(args.threshold === undefined ? {} : { threshold: number('threshold', 0) }) }); break
       case 'event.unsubscribe': result = { removed: this.wakes.unsubscribe(scope, wakeKind(text('kind'))) }; break
       default: {
+        if (spec.name === 'ui.screenshot' && turn.captures === undefined) throw new Error('A configured vision route and capture disclosure are required')
         const deadline = AbortSignal.timeout(10_000)
         const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
         // Model cannot choose project_dir or session_key: the pool pins the registered workspace directory.
         const { workspace_id: _workspaceId, ...params } = args
         const outcome = await this.options.backend.call(workspace, 'superagent.observe', { ability: spec.name, ...params }, { signal: bounded, timeoutMs: 10_000 })
         if (outcome.state !== 'accepted') throw new Error(outcome.error.message)
-        result = { ...outcome.result, untrusted: true }
+        if (spec.name === 'ui.screenshot') {
+          const captures = turn.captures
+          if (captures === undefined || typeof outcome.result.view_id !== 'string') throw new Error('Invalid capture response')
+          result = await captures.sink.add(captures.source(workspace, outcome.result.view_id), outcome.result, bounded)
+        } else result = { ...outcome.result, untrusted: true }
       }
     }
     // Mutation result is established already; audit failure here is observable, not an invitation to replay.

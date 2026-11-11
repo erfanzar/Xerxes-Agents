@@ -365,7 +365,7 @@ import { compactionSettingsPath, describeCompactionThreshold, readCompactionSett
 import { formatBytes, wipeHistoryStores, wipeMemoryStores } from "./wipe.js";
 import { searchProjectFileMentions } from "./projectFileMentions.js";
 import { profileAcceptsModel, sessionProvider } from './sessionProvider.js';
-import { HubModelService } from './hubModels.js';
+import { HubModelService, type HubModelsOptions } from './hubModels.js';
 import type { SignInReadiness, SignInReadinessProbe } from './providerReadiness.js';
 import { DaemonProviderRelays, type RelayClientFactory } from './providerRelays.js';
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings, localProviderLabel, localProviderCapabilities, localProviderSelections, type LocalProviderSelection } from './remoteProviderBindings.js';
@@ -986,6 +986,8 @@ export interface DaemonServerOptions {
   readonly hubModelClientFactory?: (model: string, profile: ProviderProfile) => LlmClient;
   /** Test seam: wall-clock limit of one `hub.model.complete` (default 120 s). */
   readonly hubModelTimeoutMs?: number;
+  /** Explicit native vision/provider-disclosure admission; images remain disabled without it. */
+  readonly hubModelAuthorizeImages?: HubModelsOptions['authorizeImages'];
   /** Legacy declarative text-template store retained for persisted packages. */
   readonly declarativeForge?: DeclarativeToolForge;
   /** DSH-style live agent-preset roster used by session selection and authoring RPCs. */
@@ -1463,6 +1465,7 @@ export class DaemonServer {
     }, {
       ...(options.hubModelClientFactory ? { clientFactory: options.hubModelClientFactory } : {}),
       ...(options.hubModelTimeoutMs === undefined ? {} : { timeoutMs: options.hubModelTimeoutMs }),
+      ...(options.hubModelAuthorizeImages === undefined ? {} : { authorizeImages: options.hubModelAuthorizeImages }),
     });
     this.remoteProviderBindings = options.remoteProviderBindings;
     this.providerReadiness = options.providerReadiness;

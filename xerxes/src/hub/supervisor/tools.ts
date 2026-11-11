@@ -36,6 +36,10 @@ export const SEARCH_MAX_BYTES = 64 * 1024
 
 /** Per-turn state handed to every tool through the execution context. */
 export interface SupervisorTurnState {
+  readonly captures?: {
+    readonly sink: import('./abilities/captureSink.js').CaptureTurnSink
+    readonly source: (workspace: string, viewId: string) => import('./abilities/captureSink.js').CaptureSource
+  }
   readonly threadId: string
   readonly requester: UserPrincipal
   readonly reader: ScopeReader
