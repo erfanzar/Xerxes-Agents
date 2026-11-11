@@ -32,6 +32,7 @@ export class SupervisorWakes {
       id TEXT PRIMARY KEY, owner TEXT NOT NULL, thread TEXT NOT NULL, workspace TEXT NOT NULL,
       kind TEXT NOT NULL, threshold REAL, UNIQUE(owner,thread,workspace,kind));
       CREATE TABLE IF NOT EXISTS hub_superagent_event_receipts (subscription TEXT NOT NULL, event TEXT NOT NULL, PRIMARY KEY(subscription,event));
+      CREATE TABLE IF NOT EXISTS hub_superagent_disk_state (subscription TEXT PRIMARY KEY, above INTEGER NOT NULL CHECK(above IN (0,1)));
       CREATE TABLE IF NOT EXISTS hub_superagent_checkins (owner TEXT NOT NULL, thread TEXT NOT NULL,
       workspace TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(owner,thread,workspace));`)
     this.refresh()
@@ -92,10 +93,18 @@ export class SupervisorWakes {
     const subscriptions = this.db.query<Subscription, [string, string]>('SELECT * FROM hub_superagent_subscriptions WHERE workspace=? AND kind=?').all(event.workspace, event.kind)
     for (const sub of subscriptions) {
       if (!this.options.authorized(sub)) continue
-      if (sub.kind === 'disk_threshold' && (event.value === undefined || !Number.isFinite(event.value) || event.value < (sub.threshold ?? 100))) continue
+      if (sub.kind === 'disk_threshold' && (event.value === undefined || !Number.isFinite(event.value) || event.value < 0 || event.value > 100)) continue
       this.db.transaction(() => {
         const seen = this.db.query('SELECT 1 FROM hub_superagent_event_receipts WHERE subscription=? AND event=?').get(sub.id, event.id)
         if (seen) return
+        if (sub.kind === 'disk_threshold') {
+          const previous = this.db.query<{ above: number }, [string]>('SELECT above FROM hub_superagent_disk_state WHERE subscription=?').get(sub.id)
+          if (event.value === undefined || event.value < (sub.threshold ?? 100)) {
+            if (previous?.above === 1) this.db.query('UPDATE hub_superagent_disk_state SET above=0 WHERE subscription=?').run(sub.id)
+            return
+          }
+          if (previous?.above === 1) return
+        }
         const count = this.db.query<{ n: number }, []>('SELECT COUNT(*) AS n FROM hub_superagent_event_receipts').get()?.n ?? 0
         if (count >= 100000) throw new Error('Event receipt budget exhausted; owner maintenance required')
         // Receipt and wake are one transaction: failure to enqueue never loses an event silently.
@@ -105,6 +114,7 @@ export class SupervisorWakes {
           reason += character
         }
         this.schedule(sub, { after: 0, reason })
+        if (sub.kind === 'disk_threshold') this.db.query('INSERT INTO hub_superagent_disk_state VALUES (?,1) ON CONFLICT(subscription) DO UPDATE SET above=1').run(sub.id)
         this.db.query('INSERT INTO hub_superagent_event_receipts VALUES (?,?)').run(sub.id, event.id)
       }).immediate()
     }

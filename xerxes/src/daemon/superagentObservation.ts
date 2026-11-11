@@ -24,7 +24,7 @@ export async function observeWorkspace(root: string, input: Readonly<Record<stri
       if (view !== 'status' && view !== 'log' && view !== 'diff') throw new Error('Invalid git view')
       result = await observer.git(view, signal); break
     }
-    case 'machine.health': result = await observer.health(signal); break
+    case 'machine.health': result = await observer.health(signal, text('view') === 'disk' ? 'disk' : 'all'); break
     case 'github.read': {
       const view = text('view')
       if (view !== 'issues' && view !== 'prs' && view !== 'ci') throw new Error('Invalid GitHub view')

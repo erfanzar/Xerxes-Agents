@@ -180,11 +180,13 @@ export class WorkspaceObservations {
     } finally { await rm(temporary, { recursive: true, force: true }) }
   }
 
-  async health(signal?: AbortSignal) {
+  async health(signal?: AbortSignal, view: 'all' | 'disk' = 'all') {
     signal?.throwIfAborted()
     const disk = await statfs(await realpath(this.root))
+    const diskResult = { available_bytes: disk.bavail * disk.bsize, total_bytes: disk.blocks * disk.bsize }
+    if (view === 'disk') return { disk: diskResult, untrusted: true }
     const processes = await readCommand(['/bin/ps', '-eo', 'pid,pcpu,pmem,comm'], this.root, signal)
-    return { disk: { available_bytes: disk.bavail * disk.bsize, total_bytes: disk.blocks * disk.bsize },
+    return { disk: diskResult,
       memory: { available_bytes: freemem(), total_bytes: totalmem() }, load: loadavg(), uptime_seconds: uptime(), processes,
       accelerators: this.hosts.accelerators === undefined ? { available: false, reason: 'No GPU/TPU observation host configured' } : await this.hosts.accelerators(signal), untrusted: true }
   }

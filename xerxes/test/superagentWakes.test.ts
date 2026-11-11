@@ -51,6 +51,11 @@ test('disk subscriptions only wake above their configured threshold and cancelle
     await wakes.drain(); expect(count).toBe(0)
     await wakes.observe({ id: 'high', workspace: 'w', kind: 'disk_threshold', digest: 'high', value: 95 })
     await wakes.drain(); expect(count).toBe(1)
+    await wakes.observe({ id: 'still-high', workspace: 'w', kind: 'disk_threshold', digest: 'unchanged high', value: 95 })
+    await wakes.drain(); expect(count).toBe(1)
+    await wakes.observe({ id: 'recovered', workspace: 'w', kind: 'disk_threshold', digest: 'low again', value: 50 })
+    await wakes.observe({ id: 'high-again', workspace: 'w', kind: 'disk_threshold', digest: 'high again', value: 95 })
+    await wakes.drain(); expect(count).toBe(2)
     const pending = wakes.schedule(scope, { after: 1, reason: 'cancel me' })
     expect(wakes.cancel(scope, pending.id)).toBe(true)
   } finally { wakes.dispose(); db.close() }

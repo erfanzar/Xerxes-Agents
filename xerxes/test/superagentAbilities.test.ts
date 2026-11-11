@@ -39,3 +39,28 @@ test('workspace-only reads reject session guests before calling daemon and fail 
     expect(world.backendCalls).toHaveLength(0)
   } finally { abilities.dispose() }
 })
+
+test('opt-in disk polling only reads subscribed authorized workspaces and stays silent while unchanged', async () => {
+  const world = makeWorld(); let authorized = true; let reads = 0; let delivered = 0
+  const abilities = new SuperagentAbilities({ db: world.db, clock: world.clock,
+    backend: { call: async (_workspace, method, params) => {
+      expect(method).toBe('superagent.observe')
+      expect(params).toEqual({ ability: 'machine.health', view: 'disk' })
+      reads++
+      return { state: 'accepted', result: { ok: true, observation: { disk: { available_bytes: 5, total_bytes: 100 } } } }
+    } }, authorized: () => authorized, deliver: async () => { delivered++ }, audit: async () => {},
+    diskPolling: { intervalMs: 5 } })
+  try {
+    await Bun.sleep(15); expect(reads).toBe(0)
+    abilities.wakes.subscribe({ owner: 'owner', thread: 'shared', workspace: 'w1' }, { kind: 'disk_threshold', threshold: 90 })
+    const deadline = Date.now() + 1000
+    while (delivered === 0 && Date.now() < deadline) await Bun.sleep(5)
+    expect(reads).toBeGreaterThan(0); expect(delivered).toBe(1)
+    await Bun.sleep(20); expect(delivered).toBe(1)
+    authorized = false
+    await Bun.sleep(10); const stoppedReads = reads
+    await Bun.sleep(20); expect(reads).toBe(stoppedReads)
+  } finally { abilities.dispose() }
+  const closedReads = reads
+  await Bun.sleep(15); expect(reads).toBe(closedReads)
+})

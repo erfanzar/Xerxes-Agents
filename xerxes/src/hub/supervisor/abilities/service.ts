@@ -7,6 +7,7 @@ import type { CommandBackend } from '../../commandRouter.js'
 import { supervisorRequestHash } from '../audit.js'
 import type { SupervisorTurnState } from '../tools.js'
 import { ABILITY_SPECS, validateAbilityInput } from './catalog.js'
+import { DiskThresholdMonitor } from './disk.js'
 import { SupervisorNotebook, type NotebookScope } from './memory.js'
 import { SupervisorWakes, type Wake, type WakeKind } from './wakes.js'
 
@@ -18,6 +19,7 @@ interface AbilityOptions {
   readonly deliver: (wake: Wake) => Promise<void>
   readonly audit: (action: string, scope: NotebookScope, requestHash: string) => Promise<void>
   readonly paused?: () => boolean
+  readonly diskPolling?: { readonly intervalMs?: number }
   readonly onError?: (error: unknown) => void
 }
 
@@ -25,11 +27,27 @@ interface AbilityOptions {
 export class SuperagentAbilities {
   readonly notebook: SupervisorNotebook
   readonly wakes: SupervisorWakes
+  private readonly disk: DiskThresholdMonitor | undefined
   constructor(private readonly options: AbilityOptions) {
     this.notebook = new SupervisorNotebook(options.db, options.clock)
     this.wakes = new SupervisorWakes(options.db, { clock: options.clock, paused: options.paused ?? (() => false),
       authorized: scope => options.authorized(scope.owner, scope.workspace), deliver: options.deliver,
       ...(options.onError === undefined ? {} : { onError: options.onError }) })
+    this.disk = options.diskPolling === undefined ? undefined : new DiskThresholdMonitor({
+      ...options.diskPolling, paused: options.paused ?? (() => false),
+      workspaces: () => {
+        const rows = options.db.query<NotebookScope, []>("SELECT owner,thread,workspace FROM hub_superagent_subscriptions WHERE kind='disk_threshold' LIMIT 1001").all()
+        if (rows.length > 1000) throw new Error('Disk subscription inventory exceeds budget')
+        return rows.filter(scope => options.authorized(scope.owner, scope.workspace)).map(scope => scope.workspace)
+      },
+      read: async (workspace, signal) => {
+        const result = await options.backend.call(workspace, 'superagent.observe', { ability: 'machine.health', view: 'disk' }, { signal, timeoutMs: 5000 })
+        if (result.state !== 'accepted') throw new Error(result.error.message)
+        return result.result
+      },
+      observe: event => this.wakes.observe(event),
+      ...(options.onError === undefined ? {} : { onError: options.onError }),
+    })
   }
 
   async execute(name: string, input: JsonObject, turn: SupervisorTurnState, signal?: AbortSignal): Promise<unknown> {
@@ -85,7 +103,7 @@ export class SuperagentAbilities {
     return workspaces.filter(workspace => reader.canRead({ workspaceId: workspace }) && this.options.authorized(owner, workspace)).slice(0, 8)
       .map(workspace => this.notebook.context({ owner, thread, workspace })).join('\n').slice(0, 32 * 1024)
   }
-  dispose(): void { this.wakes.dispose() }
+  dispose(): void { this.disk?.dispose(); this.wakes.dispose() }
 }
 
 function wakeKind(value: string): WakeKind {

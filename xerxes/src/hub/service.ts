@@ -431,6 +431,8 @@ export function createHubService(options: HubServiceOptions): HubService {
             },
             model: control.port,
             configStatus: () => control.describe(),
+            // Native sampling is model-free and does no RPC until an owner subscribes.
+            diskPolling: {},
             // A default token bound per 24 h window applies unless the operator configured one.
             quotas: withDefaultSpendBound(supervisorConfig?.kind === 'configured' ? supervisorConfig.quotas : undefined),
             ...(supervisorConfig?.kind !== 'configured' || supervisorConfig.persona === undefined ? {} : { persona: supervisorConfig.persona }),

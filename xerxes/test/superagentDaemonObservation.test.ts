@@ -14,6 +14,10 @@ test('daemon observation dispatcher uses a pinned root, a closed operation set a
   try {
     await writeFile(join(root, 'hello.txt'), 'hello')
     expect(await observeWorkspace(root, { ability: 'workspace.read', path: 'hello.txt' })).toMatchObject({ text: 'hello' })
+    const disk = await observeWorkspace(root, { ability: 'machine.health', view: 'disk' })
+    expect(disk).toHaveProperty('disk')
+    expect(disk).not.toHaveProperty('processes')
+    expect(disk).not.toHaveProperty('accelerators')
     await expect(observeWorkspace(root, { ability: 'exec_command', cmd: 'touch bad' })).rejects.toThrow()
     await expect(observeWorkspace(root, { ability: 'workspace.read', path: '../hello.txt' })).rejects.toThrow()
     expect(HUB_DAEMON_METHODS).toContain('superagent.observe')

@@ -93,6 +93,8 @@ export interface HubSupervisorOptions {
   readonly execute: ActionExecutor
   readonly workspaces: Pick<HubWorkspaceView, 'list' | 'projection' | 'health'>
   readonly backend: Pick<CommandBackend, 'call'>
+  /** Explicit opt-in to native disk sampling; no reads without an authorized disk subscription. */
+  readonly diskPolling?: { readonly intervalMs?: number }
   /** Journal for digests; observers feed attention. */
   readonly events?: DigestEventSource & { onEvents?(observer: (events: readonly WatchEvent[]) => void): () => void }
   readonly model: SupervisorModelPort
@@ -526,6 +528,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
         requestHash: hash, decision: 'allowed', outcome: 'n/a' })
     },
     onError: error => report(error, 'superagent ability'),
+    ...(options.diskPolling === undefined ? {} : { diskPolling: options.diskPolling }),
   })
 
   const registry = createSupervisorToolRegistry({
