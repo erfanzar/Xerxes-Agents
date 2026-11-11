@@ -5,6 +5,7 @@
 // so nothing here may import a .tsx module. Render helpers live in renderHelpers.tsx.
 
 import type { HubController } from '../../client/hubController.js'
+import { createSuperagentControlClient } from '../../client/superagentControl.js'
 import { initialHubState, initialSupervisorConfig, type HubState, type SupervisorConfigState } from '../../client/hubStore.js'
 import type { MachineView, SupervisorOptions, TaskSummary, WorkspaceView } from '../../client/hubTypes.js'
 import { NO_ACTIVITY } from '../../client/taskTypes.js'
@@ -17,6 +18,7 @@ export function stubController(overrides: Partial<HubController> = {}): HubContr
   const noop = async (): Promise<void> => {}
   return {
     imagesSupported: false,
+    superagentControl: createSuperagentControlClient({ allowed: () => false, request: async () => { throw new Error('Control RPC is not supplied by this fixture') } }),
     start() {}, dispose() {}, refreshInbox: noop, openSession() {}, closeSession() {}, loadOlder: noop,
     loadAgents: noop, inspectAgent: noop, closeAgent() {}, resync: noop, reconnectNow() {},
     submit: async () => true, steer: async () => true, stopTurn: async () => true,

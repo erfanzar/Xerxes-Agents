@@ -12,7 +12,7 @@ import { useDialogFocus } from './dialogFocus.js'
  * backdrop closes it.
  */
 
-export type ControlsTab = 'autopilot' | 'watch' | 'model'
+export type ControlsTab = 'autopilot' | 'watch' | 'model' | 'safety'
 
 export interface ControlsTabEntry {
   readonly id: ControlsTab

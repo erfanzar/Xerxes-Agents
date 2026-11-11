@@ -443,6 +443,8 @@ Limits are nonnegative daily UTC caps for `actions`, `wakes`, `modelCalls`, `tok
 
 Pause prevents new messages, scheduled/Watch/Autopilot wakes, ability dispatch and action dispatch. Kill also aborts active owned model/host execution signals, persists across restart and rejects late model replies. Clearing kill creates a new signal; it never re-enables an already aborted execution. It does not claim to stop other users’ tasks or arbitrary external process trees. Missing C enforcement/ownership hosts still refuse. The owner must explicitly clear both `killed` and `paused` to resume after a kill.
 
+The desktop supervisor’s **Safety** tab and phone Xerxes tab’s **Safety** sheet expose these owner-only methods. Owner discovery and emergency controls do not depend on `supervisor.thread.open` succeeding. The apps read before writing, bind that revision, serialize each update and require an explicit reload after a refused/unknown outcome; they never retry a mutation. Pause and Resume are separate stable targets, Kill has a human confirmation, offline controls are disabled, zero caps are preserved and unknown usage is displayed as unknown.
+
 `propose_risky_action` always creates an exact-argument owner-only confirmation in the owner’s private thread, even under Autopilot. The existing confirmation response method binds the full canonical action, target revision, runtime instance, expiry and idempotency identity, rechecks current ownership after audit, and never retries an unknown outcome. A typed risky-operation host must be configured; there is no shell fallback. Permission decisions remain human-only in the task approval UI; the retained `answer_permission` name is an explicit denial and no longer delegates approvals.
 
 ## XERXES Autopilot

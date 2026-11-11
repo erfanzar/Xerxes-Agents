@@ -41,7 +41,8 @@ describe('Xerxes tab Autopilot', () => {
   it('shows "Autopilot on · N workspaces" and the no-confirmation note when any workspace is active', () => {
     const html = plain(render(withAutopilot({ rows: [row(), row({ workspace_id: 'w2', label: 'Server' }), row({ workspace_id: 'w3', active: false })] }), '/xerxes'))
     expect(html).toContain('Autopilot on · 2 workspaces')
-    expect(html).toContain('acts for you at once')
+    expect(html).toContain('Permissions stay human-only')
+    expect(html).toContain('risky actions always need the owner’s Confirm')
     expect(plain(render(withAutopilot({ rows: [row()] }), '/xerxes'))).toContain('Autopilot on · 1 workspace<')
   })
 
