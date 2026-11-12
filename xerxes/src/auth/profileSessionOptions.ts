@@ -6,8 +6,9 @@ import { ProviderAccountRegistry } from './providerAccountRegistry.js'
 
 /** Account identity belongs to the client factory, never to provider wire overrides. */
 export function profileSessionOptions(
-  profile: Pick<ProviderProfile, 'oauth_account_id'> | undefined,
+  profile: Pick<ProviderProfile, 'oauth_account_id' | 'isolated_auth'> | undefined,
   accounts: Pick<ProviderAccountRegistry, 'sessionOptions'> = new ProviderAccountRegistry(),
 ): LlmClientFactoryOptions {
-  return profile?.oauth_account_id ? accounts.sessionOptions(profile.oauth_account_id) : {}
+  if (profile?.oauth_account_id) return accounts.sessionOptions(profile.oauth_account_id)
+  return profile?.isolated_auth ? { isolatedAuth: true } : {}
 }

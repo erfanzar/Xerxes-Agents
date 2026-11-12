@@ -209,9 +209,10 @@ export const PROVIDERS = {
     modelsDevVendor: 'anthropic',
     billing: 'subscription',
   }),
+  // The factory uses the native Generate Content adapter, not OpenAI compat.
   gemini: provider('gemini', 'openai', {
     apiKeyEnv: 'GEMINI_API_KEY',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   }),
   kimi: provider('kimi', 'openai', {
     apiKeyEnv: 'MOONSHOT_API_KEY',
@@ -371,7 +372,7 @@ export function detectProvider(model: string, environment: Readonly<Record<strin
   if (owners.size === 1) return [...owners][0]!
   const keyed = [...owners].filter(name => {
     const variable = PROVIDERS[name].apiKeyEnv
-    return Boolean(variable && environment[variable])
+    return Boolean((variable && environment[variable]) || (name === 'gemini' && environment.GOOGLE_API_KEY))
   })
   return keyed.length === 1 ? keyed[0]! : 'openai'
 }
@@ -481,6 +482,7 @@ export function getApiKey(
   const providerConfig: ProviderConfig = PROVIDERS[providerName]
   if (providerConfig.apiKeyEnv && ambientApiKeyAllowed(providerName, requestBaseUrl, environment)) {
     const environmentValue = environment[providerConfig.apiKeyEnv]
+      || (providerName === 'gemini' ? environment.GOOGLE_API_KEY : undefined)
     if (environmentValue) {
       return environmentValue
     }
@@ -498,6 +500,13 @@ export function ambientApiKeyAllowed(
   if (environment.XERXES_ALLOW_AMBIENT_KEY?.trim() === '1') return true
   const own = (PROVIDERS[providerName] as ProviderConfig).baseUrl
   if (!own) return true
+  if (providerName === 'gemini') {
+    try {
+      return new URL(requestBaseUrl).origin === new URL(own).origin
+    } catch {
+      return false
+    }
+  }
   const ownHost = httpHost(own)
   return ownHost !== undefined && httpHost(requestBaseUrl) === ownHost
 }
@@ -511,7 +520,9 @@ export function ambientApiKeyWithheldHint(
   requestBaseUrl: string | undefined,
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string | undefined {
-  const variable = (PROVIDERS[providerName] as ProviderConfig).apiKeyEnv
+  const variable = providerName === 'gemini' && !environment.GEMINI_API_KEY && environment.GOOGLE_API_KEY
+    ? 'GOOGLE_API_KEY'
+    : (PROVIDERS[providerName] as ProviderConfig).apiKeyEnv
   if (!variable || !environment[variable]) return undefined
   if (ambientApiKeyAllowed(providerName, requestBaseUrl, environment)) return undefined
   const host = httpHost(requestBaseUrl ?? '') ?? 'this endpoint'

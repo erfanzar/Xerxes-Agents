@@ -56,7 +56,7 @@ import { BedrockConverseClient } from './bedrock.js'
 import { createCloudflareWorkersAiClient } from './cloudflareWorkersAi.js'
 import { MistralClient } from './mistral.js'
 import { GoogleVertexClient } from './vertex.js'
-import { GeminiClient } from './gemini.js'
+import { GeminiClient, nativeGeminiBaseUrl } from './gemini.js'
 import {
   createGrammarToolInputProperties,
   grammarToolInput,
@@ -1073,12 +1073,13 @@ export function createLlmClient(
     // and other Anthropic-protocol hosts were sent the user's sk-ant-oat
     // token in place of their own key.
     const anthropicOAuth = providerConfig.name === 'anthropic' && subscriptionAuth
-      ? options.anthropicOAuthSession ?? new AnthropicOAuthSession()
+      ? options.anthropicOAuthSession ?? (options.isolatedAuth ? undefined : new AnthropicOAuthSession())
       : undefined
     // The Anthropic adapter's own fallback reads ANTHROPIC_API_KEY whatever
     // the host, so the key is resolved here: this provider's variable, and
     // only toward its own host (or with XERXES_ALLOW_AMBIENT_KEY=1).
-    const anthropicKey = options.isolatedAuth ? '' : configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl)
+    // Isolation disables ambient credentials, not an explicit account key.
+    const anthropicKey = configuredApiKey || (options.isolatedAuth ? '' : getApiKey(providerName, overrides, process.env, configuredBaseUrl))
     if (!anthropicKey && !anthropicOAuth) {
       const variable = (providerConfig as ProviderConfig).apiKeyEnv ?? `${providerName}_api_key`
       throw new ConfigurationError(
@@ -1087,7 +1088,7 @@ export function createLlmClient(
       )
     }
     return new AnthropicMessagesClient({
-      ...(options.isolatedAuth ? { apiKey: '' } : anthropicKey ? { apiKey: anthropicKey } : {}),
+      ...(anthropicKey || options.isolatedAuth ? { apiKey: anthropicKey } : {}),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
       ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
       ...(options.promptCaching === undefined ? {} : { promptCaching: options.promptCaching }),
@@ -1208,6 +1209,15 @@ export function createLlmClient(
   }
   // Dedicated transports: intercepted before responses_api/multi-api routing
   // because their native APIs do not offer those surfaces.
+  if (providerName === 'gemini') {
+    return new GeminiClient({
+      // Resolve here and pass even an empty key: named accounts must never
+      // silently fall through to another account in the ambient environment.
+      apiKey: configuredApiKey || (options.isolatedAuth ? '' : getApiKey(providerName, overrides, process.env, configuredBaseUrl)),
+      ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
+      ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
+    })
+  }
   if (providerName === 'google-vertex') {
     return new GoogleVertexClient({
       ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
@@ -1269,13 +1279,6 @@ export function createLlmClient(
           throw error
         }
       } } : {}),
-    })
-  }
-  if (providerName === 'gemini') {
-    return new GeminiClient({
-      ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
-      ...(configuredBaseUrl ? { baseUrl: nativeGeminiBaseUrl(configuredBaseUrl) } : {}),
-      ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
     })
   }
   if (providerName === 'ollama') {
@@ -1364,6 +1367,9 @@ function routeMultiApiProvider(
     case 'google-generative-ai':
       return new GeminiClient({
         ...shared,
+        // Gateway credentials are not Gemini credentials; an empty gateway
+        // key must not activate the native adapter's vendor-key fallback.
+        apiKey: resolvedApiKey,
         ...(baseUrl ? { baseUrl: nativeGeminiBaseUrl(baseUrl) } : {}),
       })
     default:
@@ -2411,21 +2417,6 @@ function withTrailingSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`
 }
 
-/** Convert the registry's official OpenAI-compatibility root to Gemini's native REST root. */
-function nativeGeminiBaseUrl(value: string): string {
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return value
-  }
-  if (url.hostname !== 'generativelanguage.googleapis.com') {
-    return value
-  }
-  url.pathname = url.pathname.replace(/\/openai\/?$/, '/')
-  return url.toString()
-}
-
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
@@ -2759,14 +2750,20 @@ function parseJsonObject(data: string, providerName: string): Record<string, unk
   }
 }
 
-async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* sseData(body: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<string> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const parser = new SSEParser()
+  // Cancelling the reader wakes a pending read even for an injected transport
+  // whose response body does not itself observe the request's AbortSignal.
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => undefined) }
+  signal?.addEventListener('abort', abort, { once: true })
 
   try {
+    signal?.throwIfAborted()
     while (true) {
       const { done, value } = await reader.read()
+      signal?.throwIfAborted()
       if (done) {
         break
       }
@@ -2781,6 +2778,7 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
       yield event.data
     }
   } finally {
+    signal?.removeEventListener('abort', abort)
     try {
       await reader.cancel()
     } catch {

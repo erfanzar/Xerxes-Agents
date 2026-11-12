@@ -113,9 +113,13 @@ test('an unfinished helper and a mismatched sync receipt never report success', 
     const account = await registry.create('claude', 'work')
     await Bun.write(join(directory, 'accounts', account.id, 'auth', 'anthropic-oauth.json'), JSON.stringify({ access: 'fixture-access', refresh: 'fixture-refresh', expires: 4102444800 }))
     let reloads = 0, writes = 0
-    const center = new GlobalProviderAccounts(registry, { alias: 'host', target: 'user@example.com', workspacePath: '/work/repo' }, async () => { reloads++; return { ok: true } }, async () => ({ ok: true }), () => 1000, async () => { writes++; return JSON.stringify({ ok: true, profile: 'wrong-profile' }) })
+    const center = new GlobalProviderAccounts(registry, { alias: 'host', target: 'user@example.com', workspacePath: '/work/repo' }, async method => {
+      if (method === 'runtime.status') return { provider_account_isolation_v1_supported: true }
+      if (method === 'runtime.reload') reloads++
+      return { ok: true }
+    }, async () => ({ ok: true }), () => 1000, async () => { writes++; return JSON.stringify({ ok: true, profile: 'wrong-profile' }) })
     const review = center.reviewSync(account.id) as { review: string }
-    await expect(center.confirmSync(review.review, true)).rejects.toThrow('different profile')
+    await expect(center.confirmSync(review.review, true)).rejects.toThrow('not acknowledged')
     await expect(center.confirmSync(review.review, true)).rejects.toThrow('expired')
     expect(writes).toBe(1)
     expect(reloads).toBe(0)
@@ -133,16 +137,17 @@ test('the global center reviews sync and activates the linked profile', async ()
     const calls: { method: string; params: Record<string, unknown> }[] = [], writes: unknown[] = []
     const center = new GlobalProviderAccounts(registry, { alias: 'host', target: 'user@example.com', workspacePath: '/work/repo' }, async (method, params) => {
       calls.push({ method, params })
+      if (method === 'runtime.status') return { provider_account_isolation_v1_supported: true }
       return method === 'provider_list' ? { ok: true, profiles: [{ name: account.profileName }] } : { ok: true }
     }, async () => ({ ok: true }), () => 1000, async payload => { writes.push(payload); return JSON.stringify({ ok: true, profile: account.profileName }) })
     const listed = await center.list() as { accounts: { id: string; available: boolean }[]; can_sync: boolean }
-    expect(listed.accounts[0]).toMatchObject({ id: account.id, available: true })
+    expect(listed.accounts[0]).toMatchObject({ id: account.id, available: false })
     expect(JSON.stringify(listed)).not.toContain('secret-refresh')
     const review = center.reviewSync(account.id) as { review: string }
     expect(await center.confirmSync(review.review, true)).toMatchObject({ ok: true, profile: account.profileName })
     expect(writes).toHaveLength(1)
     await center.activate(account.id, 'session-1')
-    expect(calls.map(call => call.method)).toEqual(['provider_list', 'runtime.reload', 'provider_select'])
+    expect(calls.map(call => call.method)).toEqual(['provider_list', 'runtime.status', 'runtime.reload', 'runtime.status', 'provider_list', 'provider_select'])
     expect(calls.at(-1)?.params).toEqual({ name: account.profileName, session_key: 'session-1' })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

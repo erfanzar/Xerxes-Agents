@@ -36,7 +36,8 @@ export interface XerxesBridge {
   getResumeSession?(): Promise<string | null>
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
-  accounts?(action: string, params?: Record<string, unknown>): Promise<unknown>
+  /** create-gemini accepts user-entered label/apiKey/model only; replies never contain a key. */
+  accounts?(action: 'list' | 'login' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove', params?: Record<string, unknown>): Promise<unknown>
   onAccountLogin?(handler: (event: { type: 'authorization_url'; login_id: string; url: string }) => void): () => void
   /** Hub cockpit: link this Mac, pair a phone, sign in to the Hub (see hubShared.ts). */
   hubCockpit?(action: string, params?: Record<string, unknown>): Promise<unknown>

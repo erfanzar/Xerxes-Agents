@@ -14,6 +14,7 @@ export interface RemoteProfileInput {
   readonly provider?: string
   readonly sampling?: Record<string, unknown>
   readonly oauth_account_id?: string
+  readonly isolated_auth?: boolean
 }
 export interface RemoteOAuthSyncInput {
   readonly kind: 'claude' | 'codex' | 'claude-code'
@@ -43,6 +44,7 @@ if (typeof profile.api_key !== 'string' || (!oauth && !profile.api_key.trim()) |
 if (typeof profile.model !== 'string' || !profile.model.trim() || profile.model.length > 512) throw new Error('invalid model')
 if (profile.provider !== undefined && (typeof profile.provider !== 'string' || profile.provider.length > 128)) throw new Error('invalid provider')
 if (profile.sampling !== undefined && (typeof profile.sampling !== 'object' || profile.sampling === null || Array.isArray(profile.sampling))) throw new Error('invalid sampling')
+if (profile.isolated_auth !== undefined && typeof profile.isolated_auth !== 'boolean') throw new Error('invalid authentication isolation')
 if (oauth) {
   if (typeof value.accountId !== 'string' || !/^[a-f0-9-]{36}$/.test(value.accountId)) throw new Error('invalid account id')
   if (!value.credential || typeof value.credential !== 'object' || Array.isArray(value.credential)) throw new Error('invalid OAuth credential')

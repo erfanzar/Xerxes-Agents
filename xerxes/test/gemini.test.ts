@@ -436,6 +436,80 @@ test('Gemini stream keeps duplicate identical function calls with distinct ids',
   expect(toolCalls[1]).toMatchObject({ type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } })
 })
 
+test('Gemini stream safety and prompt blocks never release buffered tool calls', async () => {
+  for (const blocked of [
+    { candidates: [{ content: { parts: [{ text: 'blocked output' }] }, finishReason: 'SAFETY' }] },
+    { candidates: [], promptFeedback: { blockReason: 'BLOCKLIST' } },
+    { candidates: [{ content: { parts: [{ text: 'blocked output' }] }, finishReason: 'STOP' }], promptFeedback: { blockReason: 'PROHIBITED_CONTENT' } },
+  ]) {
+    const client = new GeminiClient({
+      apiKey: 'test-key',
+      fetchImplementation: async () => sseResponse([
+        { candidates: [{ content: { parts: [{ functionCall: { name: 'ReadFile', args: { path: 'README.md' } } }] } }] },
+        blocked,
+      ]),
+    })
+    const events: unknown[] = []
+    await expect((async () => {
+      for await (const event of client.stream(simpleRequest())) events.push(event)
+    })()).rejects.toBeInstanceOf(ProviderError)
+    expect(events).toEqual([])
+  }
+})
+
+test('Gemini cancellation before fetching and between streamed chunks stops output and releases the body', async () => {
+  const controller = new AbortController()
+  const abort = new DOMException('cancelled by caller', 'AbortError')
+  let calls = 0
+  let cancelled = false
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async (_input, init) => {
+      calls++
+      expect(init?.signal).toBe(controller.signal)
+      return new Response(new ReadableStream({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"first"}]}}]}\n\n'))
+        },
+        pull(stream) {
+          stream.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"late"}]},"finishReason":"STOP"}]}\n\n'))
+        },
+        cancel() { cancelled = true },
+      }))
+    },
+  })
+  const stream = client.stream(simpleRequest(), controller.signal)
+  expect((await stream.next()).value).toEqual({ content: 'first' })
+  controller.abort(abort)
+  await expect(stream.next()).rejects.toBe(abort)
+  expect(cancelled).toBe(true)
+  await expect(client.complete(simpleRequest(), controller.signal)).rejects.toBe(abort)
+  await expect(collect(client.stream(simpleRequest(), controller.signal))).rejects.toBe(abort)
+  expect(calls).toBe(1)
+})
+
+test('Gemini abort cancels a stalled response reader without requiring another provider chunk', async () => {
+  const controller = new AbortController()
+  let cancelled = false
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response(new ReadableStream({
+      cancel() { cancelled = true },
+    })),
+  })
+  const next = client.stream(simpleRequest(), controller.signal).next()
+  const abort = new DOMException('caller cancelled', 'AbortError')
+  const timer = setTimeout(() => controller.abort(abort), 1)
+  try {
+    const outcome = await Promise.race([next, Bun.sleep(100).then(() => 'still waiting')])
+      .catch((error: unknown) => error)
+    expect(outcome).toBe(abort)
+    expect(cancelled).toBe(true)
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 function simpleRequest(): CompletionRequest {
   return { model: 'gemini-2.0-flash', messages: [{ role: 'user', content: 'hello' }] }
 }

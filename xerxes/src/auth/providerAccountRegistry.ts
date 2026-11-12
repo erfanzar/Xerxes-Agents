@@ -45,6 +45,10 @@ export type ProviderSyncPayload = OAuthSyncPayload | ApiKeySyncPayload
 
 interface RegistryDocument { readonly accounts: readonly ProviderAccountMetadata[] }
 
+function apiAccountSummary(profile: ProviderProfile): ProviderAccountSummary {
+  return { id: `api:${profile.name}`, kind: 'api_key', label: profile.name, profileName: profile.name, createdAt: '', provider: profile.provider, model: profile.model }
+}
+
 function defaultBase(kind: OAuthAccountKind): { provider: string; baseUrl: string; model: string } {
   if (kind === 'codex') return { provider: 'openai-codex', baseUrl: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-codex' }
   if (kind === 'claude-code') return { provider: 'claude-code', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' }
@@ -96,9 +100,33 @@ export class ProviderAccountRegistry {
       if (profile) result.push({ ...account, provider: profile.provider, model: profile.model })
     }
     for (const profile of profiles.filter(row => !row.oauth_account_id && row.api_key.trim())) {
-      result.push({ id: `api:${profile.name}`, kind: 'api_key', label: profile.name, profileName: profile.name, createdAt: '', provider: profile.provider, model: profile.model })
+      result.push(apiAccountSummary(profile))
     }
     return result
+  }
+
+  /** Gemini keys use the existing owner-only profiles.json, not the OAuth registry. */
+  async createGemini(label: string, apiKey: string, model: string): Promise<ProviderAccountSummary> {
+    if (typeof label !== 'string' || !label.trim() || label.trim().length > 80 || /[\x00-\x1f\x7f/\\]/.test(label)) throw new Error('A valid Gemini account label is required')
+    if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.length > 32768 || /[^\x21-\x7e]/.test(apiKey.trim())) throw new Error('A valid Gemini API key is required')
+    if (typeof model !== 'string' || model.length > 512 || !/^(?:models\/)?gemini-[A-Za-z0-9._-]+$/.test(model.trim())) throw new Error('A Gemini model id is required')
+    const profiles = new ProfileStore(this.profilesFile), name = `gemini-${label.trim()}`
+    if (profiles.list().some(profile => profile.name.toLowerCase() === name.toLowerCase())) throw new Error('A profile with this Gemini account name already exists; choose a different label')
+    try {
+      // No await between the collision check and synchronous save. Never select
+      // an account (or send its key to an SSH host) merely because it was added.
+      return apiAccountSummary(profiles.save({ name, provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', apiKey: apiKey.trim(), model: model.trim(), isolatedAuth: true, setActive: false }))
+    } catch {
+      // A filesystem/adapter error must not carry the submitted secret to IPC.
+      throw new Error('Could not save Gemini account; check local profile storage')
+    }
+  }
+
+  private apiProfile(id: string): ProviderProfile {
+    const name = id.slice(4), profile = new ProfileStore(this.profilesFile).get(name)
+    if (!name || !profile || profile.name !== name) throw new Error('Provider profile not found')
+    if (profile.oauth_account_id || !profile.api_key.trim()) throw new Error('This account has no dedicated API key')
+    return profile
   }
 
   private pendingPath(id: string): string {
@@ -221,8 +249,8 @@ export class ProviderAccountRegistry {
 
   async usage(id: string): Promise<ProfileQuota | ProviderUsageReport> {
     if (id.startsWith('api:')) {
-      const profile = new ProfileStore(this.profilesFile).get(id.slice(4))
-      if (!profile) throw new Error('Provider profile not found')
+      const profile = this.apiProfile(id)
+      if (profile.provider === 'gemini') return { status: 'unknown', remaining_tokens: null, reason: 'Gemini API-key quotas are unsupported. Recorded consumption is not remaining quota or a provider balance.' }
       return profileQuota(profile)
     }
     return this.subscriptionUsage(id)
@@ -251,9 +279,7 @@ export class ProviderAccountRegistry {
 
   async syncPayload(id: string): Promise<ProviderSyncPayload> {
     if (id.startsWith('api:')) {
-      const profile = new ProfileStore(this.profilesFile).get(id.slice(4))
-      if (!profile) throw new Error('Provider profile not found')
-      return { kind: 'api_key', profile }
+      return { kind: 'api_key', profile: this.apiProfile(id) }
     }
     const account = await this.metadata(id), directory = this.directory(id)
     const profile = new ProfileStore(this.profilesFile).get(account.profileName)
@@ -266,6 +292,14 @@ export class ProviderAccountRegistry {
   }
 
   async remove(id: string): Promise<void> {
+    if (id.startsWith('api:')) {
+      const profile = this.apiProfile(id)
+      if (profile.provider !== 'gemini') throw new Error('Delete other API-key profiles from their profile editor')
+      try {
+        if (!new ProfileStore(this.profilesFile).delete(profile.name)) throw new Error('Provider profile not found')
+      } catch { throw new Error('Could not remove Gemini account; check local profile storage') }
+      return
+    }
     const account = await this.metadata(id)
     new ProfileStore(this.profilesFile).delete(account.profileName)
     await rm(this.directory(id), { recursive: true, force: true })

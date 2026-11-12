@@ -25,9 +25,10 @@ export function canonicalProfileName(name: string): string {
   return clean === LEGACY_CLAUDE_CODE_PROFILE_NAME ? CLAUDE_CODE_PROFILE_NAME : clean
 }
 
-/** What people see for a profile; only the built-in Claude Code profile has a friendlier name. */
+/** Friendly display names; legacy saved ids stay unchanged. */
 export function profileLabel(name: string): string {
-  return canonicalProfileName(name) === CLAUDE_CODE_PROFILE_NAME ? 'Claude Code' : name
+  if (canonicalProfileName(name) === CLAUDE_CODE_PROFILE_NAME) return 'Claude Code'
+  return name === 'bonsai-local' ? 'local-model' : name
 }
 
 export const CODEX_PROFILE_NAME = 'codex'
@@ -96,6 +97,8 @@ export interface ProviderProfile {
   readonly data_trust?: DataTrust
   /** Prompt profile for turns on this profile; wins over runtime.prompt_profile. */
   readonly prompt_profile?: ProfilePromptProfile
+  /** A dedicated API-key account must never borrow an ambient credential. */
+  readonly isolated_auth?: boolean
   /** Isolated OAuth account id; credentials live under provider-accounts/<id>. */
   readonly oauth_account_id?: string
 }
@@ -122,6 +125,8 @@ export interface SaveProfileInput {
   readonly dataTrust?: DataTrust
   /** Prompt profile; kept from the saved profile when omitted. */
   readonly promptProfile?: ProfilePromptProfile
+  /** Bind authentication to this profile rather than provider environment variables. */
+  readonly isolatedAuth?: boolean
   /** Link this profile to an isolated OAuth account. */
   readonly oauthAccountId?: string
 }
@@ -200,6 +205,7 @@ export class ProfileStore {
       sampling: input.sampling ?? existing?.sampling ?? {},
       ...(dataTrust === undefined ? {} : { data_trust: dataTrust }),
       ...(promptProfile === undefined ? {} : { prompt_profile: promptProfile }),
+      ...(input.isolatedAuth ?? existing?.isolated_auth ? { isolated_auth: true } : {}),
       ...(oauthAccountId === undefined ? {} : { oauth_account_id: oauthAccountId }),
     }
     document.profiles[input.name] = profile
@@ -548,6 +554,8 @@ function providerProfile(value: unknown): ProviderProfile | undefined {
     provider: value.provider,
     sampling: value.sampling,
     ...storedDataTrust(value.data_trust),
+    // A malformed present isolation marker must not enable ambient fallback.
+    ...(value.isolated_auth === undefined ? {} : { isolated_auth: value.isolated_auth !== false }),
     ...(typeof value.oauth_account_id === 'string' && /^[a-f0-9-]{36}$/.test(value.oauth_account_id) ? { oauth_account_id: value.oauth_account_id } : {}),
     ...(typeof value.prompt_profile === 'string' && PROMPT_PROFILES.includes(value.prompt_profile as ProfilePromptProfile)
       ? { prompt_profile: value.prompt_profile as ProfilePromptProfile }
@@ -662,6 +670,12 @@ function guessProvider(baseUrl: string): string {
   const url = baseUrl.toLowerCase()
   if (url.startsWith('claude-code://')) {
     return 'claude-code'
+  }
+  // Check Google's actual host before the `/openai` compatibility path.
+  try {
+    if (new URL(baseUrl).hostname === 'generativelanguage.googleapis.com') return 'gemini'
+  } catch {
+    // Invalid/legacy endpoints keep the existing generic inference below.
   }
   if (url.includes('openrouter.ai')) {
     return 'openrouter'

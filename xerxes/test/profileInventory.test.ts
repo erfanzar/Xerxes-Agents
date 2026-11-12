@@ -1,10 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProfileStore } from '../src/bridge/profiles.js'
+import { ProviderAccountRegistry } from '../src/auth/providerAccountRegistry.js'
 import { AgentSettingsStore } from '../src/agents/settingsStore.js'
 import { inheritedSelectionValidator, profileInventoryHost, profileSelectionValidator } from '../src/runtime/profileInventory.js'
 
@@ -47,6 +48,32 @@ test('standalone Radius inventory reads gateway configuration and preserves cred
     await profileSelectionValidator(profiles)('gateway', 'radius-worker')
     expect(requests).toEqual(Array.from({ length: 2 }, () => ({ path: '/v1/config', auth: 'Bearer radius-fixture-secret' })))
   } finally { endpoint.stop(true); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('standalone Codex inventory uses the selected named account rather than the global login', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'named-codex-inventory-')), previousHome = process.env.XERXES_HOME
+  process.env.XERXES_HOME = directory
+  const seen: (string | null)[] = []
+  const endpoint = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: request => {
+    seen.push(request.headers.get('authorization'))
+    return Response.json({ models: [{ slug: 'fixture-codex-worker', display_name: 'Fixture', supported_reasoning_levels: [] }] })
+  } })
+  try {
+    const profiles = new ProfileStore(join(directory, 'profiles.json'))
+    const registry = new ProviderAccountRegistry(join(directory, 'provider-accounts'), profiles.filePath)
+    const account = await registry.create('codex', 'Inventory')
+    await mkdir(join(directory, 'provider-accounts', account.id, '.codex'), { recursive: true })
+    await writeFile(join(directory, 'provider-accounts', account.id, '.codex', 'auth.json'), JSON.stringify({ tokens: { access_token: 'fixture-named-codex-key', refresh_token: 'fixture-refresh', token_type: 'Bearer', expires_at: 4102444800, scopes: [] } }))
+    profiles.save({ name: account.profileName, provider: 'openai-codex', apiKey: '', baseUrl: String(endpoint.url), model: 'fixture-codex-worker', oauthAccountId: account.id })
+    const host = profileInventoryHost(profiles, new AgentSettingsStore(join(directory, 'settings.sqlite')))
+    expect(await host('session', { provider_profile: account.profileName })).toMatchObject({ entries: [{ model: 'fixture-codex-worker' }] })
+    expect(seen).toEqual(['Bearer fixture-named-codex-key'])
+  } finally {
+    endpoint.stop(true)
+    if (previousHome === undefined) delete process.env.XERXES_HOME
+    else process.env.XERXES_HOME = previousHome
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('standalone Copilot inventory and selection use the subscription catalog and sanitize failures', async () => {

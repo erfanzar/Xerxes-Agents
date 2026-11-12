@@ -2362,7 +2362,7 @@ function daemonRuntime(
     // connect timeout and retry cap; loopback routes default to 3 retries.
     const daemonProviderNetwork = parseProviderNetworkConfig({ ...config.runtime, ...settings });
     const daemonMaxNetworkRetries = daemonProviderNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(connection.baseUrl);
-    const accountOptions = profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined);
+    const accountOptions = profileSessionOptions({ ...(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : {}), ...(connection.isolatedAuth ? { isolated_auth: true } : {}) });
     const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
@@ -3129,7 +3129,7 @@ async function acpServer(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  }, { ...profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined), connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
+  }, { ...profileSessionOptions({ ...(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : {}), ...(connection.isolatedAuth ? { isolated_auth: true } : {}) }), connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
@@ -3380,7 +3380,7 @@ async function runOneShot(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  }, { ...profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined), connectTimeoutMs: providerNetwork.connectTimeoutMs });
+  }, { ...profileSessionOptions({ ...(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : {}), ...(connection.isolatedAuth ? { isolated_auth: true } : {}) }), connectTimeoutMs: providerNetwork.connectTimeoutMs });
   // A refused or hung endpoint gives up after a bounded number of retries:
   // fewer for a local server, which either answers or is down.
   const oneShotBaseUrl = connection.baseUrl

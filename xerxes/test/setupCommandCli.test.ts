@@ -34,6 +34,25 @@ test('xerxes setup CLI writes a validated configuration file', async () => {
   }
 })
 
+test('xerxes setup CLI accepts Gemini API-key configuration', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-gemini-cli-'))
+  try {
+    const target = join(directory, 'setup.yaml')
+    const child = Bun.spawn({
+      cmd: [process.execPath, 'src/cli.ts', 'setup', '--provider', 'gemini', '--model', 'gemini-2.5-flash', '--api-key', 'fake-gemini-key', '--target', target],
+      cwd: resolve(rootDir),
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain(`Wrote setup configuration to ${target}`)
+    expect(`${stdout}${stderr}`).not.toContain('fake-gemini-key')
+    expect(await Bun.file(target).text()).toContain('provider: "gemini"\nmodel: "gemini-2.5-flash"\napi_key: "fake-gemini-key"')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('xerxes setup CLI applies a profile preset', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-profile-cli-'))
   try {

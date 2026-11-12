@@ -119,16 +119,36 @@ test('Gemini legacy family maps an explicit off directive to a zero thinking bud
   })
 })
 
-test('Gemini blocked finish reasons fail the turn instead of returning an empty success', async () => {
+test.each(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'MALFORMED_FUNCTION_CALL', 'UNEXPECTED_TOOL_CALL', 'TOO_MANY_TOOL_CALLS', 'IMAGE_OTHER', 'UNRECOGNIZED_PROVIDER_FINISH'])(
+  'Gemini blocked or unknown finish reason %s fails both completion and stream', async finishReason => {
+    const event = { candidates: [{ content: { parts: [] }, finishReason }] }
+    const complete = new GeminiClient({ apiKey: 'test-key', fetchImplementation: async () => Response.json(event) })
+    await expect(complete.complete(simpleRequest())).rejects.toThrow(`provider stopped with: ${finishReason}`)
+    const stream = new GeminiClient({ apiKey: 'test-key', fetchImplementation: async () => sseResponse(event) })
+    await expect((async () => { for await (const _event of stream.stream(simpleRequest())) { /* drain */ } })())
+      .rejects.toThrow(`provider stopped with: ${finishReason}`)
+  },
+)
+
+test('Gemini output-limit finishes remain successful length deltas', async () => {
+  const event = { candidates: [{ content: { parts: [{ text: 'partial' }] }, finishReason: 'MAX_TOKENS' }] }
+  const client = new GeminiClient({ apiKey: 'test-key', fetchImplementation: async () => Response.json(event) })
+  expect(await client.complete(simpleRequest())).toMatchObject({ content: 'partial', finishReason: 'length' })
+  const streamed = new GeminiClient({ apiKey: 'test-key', fetchImplementation: async () => sseResponse(event) })
+  const events = []
+  for await (const delta of streamed.stream(simpleRequest())) events.push(delta)
+  expect(events).toEqual([{ content: 'partial', finishReason: 'length' }])
+})
+
+test('Gemini blocked prompt is refused even if a candidate is also present', async () => {
   const client = new GeminiClient({
     apiKey: 'test-key',
-    baseUrl: 'https://gemini.test/v1beta',
     fetchImplementation: async () => Response.json({
-      candidates: [{ content: { parts: [] }, finishReason: 'SAFETY' }],
+      promptFeedback: { blockReason: 'PROHIBITED_CONTENT' },
+      candidates: [{ content: { parts: [{ text: 'blocked' }] }, finishReason: 'STOP' }],
     }),
   })
-
-  await expect(client.complete(simpleRequest())).rejects.toThrow('provider stopped with: SAFETY')
+  await expect(client.complete(simpleRequest())).rejects.toThrow('provider blocked prompt with: PROHIBITED_CONTENT')
 })
 
 function simpleRequest(): CompletionRequest {

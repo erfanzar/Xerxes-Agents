@@ -3,6 +3,7 @@
 import { CodexSession, fetchCodexModelCatalog, type CodexModel } from '../auth/codexAuth.js'
 import { CopilotSession, fetchCopilotModels } from '../auth/copilotAuth.js'
 import { profileQuota } from '../auth/profileUsage.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 import type { AgentSettingsStore } from '../agents/settingsStore.js'
 import { reportedModelReasoning, type ProfileStore, type ProviderProfile } from '../bridge/profiles.js'
 import { claudeCodeCatalog, claudeCodeReasoningLevels } from '../llms/claudeCodeCatalog.js'
@@ -27,7 +28,9 @@ export function inheritedSelectionValidator(connection: RuntimeConnection) {
   const provider = resolveProvider(connection.model, { provider: connection.provider, base_url: connection.baseUrl })
   const profile: ProviderProfile = {
     name: 'inherited', provider, model: connection.model,
-    api_key: connection.apiKey || getApiKey(provider),
+    api_key: connection.apiKey || (connection.isolatedAuth ? '' : getApiKey(provider)),
+    ...(connection.isolatedAuth ? { isolated_auth: true } : {}),
+    ...(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : {}),
     base_url: connection.baseUrl || getProviderConfig(provider).baseUrl || '', sampling: {},
   }
   const validate = profileSelectionValidator({ list: () => [{ ...profile, active: true }], active: () => profile, get: name => name === profile.name ? profile : undefined })
@@ -106,7 +109,7 @@ async function withProfileInventory<T>(profiles: InventoryProfiles, settings: Ag
             })) }
           }
           if (profile.provider === 'openai-codex') {
-            const credential = await new CodexSession().credential(signal)
+            const credential = await (profileSessionOptions(profile).codexSession ?? new CodexSession()).credential(signal)
             signal?.throwIfAborted()
             codexModels = await fetchCodexModelCatalog(credential, { baseUrl: profile.base_url, ...(signal ? { signal } : {}) })
             return { source: 'provider', models: codexModels.map(model => ({ id: model.id, ...(model.contextLimit === undefined ? {} : { context_limit: model.contextLimit, context_source: 'provider' }) })) }

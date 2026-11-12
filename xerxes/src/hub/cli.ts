@@ -3,6 +3,7 @@
 
 import { basename, resolve } from 'node:path'
 import { ProfileStore } from '../bridge/profiles.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 import { createLlmClient } from '../llms/client.js'
 import { exposureConfigFromEnvironment } from './exposure.js'
 import { createHubIdentity } from './identity/index.js'
@@ -118,7 +119,7 @@ export function supervisorConfigFromEnvironment(
     return { kind: 'unconfigured', reason: `The supervisor provider profile ${JSON.stringify(profileName)} does not exist on this Hub machine. ${SUPERVISOR_SETUP_HINT}` }
   }
   try {
-    const client = createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url })
+    const client = createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url }, profileSessionOptions(profile))
     return { kind: 'configured', model: createLlmModelPort(client, model) }
   } catch (error) {
     return { kind: 'unconfigured', reason: `The supervisor model could not be created: ${error instanceof Error ? error.message : String(error)}` }

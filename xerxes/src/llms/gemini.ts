@@ -37,6 +37,8 @@ export interface GeminiClientOptions {
   readonly apiKey?: string
   /** Native Generative Language API root, normally ending in `/v1beta`. */
   readonly baseUrl?: string
+  /** Explicit environment injection for hosts/tests; never used when apiKey is supplied, even empty. */
+  readonly environment?: Readonly<Record<string, string | undefined>>
   readonly fetchImplementation?: FetchImplementation
   /** Static generation settings, overridden by per-turn neutral request values. */
   readonly generationConfig?: GeminiGenerationConfig
@@ -205,9 +207,10 @@ export class GeminiClient implements LlmClient {
   private readonly safetySettings: readonly GeminiSafetySetting[]
 
   constructor(options: GeminiClientOptions = {}) {
-    const configuredKey = options.apiKey ?? getApiKey('gemini')
-    this.apiKey = configuredKey || process.env.GOOGLE_API_KEY || ''
-    this.baseUrl = validBaseUrl(options.baseUrl ?? DEFAULT_GEMINI_BASE_URL)
+    this.baseUrl = validBaseUrl(nativeGeminiBaseUrl(options.baseUrl ?? DEFAULT_GEMINI_BASE_URL))
+    // An explicit empty key is a missing account credential, not permission to
+    // bill an ambient account. Ambient vendor keys never accompany a proxy URL.
+    this.apiKey = options.apiKey ?? getApiKey('gemini', {}, options.environment ?? process.env, this.baseUrl)
     this.fetchImplementation = options.fetchImplementation ?? fetch
     this.generationConfig = copyGenerationConfig(options.generationConfig ?? {})
     this.safetySettings = copySafetySettings(options.safetySettings ?? [])
@@ -218,6 +221,7 @@ export class GeminiClient implements LlmClient {
   }
 
   async complete(request: CompletionRequest, signal?: AbortSignal): Promise<LlmCompletion> {
+    signal?.throwIfAborted()
     const converted = messagesToGemini(request.messages)
     if (!converted.contents.length) {
       throw new ConfigurationError('messages', 'Gemini requires at least one user, assistant, or tool message')
@@ -233,11 +237,13 @@ export class GeminiClient implements LlmClient {
           'x-goog-api-key': this.apiKey,
         },
         body: JSON.stringify(geminiRequestPayload(request, converted, this.generationConfig, this.safetySettings)),
+        redirect: 'error',
         ...(signal === undefined ? {} : { signal }),
       })
     } catch (error) {
       // Cancellation must surface unchanged so callers classify it as a user
       // interrupt instead of a provider failure.
+      signal?.throwIfAborted()
       if (isAbortError(error)) {
         throw error
       }
@@ -253,15 +259,15 @@ export class GeminiClient implements LlmClient {
     }
 
     const completion = parseGeminiEvent(await response.text())
+    signal?.throwIfAborted()
     throwGeminiApiError(completion)
+    throwGeminiPromptBlock(completion)
     const candidate = geminiCandidates(completion.candidates)[0]
     const usage = geminiUsage(completion.usageMetadata)
     if (candidate === undefined) {
-      const promptBlock = promptBlockReason(completion.promptFeedback)
       return {
         content: '',
         toolCalls: [],
-        ...(promptBlock === undefined ? {} : { finishReason: normalizeFinishReason(promptBlock) }),
         ...(usage === undefined ? {} : { usage }),
       }
     }
@@ -278,6 +284,7 @@ export class GeminiClient implements LlmClient {
   }
 
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+    signal?.throwIfAborted()
     const converted = messagesToGemini(request.messages)
     if (!converted.contents.length) {
       throw new ConfigurationError('messages', 'Gemini requires at least one user, assistant, or tool message')
@@ -295,9 +302,11 @@ export class GeminiClient implements LlmClient {
           'x-goog-api-key': this.apiKey,
         },
         body: JSON.stringify(payload),
+        redirect: 'error',
         ...(signal === undefined ? {} : { signal }),
       })
     } catch (error) {
+      signal?.throwIfAborted()
       if (isAbortError(error)) {
         throw error
       }
@@ -319,7 +328,8 @@ export class GeminiClient implements LlmClient {
     const callIdOccurrences = new Map<string, number>()
     let emittedToolCalls = false
     let receivedTerminalEvent = false
-    for await (const data of internalSseData(response.body)) {
+    for await (const data of internalSseData(response.body, signal)) {
+      signal?.throwIfAborted()
       if (data === '[DONE]') {
         receivedTerminalEvent = true
         break
@@ -336,6 +346,7 @@ export class GeminiClient implements LlmClient {
         if (usage) yield { usage }
         continue
       }
+      throwGeminiPromptBlock(chunk)
       const candidates = geminiCandidates(chunk.candidates)
       const candidate = candidates[0]
       const delta: {
@@ -369,12 +380,6 @@ export class GeminiClient implements LlmClient {
             delta.toolCalls = [...pendingToolCalls.values()]
             emittedToolCalls = true
           }
-        }
-      } else {
-        const promptBlock = promptBlockReason(chunk.promptFeedback)
-        if (promptBlock) {
-          receivedTerminalEvent = true
-          delta.finishReason = normalizeFinishReason(promptBlock)
         }
       }
       if (usage) {
@@ -605,6 +610,19 @@ function geminiCompletionEndpoint(baseUrl: string, model: string): URL {
     throw new ConfigurationError('model', 'Gemini model must not be empty')
   }
   return new URL(`models/${encodeURIComponent(name)}:generateContent`, withTrailingSlash(baseUrl))
+}
+
+/** Normalize saved official OpenAI-compatibility roots; custom proxy paths are caller-owned. */
+export function nativeGeminiBaseUrl(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return value
+  }
+  if (url.hostname !== 'generativelanguage.googleapis.com') return value
+  url.pathname = url.pathname.replace(/\/openai(\/models)?\/?$/, '$1')
+  return url.toString()
 }
 
 function validBaseUrl(value: string): string {
@@ -850,6 +868,11 @@ function tokenCount(value: Record<string, unknown>, key: string): number | undef
   return raw
 }
 
+function throwGeminiPromptBlock(chunk: Record<string, unknown>): void {
+  const block = promptBlockReason(chunk.promptFeedback)
+  if (block) throw new ProviderError('gemini', `provider blocked prompt with: ${block}`)
+}
+
 function promptBlockReason(value: unknown): string | undefined {
   if (value === undefined) {
     return undefined
@@ -871,23 +894,9 @@ function normalizeFinishReason(value: string): string {
   const normalized = value.toLowerCase()
   if (normalized === 'max_tokens') return 'length'
   if (normalized === 'stop') return 'stop'
-  if (new Set([
-    'finish_reason_unspecified',
-    'safety',
-    'recitation',
-    'blocklist',
-    'prohibited_content',
-    'spii',
-    'language',
-    'malformed_function_call',
-    'other',
-    'image_safety',
-    'image_prohibited_content',
-    'image_recitation',
-  ]).has(normalized)) {
-    throw new ProviderError('gemini', `provider stopped with: ${value}`)
-  }
-  return normalized
+  // Only normal stops and output limits are successful terminal reasons.
+  // New safety/tool-failure enums must fail closed, not release buffered calls.
+  throw new ProviderError('gemini', `provider stopped with: ${value}`)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

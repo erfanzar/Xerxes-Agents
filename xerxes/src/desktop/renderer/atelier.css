@@ -3115,7 +3115,12 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .provcard__tool:hover:not(:disabled){background:var(--x-chip,var(--mac-control));color:var(--x-title)}
 .atelier .provcard__tool--danger:hover:not(:disabled){color:var(--x-danger,var(--x-failed-text))}
 .atelier .provider-accounts{display:flex;flex-direction:column;gap:10px;margin:12px 0 18px}
-.atelier .provider-accounts__login{display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center}
+.atelier .provider-accounts__login{display:grid;grid-template-columns:160px minmax(0,1fr) auto;gap:8px;align-items:center}
+.atelier .provider-accounts__gemini{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;align-items:center}
+.atelier .provider-accounts__gemini>p{grid-column:1/-1;margin:0;color:var(--x-secondary);font:var(--t-caption);line-height:1.5}
+.atelier .provider-accounts__gemini .palette__in{box-sizing:border-box;min-width:0;width:100%}
+.atelier .provider-account__recorded{display:flex;flex-direction:column;gap:3px}
+@media(max-width:700px){.atelier .provider-accounts__gemini{grid-template-columns:1fr}}
 .atelier .provider-accounts__signin{display:flex;flex-direction:column;gap:6px;padding:12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--mac-control)}
 .atelier .provider-accounts__signin>strong{color:var(--x-title);font:var(--t-body);font-weight:600}
 .atelier .provider-accounts__signin>p{margin:0;color:var(--x-secondary);font:var(--t-caption);line-height:1.5}

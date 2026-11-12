@@ -36,6 +36,24 @@ test('setup command writes a validated provider configuration file', async () =>
   }
 })
 
+test('setup selects Gemini and discovers its models using the native API root', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-gemini-'))
+  try {
+    const target = join(directory, 'setup.yaml')
+    expect(await runSetupCommand({
+      targetPath: target,
+      answers: { provider: 'gemini', api_key: 'fake-key' },
+      discoverModels: async input => {
+        expect(input).toEqual({ provider: 'gemini', apiKey: 'fake-key', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' })
+        return ['gemini-2.5-flash']
+      },
+    })).toBe(0)
+    expect(await Bun.file(target).text()).toContain('provider: "gemini"\nmodel: "gemini-2.5-flash"')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('setup command rejects an unknown provider', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-setup-bad-'))
   try {

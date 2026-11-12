@@ -74,6 +74,20 @@ test('the registry contains no invented context or output-capacity defaults', ()
   expect(providerDefaultHeaders('kimi-code')).toMatchObject({ 'User-Agent': 'claude-code/1.0.0' })
 })
 
+test('GOOGLE_API_KEY also selects Gemini when several providers list the same bare id', () => {
+  seedModelsDev({
+    google: { id: 'google', models: { 'shared-gemini': { id: 'shared-gemini' } } },
+    openrouter: { id: 'openrouter', models: { 'shared-gemini': { id: 'shared-gemini' } } },
+  })
+  try {
+    expect(detectProvider('shared-gemini', { GOOGLE_API_KEY: 'fake-google' })).toBe('gemini')
+    expect(detectProvider('shared-gemini', { GEMINI_API_KEY: 'fake-gemini' })).toBe('gemini')
+    expect(detectProvider('shared-gemini', { GOOGLE_API_KEY: 'fake-google', OPENROUTER_API_KEY: 'fake-router' })).toBe('openai')
+  } finally {
+    seedModelsDev()
+  }
+})
+
 test('a bare id several providers list goes to the one this environment holds a key for', () => {
   seedModelsDev({
     anthropic: { id: 'anthropic', models: { 'shared-model': { id: 'shared-model' } } },

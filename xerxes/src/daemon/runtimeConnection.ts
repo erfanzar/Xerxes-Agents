@@ -18,6 +18,8 @@ export interface RuntimeConnection {
   readonly provider?: string
   /** Isolated OAuth account backing this profile. */
   readonly oauthAccountId?: string
+  /** Dedicated API-key authentication must not fall back to ambient credentials. */
+  readonly isolatedAuth?: boolean
   /**
    * Session default effort hint for per-turn thinking resolution. This and
    * the two thinking fields below were historically dropped from this
@@ -103,6 +105,7 @@ export function runtimeConnection(
     ...(apiKey ? { apiKey } : {}),
     ...(provider ? { provider } : {}),
     ...(useProfile?.oauth_account_id ? { oauthAccountId: useProfile.oauth_account_id } : {}),
+    ...(useProfile?.isolated_auth ? { isolatedAuth: true } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(responsesApi === undefined ? {} : { responsesApi }),
     ...(serviceTier ? { serviceTier } : {}),

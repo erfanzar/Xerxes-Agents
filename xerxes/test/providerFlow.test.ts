@@ -100,6 +100,34 @@ test('provider flow uses an injected model port and never places credentials in 
   }
 })
 
+test('provider picker offers Gemini API-key setup and saves the selected native model', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-gemini-provider-flow-'))
+  const store = new ProfileStore(join(directory, 'profiles.json'))
+  const flow = new ProviderProfileFlow({
+    profileStore: store,
+    modelDiscovery: { discover: async input => {
+      expect(input).toEqual({ apiKey: 'fake-gemini-key', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', provider: 'gemini' })
+      return ['gemini-2.5-flash', 'gemini-2.5-pro']
+    } },
+  })
+  try {
+    let transition = await respond(flow, await flow.start(), PROVIDER_FLOW_ADD_LABEL)
+    transition = await respond(flow, transition, 'google-key')
+    expect(requirePrompt(transition).question.options).toContain('gemini')
+    transition = await respond(flow, transition, 'gemini')
+    transition = await respond(flow, transition, '')
+    expect(requirePrompt(transition).question.questionId).toBe('api_key')
+    transition = await respond(flow, transition, 'fake-gemini-key')
+    expect(requirePrompt(transition).question.options).toContain('gemini-2.5-pro')
+    transition = await respond(flow, transition, 'gemini-2.5-pro')
+    expect(transition).toMatchObject({ finished: true, reload: true })
+    expect(JSON.stringify(transition)).not.toContain('fake-gemini-key')
+    expect(store.active()).toMatchObject({ provider: 'gemini', model: 'gemini-2.5-pro' })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('provider flow redacts a model-discovery failure that includes the submitted credential', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-provider-flow-redact-'))
   const store = new ProfileStore(join(directory, 'profiles.json'))

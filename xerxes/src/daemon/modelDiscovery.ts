@@ -7,9 +7,11 @@ import { isIP } from "node:net";
 
 import type { ProviderProfile } from "../bridge/profiles.js";
 import type { FetchImplementation } from "../llms/client.js";
+import { nativeGeminiBaseUrl } from "../llms/gemini.js";
 import {
   PROVIDERS,
   getProviderConfig,
+  getApiKey,
   isProviderName,
   providerDefaultHeaders,
   type ProviderName,
@@ -59,6 +61,7 @@ export function profileDiscoveryApiKey(
   profile: ProviderProfile,
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
+  if (profile.isolated_auth && !profile.api_key.trim()) throw new Error('The selected account has no dedicated API key')
   return discoveryApiKey(
     profile.provider,
     profile.api_key,
@@ -86,6 +89,8 @@ export function discoveryApiKey(
   if (baseUrl !== undefined && !providerOwnsEndpoint(config.baseUrl, baseUrl)) {
     return "";
   }
+  // Share Gemini's key precedence and destination guard with its transport.
+  if (name === "gemini") return getApiKey(name, {}, environment, baseUrl).trim();
   const fromEnvironment = config.apiKeyEnv
     ? environment[config.apiKeyEnv]?.trim()
     : "";
@@ -154,42 +159,49 @@ export async function discoverModelCatalog(
     if (input.signal?.aborted) {
       controller.abort(input.signal.reason);
     }
-    if (input.allowPrivateEndpoint !== true) {
-      const resolveHostname =
-        options.resolveHostname ??
-        (fetchImplementation === platformFetch
-          ? resolveModelDiscoveryHostname
-          : undefined);
+    const resolveHostname = input.allowPrivateEndpoint === true ? undefined
+      : options.resolveHostname ?? (fetchImplementation === platformFetch ? resolveModelDiscoveryHostname : undefined);
+    // Residual DNS-rebinding risk: Bun resolves again inside fetch, with no
+    // address-pinning port. Validate before every page and refuse redirects;
+    // only opaque page tokens, never provider-supplied next URLs, are followed.
+    const models = new Map<string, DiscoveredModel>();
+    const seenPageTokens = new Set<string>();
+    const url = new URL(endpoint);
+    let remainingBytes = maxResponseBytes;
+    for (let page = 0; ; page++) {
+      controller.signal.throwIfAborted();
       if (resolveHostname) {
-        await abortable(
-          validateResolvedModelDiscoveryHost(input.baseUrl, resolveHostname),
-          controller.signal,
-        );
+        await abortable(validateResolvedModelDiscoveryHost(input.baseUrl, resolveHostname), controller.signal);
       }
+      const response = await abortable(fetchImplementation(url.toString(), {
+        headers: modelDiscoveryHeaders(provider, apiKey),
+        redirect: "error",
+        signal: controller.signal,
+      }), controller.signal);
+      if (!response.ok) {
+        throw new Error(`model endpoint returned HTTP ${response.status}`);
+      }
+      const body = await boundedResponseText(response, remainingBytes, controller.signal);
+      remainingBytes -= new TextEncoder().encode(body).byteLength;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        throw new Error("model endpoint returned invalid JSON");
+      }
+      for (const model of modelCatalogFromResponse(parsed, provider)) {
+        models.set(model.id, { ...models.get(model.id), ...model });
+      }
+      const nextPageToken = provider === "gemini" && isRecord(parsed) ? parsed.nextPageToken : undefined;
+      if (nextPageToken === undefined || nextPageToken === "") return [...models.values()];
+      if (typeof nextPageToken !== "string" || nextPageToken.length > 2048 || seenPageTokens.has(nextPageToken) || page >= 19) {
+        throw new Error("model endpoint returned invalid or excessive pagination");
+      }
+      if (remainingBytes <= 0) throw new Error(`model endpoint response exceeded ${maxResponseBytes} bytes`);
+      seenPageTokens.add(nextPageToken);
+      // A page token is data, never a next URL: it cannot change the credential destination.
+      url.searchParams.set("pageToken", nextPageToken);
     }
-    // Residual DNS-rebinding risk: Bun's fetch performs its own fresh
-    // resolution for this request and exposes neither a dispatcher to pin
-    // the validated address nor the response's remote address to re-verify
-    // it. The exposure window is therefore bounded to this single
-    // non-redirecting request: redirects are refused (`redirect: "error"`),
-    // so the profile credential can only be sent to the directly resolved
-    // endpoint, never forwarded to an attacker-chosen location.
-    const response = await fetchImplementation(endpoint, {
-      headers: modelDiscoveryHeaders(provider, apiKey),
-      redirect: "error",
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`model endpoint returned HTTP ${response.status}`);
-    }
-    const body = await boundedResponseText(response, maxResponseBytes);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      throw new Error("model endpoint returned invalid JSON");
-    }
-    return modelCatalogFromResponse(parsed);
   } catch (error) {
     throw new Error(
       sanitizeModelDiscoveryError(error, { apiKey, baseUrl: input.baseUrl }),
@@ -244,10 +256,10 @@ export function modelDiscoveryEndpoint(
   baseUrl: string,
   provider: string,
 ): string {
-  const url = new URL(baseUrl);
+  const name = canonicalProvider(provider);
+  const url = new URL(name === "gemini" ? nativeGeminiBaseUrl(baseUrl) : baseUrl);
   const path = url.pathname.replace(/\/+$/u, "");
   if (!path.toLowerCase().endsWith("/models")) {
-    const name = canonicalProvider(provider);
     // Anthropic-protocol hosts (anthropic, minimax-cn, vercel-ai-gateway) and
     // Mistral version their API root; their base URLs stop before it.
     const needsVersionedRoot =
@@ -268,7 +280,7 @@ export function modelsFromResponse(value: unknown): string[] {
 }
 
 /** Normalize model-list payloads while preserving trustworthy positive context lengths. */
-export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
+export function modelCatalogFromResponse(value: unknown, provider = ""): DiscoveredModel[] {
   if (!isRecord(value)) {
     return [];
   }
@@ -278,13 +290,17 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
       ? value.models
       : [];
   const models = new Map<string, DiscoveredModel>();
+  const gemini = canonicalProvider(provider) === "gemini";
   for (const candidate of candidates) {
-    const id =
+    if (gemini && isRecord(candidate) && Array.isArray(candidate.supportedGenerationMethods)
+      && !candidate.supportedGenerationMethods.includes("generateContent")) continue;
+    const reportedId =
       typeof candidate === "string"
         ? candidate.trim()
         : isRecord(candidate)
           ? firstString(candidate.id, candidate.name, candidate.model)
           : "";
+    const id = gemini ? reportedId.replace(/^models\//u, "") : reportedId;
     if (!id) {
       continue;
     }
@@ -295,6 +311,7 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
           candidate.context_window,
           candidate.max_context_length,
           candidate.max_model_len,
+          gemini ? candidate.inputTokenLimit : undefined,
         )
       : undefined;
     const maxOutputTokens = isRecord(candidate)
@@ -302,6 +319,7 @@ export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
           candidate.max_output_tokens,
           candidate.maxOutputTokens,
           candidate.max_tokens,
+          gemini ? candidate.outputTokenLimit : undefined,
         )
       : undefined;
     const existing = models.get(id);
@@ -415,6 +433,10 @@ function modelDiscoveryHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const name = canonicalProvider(provider);
+  if (name === "gemini") {
+    if (apiKey) headers["x-goog-api-key"] = apiKey;
+    return headers;
+  }
   // Anthropic-protocol hosts authenticate with x-api-key + a version header.
   if (isProviderName(name) && getProviderConfig(name).transport === "anthropic") {
     headers["anthropic-version"] = "2023-06-01";
@@ -435,6 +457,7 @@ function modelDiscoveryHeaders(
 async function boundedResponseText(
   response: Response,
   maxBytes: number,
+  signal: AbortSignal,
 ): Promise<string> {
   const contentLength = Number.parseInt(
     response.headers.get("content-length") ?? "",
@@ -452,7 +475,7 @@ async function boundedResponseText(
   let text = "";
   try {
     while (true) {
-      const chunk = await reader.read();
+      const chunk = await abortable(reader.read(), signal);
       if (chunk.done) {
         break;
       }
@@ -465,6 +488,11 @@ async function boundedResponseText(
     }
     return text + decoder.decode();
   } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // Cancellation cleanup must not hide the discovery failure.
+    }
     reader.releaseLock();
   }
 }

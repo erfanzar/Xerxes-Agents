@@ -6,13 +6,19 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'bun:test'
 
 import { createBridge } from '../src/desktop/bridgeApi.js'
-import { ProviderAccountsCenter, ProviderLoginLink, formatAccountUsageWindow } from '../src/desktop/renderer/ProviderAccountsCenter.js'
+import { AccountRecordedUsage, ProviderAccountsCenter, ProviderLoginLink, formatAccountUsageWindow } from '../src/desktop/renderer/ProviderAccountsCenter.js'
 import { providerAccountUsageWire } from '../src/desktop/main/globalProviderAccounts.js'
 import { ActionDialog } from '../src/desktop/renderer/ActionDialog.js'
 
 test('the global provider account center is available on Mac and SSH', () => {
   const html = renderToStaticMarkup(createElement(ProviderAccountsCenter, { accounts: async () => ({ accounts: [] }), sessionKey: 's1', turnActive: false, changed: () => {} }))
   for (const text of ['Provider accounts', 'One account center for this Mac and every SSH workspace', 'Claude', 'Codex', 'Sign in']) expect(html).toContain(text)
+})
+
+test('recorded account usage identifies profile-name aggregation, not credential identity', () => {
+  const html = renderToStaticMarkup(createElement(AccountRecordedUsage, { report: { status: 'available', profile: 'gemini-Work', calls: 1, input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0 } }))
+  expect(html).toContain('for profile gemini-Work')
+  expect(html).toContain('by profile name, not credential')
 })
 
 test('the sign-in URL stays visible and copyable while OAuth is unfinished', () => {

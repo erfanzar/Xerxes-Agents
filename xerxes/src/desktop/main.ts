@@ -839,6 +839,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (typeof action !== 'string') throw new TypeError('account action is required')
     const accounts = accountCenter()
     if (action === 'list') return accounts.list()
+    if (action === 'create-gemini') {
+      if (typeof params.label !== 'string' || typeof params.apiKey !== 'string' || typeof params.model !== 'string') throw new Error('Gemini account label, API key and model id are required')
+      return accounts.createGemini(params.label, params.apiKey, params.model)
+    }
     if (action === 'login') {
       const kind = params.kind
       if (kind !== 'claude' && kind !== 'codex') throw new Error('Choose Claude or Codex')

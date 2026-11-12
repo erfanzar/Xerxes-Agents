@@ -2586,6 +2586,15 @@ file is never overwritten.
 | `hub.list`    | `{}`                                                                    | `{ ok, hubs }`            | Pinned keys and fingerprints (compare with the Hub's pairing QR). Each row adds `all_projects: true` when `/` is pinned. |
 | `hub.revoke`  | `{ hub_id }`                                                            | `{ ok, revoked }`         | Removes a pin. |
 
+**Provider-account isolation (`provider_account_isolation_v1`).** `runtime.status`
+and `initialize` advertise `provider_account_isolation_v1_supported: true`. Named
+OAuth accounts use their own credential stores, and profiles marked
+`isolated_auth: true` never borrow an ambient API key. Desktop account transfer
+and activation on SSH require this capability, plus a confirmed transfer of the
+exact credential in the current account-center session. A same-named profile is
+not proof of account identity. Older runtimes must be updated explicitly; the
+account center does not update or restart them automatically.
+
 **Supervisor model access (`hub_models_v1`).** `runtime.status` and `initialize`
 advertise `hub_models_v1_supported: true`. Three session-less methods let the Hub's
 XERXES supervisor use this machine's provider profiles without ever holding a
