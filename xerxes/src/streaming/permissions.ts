@@ -10,14 +10,8 @@ export type PermissionMode = 'accept-all' | 'auto' | 'manual' | 'plan'
 export type PolicyAction = 'allow' | 'deny'
 export type PermissionDisposition = 'allow' | 'deny' | 'prompt'
 
-/**
- * The mode when nothing chooses one: `auto` runs reads and read-only commands
- * without asking and asks before anything else. With a run's safety floor
- * (`runtime/runSafety.ts`) it also writes new files in the output folder and
- * runs sandboxed commands without asking. `accept-all` stays available as an
- * explicit setting.
- */
-export const DEFAULT_PERMISSION_MODE: PermissionMode = 'auto'
+/** The shared fallback when no permission mode is explicitly configured. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = 'accept-all'
 
 /**
  * Tools that always require an explicit user approval, in every permission

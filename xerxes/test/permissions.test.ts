@@ -80,16 +80,15 @@ test('creator catalog mutations always require approval while pure forged runs d
   expect(permissionDisposition(define, 'accept-all', undefined, undefined, { bypassAlwaysApprove: true })).toBe('prompt')
 })
 
-test('omitting a permission mode means auto: reads run, writes ask, policy denials still win', () => {
+test('omitting a permission mode means accept-all while explicit auto and policy denials still apply', () => {
   const write = call('WriteFile', { file_path: 'a.txt' })
   const read = call('ReadFile', { file_path: 'a.txt' })
 
   expect(checkPermission(read)).toBe(true)
-  expect(checkPermission(write)).toBe(false)
-  expect(permissionDisposition(write)).toBe('prompt')
+  expect(checkPermission(write)).toBe(true)
+  expect(permissionDisposition(write)).toBe('allow')
   expect(permissionDisposition(write, undefined, { check: () => 'deny' })).toBe('deny')
-  // accept-all is still there for anyone who sets it.
-  expect(permissionDisposition(write, 'accept-all')).toBe('allow')
+  expect(permissionDisposition(write, 'auto')).toBe('prompt')
 })
 
 test('direct argv permission checks inspect every argument without weakening shell parsing', () => {

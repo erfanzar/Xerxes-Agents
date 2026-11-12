@@ -3,6 +3,7 @@
 
 import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { DEFAULT_PERMISSION_MODE } from '../streaming/permissions.js'
 
 export type SetupValidator = (value: unknown) => boolean
 
@@ -42,7 +43,7 @@ export const DEFAULT_SETUP_STEPS: readonly SetupStep[] = Object.freeze([
   {
     key: 'permission_mode',
     prompt: 'Permission mode [auto/accept-all/manual]',
-    default: 'auto',
+    default: DEFAULT_PERMISSION_MODE,
   },
   {
     key: 'enable_voice',

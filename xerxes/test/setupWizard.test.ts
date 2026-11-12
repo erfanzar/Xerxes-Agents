@@ -19,7 +19,7 @@ test('setup wizard applies defaults, preserves supplied answers, and records ski
   // to fill from the provider's own list.
   expect(result.answers).toMatchObject({
     provider: 'openai',
-    permission_mode: 'auto',
+    permission_mode: 'accept-all',
   })
   expect(result.answers).not.toHaveProperty('model')
   expect(result.skipped).toEqual(['model', 'api_key'])

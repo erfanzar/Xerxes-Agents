@@ -236,7 +236,7 @@ test('runtime connection restores every persisted profile sampling value', async
   }
 })
 
-test('runtime connection defaults to auto while preserving an explicit mode', () => {
+test('runtime connection defaults to accept-all while preserving an explicit mode', () => {
   const base = {
     runtime: { model: 'gpt-4o' },
     control: {},
@@ -246,7 +246,7 @@ test('runtime connection defaults to auto while preserving an explicit mode', ()
     maxConcurrentTurns: 8,
   }
 
-  expect(runtimeConnection(base, undefined)?.permissionMode).toBe('auto')
+  expect(runtimeConnection(base, undefined)?.permissionMode).toBe('accept-all')
   expect(runtimeConnection(base, undefined)).toMatchObject({ temperature: 0.6, topK: 64 })
   expect(runtimeConnection({ ...base, runtime: { model: 'gpt-4o', permission_mode: 'manual' } }, undefined)?.permissionMode)
     .toBe('manual')

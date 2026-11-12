@@ -79,7 +79,7 @@ test('query engine applies an injected context compressor at its configured turn
   await engine.submit('first context')
   await engine.submit('second context')
 
-  expect(engine.config.permissionMode).toBe('auto')
+  expect(engine.config.permissionMode).toBe('accept-all')
   expect(engine.state.messages).toHaveLength(3)
   expect(engine.state.messages[1]).toMatchObject({ role: 'user', content: expect.stringContaining('CONTEXT COMPACTION') })
   expect(engine.state.metadata.lastCompaction).toMatchObject({ strategy: 'first-pass', compressed_count: 2 })

@@ -4090,10 +4090,10 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     await client.next((frame) => frame.id === 1);
     expect((await client.next(eventFrame("init_done"))).params?.payload).toMatchObject({
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
 
     client.send({
@@ -4104,14 +4104,14 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect((await client.next((frame) => frame.id === 2)).result).toEqual({
       ok: true,
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "accept-all",
+      permission_mode: "auto",
     });
     expect(
       (await client.next(eventFrame("notification"))).params?.payload?.body,
-    ).toBe("YOLO mode ON.");
+    ).toBe("YOLO mode OFF.");
 
     client.send({
       jsonrpc: "2.0",
@@ -4125,7 +4125,7 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     // trust levels. The session's own mode is reported on status_update above.
     expect(
       (await client.next((frame) => frame.id === 3)).result?.permission_mode,
-    ).toBe("auto");
+    ).toBe("accept-all");
 
     client.send({
       jsonrpc: "2.0",
@@ -4135,14 +4135,14 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect((await client.next((frame) => frame.id === 4)).result).toEqual({
       ok: true,
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
     expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
-      permission_mode: "auto",
+      permission_mode: "accept-all",
     });
     expect(
       (await client.next(eventFrame("notification"))).params?.payload?.body,
-    ).toBe("YOLO mode OFF.");
+    ).toBe("YOLO mode ON.");
 
     client.send({
       jsonrpc: "2.0",
@@ -4152,7 +4152,7 @@ test("daemon yolo toggles the live permission mode in both directions", async ()
     });
     expect(
       (await client.next((frame) => frame.id === 5)).result?.permission_mode,
-    ).toBe("auto");
+    ).toBe("accept-all");
   } finally {
     client.close();
     await server.stop();
