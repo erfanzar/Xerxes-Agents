@@ -12,6 +12,43 @@ import { ProfileStore } from '../src/bridge/profiles.js'
 import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
 import { GlobalProviderAccounts } from '../src/desktop/main/globalProviderAccounts.js'
 
+test('a duplicate account row for one profile never hides the account the profile belongs to', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-duplicate-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile)
+    const real = await registry.create('claude', 'Personal')
+    // A second row claiming the same linked profile — the shape left behind by
+    // two registrations that each saw a free profile name.
+    const stale = { id: '00000000-0000-4000-8000-000000000000', kind: 'claude' as const, label: 'Personal', profileName: real.profileName, createdAt: new Date(0).toISOString() }
+    await writeFile(join(root, 'accounts.json'), JSON.stringify({ accounts: [stale, real] }, null, 2) + '\n')
+
+    const listed = await registry.list()
+    expect(listed.filter(account => account.profileName === real.profileName).map(account => account.id)).toEqual([real.id])
+    // The survivor is the one the profile actually points at, so the receiver's
+    // account-id check can pass.
+    await mkdir(join(root, real.id, 'auth'), { recursive: true })
+    await writeFile(join(root, real.id, 'auth', 'anthropic-oauth.json'), JSON.stringify({ access: 'fixture-access', refresh: 'fixture-refresh', expires: 4102444800 }))
+    expect((await registry.syncPayload(real.id)).kind).toBe('claude')
+    await expect(registry.syncPayload(stale.id)).rejects.toThrow('Provider account not found')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('registering an account cannot leave two rows for the same linked profile', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-unique-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile)
+    const first = await registry.create('claude', 'Personal')
+    // Re-create the profile the first account owns under another id, as a
+    // racing registration would.
+    new ProfileStore(profilesFile).save({ name: first.profileName, apiKey: '', model: 'x', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', setActive: false, oauthAccountId: '00000000-0000-4000-8000-000000000000' })
+    const document = JSON.parse(await readFile(join(root, 'accounts.json'), 'utf8')) as { accounts: Array<{ profileName: string }> }
+    const names = document.accounts.filter(row => row.profileName === first.profileName)
+    expect(names).toHaveLength(1)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
 test('multiple OAuth accounts have isolated directories and switchable profiles', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-registry-'))
   try {

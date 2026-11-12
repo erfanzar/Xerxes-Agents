@@ -86,13 +86,35 @@ export class ProviderAccountRegistry {
   }
 
   private async metadata(id: string): Promise<ProviderAccountMetadata> {
-    const account = (await this.document()).accounts.find(row => row.id === id)
+    const account = (await this.accounts()).find(row => row.id === id)
     if (!account) throw new Error('Provider account not found')
     return account
   }
 
+  /**
+   * Rows after one profile has a single owner. Two registrations can leave two
+   * rows claiming one linked profile; only the row the profile actually points
+   * at can ever sync (the receiver refuses an id mismatch), so the others are
+   * stale and must not be listed or acted on as if they were independent.
+   */
+  private async accounts(): Promise<readonly ProviderAccountMetadata[]> {
+    const rows = (await this.document()).accounts
+    const owners = new Map(new ProfileStore(this.profilesFile).list().map(profile => [profile.name, profile.oauth_account_id]))
+    const byProfile = new Map<string, ProviderAccountMetadata>()
+    for (const row of rows) {
+      const current = byProfile.get(row.profileName)
+      if (!current) { byProfile.set(row.profileName, row); continue }
+      const owner = owners.get(row.profileName)
+      const winner = current.id === owner ? current
+        : row.id === owner ? row
+        : Date.parse(row.createdAt) > Date.parse(current.createdAt) ? row : current
+      byProfile.set(row.profileName, winner)
+    }
+    return [...byProfile.values()]
+  }
+
   async list(): Promise<readonly ProviderAccountSummary[]> {
-    const oauth = (await this.document()).accounts
+    const oauth = await this.accounts()
     const profiles = new ProfileStore(this.profilesFile).list()
     const result: ProviderAccountSummary[] = []
     for (const account of oauth) {
@@ -157,7 +179,7 @@ export class ProviderAccountRegistry {
     const defaults = defaultBase(registered.kind)
     profileStore.save({ name: registered.profileName, apiKey: '', model: defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: registered.id })
     try {
-      await this.saveDocument({ accounts: [...document.accounts.filter(row => row.id !== registered.id), registered] })
+      await this.saveDocument({ accounts: [...document.accounts.filter(row => row.id !== registered.id && row.profileName !== registered.profileName), registered] })
     } catch (error) {
       new ProfileStore(this.profilesFile).delete(registered.profileName)
       throw error
