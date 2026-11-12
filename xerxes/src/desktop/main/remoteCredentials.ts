@@ -130,7 +130,20 @@ export function spawnSecretWriter(target: RemoteTarget, payload: RemoteProviderS
 
 /** Parse only the nonsecret receiver receipt; never return remote stdout/errors. */
 export function remoteProfileReceipt(output: string): string {
-  const value = JSON.parse(output) as Record<string, unknown>
-  if (value.ok !== true || typeof value.profile !== 'string' || !value.profile) throw new Error('Remote credential transfer was not acknowledged')
-  return value.profile
+  // A login banner or runtime notice can precede the receiver's own line, so
+  // read the last line that is a real acknowledgement instead of assuming the
+  // whole stream is one JSON document.
+  const lines = output.split('\n')
+  for (let index = lines.length - 1; index >= 0; index--) {
+    let value: unknown
+    try {
+      value = JSON.parse(lines[index]!.trim())
+    } catch {
+      continue
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const receipt = value as Record<string, unknown>
+    if (receipt.ok === true && typeof receipt.profile === 'string' && receipt.profile) return receipt.profile
+  }
+  throw new Error('Remote credential transfer was not acknowledged')
 }

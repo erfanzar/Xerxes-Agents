@@ -229,6 +229,12 @@ for (const kind of kinds) {
         let error: unknown
         try { await center.confirmSync(review.review, true) } catch (caught) { error = caught }
         expect(String(error)).toContain('not acknowledged')
+        // The failure names the step that failed, so it can be acted on; it
+        // must still never echo the credential.
+        expect(String(error)).toContain({
+          'malformed-receipt': 'receipt', 'mismatched-receipt': 'identity',
+          'writer-error': 'transfer', 'reload-error': 'reload', 'reload-refusal': 'reload',
+        }[failure]!)
         expect(String(error)).not.toContain('fixture-secret')
         await expect(center.confirmSync(review.review, true)).rejects.toThrow('review')
         expect(writes).toBe(1)

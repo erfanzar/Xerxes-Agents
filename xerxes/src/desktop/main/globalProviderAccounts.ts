@@ -69,6 +69,18 @@ export function providerAccountUsageWire(report: unknown): Record<string, unknow
   return { status: 'available', windows, observed_at: typeof value.fetchedAt === 'number' && Number.isFinite(value.fetchedAt) ? new Date(value.fetchedAt).toISOString() : null }
 }
 
+/** A secret-free description of the step that failed, for the person retrying. */
+export type SyncStage = 'transfer' | 'receipt' | 'identity' | 'reload'
+function syncStageHint(stage: SyncStage): string {
+  return stage === 'transfer'
+    ? 'transfer: the credential transfer did not complete'
+    : stage === 'receipt'
+      ? 'receipt: the remote host replied without a valid receipt'
+      : stage === 'identity'
+        ? 'identity: the remote host acknowledged a different profile'
+        : 'reload: the remote runtime did not confirm the reload'
+}
+
 /** One global account center for local and SSH workspaces. */
 export class GlobalProviderAccounts {
   private review: SyncReview | undefined
@@ -189,17 +201,24 @@ export class GlobalProviderAccounts {
     this.review = undefined
     this.syncedAccounts.delete(review.accountId)
     await this.requireRemoteAccountIsolation()
+    // Which step failed is safe to say; the failure's own message may quote the
+    // credential, so it is never surfaced.
+    let stage: 'transfer' | 'receipt' | 'identity' | 'reload' = 'transfer'
     try {
       const payload = await this.registry.syncPayload(review.accountId)
       const identity = accountIdentity(payload)
-      const profile = remoteProfileReceipt(this.writer ? await this.writer(payload) : await spawnSecretWriter(this.remote, payload, new AbortController().signal))
+      const receipt = this.writer ? await this.writer(payload) : await spawnSecretWriter(this.remote, payload, new AbortController().signal)
+      stage = 'receipt'
+      const profile = remoteProfileReceipt(receipt)
+      stage = 'identity'
       if (profile !== payload.profile.name) throw new Error('Remote credential receiver acknowledged a different profile')
+      stage = 'reload'
       const reloaded = await this.call('runtime.reload', {})
       if (reloaded.ok === false) throw new Error('Remote profile reload failed')
       this.syncedAccounts.set(review.accountId, identity)
       return { ok: true, profile, destination: this.remote.target }
     } catch {
-      throw new Error('Provider account sync was not acknowledged; review the transfer again before retrying')
+      throw new Error(`Provider account sync was not acknowledged (${syncStageHint(stage)}); review the transfer again before retrying`)
     }
   }
 
