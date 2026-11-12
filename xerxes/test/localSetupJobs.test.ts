@@ -13,7 +13,7 @@ const llamaDoctor = {
   hardware: { platform: 'darwin', arch: 'arm64', total_mem_bytes: 24 * 2 ** 30, apple_silicon: true, gpu: { vendor: 'apple' } },
   selection: { ok: true, model: 'ternary-bonsai-2-27b' },
   llama_server: { found: true, path: '/opt/homebrew/bin/llama-server', build: 12110, version: '0.9.0', new_enough: true },
-  model: { id: 'ternary-bonsai-2-27b', label: 'Ternary Bonsai 2 27B', present: false, verified: false, source_configured: true, bytes: 7_626_008_928 },
+  model: { id: 'ternary-bonsai-2-27b', label: 'Ternary local-model 2 27B', present: false, verified: false, source_configured: true, bytes: 7_626_008_928 },
   server: { running: false, healthy: false, stale: false },
 }
 
@@ -21,7 +21,7 @@ test('doctor output becomes one status, whichever engine it reported on', () => 
   expect(localStatusFromDoctor(llamaDoctor)).toEqual({
     ready: false,
     engine: { name: 'llama-server', label: 'llama.cpp', found: true, version: '0.9.0', newEnough: true },
-    model: { id: 'ternary-bonsai-2-27b', label: 'Ternary Bonsai 2 27B', bytes: 7_626_008_928, downloaded: false },
+    model: { id: 'ternary-bonsai-2-27b', label: 'Ternary local-model 2 27B', bytes: 7_626_008_928, downloaded: false },
     server: { running: false, port: null, contextLength: null },
     memoryBytes: 24 * 2 ** 30,
     blocker: null,
@@ -97,7 +97,7 @@ test('a failed setup keeps the command\'s own error, and a failed mode change is
 
   const unapplied = harness(async (_argv, io) => { io.stdout('{"ok":true}\n'); return 0 }, async () => { throw new Error('no window') })
   unapplied.jobs.start()
-  expect(await unapplied.settled()).toMatchObject({ state: 'failed', error: { code: 'MODE_NOT_APPLIED', message: 'Bonsai is set up, but the mode was not applied: no window' } })
+  expect(await unapplied.settled()).toMatchObject({ state: 'failed', error: { code: 'MODE_NOT_APPLIED', message: 'local-model is set up, but the mode was not applied: no window' } })
 })
 
 test('cancelling stops the command through its signal', async () => {

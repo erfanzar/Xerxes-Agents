@@ -157,7 +157,7 @@ export const MODEL_CARDS: readonly ModelCard[] = Object.freeze([
   Object.freeze({
     ...BONSAI_DEFAULTS,
     id: 'ternary-bonsai-2-27b',
-    label: 'Ternary Bonsai 2 27B',
+    label: 'Ternary local-model 2 27B',
     // Served as ternary-bonsai-2-27b(-mlx), prism-ml/Ternary-Bonsai-2-27B-mlx-2bit,
     // Bonsai-2-27B-Ternary-JANG and bonsai-2-27b on Ollama.
     match: /bonsai[-_. ]?2[-_. ]?27b/i,
@@ -213,7 +213,7 @@ export const MODEL_CARDS: readonly ModelCard[] = Object.freeze([
     ...BONSAI_DEFAULTS,
     // `bonsai-9b` is the local catalog's id for it, kept so existing configs still resolve.
     id: 'bonsai-9b',
-    label: 'Bonsai 2 9B',
+    label: 'local-model 2 9B',
     match: /bonsai[-_. ]?2[-_. ]?9b|(?:^|[/:])bonsai-9b(?![0-9a-z])/i,
     sampling: BONSAI_2_SMALL_SAMPLING,
     llamaServer: Object.freeze({ fileName: 'bonsai-9b.gguf', minMemoryBytes: 12 * GIB, ctxSize: 32_768 }),
@@ -221,20 +221,20 @@ export const MODEL_CARDS: readonly ModelCard[] = Object.freeze([
   Object.freeze({
     ...BONSAI_DEFAULTS,
     id: 'bonsai-2-4b',
-    label: 'Bonsai 2 4B',
+    label: 'local-model 2 4B',
     match: /bonsai[-_. ]?2[-_. ]?4b/i,
     sampling: BONSAI_2_SMALL_SAMPLING,
   }),
   Object.freeze({
     ...BONSAI_DEFAULTS,
     id: 'bonsai-2-2b',
-    label: 'Bonsai 2 2B',
+    label: 'local-model 2 2B',
     match: /bonsai[-_. ]?2[-_. ]?2b/i,
     sampling: BONSAI_2_SMALL_SAMPLING,
   }),
   // Any other Bonsai id (bonsai-8b, a fine-tune, a future size): the lean prompt
   // and the cascade, but no sampling, which Prism publishes per model.
-  Object.freeze({ ...BONSAI_DEFAULTS, id: 'bonsai', label: 'Bonsai (no published card)', match: /bonsai/i }),
+  Object.freeze({ ...BONSAI_DEFAULTS, id: 'bonsai', label: 'local-model (no published card)', match: /bonsai/i }),
 ])
 
 /** Every other model: no card values, so Xerxes's general defaults apply. */

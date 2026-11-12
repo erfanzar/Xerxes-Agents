@@ -5,18 +5,18 @@
  * Private, Hybrid and Cloud: the product's three ways to run a task, read from
  * and written to the settings that already govern them.
  *
- *   private  Bonsai (a local profile) does the work and `runtime.local_only`
+ *   private  local-model (a local profile) does the work and `runtime.local_only`
  *            is on: nothing but this machine is reachable during a run
  *   hybrid   a cloud model leads: it plans, splits the work and checks it,
  *            while the data boundary keeps every workspace file away from it
- *            (`data_boundary: hybrid`, every path private) and Bonsai agents
+ *            (`data_boundary: hybrid`, every path private) and local-model agents
  *            do the file work on this machine, their replies reaching the
  *            lead as capped summaries
  *   cloud    a cloud model does the work
  *
  * The main agent is the active provider profile. Each mode also places
- * subagents (the Agent intelligence tiers): all on Bonsai in Private; light and
- * balanced on Bonsai with thinking off and smart on the lead in Hybrid; all on
+ * subagents (the Agent intelligence tiers): all on local-model in Private; light and
+ * balanced on local-model with thinking off and smart on the lead in Hybrid; all on
  * the cloud model in Cloud. Fully local mode and the boundary are read when the
  * daemon starts, so changing them needs a restart; the state says when one is
  * pending.
@@ -55,7 +55,7 @@ export interface RunModeProfile {
 export interface RunModeState {
   /** Null until a main profile is chosen, or when the settings match no mode. */
   readonly mode: RunMode | null
-  /** The main agent: Bonsai in Private, the cloud lead in Hybrid, the cloud model in Cloud. */
+  /** The main agent: local-model in Private, the cloud lead in Hybrid, the cloud model in Cloud. */
   readonly worker: { readonly profile: string; readonly model: string; readonly local: boolean } | null
   readonly localOnly: boolean
   /** The saved settings differ from the ones this daemon started with. */
@@ -136,14 +136,14 @@ export function applyRunMode(saved: Runtime, mode: RunMode): Record<string, unkn
 }
 
 /**
- * Where subagents run in a mode (the Agent intelligence tiers). Bonsai answers
+ * Where subagents run in a mode (the Agent intelligence tiers). local-model answers
  * directly (thinking off) for light and balanced work, where a brief says
  * exactly what to do; smart keeps thinking. Cloud leaves every tier on the
  * main model.
  */
 export function runModeTiers(mode: RunMode, local: RunModeProfile | undefined, main: RunModeProfile | undefined): AgentIntelligenceConfig {
   if (mode === 'cloud') return {}
-  if (!local) throw new ValidationError('mode', `${mode} needs Bonsai set up on this machine`)
+  if (!local) throw new ValidationError('mode', `${mode} needs local-model set up on this machine`)
   const fast = { model: local.model, provider_profile: local.name, reasoning_effort: 'off' }
   const smart = mode === 'hybrid' && main ? { model: main.model, provider_profile: main.name } : { model: local.model, provider_profile: local.name }
   return { default: 'balanced', light: fast, balanced: fast, smart }

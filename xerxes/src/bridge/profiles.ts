@@ -96,6 +96,8 @@ export interface ProviderProfile {
   readonly data_trust?: DataTrust
   /** Prompt profile for turns on this profile; wins over runtime.prompt_profile. */
   readonly prompt_profile?: ProfilePromptProfile
+  /** Isolated OAuth account id; credentials live under provider-accounts/<id>. */
+  readonly oauth_account_id?: string
 }
 
 export type ProfilePromptProfile = 'lean' | 'full'
@@ -120,6 +122,8 @@ export interface SaveProfileInput {
   readonly dataTrust?: DataTrust
   /** Prompt profile; kept from the saved profile when omitted. */
   readonly promptProfile?: ProfilePromptProfile
+  /** Link this profile to an isolated OAuth account. */
+  readonly oauthAccountId?: string
 }
 
 /** Compatibility store for `$XERXES_HOME/profiles.json`. */
@@ -184,6 +188,7 @@ export class ProfileStore {
     // must not keep a stale `local` label.
     const dataTrust = input.dataTrust ?? (sameConnection ? existing.data_trust : undefined)
     const promptProfile = input.promptProfile ?? existing?.prompt_profile
+    const oauthAccountId = input.oauthAccountId ?? (sameConnection ? existing.oauth_account_id : undefined)
     const profile: ProviderProfile = {
       name: input.name,
       base_url: baseUrl,
@@ -195,6 +200,7 @@ export class ProfileStore {
       sampling: input.sampling ?? existing?.sampling ?? {},
       ...(dataTrust === undefined ? {} : { data_trust: dataTrust }),
       ...(promptProfile === undefined ? {} : { prompt_profile: promptProfile }),
+      ...(oauthAccountId === undefined ? {} : { oauth_account_id: oauthAccountId }),
     }
     document.profiles[input.name] = profile
     if (input.setActive ?? true) {
@@ -542,6 +548,7 @@ function providerProfile(value: unknown): ProviderProfile | undefined {
     provider: value.provider,
     sampling: value.sampling,
     ...storedDataTrust(value.data_trust),
+    ...(typeof value.oauth_account_id === 'string' && /^[a-f0-9-]{36}$/.test(value.oauth_account_id) ? { oauth_account_id: value.oauth_account_id } : {}),
     ...(typeof value.prompt_profile === 'string' && PROMPT_PROFILES.includes(value.prompt_profile as ProfilePromptProfile)
       ? { prompt_profile: value.prompt_profile as ProfilePromptProfile }
       : {}),

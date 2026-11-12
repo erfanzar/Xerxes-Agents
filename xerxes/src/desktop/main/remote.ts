@@ -11,6 +11,7 @@ import { XERXES_VERSION } from '../../core/version.js'
 import { remoteResumeProgram } from './remoteResume.js'
 import { remoteAttachAddress, remoteAttachProgram } from './remoteAttach.js'
 import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
+import { ensureRemoteProviderClis } from './remoteProviderSetup.js'
 
 export interface RemoteTarget {
   alias: string
@@ -116,12 +117,12 @@ export interface RemoteConnection {
   reconnect(signal: AbortSignal, onFailure: (error: Error) => void): Promise<RemoteConnection>
   close(): Promise<void>
 }
-const sshOptions = [
+export const sshOptions = [
   '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15',
   '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
   '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no',
 ]
-const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+export const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
 export type RemoteRunner = typeof runCaptured
 /**
  * The shell a read-only probe runs on the host. A host without Bun has no Xerxes runtime either: it answers
@@ -137,6 +138,9 @@ export function probeRemote(machine: RemoteTarget, program: string, signal: Abor
 export interface RemoteOpenPorts {
   run?: RemoteRunner
   spawnTunnel?: (args: string[]) => ChildProcess
+  /** Default true: detect and install claude/codex before opening the workspace. */
+  providerSetup?: boolean
+  onProviderSetupError?: (error: Error) => void
 }
 /** Own only the forwarding process; the remote daemon and its durable sessions survive disconnect. */
 export async function openRemote(
@@ -171,6 +175,13 @@ export async function openRemote(
       300000,
     )
     address = remoteAddress(output)
+  }
+  if (ports.providerSetup !== false) {
+    try { await ensureRemoteProviderClis(machine, signal, run) }
+    catch (error) {
+      const report = ports.onProviderSetupError ?? (failure => console.warn(`Provider CLI setup failed: ${failure.message}`))
+      report(error instanceof Error ? error : new Error(String(error)))
+    }
   }
   signal.throwIfAborted()
   const directory = await mkdtemp(join(tmpdir(), 'xd-')),

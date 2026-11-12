@@ -38,6 +38,16 @@ test('bridge command registry preserves canonical metadata, aliases, categories,
   ])
 })
 
+test('local-model is the displayed command and bonsai remains a legacy alias', () => {
+  const command = resolveCommand('/local-model')
+  expect(command).toMatchObject({ name: 'local-model', aliases: ['bonsai'], category: 'config' })
+  expect(resolveCommand('/bonsai')).toBe(command)
+  expect(listCommands().map(entry => entry.name)).toContain('local-model')
+  expect(listCommands().map(entry => entry.name)).not.toContain('bonsai')
+  expect(telegramBotCommands().map(entry => entry.command)).toContain('local_model')
+  expect(telegramBotCommands().map(entry => entry.command)).not.toContain('bonsai')
+})
+
 test('surface filters keep CLI-only definitions out of gateways and honor gateway-only definitions', () => {
   expect(resolveCommand('/queue', { surface: 'gateway' })).toBeUndefined()
   expect(resolveCommand('/queue', { surface: 'cli' })?.name).toBe('queue')

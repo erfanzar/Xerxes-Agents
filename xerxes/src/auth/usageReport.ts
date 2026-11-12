@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 
 import { profileLabel } from '../bridge/profiles.js'
 import { ConfigurationError } from '../core/errors.js'
+import { ProviderAccountRegistry } from './providerAccountRegistry.js'
 
 import {
   fetchSubscriptionUsage,
@@ -199,6 +200,7 @@ export interface BuildUsageReportOptions extends UsageRequestOptions {
   /** Swap the quota fetchers (tests). */
   readonly fetchUsage?: typeof fetchSubscriptionUsage
   readonly fetchBalance?: typeof fetchApiBalance
+  readonly accountUsage?: (id: string, options: UsageRequestOptions) => Promise<ProviderUsageReport>
   /**
    * Profiles listed whether or not the user ever signed in (the built-in
    * `claude-code` and `codex`). When they are not active and have no session, they
@@ -210,12 +212,13 @@ export interface BuildUsageReportOptions extends UsageRequestOptions {
 
 /** Build the per-profile report; never throws for one provider's failure. */
 export async function buildUsageReport(
-  profiles: ReadonlyArray<UsageProfile & { readonly active?: boolean }>,
+  profiles: ReadonlyArray<UsageProfile & { readonly active?: boolean; readonly oauth_account_id?: string }>,
   options: BuildUsageReportOptions = {},
 ): Promise<UsageProfileEntry[]> {
   const fetchUsage = options.fetchUsage ?? fetchSubscriptionUsage
   // One fetch per credential per report, even when `refresh` bypasses the cache.
   const fetchBalance = options.fetchBalance ?? fetchApiBalance
+  const accountUsage = options.accountUsage ?? ((id: string, request: UsageRequestOptions) => new ProviderAccountRegistry().subscriptionUsage(id, request))
   const pending = new Map<string, Promise<SourceReport>>()
   const entries = await Promise.all(profiles.map(async (profile): Promise<UsageProfileEntry | null> => {
     const base = { profile: profile.name, label: profileLabel(profile.name), provider: profile.provider, model: profile.model, active: profile.active === true }
@@ -223,13 +226,16 @@ export async function buildUsageReport(
     if (!source) {
       return { ...base, status: 'unsupported', windows: [], message: 'This provider does not publish usage limits or a balance Xerxes can read.' }
     }
-    // Profiles that share a login (e.g. two Codex profiles) share one fetch;
-    // profiles with their own keys (two Z.ai keys) are fetched separately.
-    const credential = profile.api_key?.trim() ? createHash('sha256').update(profile.api_key.trim()).digest('hex').slice(0, 16) : 'session'
+    // Named OAuth accounts are distinct credentials, including in-flight and
+    // cached requests. Only legacy unbound profiles share the ambient login.
+    const accountId = profile.oauth_account_id
+    const credential = accountId ? `account:${accountId}` : profile.api_key?.trim() ? createHash('sha256').update(profile.api_key.trim()).digest('hex').slice(0, 16) : 'session'
     const key = `${source}:${credential}:${profile.base_url ?? ''}`
-    const load = (): Promise<SourceReport> => API_BALANCE_SOURCES.has(source)
-      ? fetchBalance(source as ApiBalanceSource, profile, options)
-      : fetchUsage(source as SubscriptionUsageProvider, { ...options, profiles: [profile] })
+    const load = (): Promise<SourceReport> => accountId
+      ? accountUsage(accountId, options)
+      : API_BALANCE_SOURCES.has(source)
+        ? fetchBalance(source as ApiBalanceSource, profile, options)
+        : fetchUsage(source as SubscriptionUsageProvider, { ...options, profiles: [profile] })
     try {
       let request = pending.get(key)
       if (!request) {

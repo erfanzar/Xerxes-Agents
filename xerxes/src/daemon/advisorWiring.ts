@@ -4,6 +4,7 @@
 import type { ProfileStore } from '../bridge/profiles.js'
 import type { ToolRegistry } from '../executors/toolRegistry.js'
 import { createLlmClient } from '../llms/client.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 import { recordModelUsage } from '../runtime/modelUsageLedger.js'
 import { AdvisorBudget, parseAdvisorConfig } from '../runtime/advisorBudget.js'
 import type { OutboundGate, OutboundRequestSummary } from '../security/boundaryTypes.js'
@@ -44,7 +45,7 @@ export function registerConfiguredAdvisor(tools: ToolRegistry, options: AdvisorW
     provider: profile.provider,
     ...(profile.api_key ? { api_key: profile.api_key } : {}),
     ...(profile.base_url ? { base_url: profile.base_url } : {}),
-  })
+  }, profileSessionOptions(profile))
   const budgets = new Map<string, AdvisorBudget>()
   const log = options.log
   const gate: OutboundGate = {

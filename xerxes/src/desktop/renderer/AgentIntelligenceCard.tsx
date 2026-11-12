@@ -171,7 +171,7 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
         </p>
       )}
       {mode === 'hybrid' && cloudTiers.length > 0 && (
-        <p className="row__s">In Hybrid, agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} run in the cloud and cannot read your files; the others run on Bonsai on this Mac and do the file work.</p>
+        <p className="row__s">In Hybrid, agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} run in the cloud and cannot read your files; the others run on local-model on this Mac and do the file work.</p>
       )}
       <div className="tierlist">
         {INTELLIGENCE_TIERS.map(({ id, label, hint }) => {

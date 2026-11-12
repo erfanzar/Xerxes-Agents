@@ -37,7 +37,7 @@ const hybrid = {
 const localStatus = {
   ready: true,
   engine: { name: 'llama-server', label: 'llama.cpp', found: true, version: '0.9.0', new_enough: true },
-  model: { id: 'ternary-bonsai-2-27b', label: 'Ternary Bonsai 2 27B', bytes: 7_626_008_928, downloaded: false },
+  model: { id: 'ternary-bonsai-2-27b', label: 'Ternary local-model 2 27B', bytes: 7_626_008_928, downloaded: false },
   server: { running: false, port: null, context_length: null },
   memory_bytes: 25_769_803_776,
   blocker: null,
@@ -79,8 +79,8 @@ test('before anything is chosen, the built-in Claude Code fallback is listed as 
   expect(store.getSnapshot().providers[0]).toMatchObject({ name: 'claude-code', active: false, local: false })
 })
 
-test('choosing Hybrid without Bonsai asks for setup instead of reporting an error; a saved restart is applied', async () => {
-  let mode: Record<string, unknown> = { ok: false, code: 'needs_local_setup', error: 'Set up Bonsai on this machine first.' }
+test('choosing Hybrid without local-model asks for setup instead of reporting an error; a saved restart is applied', async () => {
+  let mode: Record<string, unknown> = { ok: false, code: 'needs_local_setup', error: 'Set up local-model on this machine first.' }
   const { store, bridge } = connectedStore(method => method === 'run_mode.set' ? mode : method === 'desktop.restartRuntime' ? { ok: false, busy: true } : { ok: true })
   expect(await store.setRunMode('hybrid')).toEqual({ ok: false, code: 'needs_local_setup' })
   expect(store.getSnapshot().runModeError).toBe('')
@@ -105,13 +105,16 @@ test('setup progress events update the job, and a finished setup reloads the mod
   expect(store.getSnapshot().runMode?.mode).toBe('hybrid')
 })
 
-test('the Models page leads with the three modes and says what Hybrid needs: Bonsai on this Mac and a cloud lead', async () => {
+test('the Models page leads with the three modes and says what Hybrid needs: local-model on this Mac and a cloud lead', async () => {
   const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status: localStatus, job: null } : method === 'provider_list' ? { ok: true, profiles } : { ok: true })
   await Promise.all([store.loadRunMode(), store.loadLocalSetup(), store.loadProviders()])
   const html = renderToStaticMarkup(createElement(RunModeSection, { snap: store.getSnapshot() }))
-  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary Bonsai 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up Bonsai', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
+  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary local-model 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up local-model', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
     expect(html).toContain(words)
   }
+  expect(html).not.toContain('Bonsai')
+  expect(html).toContain('local-model on this Mac does all the work.')
+  expect(html).toContain('Light and balanced agents run on local-model and answer directly')
   expect(html).toContain('aria-checked="true"')
   expect(html.match(/In use/g)).toHaveLength(1)
 
@@ -121,7 +124,18 @@ test('the Models page leads with the three modes and says what Hybrid needs: Bon
   expect(renderToStaticMarkup(createElement(RunModeSection, { snap: unknown.getSnapshot() }))).toBe('')
 })
 
-test('setup carries the Hybrid lead picked before Bonsai existed, and only for Hybrid', async () => {
+test('an already downloaded model offers to start local-model without changing the model ID', async () => {
+  const status = { ...localStatus, model: { ...localStatus.model, downloaded: true } }
+  const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status, job: null } : { ok: true })
+  await Promise.all([store.loadRunMode(), store.loadLocalSetup()])
+  const snap = store.getSnapshot()
+  expect(snap.localSetup.status?.model.id).toBe('ternary-bonsai-2-27b')
+  const html = renderToStaticMarkup(createElement(RunModeSection, { snap }))
+  expect(html).toContain('Start local-model and use Hybrid')
+  expect(html).not.toContain('Bonsai')
+})
+
+test('setup carries the Hybrid lead picked before local-model existed, and only for Hybrid', async () => {
   const { store, bridge } = connectedStore(() => ({ ok: true, job: { id: 'j1', state: 'running', step: 'Starting' } }))
   await store.startLocalSetup('hybrid', 'claude-code')
   await store.startLocalSetup('private', 'claude-code')

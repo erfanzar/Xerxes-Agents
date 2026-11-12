@@ -134,10 +134,28 @@ export function createBridge(transport: BridgeTransport) {
   },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
-      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-use-local', 'provider-use-host', 'provider-review', 'provider-share', 'provider-revoke'].includes(action)
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-use-local', 'provider-use-host', 'provider-review', 'provider-share', 'provider-revoke', 'provider-accounts', 'provider-bind-review', 'provider-bind', 'provider-activate', 'provider-quota'].includes(action)
     )
       return Promise.reject(new Error('Unknown remote action'))
     return transport.invoke('desktop:remote', action, cleanParams(params))
+  },
+  accounts(action: unknown, params: unknown = {}): Promise<unknown> {
+    if (typeof action !== 'string' || !['list', 'login', 'copy-login-link', 'activate', 'usage', 'sync-review', 'sync', 'remove'].includes(action)) {
+      return Promise.reject(new Error('Unknown provider account action'))
+    }
+    return transport.invoke('desktop:accounts', action, cleanParams(params))
+  },
+  onAccountLogin(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    return transport.on('desktop:account-login', value => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return
+      const event = value as Record<string, unknown>
+      if (event.type !== 'authorization_url' || typeof event.login_id !== 'string' || typeof event.url !== 'string') return
+      try {
+        if (new URL(event.url).protocol !== 'https:') return
+      } catch { return }
+      ;(handler as (event: { type: 'authorization_url'; login_id: string; url: string }) => void)({ type: 'authorization_url', login_id: event.login_id, url: event.url })
+    })
   },
   /**
    * The Hub cockpit (Settings → Hub & phone, and the XERXES tab's sign-in). The

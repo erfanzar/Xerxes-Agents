@@ -27,6 +27,7 @@ import { TerminalsCard } from './TerminalsPanel.js'
 import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
+import { ProviderAccountsCenter } from './ProviderAccountsCenter.js'
 import { RunModeSection } from './RunModeSection.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
@@ -822,6 +823,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       {/* Private and Hybrid run Bonsai on the workspace host, so the choice is offered for this Mac only. */}
       {!snap.storageScope?.startsWith('ssh:') && <RunModeSection snap={snap} />}
+      <ProviderAccountsCenter accounts={typeof window === 'undefined' ? undefined : window.xerxes.accounts} onAccountLogin={typeof window === 'undefined' ? undefined : window.xerxes.onAccountLogin} sessionKey={snap.sessionKey} turnActive={snap.turnActive} changed={()=>void store.loadModels(true)}/>
       <p className="modal__sub">
         Change the session model from the composer. Using a profile makes it the one that does the work. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>

@@ -12,6 +12,7 @@
 
 import { closeLlmClient, completeLlm, createLlmClient, type LlmClient } from '../llms/client.js'
 import type { ProviderProfile } from '../bridge/profiles.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 
 /** Titles longer than this are noise in pickers and tab strips. */
 export const TITLE_MAX_CHARS = 60
@@ -132,7 +133,7 @@ export async function generateSessionTitle(options: TitleGenerationOptions): Pro
       ...(profile?.api_key ? { api_key: profile.api_key } : {}),
       ...(profile?.base_url ? { base_url: profile.base_url } : {}),
       ...(profile?.provider ? { provider: profile.provider } : {}),
-    }))
+    }, profileSessionOptions(profile)))
 
   const attempt = async (candidate: string): Promise<string | undefined> => {
     let client: LlmClient

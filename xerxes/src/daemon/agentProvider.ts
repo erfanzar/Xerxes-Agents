@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { resolvedProfileContextLimit, resolvedProfileMaxOutputTokens, type ProfileStore } from '../bridge/profiles.js'
 import { createLlmClient } from '../llms/client.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 import { createHash } from 'node:crypto'
 import { getProviderConfig, resolveProvider } from '../llms/providerRegistry.js'
 import { wireCapability } from '../llms/modelsDev.js'
@@ -24,7 +25,7 @@ export function agentProviderResolver(
       throw new Error('Agent provider route changed; restore the original provider configuration or dispatch new work')
     }
     return {
-      llm: createClient(model, { api_key: profile.api_key, base_url: profile.base_url, provider: profile.provider }),
+      llm: createClient(model, { api_key: profile.api_key, base_url: profile.base_url, provider: profile.provider }, profileSessionOptions(profile)),
       contextLimit: candidate => resolvedProfileContextLimit(profile, candidate),
       maxOutputTokens: candidate => resolvedProfileMaxOutputTokens(profile, candidate),
     }

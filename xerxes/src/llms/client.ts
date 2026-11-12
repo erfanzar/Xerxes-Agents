@@ -419,6 +419,10 @@ export interface LlmClientFactoryOptions extends Omit<OpenAiCompatibleClientOpti
   readonly copilotSession?: CopilotSession
   /** Injected Anthropic subscription session; defaults to the stored one for `anthropic`. */
   readonly anthropicOAuthSession?: AnthropicOAuthSession
+  /** A named account must not fall back to ambient authentication. */
+  readonly isolatedAuth?: boolean
+  /** Isolated environment for a Claude Code CLI account. */
+  readonly claudeEnvironment?: Readonly<Record<string, string | undefined>>
   /** Injected Kimi Code subscription session; defaults to the stored one for `kimi-code`. */
   readonly kimiOAuthSession?: KimiCodingOAuthSession
   /** Injected OpenRouter OAuth session; defaults to the stored one for `openrouter`. */
@@ -1074,7 +1078,7 @@ export function createLlmClient(
     // The Anthropic adapter's own fallback reads ANTHROPIC_API_KEY whatever
     // the host, so the key is resolved here: this provider's variable, and
     // only toward its own host (or with XERXES_ALLOW_AMBIENT_KEY=1).
-    const anthropicKey = configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl)
+    const anthropicKey = options.isolatedAuth ? '' : configuredApiKey || getApiKey(providerName, overrides, process.env, configuredBaseUrl)
     if (!anthropicKey && !anthropicOAuth) {
       const variable = (providerConfig as ProviderConfig).apiKeyEnv ?? `${providerName}_api_key`
       throw new ConfigurationError(
@@ -1083,7 +1087,7 @@ export function createLlmClient(
       )
     }
     return new AnthropicMessagesClient({
-      ...(anthropicKey ? { apiKey: anthropicKey } : {}),
+      ...(options.isolatedAuth ? { apiKey: '' } : anthropicKey ? { apiKey: anthropicKey } : {}),
       ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
       ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
       ...(options.promptCaching === undefined ? {} : { promptCaching: options.promptCaching }),
@@ -1098,7 +1102,7 @@ export function createLlmClient(
         } catch (error) {
           // Not signed in is the normal API-key path; refresh/network
           // failures must surface rather than silently degrade.
-          if (error instanceof ConfigurationError) return undefined
+          if (error instanceof ConfigurationError && !options.isolatedAuth) return undefined
           throw error
         }
       } } : {}),
@@ -1106,7 +1110,7 @@ export function createLlmClient(
   }
   if (providerConfig.transport === 'claude-code') {
     // The local `claude` CLI on the user's own Claude sign-in, as a model.
-    return new ClaudeCodeClient()
+    return new ClaudeCodeClient(options.claudeEnvironment ? { environment: options.claudeEnvironment, isolatedAuth: true, ...(options.anthropicOAuthSession ? { subscriptionSession: options.anthropicOAuthSession } : {}) } : {})
   }
   if (providerConfig.transport !== 'openai') {
     throw new ConfigurationError('provider', `${providerName} requires its dedicated adapter.`)

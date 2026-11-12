@@ -91,7 +91,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
         <div>
           <span>{state.model ? <Icon name="check" size={12} /> : '3'}</span>
           <strong>How Xerxes runs</strong>
-          <p>{snap.model || 'Private: Bonsai on this Mac. Hybrid: a cloud model leads, Bonsai does the file work here. Cloud: a cloud model.'}</p>
+          <p>{snap.model || 'Private: local-model on this Mac. Hybrid: a cloud model leads, local-model does the file work here. Cloud: a cloud model.'}</p>
           <button disabled={!state.runtime} onClick={() => store.openSettings('models')}>
             {state.model ? 'Change mode' : 'Choose a mode'}
           </button>

@@ -38,12 +38,12 @@ export const LOCAL_PROFILE_NAME = 'bonsai-local'
 
 export const NO_ENGINE_HELP =
   'No local engine was found. Install one, in the order Xerxes prefers them: llama.cpp (`brew install llama.cpp`, ' +
-  'v0.7.0 or newer for Ternary Bonsai 2 27B), mlx-lm on Apple silicon (`uv tool install mlx-lm`, 0.32.2 or newer), ' +
+  'v0.7.0 or newer for Ternary local-model 2 27B), mlx-lm on Apple silicon (`uv tool install mlx-lm`, 0.32.2 or newer), ' +
   'or LM Studio (https://lmstudio.ai). Then run `xerxes local setup` again.'
 
 export const LOCAL_USAGE = `Usage: xerxes local <command> [options]
 
-Run a Bonsai model on this machine with llama.cpp's llama-server, mlx-lm's mlx_lm.server or
+Run a local-model on this machine with llama.cpp's llama-server, mlx-lm's mlx_lm.server or
 LM Studio. Nothing runs until you ask.
 
 Commands:
@@ -66,14 +66,14 @@ Commands:
   status  Show whether the engine is running and healthy (exit 0 running, 1 not). --json
   doctor  Report hardware, chosen model, engine binary and version, model and server health. --json
 
-Ternary Bonsai 2 27B downloads from Prism's Hugging Face repos at a pinned commit: the Q2_0
+Ternary local-model 2 27B downloads from Prism's Hugging Face repos at a pinned commit: the Q2_0
 GGUF for llama-server (stock llama.cpp v0.7.0 / build b11555 or newer) and the 2-bit MLX pack
 for mlx_lm.server (mlx-lm 0.32.2 or newer). Other models need a source in
 ~/.xerxes/daemon/config.json:
   { "runtime": { "local": { "models": { "bonsai-9b": { "url": "https://…", "sha256": "…" } } } } }
 Other settings under runtime.local: engine (llama-server | mlx | lmstudio), llama_server_path,
 mlx_server_path, lms_path, models_dir, port (default 11581; LM Studio keeps its own port unless
-set), ctx_size (up to the model's own window, 262144 for Ternary Bonsai 2 27B).
+set), ctx_size (up to the model's own window, 262144 for Ternary local-model 2 27B).
 `
 
 export interface SaveLocalProfileInput {

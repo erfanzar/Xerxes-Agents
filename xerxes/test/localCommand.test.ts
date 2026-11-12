@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { ProfileStore, resolvedProfileContextLimit } from '../src/bridge/profiles.js'
 import { GIB } from '../src/local/catalog.js'
 import { saveLocalProfile } from '../src/local/cliEntry.js'
-import { LOCAL_USAGE, runLocalCommand, type LocalCommandPorts, type SaveLocalProfileInput } from '../src/local/command.js'
+import { LOCAL_PROFILE_NAME, LOCAL_USAGE, NO_ENGINE_HELP, runLocalCommand, type LocalCommandPorts, type SaveLocalProfileInput } from '../src/local/command.js'
 import type { FetchPort } from '../src/local/download.js'
 import type { GgufAttention } from '../src/local/ggufMetadata.js'
 import type { HardwareProfile } from '../src/local/hardware.js'
@@ -107,6 +107,17 @@ describe('runLocalCommand', () => {
     const h = harness(hw16)
     expect(await runLocalCommand([], h.ports)).toBe(0)
     expect(h.out.join('')).toBe(LOCAL_USAGE)
+  })
+
+  test('help and engine guidance use local-model while the saved profile and model IDs stay compatible', async () => {
+    const h = harness(hw16)
+    expect(await runLocalCommand(['--help'], h.ports)).toBe(0)
+    expect(h.out.join('')).toContain('Run a local-model on this machine')
+    expect(h.out.join('')).toContain('Ternary local-model 2 27B downloads')
+    expect(h.out.join('')).toContain('bonsai-9b | ternary-bonsai-2-27b')
+    expect(LOCAL_PROFILE_NAME).toBe('bonsai-local')
+    expect(NO_ENGINE_HELP).toContain('Ternary local-model 2 27B')
+    expect(NO_ENGINE_HELP).not.toContain('Bonsai')
   })
 
   test('unknown command and unknown option exit 2', async () => {

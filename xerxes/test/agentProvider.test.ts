@@ -55,6 +55,25 @@ test('saved routes permit credential rotation but reject endpoint changes before
   expect(credentials).toHaveLength(1)
 })
 
+test('named OAuth child profiles keep isolated sessions when the active workspace changes', () => {
+  const first = '11111111-1111-4111-8111-111111111111'
+  const second = '22222222-2222-4222-8222-222222222222'
+  let profile: ProviderProfile = { name: 'account-a', provider: 'openai-codex', api_key: '', base_url: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-codex', sampling: {}, oauth_account_id: first }
+  const paths: (string | undefined)[] = []
+  const resolver = agentProviderResolver({ get: () => profile }, (_model, _overrides, options) => {
+    paths.push(options?.anthropicOAuthSession?.storedPath())
+    return { async *stream() { yield { content: 'ready' } } }
+  })
+  resolver('account-a', profile.model)
+  profile = { ...profile, name: 'account-b', oauth_account_id: second }
+  resolver('account-b', profile.model)
+  profile = { ...profile, name: 'account-a', oauth_account_id: first }
+  resolver('account-a', profile.model)
+  expect(paths[0]).toContain(first)
+  expect(paths[1]).toContain(second)
+  expect(paths[2]).toBe(paths[0])
+})
+
 test('routing identity distinguishes providers and transport while honoring inline connections', () => {
   const original = providerRouteIdentity('fixture', { provider: 'openai', baseUrl: 'https://inline.invalid/v1' })
   expect(providerRouteIdentity('fixture', { provider: 'openai', baseUrl: 'https://inline.invalid/v1' })).toBe(original)

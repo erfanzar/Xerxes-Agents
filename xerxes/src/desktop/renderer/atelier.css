@@ -3114,6 +3114,19 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .provcard:hover .provcard__tool,.atelier .provcard__tool:focus-visible{opacity:1}
 .atelier .provcard__tool:hover:not(:disabled){background:var(--x-chip,var(--mac-control));color:var(--x-title)}
 .atelier .provcard__tool--danger:hover:not(:disabled){color:var(--x-danger,var(--x-failed-text))}
+.atelier .provider-accounts{display:flex;flex-direction:column;gap:10px;margin:12px 0 18px}
+.atelier .provider-accounts__login{display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center}
+.atelier .provider-accounts__signin{display:flex;flex-direction:column;gap:6px;padding:12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--mac-control)}
+.atelier .provider-accounts__signin>strong{color:var(--x-title);font:var(--t-body);font-weight:600}
+.atelier .provider-accounts__signin>p{margin:0;color:var(--x-secondary);font:var(--t-caption);line-height:1.5}
+.atelier .provider-accounts__signin-link{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;margin-top:4px}
+.atelier .provider-accounts__signin-link input{box-sizing:border-box;width:100%;min-width:0;min-height:30px;padding:6px 9px;border:1px solid var(--x-hairline);border-radius:6px;background:var(--x-screen);color:var(--x-secondary);font:var(--t-caption)}
+.atelier .provider-accounts__signin-link .copybtn{white-space:nowrap}
+.atelier .provider-account .provcard__main{cursor:default;padding-right:14px}
+.atelier .provider-account .provcard__tools{position:static;flex:0 0 auto;align-self:flex-start;gap:6px}
+.atelier .provider-account .provcard__tools .btn{white-space:nowrap}
+.atelier .provider-account__usage{display:flex;flex-direction:column;gap:4px;padding:0 14px 12px;color:var(--x-meta);font:400 12px/1.45 var(--sans);overflow-wrap:anywhere;word-break:break-word}
+@media(max-width:700px){.atelier .provider-accounts__login{grid-template-columns:1fr}.atelier .provider-accounts__signin-link{grid-template-columns:1fr}.atelier .provider-accounts__signin-link .copybtn{justify-self:start}.atelier .provider-account .provcard__main{flex-wrap:wrap}.atelier .provider-account .provcard__tools{flex:1 0 100%;flex-wrap:wrap}}
 .atelier .provcard__tool:disabled{opacity:.35;cursor:default}
 .atelier .provcard__confirm{border:0;border-radius:6px;padding:4px 9px;background:var(--x-failed-bg,var(--x-needs-bg));color:var(--x-failed-text,var(--x-danger));font:500 11.5px/1.2 var(--sans);cursor:pointer}
 .atelier .provcard__keep{border:0;border-radius:6px;padding:4px 9px;background:none;color:var(--x-secondary);font:500 11.5px/1.2 var(--sans);cursor:pointer}

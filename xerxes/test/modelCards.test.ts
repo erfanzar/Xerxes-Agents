@@ -54,6 +54,19 @@ test('each Bonsai id resolves to one card, and every consumer reads that card', 
   }
 })
 
+test('model cards display local-model labels while keeping model and download identities', () => {
+  expect(MODEL_CARDS.map(card => card.label)).toEqual([
+    'Ternary local-model 2 27B', 'local-model 2 9B', 'local-model 2 4B',
+    'local-model 2 2B', 'local-model (no published card)',
+  ])
+  const card = modelCard('prism-ml/Ternary-Bonsai-2-27B-mlx-2bit')
+  expect(card.id).toBe('ternary-bonsai-2-27b')
+  expect(card.llamaServer?.fileName).toBe('Ternary-Bonsai-2-27B-Q2_0.gguf')
+  expect(card.mlx?.repo).toBe('prism-ml/Ternary-Bonsai-2-27B-mlx-2bit')
+  expect(formatModelCardReport(modelCardReport({ model: card.id, runtime: {}, env: {} })))
+    .toStartWith('Model card for `ternary-bonsai-2-27b`: Ternary local-model 2 27B')
+})
+
 test('a model without a card is unchanged: no sampling, no output cap, the window decides the prompt', () => {
   for (const model of ['qwen3-27b', 'gpt-4o-mini', 'claude-sonnet-5-5', 'llama-3.1-8b']) {
     expect(modelCard(model)).toBe(DEFAULT_CARD)
@@ -143,24 +156,33 @@ test('a model without a card reports Xerxes defaults, not the values the daemon 
   expect(report.settings.some(setting => setting.name === 'Local builds')).toBe(false)
 })
 
-test('xerxes bonsai prints the card for a named model without a daemon', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'xerxes-bonsai-cli-'))
+test('xerxes local-model and its legacy bonsai alias print the card without a daemon', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'xerxes-local-model-cli-'))
+  const env = { PATH: process.env.PATH ?? '', HOME: home, XERXES_HOME: home, NO_COLOR: '1', XERXES_CLAUDE_CODE_AUTOUPDATE: '0', XERXES_AUTO_INSTALL_CLAUDE_CODE: '0' }
   try {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), 'bonsai', 'bonsai-2-4b'], {
-      env: { ...process.env, XERXES_HOME: home, NO_COLOR: '1' },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited])
-    expect(code).toBe(0)
-    expect(stdout).toContain('Model card for `bonsai-2-4b`: Bonsai 2 4B (`bonsai-2-4b`)')
-    expect(stdout).toContain("| Sampling | temperature 1, top_p 0.95, top_k 20, min_p 0, presence_penalty 1")
-    const usage = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), 'bonsai', 'a', 'b'], {
-      env: { ...process.env, XERXES_HOME: home }, stdout: 'pipe', stderr: 'pipe',
-    })
-    const [usageError, usageCode] = await Promise.all([new Response(usage.stderr).text(), usage.exited])
-    expect(usageCode).toBe(2)
-    expect(usageError).toContain('Usage: xerxes bonsai [model]')
+    for (const command of ['local-model', 'bonsai']) {
+      // Check help first: an unknown command rejects --help before it could run a provider turn.
+      const help = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), command, '--help'], {
+        env, stdout: 'pipe', stderr: 'pipe',
+      })
+      const [helpText, helpCode] = await Promise.all([new Response(help.stderr).text(), help.exited])
+      expect(helpCode).toBe(0)
+      expect(helpText).toContain('Usage: xerxes local-model [model]')
+      const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), command, 'bonsai-2-4b'], {
+        env, stdout: 'pipe', stderr: 'pipe',
+      })
+      const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited])
+      expect(code).toBe(0)
+      expect(stdout).toContain('Model card for `bonsai-2-4b`: local-model 2 4B (`bonsai-2-4b`)')
+      expect(stdout).toContain('| Sampling | temperature 1, top_p 0.95, top_k 20, min_p 0, presence_penalty 1')
+      expect(stdout).toContain('use /local-model there.')
+      const usage = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), command, 'a', 'b'], {
+        env, stdout: 'pipe', stderr: 'pipe',
+      })
+      const [usageError, usageCode] = await Promise.all([new Response(usage.stderr).text(), usage.exited])
+      expect(usageCode).toBe(2)
+      expect(usageError).toContain('Usage: xerxes local-model [model]')
+    }
   } finally {
     await rm(home, { recursive: true, force: true })
   }

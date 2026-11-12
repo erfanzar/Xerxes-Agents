@@ -4492,7 +4492,7 @@ test("daemon /sampling leaves a Bonsai model's temperature and top_k to its publ
   }
 });
 
-test("daemon /bonsai shows the active model's card, the value in effect and what set it", async () => {
+test("daemon /local-model and legacy /bonsai show the active model's card, the value in effect and what set it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-model-card-"));
   const socketPath = join(directory, "daemon.sock");
   const runtime = new InMemoryDaemonRuntime(undefined, {
@@ -4527,21 +4527,29 @@ test("daemon /bonsai shows the active model's card, the value in effect and what
     client.send({ jsonrpc: "2.0", id: 2, method: "commands.catalog", params: {} });
     const catalog = await client.next((frame) => frame.id === 2);
     expect(catalog.result?.pairs).toContainEqual([
+      "/local-model",
+      "Show the active model's settings card and what overrides it",
+    ]);
+    expect(catalog.result?.pairs).not.toContainEqual([
       "/bonsai",
       "Show the active model's settings card and what overrides it",
     ]);
 
-    client.send({ jsonrpc: "2.0", id: 3, method: "slash", params: { command: "/bonsai" } });
-    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
-      ok: true,
-      card: "ternary-bonsai-2-27b",
-    });
-    const body = String((await client.next(eventFrame("notification"))).params?.payload?.body);
-    expect(body).toContain("Model card for `ternary-bonsai-2-27b-mlx`: Ternary Bonsai 2 27B (`ternary-bonsai-2-27b`)");
-    expect(body).toContain("| temperature 0.3; the rest from the card | settings |");
-    expect(body).toContain("| Output limit | 32,768 tokens | 32,768 tokens | card |");
-    expect(body).toContain("| Prompt and tools | lean | full | runtime.prompt_profile |");
-    expect(body).toContain("| Result checks and escalation | on | on | card |");
+    let id = 3;
+    for (const command of ["/local-model", "/bonsai"]) {
+      client.send({ jsonrpc: "2.0", id, method: "slash", params: { command } });
+      expect((await client.next((frame) => frame.id === id)).result).toMatchObject({
+        ok: true,
+        card: "ternary-bonsai-2-27b",
+      });
+      const body = String((await client.next(eventFrame("notification"))).params?.payload?.body);
+      expect(body).toContain("Model card for `ternary-bonsai-2-27b-mlx`: Ternary local-model 2 27B (`ternary-bonsai-2-27b`)");
+      expect(body).toContain("| temperature 0.3; the rest from the card | settings |");
+      expect(body).toContain("| Output limit | 32,768 tokens | 32,768 tokens | card |");
+      expect(body).toContain("| Prompt and tools | lean | full | runtime.prompt_profile |");
+      expect(body).toContain("| Result checks and escalation | on | on | card |");
+      id += 1;
+    }
   } finally {
     client.close();
     await server.stop();

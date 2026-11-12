@@ -4,6 +4,7 @@
 import { randomBytes } from 'node:crypto'
 import type { ProfileStore, ProviderProfile } from '../bridge/profiles.js'
 import { createLlmClient, type LlmClient } from '../llms/client.js'
+import { profileSessionOptions } from '../auth/profileSessionOptions.js'
 import { LocalProviderEndpoint } from '../security/localProviderEndpoint.js'
 import { LocalProviderRelay, LocalProviderRelayError, type LocalProviderDefaults, type LocalProviderGrant, type LocalProviderGrantView, type RelayPeer } from '../security/localProviderRelay.js'
 import { nativeSamplingDefaults } from '../llms/samplingDefaults.js'
@@ -27,7 +28,7 @@ export class DaemonProviderRelays {
   // Recent terminal status only: no endpoint, authority token or client resolver.
   private readonly retired = new Map<string, RetiredRelay>()
   constructor(private readonly profiles: Pick<ProfileStore, 'get' | 'list'>,
-    private readonly client: RelayClientFactory = (model, profile) => createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url })) {}
+    private readonly client: RelayClientFactory = (model, profile) => createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url }, profileSessionOptions(profile))) {}
 
   inventory() {
     // A profile with no model yet (the built-in ones until first chosen) has

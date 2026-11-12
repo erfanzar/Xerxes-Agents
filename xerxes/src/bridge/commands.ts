@@ -88,7 +88,7 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('model', 'List provider models or switch model', 'config', { argsHint: '[provider:model]' }),
   command('provider', 'Setup or switch provider profile', 'config'),
   command('sampling', 'Get or set sampling params', 'config'),
-  command('bonsai', 'Show the active model\'s settings card and what overrides it', 'config'),
+  command('local-model', 'Show the active model\'s settings card and what overrides it', 'config', { aliases: ['bonsai'] }),
   command('personality', 'Choose a SOUL.md preset', 'config', { argsHint: '[name]' }),
   command('statusbar', 'Toggle the status bar', 'config', { cliOnly: true }),
   command('verbose', 'Toggle verbose event logging', 'config', { cliOnly: true }),

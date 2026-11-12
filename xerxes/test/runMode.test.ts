@@ -55,7 +55,7 @@ test('each mode places subagents: Bonsai answering directly for light and balanc
   expect(runModeTiers('hybrid', bonsai, claude)).toEqual({ default: 'balanced', light: fast, balanced: fast, smart: { model: 'claude-code/opus', provider_profile: 'claude-code' } })
   expect(runModeTiers('private', bonsai, bonsai)).toEqual({ default: 'balanced', light: fast, balanced: fast, smart: { model: 'ternary-bonsai-2-27b', provider_profile: 'bonsai-local' } })
   expect(runModeTiers('cloud', undefined, claude)).toEqual({})
-  expect(() => runModeTiers('hybrid', undefined, claude)).toThrow('Bonsai')
+  expect(() => runModeTiers('hybrid', undefined, claude)).toThrow('hybrid needs local-model set up on this machine')
 })
 
 test('the settings file keeps other sections, starts empty when missing and is owner-only', async () => {

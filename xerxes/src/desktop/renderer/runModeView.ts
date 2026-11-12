@@ -5,8 +5,8 @@ import type { LocalSetupJobView, LocalStatusView, RunModeName, RunModeView } fro
 
 /** What each mode means, in the product plan's words: who does the work and what may leave. */
 export const RUN_MODE_CHOICES: ReadonlyArray<{ readonly mode: RunModeName; readonly label: string; readonly summary: string; readonly boundary: string }> = [
-  { mode: 'private', label: 'Private', summary: 'Bonsai on this Mac does all the work.', boundary: 'Nothing leaves during a run.' },
-  { mode: 'hybrid', label: 'Hybrid', summary: 'A cloud model plans and checks; Bonsai does the file work on this Mac.', boundary: 'Your files stay here. Plans and short summaries go to the cloud.' },
+  { mode: 'private', label: 'Private', summary: 'local-model on this Mac does all the work.', boundary: 'Nothing leaves during a run.' },
+  { mode: 'hybrid', label: 'Hybrid', summary: 'A cloud model plans and checks; local-model does the file work on this Mac.', boundary: 'Your files stay here. Plans and short summaries go to the cloud.' },
   { mode: 'cloud', label: 'Cloud', summary: 'A cloud model does the work.', boundary: 'Task context may leave.' },
 ]
 

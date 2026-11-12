@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { parseStreamingJson } from '@earendil-works/pi-ai'
 
 import { claudeCodeLogin, claudeExecutable } from '../auth/claudeCodeLogin.js'
+import type { AnthropicOAuthSession } from '../auth/anthropicOAuth.js'
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { fitImage } from '../core/imageFit.js'
 import { screenshotParts } from '../context/screenshotSuperseder.js'
@@ -61,6 +62,9 @@ export interface ClaudeCodeClientOptions {
   /** `claude` executable; defaults to `CLAUDE_CODE_CLI`, then PATH and the installers' locations. */
   readonly executable?: string
   readonly environment?: Readonly<Record<string, string | undefined>>
+  /** A named account may not read the global keychain or borrow ambient auth. */
+  readonly isolatedAuth?: boolean
+  readonly subscriptionSession?: AnthropicOAuthSession
   readonly launch?: ClaudeCodeLauncher
   /** Where the CLI runs. An empty directory, so no project CLAUDE.md is pulled in. */
   readonly workingDirectory?: string
@@ -1023,12 +1027,16 @@ export class ClaudeCodeClient implements LlmClient {
   private readonly launch: ClaudeCodeLauncher
   private readonly executableOverride: string | undefined
   private readonly workingDirectory: string | undefined
+  private readonly isolatedAuth: boolean
+  private readonly subscriptionSession: AnthropicOAuthSession | undefined
 
   constructor(options: ClaudeCodeClientOptions = {}) {
     this.environment = options.environment ?? process.env
     this.launch = options.launch ?? launchClaudeCode
     this.executableOverride = options.executable
     this.workingDirectory = options.workingDirectory
+    this.isolatedAuth = options.isolatedAuth === true
+    this.subscriptionSession = options.subscriptionSession
   }
 
   private cwd(): string {
@@ -1038,10 +1046,19 @@ export class ClaudeCodeClient implements LlmClient {
     return directory
   }
 
+  private async isolatedAccessToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted()
+    if (this.subscriptionSession && await this.subscriptionSession.stored()) return (await this.subscriptionSession.credential(signal)).access
+    if (!this.environment.CLAUDE_CONFIG_DIR?.trim()) throw new ConfigurationError(CLAUDE_CODE_PROVIDER, 'An isolated account requires its own Claude Code directory.')
+    const login = await claudeCodeLogin({ environment: this.environment, readKeychain: async () => undefined })
+    signal?.throwIfAborted()
+    return login.accessToken
+  }
+
   async authFingerprint(): Promise<string | undefined> {
     try {
-      const login = await claudeCodeLogin({ environment: this.environment })
-      return credentialFingerprint({ authorization: `Bearer ${login.accessToken}` })
+      const token = this.isolatedAuth ? await this.isolatedAccessToken() : (await claudeCodeLogin({ environment: this.environment })).accessToken
+      return credentialFingerprint({ authorization: `Bearer ${token}` })
     } catch { return undefined }
   }
 
@@ -1109,6 +1126,14 @@ export class ClaudeCodeClient implements LlmClient {
 
   private async *attempt(request: CompletionRequest, signal: AbortSignal | undefined, correction: string | undefined): AsyncIterable<LlmDelta> {
     signal?.throwIfAborted()
+    const accountToken = this.isolatedAuth ? await this.isolatedAccessToken(signal) : undefined
+    const environment = claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request), reportedModelCapability(CLAUDE_CODE_PROVIDER, request.model)?.maxOutputTokens)
+    if (accountToken !== undefined) {
+      for (const key of Object.keys(environment)) if (key.startsWith('ANTHROPIC_')) delete environment[key]
+      delete environment.CLAUDE_CODE_USE_BEDROCK
+      delete environment.CLAUDE_CODE_USE_VERTEX
+      environment.CLAUDE_CODE_OAUTH_TOKEN = accountToken
+    }
     const tools = request.tools ?? []
     const native = this.nativeTools && tools.length > 0 && request.toolChoice !== 'none'
     const system = [
@@ -1137,7 +1162,7 @@ export class ClaudeCodeClient implements LlmClient {
     let child: ReturnType<typeof this.launch>
     try {
       child = this.launch(claudeCodeArgv(this.executableOverride ?? await resolveClaudeCode(this.environment), request, systemPromptFile, known?.effortLevels, mcpConfigFile), {
-        env: claudeCodeEnvironment(this.environment, request.maxTokens, claudeCodeThinkingOff(request), reportedModelCapability(CLAUDE_CODE_PROVIDER, request.model)?.maxOutputTokens),
+        env: environment,
         cwd: this.cwd(),
         input,
       })

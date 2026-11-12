@@ -98,6 +98,7 @@ import { AuditEmitter } from "./audit/emitter.js";
 import { JSONLSinkCollector } from "./audit/collector.js";
 import { contextCalibrationRatio, estimateContextTokens } from "./context/windowUsage.js";
 import { createLlmClient } from "./llms/client.js";
+import { profileSessionOptions } from "./auth/profileSessionOptions.js";
 import type { ChatMessage } from "./types/messages.js";
 import type { SpawnedAgentSnapshot } from "./operators/subagents.js";
 import { mergePersistedSubagentSnapshots } from "./agents/subagentPersistence.js";
@@ -271,8 +272,8 @@ const HELP_GROUPS: readonly {
       ["xerxes auth login codex", "sign in to ChatGPT and use its Codex plan"],
       ["xerxes auth login copilot", "sign in to GitHub and use Copilot models"],
       ["xerxes auth login anthropic|kimi|openrouter|xai|radius", "authorize subscription or gateway OAuth sessions"],
-      ["xerxes local setup|start|stop|status|doctor [--engine llama-server|lmstudio]", "run a Bonsai model on this machine with llama.cpp or LM Studio"],
-      ["xerxes bonsai [model]", "show a model's settings card and what overrides it"],
+      ["xerxes local setup|start|stop|status|doctor [--engine llama-server|lmstudio]", "run local-model on this machine with llama.cpp or LM Studio"],
+      ["xerxes local-model [model]", "show a model's settings card and what overrides it"],
       ["xerxes doctor", "check the host, providers, and configuration"],
       ["xerxes usage [claude|codex|kimi|zai] [--json]", "show subscription 5-hour/weekly quota windows"],
       ["xerxes update [--check] [--git] [--dry-run] [--apply]", "report or apply an update"],
@@ -343,6 +344,7 @@ const [argument, ...argumentsAfterCommand] = cliArguments;
  */
 const NON_ONESHOT_COMMANDS: ReadonlySet<string> = new Set([
   "skill",
+  "local-model",
   "bonsai",
   "auth",
   "doctor",
@@ -495,6 +497,25 @@ if (argument === "--help" || argument === "-h") {
   process.exit(await runHubCli(argumentsAfterCommand));
 } else if (argument === "skill") {
   process.exit(await runBundledSkillCli(argumentsAfterCommand));
+} else if (argument === "provider-account-login") {
+  const accountId = argumentsAfterCommand[0]?.trim();
+  if (!accountId) throw new Error("provider-account-login requires an account id");
+  const { ProviderAccountRegistry } = await import("./auth/providerAccountRegistry.js");
+  const { openInBrowser } = await import("./auth/codexLogin.js");
+  const registry = new ProviderAccountRegistry();
+  try {
+    await registry.login(accountId, openInBrowser, url => {
+      // Public PKCE authorize URL only; credentials never cross this channel.
+      process.stdout.write(JSON.stringify({ type: "authorization_url", url }) + "\n");
+    });
+    process.exit(0);
+  } catch (error) {
+    try { await registry.discard(accountId); }
+    catch (cleanup) { console.error(`Could not remove temporary login files: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`); }
+    // A desktop settings panel needs the actionable message, not a minified stack.
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 } else if (argument === "auth") {
   try {
     process.exit(await runAuthCommand(argumentsAfterCommand));
@@ -855,8 +876,8 @@ if (argument === "--help" || argument === "-h") {
   }
   if (result.message) console.log(result.message)
   process.exit(0)
-} else if (argument === "bonsai") {
-  process.exit(runBonsaiCommand(argumentsAfterCommand));
+} else if (argument === "local-model" || argument === "bonsai") {
+  process.exit(runLocalModelCardCommand(argumentsAfterCommand));
 } else if (argument === "export") {
   await runExport(argumentsAfterCommand);
 } else if (argument === "local") {
@@ -1605,10 +1626,10 @@ function applyLocalOnly(config: DaemonConfig): void {
   if (parseLocalOnlyConfig(config.runtime, process.env)) enableLocalOnly();
 }
 
-/** `xerxes bonsai [model]`: the settings card for the active model, or the one named. */
-function runBonsaiCommand(args: readonly string[]): number {
+/** `xerxes local-model [model]`: the settings card; `bonsai` remains a legacy alias. */
+function runLocalModelCardCommand(args: readonly string[]): number {
   if (args.length > 1 || args[0]?.startsWith("-")) {
-    console.error("Usage: xerxes bonsai [model]");
+    console.error("Usage: xerxes local-model [model]");
     return args[0] === "--help" || args[0] === "-h" ? 0 : 2;
   }
   const config = loadSystemDaemonConfig();
@@ -1617,7 +1638,7 @@ function runBonsaiCommand(args: readonly string[]): number {
   // The active profile's settings apply only to the model it serves.
   const profile = active && (args[0] === undefined || args[0] === active.model) ? active : undefined;
   if (!model) {
-    console.error("No model is configured. Run `xerxes setup`, or name one: xerxes bonsai <model>");
+    console.error("No model is configured. Run `xerxes setup`, or name one: xerxes local-model <model>");
     return 1;
   }
   const report = modelCardReport({
@@ -1628,7 +1649,7 @@ function runBonsaiCommand(args: readonly string[]): number {
     samplingSet: { ...config.runtime, ...(profile?.sampling ?? {}) },
   });
   console.log(formatModelCardReport(report));
-  console.log("\nThe running daemon also knows the window the engine loaded: use /bonsai there.");
+  console.log("\nThe running daemon also knows the window the engine loaded: use /local-model there.");
   return 0;
 }
 
@@ -2341,12 +2362,13 @@ function daemonRuntime(
     // connect timeout and retry cap; loopback routes default to 3 retries.
     const daemonProviderNetwork = parseProviderNetworkConfig({ ...config.runtime, ...settings });
     const daemonMaxNetworkRetries = daemonProviderNetwork.maxNetworkRetries ?? defaultMaxNetworkRetries(connection.baseUrl);
+    const accountOptions = profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined);
     const llm = nativeConnection ? createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
       ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
       ...(connection.provider ? { provider: connection.provider } : {}),
       ...(connection.responsesApi ? { responses_api: true } : {}),
-    }, { connectTimeoutMs: daemonProviderNetwork.connectTimeoutMs }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
+    }, { ...accountOptions, connectTimeoutMs: daemonProviderNetwork.connectTimeoutMs }) : { async *stream(): AsyncGenerator<never> { throw new Error("Configure a remote provider or authorize a local provider connection before starting a turn"); } };
     // Fallback model chain (Claude Code fallback-model parity): configured via
     // XERXES_FALLBACK_MODEL or runtime.fallback_model; the fallback client
     // reuses the primary connection's credentials and routing.
@@ -2475,7 +2497,7 @@ function daemonRuntime(
           const model = active?.model || connection.model;
           const localClient = active ? host.remoteProviderBindings?.client(active, model) : undefined;
           const profile = !localClient && active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
-          const planner = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm);
+          const planner = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)) : llm);
           return createLlmPlanGenerator(planner, { model }).generate(request, signal);
         },
       },
@@ -2533,8 +2555,8 @@ function daemonRuntime(
         const profile = sessionProvider(profileStore, session, model);
         if (!profile) return { llm };
         return {
-          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
-          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)),
+          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)),
           providerOverrides: { provider: profile.provider, base_url: profile.base_url },
           contextLimit: resolvedProfileContextLimit(profile, model),
           maxOutputTokens: candidate => resolvedProfileMaxOutputTokens(profile, candidate),
@@ -2635,8 +2657,8 @@ function daemonRuntime(
         profiles: profileStore,
         boundaryMode: session => parseDataBoundaryConfig({ ...config.runtime, ...settings }, process.env, { root: session.cwd }).mode,
         buildProvider: (profile, model) => ({
-          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
-          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }),
+          llm: createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)),
+          createLlmForModel: candidate => createLlmClient(candidate, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)),
           providerOverrides: { provider: profile.provider, base_url: profile.base_url },
           contextLimit: resolvedProfileContextLimit(profile, model),
           maxOutputTokens: candidate => resolvedProfileMaxOutputTokens(profile, candidate),
@@ -2674,7 +2696,7 @@ function daemonRuntime(
           ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
           ...(connection.provider ? { provider: connection.provider } : {}),
           ...(connection.responsesApi ? { responses_api: true } : {}),
-        }),
+        }, accountOptions),
       }),
       ...(maxTokens === undefined ? {} : { maxTokens }),
       // The runner checks the actual attempt route, not the daemon's startup
@@ -2734,7 +2756,7 @@ function daemonRuntime(
         const model = active?.model || connection.model;
         const localClient = active ? host.remoteProviderBindings?.client(active, model) : undefined;
         const profile = !localClient && active && (active.metadata.provider_profile || !(config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) ? sessionProvider(profileStore, active, model) : undefined;
-        const compactionLlm = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }) : llm);
+        const compactionLlm = localClient ?? (profile ? createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url, ...(connection.responsesApi ? { responses_api: true } : {}) }, profileSessionOptions(profile)) : llm);
         // PreCompact hook before any message is dropped (Claude Code parity).
         const hookRunner = hooksForWorkspace(active.cwd || workspaceRoot);
         if (hookRunner.hasHooks("on_compact")) {
@@ -3107,7 +3129,7 @@ async function acpServer(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  }, { connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
+  }, { ...profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined), connectTimeoutMs: acpProviderNetwork.connectTimeoutMs });
   const subagentHost = createNativeSubagentHost({
     ...(connection.reasoningEffort ? { reasoningEffort: connection.reasoningEffort } : {}),
     skillRegistry,
@@ -3358,7 +3380,7 @@ async function runOneShot(
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responses_api: true } : {}),
-  }, { connectTimeoutMs: providerNetwork.connectTimeoutMs });
+  }, { ...profileSessionOptions(connection.oauthAccountId ? { oauth_account_id: connection.oauthAccountId } : undefined), connectTimeoutMs: providerNetwork.connectTimeoutMs });
   // A refused or hung endpoint gives up after a bounded number of retries:
   // fewer for a local server, which either answers or is down.
   const oneShotBaseUrl = connection.baseUrl

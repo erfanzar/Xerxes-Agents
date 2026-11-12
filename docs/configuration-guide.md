@@ -498,24 +498,24 @@ run. Each mode is a combination of settings the runtime already has:
 
 | Mode | Main agent | Subagents (Agent intelligence tiers) | Settings |
 | --- | --- | --- | --- |
-| Private | Bonsai on this machine | all on Bonsai | `runtime.local_only: true` |
-| Hybrid | a cloud model that plans, splits the work and checks it | light and balanced on Bonsai with thinking off; smart on the lead | `runtime.data_boundary: hybrid` with `boundary: { private_paths: ["**"], cloud_results: summary, approve_outbound: off }` |
+| Private | local-model on this machine | all on local-model | `runtime.local_only: true` |
+| Hybrid | a cloud model that plans, splits the work and checks it | light and balanced on local-model with thinking off; smart on the lead | `runtime.data_boundary: hybrid` with `boundary: { private_paths: ["**"], cloud_results: summary, approve_outbound: off }` |
 | Cloud | a cloud model | all on the main model | none |
 
 - **The main agent** is the active provider profile. Nothing runs until one is chosen: the built-in
   Claude Code profile is listed, but it is not used until you pick it.
 - **Hybrid in practice:** the [data boundary](#data-boundary) keeps every workspace file away from
-  the cloud lead, so it hands the file work to Bonsai agents on this machine and gets back their
+  the cloud lead, so it hands the file work to local-model agents on this machine and gets back their
   replies cut to 8 KB. In a test on five spreadsheet and document tasks it got 4 right, with no input
-  file lines reaching the cloud except quoted answers; Bonsai alone got 2, Claude alone 5. A step on
-  Bonsai takes seconds to minutes, so a Hybrid task takes minutes where Cloud takes seconds, and work
+  file lines reaching the cloud except quoted answers; local-model alone got 2, Claude alone 5. A step on
+  local-model takes seconds to minutes, so a Hybrid task takes minutes where Cloud takes seconds, and work
   that needs reading free text (invoices in many layouts) can still fail.
 - **Choosing a mode** also sets the Agent intelligence tiers in the table; adjust them afterwards
   under Agent intelligence. The cloud advisor is no longer part of a mode: choosing one clears
   `runtime.advisor.profile` (set it yourself to use the advisor).
-- **Setting up Bonsai from the app** runs the same steps as `xerxes local setup`, in the
+- **Setting up local-model from the app** runs the same steps as `xerxes local setup`, in the
   runtime, with live progress. It can be cancelled; a partial download resumes next time.
-  Choosing Private or Hybrid before Bonsai is set up offers the setup first.
+  Choosing Private or Hybrid before local-model is set up offers the setup first.
 - **Restart:** fully local mode and the data boundary are read when the runtime starts. After a
   change to either, the app restarts the runtime once no work is running.
 - **Environment:** `XERXES_LOCAL_ONLY` and `XERXES_DATA_BOUNDARY` override the saved settings, and
@@ -563,15 +563,15 @@ or a unix socket, or when its `data_trust` says so; anything else is cloud.
       "balanced": { "model": "ternary-bonsai-2-27b", "provider_profile": "bonsai-local" } } } }
   ```
 
-## Bonsai and the local cascade
+## local-model and the local cascade
 
-`xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
+`xerxes local setup` starts a local-model on `127.0.0.1` and saves a `bonsai-local` provider
 profile. The engine is a separate process that Xerxes reaches over OpenAI-compatible HTTP; no
 inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine`
 (`XERXES_LOCAL_ENGINE`). Unset, setup, start and doctor use the first engine installed, in this
 order, and say which they picked. `--model-key` picks LM Studio and `--model-file` picks
 llama-server.
-- **Downloads:** Ternary Bonsai 2 27B's builds come from Prism's Hugging Face repos at a pinned
+- **Downloads:** Ternary local-model 2 27B's builds come from Prism's Hugging Face repos at a pinned
   commit. Each file is checked against its pinned size and SHA-256 before it is used, and a
   download that does not match is discarded. Other models need a source in
   `runtime.local.models`, which also replaces a built-in one.
@@ -601,7 +601,7 @@ llama-server.
      at another `mlx_lm.server`. Its version is read from the `mlx_lm` command beside it.
 3. **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
    then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
-   Ternary Bonsai 2 27B's MLX pack has the key `ternary-bonsai-2-27b-mlx`. LM Studio runs it
+   Ternary local-model 2 27B's MLX pack has the key `ternary-bonsai-2-27b-mlx`. LM Studio runs it
    with its own bundled runtime, so whether a model loads depends on LM Studio's version.
    - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
    - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
@@ -613,17 +613,18 @@ llama-server.
 
 `status` and `stop` find whichever engine Xerxes started without `--engine`.
 
-**Model cards.** Every Bonsai-specific setting lives in one record per model, in
+**Model cards.** Every local-model-specific setting lives in one record per model, in
 `xerxes/src/llms/modelCards.ts`:
 - **What a card holds:** the ids it answers to, published sampling, output limit, native window,
   default prompt profile, escalation default, reply budget and local builds.
-- **Which models have one:** Bonsai 2 at 2B, 4B and 9B, and Ternary Bonsai 2 27B each have a
+- **Which models have one:** local-model 2 at 2B, 4B and 9B, and Ternary local-model 2 27B each have a
   card. Any other model id containing "bonsai" (such as `bonsai-8b`) gets the family card: the lean
   prompt and the cascade, but no sampling, because Prism publishes sampling per model.
 - **Other models:** no card, so nothing about them changes.
 - **Precedence:** settings always win over the card.
-- **Viewing it:** `/bonsai` in the TUI, or `xerxes bonsai [model]` in a terminal, shows the
+- **Viewing it:** `/local-model` in the TUI, or `xerxes local-model [model]` in a terminal, shows the
   active model's card. For each setting it shows the value in effect and what set it.
+  `/bonsai` and `xerxes bonsai [model]` remain supported as legacy aliases.
   - **Settings it reports:** sampling, output limit, context window, prompt and tools, result
     checks and escalation, reply budget, and local builds.
   - **Sources it names:** the card, `/sampling` or another setting, a profile's
@@ -632,12 +633,12 @@ llama-server.
 
 With either engine:
 - **Context window:** the profile records the window the engine actually loaded: LM Studio's
-  `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary Bonsai 2 27B reads 262,144
+  `loaded_context_length`, or llama-server's `/props` `n_ctx`. Ternary local-model 2 27B reads 262,144
   tokens. Choose a window with `--ctx-size`, `runtime.local.ctx_size` or
   `XERXES_LOCAL_CTX_SIZE`, up to the model's own window. Without one:
   - **llama-server** sizes it from the memory free when it starts: half of what is left after the
     weights and a 1 GiB reserve, divided by the cache one token needs, up to the model's own window.
-    The cache per token comes from the GGUF header; a hybrid model such as Ternary Bonsai 2 27B
+    The cache per token comes from the GGUF header; a hybrid model such as Ternary local-model 2 27B
     keeps a cache in only one layer in four (64 KiB per token). Free memory is the GPU's free VRAM,
     macOS's free, inactive, speculative and purgeable pages, or Linux's `MemAvailable`. `setup`
     and `start` print the window and why. If the header or free memory cannot be read, they say so
@@ -645,7 +646,7 @@ With either engine:
   - **LM Studio** gets the catalog's fixed window.
   An LM Studio model outside the catalog with no size set loads LM Studio's default window.
   LM Studio does not apply `--context-length` to every model. On a 24 GB M4 Pro it loads Ternary
-  Bonsai 2 27B's MLX pack with 42,752 tokens whatever is asked, while stock models get the size
+  local-model 2 27B's MLX pack with 42,752 tokens whatever is asked, while stock models get the size
   asked for. `setup` says when the loaded window differs and records the loaded one.
 - **Window discovery:** neither engine reports its loaded window in `/v1/models`. For any profile
   whose base URL is on this machine (`localhost`, `127.0.0.1`, `::1`), the daemon asks the server
@@ -664,7 +665,7 @@ With either engine:
   - **A failed reload** is named in the retry message, and the failure is then handled as before.
   - **Older starts:** a llama-server started before this release has no recorded window, so it is
     not restarted. Run `xerxes local stop` and `start` once.
-- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 13 tools and terse
+- **Lean prompt:** a local-model gets the lean prompt wherever it runs: up to 13 tools and terse
   rules, at most about 3.1K tokens with a full instruction block, instead of about 29K. The tools are
   ReadFile, WriteFile, FileEditTool, GlobTool, GrepTool, exec_command, check_command, CSVProcessor,
   XlsxReader, XlsxWriter, XlsxConvert, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
@@ -676,7 +677,7 @@ With either engine:
   Sub-agents follow the same rule for their own model. Set `runtime.prompt_profile` (or
   `XERXES_PROMPT_PROFILE`, or the profile's `prompt_profile`) to `full` or `lean` to choose
   yourself.
-- **Sampling:** a Bonsai 2 model gets the sampling Prism publishes for it, wherever it runs. MLX
+- **Sampling:** a local-model 2 model gets the sampling Prism publishes for it, wherever it runs. MLX
   and llama.cpp servers, LM Studio included, don't read the model's `generation_config.json`, so a
   value Xerxes leaves out is the engine's default, not the model's.
   - With thinking on (the default), the 27B gets temperature 1.0, top_p 0.95, top_k 20, min_p 0,
@@ -700,13 +701,13 @@ With either engine:
   Codex subscriptions and other native provider adapters retain their existing behavior.
   A locally shared SSH provider still uses the local profile snapshot authorized for its grant;
   `-1` never removes that grant's separately approved output ceiling.
-- **Output limit:** Ternary Bonsai 2 27B's replies are capped at 32,768 tokens, the limit Prism's own
+- **Output limit:** Ternary local-model 2 27B's replies are capped at 32,768 tokens, the limit Prism's own
   agent demo uses. Without it, a local engine lets a runaway reply run until the turn's time limit.
   It applies only when nothing else sets one (`max_tokens`, a profile's `max_output_tokens`, or the
   provider). A reply that reaches it is told to continue, as with any other limit. It doesn't
   reduce the prompt budget used for compaction.
 - **Reply budget:** a local model can reason for many minutes in one reply without acting, which
-  can use up a task's whole time limit. Every Bonsai card gives a reply about 8,192 reasoning
+  can use up a task's whole time limit. Every local-model card gives a reply about 8,192 reasoning
   tokens or 10 minutes, whichever comes first, to take its first action.
   - **When a reply is stopped:** it is still reasoning past either limit, with no tool call and no
     answer text yet. A reply that has started answering or calling a tool is never cut.
@@ -732,7 +733,7 @@ With either engine:
   3. The ladder stops when nothing improves twice in a row, when the advisor is not allowed, or
      when its budget is spent.
 
-  Without a setting, the cascade is on for local models and Bonsai, and when
+  Without a setting, the cascade is on for local models and local-model, and when
   `advisor.auto_on_check_fail` is true. `runtime.escalation.mode` or `XERXES_ESCALATION` (`on`
   or `off`) decides otherwise. On a local provider, model-written titles and long-turn
   reflection are off unless set, so they don't compete with the turn for the one model.
@@ -745,7 +746,7 @@ With either engine:
   - ACP shows them as text in the reply.
   - In the SDK, set `promptProfile` (`lean` or `full`) and `cascade`:
     - `cascade` defaults on when `workspaceRoot` is set, with checks in `warn` mode and escalation
-      for Bonsai models.
+      for local-model models.
     - Its options are `checks`, `escalation` (as `runtime.escalation`) and `consultAdvisor`. A
       registered `AskAdvisor` tool is used by default.
     - `false` turns the cascade off.

@@ -110,7 +110,7 @@ test.skipIf(process.platform === 'win32')('openRemote attaches and reconnects wi
   const commands: string[][] = []
   const connection = await openRemote(machine, signal(), () => {}, undefined, {
     run: async (_binary, args) => { commands.push(args); return commands.length === 1 ? attached : commands.length === 2 ? 'XERXES_REMOTE_ALIVE' : ready },
-    spawnTunnel: localTunnel,
+    spawnTunnel: localTunnel, providerSetup: false,
   })
   let replacement: Awaited<ReturnType<typeof openRemote>> | undefined
   try {
@@ -131,7 +131,7 @@ test.skipIf(process.platform === 'win32')('openRemote attaches and reconnects wi
 test.skipIf(process.platform === 'win32')('openRemote bootstraps only after a definitive MISSING response', async () => {
   const commands: string[][] = []
   const connection = await openRemote(machine, signal(), () => {}, undefined, {
-    run: async (_binary, args) => { commands.push(args); return commands.length === 1 ? 'XERXES_REMOTE_MISSING' : ready }, spawnTunnel: localTunnel,
+    run: async (_binary, args) => { commands.push(args); return commands.length === 1 ? 'XERXES_REMOTE_MISSING' : ready }, spawnTunnel: localTunnel, providerSetup: false,
   })
   try {
     expect(commands).toHaveLength(2)
@@ -144,11 +144,33 @@ test.skipIf(process.platform === 'win32')('openRemote bootstraps only after a de
   })).rejects.toThrow('valid status')
   expect(calls).toBe(1)
 })
+test.skipIf(process.platform === 'win32')('openRemote installs missing provider CLIs by default', async () => {
+  const commands: string[][] = []
+  let probes = 0, setupError = ''
+  const connection = await openRemote(machine, signal(), () => {}, undefined, {
+    run: async (_binary, args) => {
+      commands.push(args)
+      const text = args.join(' ')
+      if (text.includes('XERXES_PROVIDER_CLIS') && !text.includes('@anthropic') && !text.includes('@openai')) {
+        probes++
+        return probes === 1 ? 'XERXES_PROVIDER_CLIS {"claude":false,"codex":false}' : 'XERXES_PROVIDER_CLIS {"claude":true,"codex":true}'
+      }
+      return attached
+    },
+    spawnTunnel: localTunnel,
+    onProviderSetupError: error => { setupError = error.message },
+  })
+  try {
+    expect(commands.some(args => args.join(' ').includes('@anthropic-ai/claude-code'))).toBe(true)
+    expect(commands.some(args => args.join(' ').includes('@openai/codex'))).toBe(true)
+    expect(setupError).toBe('')
+  } finally { await connection.close() }
+})
 test.skipIf(process.platform === 'win32')('reconnect discovers a running global daemon when a previous address disappears, without setup', async () => {
   let calls = 0
   const connection = await openRemote(machine, signal(), () => {}, { socketPath: '/old/daemon.sock', projectDir: machine.workspacePath }, {
     run: async () => ++calls === 1 ? 'XERXES_REMOTE_MISSING' : attached,
-    spawnTunnel: localTunnel,
+    spawnTunnel: localTunnel, providerSetup: false,
   })
   try { expect(calls).toBe(2); expect(connection.expectedBuildId).toBeUndefined() }
   finally { await connection.close() }

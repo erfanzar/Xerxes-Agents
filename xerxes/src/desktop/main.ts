@@ -8,7 +8,7 @@
  * those properties are the design, not configuration.
  */
 
-import { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeImage, Notification, safeStorage, shell, Menu, screen, webContents, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, nativeImage, Notification, safeStorage, shell, Menu, screen, webContents, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -26,7 +26,13 @@ import { SavedHostContexts } from './main/savedHosts.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
-import { copyProfilesToRemote, localActiveProfile, watchProfiles } from './main/profileSync.js'
+import { localActiveProfile } from './main/profileSync.js'
+import { ProviderAccountDirectory } from './main/providerAccounts.js'
+import { spawnSecretWriter } from './main/remoteCredentials.js'
+import { ensureRemoteProviderClis } from './main/remoteProviderSetup.js'
+import { ProviderAccountRegistry } from '../auth/providerAccountRegistry.js'
+import { GlobalProviderAccounts } from './main/globalProviderAccounts.js'
+import { runBunProviderAccountLogin } from './main/providerAccountLogin.js'
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
@@ -364,18 +370,41 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   }
   let providerForwarding: DesktopProviderForwarding | null = null
   let localProviderDaemon: DaemonRpc | null = null
-  // Copies this Mac's keyed profiles to the connected SSH host; null when local.
-  let syncProfiles: (() => void) | null = null
-  let stopProfileWatch: (() => void) | null = null
-  let lastProfileSync = 0
+  // Explicit per-host provider binding; null when local or no host is attached.
+  let accountDirectory: ProviderAccountDirectory | null = null
+  let globalAccounts: GlobalProviderAccounts | null = null
+  let globalAccountsTarget: string | undefined
   const closeProviderForwarding = () => {
-    stopProfileWatch?.()
-    stopProfileWatch = null
-    syncProfiles = null
+    accountDirectory = null
+    globalAccounts = null
+    globalAccountsTarget = undefined
     void providerForwarding?.disconnect()
     providerForwarding = null
     localProviderDaemon?.dispose()
     localProviderDaemon = null
+  }
+  const accountCenter = () => {
+    const target = remoteMachine?.target
+    if (!globalAccounts || globalAccountsTarget !== target) {
+      globalAccountsTarget = target
+      globalAccounts = new GlobalProviderAccounts(
+        new ProviderAccountRegistry(),
+        remoteMachine ?? undefined,
+        (method, args) => {
+          if (!daemon) throw new Error('The workspace is not connected')
+          return daemon.call(method, args)
+        },
+        async (_method, args, onAuthorizationUrl) => {
+          const accountId = args?.account_id
+          if (typeof accountId !== 'string' || !accountId) throw new Error('An account id is required')
+          // Login is a standalone Bun helper: an app relaunch may leave an older
+          // daemon running which does not know provider_account.login yet.
+          await runBunProviderAccountLogin(accountId, { onAuthorizationUrl })
+          return { ok: true }
+        },
+      )
+    }
+    return globalAccounts
   }
   let selectedWorkspace: string | null = null
   const session = new SurfaceSession(initialSessionId ?? saved?.sessionId ?? null)
@@ -454,9 +483,6 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     // Opening or starting a conversation on an SSH host: keep it on this
     // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
     if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
-    // Opening a task (or reloading the window) re-sends the profiles too, in
-    // case the watch missed a change; at most every 15 seconds.
-    if ((method === 'initialize' || method === 'session.open') && syncProfiles && Date.now() - lastProfileSync > 15_000) syncProfiles()
   })
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
     windowRoutes.bind(id, channel, handler)
@@ -701,18 +727,14 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       daemon?.dispose()
       daemon = rpc
       attach(rpc)
-      // The Mac's keyed providers work on the host too. Best effort, after
-      // attach so the provider list the host re-sends reaches this window.
-      const profilesFile = join(xerxesHome(), 'profiles.json')
-      syncProfiles = () => {
-        lastProfileSync = Date.now()
-        void copyProfilesToRemote((method, args) => rpc.call(method, args), profilesFile).then(result => {
-          if (result.error) console.warn(`Could not copy provider profiles to ${machine.alias}: ${result.error}`)
-        })
-      }
-      syncProfiles()
-      // A provider added or a key changed on this Mac reaches the host at once.
-      stopProfileWatch = watchProfiles(profilesFile, () => syncProfiles?.())
+      // Explicit per-host provider accounts. No profile or key is copied until
+      // the person reviews and confirms one named account for this host.
+      accountDirectory = new ProviderAccountDirectory(
+        machine,
+        join(xerxesHome(), 'profiles.json'),
+        (method, args) => rpc.call(method, args),
+        (profile, signal) => spawnSecretWriter(machine, profile, signal),
+      )
       remote = next
       remoteMachine = machine
       startHubShare(machine.alias, next.socketPath)
@@ -771,6 +793,18 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         if (action === 'provider-share') return providerForwarding.authorize(params)
         return providerForwarding.revoke(params.sessionKey)
       }
+      if (action === 'provider-accounts' || action === 'provider-bind-review' || action === 'provider-bind' || action === 'provider-activate' || action === 'provider-quota') {
+        if (!remote || !daemon?.online || !accountDirectory) throw new Error('Reconnect the SSH workspace before managing provider accounts.')
+        if (action === 'provider-accounts') {
+          const accounts = await accountDirectory.list()
+          try { return { ...accounts, provider_setup: await ensureRemoteProviderClis(remoteMachine!, new AbortController().signal) } }
+          catch (error) { return { ...accounts, provider_setup_error: error instanceof Error ? error.message : String(error) } }
+        }
+        if (action === 'provider-bind-review') return accountDirectory.reviewBind(String(params.profile ?? ''))
+        if (action === 'provider-bind') return accountDirectory.confirmBind(String(params.review ?? ''), params.confirm === true, new AbortController().signal)
+        if (action === 'provider-activate') return accountDirectory.activate(String(params.sessionKey ?? ''))
+        return accountDirectory.quota()
+      }
       if (action === 'connect') {
         const machine = remoteTarget(params.machine)
         // A connection belongs to a retained conversation context. Never replace
@@ -800,6 +834,33 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       return desktopMachineCommand(join(xerxesHome(), 'machines.json'), command)
     },
   )
+
+  handle('desktop:accounts', async (event, action: unknown, params: Record<string, unknown>) => {
+    if (typeof action !== 'string') throw new TypeError('account action is required')
+    const accounts = accountCenter()
+    if (action === 'list') return accounts.list()
+    if (action === 'login') {
+      const kind = params.kind
+      if (kind !== 'claude' && kind !== 'codex') throw new Error('Choose Claude or Codex')
+      const loginId = String(params.loginId ?? '')
+      if (!/^[a-f0-9-]{36}$/.test(loginId)) throw new Error('A login id is required')
+      return accounts.login(kind, String(params.label ?? ''), url => {
+        if (!event.sender.isDestroyed()) event.sender.send('desktop:account-login', { type: 'authorization_url', login_id: loginId, url })
+      })
+    }
+    if (action === 'copy-login-link') {
+      const url = String(params.url ?? '')
+      if (new URL(url).protocol !== 'https:') throw new Error('Only an HTTPS sign-in link can be copied')
+      clipboard.writeText(url)
+      return { ok: true }
+    }
+    if (action === 'activate') return accounts.activate(String(params.accountId ?? ''), String(params.sessionKey ?? ''))
+    if (action === 'usage') return accounts.usage(String(params.accountId ?? ''))
+    if (action === 'sync-review') return accounts.reviewSync(String(params.accountId ?? ''))
+    if (action === 'sync') return accounts.confirmSync(String(params.review ?? ''), params.confirm === true)
+    if (action === 'remove') return accounts.remove(String(params.accountId ?? ''))
+    throw new Error('Unknown provider account action')
+  })
 
   // Native capabilities behind validated, narrow channels (repo law: every
   // preload capability has a bridge contract, a default wrapper, and types).

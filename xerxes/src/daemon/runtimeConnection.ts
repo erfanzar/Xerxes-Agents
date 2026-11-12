@@ -16,6 +16,8 @@ export interface RuntimeConnection {
   readonly model: string
   readonly permissionMode: PermissionMode
   readonly provider?: string
+  /** Isolated OAuth account backing this profile. */
+  readonly oauthAccountId?: string
   /**
    * Session default effort hint for per-turn thinking resolution. This and
    * the two thinking fields below were historically dropped from this
@@ -100,6 +102,7 @@ export function runtimeConnection(
     ...(baseUrl ? { baseUrl } : {}),
     ...(apiKey ? { apiKey } : {}),
     ...(provider ? { provider } : {}),
+    ...(useProfile?.oauth_account_id ? { oauthAccountId: useProfile.oauth_account_id } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(responsesApi === undefined ? {} : { responsesApi }),
     ...(serviceTier ? { serviceTier } : {}),

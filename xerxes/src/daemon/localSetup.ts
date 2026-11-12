@@ -189,7 +189,7 @@ export function createLocalSetupJobs(options: LocalSetupJobsOptions): LocalSetup
     try {
       await options.onSucceeded?.(parsed.payload)
     } catch (error) {
-      set({ id, startedAt, state: 'failed', step, finishedAt: now(), error: { code: 'MODE_NOT_APPLIED', message: `Bonsai is set up, but the mode was not applied: ${error instanceof Error ? error.message : String(error)}` } })
+      set({ id, startedAt, state: 'failed', step, finishedAt: now(), error: { code: 'MODE_NOT_APPLIED', message: `local-model is set up, but the mode was not applied: ${error instanceof Error ? error.message : String(error)}` } })
       return
     }
     set({ id, startedAt, state: 'done', step, finishedAt: now(), result: parsed.payload })

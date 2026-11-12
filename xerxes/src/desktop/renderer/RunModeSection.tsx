@@ -11,16 +11,16 @@ import type { RunModeName } from './types.js'
 const MODE_ICONS: Record<RunModeName, IconName> = { private: 'shield', hybrid: 'spark', cloud: 'cloud' }
 
 /**
- * How new tasks run: Private (Bonsai on this Mac, nothing leaves), Hybrid (a
- * cloud model leads and Bonsai does the file work here) or Cloud. Below the
- * choice, what the chosen mode needs: Bonsai set up on this Mac, and for Hybrid
+ * How new tasks run: Private (local-model on this Mac, nothing leaves), Hybrid (a
+ * cloud model leads and local-model does the file work here) or Cloud. Below the
+ * choice, what the chosen mode needs: local-model set up on this Mac, and for Hybrid
  * and Cloud the cloud model that leads or does the work. The provider profiles
  * stay listed beneath.
  */
 export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | null {
   /** A mode the person picked that still needs a step (setup, or a cloud provider) before it applies. */
   const [pending, setPending] = useState<RunModeName | null>(null)
-  /** The cloud lead picked for Hybrid before Bonsai was set up; setup applies it with the mode. */
+  /** The cloud lead picked for Hybrid before local-model was set up; setup applies it with the mode. */
   const [lead, setLead] = useState('')
   const view = snap.runMode
   // Once the mode it waited for is in use (setup finished, a provider chosen), nothing is pending.
@@ -119,8 +119,8 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
             <div className="localpanel__actions">
               <button className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown, shown === 'hybrid' ? lead : undefined)}>
                 {local.status.model.downloaded
-                  ? `Start Bonsai and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
-                  : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up Bonsai`}
+                  ? `Start local-model and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
+                  : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up local-model`}
               </button>
               {!local.status.model.downloaded && <span className="row__s">From Prism's Hugging Face repository, checked by SHA-256. It runs on this Mac.</span>}
             </div>
@@ -140,7 +140,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
                   onChange={event => {
                     const name = event.target.value
                     if (!name) return
-                    // Kept while Bonsai still needs setting up, so the setup button applies it.
+                    // Kept while local-model still needs setting up, so the setup button applies it.
                     setLead(name)
                     void store.setRunMode('hybrid', { workerProfile: name }).then(result => { if (result.ok) setPending(null) })
                   }}>
@@ -149,7 +149,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
                 </select>
               </label>
             )}
-          <p className="row__s">Light and balanced agents run on Bonsai and answer directly; smart agents run on the lead. Change this under Agent intelligence.</p>
+          <p className="row__s">Light and balanced agents run on local-model and answer directly; smart agents run on the lead. Change this under Agent intelligence.</p>
         </div>
       )}
 

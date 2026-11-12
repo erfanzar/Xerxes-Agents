@@ -2841,8 +2841,8 @@ with `{ ok: false, code: "unsupported" }`.
   `unknown_profile`, `invalid_request` or `worker_not_selected`. The main profile is
   selected as by `provider_select` (emitting `InitDone`); the settings are written to
   the `runtime` section of `daemon/config.json`, and the Agent intelligence tiers
-  are saved as `agent.settings.save` would (all on Bonsai in Private; light and
-  balanced on Bonsai with `reasoning_effort: off` and smart on the lead in Hybrid;
+  are saved as `agent.settings.save` would (all on local-model in Private; light and
+  balanced on local-model with `reasoning_effort: off` and smart on the lead in Hybrid;
   none in Cloud).
 - `local.status` `{}` → `{ ok, status, job }`: `xerxes local doctor --json` as one
   shape, `status: { ready, engine: { name, label, found, version, new_enough },
@@ -2851,7 +2851,7 @@ with `{ ok: false, code: "unsupported" }`.
 - `local.setup` `{ then_mode?, then_worker_profile? }` → `{ ok, job }` at once; the
   setup itself runs `xerxes local setup --json` in the daemon. `then_mode` (`private`
   or `hybrid`) is applied as `run_mode.set` when it succeeds. `then_worker_profile`,
-  with `then_mode: "hybrid"` only, is the cloud lead picked before Bonsai existed; it
+  with `then_mode: "hybrid"` only, is the cloud lead picked before local-model existed; it
   is applied as that `run_mode.set`'s `worker_profile`. An unknown profile returns
   `unknown_profile`, a local one `wrong_location`. A second request while one runs
   returns `{ ok: false, code: "busy", job }`.

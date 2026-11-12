@@ -69,6 +69,8 @@ import { listProjectAgents, readProjectAgent, writeProjectAgent } from "../agent
 import { generateProjectAgent } from "../agents/projectGenerator.js";
 import { AgentPresetRoster, type AgentPresetEntry } from "../agents/presets.js";
 import { CodexSession, fetchCodexModelCatalog } from "../auth/codexAuth.js";
+import { ProviderAccountRegistry } from "../auth/providerAccountRegistry.js";
+import { profileSessionOptions } from "../auth/profileSessionOptions.js";
 import { profileQuota } from '../auth/profileUsage.js';
 import { buildUsageReport, UsageReportCache } from "../auth/usageReport.js";
 import { formatUsageText, parseUsageReport } from "../auth/usageView.js";
@@ -590,7 +592,7 @@ interface DaemonSlashCommand {
 const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "agents",
   "background",
-  "bonsai",
+  "local-model",
   "branch",
   "branches",
   "browser",
@@ -1042,7 +1044,7 @@ export interface DaemonServerOptions {
    */
   readonly localWindowProbe?: (input: ProbeLoadedWindowsInput) => Promise<LoadedWindows>;
   /**
-   * The runtime settings and environment `/bonsai` resolves the prompt profile and
+   * The runtime settings and environment `/local-model` resolves the prompt profile and
    * escalation default from, as the host resolved them at start.
    */
   readonly modelCardContext?: () => { readonly runtime: Record<string, unknown>; readonly env: Record<string, string | undefined> };
@@ -1365,7 +1367,7 @@ export class DaemonServer {
     ] : [];
     this.machineSettingsPath = options.machineSettingsPath ?? join(xerxesHome(), 'machines.json');
     this.codexModelCatalog = options.codexModelCatalog ?? (async (profile, signal) => {
-      const credential = await new CodexSession().credential(signal);
+      const credential = await (profileSessionOptions(profile).codexSession ?? new CodexSession()).credential(signal);
       return fetchCodexModelCatalog(credential, {
         ...(profile.base_url.trim() ? { baseUrl: profile.base_url.trim() } : {}),
         ...(signal ? { signal } : {}),
@@ -4046,6 +4048,12 @@ export class DaemonServer {
       this.localSetupIntent = then === undefined ? undefined : { connection, mode: then, ...(lead === undefined ? {} : { workerProfile: lead }) };
       return { ok: true, job: localSetupJobPayload(started.job) };
     }
+    if (method === 'provider_account.login') {
+      const accountId = typeof params.account_id === 'string' ? params.account_id : '';
+      if (!accountId) return { ok: false, code: 'invalid_request', error: 'account_id is required' };
+      await new ProviderAccountRegistry().login(accountId);
+      return { ok: true };
+    }
     if (method === "provider_list") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
@@ -6270,7 +6278,7 @@ export class DaemonServer {
         return this.showRuntimeConfig(connection);
       case "sampling":
         return this.configureSampling(connection, args);
-      case "bonsai":
+      case "local-model":
         return this.showModelCard(connection);
       case "reasoning":
         return this.configureReasoning(connection, args);
@@ -8278,7 +8286,7 @@ export class DaemonServer {
     return { ...(this.runtime.settings?.() ?? this.runtime.status()) };
   }
 
-  /** `/bonsai`: the active model's card, and what each of its settings is in effect. */
+  /** `/local-model`: the active model's card, and what each of its settings is in effect. */
   private showModelCard(connection: DaemonTransportConnection): JsonRpcPayload {
     const status = this.runtime.status();
     const model = typeof status.model === "string" ? status.model : "";
@@ -11188,7 +11196,7 @@ export class DaemonServer {
     // Private runs Bonsai itself; Hybrid and Cloud are led by a cloud model.
     const mainIsLocal = mode === "private";
     const local = this.profileStore.get(LOCAL_PROFILE_NAME);
-    if (mode !== "cloud" && !local) return { ok: false, code: "needs_local_setup", error: "Set up Bonsai on this machine first." };
+    if (mode !== "cloud" && !local) return { ok: false, code: "needs_local_setup", error: "Set up local-model on this machine first." };
     const chosen = this.profileStore.chosenActive();
     const current = chosen === undefined ? undefined : this.profileStore.get(chosen);
     const requested = optionalString(params.worker_profile);
@@ -13916,7 +13924,7 @@ function createCompactionClient(
     ...(!profile && typeof status.provider === "string" && status.provider
       ? { provider: status.provider }
       : {}),
-  });
+  }, profileSessionOptions(profile));
 }
 
 function errorMessage(error: unknown): string {
