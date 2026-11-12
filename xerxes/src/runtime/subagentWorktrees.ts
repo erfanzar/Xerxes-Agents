@@ -4,12 +4,26 @@ import { applyWorkspacePatch, inspectDestination, recoverWorkspaceApply, listWor
 import { createHash } from 'node:crypto'
 import { parseWorktreeRef, parseWorktreeSource, WorktreeSetupError } from '../agents/worktreeOptions.js'
 import { mkdir, realpath, unlink, readdir, lstat, rename } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { SubagentWorktree, SubagentWorktreePort } from '../agents/subagentManager.js'
 import { loadWorkspaceSetup, runWorkspaceSetup } from './workspaceSetup.js'
 import { captureWorkingTree } from './workingTreeCapture.js'
 
 interface Ownership { id: string; taskId: string; path: string; branch: string; base: string; snapshotTree?: string }
+
+// Git enumerates sibling worktrees while registering/removing one. Concurrent
+// mutations can expose a directory before its commondir file has been written.
+// Share the queue across adapters for the same canonical Git common directory;
+// only registry mutations serialize, never the children's tool/provider work.
+const worktreeRegistryMutations = new Map<string, Promise<void>>()
+
+async function mutateWorktreeRegistry<Value>(root: string, operation: () => Promise<Value>): Promise<Value> {
+  const pending = (worktreeRegistryMutations.get(root) ?? Promise.resolve()).then(operation)
+  const settled = pending.then(() => undefined, () => undefined)
+  worktreeRegistryMutations.set(root, settled)
+  try { return await pending }
+  finally { if (worktreeRegistryMutations.get(root) === settled) worktreeRegistryMutations.delete(root) }
+}
 
 export interface AgentWorkspaceRecord {
   readonly id: string
@@ -228,7 +242,7 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
       // Write ownership before Git can create resources. Failed setup leaves
       // its record and any partial checkout available for explicit recovery.
       await Bun.write(join(root, `${id}.json`), JSON.stringify(record), { mode: 0o600 })
-      await allocateGit(['worktree', 'add', '-b', record.branch, record.path, base])
+      await mutateWorktreeRegistry(root, () => allocateGit(['worktree', 'add', '-b', record.branch, record.path, base]))
       if (record.snapshotTree) {
         await allocateGit(['read-tree', '--reset', '-u', record.snapshotTree], record.path)
         // Copied edits remain ordinary working files, visible to git diff; do not
@@ -251,7 +265,7 @@ export function nativeSubagentWorktrees(repository: string, options: { setupConf
     async remove(tree) {
       const { record, manifest } = await ownership(tree)
       if (!await clean(tree, record)) throw new Error('Agent worktree has files or commits to review; refusing cleanup')
-      await git(['worktree', 'remove', tree.path])
+      await mutateWorktreeRegistry(dirname(manifest), () => git(['worktree', 'remove', tree.path]))
       await unlink(manifest)
       // Keep the branch reference. Cleanup never deletes unmerged history.
     },

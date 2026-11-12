@@ -20,11 +20,34 @@ async function git(cwd: string, ...args: string[]) {
   if (code !== 0) throw new Error(error)
 }
 
+test('concurrent native allocations keep the shared Git worktree registry consistent across adapters', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-native-allocation-')))
+  try {
+    // A wider fan-out exposes Git reading a sibling's partially registered
+    // worktree before its commondir file exists. Keep real Git and separate
+    // adapters: the registry belongs to the repository, not one host instance.
+    for (let round = 0; round < 5; round++) {
+      const repository = join(root, String(round))
+      await git(root, 'init', repository)
+      await Bun.write(join(repository, 'parent.txt'), 'parent content')
+      await git(repository, 'add', '.')
+      await git(repository, 'commit', '-m', 'fixture baseline')
+      const ports = [nativeSubagentWorktrees(repository), nativeSubagentWorktrees(repository)]
+      const results = await Promise.allSettled(Array.from({ length: 32 }, (_, child) => ports[child % ports.length]!.create({ taskId: `child-${child}`, taskName: `Child ${child}` })))
+      expect(results.flatMap(result => result.status === 'rejected' ? [String(result.reason)] : [])).toEqual([])
+      const trees = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+      expect(new Set(trees.map(tree => tree.path)).size).toBe(32)
+      for (const tree of trees) expect(await Bun.file(join(tree.path, 'parent.txt')).text()).toBe('parent content')
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+}, 15_000)
+
 test('concurrent native children bind real file tools to their own worktrees', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xerxes-native-isolation-')))
   const tools = new ToolRegistry()
   registerFileTools(tools, new WorkspacePathResolver(root, () => getActiveSession<{ cwd: string }>()?.cwd))
   const calls = new Map<string, number>()
+  const bothChildrenStarted = Promise.withResolvers<void>()
   const transcripts = new DaemonTranscriptStore({ directory: join(root, 'sessions'), currentProjectDirectory: root })
   const host = createNativeSubagentHost({ transcriptStore: transcripts, agentDefinitions: BUILTIN_AGENTS, cwd: root, worktree: nativeSubagentWorktrees(root), model: 'gpt-4o', permissionMode: 'accept-all', eventBus: new DaemonSubagentEventBus(), tools: tools.definitions(), toolExecutor: tools,
     llm: { async *stream() {
@@ -34,6 +57,10 @@ test('concurrent native children bind real file tools to their own worktrees', a
       expect(await Bun.file(join(cwd!, 'parent.txt')).text()).toBe('parent content')
       const round = calls.get(cwd!) ?? 0
       calls.set(cwd!, round + 1)
+      // Registry allocation may serialize, but both real child turns must
+      // still overlap before either starts exercising its bound file tools.
+      if (calls.size >= 2) bothChildrenStarted.resolve()
+      await bothChildrenStarted.promise
       if (round < 2) yield { toolCalls: [{ id: 'write-' + round, type: 'function', function: { name: 'WriteFile', arguments: { file_path: round === 0 ? 'child.txt' : join(root, 'escaped.txt'), content: cwd! } } }] }
       else yield { content: 'Isolated file created; parent path denied.' }
     } } })
@@ -47,7 +74,11 @@ test('concurrent native children bind real file tools to their own worktrees', a
     await git(root, 'commit', '-am', 'new parent fixture')
     await runWithActiveSession({ cwd: root }, async () => {
       const tasks = await Promise.all(['one', 'two'].map(name => host.managerPort.spawn({ message: 'Exercise isolated file tools', nickname: name, isolation: 'worktree', worktreeRef: 'baseline' })))
-      for (const task of tasks) await host.manager.wait(task.id, 3000)
+      for (const task of tasks) {
+        const settled = await host.manager.wait(task.id, 3000)
+        expect(settled?.error).toBe('')
+        expect(settled?.status).toBe('completed')
+      }
       expect(calls.size).toBe(2)
       for (const snapshot of tasks) {
         expect(snapshot.rules).toContain('isolation:worktree')
@@ -75,7 +106,7 @@ test('concurrent native children bind real file tools to their own worktrees', a
     expect(originalPaths).not.toContain(retried.worktreePath)
     expect(await Bun.file(join(retried.worktreePath, 'child.txt')).text()).toBe(retried.worktreePath)
     for (const path of originalPaths) expect(await Bun.file(join(path, 'child.txt')).exists()).toBe(true)
-  } finally { await host.manager.shutdown(); await rm(root, { recursive: true, force: true }) }
+  } finally { bothChildrenStarted.resolve(); await host.manager.shutdown(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('project switches during allocation and later retries keep their original worktree owner', async () => {
