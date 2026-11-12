@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.36 — 2026-11-13
+
+- **XERXES reports live progress instead of filler.** An empty supervisor reply is never replaced by "I have nothing to add." Scheduled check-ins post the observed facts — task, status, agents, tool calls, edits, tests, last activity and anything waiting — and a wake with nothing observable posts nothing at all. A direct question always gets a substantive answer, or a named reason why the check failed.
+- **Unconfirmed supervisor actions are verified.** When a mutation cannot be confirmed, the supervisor reads the task back and says what it checked, while still never retrying a command automatically.
+- **Unknown SSH hosts are trusted in the app.** Connecting to a host with no saved key opens a fingerprint dialog; only a first-trust prompt is answered, password prompts are never shown as host trust, and a changed key is never replaced. Every step opens its own connection so a cached `ControlMaster` cannot hide a missing `known_hosts` entry.
+- **Gemini models are served by the native API.** A profile that declares an OpenAI-compatible wire but points at Google's host now reaches the native Generate Content API instead of the compatibility shim that answered `404 model_not_found`; a 404 names the model and the endpoint.
+- **Codex transport failures are attributable.** A Codex 400 from the HTTP fallback now names the WebSocket failure that forced the downgrade; previously that detail was discarded.
+
 ## 0.8.35 — 2026-11-12
 
 - **Bonsai is now local-model.** App setup, mode descriptions, model-card labels, CLI help and documentation use local-model. Existing saved settings, model/download identifiers and the `bonsai-local` profile remain compatible; `bonsai` remains an alias for the new `local-model` command.
