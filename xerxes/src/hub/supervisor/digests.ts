@@ -353,3 +353,219 @@ export class DigestService {
     }
   }
 }
+
+// ── the supervisor's own status digest ──────────────────────────────
+
+/**
+ * The observable state of one task, as the Hub reads it from its projections
+ * (and from the model-free watcher when the task is watched). Never model
+ * output, and never a claim about an outcome the Hub did not observe.
+ */
+export interface StatusWatchFacts {
+  readonly tool_calls: number
+  readonly edits: number
+  readonly tests: { readonly runs: number; readonly passed: number; readonly failed: number; readonly last: 'pass' | 'fail' | null }
+  readonly last_activity_at: number | null
+  /** Open anomaly kinds from the watcher, as short words. */
+  readonly anomalies: readonly string[]
+}
+
+export interface StatusTaskFacts {
+  readonly workspace_id: string
+  readonly session_id: string
+  readonly workspace_label: string
+  readonly title: string
+  readonly status: SessionProjection['status']
+  readonly agents_total: number
+  readonly agents_active: number
+  readonly pending_human_count: number
+  readonly goal_objective: string
+  /** ISO time of the task's last observed change. */
+  readonly updated_at: string
+  readonly stale: boolean
+  readonly watched?: StatusWatchFacts
+}
+
+export interface StatusAttention {
+  readonly kind: string
+  readonly title: string
+}
+
+/** Everything the Hub can honestly say about itself right now. */
+export interface StatusSnapshot {
+  readonly tasks: readonly StatusTaskFacts[]
+  readonly attention: readonly StatusAttention[]
+}
+
+/** Where a status digest is posted: a Hub wake (`wake`) or a person's own turn (`direct`). */
+export type SupervisorStatusMode = 'wake' | 'direct'
+
+export interface SupervisorStatusDigestInput {
+  readonly snapshot: StatusSnapshot
+  readonly now: number
+  readonly mode: SupervisorStatusMode
+  /** The task a wake is about; it leads the digest. */
+  readonly focus?: { readonly workspaceId: string; readonly sessionId: string }
+  /** Why the Hub could not read its state. A direct turn names it; a wake stays silent. */
+  readonly failure?: string
+}
+
+/** Tasks named in one digest. */
+const STATUS_MAX_TASKS = 3
+const STATUS_LINE_CHARS = 260
+
+const STATUS_WORDS: Readonly<Record<string, string>> = {
+  working: 'working',
+  needs_you: 'waiting on you',
+  failed: 'failed',
+  idle: 'idle',
+  unknown: 'in an unknown state',
+}
+
+const STATUS_RANK: Readonly<Record<string, number>> = { needs_you: 0, failed: 1, working: 2, idle: 3, unknown: 4 }
+
+/** How a watcher anomaly kind reads in a digest (the kinds themselves are the watcher's). */
+const ANOMALY_WORDS: Readonly<Record<string, string>> = {
+  loop: 'looping',
+  stall: 'stalled',
+  test_fail_repeat: 'the same tests keep failing',
+  error_burst: 'errors piling up',
+  context_high: 'context nearly full',
+  goal_blocked: 'goal blocked',
+}
+
+function flatten(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length <= max ? flat : `${flat.slice(0, Math.max(0, max - 1))}…`
+}
+
+function ago(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min`
+  return `${Math.round(minutes / 60)} h`
+}
+
+function lastActivity(task: StatusTaskFacts, now: number): string | undefined {
+  const watched = task.watched?.last_activity_at
+  const at = watched ?? (Number.isFinite(Date.parse(task.updated_at)) ? Date.parse(task.updated_at) : undefined)
+  if (at === undefined) return undefined
+  return `last activity ${ago(now - at)} ago`
+}
+
+/** One task as a short, factual line. Task text is flattened and clipped, never repeated as an instruction. */
+export function describeStatusTask(task: StatusTaskFacts, now: number): string {
+  const title = flatten(task.title === '' ? task.session_id : task.title, 90)
+  const label = flatten(task.workspace_label, 60)
+  const parts: string[] = []
+  if (task.agents_total > 0) parts.push(`${task.agents_active} of ${task.agents_total} agents running`)
+  const watched = task.watched
+  if (watched !== undefined) {
+    if (watched.tool_calls > 0) parts.push(`${watched.tool_calls} tool call${watched.tool_calls === 1 ? '' : 's'}`)
+    if (watched.edits > 0) parts.push(`${watched.edits} edit${watched.edits === 1 ? '' : 's'}`)
+    if (watched.tests.last !== null) parts.push(watched.tests.last === 'pass' ? 'tests passing' : 'tests failing')
+    for (const kind of watched.anomalies.slice(0, 2)) {
+      // "tests failing" already says this one.
+      if (kind === 'test_fail_repeat' && watched.tests.last === 'fail') continue
+      parts.push(flatten(ANOMALY_WORDS[kind] ?? kind.replaceAll('_', ' '), 40))
+    }
+  }
+  const activity = lastActivity(task, now)
+  if (activity !== undefined) parts.push(activity)
+  if (task.pending_human_count > 0) {
+    parts.push(`${task.pending_human_count} item${task.pending_human_count === 1 ? ' is' : 's are'} waiting on you`)
+  }
+  const goal = flatten(task.goal_objective, 120)
+  if (goal !== '') parts.push(`goal “${goal}”`)
+  const state = STATUS_WORDS[task.status] ?? 'in an unknown state'
+  const head = `“${title}”${label === '' ? '' : ` in ${label}`} is ${state}`
+  const line = parts.length === 0 ? head : `${head}: ${parts.join(', ')}`
+  return clip(line, STATUS_LINE_CHARS)
+}
+
+/**
+ * The Hub-authored replacement for an empty model reply.
+ *
+ * - A wake with nothing observable returns `undefined`: the Hub posts nothing
+ *   rather than filler.
+ * - A person's own turn always returns a line, naming the real failure when the
+ *   Hub could not read its state.
+ *
+ * Everything here is read from projections or from the watcher; no outcome is
+ * invented and no threshold is presented as a fact.
+ */
+export function formatSupervisorStatus(input: SupervisorStatusDigestInput): string | undefined {
+  const { snapshot, now, mode } = input
+  const tasks = snapshot.tasks
+  const attention = snapshot.attention
+  if (tasks.length === 0 && attention.length === 0) {
+    if (mode === 'wake') return undefined
+    const why = (input.failure === undefined ? 'the Hub reports no tasks or workspaces I can read' : input.failure)
+      .replace(/\s+/g, ' ').trim().replace(/[.!]+$/, '')
+    return clip(`I could not check what is running: ${why}.`, STATUS_LINE_CHARS)
+  }
+  const ordered = [...tasks].sort((a, b) => {
+    const focus = input.focus
+    if (focus !== undefined) {
+      const aFocus = a.workspace_id === focus.workspaceId && a.session_id === focus.sessionId
+      const bFocus = b.workspace_id === focus.workspaceId && b.session_id === focus.sessionId
+      if (aFocus !== bFocus) return aFocus ? -1 : 1
+    }
+    const rank = (STATUS_RANK[a.status] ?? 5) - (STATUS_RANK[b.status] ?? 5)
+    if (rank !== 0) return rank
+    return Date.parse(b.updated_at) - Date.parse(a.updated_at)
+  })
+  const lines = ordered.slice(0, STATUS_MAX_TASKS).map(task => `- ${describeStatusTask(task, now)}`)
+  for (const item of attention.slice(0, 2)) {
+    lines.push(`- needs attention (${flatten(item.kind.replaceAll('_', ' '), 40)}): “${flatten(item.title, 90)}”`)
+  }
+  if (tasks.length > STATUS_MAX_TASKS) lines.push(`- and ${tasks.length - STATUS_MAX_TASKS} more task(s)`)
+  const lost = ordered.filter(task => task.stale).map(task => flatten(task.workspace_label, 60))
+  const prefix = mode === 'wake' ? 'Hub status:' : 'Here is what the Hub shows:'
+  const out = [prefix, ...lines]
+  if (lost.length > 0) out.push(`Note: the Hub has lost contact with ${[...new Set(lost)].join(', ')}, so this may be out of date.`)
+  return clip(out.join('\n'), 1200)
+}
+
+export interface StatusSnapshotSources {
+  readonly workspaces: Pick<HubWorkspaceView, 'list' | 'projection'>
+  /** Whether this requester may read the target (the turn's own shared scope). */
+  readonly canRead: (target: { readonly workspaceId: string; readonly sessionId?: string }) => boolean
+  /** The model-free watcher of a task, when the Hub watches it. */
+  readonly watched?: (workspaceId: string, sessionId: string) => StatusWatchFacts | undefined
+  /** Open items from the attention queue. */
+  readonly attention?: () => readonly { readonly kind: string; readonly title: string; readonly workspaceId: string; readonly sessionId: string; readonly state?: string }[]
+}
+
+/** Read the observable state once. Only workspaces and tasks this reader may see are included. */
+export function readStatusSnapshot(sources: StatusSnapshotSources): StatusSnapshot {
+  const tasks: StatusTaskFacts[] = []
+  for (const workspace of sources.workspaces.list()) {
+    const projection = sources.workspaces.projection(workspace.id)
+    if (projection === undefined) continue
+    for (const row of Object.values(projection.sessions)) {
+      if (!sources.canRead({ workspaceId: workspace.id, sessionId: row.id })) continue
+      const watched = sources.watched?.(workspace.id, row.id)
+      tasks.push({
+        workspace_id: workspace.id,
+        session_id: row.id,
+        workspace_label: workspace.label,
+        title: row.title,
+        status: row.status,
+        agents_total: row.agent_counts.total,
+        agents_active: row.agent_counts.active,
+        pending_human_count: row.pending_interaction_count,
+        goal_objective: row.goal_summary,
+        updated_at: row.updated_at === '' ? row.source_timestamp : row.updated_at,
+        stale: row.stale,
+        ...(watched === undefined ? {} : { watched }),
+      })
+    }
+  }
+  const attention = (sources.attention?.() ?? []).flatMap(item =>
+    item.state === 'resolved' || !sources.canRead({ workspaceId: item.workspaceId, sessionId: item.sessionId })
+      ? []
+      : [{ kind: item.kind, title: item.title }])
+  return { tasks, attention }
+}

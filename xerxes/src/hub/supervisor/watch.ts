@@ -1321,6 +1321,8 @@ export class WatchService {
     const trigger: SupervisorTurnTrigger = {
       kind: 'watch',
       target: { workspaceId, sessionId: taskId },
+      // A periodic review is a scheduled check-in: its update always carries the facts.
+      ...(reason === 'review' ? { scheduled: true } : {}),
       // Built when the turn starts: the steps are taken (and the look recorded) only then.
       text: () => {
         taken = task.takeSteps()

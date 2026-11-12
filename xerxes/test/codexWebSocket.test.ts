@@ -13,6 +13,7 @@ import {
   closeCodexWebSocketSessions,
   codexContinuationFor,
   codexWebSocketFallbackActive,
+  codexWebSocketFallbackNote,
   compressRequestBodyZstd,
   continuationFromResponse,
   getCodexWebSocketDebugStats,
@@ -471,6 +472,20 @@ test('the SSE fallback flag is sticky per session until cleared', () => {
   recordCodexWebSocketFallback('sess-y')
   clearCodexWebSocketFallback()
   expect(codexWebSocketFallbackActive('sess-y')).toBe(false)
+})
+
+// ── Fallback diagnostics ────────────────────────────────────────────────
+
+test('the discarded WebSocket failure is described without leaking request data', () => {
+  expect(codexWebSocketFallbackNote(new CodexWsApiError('websocket_closed', 'connection closed before it opened', 1006)))
+    .toBe('websocket_closed (close 1006)')
+  expect(codexWebSocketFallbackNote(new CodexWsApiError('connect_timeout', 'no open frame within 15000ms')))
+    .toBe('connect_timeout')
+  // A generic error contributes its type only: messages can quote headers or payload text.
+  expect(codexWebSocketFallbackNote(new TypeError('Authorization: Bearer secret-value')))
+    .toBe('TypeError')
+  expect(codexWebSocketFallbackNote('not an error')).toBe('error')
+  expect(codexWebSocketFallbackNote(new CodexWsApiError('x'.repeat(400), 'long'))).toHaveLength(120)
 })
 
 // ── Delta continuation ──────────────────────────────────────────────────

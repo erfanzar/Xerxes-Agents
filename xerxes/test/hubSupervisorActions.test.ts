@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
 import { HubProtocolError } from '../src/hub/protocol.js'
-import { ActionService, UNKNOWN_OUTCOME_MESSAGE, actionToWire } from '../src/hub/supervisor/actions.js'
+import { ActionService, actionToWire } from '../src/hub/supervisor/actions.js'
 import { TURN_METADATA_KEY } from '../src/hub/supervisor/tools.js'
 import { disposeAll } from './hubHarness.js'
 import { makeWorld, steerArgs, toolCall } from './hubSupervisorHarness.js'
@@ -139,7 +139,12 @@ describe('supervisor confirmed actions', () => {
     const card = await world.propose('task.steer', steerArgs())
     const done = await world.confirm('alice', card.id)
     expect(done.state).toBe('unknown')
-    expect(actionToWire(done)).toMatchObject({ state: 'failed', message: UNKNOWN_OUTCOME_MESSAGE })
+    // The honest uncertainty is kept, followed by exactly what the Hub read back.
+    const wire = actionToWire(done)
+    expect(wire.state).toBe('failed')
+    expect(String(wire.message)).toStartWith('Could not confirm whether this was applied.')
+    expect(String(wire.message)).toContain('XERXES checked')
+    expect(String(wire.message)).toContain('XERXES will not retry it')
     expect((await world.confirm('alice', card.id)).state).toBe('unknown')
     expect(world.calls).toHaveLength(1)
   })

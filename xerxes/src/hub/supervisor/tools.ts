@@ -471,7 +471,7 @@ export function createSupervisorToolRegistry(deps: SupervisorToolDeps): ToolRegi
           ...(action.errorMessage === undefined ? {} : { message: action.errorMessage }),
           note: state === 'accepted' ? 'Done by Autopilot. The owner was told.'
             : state === 'rejected' ? 'Not done. The owner was told. Do not retry blindly.'
-            : 'The outcome is unknown. Do not retry it; the owner was told.',
+            : 'The outcome is unknown. XERXES checked the current state instead of retrying it (see outcome.verification); the owner was told.',
         }
       }
       return {

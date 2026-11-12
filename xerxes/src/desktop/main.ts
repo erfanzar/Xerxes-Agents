@@ -663,6 +663,18 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     try {
       let next = await openRemote(machine, controller.signal, (error) => {
         remoteError = error.message
+      }, undefined, {
+        confirmHostKey: async (target, prompt, signal) => {
+          if (window.isDestroyed() || contents.isDestroyed() || signal.aborted) return false
+          const result = await dialog.showMessageBox(window, {
+            type: 'warning', title: 'Verify SSH server',
+            message: `Trust the SSH host key for ${target}?`,
+            detail: `${prompt}\n\nCompare this fingerprint with one from the server administrator or another trusted connection. Trusting it saves the key in your SSH known_hosts file. A changed key is never accepted here.`,
+            buttons: ['Cancel', 'Trust and connect'], defaultId: 0, cancelId: 0,
+            noLink: true, signal,
+          })
+          return result.response === 1 && !signal.aborted && !window.isDestroyed() && !contents.isDestroyed()
+        },
       })
       const localProviders = new DaemonRpc({projectDir:homedir()})
       let forwarding: DesktopProviderForwarding

@@ -20,10 +20,11 @@ import { SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID, SupervisorAudit, supe
 import {
   AutopilotActionBudget, AutopilotSettings, AutopilotWaker, autopilotOwnerPrincipal, displayOption, scanPendingInteractions, type PendingInteractions,
 } from './autopilot.js'
-import { DigestService, type DigestEventSource } from './digests.js'
+import { DigestService, readStatusSnapshot, type DigestEventSource, type StatusSnapshot } from './digests.js'
 import { createSupervisorHandlers, type SupervisorHandlers } from './handlers.js'
 import {
   DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW, SupervisorRunner, createModelDigestSummarizer, type SupervisorModelPort, type SupervisorQuotas,
+  type SupervisorStatusInput,
 } from './runner.js'
 import { createSupervisorToolRegistry, type SupervisorToolDeps } from './tools.js'
 import { SuperagentAbilities } from './abilities/service.js'
@@ -272,6 +273,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     online: id => workspaces.health(id)?.state === 'online',
     label: id => workspaces.list().find(workspace => workspace.id === id)?.label,
     title: (workspaceId, sessionId) => workspaces.projection(workspaceId)?.sessions[sessionId]?.title,
+    status: (workspaceId, sessionId) => workspaces.projection(workspaceId)?.sessions[sessionId]?.status,
   }
 
   const actions = new ActionService({
@@ -480,6 +482,8 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     model: controlledModel,
     beforeTurn: async input => { control.assertActive(); if (input.trigger !== undefined) await control.reserve('wake', `wake-${randomUUID()}`); control.assertActive() },
     persona: options.persona ?? loadSupervisorPersona(),
+    // An empty model reply becomes the Hub's own account of what it can observe, never filler.
+    status: { read: input => readSupervisorStatus(input) },
     notebookContext: (threadId, requester) => {
       const thread = threads.access(threadId, requester)
       return abilities.context(requester.id, threadId, workspaces.list().map(workspace => workspace.id), threads.scopeReader(thread, requester))
@@ -567,6 +571,35 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
     ...(options.watch?.anomalyCooldownMs === undefined ? {} : { anomalyCooldownMs: options.watch.anomalyCooldownMs }),
     onError: report,
   })
+
+  /**
+   * The observable state a status digest reports, limited to what this person may read: the
+   * projections, the model-free watcher of each watched task, and the open attention items.
+   * It only reads; it never sends anything.
+   */
+  function readSupervisorStatus(input: SupervisorStatusInput): StatusSnapshot {
+    const thread = threads.get(input.threadId)
+    if (!thread) throw new Error('this thread no longer exists')
+    const reader = threads.scopeReader(thread, input.requester)
+    return readStatusSnapshot({
+      workspaces,
+      canRead: target => reader.canRead(target),
+      watched: (workspaceId, sessionId) => {
+        const task = watch.watcher(workspaceId, sessionId)
+        if (task === undefined) return undefined
+        return {
+          tool_calls: task.toolCalls,
+          edits: task.edits,
+          tests: { runs: task.tests.runs, passed: task.tests.passed, failed: task.tests.failed, last: task.tests.last },
+          last_activity_at: task.lastActivityAt,
+          anomalies: task.anomalies().map(item => item.kind),
+        }
+      },
+      attention: () => attention.list().map(item => ({
+        kind: item.kind, title: item.title, workspaceId: item.workspaceId, sessionId: item.sessionId, state: item.state,
+      })),
+    })
+  }
 
   const subscriptionEvents = new SubscriptionEvents()
   const offEvents = options.events?.onEvents?.(events => {

@@ -87,6 +87,20 @@ export class CodexWsApiError extends ProviderError {
   }
 }
 
+/**
+ * One bounded phrase describing why a WebSocket attempt was abandoned. The
+ * HTTP fallback otherwise discards the more specific transport failure, which
+ * left an intermittent Codex 400 unattributable. Error messages are never
+ * included: they can quote request headers or payload text.
+ */
+export function codexWebSocketFallbackNote(error: unknown): string {
+  const detail = error instanceof CodexWsApiError
+    ? `${error.code}${error.closeCode === undefined ? '' : ` (close ${error.closeCode})`}`
+    : error instanceof Error ? error.name || 'error' : 'error'
+  const printable = detail.replace(/[^\x20-\x7e]/g, '').trim().slice(0, 120)
+  return printable === '' ? 'error' : printable
+}
+
 /** The stream violated the framing contract (unparseable JSON, wrong shape). */
 export class CodexWsProtocolError extends ProviderError {
   constructor(message: string) {

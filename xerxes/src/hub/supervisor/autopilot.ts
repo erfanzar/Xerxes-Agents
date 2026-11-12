@@ -494,6 +494,8 @@ export interface AutopilotTrigger {
   readonly text: string
   /** The one task this wake is about. Only actions on it may run without a Confirm tap. */
   readonly target: { readonly workspaceId: string; readonly sessionId: string }
+  /** A periodic check-in: its posted update always carries the Hub's own progress facts. */
+  readonly scheduled?: boolean
 }
 
 export interface AutopilotPush {
@@ -792,6 +794,9 @@ export class AutopilotWaker {
     const trigger: AutopilotTrigger = {
       kind: 'autopilot',
       target: { workspaceId, sessionId },
+      // A periodic check-in is where the owner expects to see motion, so its update
+      // always carries the Hub's own progress facts.
+      ...(reason === 'check_in' ? { scheduled: true } : {}),
       text: autopilotTriggerText({
         reason, workspaceId, label: this.label(workspaceId), sessionId, title: rawTitle, ownerName: owner.displayName,
         instruction: active.instruction, ...(options.otherTasks === undefined ? {} : { otherTasks: options.otherTasks }),

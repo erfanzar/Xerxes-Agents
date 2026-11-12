@@ -61,6 +61,34 @@ export const UNKNOWN_OUTCOME_MESSAGE = 'Could not confirm whether this was appli
 export const DEFAULT_ACTION_EXPIRY_MS = 10 * 60 * 1000
 const SELF_NAMES: ReadonlySet<string> = new Set(['xerxes-supervisor', 'supervisor', 'xerxes'])
 
+/**
+ * What the Hub read back after a mutation it could not confirm. It is an
+ * observation of current state, never a second attempt: nothing in this module
+ * re-sends a command whose outcome is unknown.
+ */
+export interface ActionVerification {
+  /** What was read, in one short noun phrase. */
+  readonly checked: string
+  /** What it showed, in one short clause. */
+  readonly observed: string
+  /** Whether the task's revision moved since the card was proposed. `null`: no comparison was possible. */
+  readonly changed_since_proposed: boolean | null
+  readonly conclusion: 'looks_applied' | 'looks_not_applied' | 'undetermined'
+}
+
+const CONCLUSION_TEXT: Readonly<Record<ActionVerification['conclusion'], string>> = {
+  looks_applied: 'That matches what was asked, so it was most likely applied.',
+  looks_not_applied: 'That does not show it was applied.',
+  undetermined: 'That does not prove whether it was applied.',
+}
+
+/** The honest uncertainty, followed by exactly what the Hub checked. */
+export function unknownOutcomeMessage(verification: ActionVerification | undefined, reported?: string): string {
+  if (verification === undefined) return UNKNOWN_OUTCOME_MESSAGE
+  const cause = reported === undefined || reported.trim() === '' ? '' : ` What the dispatch reported: ${clip(reported, 200)}.`
+  return `Could not confirm whether this was applied. XERXES checked ${verification.checked}: ${verification.observed}. ${CONCLUSION_TEXT[verification.conclusion]} Check the task before trying again. XERXES will not retry it.${cause}`
+}
+
 /** An access refusal for the supervisor (as opposed to bad arguments). The runner stops the turn on it. */
 export class SupervisorDenied extends Error {
   constructor(message: string) {
@@ -135,6 +163,8 @@ export interface ActionTargets {
   online(workspaceId: string): boolean
   label(workspaceId: string): string | undefined
   title(workspaceId: string, sessionId: string): string | undefined
+  /** The task's current status word, used only to read back an unconfirmed mutation. */
+  status?(workspaceId: string, sessionId: string): string | undefined
 }
 
 export type ActionExecutor = (context: AuthenticatedContext, params: Record<string, unknown>) => Promise<HubCommandResult>
@@ -267,7 +297,10 @@ export function actionToWire(action: ActionRecord): Record<string, unknown> {
   const state = action.state === 'accepted' ? 'confirmed'
     : action.state === 'rejected' || action.state === 'unknown' ? 'failed'
     : action.state
-  const message = action.state === 'unknown' ? UNKNOWN_OUTCOME_MESSAGE : action.state === 'rejected' ? action.errorMessage : undefined
+  const message = action.state === 'unknown'
+    // An unconfirmed outcome keeps its honest uncertainty AND what the Hub read back.
+    ? action.errorMessage ?? UNKNOWN_OUTCOME_MESSAGE
+    : action.state === 'rejected' ? action.errorMessage : undefined
   return {
     id: action.id,
     confirmation_id: action.id,
@@ -744,10 +777,11 @@ export class ActionService {
     const outcome = action.state === 'accepted' ? 'accepted' : action.state === 'rejected' ? 'rejected' : 'unknown'
     await this.audit.recordBestEffort(this.auditEntry(action, 'outcome', 'allowed', outcome, human.id))
     if (this.disposed) return action
+    const unknown = action.errorMessage ?? UNKNOWN_OUTCOME_MESSAGE
     if (action.auto) {
       const notice = action.state === 'accepted' ? `Autopilot did: ${action.summary} (on behalf of ${human.displayName})`
         : action.state === 'rejected' ? `Autopilot needs you: this was not done: ${action.summary} ${action.errorMessage ?? ''}`.trim()
-        : `Autopilot needs you: the outcome is unknown: ${action.summary} Check the task; XERXES will not retry it.`
+        : `Autopilot needs you: the outcome is unknown: ${action.summary} ${unknown}`
       this.announce(action)
       // Only readers of the target see what Autopilot did.
       this.autopilotNote(action, human.id, notice)
@@ -756,7 +790,7 @@ export class ActionService {
     }
     const notice = action.state === 'accepted' ? `Done: ${action.summary} (confirmed by ${human.displayName}).`
       : action.state === 'rejected' ? `Not done: ${action.summary} ${action.errorMessage ?? ''}`.trim()
-      : `Outcome unknown: ${action.summary} Check the task before trying again; XERXES will not retry it.`
+      : `Outcome unknown: ${action.summary} ${unknown}`
     this.announce(action, notice)
     return action
   }
@@ -789,6 +823,51 @@ export class ActionService {
   }
 
   // ── dispatch ───────────────────────────────────────────────────────
+
+  /**
+   * Read back a mutation whose outcome is unknown. It reads the projections only
+   * (never re-sends anything): a steer or a message leaves no proof behind, and
+   * that is reported as such instead of being guessed.
+   */
+  private verifyOutcome(action: ActionRecord, sessionId: string | undefined): ActionVerification {
+    const { targets } = this.options
+    if (sessionId === undefined) {
+      return {
+        checked: 'the workspace',
+        observed: 'there is no task id to look up, so a new task cannot be matched',
+        changed_since_proposed: null,
+        conclusion: 'undetermined',
+      }
+    }
+    const title = targets.title(action.workspaceId, sessionId)
+    const label = targets.label(action.workspaceId)
+    const named = title === undefined
+      ? 'the task'
+      : `“${clip(title, 60)}”${label === undefined ? '' : ` in ${clip(label, 40)}`}`
+    const revision = targets.revision(action.workspaceId, sessionId)
+    if (revision === undefined) {
+      return { checked: named, observed: 'it is no longer in the workspace', changed_since_proposed: null, conclusion: 'undetermined' }
+    }
+    const changed = action.targetRevision === undefined ? null : revision !== action.targetRevision
+    const status = targets.status?.(action.workspaceId, sessionId)
+    const observed = status === undefined ? 'the Hub has no status for it' : `it now shows ${clip(status, 40)}`
+    let conclusion: ActionVerification['conclusion'] = 'undetermined'
+    if (action.tool === 'task.start') {
+      // A submitted turn moves the task into `working`; that is the only trace it leaves.
+      if (status === 'working' && changed === true) conclusion = 'looks_applied'
+      else if (status !== undefined && status !== 'working' && changed === false) conclusion = 'looks_not_applied'
+    } else if (action.tool === 'task.stop') {
+      if (changed === true && status !== undefined && status !== 'working' && status !== 'needs_you') conclusion = 'looks_applied'
+      else if (changed === false && status === 'idle') conclusion = 'looks_not_applied'
+    } else if (action.tool === 'goal.set') {
+      const expected = action.args.expected_revision
+      const hasGoal = targets.hasGoal(action.workspaceId, sessionId)
+      if (typeof expected === 'number' && hasGoal !== undefined) {
+        conclusion = hasGoal !== (expected === 0) ? 'looks_applied' : 'looks_not_applied'
+      }
+    }
+    return { checked: named, observed, changed_since_proposed: changed, conclusion }
+  }
 
   private async dispatch(action: ActionRecord, confirmer: UserPrincipal, signal?: AbortSignal): Promise<DispatchOutcome> {
     if (action.tool === 'risk.execute') {
@@ -845,9 +924,17 @@ export class ActionService {
         return { state: 'unknown', error: { code: 'internal', message: 'The dispatch failed after it may have been sent.' } }
       }
     }
-    const done = (result: StepResult, detail: Record<string, unknown>): DispatchOutcome => ({
-      state: result.state, detail, ...(result.error === undefined ? {} : { error: result.error }),
-    })
+    const done = (result: StepResult, detail: Record<string, unknown>): DispatchOutcome => {
+      if (result.state !== 'unknown') return { state: result.state, detail, ...(result.error === undefined ? {} : { error: result.error }) }
+      // Unconfirmed: read the current state once. This is a query, never a retry.
+      const sessionId = typeof detail.session_id === 'string' ? detail.session_id : action.sessionId
+      const verification = this.verifyOutcome(action, sessionId)
+      return {
+        state: 'unknown',
+        detail: { ...detail, verification },
+        error: { code: result.error?.code ?? 'unavailable', message: unknownOutcomeMessage(verification, result.error?.message) },
+      }
+    }
     const args = action.args
     const text = stringArg(args, 'text') ?? ''
 
@@ -861,7 +948,7 @@ export class ActionService {
           if (open.state !== 'accepted') return done(open, { step: 'open' })
           const created = open.result?.session_id
           if (typeof created !== 'string' || created === '') {
-            return { state: 'unknown', detail: { step: 'open' }, error: { code: 'internal', message: 'The new task id was not reported.' } }
+            return done({ state: 'unknown', error: { code: 'internal', message: 'The new task id was not reported.' } }, { step: 'open' })
           }
           sessionId = created
           opened = true

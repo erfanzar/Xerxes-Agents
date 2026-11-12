@@ -144,6 +144,37 @@ test.skipIf(process.platform === 'win32')('openRemote bootstraps only after a de
   })).rejects.toThrow('valid status')
   expect(calls).toBe(1)
 })
+test.skipIf(process.platform === 'win32')('openRemote asks for host trust before probing, even when plain SSH could reuse a master', async () => {
+  let confirmed = false
+  const calls: string[][] = []
+  const connection = await openRemote(machine, signal(), () => {}, undefined, {
+    confirmHostKey: async (target, prompt) => {
+      expect(target).toBe(machine.target)
+      expect(prompt).toContain('SHA256:')
+      confirmed = true
+      return true
+    },
+    run: async (_binary, args, requestSignal, timeout, env) => {
+      calls.push(args)
+      if (env?.SSH_ASKPASS) {
+        const answer = await runCaptured(env.SSH_ASKPASS, ["The authenticity of host 'worker' can't be established.\nED25519 key fingerprint is SHA256:test.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?"], requestSignal, timeout, env)
+        expect(answer.trim()).toBe('yes')
+        return ''
+      }
+      return attached
+    },
+    spawnTunnel: localTunnel, providerSetup: false,
+  })
+  try {
+    expect(confirmed).toBe(true)
+    expect(calls[0]).toContain('StrictHostKeyChecking=ask')
+    expect(calls[0]).toContain('ControlMaster=no')
+    expect(calls[0]).toContain('none')
+    expect(calls[1]).toContain('StrictHostKeyChecking=yes')
+    expect(calls[1]).toContain('ControlMaster=no')
+  } finally { await connection.close() }
+})
+
 test.skipIf(process.platform === 'win32')('openRemote installs missing provider CLIs by default', async () => {
   const commands: string[][] = []
   let probes = 0, setupError = ''

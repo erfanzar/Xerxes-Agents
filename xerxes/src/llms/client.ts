@@ -35,6 +35,7 @@ import {
   buildCachedWebSocketRequestBody,
   codexContinuationFor,
   codexWebSocketFallbackActive,
+  codexWebSocketFallbackNote,
   CODEX_SSE_COMPRESSION_HEADER,
   compressRequestBodyZstd,
   continuationFromResponse,
@@ -801,6 +802,9 @@ export class ResponsesApiClient implements LlmClient {
       && !(sessionId !== undefined && codexWebSocketFallbackActive(sessionId))
     let retriedConnectionLimit = false
     let retriedMissingPrevious = false
+    // Kept for the HTTP fallback: a 400 from SSE is otherwise unattributable,
+    // and the WebSocket failure that forced the downgrade is the usual suspect.
+    let wsFallbackNote: string | undefined
     while (wsAllowed) {
       let emitted = false
       try {
@@ -841,10 +845,11 @@ export class ResponsesApiClient implements LlmClient {
           continue
         }
         if (sessionId) recordCodexWebSocketFallback(sessionId)
+        wsFallbackNote = codexWebSocketFallbackNote(error)
         break
       }
     }
-    yield* this.streamCodexSse(request, signal)
+    yield* this.streamCodexSse(request, signal, wsFallbackNote)
   }
 
   /** WebSocket transport: one uncompressed `response.create` frame per request. */
@@ -912,7 +917,7 @@ export class ResponsesApiClient implements LlmClient {
   }
 
   /** SSE fallback with pi-ai's zstd request compression for the Codex backend. */
-  private async *streamCodexSse(request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+  private async *streamCodexSse(request: CompletionRequest, signal?: AbortSignal, wsFallbackNote?: string): AsyncGenerator<LlmDelta> {
     const endpoint = new URL('responses', withTrailingSlash(this.baseUrl)).toString()
     const rawBody = JSON.stringify(responsesPayload(request, this.providerName, true))
     const compressed = compressRequestBodyZstd(rawBody)
@@ -928,7 +933,8 @@ export class ResponsesApiClient implements LlmClient {
       const body = await response.text()
       throw openAiHttpError(
         this.providerName,
-        'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body),
+        'Responses API stream request failed (' + response.status + '): ' + httpErrorBody(body)
+          + (wsFallbackNote === undefined ? '' : ` [websocket first attempt: ${wsFallbackNote}]`),
         response,
         this.ambientKeyHint,
         request.model,
@@ -1209,6 +1215,18 @@ export function createLlmClient(
   }
   // Dedicated transports: intercepted before responses_api/multi-api routing
   // because their native APIs do not offer those surfaces.
+  // A profile that declares an OpenAI-compatible wire but points at Google's
+  // own Generative Language host must not reach the compatibility shim: Google
+  // serves these model ids on the native API and answers the shim with
+  // `404 model_not_found`. The endpoint is authoritative, not the label.
+  const googleGenerativeRoot = googleGenerativeBaseUrl(configuredBaseUrl)
+  if (googleGenerativeRoot !== undefined && providerName !== 'google-vertex') {
+    return new GeminiClient({
+      apiKey: configuredApiKey || (options.isolatedAuth ? '' : getApiKey('gemini', overrides, process.env, googleGenerativeRoot)),
+      baseUrl: googleGenerativeRoot,
+      ...(options.fetchImplementation ? { fetchImplementation: options.fetchImplementation } : {}),
+    })
+  }
   if (providerName === 'gemini') {
     return new GeminiClient({
       // Resolve here and pass even an empty key: named accounts must never
@@ -1295,6 +1313,23 @@ export function createLlmClient(
     ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
     ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
   })
+}
+
+/**
+ * The native Generative Language root when this endpoint is Google's own host,
+ * whatever the declared wire is. A provider label such as `openai` is a claim
+ * about the request shape, not evidence about which API serves the model.
+ */
+function googleGenerativeBaseUrl(configuredBaseUrl: string | undefined): string | undefined {
+  if (configuredBaseUrl === undefined) return undefined
+  let url: URL
+  try {
+    url = new URL(configuredBaseUrl)
+  } catch {
+    return undefined
+  }
+  if (url.hostname !== 'generativelanguage.googleapis.com') return undefined
+  return nativeGeminiBaseUrl(configuredBaseUrl)
 }
 
 /**

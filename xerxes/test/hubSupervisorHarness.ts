@@ -10,7 +10,7 @@ import type { PoolCallResult, PoolHealth } from '../src/hub/runtimePool.js'
 import { ActionService, SupervisorGrantOverlay, type ActionExecutor, type ActionRecord, type ActionTargets, type ActionTool } from '../src/hub/supervisor/actions.js'
 import { DigestService } from '../src/hub/supervisor/digests.js'
 import {
-  SupervisorRunner, type SupervisorModelPort, type SupervisorModelRequest, type SupervisorModelResponse, type SupervisorQuotas,
+  SupervisorRunner, type SupervisorModelPort, type SupervisorModelRequest, type SupervisorModelResponse, type SupervisorQuotas, type SupervisorStatusPort,
 } from '../src/hub/supervisor/runner.js'
 import { createSupervisorToolRegistry } from '../src/hub/supervisor/tools.js'
 import { SupervisorThreads, type SupervisorEventType, type UserPrincipal } from '../src/hub/supervisor/threads.js'
@@ -87,6 +87,7 @@ export function makeWorld(options: { modelSetSessionOnly?: boolean; expiryMs?: n
     online: () => state.online,
     label: id => (id === 'w1' ? 'One' : undefined),
     title: (_workspaceId, sessionId) => state.projection.sessions[sessionId]?.title,
+    status: (workspaceId, sessionId) => (workspaceId === 'w1' ? state.projection.sessions[sessionId]?.status : undefined),
   }
 
   const overlay = new SupervisorGrantOverlay()
@@ -144,7 +145,7 @@ export function makeWorld(options: { modelSetSessionOnly?: boolean; expiryMs?: n
 }
 export type World = ReturnType<typeof makeWorld>
 
-export function makeRunner(world: World, model: SupervisorModelPort, options: { quotas?: Partial<SupervisorQuotas>; onStopped?: (info: unknown) => void } = {}) {
+export function makeRunner(world: World, model: SupervisorModelPort, options: { quotas?: Partial<SupervisorQuotas>; onStopped?: (info: unknown) => void; status?: SupervisorStatusPort } = {}) {
   return new SupervisorRunner({
     threads: world.threads,
     registry: world.registry,
@@ -154,6 +155,7 @@ export function makeRunner(world: World, model: SupervisorModelPort, options: { 
     clock: world.clock,
     ...(options.quotas === undefined ? {} : { quotas: options.quotas }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
+    ...(options.status === undefined ? {} : { status: options.status }),
   })
 }
 

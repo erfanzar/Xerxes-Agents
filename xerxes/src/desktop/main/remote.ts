@@ -12,6 +12,7 @@ import { remoteResumeProgram } from './remoteResume.js'
 import { remoteAttachAddress, remoteAttachProgram } from './remoteAttach.js'
 import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
 import { ensureRemoteProviderClis } from './remoteProviderSetup.js'
+import { freshSshOptions, verifyRemoteHost, type ConfirmRemoteHostKey } from './remoteHostTrust.js'
 
 export interface RemoteTarget {
   alias: string
@@ -66,10 +67,11 @@ export function runCaptured(
   args: string[],
   signal: AbortSignal,
   timeout: number,
+  env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((accept, reject) => {
     signal.throwIfAborted()
-    const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) })
     let output = '',
       errors = '',
       settled = false
@@ -118,6 +120,7 @@ export interface RemoteConnection {
   close(): Promise<void>
 }
 export const sshOptions = [
+  ...freshSshOptions,
   '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15',
   '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
   '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no',
@@ -138,6 +141,8 @@ export function probeRemote(machine: RemoteTarget, program: string, signal: Abor
 export interface RemoteOpenPorts {
   run?: RemoteRunner
   spawnTunnel?: (args: string[]) => ChildProcess
+  /** Only a human-facing host dialog may approve an unknown host key. */
+  confirmHostKey?: ConfirmRemoteHostKey
   /** Default true: detect and install claude/codex before opening the workspace. */
   providerSetup?: boolean
   onProviderSetupError?: (error: Error) => void
@@ -154,6 +159,7 @@ export async function openRemote(
   const destination = sshDestination(machine.target)
   const ssh = sshOptions
   const run = ports.run ?? runCaptured
+  if (ports.confirmHostKey) await verifyRemoteHost(destination, signal, ports.confirmHostKey, run, ssh)
   let address: ReturnType<typeof remoteAddress> | undefined
   if (previousAddress) {
     const probe = await probeRemote(machine, remoteResumeProgram(previousAddress.socketPath), signal, run)
@@ -208,12 +214,6 @@ export async function openRemote(
     signal.throwIfAborted()
     tunnel = (ports.spawnTunnel ?? (args => spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })))([
         ...ssh,
-        '-S',
-        'none',
-        '-o',
-        'ControlMaster=no',
-        '-o',
-        'ForkAfterAuthentication=no',
         '-N',
         '-T',
         '-o',

@@ -228,8 +228,10 @@ export class GeminiClient implements LlmClient {
     }
 
     let response: Response
+    let completionEndpoint = ''
     try {
-      response = await this.fetchImplementation(geminiCompletionEndpoint(this.baseUrl, request.model), {
+      completionEndpoint = geminiCompletionEndpoint(this.baseUrl, request.model).toString()
+      response = await this.fetchImplementation(completionEndpoint, {
         method: 'POST',
         headers: {
           Accept: 'application/json',
@@ -253,7 +255,8 @@ export class GeminiClient implements LlmClient {
       const body = await response.text()
       const status = response.statusText ? ` ${response.statusText}` : ''
       throw geminiHttpError(
-        `completion request failed (${response.status}${status}): ${body.slice(0, 4_096)}`,
+        `completion request failed (${response.status}${status}): ${body.slice(0, 4_096)}`
+          + geminiModelHint(response.status, request.model, completionEndpoint),
         response,
       )
     }
@@ -316,7 +319,8 @@ export class GeminiClient implements LlmClient {
       const body = await response.text()
       const status = response.statusText ? ` ${response.statusText}` : ''
       throw geminiHttpError(
-        `stream request failed (${response.status}${status}): ${body.slice(0, 4_096)}`,
+        `stream request failed (${response.status}${status}): ${body.slice(0, 4_096)}`
+          + geminiModelHint(response.status, request.model, endpoint.toString()),
         response,
       )
     }
@@ -623,6 +627,16 @@ export function nativeGeminiBaseUrl(value: string): string {
   if (url.hostname !== 'generativelanguage.googleapis.com') return value
   url.pathname = url.pathname.replace(/\/openai(\/models)?\/?$/, '$1')
   return url.toString()
+}
+
+/**
+ * A 404 from the native API means this API version does not serve the model.
+ * Name the model and the exact endpoint so the failure is actionable instead
+ * of a bare provider message, and never echo the key.
+ */
+function geminiModelHint(status: number, model: string, endpoint: string): string {
+  if (status !== 404) return ''
+  return ` (model '${model}' is not served by this API version at ${endpoint}; use a model id this Gemini API root lists)`
 }
 
 function validBaseUrl(value: string): string {

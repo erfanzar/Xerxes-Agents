@@ -5,7 +5,7 @@ import { completeLlm, type LlmClient } from '../../llms/client.js'
 import type { ToolRegistry } from '../../executors/toolRegistry.js'
 import type { ChatMessage } from '../../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../../types/toolCalls.js'
-import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, type DigestSummarizer, type DigestSummaryInput } from './digests.js'
+import { DIGEST_SYSTEM_PROMPT, fenceUntrusted, formatSupervisorStatus, type DigestSummarizer, type DigestSummaryInput, type StatusSnapshot } from './digests.js'
 import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
 import { ABILITY_SPECS } from './abilities/catalog.js'
 import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abilities/captureSink.js'
@@ -151,10 +151,32 @@ export interface SupervisorTurnTrigger {
   readonly text: string | (() => string)
   /** The one task this wake is about. Only actions on it may run without a Confirm tap. */
   readonly target?: { readonly workspaceId: string; readonly sessionId: string }
+  /**
+   * A scheduled check-in (an Autopilot check-in or a Watch review). Its posted update
+   * always carries the Hub's own progress facts, whatever the model wrote.
+   */
+  readonly scheduled?: boolean
 }
 
 /** Default spend bound applied when the Hub wires the supervisor: tokens per 24-hour window. */
 export const DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW = 2_000_000
+
+/** What a status read is about: the thread, the person, and the wake that started it. */
+export interface SupervisorStatusInput {
+  readonly threadId: string
+  readonly requester: UserPrincipal
+  readonly trigger?: 'autopilot' | 'watch'
+  readonly target?: { readonly workspaceId: string; readonly sessionId: string }
+}
+
+/**
+ * Observable Hub state for one requester, supplied by the Hub's projections and
+ * its model-free watcher. It throws when the state cannot be read, so the runner
+ * can say which check failed instead of inventing a status.
+ */
+export interface SupervisorStatusPort {
+  read(input: SupervisorStatusInput): StatusSnapshot
+}
 
 export type SupervisorStop = 'completed' | 'tool_cap' | 'denied' | 'quota' | 'timeout' | 'cancelled' | 'model_error' | 'gone'
 
@@ -182,6 +204,12 @@ export interface SupervisorRunnerOptions {
   readonly quotas?: Partial<SupervisorQuotas>
   readonly scopeReader: (threadId: string, requester: UserPrincipal) => SupervisorTurnState['reader']
   readonly notebookContext?: (threadId: string, requester: UserPrincipal) => string
+  /**
+   * Observable Hub state, used when the model returns no text: a wake posts a real
+   * progress digest, a person's turn gets the state or a named failure. Absent, a
+   * direct turn says what it could not read and a wake stays silent.
+   */
+  readonly status?: SupervisorStatusPort
   /** Runs after queue ownership is installed, before any context/model work. */
   readonly beforeTurn?: (input: Parameters<SupervisorRunner['enqueue']>[0]) => Promise<void>
   readonly clock?: () => number
@@ -193,6 +221,7 @@ const CONTEXT_MESSAGES = 40
 const TOOL_RESULT_CHARS = 60_000
 /** Longest narration line streamed as a live step. */
 const STEP_TEXT_CHARS = 400
+const EMPTY_STATUS: StatusSnapshot = { tasks: [], attention: [] }
 
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
@@ -425,11 +454,21 @@ export class SupervisorRunner {
         }
 
         if (response.toolCalls.length === 0) {
-          const text = clip(response.text.trim(), MAX_MESSAGE_CHARS)
+          const said = clip(response.text.trim(), MAX_MESSAGE_CHARS)
+          // An empty model reply is never turned into filler: the Hub reports what it can
+          // observe, or says which check failed. A wake with nothing observable stays silent.
+          // A scheduled check-in always carries the facts: the owner wants to see motion.
+          const wantsFacts = said === '' || input.trigger?.scheduled === true
+          const facts = wantsFacts ? this.statusDigest(threadId, requester, input.trigger) : undefined
+          const text = said === '' ? facts : facts === undefined ? said : `${said}\n\n${facts}`
+          if (text === undefined) return { stop: 'completed', ...counts }
+          // A Hub-authored digest may quote task titles, so it gets the same `wake`
+          // origin as a wake reply: later turns see its text fenced as untrusted.
+          const hubAuthored = said === ''
           const { message } = threads.append({
-            threadId, role: 'xerxes', text: text === '' ? 'I have nothing to add.' : text,
+            threadId, role: 'xerxes', text,
             ...(inReplyTo === undefined ? {} : { causalMessageId: inReplyTo }),
-            ...(input.trigger === undefined ? {} : { origin: 'wake' as const }),
+            ...(input.trigger === undefined && !hubAuthored ? {} : { origin: 'wake' as const }),
           })
           threads.emit(threadId, 'supervisor.thread_event', { message: messageToWire(message) })
           threads.publishReply(threadId, { id: message.id, text: message.text, ...(inReplyTo === undefined ? {} : { inReplyTo }) })
@@ -474,6 +513,41 @@ export class SupervisorRunner {
       // After shutdown the database may already be closed; there is nobody left to tell.
       if (!this.closed) threads.setWorking(threadId, false)
     }
+  }
+
+  /**
+   * The Hub's own account of what it can observe, used when the model returned no
+   * text. A wake with nothing observable returns `undefined`, so no filler is
+   * posted; a person's turn always gets the state or the real failure.
+   */
+  private statusDigest(threadId: string, requester: UserPrincipal, trigger: SupervisorTurnTrigger | undefined): string | undefined {
+    const direct = trigger === undefined
+    const status = this.options.status
+    if (status === undefined) {
+      if (!direct) return undefined
+      return formatSupervisorStatus({
+        snapshot: EMPTY_STATUS, now: this.clock(), mode: 'direct', failure: 'this Hub cannot report its live task state',
+      })
+    }
+    let snapshot: StatusSnapshot
+    try {
+      snapshot = status.read({
+        threadId, requester,
+        ...(trigger === undefined ? {} : { trigger: trigger.kind }),
+        ...(trigger?.target === undefined ? {} : { target: trigger.target }),
+      })
+    } catch (error) {
+      this.options.onError?.(error, 'supervisor status')
+      if (!direct) return undefined
+      return formatSupervisorStatus({
+        snapshot: EMPTY_STATUS, now: this.clock(), mode: 'direct',
+        failure: clip(error instanceof Error ? error.message : String(error), 200),
+      })
+    }
+    return formatSupervisorStatus({
+      snapshot, now: this.clock(), mode: direct ? 'direct' : 'wake',
+      ...(trigger?.target === undefined ? {} : { focus: trigger.target }),
+    })
   }
 
   private aborted(controller: AbortController, threadId: string, requester: UserPrincipal, counts: { toolCalls: number; modelCalls: number }): SupervisorTurnResult {
