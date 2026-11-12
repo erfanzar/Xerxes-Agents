@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.37 — 2026-11-13
+
+- **Google-hosted profiles report their context window.** Model discovery chose its endpoint, credentials and payload shape from the profile's wire label, so a profile pointed at `generativelanguage.googleapis.com` but labelled `openai` authenticated with a bearer token, got 401, and listed every model with no context or output limit. The endpoint now decides, as the completion path already did — all 49 Gemini models report their native limits.
+- **Capabilities no longer depend on a warm catalog.** Profile inventory read the shared model catalog synchronously, so a cold start reported catalog-known models as unknown until another call loaded it. The catalog is loaded first; a failed refresh keeps the previous answer.
+- **A failed account sync now says which step failed.** The "sync was not acknowledged" message replaced the real cause, so a refusal was impossible to act on. It now names a secret-free stage — transfer, receipt, identity or reload — and a receipt is read past harmless login-shell noise instead of being rejected as invalid.
+- **A provider that publishes no limits is reported as unknown, not guessed.** Qwen plan's `/models` returns only id/created/object/owned_by, and the catalog's nine reseller entries disagree on the window, so no limit is invented. Set an explicit per-model override when you know the number.
+
 ## 0.8.36 — 2026-11-13
 
 - **XERXES reports live progress instead of filler.** An empty supervisor reply is never replaced by "I have nothing to add." Scheduled check-ins post the observed facts — task, status, agents, tool calls, edits, tests, last activity and anything waiting — and a wake with nothing observable posts nothing at all. A direct question always gets a substantive answer, or a named reason why the check failed.
