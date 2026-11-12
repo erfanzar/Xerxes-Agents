@@ -3,16 +3,16 @@
 
 /**
  * Local model catalog, model selection by hardware, and the `local` settings
- * parser. Built-in entries carry NO download source: URLs and hashes come only
- * from `local.models.<id>` in the user's config, so nothing here can point at
- * an unverified artifact.
+ * parser. A built-in entry's download source is the one its model card pins:
+ * a Hugging Face file at one commit with its SHA-256, so nothing here points at
+ * an unverified artifact. `local.models.<id>` in the user's config replaces it.
  */
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
-import { localModelCards, type LmStudioBuild } from '../llms/modelCards.js'
+import { huggingFaceUrl, localModelCards, type LmStudioBuild, type MlxBuild } from '../llms/modelCards.js'
 import type { HardwareProfile } from './hardware.js'
 
 export const GIB = 1024 ** 3
@@ -40,12 +40,17 @@ export interface CatalogEntry {
   /** The model's own context window; local.ctx_size may not exceed it. */
   readonly nativeContext?: number
   readonly source?: ModelSource
+  /** The oldest stock llama.cpp that runs the GGUF build. */
+  readonly minLlamaCpp?: { readonly build: number; readonly version: string }
+  /** The MLX build mlx_lm.server runs, when there is one. */
+  readonly mlx?: MlxBuild
   /** How LM Studio knows this model, when it has a build LM Studio can run. */
   readonly lmstudio?: LmStudioBuild
 }
 
-export type LocalEngineName = 'llama-server' | 'lmstudio'
-export const LOCAL_ENGINES: readonly LocalEngineName[] = ['llama-server', 'lmstudio']
+/** In the order `xerxes local` tries them when no engine is chosen. */
+export type LocalEngineName = 'llama-server' | 'mlx' | 'lmstudio'
+export const LOCAL_ENGINES: readonly LocalEngineName[] = ['llama-server', 'mlx', 'lmstudio']
 
 export type Catalog = readonly CatalogEntry[]
 
@@ -61,14 +66,25 @@ export const BUILTIN_MODELS: Catalog = localModelCards()
     minMemoryBytes: card.llamaServer.minMemoryBytes,
     ctxSize: card.llamaServer.ctxSize,
     ...(card.nativeContext === undefined ? {} : { nativeContext: card.nativeContext }),
+    ...(card.llamaServer.published === undefined ? {} : {
+      source: {
+        url: huggingFaceUrl(card.llamaServer.published, card.llamaServer.fileName),
+        sha256: card.llamaServer.published.sha256,
+        bytes: card.llamaServer.published.bytes,
+      },
+    }),
+    ...(card.llamaServer.minLlamaCpp === undefined ? {} : { minLlamaCpp: card.llamaServer.minLlamaCpp }),
+    ...(card.mlx === undefined ? {} : { mlx: card.mlx }),
     ...(card.lmstudio === undefined ? {} : { lmstudio: card.lmstudio }),
   }])
   .sort((a, b) => a.minMemoryBytes - b.minMemoryBytes)
 
 export interface LocalConfig {
-  /** local.engine / XERXES_LOCAL_ENGINE; undefined when unset (setup and start then use llama-server). */
+  /** local.engine / XERXES_LOCAL_ENGINE; undefined when unset (setup and start then use the first installed engine of llama-server, mlx and lmstudio). */
   readonly engine?: LocalEngineName
   readonly llamaServerPath?: string
+  /** mlx-lm's `mlx_lm.server` (local.mlx_server_path / XERXES_LOCAL_MLX_SERVER). */
+  readonly mlxServerPath?: string
   /** LM Studio's `lms` CLI (local.lms_path / XERXES_LOCAL_LMS). */
   readonly lmsPath?: string
   readonly modelsDir: string
@@ -82,7 +98,7 @@ export interface LocalConfig {
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const LOCAL_KEYS = new Set(['engine', 'llama_server_path', 'lms_path', 'models_dir', 'port', 'models', 'ctx_size'])
+const LOCAL_KEYS = new Set(['engine', 'llama_server_path', 'mlx_server_path', 'lms_path', 'models_dir', 'port', 'models', 'ctx_size'])
 const MIN_CTX_SIZE = 2048
 const MAX_CTX_SIZE = 1_048_576
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
@@ -156,6 +172,13 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
   }
   const serverPath = envServer ? envServer : typeof fileServer === 'string' ? fileServer.trim() : undefined
 
+  const envMlx = env.XERXES_LOCAL_MLX_SERVER?.trim()
+  const fileMlx = section.mlx_server_path
+  if (fileMlx !== undefined && (typeof fileMlx !== 'string' || fileMlx.trim() === '')) {
+    throw new ValidationError('local.mlx_server_path', 'must be a non-empty string', fileMlx)
+  }
+  const mlxServerPath = envMlx ? envMlx : typeof fileMlx === 'string' ? expandHome(fileMlx.trim(), env) : undefined
+
   const envLms = env.XERXES_LOCAL_LMS?.trim()
   const fileLms = section.lms_path
   if (fileLms !== undefined && (typeof fileLms !== 'string' || fileLms.trim() === '')) {
@@ -220,6 +243,7 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
   return {
     ...(engine === undefined ? {} : { engine }),
     ...(serverPath === undefined ? {} : { llamaServerPath: serverPath }),
+    ...(mlxServerPath === undefined ? {} : { mlxServerPath }),
     ...(lmsPath === undefined ? {} : { lmsPath }),
     modelsDir,
     port,
@@ -229,10 +253,10 @@ export function parseLocalConfig(runtime: Record<string, unknown>, env: Env): Lo
   }
 }
 
-/** `llama-server` or `lmstudio`; anything else is refused naming the field. */
+/** `llama-server`, `mlx` or `lmstudio`; anything else is refused naming the field. */
 export function parseEngine(value: unknown, field: string): LocalEngineName {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : value
-  if (name === 'llama-server' || name === 'lmstudio') return name
+  if (name === 'llama-server' || name === 'mlx' || name === 'lmstudio') return name
   throw new ValidationError(field, `must be one of ${LOCAL_ENGINES.join(', ')}`, value)
 }
 

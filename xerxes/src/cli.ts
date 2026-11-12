@@ -46,12 +46,12 @@ import {
   createDaemonChannelManager,
   daemonChannelWebhookOptions,
 } from "./daemon/channels.js";
-import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
+import { daemonConfigPath, loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
-import { createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
+import { BoundaryRegistry, createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
 import { outboundApprovalPort } from './daemon/outboundGate.js';
 import { createTurnRouter } from './daemon/turnRouting.js';
 import { createEscalationFactory } from './daemon/turnEscalation.js';
@@ -59,7 +59,7 @@ import { createHybridPlacement } from './daemon/hybridPlanTool.js';
 import { buildLeanSystemPrompt, localDay, parsePromptProfileConfig, readLeanProjectInstructions, selectLeanTools, type PromptProfileRoute } from './runtime/leanPrompt.js';
 import { formatModelCardReport, modelCardReport } from './runtime/modelCardReport.js';
 import { RunSafety, RunSafetyRegistry } from './runtime/runSafety.js';
-import { enableLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
+import { enableLocalOnly, environmentBeforeLocalOnly, isLocalUrl, localOnlyActive, parseLocalOnlyConfig } from './runtime/localOnly.js';
 import { parseChecksConfig, renderFindings } from './runtime/resultChecks.js';
 import { registerConfiguredAdvisor } from './daemon/advisorWiring.js';
 import { defaultEscalationMode } from './runtime/escalationPolicy.js';
@@ -131,6 +131,7 @@ import { LessonSharing } from './memory/lessonSharing.js';
 import { createRepoIdentityResolver } from './memory/repoIdentity.js';
 import { MODEL_FACING_LEARNING_TOOLS, registerLessonTools } from './tools/lessonTools.js';
 import { createSignInReadinessProbe } from './daemon/providerReadiness.js';
+import { runtimeSettingsFile } from './daemon/runMode.js';
 import { registerReflectionTools } from './tools/reflectionTools.js';
 import { ReflectionProposalStore, reflectionModeFor, type ReflectionApplier } from './runtime/reflection.js';
 import { createReflectionApplier } from './runtime/reflectionApplier.js';
@@ -1257,6 +1258,13 @@ async function runDaemonOwned(
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
     remoteProviderBindings,
     providerReadiness: createSignInReadinessProbe(),
+    // The desktop's "On this Mac" setup: the same command as `xerxes local`, loaded on first use.
+    localSetup: async (argv, io) => {
+      const [{ runLocalCommand }, { systemLocalCommandPorts }] = await Promise.all([import("./local/command.js"), import("./local/cliEntry.js")]);
+      return runLocalCommand([...argv], systemLocalCommandPorts(io));
+    },
+    // The launch environment: fully local mode exports XERXES_LOCAL_ONLY itself, which is not the user's override.
+    modeSettings: { file: runtimeSettingsFile(daemonConfigPath(xerxesHome())), loaded: config.runtime, env: environmentBeforeLocalOnly() },
     workspaceResources: cwd => workspaces.get(cwd),
     workspaceRelease: cwd => workspaces.release(cwd),
     autoSnapshotTurns: true,
@@ -2129,6 +2137,8 @@ function daemonRuntime(
     },
   };
   const subagentHosts = new Map<string, ReturnType<typeof createNativeSubagentHost>>();
+  // One data boundary per workspace for the main conversation and its subagents.
+  const boundaryRegistry = new BoundaryRegistry();
   let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
   // One for the host's lifetime: settings changes rebuild runners, and each
@@ -2365,6 +2375,18 @@ function daemonRuntime(
         if (!session) throw new Error('Subagent source session is unavailable; reopen the parent chat');
         return session.cwd;
       },
+      dataBoundaryFor: (root: string) => boundaryRegistry.boundaryFor(root, { ...config.runtime, ...settings }),
+      trustOfProfile: (profile: string | undefined, _model: string) => {
+        const named = profile ? profileStore.get(profile) : undefined;
+        return deriveDataTrust(named ?? (connection.baseUrl ? { base_url: connection.baseUrl } : undefined));
+      },
+      sourceTrust: (sourceId: string) => {
+        const session = runtime?.listSessions().find(candidate => candidate.id === sourceId);
+        return session ? sessionDataTrust(session) : 'cloud';
+      },
+      // A child works under its conversation's safety floor: same output
+      // folder, same locked inputs, same command sandbox.
+      runSafetyFor: (sourceId: string, outputFolder: string) => runSafetyRegistry.forSession(sourceId, outputFolder),
       restoreModelCallScopes: (snapshot: SpawnedAgentSnapshot) =>
         restoreRecoveredModelCallScopes(snapshot.modelCallBindings, snapshot.sourceAgentId, {
           readSession: (id) => runtime?.listSessions().find(session => session.id === id),
@@ -2569,6 +2591,7 @@ function daemonRuntime(
       dataBoundaryForSession: createSessionBoundaryFactory<DaemonSession>({
         runtime: () => ({ ...config.runtime, ...settings }),
         trustOf: sessionDataTrust,
+        registry: boundaryRegistry,
       }),
       maxNetworkRetries: daemonMaxNetworkRetries,
       // Lean prompt (off by default): the session's profile field wins, then

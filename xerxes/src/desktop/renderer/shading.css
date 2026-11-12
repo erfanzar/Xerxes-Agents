@@ -193,7 +193,7 @@
 :root[data-style='shading']:not(#shading) .atelier .tab.is-on{color:var(--x-title);border-bottom-color:var(--x-title)}
 
 /* ── Cards: hairline boxes, no shadow ─────────────────────────────── */
-:root[data-style='shading']:not(#shading) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard,.appupdate__card){background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:none}
+:root[data-style='shading']:not(#shading) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard){background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .palette-card{background:var(--x-card);border:1px solid var(--x-hairline);border-radius:12px;box-shadow:none}
 :root[data-style='shading']:not(#shading) .atelier .palette-card:hover{background:var(--x-chip)}
 :root[data-style='shading']:not(#shading) .atelier .palette-card.is-on{border-color:var(--x-title);box-shadow:0 0 0 1px var(--x-title)}

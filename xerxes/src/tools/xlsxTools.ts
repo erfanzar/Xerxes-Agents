@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { basename, dirname, extname } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import type { ToolRegistry } from '../executors/toolRegistry.js'
@@ -12,6 +12,7 @@ import { escapeXmlAttribute, parseOoxmlRelationships, parseXmlAttributes } from 
 import { createOfficeZip, readOfficeZip } from '../skills/powerpoint/zip.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../types/toolCalls.js'
 import { isJsonObject } from '../types/toolCalls.js'
+import { parseCsv, stringifyCsv } from './dataTools.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from './inputs.js'
 
 /** One workbook cell as it crosses the tool boundary. `null` is an empty cell. */
@@ -93,7 +94,29 @@ export const XLSX_READER_DEFINITION: ToolDefinition = {
   },
 }
 
-export const XLSX_TOOL_DEFINITIONS: readonly ToolDefinition[] = [XLSX_WRITER_DEFINITION, XLSX_READER_DEFINITION]
+export const XLSX_CONVERT_DEFINITION: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'XlsxConvert',
+    description: 'Convert an .xlsx sheet to CSV, or a CSV to an .xlsx workbook. Use it so a script can work on a '
+      + 'workbook with only its standard library. Replies with the row count and header only, never the rows. CSV '
+      + 'text that is a plain decimal number becomes a number; everything else, including IDs with leading zeros, '
+      + 'stays text. Refuses an existing output unless overwrite=true.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string', description: 'The .xlsx or .csv file.' },
+        output_path: { type: 'string', description: 'The .csv or .xlsx file to write.' },
+        sheet: { type: 'string', description: 'Sheet name. Default: the first.' },
+        overwrite: { type: 'boolean', default: false },
+      },
+      required: ['path', 'output_path'],
+    },
+  },
+}
+
+export const XLSX_TOOL_DEFINITIONS: readonly ToolDefinition[] = [XLSX_WRITER_DEFINITION, XLSX_READER_DEFINITION, XLSX_CONVERT_DEFINITION]
 
 export interface XlsxToolOptions {
   /** Resolve a tool-supplied path inside the workspace; throws when it escapes. */
@@ -117,10 +140,11 @@ const WRITER_CAPABILITIES = Object.freeze({
   readOnly: false,
 } as const)
 
-/** Register XlsxWriter and XlsxReader. */
+/** Register XlsxWriter, XlsxReader and XlsxConvert. */
 export function registerXlsxTools(registry: ToolRegistry, options: XlsxToolOptions): void {
   registry.register(XLSX_WRITER_DEFINITION, inputs => writeWorkbook(inputs, options), 'default', WRITER_CAPABILITIES)
   registry.register(XLSX_READER_DEFINITION, inputs => readWorkbook(inputs, options), 'default', READER_CAPABILITIES)
+  registry.register(XLSX_CONVERT_DEFINITION, inputs => convertWorkbook(inputs, options), 'default', WRITER_CAPABILITIES)
 }
 
 // --- writing ---------------------------------------------------------------
@@ -285,28 +309,33 @@ async function writeWorkbook(inputs: JsonObject, options: XlsxToolOptions): Prom
   const overwrite = optionalBoolean(inputs, 'overwrite', false)
   const sheets = parseSheets(inputs)
   const bytes = buildWorkbook(sheets)
-  const target = await options.resolvePath(path)
-  await mkdir(dirname(target), { recursive: true })
-  // Re-resolve right before the write so a symlink swapped in meanwhile is caught.
-  const checked = await options.resolvePath(path)
-  if (overwrite) {
-    await writeFile(checked, bytes)
-  } else {
-    try {
-      await writeFile(checked, bytes, { flag: 'wx' })
-    } catch (error) {
-      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST') {
-        throw new ValidationError('path', 'already exists; pass overwrite=true to replace it', path)
-      }
-      throw error
-    }
-  }
+  await writeOutput(path, 'path', bytes, overwrite, options)
   return {
     success: true,
     file_path: path,
     sheets: sheets.length,
     rows: sheets.reduce((total, sheet) => total + sheet.rows.length, 0),
     bytes: bytes.byteLength,
+  }
+}
+
+/** Write `bytes` to a workspace path, refusing an existing file unless `overwrite`. */
+async function writeOutput(path: string, field: string, bytes: Uint8Array | string, overwrite: boolean, options: XlsxToolOptions): Promise<void> {
+  const target = await options.resolvePath(path)
+  await mkdir(dirname(target), { recursive: true })
+  // Re-resolve right before the write so a symlink swapped in meanwhile is caught.
+  const checked = await options.resolvePath(path)
+  if (overwrite) {
+    await writeFile(checked, bytes)
+    return
+  }
+  try {
+    await writeFile(checked, bytes, { flag: 'wx' })
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST') {
+      throw new ValidationError(field, 'already exists; pass overwrite=true to replace it', path)
+    }
+    throw error
   }
 }
 
@@ -425,6 +454,25 @@ async function readWorkbook(inputs: JsonObject, options: XlsxToolOptions): Promi
   const wanted = optionalString(inputs, 'sheet')
   const maxRows = optionalInteger(inputs, 'max_rows', DEFAULT_READ_ROWS)
   if (maxRows < 1 || maxRows > MAX_READ_ROWS) throw new ValidationError('max_rows', `must be between 1 and ${MAX_READ_ROWS}`, maxRows)
+  const loaded = await loadSheet(path, wanted, maxRows, options)
+  return {
+    sheet: loaded.sheet,
+    sheets: loaded.sheets,
+    row_count: loaded.rows.length,
+    rows: loaded.rows,
+    truncated: loaded.truncated,
+  }
+}
+
+interface LoadedSheet {
+  readonly sheet: string
+  readonly sheets: string[]
+  readonly rows: XlsxCell[][]
+  readonly truncated: boolean
+}
+
+/** One sheet of a workbook as rectangular rows: the first sheet unless `wanted` names one. */
+async function loadSheet(path: string, wanted: string | undefined, maxRows: number, options: XlsxToolOptions): Promise<LoadedSheet> {
   const target = await options.resolvePath(path)
   let size: number
   try {
@@ -468,11 +516,69 @@ async function readWorkbook(inputs: JsonObject, options: XlsxToolOptions): Promi
     if (row.length === 0 || row.length >= width) return row
     return [...row, ...Array.from<null>({ length: width - row.length }).fill(null)]
   })
-  return {
-    sheet: chosen.name,
-    sheets: sheets.map(sheet => sheet.name),
-    row_count: rows.length,
-    rows,
-    truncated,
+  return { sheet: chosen.name, sheets: sheets.map(sheet => sheet.name), rows, truncated }
+}
+
+// --- converting ------------------------------------------------------------
+
+/** A plain decimal: no leading zeros (so IDs such as 007 stay text), no exponent, no thousands separators. */
+const PLAIN_NUMBER = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u
+const MAX_HEADER_COLUMNS = 50
+const MAX_HEADER_CHARS = 80
+
+function csvText(cell: XlsxCell): string {
+  if (cell === null) return ''
+  if (typeof cell === 'boolean') return cell ? 'TRUE' : 'FALSE'
+  return String(cell)
+}
+
+function csvCellValue(text: string): XlsxCell {
+  if (text === '') return null
+  // At most 15 significant digits, so the stored double shows the same number.
+  if (PLAIN_NUMBER.test(text) && text.replace(/[-.]/gu, '').replace(/^0+/u, '').length <= 15) return Number(text)
+  return text
+}
+
+/** A sheet name from a CSV file name: forbidden characters dropped, at most 31 characters. */
+function sheetNameFor(path: string): string {
+  const stem = basename(path, extname(path)).replace(new RegExp(FORBIDDEN_SHEET_CHARS.source, 'gu'), '').replace(new RegExp(INVALID_XML_CHARS.source, 'gu'), '').replace(/^'+|'+$/gu, '').trim()
+  return stem.slice(0, MAX_SHEET_NAME) || 'Sheet1'
+}
+
+function headerOf(rows: readonly (readonly XlsxCell[])[]): string[] {
+  return (rows[0] ?? []).slice(0, MAX_HEADER_COLUMNS).map(cell => csvText(cell).slice(0, MAX_HEADER_CHARS))
+}
+
+async function convertWorkbook(inputs: JsonObject, options: XlsxToolOptions): Promise<JsonObject> {
+  const path = requiredString(inputs, 'path')
+  const output = requiredString(inputs, 'output_path')
+  const sheet = optionalString(inputs, 'sheet')
+  const overwrite = optionalBoolean(inputs, 'overwrite', false)
+  const from = extname(path).toLowerCase()
+  const to = extname(output).toLowerCase()
+  if (from === '.xlsx' && to === '.csv') {
+    const loaded = await loadSheet(path, sheet, MAX_ROWS, options)
+    const text = stringifyCsv(loaded.rows.map(row => row.map(csvText)), ',')
+    await writeOutput(output, 'output_path', text, overwrite, options)
+    return { success: true, path, output_path: output, sheet: loaded.sheet, sheets: loaded.sheets, rows: loaded.rows.length, columns: loaded.rows[0]?.length ?? 0, header: headerOf(loaded.rows) }
   }
+  if (from === '.csv' && to === '.xlsx') {
+    const target = await options.resolvePath(path)
+    let size: number
+    try {
+      size = (await stat(target)).size
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') throw new ValidationError('path', 'does not exist', path)
+      throw error
+    }
+    if (size > MAX_READ_BYTES) throw new ValidationError('path', `is larger than ${MAX_READ_BYTES} bytes`, path)
+    const text = (await readFile(target, 'utf8')).replace(/^\uFEFF/u, '')
+    const table = parseCsv(text, ',')
+    const name = sheet ?? sheetNameFor(path)
+    validateSheetName(name, 'sheet')
+    const rows = parseSheets({ sheets: [{ name, rows: table.map(row => row.map(csvCellValue)) }] })
+    await writeOutput(output, 'output_path', buildWorkbook(rows), overwrite, options)
+    return { success: true, path, output_path: output, sheet: name, rows: table.length, columns: table.reduce((widest, row) => Math.max(widest, row.length), 0), header: headerOf(rows[0]?.rows ?? []) }
+  }
+  throw new ValidationError('output_path', 'must convert .xlsx to .csv or .csv to .xlsx', `${path} -> ${output}`)
 }

@@ -9,7 +9,7 @@
  * all see Xerxes Agents rather than Electron.
  */
 
-import { chmod, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,6 +22,13 @@ const outputDirectory = join(packageDirectory, 'dist')
 const packageOutputDirectory = process.env.XERXES_DESKTOP_PACKAGE_DIR?.trim()
   ? resolve(process.env.XERXES_DESKTOP_PACKAGE_DIR.trim()) : outputDirectory
 const applicationBundle = join(packageOutputDirectory, `${productName}.app`)
+/**
+ * Hardened-runtime entitlements Electron needs: V8 and bun compile code at
+ * run time (without allow-jit V8 cannot reserve its code range and the app
+ * aborts at launch), native modules load unsigned by this team, and
+ * dictation records from the microphone.
+ */
+const ENTITLEMENTS = join(packageDirectory, 'scripts', 'desktop.entitlements.plist')
 
 async function run(command: string, arguments_: string[]): Promise<void> {
   const process = Bun.spawn([command, ...arguments_], { stdout: 'inherit', stderr: 'inherit' })
@@ -91,7 +98,10 @@ async function packageDesktopMac(): Promise<void> {
 
   await mkdir(packageOutputDirectory, { recursive: true })
   await rm(applicationBundle, { recursive: true, force: true })
-  await cp(sourceBundle, applicationBundle, { recursive: true })
+  // Keep the framework's relative symlinks (Versions/Current, …) as they are:
+  // cp otherwise rewrites them to absolute paths into node_modules, and
+  // codesign then rejects the framework as having unsealed contents.
+  await cp(sourceBundle, applicationBundle, { recursive: true, verbatimSymlinks: true })
   await rename(sourceExecutable, productExecutable)
   await brandHelperBundles(join(contents, 'Frameworks'))
   await rm(join(resources, 'app'), { recursive: true, force: true })
@@ -146,16 +156,7 @@ async function packageDesktopMac(): Promise<void> {
   const identity =
     process.env.XERXES_SIGN_IDENTITY?.trim() || (await developerIdIdentity())
   if (identity) {
-    await run('codesign', [
-      '--force',
-      '--deep',
-      '--options',
-      'runtime',
-      '--timestamp',
-      '--sign',
-      identity,
-      applicationBundle,
-    ])
+    await signForRelease(applicationBundle, identity)
     const notarized = await notarizeIfPossible(applicationBundle)
     if (!notarized) {
       console.warn('signed but not notarized — set ASC key credentials to notarize')
@@ -228,6 +229,31 @@ async function developerIdIdentity(): Promise<string | undefined> {
  * `notarytool store-credentials`) or explicit key/id/issuer env triple.
  * Returns false when no credentials are configured.
  */
+/**
+ * Hardened-runtime signing, inside out. `codesign --deep` re-signs nested
+ * bundles but not the plain dylibs in a framework's Libraries folder, which
+ * then keep Electron's team ID: under the hardened runtime dyld refuses to
+ * load them ("different Team IDs") and the app dies at launch. The bundled
+ * bun is re-signed too, since notarization needs every executable under this
+ * identity. Every piece gets the entitlements, and the app itself is signed
+ * last without --deep so the helpers keep theirs.
+ */
+async function signForRelease(applicationBundle: string, identity: string): Promise<void> {
+  const sign = (target: string) => run('codesign', [
+    '--force', '--options', 'runtime', '--timestamp', '--entitlements', ENTITLEMENTS, '--sign', identity, target,
+  ])
+  const frameworks = join(applicationBundle, 'Contents', 'Frameworks')
+  for (const entry of await readdir(frameworks, { recursive: true })) {
+    const file = join(frameworks, String(entry))
+    if (file.endsWith('.dylib') && (await lstat(file)).isFile()) await sign(file)
+  }
+  const nested = await readdir(frameworks)
+  for (const entry of nested) if (entry.endsWith('.app')) await sign(join(frameworks, entry))
+  for (const entry of nested) if (entry.endsWith('.framework')) await sign(join(frameworks, entry))
+  await sign(join(applicationBundle, 'Contents', 'Resources', 'bun'))
+  await sign(applicationBundle)
+}
+
 async function notarizeIfPossible(applicationBundle: string): Promise<boolean> {
   const profile = process.env.XERXES_NOTARY_KEY_PROFILE?.trim()
   const keyPath = process.env.XERXES_ASC_KEY_PATH?.trim()

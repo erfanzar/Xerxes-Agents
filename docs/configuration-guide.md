@@ -491,26 +491,127 @@ runtime log. Set `XERXES_CLAUDE_CODE_AUTOUPDATE=0` to turn this off. `XERXES_AUT
 stops the install of a missing CLI but still lets an installed one update. The Codex provider needs no
 CLI: Xerxes calls the ChatGPT backend directly and only reads the Codex CLI's saved sign-in.
 
+## Private, Hybrid and Cloud
+
+How new tasks run. The desktop app sets it under **Models & Providers**, and asks for it on first
+run. Each mode is a combination of settings the runtime already has:
+
+| Mode | Main agent | Subagents (Agent intelligence tiers) | Settings |
+| --- | --- | --- | --- |
+| Private | Bonsai on this machine | all on Bonsai | `runtime.local_only: true` |
+| Hybrid | a cloud model that plans, splits the work and checks it | light and balanced on Bonsai with thinking off; smart on the lead | `runtime.data_boundary: hybrid` with `boundary: { private_paths: ["**"], cloud_results: summary, approve_outbound: off }` |
+| Cloud | a cloud model | all on the main model | none |
+
+- **The main agent** is the active provider profile. Nothing runs until one is chosen: the built-in
+  Claude Code profile is listed, but it is not used until you pick it.
+- **Hybrid in practice:** the [data boundary](#data-boundary) keeps every workspace file away from
+  the cloud lead, so it hands the file work to Bonsai agents on this machine and gets back their
+  replies cut to 8 KB. In a test on five spreadsheet and document tasks it got 4 right, with no input
+  file lines reaching the cloud except quoted answers; Bonsai alone got 2, Claude alone 5. A step on
+  Bonsai takes seconds to minutes, so a Hybrid task takes minutes where Cloud takes seconds, and work
+  that needs reading free text (invoices in many layouts) can still fail.
+- **Choosing a mode** also sets the Agent intelligence tiers in the table; adjust them afterwards
+  under Agent intelligence. The cloud advisor is no longer part of a mode: choosing one clears
+  `runtime.advisor.profile` (set it yourself to use the advisor).
+- **Setting up Bonsai from the app** runs the same steps as `xerxes local setup`, in the
+  runtime, with live progress. It can be cancelled; a partial download resumes next time.
+  Choosing Private or Hybrid before Bonsai is set up offers the setup first.
+- **Restart:** fully local mode and the data boundary are read when the runtime starts. After a
+  change to either, the app restarts the runtime once no work is running.
+- **Environment:** `XERXES_LOCAL_ONLY` and `XERXES_DATA_BOUNDARY` override the saved settings, and
+  the app says so.
+- **Seeing where a task ran:** every provider round is charged to its task: the main agent's,
+  each subagent's and each advisor call (with the bytes it sent). In Hybrid the desktop composer
+  shows the split ("35% on this Mac"), and **Usage** opens with the task model by model: role, on
+  this Mac or in the cloud, calls, tokens and cloud cost. The terminal UI's `/usage` prints the
+  same lines. Shares are by tokens processed.
+- **RPC:** `run_mode.get` and `run_mode.set` (`mode`, and optionally `worker_profile`: the main
+  profile, which is the lead in Hybrid); `local.status`, `local.setup` (optionally `then_mode`:
+  `private` or `hybrid`, and with Hybrid `then_worker_profile`, the lead picked before setup) and
+  `local.setup.cancel`, with progress as `local_setup` events.
+
+## Data boundary
+
+`runtime.data_boundary` (`off` by default, or `private`, `hybrid`, `cloud`; `XERXES_DATA_BOUNDARY`
+wins) keeps chosen files away from cloud models. A profile is local when its base URL is loopback
+or a unix socket, or when its `data_trust` says so; anything else is cloud.
+
+| `runtime.boundary` key | Default | What it does |
+| --- | --- | --- |
+| `private_paths` | none | Globs relative to the project (the project's `.xerxes/data-policy.yaml` can add more). A cloud model may not read, search or run commands on them; a local agent that does is marked as having read private data. |
+| `read_only_inputs` | on when a mode is set | Existing files may not be changed and private paths may not be written, except under `output_dir`, which stays writable even when it falls under `private_paths`. This covers the file tools and the Excel writers (`XlsxWriter`, and `XlsxConvert`'s `output_path`). |
+| `output_dir` | `out` | Where results are written. |
+| `approve_outbound` | `first` in `hybrid`, else `off` | Ask before a cloud model request: `off`, `first` or `every`. |
+| `cloud_results` | `withhold` | What a cloud conversation gets back from a local agent that read private data: nothing, or (`summary`) its reply cut to `summary_max_bytes` and marked as such. |
+| `summary_max_bytes` | `8000` | 256 to 65536. |
+
+- **Subagents** are held to the same rules as the conversation that started them: each one's tool
+  calls are judged by where its own model runs, and its reply is filtered before a cloud parent
+  sees it. Where the boundary would ask before a command on private files, a local subagent (which
+  has nobody to ask) follows the normal permission mode instead; what it read is still recorded.
+  Refusals, such as changing an input file, apply to every agent.
+- **A cloud model as lead:** with `hybrid`, private paths and a cloud model running the
+  conversation, the model is told to hand the file work to local agents (a local
+  [Agent intelligence](#agent-intelligence-tiers) tier) and to ask them for counts, totals and check
+  results rather than contents. For example, to keep every file in the workspace on this machine:
+
+  ```json
+  { "runtime": {
+    "data_boundary": "hybrid",
+    "boundary": { "private_paths": ["**"], "cloud_results": "summary", "approve_outbound": "off" },
+    "agent_intelligence": { "default": "balanced",
+      "balanced": { "model": "ternary-bonsai-2-27b", "provider_profile": "bonsai-local" } } } }
+  ```
+
 ## Bonsai and the local cascade
 
 `xerxes local setup` starts a Bonsai model on `127.0.0.1` and saves a `bonsai-local` provider
 profile. The engine is a separate process that Xerxes reaches over OpenAI-compatible HTTP; no
 inference runs inside Xerxes. Choose it with `--engine` or `runtime.local.engine`
-(`XERXES_LOCAL_ENGINE`):
-- **`llama-server`** (default): downloads the GGUF build (verified against a configured sha256)
-  and supervises llama.cpp's `llama-server`. Ternary GGUF builds need Prism's llama.cpp fork.
-- **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
-  then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
-  On Apple silicon this is the engine for Ternary Bonsai 2 27B's MLX pack (key
-  `ternary-bonsai-2-27b-mlx`). Stock MLX loaders don't apply the pack's Hadamard transforms.
-  - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
-  - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
-    (`XERXES_LOCAL_LMS`) to use another.
-  - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
-    already running is used on its port.
-  - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
-    Xerxes started it and nothing else is loaded on it. `status` and `stop` find the LM Studio load
-    without `--engine`.
+(`XERXES_LOCAL_ENGINE`). Unset, setup, start and doctor use the first engine installed, in this
+order, and say which they picked. `--model-key` picks LM Studio and `--model-file` picks
+llama-server.
+- **Downloads:** Ternary Bonsai 2 27B's builds come from Prism's Hugging Face repos at a pinned
+  commit. Each file is checked against its pinned size and SHA-256 before it is used, and a
+  download that does not match is discarded. Other models need a source in
+  `runtime.local.models`, which also replaces a built-in one.
+- **Version checks:** before downloading, setup reads the engine's version and refuses one older
+  than the model needs, or one whose version it cannot read. A llama.cpp build from before a
+  model's runtime loads the file and writes gibberish without an error. `--yes` goes on anyway,
+  for example with Prism's own builds, which report other build numbers.
+1. **`llama-server`**: supervises llama.cpp's `llama-server`.
+   - **The 27B:** downloads the `Q2_0` GGUF (7.6 GB), which stock llama.cpp runs from build b11555
+     (release v0.7.0). Prism's smaller `PQ2_0` and `PTQ1_0` packings still need its fork; pass one
+     with `--model-file`.
+   - **Finding the binary:** `llama-server` is found on `PATH`, then in `/opt/homebrew/bin`,
+     `/usr/local/bin`, `~/.local/bin` and `~/.lmstudio/bin`, so the desktop app finds it when
+     opened from Finder. Set `runtime.local.llama_server_path` (`XERXES_LOCAL_LLAMA_SERVER`) to
+     use another.
+2. **`mlx`** (Apple silicon only): supervises mlx-lm's `mlx_lm.server`, installed with
+   `uv tool install mlx-lm`.
+   - **The 27B:** downloads the 2-bit MLX pack (8.6 GB) into a folder under the models directory.
+     mlx-lm runs it from 0.32.2, the first release with its model type (`prism_hadamard_qwen35`).
+   - **Request shape:** one request at a time and two prompt caches, so cached prompts don't
+     crowd the weights out of memory.
+   - **Model name:** the saved profile's model is the folder's path. `mlx_lm.server` treats any
+     other model name in a request as a new model to download.
+   - **Context window:** mlx-lm has no window setting. The window recorded for compaction is sized
+     from free memory and the model's `config.json`, as for llama-server.
+   - **Finding the binary:** `runtime.local.mlx_server_path` (`XERXES_LOCAL_MLX_SERVER`) points
+     at another `mlx_lm.server`. Its version is read from the `mlx_lm` command beside it.
+3. **`lmstudio`**: drives LM Studio's `lms` CLI. It starts LM Studio's server if it is not running,
+   then runs `lms load <key> --context-length <n> --parallel 1 --gpu max --identifier <key> -y`.
+   Ternary Bonsai 2 27B's MLX pack has the key `ternary-bonsai-2-27b-mlx`. LM Studio runs it
+   with its own bundled runtime, so whether a model loads depends on LM Studio's version.
+   - `--model-key <key>` loads any model from `lms ls` instead of the catalog choice.
+   - `lms` is found on `PATH` or in `~/.lmstudio/bin`. Set `runtime.local.lms_path`
+     (`XERXES_LOCAL_LMS`) to use another.
+   - LM Studio keeps its own server port unless `runtime.local.port` is set. A server that is
+     already running is used on its port.
+   - `xerxes local stop` unloads only a model Xerxes loaded, and stops LM Studio's server only if
+     Xerxes started it and nothing else is loaded on it.
+
+`status` and `stop` find whichever engine Xerxes started without `--engine`.
 
 **Model cards.** Every Bonsai-specific setting lives in one record per model, in
 `xerxes/src/llms/modelCards.ts`:
@@ -563,10 +664,10 @@ With either engine:
   - **A failed reload** is named in the retry message, and the failure is then handled as before.
   - **Older starts:** a llama-server started before this release has no recorded window, so it is
     not restarted. Run `xerxes local stop` and `start` once.
-- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 12 tools and terse
-  rules, at most 3K tokens with a full instruction block, instead of about 29K. The tools are
+- **Lean prompt:** a Bonsai model gets the lean prompt wherever it runs: up to 13 tools and terse
+  rules, at most about 3.1K tokens with a full instruction block, instead of about 29K. The tools are
   ReadFile, WriteFile, FileEditTool, GlobTool, GrepTool, exec_command, check_command, CSVProcessor,
-  XlsxReader, XlsxWriter, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
+  XlsxReader, XlsxWriter, XlsxConvert, AskUserQuestionTool and AskAdvisor, where registered. So does any model whose known window is 32K tokens or less.
   The reason is prefill time, not fit: a cold prefill of the full prompt took minutes on a laptop.
   It includes the project's instruction files (`XERXES.md`, `AGENTS.md`, `CLAUDE.md` and their
   `.local.md` overlays, found the same way as for the full prompt) in at most 1,500 characters. A
@@ -721,7 +822,7 @@ permission mode. In `auto`, each session gets a safety floor for its working fol
   - A result check reports any input that changed anyway, once.
   - `.git`, `node_modules` and virtual environments are never written without asking.
 - **Outputs:** a new file in the folder, or one the session created, is written
-  without asking: `WriteFile`, `XlsxWriter`, `CSVProcessor` writes and edits.
+  without asking: `WriteFile`, `XlsxWriter`, `XlsxConvert`, `CSVProcessor` writes and edits.
 - **Commands:** `exec_command` runs in an OS sandbox without asking. The sandbox
   reads anything and writes only the folder and a per-session temp folder (its
   `TMPDIR`). It can't change, delete or rename inputs, and has no network.
@@ -768,6 +869,10 @@ itself. Keep network, browser, media, accelerator, and remote-channel integratio
 explicit host port.
 
 ## Agent intelligence tiers
+
+The tiers sit under the mode: in Private, fully local mode refuses a tier pointed at a cloud
+provider, and the desktop app warns about it; in Hybrid, agents on a cloud tier send their task
+to that provider.
 
 `AgentTool`, `TaskCreateTool`, and each entry in `SpawnAgents.agents` accept an optional
 `intelligence` value: `light`, `balanced`, or `smart`. The parent model chooses a tier according

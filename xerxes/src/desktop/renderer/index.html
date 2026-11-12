@@ -4,10 +4,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- No remote origins: the renderer loads only what it ships with. -->
+    <!-- No remote origins: the renderer loads only what it ships with. The one
+         frame source is a blob: the page makes from a workspace PDF, which
+         Chromium's built-in viewer shows (Files panel). -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:;"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; frame-src blob:;"
     />
     <title>Xerxes Agents</title>
     <link rel="stylesheet" href="./theme.css" />

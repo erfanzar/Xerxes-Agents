@@ -20,6 +20,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
+import { whichEngine } from './enginePath.js'
 import type { EngineRecovery, EngineTarget } from './engineRecovery.js'
 import { parseLmStudioModels, systemWindowFetch, type LmStudioModelEntry, type WindowFetch } from './loadedWindow.js'
 import { ServerError, type ServerStatus } from './server.js'
@@ -500,7 +501,7 @@ export function createLmStudioEngine(ports: LmStudioPorts, options: LmStudioOpti
 /** Real ports: `lms` via Bun.spawn (argv only), the platform fetch, real time. */
 export function systemLmStudioPorts(): LmStudioPorts {
   return {
-    which: (name) => Bun.which(name) ?? undefined,
+    which: (name) => whichEngine(name),
     exists: (path) => Bun.file(path).exists(),
     async run(argv, { timeoutMs }) {
       const proc = Bun.spawn({ cmd: [...argv], stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })

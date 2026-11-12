@@ -72,6 +72,9 @@ import { DaemonSubagentEventBus } from './subagentEvents.js'
 import { resolveOwnedSubagentRetry } from './subagentRetryOwnership.js'
 import type { DurableTaskBridge } from '../tasks/durableTaskBridge.js'
 import { recordModelUsage } from '../runtime/modelUsageLedger.js'
+import type { RunSafety } from '../runtime/runSafety.js'
+import type { DataTrust } from '../security/boundaryTypes.js'
+import { subagentBoundaryPort, type DataBoundary } from '../security/dataBoundary.js'
 
 export type { SubagentRetryOptions } from '../agents/subagentManager.js'
 
@@ -96,6 +99,24 @@ export interface NativeSubagentHostOptions {
   /** Host-owned source routing, checked before allocation and execution. Never persist the client. */
   readonly resolveSourceClient?: (sourceId: string, model: string, explicitProfile?: string) => SourceProviderClient | undefined
   readonly resolveSourceProvider?: (sourceId: string, model: string) => string | undefined
+  /**
+   * The local/cloud data boundary of a workspace root, shared with the main
+   * conversation's gate (undefined when the mode is off). With it, a child's
+   * tool calls are judged under the child's own trust, and its reply is
+   * filtered before a cloud-trust parent sees it.
+   */
+  readonly dataBoundaryFor?: (root: string) => DataBoundary | undefined
+  /** Where a model on a profile sends data; the inherited connection when the profile is unknown. */
+  readonly trustOfProfile?: (profile: string | undefined, model: string) => DataTrust
+  /** Where the owning conversation's model sends data. */
+  readonly sourceTrust?: (sourceId: string) => DataTrust
+  /**
+   * The owning conversation's safety floor (`runtime/runSafety.ts`). In `auto`
+   * mode it lets a child write new files in the output folder and run commands
+   * in the sandbox without asking, as the conversation itself can; without it
+   * every such call asks, and a child's question is answered no.
+   */
+  readonly runSafetyFor?: (sourceId: string, outputFolder: string) => Promise<RunSafety | undefined>
   /** Route identity captured for inherited children and checked on recovery. */
   readonly inheritedProviderRoute?: string
   /** Resolve the current route identity for an explicit provider profile. */
@@ -1438,6 +1459,8 @@ async function runNativeSubagent(
     const { maxTokens: _max, maxOutputTokens: _output, contextLimit: _context, temperature: _temperature, topK: _topK, topP: _topP, ...shared } = options
     options = { ...shared, ...selected }
   }
+  // The profile this child's rounds are charged to: its own, or the task's it inherits.
+  const usageProfile = sourceClient?.profile ?? (providerProfile || undefined)
   const permissionMode = permissionModeConfig(request.config.permissionMode, options.permissionMode)
   const permissionBroker = delegatedPermissionBroker(permissionMode)
   // A child on a model that gets the lean prompt (Bonsai) gets the lean tools
@@ -1447,6 +1470,22 @@ async function runNativeSubagent(
   const policyTools = subagentTools(options.tools, request.config)
   const tools = lean ? selectLeanTools(policyTools) : policyTools
   const cwd = request.worktree?.path || options.cwd
+  const boundaryRoot = request.task.sourceId ? options.resolveSourceWorkspace?.(request.task.sourceId) ?? options.cwd : options.cwd
+  const boundary = options.dataBoundaryFor?.(boundaryRoot)
+  // Unknown counts as cloud, the stricter side, for both the child and its parent.
+  const childTrust: DataTrust = boundary ? options.trustOfProfile?.(usageProfile, model) ?? 'cloud' : 'local'
+  const parentTrust: DataTrust = !boundary ? 'local'
+    : !request.task.parentId && request.task.sourceId ? options.sourceTrust?.(request.task.sourceId) ?? 'cloud'
+    : 'cloud'
+  const runSafety = request.task.sourceId ? await options.runSafetyFor?.(request.task.sourceId, boundaryRoot) : undefined
+  const forParent = (text: string): string => boundary
+    ? boundary.filterSubagentResult(text, {
+      childAgentId: request.task.id,
+      childTrust,
+      parentTrust,
+      ...(request.task.parentId ? { parentAgentId: request.task.parentId } : {}),
+    }).text
+    : text
   const conversation: SubagentConversationContext = {
     agentId: request.task.agentDefName || request.task.id,
     ...(request.task.creatorId ? { creatorAgentId: request.task.creatorId } : {}),
@@ -1558,6 +1597,8 @@ async function runNativeSubagent(
         } : {}),
         llm: options.llm,
         ...(permissionBroker === undefined ? {} : { permissionBroker }),
+        ...(boundary ? { dataBoundary: subagentBoundaryPort(boundary, childTrust, request.task.id) } : {}),
+        ...(runSafety ? { runSafety } : {}),
         toolExecutor: options.toolExecutor,
       }, request.cancelSignal)
       const iterator = events[Symbol.asyncIterator]()
@@ -1584,7 +1625,7 @@ async function runNativeSubagent(
             partialBaseMessageCount = state.messages.length
             partialCheckpointed = false
           }
-          const visibleText = reportNativeSubagentEvent(event, request)
+          const visibleText = reportNativeSubagentEvent(event, request, usageProfile)
           if (event.type === 'turn_done' && (
             event.reason && event.reason !== 'completed' && event.reason !== 'objective_verified'
           )) {
@@ -1626,7 +1667,7 @@ async function runNativeSubagent(
         const firstEvent = await firstEventPromise
         if (!firstEvent.done) await checkpoint(firstEvent.value)
         for await (const event of iterator) await checkpoint(event)
-        if (terminalFailure) throw new IncompleteSubagentTurnError(terminalFailure.message, output)
+        if (terminalFailure) throw new IncompleteSubagentTurnError(terminalFailure.message, forParent(output))
         await conversations.save(
           conversation,
           state,
@@ -1661,7 +1702,7 @@ async function runNativeSubagent(
       }
       throw error
     }
-    return { content: latestAssistantText(state.messages) || output }
+    return { content: forParent(latestAssistantText(state.messages) || output) }
   } finally {
     runningChildDepths.delete(request.task.id)
     // A build or dev server the child left running (adopted past its timeout
@@ -1856,7 +1897,7 @@ async function waitForTurnStart(state: AgentState, previousTurnCount: number): P
   }
 }
 
-function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunRequest): string {
+function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunRequest, profile?: string): string {
   switch (event.type) {
     case 'text':
       request.report.text(event.text)
@@ -1883,6 +1924,9 @@ function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunR
     case 'usage_update':
       recordModelUsage({
         model: event.model,
+        profile,
+        ...(request.task.sourceId ? { session: request.task.sourceId } : {}),
+        role: 'subagent',
         inputTokens: event.usage.inputTokens,
         outputTokens: event.usage.outputTokens,
         cacheReadTokens: event.usage.cacheReadTokens,

@@ -16,6 +16,7 @@ import type { CockpitProgress, HubSocketEvent } from '../hubShared.js'
 import type { MacPermissionAction, MacPermissionsState } from '../macPermissionsShared.js'
 import type { HubHealthAction, HubHealthState } from '../hubHealthShared.js'
 import type { ChatImageRequestWire, ChatImageResult } from '../chatMediaShared.js'
+import type { FileAction, FileActionResult } from '../fileActionShared.js'
 
 /** A daemon event push after bridge sanitization. Payload is frozen. */
 export interface DaemonEvent {
@@ -90,6 +91,8 @@ export interface XerxesBridge {
   openExternal?(url: string): Promise<boolean>
   /** An image file the chat shows, read by the host and returned as a data URL, or the reason it cannot be. */
   imageData?(request: ChatImageRequestWire): Promise<ChatImageResult>
+  /** Open a workspace file in its default app (`open`) or show it in Finder (`reveal`); see fileActionShared.ts. */
+  fileAction?(action: FileAction, path: string, cwd: string): Promise<FileActionResult>
 }
 
 declare global {
@@ -385,6 +388,48 @@ export interface ProviderRow {
   readonly signsIn: boolean
   /** An SSH host reported its own copy of this sign-in working; it then runs there, not through this computer. */
   readonly ready?: boolean
+  /** Runs on the workspace host itself (data trust local): a Private or Hybrid worker. */
+  readonly local?: boolean
+}
+
+/** Private, Hybrid or Cloud: how new tasks run (`run_mode.get`). */
+export type RunModeName = 'private' | 'hybrid' | 'cloud'
+
+export interface RunModeView {
+  /** Null until a main profile is chosen, or when the settings match no mode. */
+  readonly mode: RunModeName | null
+  /** The main agent: Bonsai in Private, the cloud lead in Hybrid, the cloud model in Cloud. */
+  readonly worker: { readonly profile: string; readonly model: string; readonly local: boolean } | null
+  /** Saved, but the runtime applies it only after a restart. */
+  readonly restartPending: boolean
+  /** Environment variables that override the saved mode. */
+  readonly lockedBy: readonly string[]
+}
+
+/** `local.status`: the engine, model and server for running Bonsai on the workspace host. */
+export interface LocalStatusView {
+  readonly ready: boolean
+  readonly engine: { readonly name: string; readonly label: string; readonly found: boolean; readonly version: string | null; readonly newEnough: boolean | null }
+  readonly model: { readonly id: string | null; readonly label: string | null; readonly bytes: number | null; readonly downloaded: boolean }
+  readonly server: { readonly running: boolean; readonly port: number | null; readonly contextLength: number | null }
+  readonly memoryBytes: number | null
+  /** What must happen before setup can work; null when it can run. */
+  readonly blocker: string | null
+}
+
+export interface LocalSetupJobView {
+  readonly id: string
+  readonly state: 'running' | 'done' | 'failed' | 'cancelled'
+  readonly step: string
+  readonly percent: number | null
+  readonly error: string | null
+}
+
+export interface LocalSetupView {
+  readonly status: LocalStatusView | null
+  readonly job: LocalSetupJobView | null
+  readonly error: string
+  readonly loading: boolean
 }
 
 /**

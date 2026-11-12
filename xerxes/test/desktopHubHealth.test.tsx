@@ -109,11 +109,9 @@ test('the notice names an unreachable Hub with its address, reason and the actio
   for (const label of ['Hub settings', 'Re-check', 'Not now', 'Don&#x27;t remind me']) expect(html).toContain(label)
 })
 
-test('the notice offers setup when no Hub is saved, and stays away when online, hidden or dismissed', () => {
-  const setup = view(state({ kind: 'not_configured', target: null, origin: null, detail: null }))
-  expect(setup).toContain('No Hub is set up.')
-  expect(setup).toContain('Set up a Hub')
-  expect(setup).not.toContain('Re-check')
+test('the notice stays away when no Hub was ever set up, and when online, hidden or dismissed', () => {
+  // Most people never need a Hub: setting one up lives in Settings, not in a startup notice.
+  expect(view(state({ kind: 'not_configured', target: null, origin: null, detail: null }))).toBe('')
   expect(view(state({ kind: 'online', detail: null }))).toBe('')
   expect(view(state({ kind: 'degraded' }))).toBe('')
   expect(view(state({}), true)).toBe('')

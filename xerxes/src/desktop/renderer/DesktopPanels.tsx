@@ -36,12 +36,14 @@ import {
 import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
+import { FileActions, renderedViewOf, requestPreview, RichFilePreview, type RichPreview } from './FilePreview.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { Icon, type IconName } from './Icon.js'
 import { GitPanel } from './GitPanel.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
 import { handleDialogEscape, useDialogFocus } from './dialogFocus.js'
+import { OutputsList, OutputsPanel } from './OutputsPanel.js'
 import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
 import { trustAllSkills } from './catalogBulk.js'
@@ -58,6 +60,7 @@ export type DesktopPanel =
   | 'review'
   | 'terminal'
   | 'usage'
+  | 'outputs'
   | 'workspace'
   | 'snapshots'
   | null
@@ -69,16 +72,16 @@ export const PAGE_TITLES: Readonly<Record<DesktopPageName, string>> = {
 const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> = {
   agents: 'Specialists you can bring into a conversation.',
   extensions: 'Instructions and tools available in this workspace.',
-  artifacts: 'Files this task changed, and its exportable transcript.',
+  artifacts: 'Files this task wrote or changed, and its exportable transcript.',
   schedules: 'Jobs that run on their own in this workspace.',
 }
 /** Views that open in the task-context rail beside the conversation. */
-export type RailPanel = 'files' | 'review' | 'terminal' | 'activity' | 'usage'
-export const RAIL_PANELS: readonly RailPanel[] = ['files', 'review', 'terminal', 'activity', 'usage']
+export type RailPanel = 'files' | 'outputs' | 'review' | 'terminal' | 'activity' | 'usage'
+export const RAIL_PANELS: readonly RailPanel[] = ['files', 'outputs', 'review', 'terminal', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
@@ -190,12 +193,13 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     return () => observer.disconnect()
   }, [panel])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
+      {panel === 'outputs' && <OutputsPanel snap={snap} />}
       {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
     </div>
   </aside>
@@ -234,6 +238,7 @@ export function DesktopSheet({
     review: 'Git',
     terminal: 'Terminal',
     usage: 'Usage',
+    outputs: 'Outputs',
     workspace: 'Workspace',
     snapshots: 'Snapshots',
   }
@@ -276,6 +281,7 @@ export function DesktopSheet({
           {panel === 'review' && <GitPanel snap={snap} expanded />}
           {panel === 'terminal' && <TerminalPanel snap={snap} />}
           {panel === 'usage' && <UsagePanel snap={snap} />}
+          {panel === 'outputs' && <OutputsPanel snap={snap} />}
           {panel === 'files' && <FilesPanel snap={snap} close={close} />}
           {panel === 'workspace' && <WorkspacePanel snap={snap} />}
         </div>
@@ -290,6 +296,7 @@ function ArtifactsPanel({ snap }: { snap: Snapshot }): ReactElement {
   return <div className="studio-form">
     <Feedback {...request} />
     <button className="btn btn--ghost" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
+    <OutputsList snap={snap} />
     {snap.changes.map(file => <div className="studio-item" key={file.path}><div><strong>{file.path}</strong><p>+{file.adds} −{file.dels}</p></div><button onClick={() => open('review', file.path)}>Review changes <Icon name="arrow" size={12} /></button></div>)}
     {!snap.changes.length && <p className="studio-muted">No files changed in this session yet.</p>}
   </div>
@@ -1285,7 +1292,10 @@ function lastUnsavedPath(cwd: string): string {
 
 export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'>; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
   const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : lastUnsavedPath(snap.cwd))
-  const [source, setSource] = useState(false)
+  // The path whose Source view is on, and the workbook sheet chosen for a path: both reset with the selection.
+  const [sourceOf, setSourceOf] = useState('')
+  const [sheetOf, setSheetOf] = useState({ path: '', index: 0 })
+  const [rich, setRich] = useState<RichPreview | null>(null)
   const [file, setFile] = useState<OpenFile | null>(() => unsavedFile(snap.cwd, selected)?.file ?? null)
   const [draft, setDraft] = useState(() => unsavedFile(snap.cwd, selected)?.draft ?? '')
   const [previewError, setPreviewError] = useState('')
@@ -1297,6 +1307,12 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
   }
   useEffect(() => () => { selection.current = { ...selection.current } }, [])
   const dirty = file !== null && draft !== file.content
+  const view = renderedViewOf(selected)
+  const serverRendered = view !== undefined && view !== 'markdown'
+  // A table, SVG or page with unsaved edits stays in Source view until they are saved or reverted.
+  const source = Boolean(selected) && (sourceOf === selected || (serverRendered && unsavedFile(snap.cwd, selected) !== undefined))
+  const serverSource = source && serverRendered
+  const sheet = sheetOf.path === selected ? sheetOf.index : 0
   /** Leaving a file with unsaved edits asks first. */
   const setSelected = (path: string): void => {
     if (path === selected) return
@@ -1305,7 +1321,7 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
     setSelectedPath(path)
   }
   useEffect(() => { if (target?.path) setSelected(workspaceFilePath(target.path, snap.cwd)) }, [target?.count])
-  useEffect(() => { setSource(false); setSave({ state: 'idle' }) }, [selected])
+  useEffect(() => { setSave({ state: 'idle' }) }, [selected])
   useEffect(() => { if (file) keepUnsavedFile(snap.cwd, file, draft) }, [file, draft, snap.cwd])
   useEffect(() => {
     let current = true
@@ -1313,23 +1329,25 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
     // Reopened with edits still unsaved: show those, not the file on disk.
     const kept = selected ? unsavedFile(snap.cwd, selected) : undefined
     if (kept) {
+      setRich(null)
       setFile(kept.file)
       setDraft(kept.draft)
       return
     }
+    // Choosing another sheet keeps the workbook on screen until that sheet arrives.
+    setRich(previous => previous?.kind === 'sheet' && previous.path === selected ? previous : null)
     setFile(null)
-    if (selected) void desktopCall(window.xerxes, snap.sessionKey, 'workspace.filePreview', { path: selected })
-      .then(value => {
+    if (selected) void requestPreview(window.xerxes, snap.sessionKey, selected, { source: serverSource, sheet })
+      .then(reply => {
         if (!current) return
-        const content = text(value.content)
-        setFile({ path: selected, content, version: typeof value.version === 'string' ? value.version : null, truncated: value.truncated === true })
-        setDraft(content)
+        setRich(reply.rich ?? null)
+        if (reply.file) { setFile(reply.file); setDraft(reply.file.content) }
       })
-      .catch(error => { if (current) setPreviewError(desktopError(error)) })
+      .catch(error => { if (current) { setRich(null); setPreviewError(desktopError(error)) } })
     return () => { current = false }
-  }, [selected, snap.sessionKey, snap.cwd, reload])
+  }, [selected, snap.sessionKey, snap.cwd, reload, serverSource, sheet])
   const editable = file !== null && !file.truncated && file.version !== null
-  const readOnlyReason = file === null ? '' : file.truncated ? 'Only the first 128 KB is shown, so this file is read-only here.' : file.version === null ? 'Update the workspace runtime to edit files here.' : ''
+  const readOnlyReason = file === null || rich ? '' : file.truncated ? 'Only the first 128 KB is shown, so this file is read-only here.' : file.version === null ? 'Update the workspace runtime to edit files here.' : ''
   const saveFile = async (): Promise<void> => {
     if (!file || !editable || !dirty || save.state === 'saving') return
     const content = draft
@@ -1349,6 +1367,7 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
   }
   const [needle, setNeedle] = useState('')
   const isDocument = rendersAsDocument(selected)
+  const fileActions = <FileActions path={selected} cwd={snap.cwd} remote={Boolean(snap.storageScope?.startsWith('ssh:'))} />
   return (
     <div className={'file-browser' + (selected ? ' file-browser--preview' : '')}>
       <div className="file-browser__navigation">
@@ -1365,7 +1384,8 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
         <p title={selected}>{selected}{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
         {dirty && <><button className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }) }}>Revert</button></>}
         {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
-        {isDocument && <button className="file-browser__mode" aria-pressed={source} title={source ? 'Show the rendered document' : 'Edit the source'} onClick={() => setSource(value => !value)}>{source ? 'Preview' : 'Source'}</button>}
+        {view && <button className="file-browser__mode" aria-pressed={source} disabled={dirty && serverRendered} title={dirty && serverRendered ? 'Save or revert your changes to see the preview' : source ? 'Show the rendered view' : 'Edit the source'} onClick={() => setSourceOf(source ? '' : selected)}>{source ? 'Preview' : 'Source'}</button>}
+        {fileActions}
         <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); if (!dirty) close() }} title={dirty ? 'Unsaved changes stay open here; the message reads the file as saved' : undefined}>Add to message</button>
         <button className="file-browser__close" aria-label="Close file" title="Close file" onClick={() => setSelected('')}><Icon name="close" size={13} /></button>
       </div>
@@ -1373,8 +1393,9 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
       {readOnlyReason && <p className="file-browser__notice file-browser__notice--quiet">{readOnlyReason}</p>}
       {/* Keyed by file and mode so each opens scrolled to its top-left. */}
       <section key={`${selected}:${source}:${reload}`} className="file-browser__preview" aria-label="File">
-        <Feedback busy={!file && !previewError} error={previewError} />
-        {file && (isDocument && !source
+        <Feedback busy={!file && !rich && !previewError} error={previewError} />
+        {rich ? <RichFilePreview preview={rich} requestedSheet={sheet} chooseSheet={index => setSheetOf({ path: selected, index })} actions={fileActions} />
+          : file && (isDocument && !source
           ? <FileDocument source={draft} />
           : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()} />)}
       </section></div>}

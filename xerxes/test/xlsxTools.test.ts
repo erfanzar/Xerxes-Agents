@@ -120,3 +120,46 @@ test('the written workbook is a valid archive for the system unzip', async () =>
     expect(test.exitCode).toBe(0)
   })
 })
+
+test('XlsxConvert turns a sheet into CSV and back without changing a value, and replies without the rows', async () => {
+  await inWorkspace(async (workspace, registry) => {
+    await run(registry, 'XlsxWriter', {
+      path: 'sales.xlsx',
+      sheets: [
+        { name: 'Notes', rows: [['ignore me']] },
+        { name: 'Orders', rows: [['order_id', 'region', 'units', 'unit_price', 'ok', 'memo'], ['007', 'North', 3, 33.37, true, 'a, "quoted"\nline'], ['S2', 'south ', 26, 12.5, false, null]] },
+      ],
+    })
+    const toCsv = await run(registry, 'XlsxConvert', { path: 'sales.xlsx', output_path: 'out/sales.csv', sheet: 'Orders' })
+    // Only counts and the header reach the model: a local agent's context stays small.
+    expect(toCsv).toMatchObject({ success: true, sheet: 'Orders', sheets: ['Notes', 'Orders'], rows: 3, columns: 6, header: ['order_id', 'region', 'units', 'unit_price', 'ok', 'memo'] })
+    expect(JSON.stringify(toCsv)).not.toContain('North')
+    const csv = await Bun.file(join(workspace, 'out', 'sales.csv')).text()
+    expect(csv).toBe('order_id,region,units,unit_price,ok,memo\n007,North,3,33.37,TRUE,"a, ""quoted""\nline"\nS2,south ,26,12.5,FALSE,\n')
+
+    // Back again: plain decimals become numbers, IDs with leading zeros and spellings stay as written.
+    const toXlsx = await run(registry, 'XlsxConvert', { path: 'out/sales.csv', output_path: 'out/back.xlsx' })
+    expect(toXlsx).toMatchObject({ success: true, sheet: 'sales', rows: 3, columns: 6 })
+    const back = await run(registry, 'XlsxReader', { path: 'out/back.xlsx' })
+    expect(back.rows).toEqual([
+      ['order_id', 'region', 'units', 'unit_price', 'ok', 'memo'],
+      ['007', 'North', 3, 33.37, 'TRUE', 'a, "quoted"\nline'],
+      ['S2', 'south ', 26, 12.5, 'FALSE', null],
+    ])
+  })
+})
+
+test('XlsxConvert keeps long digit runs as text and refuses what it cannot do faithfully', async () => {
+  await inWorkspace(async (workspace, registry) => {
+    await writeFile(join(workspace, 'ids.csv'), '﻿account,amount\n12345678901234567890,-0.5\n')
+    await run(registry, 'XlsxConvert', { path: 'ids.csv', output_path: 'ids.xlsx', sheet: 'Accounts' })
+    expect((await run(registry, 'XlsxReader', { path: 'ids.xlsx' })).rows).toEqual([['account', 'amount'], ['12345678901234567890', -0.5]])
+    const convert = (input: JsonObject) => run(registry, 'XlsxConvert', input)
+    await expect(convert({ path: 'ids.csv', output_path: 'ids.xlsx' })).rejects.toThrow('overwrite')
+    expect(await convert({ path: 'ids.csv', output_path: 'ids.xlsx', overwrite: true })).toMatchObject({ success: true })
+    await expect(convert({ path: 'ids.csv', output_path: 'copy.csv' })).rejects.toThrow('.xlsx to .csv or .csv to .xlsx')
+    await expect(convert({ path: 'ids.xlsx', output_path: 'x.csv', sheet: 'Nope' })).rejects.toThrow('available sheets')
+    await expect(convert({ path: 'missing.csv', output_path: 'x.xlsx' })).rejects.toThrow('does not exist')
+    await expect(convert({ path: 'ids.csv', output_path: '../outside.xlsx' })).rejects.toThrow()
+  })
+})

@@ -47,6 +47,24 @@ export interface ModelUsageView {
   readonly costUsd?: number
   /** `subscription` when a plan pays for these calls; costUsd is then only what API prices would charge. */
   readonly costBasis?: 'subscription'
+  /** True on this machine, false in the cloud, null when the profile is unknown; absent on older runtimes. */
+  readonly local?: boolean | null
+}
+
+export type ModelRole = 'worker' | 'advisor' | 'subagent'
+
+/** One model's share of a single task. */
+export interface TaskModelUsageView extends ModelUsageView {
+  readonly role?: ModelRole
+  /** Bytes the calls sent, when measured (advisor calls are). */
+  readonly bytesSent?: number
+}
+
+/** The cloud advisor's per-task limits, present when an advisor is configured. */
+export interface AdvisorLimitsView {
+  readonly profile: string
+  readonly maxCalls: number
+  readonly maxUsd: number
 }
 
 /**
@@ -75,6 +93,9 @@ export interface SessionUsageView {
   readonly contextMax: number
   readonly costUsd?: number
   readonly costBasis?: 'subscription'
+  /** Which models this task used; absent on runtimes that do not record it. */
+  readonly models?: readonly TaskModelUsageView[]
+  readonly advisor?: AdvisorLimitsView
 }
 
 export interface UsageReportView {
@@ -168,7 +189,30 @@ function sessionOf(value: unknown): SessionUsageView | undefined {
     ...(num(item.calls) === undefined ? {} : { calls: num(item.calls)! }),
     ...optional('cost_usd', 'costUsd'),
     ...(item.cost_basis === 'subscription' ? { costBasis: 'subscription' } : {}),
+    ...taskModelsOf(item),
   } as SessionUsageView
+}
+
+/** `models` and `advisor` from a `session.usage` answer (or a report's session); empty on older runtimes. */
+export function taskModelsOf(value: unknown): Pick<SessionUsageView, 'models' | 'advisor'> {
+  const item = record(value)
+  const advisor = record(item.advisor)
+  const profile = str(advisor.profile)
+  const maxCalls = num(advisor.max_calls)
+  const maxUsd = num(advisor.max_usd)
+  return {
+    ...(Array.isArray(item.models) ? { models: item.models.map(taskModelOf).filter((entry): entry is TaskModelUsageView => entry !== null) } : {}),
+    ...(profile && maxCalls !== undefined && maxUsd !== undefined ? { advisor: { profile, maxCalls, maxUsd } } : {}),
+  }
+}
+
+function taskModelOf(value: unknown): TaskModelUsageView | null {
+  const base = modelOf(value)
+  if (!base) return null
+  const item = record(value)
+  const role = item.role === 'worker' || item.role === 'advisor' || item.role === 'subagent' ? item.role : undefined
+  const bytes = num(item.bytes_sent)
+  return { ...base, ...(role ? { role } : {}), ...(bytes !== undefined && bytes > 0 ? { bytesSent: bytes } : {}) }
 }
 
 function modelOf(value: unknown): ModelUsageView | null {
@@ -187,7 +231,68 @@ function modelOf(value: unknown): ModelUsageView | null {
     cacheWrite: num(item.cache_write_tokens) ?? 0,
     ...(cost === undefined ? {} : { costUsd: cost }),
     ...(item.cost_basis === 'subscription' ? { costBasis: 'subscription' as const } : {}),
+    ...(typeof item.local === 'boolean' || item.local === null ? { local: item.local as boolean | null } : {}),
   }
+}
+
+/** Every token a round processed: what it read (fresh and cached) and what it wrote. */
+export function processedTokens(model: Pick<ModelUsageView, 'input' | 'output' | 'cacheRead' | 'cacheWrite'>): number {
+  return model.input + model.output + model.cacheRead + model.cacheWrite
+}
+
+/** How a task split between this machine and the cloud. */
+export interface TaskSplit {
+  readonly localTokens: number
+  readonly cloudTokens: number
+  /** Tokens from a profile that no longer exists, so where they ran is unknown. */
+  readonly unknownTokens: number
+  /** Share of the known tokens that ran on this machine, 0–1; null with no known tokens. */
+  readonly localShare: number | null
+  readonly advisorCalls: number
+  /** Cloud spend at published prices; undefined when a cloud call has no published price. */
+  readonly cloudUsd: number | undefined
+  /** Every cloud call is paid by a plan, so there is no spend to show. */
+  readonly cloudOnPlan: boolean
+  readonly bytesSent: number
+}
+
+export function taskSplit(models: readonly TaskModelUsageView[]): TaskSplit {
+  let localTokens = 0, cloudTokens = 0, unknownTokens = 0, advisorCalls = 0, bytesSent = 0
+  let cloudUsd: number | undefined = 0
+  let cloudOnPlan = true, anyCloud = false
+  for (const model of models) {
+    const tokens = processedTokens(model)
+    if (model.role === 'advisor') advisorCalls += model.calls
+    bytesSent += model.bytesSent ?? 0
+    if (model.local === true) { localTokens += tokens; continue }
+    if (model.local !== false) { unknownTokens += tokens; continue }
+    cloudTokens += tokens
+    anyCloud = true
+    if (model.costBasis === 'subscription') continue
+    cloudOnPlan = false
+    cloudUsd = model.costUsd === undefined || cloudUsd === undefined ? undefined : cloudUsd + model.costUsd
+  }
+  const known = localTokens + cloudTokens
+  return {
+    localTokens, cloudTokens, unknownTokens,
+    localShare: known > 0 ? localTokens / known : null,
+    advisorCalls,
+    cloudUsd: anyCloud && cloudOnPlan ? undefined : cloudUsd,
+    cloudOnPlan: anyCloud && cloudOnPlan,
+    bytesSent,
+  }
+}
+
+/** "4.2 KB", "1.3 MB": bytes as a person reads them. */
+export function compactBytes(bytes: number): string {
+  if (bytes < 1_000) return `${bytes} B`
+  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(bytes < 10_000 ? 1 : 0)} KB`
+  return `${(bytes / 1_000_000).toFixed(1)} MB`
+}
+
+/** "Main" for the conversation's own model (the lead in Hybrid), "Advisor" and "Subagent" for the others. */
+export function modelRoleLabel(role: ModelRole | undefined): string {
+  return role === 'advisor' ? 'Advisor' : role === 'subagent' ? 'Subagent' : role === 'worker' ? 'Main' : 'Model'
 }
 
 /** Normalize a `usage.report` result; malformed entries are dropped, never guessed. */
@@ -301,6 +406,21 @@ export function formatUsageText(report: UsageReportView, now = Date.now()): stri
     if (session.contextMax > 0) {
       const percent = (session.contextUsed / session.contextMax) * 100
       lines.push(`  ${'Context'.padEnd(15)}${textBar(percent)} ${Math.round(percent)}%  ${compactTokens(session.contextUsed)} / ${compactTokens(session.contextMax)}`)
+    }
+    const models = session.models ?? []
+    if (models.length) {
+      const split = taskSplit(models)
+      if (split.localShare !== null && split.cloudTokens > 0) {
+        lines.push(`  ${'Where it ran'.padEnd(15)}${textBar(split.localShare * 100)} ${Math.round(split.localShare * 100)}% on this machine`)
+      }
+      for (const model of models) {
+        const where = model.local === true ? 'this machine' : model.local === false ? 'cloud' : 'unknown'
+        lines.push(`  ${modelRoleLabel(model.role).padEnd(15)}${model.model} (${where})  ${modelUsageSummary(model)}${model.local === false ? `  ${costLabel(model.costUsd, model.costBasis)}` : ''}`)
+      }
+      if (session.advisor) {
+        const spent = split.cloudOnPlan ? 'included in plan' : split.cloudUsd === undefined ? 'spend unknown' : `${usd(split.cloudUsd)} of ${usd(session.advisor.maxUsd)}`
+        lines.push(`  ${'Advisor budget'.padEnd(15)}${split.advisorCalls} of ${session.advisor.maxCalls} calls · ${spent}`)
+      }
     }
   }
   if (report.profiles.length) {

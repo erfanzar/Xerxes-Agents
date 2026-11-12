@@ -30,6 +30,7 @@ export const LEAN_CORE_TOOL_NAMES: readonly string[] = Object.freeze([
   'CSVProcessor',
   'XlsxWriter',
   'XlsxReader',
+  'XlsxConvert',
   'AskUserQuestionTool',
   'AskAdvisor',
 ])
@@ -167,6 +168,7 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     '- Read a file before you edit it. Make the smallest change that does the task.',
     '- Input files are read-only unless the user asks you to change them. Write results to a new file.',
     '- Do not guess file contents or paths. Use the tools to look.',
+    '- Keep names, labels and IDs as the input spells them. To group values that differ only in case or spaces, match on a cleaned key but write the input\'s own spelling, never the cleaned key.',
     '- Check your result by running a check (a test, a validator, or reading the output back) before you say it is done.',
     '- Never say you checked or validated something you did not run. If you could not check, say so.',
   ]
@@ -182,7 +184,11 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
     lines.push('- A command still running at its timeout keeps running in the background. Read it with check_command and the proc_id it returned.')
   }
   if (has('XlsxWriter')) {
-    lines.push('- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')
+    lines.push(has('XlsxConvert')
+      ? '- Write .xlsx with XlsxWriter (WriteFile stores plain text). Python may lack openpyxl: for a script, convert .xlsx to CSV and back with XlsxConvert.'
+      : '- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')
+  } else if (has('XlsxConvert')) {
+    lines.push('- Python may lack openpyxl: for a script, convert .xlsx to CSV and back with XlsxConvert.')
   }
   if (has('AskUserQuestionTool')) {
     lines.push('- If the request is unclear in a way that changes the result, ask with AskUserQuestionTool.')

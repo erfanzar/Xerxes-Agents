@@ -49,6 +49,7 @@ import { ErrorBoundary } from './ErrorBoundary.js'
 import { FindBar } from './FindBar.js'
 import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
+import { ModelSplitChip } from './TaskModels.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
@@ -103,7 +104,7 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
 function railLabel(rail: RailPanel): string {
-  return rail === 'files' ? 'Project files' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
+  return rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -209,7 +210,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // the rail stays as it was.
     if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'files' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
+    if (next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
@@ -255,7 +256,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
       <SettingsModal snap={snap} />
       <AppUpdatePrompt update={snap.appUpdate} />
       {/* Startup notices share one corner and stack instead of overlapping. */}
-      <div className="notice-stack"><HubHealthNotice /><MacPermissionsNotice /></div>
+      <div className="notice-stack"><HubHealthNotice /><MacPermissionsNotice wanted={snap.computerUseWanted} /></div>
       {snap.taskModalOpen && <TaskModal snap={snap} />}
       {/* Mounted only while open: the palette's hooks (needle, cursor,
           focus effect) must never share a fiber with a closed render. */}
@@ -2104,6 +2105,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           title="Reasoning effort — click to change"
           onClick={() => store.toggleReasoningPicker()}
         >{capitalizeWord(snap.reasoningEffort || 'default')}</button>}
+        <ModelSplitChip snap={snap} onOpen={() => open('usage')} />
         <ContextRing snap={snap} onOpen={() => open('usage')} />
       </div>
     </div>

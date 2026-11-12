@@ -43,7 +43,7 @@ function boundary(root: string, runtime: Record<string, unknown> = {}): DataBoun
 }
 
 test('config defaults keep the boundary off and the env var wins', () => {
-  expect(parseDataBoundaryConfig({}, {})).toEqual({ mode: 'off', approveOutbound: 'off', readOnlyInputs: false, privatePaths: [], outputDir: 'out' })
+  expect(parseDataBoundaryConfig({}, {})).toEqual({ mode: 'off', approveOutbound: 'off', readOnlyInputs: false, privatePaths: [], outputDir: 'out', cloudResults: 'withhold', summaryMaxBytes: 8000 })
   const hybrid = parseDataBoundaryConfig({ data_boundary: 'cloud' }, { XERXES_DATA_BOUNDARY: 'hybrid' })
   expect(hybrid.mode).toBe('hybrid')
   expect(hybrid.approveOutbound).toBe('first')

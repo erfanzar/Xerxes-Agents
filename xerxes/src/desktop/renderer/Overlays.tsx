@@ -27,6 +27,7 @@ import { TerminalsCard } from './TerminalsPanel.js'
 import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
+import { RunModeSection } from './RunModeSection.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { CompactionSetting } from './CompactionSetting.js'
@@ -819,8 +820,10 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
     <>
       <h2 className="modal__title">Models & Providers</h2>
       {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
+      {/* Private and Hybrid run Bonsai on the workspace host, so the choice is offered for this Mac only. */}
+      {!snap.storageScope?.startsWith('ssh:') && <RunModeSection snap={snap} />}
       <p className="modal__sub">
-        Change the session model from the composer. Select a provider to make it active. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
+        Change the session model from the composer. Using a profile makes it the one that does the work. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>
 
       <div className="field">
@@ -881,6 +884,8 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
               <span className="provcard__title">
                 <span className="provcard__name">{name}</span>
                 {row.chip ? <span className={`provcard__badge provcard__badge--${tone}`}>{row.chip}</span> : null}
+                {provider.local !== undefined && <span className="provcard__badge provcard__badge--quiet">{provider.local ? 'on this machine' : 'cloud'}</span>}
+                {snap.runMode?.mode === 'hybrid' && snap.runMode.worker?.profile === provider.name && <span className="provcard__badge provcard__badge--quiet">Hybrid lead</span>}
               </span>
               <span className="provcard__model">{provider.model || 'Model chosen when used'}</span>
               <span className="provcard__meta">{provider.provider} · {row.status}</span>

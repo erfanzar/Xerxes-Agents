@@ -135,7 +135,8 @@ function replyBudgetSetting(input: ModelCardReportInput, card: ModelCard): Model
 
 function buildsSetting(card: ModelCard): ModelCardSetting | undefined {
   const builds = [
-    ...(card.llamaServer ? [`llama-server ${card.llamaServer.fileName} (needs ${count(card.llamaServer.minMemoryBytes / 1024 ** 3)} GiB, launches with ${count(card.llamaServer.ctxSize)} tokens)`] : []),
+    ...(card.llamaServer ? [`llama-server ${card.llamaServer.fileName} (needs ${count(card.llamaServer.minMemoryBytes / 1024 ** 3)} GiB${card.llamaServer.minLlamaCpp === undefined ? '' : ` and llama.cpp b${card.llamaServer.minLlamaCpp.build}+`}, launches with ${count(card.llamaServer.ctxSize)} tokens)`] : []),
+    ...(card.mlx ? [`mlx_lm.server ${card.mlx.repo} (needs ${count(card.mlx.minMemoryBytes / 1024 ** 3)} GiB and mlx-lm ${card.mlx.minMlxLm}+)`] : []),
     ...(card.lmstudio ? [`LM Studio ${card.lmstudio.modelKey} (needs ${count(card.lmstudio.minMemoryBytes / 1024 ** 3)} GiB)`] : []),
   ]
   return builds.length ? { name: 'Local builds', card: builds.join('; '), effective: '—', from: '—' } : undefined

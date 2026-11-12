@@ -25,6 +25,9 @@ agent:
     - GlobTool
     - GrepTool
     - ListDir
+    - XlsxReader
+    - XlsxWriter
+    - XlsxConvert
     - DuckDuckGoSearch
     - computer_use
   exclude_tools:

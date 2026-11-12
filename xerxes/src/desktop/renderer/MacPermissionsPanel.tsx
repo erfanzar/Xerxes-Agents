@@ -239,12 +239,16 @@ export function MacPermissionsCard(): ReactElement {
   )
 }
 
-/** The startup notice, wired to the main process. Renders nothing outside the desktop app or off macOS. */
-export function MacPermissionsNotice(): ReactElement | null {
+/**
+ * The permissions notice, wired to the main process: shown once a task tries
+ * to use the computer (`wanted`), not to everyone at startup. Renders nothing
+ * outside the desktop app or off macOS.
+ */
+export function MacPermissionsNotice({ wanted }: { wanted: boolean }): ReactElement | null {
   const [api] = useState(() => windowMacPermissionsApi())
   const { state, busy, error, run } = useMacPermissions(api)
   const [hidden, setHidden] = useState(false)
-  if (api === undefined) return null
+  if (api === undefined || !wanted) return null
   return (
     <MacPermissionsNoticeView
       state={state}

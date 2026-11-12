@@ -108,10 +108,11 @@ describe('selectModel', () => {
     const apple = (gib: number) => hw({ totalMemBytes: gib * GIB, appleSilicon: true, gpu: { vendor: 'apple' } })
     const at16 = selectModel(apple(16), catalog)
     expect(at16.ok && at16.entry.id).toBe('bonsai-9b')
-    const at28 = selectModel(apple(28), catalog)
-    expect(at28.ok && at28.entry.id).toBe('ternary-bonsai-2-27b')
-    const at27 = selectModel(apple(27), catalog)
-    expect(at27.ok && at27.entry.id).toBe('bonsai-9b')
+    // The 27B needs 20 GiB usable: a 24 GB Mac after the reserve.
+    const at24 = selectModel(apple(24), catalog)
+    expect(at24.ok && at24.entry.id).toBe('ternary-bonsai-2-27b')
+    const at23 = selectModel(apple(23), catalog)
+    expect(at23.ok && at23.entry.id).toBe('bonsai-9b')
     expect(selectModel(apple(15), catalog).ok).toBe(false)
   })
 
@@ -137,9 +138,19 @@ describe('selectModel', () => {
 })
 
 describe('catalog', () => {
-  test('built-ins carry no download source', () => {
-    for (const entry of BUILTIN_MODELS) expect(entry.source).toBeUndefined()
-    expect(BUILTIN_MODELS.map((m) => m.minMemoryBytes)).toEqual([12 * GIB, 24 * GIB])
+  test('a built-in source is only a pinned Hugging Face file with its sha256 and size', () => {
+    const big = BUILTIN_MODELS.find((m) => m.id === 'ternary-bonsai-2-27b')
+    expect(big?.source).toEqual({
+      url: 'https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/839bd57023c1558945afea70a74fa83c054f35f9/Ternary-Bonsai-2-27B-Q2_0.gguf',
+      sha256: '4f99aed01b8a877e153f9aa6569a4440fe17c59701cc0953e36d7f460549e70e',
+      bytes: 7_626_008_928,
+    })
+    expect(big?.minLlamaCpp).toEqual({ build: 11_555, version: '0.7.0' })
+    expect(big?.mlx?.files.map((file) => file.path)).toContain('model.safetensors')
+    for (const file of big?.mlx?.files ?? []) expect(file.sha256).toMatch(/^[0-9a-f]{64}$/)
+    // A model without a published build has no source until the user configures one.
+    expect(BUILTIN_MODELS.find((m) => m.id === 'bonsai-9b')?.source).toBeUndefined()
+    expect(BUILTIN_MODELS.map((m) => m.minMemoryBytes)).toEqual([12 * GIB, 20 * GIB])
   })
 
   test('config sources merge onto matching entries only', () => {
@@ -153,7 +164,8 @@ describe('catalog', () => {
       sha256: 'a'.repeat(64),
       bytes: 10,
     })
-    expect(merged.find((m) => m.id === 'ternary-bonsai-2-27b')?.source).toBeUndefined()
+    // The 27B keeps its built-in source; a configured one would replace it.
+    expect(merged.find((m) => m.id === 'ternary-bonsai-2-27b')?.source?.url).toStartWith('https://huggingface.co/prism-ml/')
   })
 })
 

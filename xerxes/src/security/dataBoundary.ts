@@ -52,7 +52,9 @@ export const DEFAULT_BOUNDARY_AGENT = 'default'
 
 const MODES: readonly DataBoundaryMode[] = ['off', 'private', 'hybrid', 'cloud']
 const APPROVALS: readonly OutboundApproval[] = ['off', 'first', 'every']
-const BOUNDARY_KEYS = new Set(['approve_outbound', 'read_only_inputs', 'private_paths', 'output_dir'])
+const BOUNDARY_KEYS = new Set(['approve_outbound', 'read_only_inputs', 'private_paths', 'output_dir', 'cloud_results', 'summary_max_bytes'])
+const CLOUD_RESULTS: readonly CloudResults[] = ['withhold', 'summary']
+export const SUMMARY_MAX_BYTES_DEFAULT = 8000
 const PROJECT_POLICY_KEYS = new Set(['private_paths', 'read_only_inputs'])
 const MAX_PRIVATE_PATHS = 256
 const MAX_PATTERN_LENGTH = 1024
@@ -66,7 +68,17 @@ export interface DataBoundaryConfig {
   readonly privatePaths: readonly string[]
   /** Project-relative directory where writes to existing files stay allowed under read_only_inputs. */
   readonly outputDir: string
+  /**
+   * What a cloud-trust parent receives from a local agent that read private
+   * data: nothing (`withhold`, the default), or the agent's reply cut to
+   * `summaryMaxBytes` (`summary`), marked as such. `summary` is what lets a
+   * cloud model lead while local agents do the work on private files.
+   */
+  readonly cloudResults: CloudResults
+  readonly summaryMaxBytes: number
 }
+
+export type CloudResults = 'withhold' | 'summary'
 
 export interface DataBoundaryProject {
   readonly root: string
@@ -116,7 +128,9 @@ export function parseDataBoundaryConfig(
   }
   const unique = [...new Set(privatePaths)]
   if (unique.length > MAX_PRIVATE_PATHS) throw new ValidationError('boundary.private_paths', `at most ${MAX_PRIVATE_PATHS} patterns`, unique.length)
-  return Object.freeze({ mode, approveOutbound, readOnlyInputs, privatePaths: Object.freeze(unique), outputDir })
+  const cloudResults = boundary.cloud_results === undefined ? 'withhold' : oneOf('boundary.cloud_results', boundary.cloud_results, CLOUD_RESULTS)
+  const summaryMaxBytes = boundary.summary_max_bytes === undefined ? SUMMARY_MAX_BYTES_DEFAULT : boundedInteger('boundary.summary_max_bytes', boundary.summary_max_bytes, 256, 65536)
+  return Object.freeze({ mode, approveOutbound, readOnlyInputs, privatePaths: Object.freeze(unique), outputDir, cloudResults, summaryMaxBytes })
 }
 
 function readProjectPolicy(project: DataBoundaryProject): { readonly privatePaths: string[]; readonly readOnlyInputs?: boolean } {
@@ -237,6 +251,16 @@ export interface BoundaryPermissionPort {
   toolDisposition(call: Pick<ToolCall, 'function'>, agentId?: string): PermissionDisposition | undefined
   /** The reason behind a non-allow verdict, shown to the model with a denial. */
   reason(call: Pick<ToolCall, 'function'>, agentId?: string): string | undefined
+  /** Standing instructions for the conversation's model; empty when none apply. */
+  instruction?(): string
+}
+
+export interface SubagentResultVerdict {
+  readonly text: string
+  readonly withheld: boolean
+  /** With `cloud_results: summary`: bytes of a tainted reply sent to the cloud parent, and bytes kept back. */
+  readonly forwardedBytes?: number
+  readonly keptBytes?: number
 }
 
 type Glob = InstanceType<typeof Bun.Glob>
@@ -260,7 +284,9 @@ interface ShellSegment {
 }
 
 const SHELL_TOOLS = new Set(['exec_command', 'ExecuteShell', 'Bash', 'shell', 'pty_open', 'pty_write'])
-const WRITE_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'MultiEdit', 'AppendFile', 'NotebookEdit'])
+const WRITE_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'MultiEdit', 'AppendFile', 'NotebookEdit', 'XlsxWriter', 'XlsxConvert'])
+/** The argument naming the file a write tool writes, where it is not `file_path` or `notebook_path`. */
+const WRITE_TARGET_KEYS: Readonly<Record<string, string>> = { XlsxWriter: 'path', XlsxConvert: 'output_path' }
 const CONTENT_SEARCH_TOOLS = new Set(['GrepTool', 'Grep'])
 const NAME_GLOB_TOOLS = new Set(['GlobTool', 'Glob'])
 const PATH_KEYS = ['file_path', 'path', 'directory_path', 'notebook_path'] as const
@@ -361,10 +387,19 @@ export class DataBoundary {
    * result never reaches a cloud-trust parent; a local parent that receives it
    * becomes tainted.
    */
-  filterSubagentResult(text: string, ctx: SubagentResultContext): { readonly text: string; readonly withheld: boolean } {
+  filterSubagentResult(text: string, ctx: SubagentResultContext): SubagentResultVerdict {
     if (this.config.mode === 'off') return { text, withheld: false }
     const tainted = [ctx.childAgentId, ...(ctx.childAliases ?? [])].some(key => key && this.taints.isTainted(key))
     if (!tainted) return { text, withheld: false }
+    if (ctx.parentTrust === 'cloud' && this.config.cloudResults === 'summary') {
+      const bytes = Buffer.byteLength(text, 'utf8')
+      const kept = utf8Prefix(text, this.config.summaryMaxBytes)
+      const sent = Buffer.byteLength(kept, 'utf8')
+      const note = sent < bytes
+        ? `[Reply of local agent ${ctx.childAgentId}, which read private data: the first ${sent} of ${bytes} bytes go to the cloud model; the rest stays on this machine.]`
+        : `[Reply of local agent ${ctx.childAgentId}, which read private data: ${sent} bytes go to the cloud model.]`
+      return { text: `${note}\n${kept}`, withheld: false, forwardedBytes: sent, keptBytes: bytes - sent }
+    }
     if (ctx.parentTrust === 'cloud') {
       const bytes = Buffer.byteLength(text, 'utf8')
       return {
@@ -374,6 +409,28 @@ export class DataBoundary {
     }
     if (ctx.parentAgentId) this.taints.mark(ctx.parentAgentId, `received a result from tainted subagent ${ctx.childAgentId}`)
     return { text, withheld: false }
+  }
+
+  /**
+   * Standing instructions for a cloud-trust conversation that may not touch
+   * private paths itself: hand the file work to local agents and ask them for
+   * results, not contents. Empty when it does not apply.
+   */
+  leadInstruction(trust: DataTrust): string {
+    if (this.config.mode !== 'hybrid' || trust !== 'cloud' || !this.patterns.length) return ''
+    const results = this.config.cloudResults === 'summary'
+      ? `Their replies reach you cut to ${this.config.summaryMaxBytes} bytes, so ask for results, not contents.`
+      : 'Their replies are withheld from you once they read private files, so have them write every result to a file in the output folder and confirm only that they finished.'
+    return [
+      '# Data boundary: you lead, local agents do the file work',
+      `You run on a cloud model. These paths stay on this machine and you cannot read, search or run commands on them: ${this.config.privatePaths.join(', ')}.`,
+      'Hand every step that touches them to local agents (AgentTool or SpawnAgents with a local intelligence tier). Give each one a complete brief: which files, the exact output path and format, and the checks to run before reporting. Tell them to keep names, labels and IDs as the input spells them.',
+      'Local agents have a small context window and are slow. Give each one a small piece (a few files, or one calculation), and tell it to work on data files with a script (python3) that prints only short results, never reading a whole data file into its own context. Python here may lack openpyxl and pandas: have it convert an .xlsx input to CSV with XlsxConvert first, and a CSV result to .xlsx the same way, so scripts need only the standard library.',
+      'Wait at most a few minutes at a time. If an agent is still busy, read its progress; if it repeats itself or stalls, stop it and send the work again in smaller pieces with a sharper brief.',
+      `Ask them to reply with what you need to decide: row counts, totals, check results and the paths they wrote. ${results}`,
+      'You know the files only from what local agents report. Never state a fact about them that no agent reported, such as how the input spells a value, which currency or unit it uses, or why an output looks as it does; ask a local agent to check it, or say you do not know.',
+      `Have them write outputs, scripts and scratch files under ${this.config.outputDir}/ (inputs are read-only). Finish only after a local agent has checked each output against the task.`,
+    ].join('\n')
   }
 
   /** Throw when a model/tier selection would move work across the boundary. */
@@ -535,14 +592,19 @@ export class DataBoundary {
   }
 
   private writeVerdict(name: string, inputs: JsonObject): BoundaryToolVerdict | undefined {
-    const raw = typeof inputs.file_path === 'string' ? inputs.file_path : typeof inputs.notebook_path === 'string' ? inputs.notebook_path : undefined
+    const key = WRITE_TARGET_KEYS[name]
+    const named = key === undefined ? undefined : inputs[key]
+    const raw = key !== undefined ? (typeof named === 'string' ? named : undefined)
+      : typeof inputs.file_path === 'string' ? inputs.file_path : typeof inputs.notebook_path === 'string' ? inputs.notebook_path : undefined
     if (!raw?.trim()) return undefined
     const absolute = resolve(this.root, expandHome(raw))
+    // The output folder holds the run's results: it stays writable even when
+    // every path is private, or a local agent could only write through a script.
+    if (isAncestorOrEqual(this.outputKey, pathKey(canonicalPath(absolute)))) return undefined
     if (this.isPrivatePath(absolute)) {
-      return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: ${name} may not modify private input ${raw}.`)
+      return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: ${name} may not write into private path ${raw}; write into ${this.config.outputDir}/.`)
     }
     if (!existsSync(absolute)) return undefined
-    if (isAncestorOrEqual(this.outputKey, pathKey(canonicalPath(absolute)))) return undefined
     return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: inputs are read-only; ${name} may not modify existing file ${raw}. Write new files, or write into ${this.config.outputDir}/.`)
   }
 }
@@ -553,7 +615,40 @@ export function boundaryPermissionPort(boundary: DataBoundary, trustOf: (agentId
   return {
     toolDisposition: (call, agentId) => boundary.toolDisposition(call, context(agentId)),
     reason: (call, agentId) => boundary.toolVerdict(call, context(agentId))?.reason,
+    instruction: () => boundary.leadInstruction(trustOf()),
   }
+}
+
+/**
+ * The permission gate for one subagent: every call is judged with the
+ * child's own trust and recorded under its task id, whatever agent id the
+ * loop reports, so the taint check on its result finds it.
+ *
+ * A local child has nobody to ask: the boundary's "confirm first" for a
+ * command on private files would refuse the very work a local agent is sent
+ * to do. For a local child such a call follows the normal permission mode
+ * instead, while what it read is still recorded (so its reply to a cloud
+ * parent is filtered). Refusals stand for every child.
+ */
+export function subagentBoundaryPort(boundary: DataBoundary, trust: DataTrust, taskId: string): BoundaryPermissionPort {
+  const context: BoundaryToolContext = { agentId: taskId, trust }
+  const verdict = (call: Pick<ToolCall, 'function'>) => {
+    const judged = boundary.toolVerdict(call, context)
+    return judged?.disposition === 'prompt' && trust === 'local' ? undefined : judged
+  }
+  return {
+    toolDisposition: call => verdict(call)?.disposition,
+    reason: call => verdict(call)?.reason,
+  }
+}
+
+/** The longest prefix of `text` that fits in `maxBytes` of UTF-8 without splitting a character. */
+function utf8Prefix(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length <= maxBytes) return text
+  let end = maxBytes
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1
+  return bytes.subarray(0, end).toString('utf8')
 }
 
 function deny(code: DataBoundaryErrorCode, reason: string): BoundaryToolVerdict {
@@ -701,6 +796,12 @@ function oneOf<Value extends string>(key: string, value: unknown, allowed: reado
   const match = allowed.find(candidate => candidate === value)
   if (match === undefined) throw new ValidationError(key, `must be one of ${allowed.join(', ')}`, value)
   return match
+}
+
+function boundedInteger(key: string, value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new ValidationError(key, 'must be an integer', value)
+  if (value < min || value > max) throw new ValidationError(key, `must be between ${min} and ${max}`, value)
+  return value
 }
 
 function booleanSetting(key: string, value: unknown): boolean {

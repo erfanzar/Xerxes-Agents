@@ -11,6 +11,8 @@
 import { notificationFor } from '../desktop/main/notify.js'
 import { readLocalChatImage } from '../desktop/main/chatMedia.js'
 import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from '../desktop/chatMediaShared.js'
+import { FILE_ACTION_CHANNEL, fileActionRequestOf } from '../desktop/fileActionShared.js'
+import { performFileAction } from '../desktop/main/fileActions.js'
 import { invokeFrame, type PushFrame, type ResultFrame } from './messages.js'
 
 /** The runtime connection (desktop/main/daemon.ts DaemonRpc satisfies it). */
@@ -54,6 +56,10 @@ export interface PanelPorts {
   visible(): boolean
   /** Open an already validated http, https or mailto link (`vscode.env.openExternal`). */
   openExternal?(url: string): Promise<boolean>
+  /** Open a checked absolute file path in the system's default app; '' on success, else why not. */
+  openWithSystem?(path: string): Promise<string>
+  /** Show a checked absolute file path in the system file manager. */
+  revealInOS?(path: string): Promise<void>
 }
 
 export interface PanelOptions {
@@ -177,6 +183,14 @@ export class PanelHost {
         const request = chatImageRequestOf(args[0])
         if ('error' in request) return { ok: false, error: request.error }
         return readLocalChatImage(request.path, request.cwd ?? this.ports.workspace)
+      }
+      case FILE_ACTION_CHANNEL: {
+        const request = fileActionRequestOf(args[0])
+        if ('error' in request) return { ok: false, error: request.error }
+        const { openWithSystem, revealInOS } = this.ports
+        // Remote-SSH, WSL…: the file is on the remote host, not on the computer showing VS Code.
+        if (this.ports.remoteName || !openWithSystem || !revealInOS) return { ok: false, error: 'This VS Code window cannot open files in another app. Open the file from the Explorer instead.' }
+        return performFileAction(request, { openPath: openWithSystem, showItemInFolder: revealInOS })
       }
       case 'host:set-style': {
         const style = args[0]

@@ -72,6 +72,9 @@ test('auto asks before a write outside the output folder or to an input, and not
   expect(disposition(run, call('CSVProcessor', { operation: 'read', file_path: 'data.csv' }))).toBe('allow')
   expect(disposition(run, call('CSVProcessor', { operation: 'write', file_path: 'data.csv', overwrite: true }))).toBe('prompt')
   expect(disposition(run, call('CSVProcessor', { operation: 'write', file_path: 'clean.csv' }))).toBe('allow')
+  // XlsxConvert reads `path` and writes `output_path`: only the output decides.
+  expect(disposition(run, call('XlsxConvert', { path: 'data.csv', output_path: 'out/data.xlsx' }))).toBe('allow')
+  expect(disposition(run, call('XlsxConvert', { path: 'out/data.xlsx', output_path: 'data.csv', overwrite: true }))).toBe('prompt')
 })
 
 test('without a sandbox a command that is not read-only still asks; with one it runs unless it asks to leave it', async () => {

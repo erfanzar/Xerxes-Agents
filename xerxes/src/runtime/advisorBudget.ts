@@ -22,7 +22,7 @@ export const ADVISOR_DEFAULT_MAX_USD = 1
 export const ADVISOR_DEFAULT_TIMEOUT_MS = 120_000
 export const ADVISOR_DEFAULT_MAX_INPUT_CHARS = 40_000
 
-const ADVISOR_PROFILE_ENV = 'XERXES_ADVISOR_PROFILE'
+export const ADVISOR_PROFILE_ENV = 'XERXES_ADVISOR_PROFILE'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

@@ -25,7 +25,7 @@ import {
 } from '../src/tools/fileTools.js'
 import { CHECK_COMMAND_DEFINITION, EXEC_COMMAND_DEFINITION } from '../src/tools/processTools.js'
 import { CLAUDE_WORKFLOW_TOOL_DEFINITIONS } from '../src/tools/claudeTools/workflow.js'
-import { XLSX_READER_DEFINITION, XLSX_WRITER_DEFINITION } from '../src/tools/xlsxTools.js'
+import { XLSX_CONVERT_DEFINITION, XLSX_READER_DEFINITION, XLSX_WRITER_DEFINITION } from '../src/tools/xlsxTools.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 const askUser = CLAUDE_WORKFLOW_TOOL_DEFINITIONS.find(tool => tool.function.name === 'AskUserQuestionTool')
@@ -43,6 +43,7 @@ const REAL_DEFINITIONS: readonly ToolDefinition[] = [
   CSV_PROCESSOR_DEFINITION,
   XLSX_WRITER_DEFINITION,
   XLSX_READER_DEFINITION,
+  XLSX_CONVERT_DEFINITION,
   askUser,
   // Present in the registry but not part of the lean core set.
   CLAUDE_WORKFLOW_TOOL_DEFINITIONS[0]!,
@@ -117,8 +118,13 @@ test('buildLeanSystemPrompt states the rules, adapts to tools, and clips project
   expect(withAdvisor).toContain('Read a file before you edit it')
   expect(withAdvisor).toContain('read-only')
   expect(withAdvisor).toContain('Never say you checked')
+  // Grouping case variants must not rewrite the labels a person will read.
+  expect(withAdvisor).toContain('Keep names, labels and IDs as the input spells them')
   expect(withAdvisor).toContain('AskAdvisor')
   expect(withAdvisor).toContain('XlsxWriter')
+  const withConvert = buildLeanSystemPrompt({ ...base, toolNames: ['XlsxWriter', 'XlsxConvert'] })
+  expect(withConvert).toContain('convert .xlsx to CSV and back with XlsxConvert')
+  expect(withConvert.match(/XlsxWriter/g)).toHaveLength(1)
 
   const without = buildLeanSystemPrompt({ ...base, toolNames: ['ReadFile'] })
   expect(without).not.toContain('AskAdvisor')
@@ -128,7 +134,7 @@ test('buildLeanSystemPrompt states the rules, adapts to tools, and clips project
   expect(long.length).toBeLessThan(without.length + 1700)
 })
 
-test('lean prompt plus real tool schemas, with a full instruction block, stays within 3,000 tokens', () => {
+test('lean prompt plus real tool schemas, with a full instruction block, stays within 3,100 tokens', () => {
   const tools = selectLeanTools([...REAL_DEFINITIONS, advisor()])
   const prompt = buildLeanSystemPrompt({
     cwd: '/Users/someone/Documents/Projects/a-fairly-long-project-name',
@@ -139,12 +145,24 @@ test('lean prompt plus real tool schemas, with a full instruction block, stays w
   })
   const size = leanPromptSize(prompt, tools)
   console.log(`lean prompt: ${size.chars} chars, ~${size.estimatedTokens} tokens, ${tools.length} tools`)
-  expect(size.estimatedTokens).toBeLessThanOrEqual(3000)
+  // The target was 3,000 at about 2.9K measured. XlsxConvert (an .xlsx <-> CSV
+  // step, so local scripts need no openpyxl) and its one rule added about 140
+  // tokens: about 3.05K measured 2026-11-11. Raise it again only for real content.
+  expect(size.estimatedTokens).toBeLessThanOrEqual(3100)
   expect(tools.map(tool => tool.function.name)).not.toContain('ListDir')
   expect(size.chars).toBe(prompt.length + JSON.stringify(tools).length)
 
   const full = leanPromptSize('', REAL_DEFINITIONS)
   expect(size.estimatedTokens - Math.ceil(prompt.length / 4)).toBeLessThan(full.estimatedTokens)
+})
+
+test('the coder agent local workers run as can use the Excel tools', () => {
+  const coder = loadBuiltinAgentDefinitions().get('coder')
+  if (coder === undefined) throw new Error('coder agent profile is missing')
+  for (const name of ['XlsxReader', 'XlsxWriter', 'XlsxConvert']) {
+    expect(coder.allowedTools).toContain(name)
+    expect(coder.excludeTools).not.toContain(name)
+  }
 })
 
 test('the default agent profile admits every lean core tool, so lean mode is not cut down by the profile', () => {

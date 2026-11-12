@@ -20,6 +20,9 @@
      product. Do not retune these in isolation — theme.ts is the source. */
   --x-working:#6ea8fe;--x-activity:#b39cf0;--x-accent:#6ea8fe;--x-accent-soft:#6ea8fe1c;
   --x-structure:#56c8d8;
+  /* Where a task ran: on this machine or in the cloud. A lightness gap keeps
+     the pair apart under protan, deutan and tritan vision (OKLab ΔE ≥ 12). */
+  --x-local:#6ea8fe;--x-cloud:#8b6ad8;
   --x-done:#57ca85;--x-needs:#d8ae58;--x-focus:#6ea8fe;--x-chip:#1f242e;
   --x-failed:#f47067;--x-failed-text:#e39a94;--x-failed-bg:#f4706714;--x-failed-border:#f4706733;
   --x-needs-text:#e4c37e;--x-needs-bg:#d8ae5818;--x-needs-border:#d8ae5833;
@@ -71,6 +74,7 @@
   /* Derafsh light variants, from `src/ui/theme.ts`. */
   --x-working:#1f64b5;--x-activity:#7047b5;--x-accent:#1f64b5;--x-accent-soft:#1f64b514;
   --x-structure:#276b78;
+  --x-local:#1f64b5;--x-cloud:#9a7fe0;
   --x-done:#1b6f45;--x-needs:#8a5a12;--x-focus:#1f64b5;--x-chip:#e9ecf1;
   --x-failed:#c02f27;--x-failed-text:#a82a23;--x-failed-bg:#c02f270a;--x-failed-border:#c02f2726;
   --x-needs-text:#8a5a12;--x-needs-bg:#8a5a1210;--x-needs-border:#8a5a1226;
@@ -2930,6 +2934,47 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .usage-model__cost[data-unknown]{font:var(--t-caption);color:var(--x-meta)}
 .atelier .usage-model__meta{font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .atelier .usage__note{margin:0;font:var(--t-caption);color:var(--x-meta)}
+
+/* Where a task ran, by tokens: the composer chip (Hybrid) and the split at
+   the top of Usage. Blue is this Mac, purple the cloud; text stays in text
+   colours and every segment has a label beside it, so colour never carries
+   the meaning alone. */
+.atelier .cchip.modelsplit{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
+.atelier .modelsplit__bar{display:inline-flex;flex:none;gap:2px;width:28px;height:6px}
+.atelier .modelsplit__spend{color:var(--x-meta)}
+/* A narrow chat keeps the bar and drops the words; the label and tooltip still say it. */
+@container(max-width:640px){.atelier .cchip.modelsplit>span:not(.modelsplit__bar){display:none}}
+.atelier .tasksplit{display:grid;gap:var(--s-2);padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+.atelier .tasksplit__bar{display:flex;gap:2px;height:8px}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>span{min-width:3px;border-radius:4px}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>[data-where='local'],
+.atelier [data-where='local']>.tasksplit__swatch,.atelier .tasksplit__swatch[data-where='local']{background:var(--x-local)}
+.atelier :is(.modelsplit__bar,.tasksplit__bar)>[data-where='cloud'],
+.atelier [data-where='cloud']>.tasksplit__swatch,.atelier .tasksplit__swatch[data-where='cloud']{background:var(--x-cloud)}
+.atelier .tasksplit__legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0;padding:0;list-style:none;font:var(--t-caption);color:var(--x-secondary);font-variant-numeric:tabular-nums}
+.atelier .tasksplit__legend li{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.atelier .tasksplit__legend b{font-weight:600;color:var(--x-title)}
+.atelier .tasksplit__swatch{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%;background:var(--x-meta)}
+.atelier .taskmodel__name{display:inline-flex;align-items:center;gap:6px;min-width:0}
+.atelier .taskadvisor{padding:var(--s-3);border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card)}
+
+/* Outputs: every file the task wrote. A row previews in Files; Open and Show
+   appear when the host offers them. */
+.atelier .outputs{display:grid;gap:var(--s-5)}
+.atelier .output-list{display:grid;gap:0;margin:0;padding:0;list-style:none;border:1px solid var(--x-hairline);border-radius:var(--r-md);background:var(--x-card);overflow:hidden}
+.atelier .output-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0;padding:6px var(--s-2) 6px var(--s-3)}
+.atelier .output-row+.output-row{border-top:1px solid var(--x-hairline)}
+.atelier .output-row__main{display:flex;flex:1;align-items:center;gap:var(--s-2);min-width:0;padding:2px 0;border:0;background:transparent;color:var(--x-secondary);text-align:left;cursor:pointer}
+.atelier .output-row__main:hover .output-row__name{color:var(--x-accent);text-decoration:underline}
+.atelier .output-row__main:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px;border-radius:var(--r-sm)}
+.atelier .output-row__text{display:grid;gap:1px;min-width:0}
+.atelier .output-row__name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-body);font-weight:500;color:var(--x-title)}
+.atelier .output-row__meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--t-caption);color:var(--x-meta);font-variant-numeric:tabular-nums}
+.atelier .output-row__actions{display:inline-flex;flex:none;gap:2px}
+.atelier .output-row__actions .btn{padding:2px 8px;font:var(--t-caption)}
+.atelier .output-row__error{flex-basis:100%;margin:0;font:var(--t-caption);color:var(--x-failed-text)}
+.atelier .md__link--code{text-decoration:none}
+.atelier .md__link--code code{text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--x-accent) 45%,transparent);text-underline-offset:2px;cursor:pointer}
 .atelier .field__optional{margin-left:6px;font:var(--t-caption);font-weight:400;color:var(--x-meta)}
 
 /* Floating surfaces over a see-through window. With a background or the
@@ -2955,19 +3000,18 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .delegation-menu__foot code{font-family:var(--mono);font-size:11.5px}
 
 /* App update consent (GitHub releases): asks before it downloads anything. */
-.atelier .appupdate{position:fixed;inset:0;z-index:80;display:grid;place-items:center;padding:24px}
-.atelier .appupdate__scrim{position:absolute;inset:0;background:rgba(0,0,0,.42)}
-.atelier .appupdate__card{position:relative;display:grid;gap:14px;width:min(560px,100%);max-height:min(640px,calc(100vh - 48px));padding:20px 22px 16px;border:1px solid var(--glass-edge);border-radius:14px;background:var(--x-popover,var(--x-card));box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden}
-.atelier .appupdate__head{display:grid;grid-template-columns:32px minmax(0,1fr);gap:12px;align-items:start}
-.atelier .appupdate__icon{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:color-mix(in srgb,var(--x-accent) 16%,transparent);color:var(--x-accent)}
-.atelier .appupdate__head h2{margin:0 0 4px;font:600 16px/1.3 var(--sans);color:var(--x-title)}
-.atelier .appupdate__head p{margin:0;font:400 13px/1.5 var(--sans);color:var(--x-secondary)}
-.atelier .appupdate__progress{height:6px;border-radius:999px;background:color-mix(in srgb,var(--x-title) 10%,transparent);overflow:hidden}
-.atelier .appupdate__progress span{display:block;height:100%;border-radius:999px;background:var(--x-accent);transition:width 200ms ease}
-.atelier .appupdate__notes{min-height:0;overflow:auto;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--x-title) 4%,transparent)}
-.atelier .appupdate__notes h3{margin:0 0 6px;font:600 12px/1.3 var(--sans);letter-spacing:.02em;color:var(--x-meta);text-transform:uppercase}
-.atelier .appupdate__notes .md{font:400 13px/1.55 var(--sans);color:var(--x-prose)}
-.atelier .appupdate__actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+/* The update banner: a slim bar at the top of the window, never over the task. */
+.atelier .appbanner{position:fixed;top:10px;left:50%;z-index:80;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;width:max-content;max-width:min(860px,calc(100vw - 32px));padding:6px 8px 6px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-dialog));box-shadow:0 6px 20px rgba(0,0,0,.12);transform:translateX(-50%);font:400 12.5px/1.4 var(--sans);color:var(--x-secondary)}
+.atelier .appbanner__icon{display:inline-flex;flex:none;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:color-mix(in srgb,var(--x-accent) 16%,transparent);color:var(--x-accent)}
+.atelier .appbanner[data-phase='error'] .appbanner__icon{background:var(--x-failed-bg);color:var(--x-failed-text)}
+.atelier .appbanner__text{min-width:0;flex:1 1 280px}
+.atelier .appbanner__text strong{font-weight:600;color:var(--x-title)}
+.atelier .appbanner__progress{flex:0 0 120px;height:5px;border-radius:999px;background:color-mix(in srgb,var(--x-title) 10%,transparent);overflow:hidden}
+.atelier .appbanner__progress span{display:block;height:100%;border-radius:999px;background:var(--x-accent);transition:width 200ms ease}
+.atelier .appbanner__actions{display:inline-flex;flex:none;flex-wrap:wrap;gap:4px}
+.atelier .appbanner__actions .btn{padding:3px 10px;font:500 12px/1.3 var(--sans)}
+.atelier .appbanner__notes{flex-basis:100%;max-height:220px;overflow:auto;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--x-title) 4%,transparent);font:400 12.5px/1.5 var(--sans);color:var(--x-prose)}
+@media (prefers-reduced-motion:reduce){.atelier .appbanner__progress span{transition:none}}
 
 /* Runtime popover: what keeps a queued update waiting, and restarting anyway. */
 .atelier .runtime-popover__blockers,.runtime-popover__blockers{margin:0;padding-left:18px;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary)}
@@ -3074,6 +3118,34 @@ html,body,#root,.app.atelier{background:transparent}
 .atelier .provcard__confirm{border:0;border-radius:6px;padding:4px 9px;background:var(--x-failed-bg,var(--x-needs-bg));color:var(--x-failed-text,var(--x-danger));font:500 11.5px/1.2 var(--sans);cursor:pointer}
 .atelier .provcard__keep{border:0;border-radius:6px;padding:4px 9px;background:none;color:var(--x-secondary);font:500 11.5px/1.2 var(--sans);cursor:pointer}
 .atelier .provcard--add{flex-direction:row;align-items:center;gap:12px;padding:14px;border-style:dashed;background:transparent;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.atelier .runmode{display:flex;flex-direction:column;gap:10px;margin:4px 0 18px}
+.atelier .modecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.atelier .modecard{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0;padding:12px 14px;border:1px solid var(--x-hairline);border-radius:12px;background:var(--mac-control);color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color 140ms ease,background 140ms ease}
+.atelier .modecard:hover:not(:disabled){border-color:var(--x-separator,var(--x-meta))}
+.atelier .modecard:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}
+.atelier .modecard:disabled{cursor:default;opacity:.7}
+.atelier .modecard.is-current{border-color:color-mix(in srgb,var(--x-accent) 60%,transparent);background:var(--x-accent-soft)}
+.atelier .modecard__head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 7px;width:100%;color:var(--x-title)}
+.atelier .modecard__name{font:500 13.5px/1.3 var(--sans);margin-right:auto}
+.atelier .modecard__summary{font:var(--t-body);font-size:12.5px;line-height:1.45;color:var(--x-secondary)}
+.atelier .modecard__boundary{font:var(--t-caption);color:var(--x-meta)}
+.atelier .runmode__notice{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 12px;border-radius:10px;background:var(--x-needs-bg);color:var(--x-needs-text);border:1px solid var(--x-needs-border,transparent);font:var(--t-body);font-size:12.5px}
+.atelier .runmode__notice>span{flex:1 1 240px;min-width:0}
+.atelier .localpanel{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border:1px solid var(--x-hairline);border-radius:12px}
+.atelier .localpanel__head{display:flex;align-items:center;gap:8px;color:var(--x-title)}
+.atelier .localpanel__head strong{font:500 13.5px/1.3 var(--sans)}
+.atelier .localpanel__head .provcard__badge{margin-left:auto}
+.atelier .localpanel__facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px 12px;margin:0}
+.atelier .localpanel__facts dt{font:var(--t-caption);color:var(--x-meta)}
+.atelier .localpanel__facts dd{margin:2px 0 0;font:var(--t-body);font-size:12.5px;color:var(--x-title);overflow-wrap:anywhere}
+.atelier .localpanel__progress{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.atelier .localpanel__progress .row__s{flex:1 1 200px;min-width:0}
+.atelier .progressbar{flex:1 1 100%;height:6px;border-radius:999px;background:var(--x-chip,var(--x-hairline));overflow:hidden}
+.atelier .progressbar>span{display:block;height:100%;border-radius:inherit;background:var(--x-accent);transition:width 300ms ease}
+.atelier .localpanel__actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.atelier .runmode__budget{display:flex;align-items:center;gap:8px}
+.atelier .runmode__budget input{width:110px}
+@media (prefers-reduced-motion:reduce){.atelier .progressbar>span,.atelier .modecard{transition:none}}
 .atelier .provcard--add:hover:not(:disabled){background:var(--mac-control);border-color:var(--x-meta)}
 .atelier .provcard--add:disabled{opacity:.5;cursor:default}
 

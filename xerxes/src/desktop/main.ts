@@ -52,6 +52,8 @@ import { createHubHealth, createNodeHubHealthPort, registerHubHealthIpc } from '
 import { HUB_HEALTH_STATE_EVENT } from './hubHealthShared.js'
 import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from './chatMediaShared.js'
 import { readLocalChatImage, readRemoteChatImage } from './main/chatMedia.js'
+import { FILE_ACTION_CHANNEL, fileActionRequestOf } from './fileActionShared.js'
+import { performFileAction } from './main/fileActions.js'
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -840,6 +842,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       return readRemoteChatImage(request, (method, params) => rpc.call(method, params))
     }
     return readLocalChatImage(request.path, request.cwd ?? selectedWorkspace)
+  })
+  // Files panel: open a workspace file in its default app, or show it in Finder.
+  handle(FILE_ACTION_CHANNEL, async (_event, value: unknown) => {
+    const request = fileActionRequestOf(value)
+    if ('error' in request) return { ok: false, error: request.error }
+    if (remoteMachine) return { ok: false, error: 'This file is on the SSH host, so it cannot be opened on this computer.' }
+    return performFileAction(request, { openPath: path => shell.openPath(path), showItemInFolder: path => shell.showItemInFolder(path) })
   })
   handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown, existingOnly?: unknown) => {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')

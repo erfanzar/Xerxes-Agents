@@ -27,6 +27,7 @@ import {
 } from '../../auth/usageView.js'
 import { desktopCall } from './desktopRpc.js'
 import { Icon } from './Icon.js'
+import { TaskModelsSection } from './TaskModels.js'
 import type { Snapshot } from './store.js'
 
 /** Plan windows move slowly; the runtime caches each answer for a minute. */
@@ -137,9 +138,11 @@ export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
 
   const profiles = report?.profiles ?? []
 
-  // Account-level only: plans, keys and limits. The current task's numbers
-  // are in the Activity card's session statistics.
+  // This task's models first (where it ran, and what the cloud cost), then
+  // the account: plans, keys and limits. The task's timings stay in the
+  // Activity card's session statistics.
   return <div className="usage">
+    <TaskModelsSection snap={snap} />
     <section className="usage__section" aria-labelledby="usage-plans" aria-busy={loading || undefined}>
       <header className="usage__head">
         <h3 id="usage-plans">Plans &amp; keys</h3>

@@ -17,6 +17,7 @@
  * When neither says anything, nothing is offered — never a guessed ladder.
  */
 
+import { modelCard } from './modelCards.js'
 import { modelsDev, type LiveReasoning } from './modelsDev.js'
 import type { ProviderName } from './providerRegistry.js'
 
@@ -127,6 +128,17 @@ export function catalogReasoningLevels(
   if (!model.trim()) return undefined
   const found = modelsDev.find({ model, ...(providerName ? { provider: providerName } : {}), ...(baseUrl ? { baseUrl } : {}) })
   return liveReasoningLevels(found?.reasoning, 'catalog')
+}
+
+/**
+ * A model whose card publishes separate thinking and thinking-off sampling
+ * (Bonsai) has a thinking switch even when its local server reports nothing:
+ * on/off, sent as its chat-template flag. Undefined for other models.
+ */
+export function cardReasoningLevels(model: string): ReasoningLevelSet | undefined {
+  const sampling = modelCard(model).sampling
+  if (!sampling?.thinking || !sampling.instruct) return undefined
+  return liveReasoningLevels({ supported: true, canDisable: true, efforts: [] }, 'catalog')
 }
 
 /** Every value the user may select, including the Xerxes-side off switch. */

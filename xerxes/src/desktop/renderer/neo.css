@@ -105,7 +105,7 @@
 :root[data-style='neo']:not(#neo) .runtime-popover{border-radius:0}
 /* Indicators that are round by meaning, not by decoration. */
 :root[data-style='neo']:not(#neo) .atelier :is(.agent-orb,.agent-orb canvas,.dot,.sess__dot,.railstatus__dot,.railrow__dot,.command-activity__dot,.offline__dot,.runtime-status__dot,.relaybadge__dot,.approval__dot,.wgroup__mark,.resumerow__dot,.welcome__sep,.usage-plan__dot,.studio-spinner,.acard__spin,.todo__icon,.railtodos__mark){border-radius:50%}
-:root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.palette-card,.composer-dock,.seg button,.btn,.chipbtn,.cchip,.provcard,.pcard,.appupdate__card,.activity-group){box-shadow:none}
+:root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.palette-card,.composer-dock,.seg button,.btn,.chipbtn,.cchip,.provcard,.pcard,.activity-group){box-shadow:none}
 :root[data-style='neo']:not(#neo) ::-webkit-scrollbar-thumb{border-radius:0;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 14%,transparent)}
 :root[data-style='neo']:not(#neo) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:1px solid var(--x-accent);outline-offset:1px;border-radius:0}
 

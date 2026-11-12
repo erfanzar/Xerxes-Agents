@@ -71,7 +71,7 @@ export interface PermissionBroker {
 }
 
 export const SAFE_TOOLS = new Set([
-  'ReadFile', 'GlobTool', 'GrepTool', 'ListDir', 'APIClient', 'RSSReader', 'URLAnalyzer', 'DuckDuckGoSearch', 'SystemInfo',
+  'ReadFile', 'XlsxReader', 'GlobTool', 'GrepTool', 'ListDir', 'APIClient', 'RSSReader', 'URLAnalyzer', 'DuckDuckGoSearch', 'SystemInfo',
   'skills_list', 'skill_view', 'session_search', 'search_memory', 'get_memory_statistics', 'consolidate_agent_memories',
   'agent_memory_read', 'agent_memory_list', 'agent_memory_search', 'agent_memory_status', 'TaskListTool', 'TaskGetTool',
   'TaskOutputTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ToolSearchTool', 'AskUserQuestionTool',
@@ -174,10 +174,14 @@ export function permissionDisposition(
   if (command) {
     return isSafeCommandInput(command) ? 'allow' : 'prompt'
   }
+  // Stopping a task only ends work this conversation started (a subagent or
+  // a background command): a lead that cuts a stalled worker short should not
+  // have to wait for a click to do it.
   return name === 'Agent'
     || name === 'AgentTool'
     || name === 'SendMessage'
     || name === 'SendMessageTool'
+    || name === 'TaskStopTool'
     || name === 'MemorySave'
     ? 'allow'
     : 'prompt'

@@ -39,6 +39,7 @@ const FILE_WRITERS: Readonly<Record<string, string>> = {
   Edit: 'file_path',
   FileEditTool: 'file_path',
   XlsxWriter: 'path',
+  XlsxConvert: 'output_path',
 }
 
 export interface RunSafetyOptions {
@@ -48,6 +49,14 @@ export interface RunSafetyOptions {
   readonly sandbox?: CommandSandbox
   /** Why there is no sandbox, for the run's notice. */
   readonly sandboxUnavailable?: string
+}
+
+/** A file a run wrote, relative to its output folder. */
+export interface RunOutput {
+  readonly path: string
+  readonly size: number
+  /** Milliseconds since the epoch. */
+  readonly modifiedAt: number
 }
 
 /** The inputs a run started with: real path to a size-and-mtime signature. */
@@ -111,6 +120,7 @@ export class RunSafety implements RunSafetyPort {
   readonly sandboxUnavailable: string | undefined
   readonly #inputs: Map<string, string>
   readonly #protectedFolders: readonly string[]
+  readonly #complete: boolean
   readonly #tempFolder: string
   readonly #sandbox: CommandSandbox | undefined
   #bound: BoundCommandSandbox | undefined
@@ -119,6 +129,7 @@ export class RunSafety implements RunSafetyPort {
     this.outputFolder = outputFolder
     this.#inputs = new Map(snapshot.files)
     this.#protectedFolders = snapshot.protectedFolders
+    this.#complete = snapshot.complete
     this.#tempFolder = tempFolder
     this.#sandbox = snapshot.complete ? options.sandbox : undefined
     this.sandboxUnavailable = !snapshot.complete
@@ -139,6 +150,24 @@ export class RunSafety implements RunSafetyPort {
   /** The input files, relative to the output folder. */
   inputs(): string[] {
     return [...this.#inputs.keys()].map(path => relative(this.outputFolder, path)).sort()
+  }
+
+  /**
+   * Every file the run created or was allowed to change, written by any tool
+   * or script: what is in the output folder now and is not one of its inputs.
+   * Undefined when the folder is too large for the run to know its inputs.
+   */
+  async outputs(): Promise<RunOutput[] | undefined> {
+    if (!this.#complete) return undefined
+    const now = await snapshotFolder(this.outputFolder)
+    if (!now.complete) return undefined
+    const written: RunOutput[] = []
+    for (const [path, value] of now.files) {
+      if (this.#inputs.has(path)) continue
+      const [size, modified] = value.split(':')
+      written.push({ path: relative(this.outputFolder, path), size: Number(size), modifiedAt: Math.round(Number(modified)) })
+    }
+    return written.sort((a, b) => b.modifiedAt - a.modifiedAt || a.path.localeCompare(b.path))
   }
 
   /** The sandbox exec_command runs in, bound to this run's folders; undefined when commands ask. */

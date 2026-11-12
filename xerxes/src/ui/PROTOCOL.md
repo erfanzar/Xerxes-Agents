@@ -244,8 +244,9 @@ params fall back to per-connection defaults.
 
 | Method                  | Params                                                      | Result                                                     | Notes                                                                                                                                              |
 | ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session.usage`         | `{ session_key? }`                                           | `{ ok, ... }` or `{ ok: false }`                            | Token/telemetry totals for one session, with the resolved context limit.                                                                           |
-| `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. `cost_basis: "subscription"` (on `session`, each `models[]` row, `status_update`, session payloads and the `/cost` result) marks calls a plan pays for (Claude Code, Codex, Copilot, keyless Anthropic): `cost_usd` is then only what API prices would charge, clients show "Included in plan" and leave it out of spend totals. Absent means per-token billing. |
+| `outputs.list`          | `{ session_key? }`                                           | `{ ok, cwd, outputs[] }` or `{ ok: false }`                 | Every file the task wrote, by any tool or script, recorded at the end of each turn: `outputs[]` rows are `{ path, turn, size, modified_at }`, `path` relative to `cwd`, newest first. Hidden files and bytecode caches are left out; a file deleted since drops out. |
+| `session.usage`         | `{ session_key? }`                                           | `{ ok, ..., models?, advisor? }` or `{ ok: false }`         | Token/telemetry totals for one session, with the resolved context limit. `models[]` and `advisor` are described under "Per-task model usage".      |
+| `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. `cost_basis: "subscription"` (on `session`, each `models[]` row, `status_update`, session payloads and the `/cost` result) marks calls a plan pays for (Claude Code, Codex, Copilot, keyless Anthropic): `cost_usd` is then only what API prices would charge, clients show "Included in plan" and leave it out of spend totals. Absent means per-token billing. Each `models[]` row also carries `local` (true on this machine, false in the cloud, null when the profile is unknown), and `session` carries the task's own `models[]` and `advisor` (see "Per-task model usage"). |
 | `plugins.secret.set`    | `{ plugin, name, value, session_key? }`                      | `{ ok, plugin, name, stored }` or `{ ok: false, error }`    | Store one secret a managed or project plugin declares in `permissions.secrets`. The value goes straight to the encrypted store (mode 0600) and never appears in a reply, notification, transcript or log; empty or over-16 KB values are refused. Clients send it from a password field, never a slash command. |
 | `plugins.secret.status` | `{ plugin, session_key? }`                                   | `{ ok, plugin, declared[], set[] }`                         | Secret names a plugin declares and which of them have a stored value. Never returns values. |
 | `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the named (default: attached) session; also emits `session_title`. Like `session.save`, `session.undo`, `session.compress`, `changes.undo` and `workspace.worktree`, it never re-binds the connection to `session_key`. |
@@ -1233,6 +1234,51 @@ UTF-8 text is limited to 128 KiB and retains whitespace; binary or invalid UTF-8
 files return errors. This read-only operation does not append messages, execute a
 tool, or call a provider. Older daemons may report an unsupported method. A preview of
 a whole file (not `truncated`) also carries `version`, the SHA-256 of its bytes.
+
+#### Rich file previews (additive)
+
+A client that can draw more than text adds `kinds`: the preview kinds it renders, from
+`table`, `image`, `pdf`, `sheet`, `document` and `html` (at most 16 names; names a
+daemon does not know are ignored, so newer clients stay compatible). Without `kinds` the
+request and reply are exactly as above. With `kinds`, the file's extension picks its
+kind; when that kind is not in `kinds`, the reply is the text preview above plus
+`kind:"text"` and `size` (bytes on disk). A client shows a file's source by leaving its
+rendered kind out (a CSV's `table`, an SVG's `image`, a page's `html`).
+
+Every rich reply is `{ok:true,path,kind,size,...}`:
+
+| Extensions | `kind` | Fields |
+| --- | --- | --- |
+| `.csv` `.tsv` `.tab` | `table` | `delimiter` (sniffed for `.csv`: `,` `;` tab `\|`), `encoding` (`utf-8`, `utf-16le`, `utf-16be` or `windows-1252`), `header` (first record), `rows` (data records), `total_rows` (data records in the file), `total_columns` (widest record), `truncated` |
+| `.xlsx` `.xlsm` | `sheet` | `sheets` (`[{name,hidden}]` in workbook order), `sheet` (zero-based index shown), `rows` (dense cells from A1), `total_rows`, `total_columns` (last row and column holding a value), `truncated`, optional `notice` (why a sheet has no cells, e.g. a chart sheet) |
+| `.docx` `.docm` | `document` | `blocks`, `truncated` |
+| `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` | `image` | `media_type` (`image/png`, `image/jpeg`, `image/gif`, `image/webp` or `image/svg+xml`, decided by the bytes for raster images), `data` (base64) |
+| `.pdf` | `pdf` | `media_type:"application/pdf"`, `data` (base64) |
+| `.html` `.htm` `.xhtml` | `html` | `content` (UTF-8 text), `truncated:false`, and `version` when the page fits the 128 KiB editor |
+
+`sheet` (integer 0–4095, default 0) picks the workbook sheet; an index past the last
+sheet shows the last one, and the reply's `sheet` says which. Sheet cells are strings as
+Excel displays them: shared and inline strings, `TRUE`/`FALSE`, error codes, numbers under
+their number format (percent, decimals, grouping, currency literals), dates and times as
+ISO `YYYY-MM-DD` / `HH:MM[:SS]`; a formula without a cached value shows as `=FORMULA`.
+`blocks` are `{type:"heading",level,text}`, `{type:"paragraph",runs}`,
+`{type:"list_item",ordered,level,marker,runs}` (the marker Word prints, such as `2.` or
+`1.a)`) and `{type:"table",rows}`, where `runs` are `[{text,bold?,italic?,underline?}]`.
+Tracked deletions, hidden text and field codes are left out.
+
+Tables and sheets carry at most 1,000 rows, 100 columns, 1,000 characters per cell and
+2 MiB of cell text; documents at most 5,000 blocks and 2 MiB of text. `truncated` is true
+when anything was left out, and the totals still count the whole file. Files larger than
+a kind's limit are not read: images and PDFs 10 MiB (one reply must fit a 16 MiB frame),
+HTML 4 MiB, tables, workbooks and documents 32 MiB, with no single archive part inflated
+past 64 MiB.
+
+A file that cannot be shown is a typed reply, not an RPC error:
+`{ok:false,path,reason,error,size}` where `reason` is `too_large` (also `limit`, in
+bytes), `unsupported` (not text and no kind the client renders) or `unreadable` (the
+bytes do not match the extension, a damaged archive, or a password-protected or legacy
+binary Office file). Invalid `path`, containment failures, and invalid `kinds` or `sheet`
+remain RPC errors. Clients must treat an unknown `kind` as unsupported.
 
 `workspace.fileWrite` accepts `{session_key,path,content,base_version}` and saves an
 edit made by the person in a client (it is not a tool call and appends nothing to the
@@ -2754,3 +2800,68 @@ session `shared`, permanently. In a shared session the remembered `ALWAYS` appro
 `security/approvals.ts` never authorize a call (neither grants nor denials) and an
 "always" answer is remembered only for that session; once/session grants made inside the
 session are still honored.
+
+### Per-task model usage (additive v35)
+
+`session.usage` and the `session` object of `usage.report` carry which models
+the task used, from the daemon's usage ledger (absent when the daemon keeps
+none):
+
+- `models[]`: one row per model, profile and role, most tokens first:
+  `model`, `profile?`, `role?` (`worker`, `advisor` or `subagent`), `local`
+  (true on this machine, false in the cloud, null when the profile is unknown
+  or deleted), `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`, `bytes_sent?` (measured for advisor calls), `cost_usd?`
+  (only when a published price exists) and `cost_basis?`.
+- `advisor`: `{ profile, max_calls, max_usd }`, the advisor's per-task limits
+  as the runtime loaded them, present when an advisor is configured.
+
+A subagent's rounds count toward the task that started it. Rounds recorded
+before this field existed belong to no task and appear only in the machine
+totals. Clients compute shares by tokens processed (input, output and cache).
+
+### Run modes and local setup (additive v35)
+
+Private, Hybrid and Cloud are combinations of existing settings, so these methods
+add no new runtime state. A daemon started without the host ports answers each
+with `{ ok: false, code: "unsupported" }`.
+
+- `run_mode.get` `{}` → `{ ok, mode, worker, local_only, restart_pending,
+  locked_by }`. `mode` is `private` (local main profile, fully local mode on),
+  `hybrid` (cloud main profile leading, `data_boundary: hybrid`) or `cloud` (cloud
+  main profile), and null until a main profile is chosen or when the settings
+  match no mode. `worker` is the main profile `{ profile, model, local }`.
+  `restart_pending` says the saved settings differ from the ones the daemon started
+  with; `locked_by` lists environment variables that override them.
+- `run_mode.set` `{ mode, worker_profile? }` → the same fields plus
+  `restart_required`. Without `worker_profile` it keeps the current main profile
+  when it fits the mode, else uses `bonsai-local` for Private; Hybrid and Cloud
+  need a cloud profile. Private and Hybrid need `bonsai-local`. Refusals carry a
+  `code`: `needs_local_setup`, `needs_cloud_profile`, `wrong_location`,
+  `unknown_profile`, `invalid_request` or `worker_not_selected`. The main profile is
+  selected as by `provider_select` (emitting `InitDone`); the settings are written to
+  the `runtime` section of `daemon/config.json`, and the Agent intelligence tiers
+  are saved as `agent.settings.save` would (all on Bonsai in Private; light and
+  balanced on Bonsai with `reasoning_effort: off` and smart on the lead in Hybrid;
+  none in Cloud).
+- `local.status` `{}` → `{ ok, status, job }`: `xerxes local doctor --json` as one
+  shape, `status: { ready, engine: { name, label, found, version, new_enough },
+  model: { id, label, bytes, downloaded }, server: { running, port, context_length },
+  memory_bytes, blocker }`, and the current or last setup job.
+- `local.setup` `{ then_mode?, then_worker_profile? }` → `{ ok, job }` at once; the
+  setup itself runs `xerxes local setup --json` in the daemon. `then_mode` (`private`
+  or `hybrid`) is applied as `run_mode.set` when it succeeds. `then_worker_profile`,
+  with `then_mode: "hybrid"` only, is the cloud lead picked before Bonsai existed; it
+  is applied as that `run_mode.set`'s `worker_profile`. An unknown profile returns
+  `unknown_profile`, a local one `wrong_location`. A second request while one runs
+  returns `{ ok: false, code: "busy", job }`.
+- `local.setup.cancel` `{}` → `{ ok, cancelled }`.
+
+`local_setup` (event, broadcast) `{ job }` reports every change to the job:
+`{ id, state, step, started_at }` with `percent` while `running`, and
+`finished_at` once `done` (with `result`), `failed` (with `error: { code,
+message }`) or `cancelled`.
+
+`provider_list` adds `active_chosen` (false while only the built-in Claude Code
+fallback is active, which nothing runs on) and a per-profile `local` flag (data
+trust local: a Private or Hybrid worker).

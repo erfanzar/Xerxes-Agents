@@ -130,6 +130,8 @@ test('the card report names what set each value', () => {
   expect(byName['Prompt and tools']).toMatchObject({ card: 'lean', effective: 'full', from: 'XERXES_PROMPT_PROFILE' })
   expect(byName['Result checks and escalation']).toMatchObject({ card: 'on', effective: 'off', from: 'XERXES_ESCALATION' })
   expect(byName['Local builds']?.card).toContain('LM Studio ternary-bonsai-2-27b-mlx (needs 16 GiB)')
+  expect(byName['Local builds']?.card).toContain('llama-server Ternary-Bonsai-2-27B-Q2_0.gguf (needs 20 GiB and llama.cpp b11555+')
+  expect(byName['Local builds']?.card).toContain('mlx_lm.server prism-ml/Ternary-Bonsai-2-27B-mlx-2bit (needs 16 GiB and mlx-lm 0.32.2+)')
 })
 
 test('a model without a card reports Xerxes defaults, not the values the daemon materialized', () => {

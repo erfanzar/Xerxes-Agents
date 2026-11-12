@@ -28,6 +28,8 @@ interface Fake {
   ignoreSigterm: boolean
   exitImmediately: number | undefined
   logLine: string
+  ran: string[][]
+  versionOutput: string | undefined
 }
 
 function fake(): Fake {
@@ -43,6 +45,8 @@ function fake(): Fake {
     ignoreSigterm: false,
     exitImmediately: undefined,
     logLine: 'loading model...',
+    ran: [],
+    versionOutput: undefined,
     ports: undefined as unknown as ServerPorts,
   }
   const ports: ServerPorts = {
@@ -70,6 +74,11 @@ function fake(): Fake {
       if (signal === 'SIGKILL' || !state.ignoreSigterm) state.alive.delete(pid)
     },
     portInUse: async () => state.portBusy,
+    run: async (argv) => {
+      state.ran.push([...argv])
+      if (state.versionOutput === undefined) throw new Error('not found')
+      return { exitCode: 0, output: state.versionOutput }
+    },
     sleep: async (ms) => {
       clock += ms
     },
@@ -112,10 +121,10 @@ describe('createLocalServer', () => {
     expect(error).toBeInstanceOf(ServerError)
     expect((error as ServerError).code).toBe('BINARY_NOT_FOUND')
     expect((error as ServerError).message).toContain('brew install llama.cpp')
-    expect((error as ServerError).message).toContain('Prism')
+    expect((error as ServerError).message).toContain('github.com/ggml-org/llama.cpp/releases')
     expect(f.spawned).toEqual([])
 
-    const configured = createLocalServer(f.ports, { stateDir: dir, llamaServerPath: '/nowhere/llama-server' })
+    const configured = createLocalServer(f.ports, { stateDir: dir, binaryPath: '/nowhere/llama-server' })
     const missing = await configured.start(start).catch((e: unknown) => e)
     expect((missing as ServerError).message).toContain('/nowhere/llama-server')
   })

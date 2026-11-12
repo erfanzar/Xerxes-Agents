@@ -64,6 +64,10 @@ test('environment dumping commands always prompt instead of auto-approving', () 
 
 test('permission modes preserve read-only and write behavior', () => {
   expect(checkPermission(call('ReadFile', {}), 'auto')).toBe(true)
+  // Reading a workbook is a read like ReadFile: a local agent has nobody to ask.
+  expect(checkPermission(call('XlsxReader', { path: 'out/summary.xlsx' }), 'auto')).toBe(true)
+  // Converting writes a file, so it is not on the read-only list.
+  expect(checkPermission(call('XlsxConvert', { path: 'a.csv', output_path: 'a.xlsx' }), 'auto')).toBe(false)
   expect(checkPermission(call('WriteFile', { file_path: 'a.txt' }), 'auto')).toBe(false)
   expect(checkPermission(call('exec_command', { cmd: 'git status' }), 'plan')).toBe(true)
   expect(checkPermission(call('exec_command', { cmd: 'touch a.txt' }), 'plan')).toBe(false)
@@ -126,6 +130,9 @@ test('auto mode recognizes registered single-agent tool names but still prompts 
   expect(checkPermission(call('AgentTool', { prompt: 'inspect this' }), 'auto')).toBe(true)
   expect(checkPermission(call('SendMessageTool', { target: 'reviewer', message: 'check tests' }), 'auto')).toBe(true)
   expect(checkPermission(call('SpawnAgents', {}), 'auto')).toBe(false)
+  // Stopping a task this conversation started needs no click in auto mode.
+  expect(checkPermission(call('TaskStopTool', { task_id: 'subagent_1' }), 'auto')).toBe(true)
+  expect(checkPermission(call('TaskStopTool', { task_id: 'subagent_1' }), 'manual')).toBe(false)
   expect(checkPermission(call('AgentTool', { prompt: 'inspect this' }), 'plan')).toBe(false)
 })
 

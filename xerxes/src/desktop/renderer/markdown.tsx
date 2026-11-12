@@ -71,6 +71,21 @@ function CodeBlock({ code, language }: { code: string; language: string }): Reac
   )
 }
 
+/** Extensions of files a task reads or writes; anything else in backticks stays plain code. */
+const FILE_EXTENSIONS = new Set([
+  'csv', 'tsv', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'pdf', 'md', 'txt', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'xml', 'html', 'htm',
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'log', 'sql', 'ipynb', 'py', 'ts', 'tsx', 'js', 'mjs', 'jsx', 'css', 'sh', 'rb', 'go', 'rs',
+  'java', 'c', 'h', 'cpp', 'zip',
+])
+
+/** A relative or absolute file path with a known extension: `out/summary.csv`, `notes.md`. */
+export function looksLikeFilePath(text: string): boolean {
+  if (!text || text.length > 260 || /\s|:\/\//.test(text)) return false
+  if (!/^(?:\.{1,2}\/|\/|~\/)?[\w.@+-]+(?:\/[\w.@+-]+)*$/.test(text)) return false
+  const dot = text.lastIndexOf('.')
+  return dot > 0 && dot > text.lastIndexOf('/') + 1 && FILE_EXTENSIONS.has(text.slice(dot + 1).toLowerCase())
+}
+
 // code | image `![alt](src "title")` | bold | italic | link `[label](href "title")`
 const INLINE_RE = /(`[^`]+`)|(!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*(?:\s+"[^"]*")?\))/g
 const IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/
@@ -81,24 +96,32 @@ const LINK_RE = /^\[([^\]]+)\]\(([^)\s]*)(?:\s+"[^"]*")?\)$/
  * Links open through the host (chatLinks.tsx); bare URLs in plain text
  * become links too, never inside code.
  */
-function inlinePieces(line: string): ReactElement[] {
+function inlinePieces(line: string, bareUrls = true): ReactElement[] {
   const pieces: ReactElement[] = []
   let last = 0
   let key = 0
   const nextKey = (): number => key++
-  const plain = (text: string): void => { pieces.push(<Fragment key={key++}>{autolinked(text, nextKey)}</Fragment>) }
+  const plain = (text: string): void => { pieces.push(<Fragment key={key++}>{bareUrls ? autolinked(text, nextKey) : text}</Fragment>) }
   for (const match of line.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
     if (start > last) plain(line.slice(last, start))
     const [raw, code, image, bold, italic, link] = match
-    if (code) pieces.push(<code key={key++}>{code.slice(1, -1)}</code>)
+    if (code) {
+      const text = code.slice(1, -1)
+      // `out/summary.csv` in a reply opens that file, as a markdown file link does.
+      pieces.push(looksLikeFilePath(text)
+        ? <ChatLink key={key++} label={<code>{text}</code>} href={text} className="md__link--code" />
+        : <code key={key++}>{text}</code>)
+    }
     else if (image) {
       const parsed = IMAGE_RE.exec(image)
       if (parsed) pieces.push(<ChatImage key={key++} alt={parsed[1] ?? ''} src={parsed[2] ?? ''} />)
       else plain(raw)
     }
-    else if (bold) pieces.push(<strong key={key++}>{bold.slice(2, -2)}</strong>)
-    else if (italic) pieces.push(<em key={key++}>{italic.slice(1, -1)}</em>)
+    // Emphasis holds code and markdown links too (**`out/summary.csv`** is
+    // bold code that opens the file); a bare URL in it stays text, as before.
+    else if (bold) pieces.push(<strong key={key++}>{inlinePieces(bold.slice(2, -2), false)}</strong>)
+    else if (italic) pieces.push(<em key={key++}>{inlinePieces(italic.slice(1, -1), false)}</em>)
     else if (link) {
       const parsed = LINK_RE.exec(link)
       if (parsed) pieces.push(<ChatLink key={key++} label={parsed[1] ?? ''} href={parsed[2] ?? ''} />)

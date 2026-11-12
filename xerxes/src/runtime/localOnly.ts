@@ -45,6 +45,8 @@ export function parseLocalOnlyConfig(
 }
 
 let active = false
+/** The values `enableLocalOnly` overwrote in the environment (undefined: the key was unset). */
+let overwritten: Readonly<Record<string, string | undefined>> | undefined
 
 /** Whether fully local mode is on in this process. */
 export function localOnlyActive(): boolean {
@@ -94,6 +96,7 @@ export function enableLocalOnly(env: Record<string, string | undefined> = proces
   if (active) return () => undefined
   active = true
   const previousEnv = Object.fromEntries(Object.keys(LOCAL_ONLY_SWITCHES).map(key => [key, env[key]]))
+  overwritten = previousEnv
   Object.assign(env, LOCAL_ONLY_SWITCHES)
 
   const originalFetch = globalThis.fetch
@@ -122,8 +125,23 @@ export function enableLocalOnly(env: Record<string, string | undefined> = proces
       if (value === undefined) delete env[key]
       else env[key] = value
     }
+    overwritten = undefined
     active = false
   }
+}
+
+/**
+ * The environment as it was before fully local mode set its switches. Code
+ * that asks whether the user set `XERXES_LOCAL_ONLY` must read this: once
+ * the mode is on, the process's own environment always says it is.
+ */
+export function environmentBeforeLocalOnly(env: Readonly<Record<string, string | undefined>> = process.env): Record<string, string | undefined> {
+  const copy: Record<string, string | undefined> = { ...env }
+  for (const [key, value] of Object.entries(overwritten ?? {})) {
+    if (value === undefined) delete copy[key]
+    else copy[key] = value
+  }
+  return copy
 }
 
 /** The origin only: a refused URL's path and query may carry tokens. */

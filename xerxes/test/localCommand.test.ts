@@ -46,6 +46,8 @@ interface Harness {
   readonly fetched: string[]
   status: ServerStatus
   binary: string | undefined
+  /** What `llama-server --version` prints; undefined when it cannot be read. */
+  version: string | undefined
 }
 
 function harness(hardware: HardwareProfile, runtime: Record<string, unknown> = {}): Harness {
@@ -54,9 +56,15 @@ function harness(hardware: HardwareProfile, runtime: Record<string, unknown> = {
   const profiles: SaveLocalProfileInput[] = []
   const starts: StartOptions[] = []
   const fetched: string[] = []
-  const h = { status: { running: false, healthy: false, stale: false } as ServerStatus, binary: '/opt/bin/llama-server' as string | undefined }
+  const h = {
+    status: { running: false, healthy: false, stale: false } as ServerStatus,
+    binary: '/opt/bin/llama-server' as string | undefined,
+    version: 'version: 0.9.0 (build 11683, commit a1b2c3d)' as string | undefined,
+  }
   const server: LocalServer = {
+    engine: 'llama-server',
     findBinary: async () => h.binary,
+    version: async () => h.version,
     async start(options) {
       starts.push(options)
       h.status = { running: true, healthy: true, stale: false, pid: 4242, port: options.port, model: options.modelPath, startedAt: 'now', logPath: '/log' }
@@ -273,7 +281,7 @@ describe('runLocalCommand', () => {
     const body = json(h) as Record<string, any>
     expect(body.ready).toBe(true)
     expect(body.model).toMatchObject({ present: true, verified: true, source_configured: true })
-    expect(body.llama_server).toEqual({ found: true, path: '/opt/bin/llama-server' })
+    expect(body.llama_server).toEqual({ found: true, path: '/opt/bin/llama-server', build: 11683, version: '0.9.0' })
   })
 })
 
@@ -425,9 +433,16 @@ describe('runLocalCommand with LM Studio', () => {
     expect(await runLocalCommand(['setup', '--engine', 'lmstudio', '--model', 'bonsai-9b'], h.ports)).toBe(1)
     expect(h.base.err.join('')).toContain('--model-key')
     expect(await runLocalCommand(['setup', '--engine', 'lmstudio', '--model-file', '/m.gguf'], h.ports)).toBe(2)
-    expect(await runLocalCommand(['setup', '--model-key', KEY], h.ports)).toBe(2)
+    expect(await runLocalCommand(['setup', '--engine', 'llama-server', '--model-key', KEY], h.ports)).toBe(2)
     expect(await runLocalCommand(['setup', '--engine', 'ollama'], h.ports)).toBe(2)
     expect(h.starts).toEqual([])
+  })
+
+  test('--model-key alone picks LM Studio, the only engine it belongs to', async () => {
+    const h = lmHarness(mac24)
+    expect(await runLocalCommand(['setup', '--model-key', KEY, '--json'], h.ports)).toBe(0)
+    expect(h.starts[0]).toMatchObject({ modelKey: KEY })
+    expect(h.base.starts).toEqual([])
   })
 
   test('without lms the guidance names LM Studio and nothing starts', async () => {
@@ -493,7 +508,9 @@ test('llama-server setup records the window the server reports, not just the lau
     const profiles: SaveLocalProfileInput[] = []
     const probed: string[] = []
     const server: LocalServer = {
+      engine: 'llama-server',
       findBinary: async () => '/opt/bin/llama-server',
+      version: async () => 'version: 0.9.0 (build 11683, commit a1b2c3d)',
       start: async (options) => ({ running: true, healthy: true, stale: false, pid: 1, port: options.port, model: options.modelPath }),
       stop: async () => ({ stopped: false, reason: 'not-running' }),
       status: async () => ({ running: false, healthy: false, stale: false }),

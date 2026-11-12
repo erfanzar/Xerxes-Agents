@@ -22,6 +22,7 @@ import { buildLeanSystemPrompt, localDay, readLeanProjectInstructions, selectLea
 import { renderFindings, type CheckFinding } from '../runtime/resultChecks.js'
 import { cascadeCheck, cascadeNext, latestAssistantContent, MAX_CASCADE_ROUNDS, MUTATING_TOOL_NAMES, type CascadeHooks } from '../runtime/cascade.js'
 import type { RunSafety } from '../runtime/runSafety.js'
+import { TASK_OUTPUTS_KEY, taskOutputsOf, withTurnOutputs } from './taskOutputs.js'
 import type { RecoverEngine } from '../local/engineRecovery.js'
 import type { ReplyBudget } from '../runtime/replyBudget.js'
 import { localOnlyActive } from '../runtime/localOnly.js'
@@ -719,8 +720,10 @@ export class AgentTurnRunner implements TurnRunner {
         : '',
       delegationModels: this.delegationModelsFor(session, tools),
       // Read every turn, not cached: the chip can change it mid-conversation.
+      // With a data boundary, a cloud model that may not open private files
+      // is told to lead: local agents do the file work and report results.
       delegationMode: tools?.some(tool => DELEGATING_TOOLS.has(tool.function.name))
-        ? delegationModePrompt(delegationModeOf(session.metadata))
+        ? [delegationModePrompt(delegationModeOf(session.metadata)), this.options.dataBoundaryForSession?.(session)?.instruction?.() ?? ''].filter(Boolean).join('\n\n')
         : '',
       // Deferred loading hides most of the surface from the request. Without
       // this the model is simply told it has sixteen tools and concludes the
@@ -1152,6 +1155,17 @@ export class AgentTurnRunner implements TurnRunner {
               state.messages.push({ role: 'user', content: next.feedback, origin: 'harness' })
             } else if (next.enforceMessage !== undefined) {
               state.messages.push({ role: 'user', content: next.enforceMessage, origin: 'harness' })
+            }
+          }
+          // What the task wrote this turn, by any tool or script, kept with the
+          // task for its Outputs list. A scan that fails never fails the turn.
+          if (runSafety && !signal.aborted) {
+            try {
+              const written = await runSafety.outputs()
+              // On the turn's state: it is what the runtime writes back to the task.
+              if (written) state.metadata[TASK_OUTPUTS_KEY] = withTurnOutputs(taskOutputsOf(state.metadata), written, state.turnCount)
+            } catch (error) {
+              yield { type: 'notification', payload: { level: 'warning', message: `The task's outputs could not be listed: ${error instanceof Error ? error.message : String(error)}` } }
             }
           }
           break
@@ -2160,6 +2174,8 @@ function accumulateSessionTelemetry(session: DaemonSession, event: StreamEvent):
     recordModelUsage({
       model: event.model,
       profile: typeof session.metadata.provider_profile === 'string' ? session.metadata.provider_profile : undefined,
+      session: session.id,
+      role: 'worker',
       inputTokens: event.usage.inputTokens,
       outputTokens: event.usage.outputTokens,
       cacheReadTokens: event.usage.cacheReadTokens,

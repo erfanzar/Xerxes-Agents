@@ -152,6 +152,12 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
     } catch (error) { setStatus({ kind: 'error', message: desktopError(error) }) }
   }
   const activeProfile = profiles.find(profile => profile.name === snap.providers.find(provider => provider.active)?.name)
+  // Tiers pointed at a cloud provider: Private mode refuses them, Hybrid sends those agents' tasks out.
+  const cloudTiers = INTELLIGENCE_TIERS.filter(({ id }) => {
+    const tier = draft.tiers[id]
+    return tier.model.trim() !== '' && tier.provider_profile !== '' && snap.providers.find(provider => provider.name === tier.provider_profile)?.local === false
+  }).map(({ label }) => label)
+  const mode = snap.runMode?.mode ?? null
 
   return (
     <>
@@ -159,6 +165,14 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
       <p className="modal__sub">
         Agents and workflow steps ask for a tier by name. Point each tier at any provider, any model and any reasoning effort. An agent given an explicit model uses that instead.
       </p>
+      {mode === 'private' && cloudTiers.length > 0 && (
+        <p className="studio-error" role="alert">
+          Private mode refuses cloud models, so agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} will not run. Point {cloudTiers.length === 1 ? 'it' : 'them'} at a provider on this machine, or use Hybrid.
+        </p>
+      )}
+      {mode === 'hybrid' && cloudTiers.length > 0 && (
+        <p className="row__s">In Hybrid, agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} run in the cloud and cannot read your files; the others run on Bonsai on this Mac and do the file work.</p>
+      )}
       <div className="tierlist">
         {INTELLIGENCE_TIERS.map(({ id, label, hint }) => {
           const tier = draft.tiers[id]
