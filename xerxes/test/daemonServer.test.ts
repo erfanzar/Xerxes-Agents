@@ -4262,7 +4262,7 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
         base_url: "https://native.example/v1",
         max_tokens: 512,
         model: "native-model",
-        permission_mode: "auto",
+        permission_mode: "accept-all",
         provider: "openai",
         temperature: 0.2,
         top_p: 0.8,
