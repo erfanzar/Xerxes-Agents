@@ -81,6 +81,38 @@ test('Gemini discovery refuses repeated page tokens, redirects and aggregate ove
   })).rejects.toThrow('HTTP 302')
 })
 
+test('a Google-hosted profile is discovered natively even when its wire says openai', async () => {
+  const requests: URL[] = []
+  const models = await discoverModelCatalog({ provider: 'openai', apiKey: 'fake-key', baseUrl: root }, {
+    fetchImplementation: async (input, init) => {
+      const url = new URL(String(input))
+      requests.push(url)
+      const headers = new Headers(init?.headers)
+      // The endpoint decides the credentials: Google rejects a bearer token here.
+      expect(headers.get('x-goog-api-key')).toBe('fake-key')
+      expect(headers.get('authorization')).toBeNull()
+      return Response.json({ models: [
+        { name: 'models/gemini-4-carbon', inputTokenLimit: 1_048_576, outputTokenLimit: 65_536, supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/embedding-only', supportedGenerationMethods: ['embedContent'] },
+      ] })
+    },
+  })
+  expect(requests[0]?.pathname).toBe('/v1beta/models')
+  expect(models).toEqual([
+    { id: 'gemini-4-carbon', contextLimit: 1_048_576, maxOutputTokens: 65_536 },
+  ])
+})
+
+test('a provider that reports no context window leaves it unknown instead of guessing', async () => {
+  const models = await discoverModelCatalog({ provider: 'openai', apiKey: 'fake-key', baseUrl: 'https://qwen.example/v1' }, {
+    fetchImplementation: async () => Response.json({ object: 'list', data: [
+      { id: 'deepseek-v4.1-flash-1017', object: 'model', created: 1, owned_by: 'qwen-plan' },
+    ] }),
+  })
+  expect(models).toEqual([{ id: 'deepseek-v4.1-flash-1017' }])
+  expect(models[0]).not.toHaveProperty('contextLimit')
+})
+
 test('Gemini discovery revalidates public DNS before each page and caps unique pagination', async () => {
   let resolved = 0
   let fetched = 0

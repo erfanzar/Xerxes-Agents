@@ -125,7 +125,12 @@ export async function discoverModelCatalog(
   }
 
   const fetchImplementation = options.fetchImplementation ?? globalThis.fetch;
-  const provider = canonicalProvider(input.provider);
+  // A profile's wire label is a claim about request shape, not about which API
+  // serves the models. Google's host has its own auth header, envelope and
+  // limit fields, so the endpoint decides there — otherwise a Google-hosted
+  // profile declared as `openai` authenticates with a bearer token, gets 401,
+  // and reports no context window at all.
+  const provider = googleGenerativeHost(input.baseUrl) ? "gemini" : canonicalProvider(input.provider);
   const apiKey =
     input.resolveProviderCredential === false
       ? (input.apiKey?.trim() ?? "")
@@ -425,6 +430,16 @@ export function sanitizeModelDiscoveryError(
     }
   }
   return redactString(message);
+}
+
+/** Google's own Generative Language host serves a native API on every path. */
+function googleGenerativeHost(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false;
+  try {
+    return new URL(baseUrl).hostname === "generativelanguage.googleapis.com";
+  } catch {
+    return false;
+  }
 }
 
 function modelDiscoveryHeaders(

@@ -78,6 +78,11 @@ export function profileSelectionValidator(profiles: InventoryProfiles, options: 
 
 async function withProfileInventory<T>(profiles: InventoryProfiles, settings: AgentSettingsStore | undefined, signal: AbortSignal | undefined, read: (port: ModelInventoryPort) => Promise<T>, profileName?: string, options: ProfileInventoryOptions = {}): Promise<T> {
     signal?.throwIfAborted()
+    // Capability resolution reads models.dev synchronously, so a cold start
+    // reported every catalog-known model (Qwen plan models, for example) as
+    // unknown until something else happened to load it. Load it first; the
+    // read is cached and a failure keeps the previous answer.
+    await modelsDev.load().catch(() => undefined)
     const snapshot = profiles.list(), active = profiles.active()?.name
     const selected = (name: string): ProviderProfile => {
       const profile = snapshot.find(value => value.name === name)
