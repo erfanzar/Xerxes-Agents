@@ -1,7 +1,7 @@
 # Xerxes 24/7 superagent
 
-Status: implementation in progress. Baseline: main `30f5bea9` (0.8.33).
-All work is local on branch `xerxes-superagent`; no release or deployment is implied.
+Status: local v0.8.34 delivery candidate on `xerxes-superagent-v0.8.34`, normally merged from `xerxes-superagent` onto release base `51f634bb`.
+No release, deployment or update of the user's running app/daemon is implied. The owner removed sandboxed execution from this scope; DO means the existing Hub task/agent actions, not a new shell or sandbox.
 
 ## Existing architecture (Step 1)
 
@@ -11,7 +11,7 @@ All work is local on branch `xerxes-superagent`; no release or deployment is imp
 - `audit.ts` records intent/confirm/dispatch/outcome through the identity audit log. Pre-mutation audit fails closed; post-outcome logging cannot undo execution.
 - `autopilot.ts` handles attention events and periodic check-ins. `watch.ts` observes events, bounded step digests and anomalies/reviews. `index.ts` composes these with the runner and event subscription.
 - At the baseline, `task.tail` resolved session keys using `session.active_list {}`. Omitting `history_limit: 0` requests all active histories before a second `session.history` request. Resolution does not propagate cancellation. The tail rejects pagination despite daemon support for `before`. Static evidence establishes these defects; no live latency measurement has been made.
-- Existing delegated permission approvals and broad automatic owner actions require tightening under this contract.
+- Supervisor permission approvals remain disabled: the owner uses the human task approval UI. Normal Hub actions retain their existing confirmation/Autopilot behavior.
 
 ## Safety contract (Step 2)
 
@@ -19,14 +19,14 @@ All work is local on branch `xerxes-superagent`; no release or deployment is imp
 |---|---|---|
 | A SEE | Workspace file/directory/search/git reads; paginated transcripts and test/build results; health; GitHub reads; Xerxes UI screenshots at fixed widths | Existing thread/workspace read ACL, bounded bytes/time. No new authority from read content. |
 | B REMEMBER/SCHEDULE | Persistent notebook (plans/promises/open items), one-shot wakes, event subscriptions, quiet unchanged check-ins | Scoped to owner/thread/workspace; stored provenance remains data, not an instruction grant. |
-| C SCOPED DO | Commands and file edits | Owner-authorized action mandate; owned worktree plus enforced sandbox; branch/file leases, timeout, bounded output, cancellation. Never ambient Hub shell access. |
+| C DO | Existing Hub task start/steer/stop, agent messages, goal/model changes and delegated question answers | Existing Hub grants, confirmation/Autopilot rules and command router. The target task performs its work under its own permission mode. No supervisor shell, sandbox or new scoped-execution guarantee. Permission approvals stay in the human task approval UI. |
 | D GATED | Push/publish/outside delete/spend/credentials/others' systems/permission modes/goal completion | Current Hub owner must explicitly confirm exact canonical action; no Autopilot shortcut. |
 
 Each ability has its own module and tests. Tool schemas, policy/admission and host execution are separate layers. Additive RPCs preserve protocol v35. Production composition injects genuine workspace/OS/GitHub/screenshot ports; missing hosts return actionable unsupported results, never fake observations.
 
 ### Untrusted input
 
-Task transcripts, file contents, web responses, notebook text and event reasons are untrusted observations. They cannot create a C/D mandate. Admission uses an out-of-band, persisted owner authorization bound to workspace, action kind and canonical request hash. A model-supplied boolean, source label, notebook sentence or event payload is never proof of authority. D confirmations bind the exact request, expire, are single-use, and require current owner identity at dispatch. C has no network/credential privileges and refuses when enforcement or task ownership cannot be established.
+Task transcripts, file contents, web responses, notebook text and event reasons are untrusted observations. They cannot grant action authority. Normal DO uses the existing Hub actions and their target-bound grants; the target task retains its own tool permissions. A model-supplied boolean, source label, notebook sentence or event payload is never proof of owner approval. D confirmations bind the exact request, expire, are single-use, and require current owner identity at dispatch. This feature does not claim to sandbox a delegated task.
 
 ### Operational controls
 
@@ -40,13 +40,15 @@ Use durable SQLite notebook, wake and subscription records. Events are delivered
 
 ## Verification and delivery
 
-Use Bun-native tests from `xerxes/` so isolated-home preload applies. Write failing behavior tests first; run each slice's focused tests before its local commit. After integration, run the root check/test/build gate and `git diff --check`, independently review safety paths, and report failures/skips explicitly. Live-provider validation requires an explicit owner request; the screenshot proof below follows that delivery request. External GitHub mutations, cloud infrastructure spend, user-service restarts, push, publish and releases remain outside this task.
+Use Bun-native tests from `xerxes/` so isolated-home preload applies. Write failing behavior tests first; run each slice's focused tests before its local commit. For this delivery, commit after targeted tests, then run one complete clean-copy check/test/build/release-package gate and `git diff --check`. Report failures/skips explicitly; no additional review or hardening round is part of the owner's final scope. Live-provider validation requires an explicit owner request; the screenshot proof below follows that delivery request. External GitHub mutations, cloud infrastructure spend, user-service restarts, push, publish and releases remain outside this task.
 
-## Implementation checkpoints
+## Historical implementation checkpoints
+
+The checkpoint notes below describe their original scope and verification, not additional release requirements. The owner has since removed sandboxed DO and further review rounds; the current DO scope and approval proof are stated above and below.
 
 1. Map and tiered design posted. Separate local worktree created from default branch.
 2. Phase 1 in progress: summary-only/cancellable tail resolution and opaque history cursors; scoped notebook; durable single-shot wakes/event receipts; task/goal/question/test event adapter; fixed-width screenshot/GitHub host contracts; bounded native file/list/grep/git/health observations; Hub registry/daemon composition; model-free unchanged-check-in suppression. Native file traversal is descriptor-anchored on macOS/Linux, with actual read caps and private-file exclusions. Git reads are subtree-scoped and exclude credential diffs. Independent narrow reviews found and drove clock/UTF-8, Git scope/secret and filesystem race/cap fixes.
-3. Pending: scoped execution and shared running-task locks. A setup-disabled allocation policy now lets an enforced execution host create an owned worktree without parsing or running repository setup commands; normal subagents keep their configured behavior. This is preparation, NOT scoped execution. Existing default local sandbox host only probes and refuses execution; capability detection is NOT an enforceable execution host. Do not expose a subprocess fallback.
+3. Superseded by owner scope change: no new scoped executor, sandbox or shared running-task locks will be built for the superagent. Existing Hub actions are DO. The earlier setup-disabled worktree-allocation option is not wired into supervisor execution and makes no sandbox guarantee; ordinary subagent allocation behavior is unchanged.
 4. D confirmation checkpoint: `propose_risky_action` uses the existing durable action-card path, NEVER the Autopilot shortcut or read-only observation dispatcher. It requires the live Hub owner in their private thread, displays all canonical arguments without summarization, binds the expected target revision and argument hash, and rechecks ownership/target/hash after awaited audits. Unknown execution outcomes are not retried. Typed risky-operation hosts are optional and absent hosts refuse; no generic shell fallback is provided. Five new behavior tests cover the provider-facing path, Autopilot, owner revocation, target/argument drift, extra authority fields and unknown outcomes. Focused action/runner/Autopilot/contracts suite: 103 pass; runtime TypeScript passes. The next increment adds durable human-owner control RPCs, global pause/kill signals and atomic UTC-day reservations for actions/wakes/model calls/tokens/USD. Unknown cost remains null; configured token/USD caps refuse unquoted model calls before dispatch. Pause gates messages, wakes, abilities and action dispatch; kill fences late model responses and persists across restart. The supervisor’s legacy delegated permission executor is removed: all permission decisions now refuse and direct the owner to the human task approval UI, including Autopilot and injected approval claims. Focused control/action/runner/Autopilot/Watch/tool tests: 148 pass; runtime TypeScript passes. C integration, UI controls, production quotes, full injection coverage and final review/gate remain pending; this is not deployment-ready.
 5. Full root gate passed at commit `2eebfe48`: all configured checks, runtime 6612 pass / 3 skip / 0 fail across 785 files, UI 1571 pass / 155 files, mobile 647 pass / 39 files, production build and diff check. Earlier runs exposed two contract failures (documentation/schema count) and a desktop EPIPE race; they were fixed, not dismissed as load. Logs: `.xerxes/review/superagent-phase1-gate/committed/` (local only). After that gate, further tested local commits fixed shutdown-after-delivery DB access, root/ancestor symlink redirection, repository filter/lazy-fetch execution and setup-disabled worktree allocation. Latest focused runs: 284 supervisor/contract/disk tests plus 35 native worktree/setup/integration tests pass; runtime TypeScript and diff check pass. The newer commits still require the final full gate after the remaining implementation. Safety review and final report remain open.
 
@@ -96,11 +98,23 @@ A disposable native Hub identity was bootstrapped and paired through the actual 
 - **Memory:** the model called `notebook_put` for `delivery_plan` and replied `stored`. The exact note `LIVE_NOTE_736dfff1-89dd-4f19-9144-c720f336df8c` survived closing and reopening the Hub/SQLite composition.
 - **Wake:** the model called `schedule_wakeup`; the real timer delivered it. Actual reply: `WAKE_PROOF\n\n> LIVE_NOTE_736dfff1-89dd-4f19-9144-c720f336df8c`. The persisted wake state was `delivered`.
 - **Pause/Resume:** a paused owner submit was refused with **0 provider calls**. Pause persisted across reopening. Resume admitted one real provider request; actual reply: `RESUME_PROOF`.
-- **Risky confirmation:** the real model called `propose_risky_action` for deletion of only an owned temporary marker. Native action `act-4d9baabe-74d0-46f8-ba19-c2d9961e96aa` displayed the exact operation, target and revision in its confirmation. While pending, **0 executions**, marker still present. The human prompt timed out (`auto_answered:true`), so it was not treated as approval. The proof withdrew the action through the normal confirmation RPC: state `cancelled`, **0 executions**, marker still present before owned-fixture cleanup. **Live execution after human approval was not verified.**
+- **Risky confirmation:** the real model called `propose_risky_action` for deletion of only an owned temporary marker. Native action `act-4d9baabe-74d0-46f8-ba19-c2d9961e96aa` displayed the exact operation, target and revision in its confirmation. While pending, **0 executions**, marker still present. The human prompt timed out (`auto_answered:true`), so it was not treated as approval. The proof withdrew the action through the normal confirmation RPC: state `cancelled`, **0 executions**, marker still present before owned-fixture cleanup. That earlier run did not exercise approval; the owner-authorized approve/reject proof below now covers it.
 - **Other SEE reads:** the native observation dispatcher actually read the first 600 bytes of this worktree's `package.json`, returned bounded Git status and measured disk capacity. These exercised real local observations, not remote transport or GitHub.
-- **Scoped DO:** no live run. The required execution/ownership implementation remains absent following explicit earlier write denials. The reauthorization prompt also timed out and did not lift those denials. No unsandboxed fallback or denied implementation write was attempted.
+- **DO:** the owner subsequently removed sandboxed execution from the requirement. The existing `ActionService` dispatches task start/steer/stop, agent messages and goal/model changes through `HubCommandRouter`; delegated question answering uses the existing question route. Tasks retain their own tool permission mode. No sandbox/ownership implementation or new executor is needed or claimed. Permission approvals remain human-only.
 
 The first combined live check failed. A separate real notebook call established that writes worked; tracing the scheduler showed the model supplying both `after_seconds:1` and `at:""`. Responses' implicit strict normalization made the optional alternative behave as required. Commit `5f599b62` explicitly sets `strict:false` on function tools while retaining native schema validation. Its regression failed before the fix; 32 focused client tests passed afterward, and the same live scheduling request then omitted `at`. The complete available native proof subsequently exited **0** after cancellation and cleanup. All temporary accounts/state were confined to the owned proof directory; no production account, app or daemon was changed.
+
+### Owner-authorized approve/reject delivery proof
+
+The owner explicitly requested approval as the owner of an isolated test Hub. `superagentOwnerApproval.test.ts` uses real SQLite identity storage, actual identity HTTP pairing/cookie authentication, wall-clock time, production `createHubSupervisor` and the existing `supervisor.confirmation.respond` handler. No model decision or production account is substituted for approval. The only operation port is fixture-local deletion of one of two markers created in that Hub's temporary directory; it is not a new product executor.
+
+On the targeted run:
+- Card `act-fcf4545f-2e77-48aa-b44b-f034fd2bb5ee` was pending with zero executions and its marker present. The authenticated owner approved it; wire state became `confirmed`, the marker disappeared, and execution count was exactly **1**. A repeated approval left the count at **1**.
+- Card `act-e22f8e89-d00b-451c-a065-0cd13608106d` was rejected with the existing `cancel` decision. Its execution count stayed **0** and its marker remained. A late approval did not resurrect it.
+- The accepted action's hash-bound audit stages were `intent`, `confirm`, `dispatch`, `outcome: accepted` (sequences 4, 5, 6, 8). The rejected action had only `intent` and `cancel` (sequences 9, 10), with no dispatch. The real 10-record audit chain verified successfully.
+- The proof plus existing Hub actions/tools/router, controls and risky-action tests passed: **67 pass / 0 fail** across six files. The first proof assertion incorrectly expected internal `accepted`/`auto:false` on the public wire; the existing wire uses `confirmed` and omits false `auto`. Correcting that assertion required no production change.
+
+This is an actual native Hub-handler/identity/filesystem operation proof, not an installed-app visual or WebSocket transport demonstration. Cleanup touches only the proof's owned temporary directory. DO remains the existing Hub task/agent delegation path, under each task's own permission mode; no sandbox is promised.
 
 ### Explicit remaining capability limits
 
