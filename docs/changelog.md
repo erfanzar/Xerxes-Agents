@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.35 — 2026-11-12
+
+- **Bonsai is now local-model.** App setup, mode descriptions, model-card labels, CLI help and documentation use local-model. Existing saved settings, model/download identifiers and the `bonsai-local` profile remain compatible; `bonsai` remains an alias for the new `local-model` command.
+- **Multiple Claude/Codex sign-ins are back.** The account center supports isolated labelled logins, switching, per-account usage and explicitly reviewed SSH synchronization alongside Private/Hybrid/Cloud modes and per-task model usage.
+- **Gemini is a first-class provider.** The existing native Gemini transport powers app, CLI and setup selection plus multiple named API-key accounts and account-attributed usage. API keys only: no Google OAuth client or third-party client secret is embedded. Provider-side remaining quota is unavailable, not estimated.
+- **Native child worktree allocations avoid a shared Git registry race.** Registration and removal serialize per repository; child tool and provider work stays concurrent. Real-Git contention and isolation tests cover the behavior.
+
 ## 0.8.34 — 2026-11-11
 
 - **OpenAI API output budgets work on the next request.** OpenAI and selected OpenAI-compatible routes default to 32,768 output tokens; `/sampling max_tokens -1` removes the user-set cap while retaining model, context and authorized relay ceilings. Changes apply after a tool completes in an existing turn. Pinned sessions use their own provider for validation, and one-shot/ACP defaults no longer expand to the model's maximum. Codex subscriptions keep their existing behavior.

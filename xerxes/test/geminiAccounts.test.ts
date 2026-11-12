@@ -108,6 +108,7 @@ test('a saved Gemini account with a missing key cannot borrow ambient credential
     expect(observed).toEqual([])
     const legacy = profiles.save({ name: 'legacy-env', provider: 'gemini', baseUrl: saved.base_url, model: saved.model, apiKey: '', setActive: false })
     const client = createLlmClient(legacy.model, { provider: legacy.provider, api_key: legacy.api_key, base_url: legacy.base_url }, { ...profileSessionOptions(legacy, registry), fetchImplementation })
+    if (!client.complete) throw new Error('Gemini must support native completion')
     await client.complete({ model: legacy.model, messages: [{ role: 'user', content: 'offline fixture' }] })
     expect(observed).toEqual(['fixture-ambient-not-the-selected-account'])
   } finally {
@@ -242,7 +243,7 @@ test('Gemini availability and activation reject a same-named unrelated remote pr
 
 test('Gemini quota inspection performs no network probes and transfer failures never expose secrets', async () => {
   const { directory, registry } = await fixture()
-  const network = spyOn(globalThis, 'fetch').mockImplementation(async () => { throw new Error('Unexpected network quota probe') })
+  const network = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async () => { throw new Error('Unexpected network quota probe') }, { preconnect: () => { throw new Error('Unexpected network preconnect') } }))
   try {
     const account = await registry.createGemini('Work', 'fixture-gemini-A', 'gemini-2.5-flash')
     expect(await registry.usage(account.id)).toMatchObject({ status: 'unknown', remaining_tokens: null })

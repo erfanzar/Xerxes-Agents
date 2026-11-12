@@ -9,7 +9,7 @@ import { Sidebar } from '../src/desktop/renderer/App.js'
 import { Store } from '../src/desktop/renderer/store.js'
 
 const machine = { alias: 'v5p-128', target: 'user@worker', workspacePath: '/srv/project' }
-const attach = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: machine.workspacePath, version: '0.8.34', buildId: 'a'.repeat(16) })
+const attach = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: machine.workspacePath, version: '0.8.35', buildId: 'a'.repeat(16) })
 const output = attach + '\nXERXES_REMOTE_SESSIONS ' + JSON.stringify({
   saved: [{ id: 'saved-chat', cwd: '/srv/other-project', title: 'Train v5p-128', status: 'idle' }],
   live: [{ session_id: 'saved-chat', cwd: '/srv/other-project', title: '', active_turn_id: 'turn' }, { id: 'child', cwd: '/srv/project', kind: 'subagent' }],
@@ -79,14 +79,14 @@ test('saved host contexts dedupe the same folder under another alias and hide on
   } finally { hosts.dispose() }
 })
 test('two saved folders on one host are two named contexts, each listing only its own tasks and opening its newest one', async () => {
-  const easydel = { alias: 'v5p-128-dev', target: 'v5p-128-dev', workspacePath: '/home/erfan/easydel-src' }
-  const prismcore = { alias: 'v5p-128-prismcore', target: 'v5p-128-dev', workspacePath: '/home/erfan/prismcore' }
-  const both = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: easydel.workspacePath, version: '0.8.34', buildId: 'a'.repeat(16) })
+  const easydel = { alias: 'v5p-128-dev', target: 'v5p-128-dev', workspacePath: '/srv/projects/easydel-src' }
+  const prismcore = { alias: 'v5p-128-prismcore', target: 'v5p-128-dev', workspacePath: '/srv/projects/prismcore' }
+  const both = 'XERXES_REMOTE_ATTACH ' + JSON.stringify({ socketPath: '/remote/global.sock', projectDir: easydel.workspacePath, version: '0.8.35', buildId: 'a'.repeat(16) })
     + '\nXERXES_REMOTE_SESSIONS ' + JSON.stringify({
       saved: [
-        { id: 'prism-new', cwd: '/home/erfan/prismcore', title: 'Prism newest' },
-        { id: 'easy-new', cwd: '/home/erfan/easydel-src/tests', title: 'EasyDeL newest' },
-        { id: 'prism-old', cwd: '/home/erfan/prismcore', title: 'Prism older' },
+        { id: 'prism-new', cwd: '/srv/projects/prismcore', title: 'Prism newest' },
+        { id: 'easy-new', cwd: '/srv/projects/easydel-src/tests', title: 'EasyDeL newest' },
+        { id: 'prism-old', cwd: '/srv/projects/prismcore', title: 'Prism older' },
         { id: 'stray', cwd: '/tmp/scratch', title: 'Elsewhere' },
       ],
       live: [],
