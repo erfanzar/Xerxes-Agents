@@ -4048,12 +4048,6 @@ export class DaemonServer {
       this.localSetupIntent = then === undefined ? undefined : { connection, mode: then, ...(lead === undefined ? {} : { workerProfile: lead }) };
       return { ok: true, job: localSetupJobPayload(started.job) };
     }
-    if (method === 'provider_account.login') {
-      const accountId = typeof params.account_id === 'string' ? params.account_id : '';
-      if (!accountId) return { ok: false, code: 'invalid_request', error: 'account_id is required' };
-      await new ProviderAccountRegistry().login(accountId);
-      return { ok: true };
-    }
     if (method === "provider_list") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
