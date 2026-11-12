@@ -42,7 +42,7 @@ test('real isolated Hub owner approval executes once and audits; rejecting a sec
     },
     backend: { async call() { throw new Error('The marker action must not call a daemon') } },
     execute: async () => { throw new Error('The marker action must use its existing typed operation port') },
-    model: { id: 'not-used-for-owner-confirmation', async complete() { throw new Error('Confirmations must not invoke a model') } },
+    model: { id: 'not-used-for-owner-confirmation', reportsCost: false, async complete() { throw new Error('Confirmations must not invoke a model') } },
     autopilot: { checkInMs: 0 },
     risk: {
       revision: (workspace, target) => workspace === workspaceId && [approvedPath, rejectedPath].includes(target)
