@@ -143,11 +143,16 @@ test('the shell owns its terminal: a resize reaches it and Ctrl-C stops the runn
     await Bun.sleep(300)
     expect(await drain(opened.sessionId, 'echo cols-$COLUMNS\r', /cols-\d+/)).toMatch(/cols-150/)
 
-    await drain(opened.sessionId, 'sleep 30; echo NOT-INTERRUPTED\r', /sleep 30/, 3)
-    await Bun.sleep(300)
-    const after = await drain(opened.sessionId, '\x03', /\^C/, 5) + await drain(opened.sessionId, 'echo alive-$((2+2))\r', /alive-4\r?\n/)
-    expect(after).toMatch(/alive-4\r?\n/)
+    // macOS sh/bash still run the next `;` command after sleep receives SIGINT.
+    // Make the sentinel depend on sleep succeeding, not on shell list semantics.
+    await drain(opened.sessionId, 'sleep 30 && echo NOT-INTERRUPTED\r', /sleep 30/, 3)
+    // Terminal echo alone does not prove sleep has taken the foreground yet.
+    for (let tries = 0; tries < 40 && manager.isAtPrompt(opened.sessionId); tries += 1) await Bun.sleep(25)
+    expect(manager.isAtPrompt(opened.sessionId)).toBe(false)
+    const after = await drain(opened.sessionId, '\x03', /\^C/, 5) + await drain(opened.sessionId, 'echo status-$? alive-$((2+2))\r', /alive-4\r?\n/)
+    expect(after).toMatch(/status-130 alive-4\r?\n/)
     expect(after).not.toContain('NOT-INTERRUPTED')
+    expect(manager.isAtPrompt(opened.sessionId)).toBe(true)
   } finally {
     await manager.closeAll()
   }
