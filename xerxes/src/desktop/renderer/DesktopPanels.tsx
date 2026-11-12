@@ -1290,7 +1290,7 @@ function lastUnsavedPath(cwd: string): string {
   return path
 }
 
-export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'>; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
+export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
   const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : lastUnsavedPath(snap.cwd))
   // The path whose Source view is on, and the workbook sheet chosen for a path: both reset with the selection.
   const [sourceOf, setSourceOf] = useState('')
