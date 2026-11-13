@@ -144,7 +144,9 @@ it('prepares and reviews before authorizing, then serves the exact remote task w
     expect(f.runtime.listSessions().filter(s=>s.id===prepared!.sessionId)).toHaveLength(1)
     await renderer.request('turn.submit',{text:'Run the approved task.'})
     await vi.waitFor(()=>expect(session.messages.at(-1)?.content).toBe('LOCAL REPLY'))
-    expect(f.localCalls).toBe(2);expect(f.remoteCalls).toBe(0)
+    // The reply can land before the second relayed call is counted on a loaded
+    // CI runner (Bun CI failed here with 1 vs 2), so wait for the count too.
+    await vi.waitFor(()=>expect(f.localCalls).toBe(2));expect(f.remoteCalls).toBe(0)
     expect(session.messages.at(-1)?.content).toBe('LOCAL REPLY')
     expect(JSON.stringify(session)).not.toContain('synthetic-private-key')
     await prepared.close()
