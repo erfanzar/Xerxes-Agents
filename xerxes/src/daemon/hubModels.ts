@@ -36,7 +36,24 @@ export const HUB_MODEL_MAX_REQUEST_BYTES = 1024 * 1024
 export const HUB_MODEL_DEFAULT_MAX_TOKENS = 2048
 export const HUB_MODEL_MAX_TOKENS = 8192
 export const HUB_MODEL_MAX_CONCURRENT = 2
-export const HUB_MODEL_TIMEOUT_MS = 120_000
+/**
+ * How long the Hub waits for this daemon's provider call. Two minutes cut off
+ * slow reasoning models mid-thought, which XERXES reported as "the model did
+ * not answer within 120 seconds" and then stopped. Generous by default, and
+ * raisable per deployment without ever being unbounded.
+ */
+export const HUB_MODEL_TIMEOUT_MS = 300_000
+export const HUB_MODEL_MIN_TIMEOUT_MS = 15_000
+export const HUB_MODEL_MAX_TIMEOUT_MS = 900_000
+
+/** `XERXES_HUB_MODEL_TIMEOUT_MS`, clamped; a malformed value keeps the default. */
+export function hubModelTimeoutMs(environment: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = environment.XERXES_HUB_MODEL_TIMEOUT_MS?.trim()
+  if (!raw || !/^\d+$/.test(raw)) return HUB_MODEL_TIMEOUT_MS
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) return HUB_MODEL_TIMEOUT_MS
+  return Math.min(HUB_MODEL_MAX_TIMEOUT_MS, Math.max(HUB_MODEL_MIN_TIMEOUT_MS, value))
+}
 
 const MAX_MESSAGES = 500
 const MAX_TOOLS = 64
@@ -212,7 +229,7 @@ export class HubModelService {
   private readonly timeoutMs: number
 
   constructor(private readonly host: HubModelsHost, private readonly settings: HubModelsOptions = {}) {
-    this.timeoutMs = settings.timeoutMs ?? HUB_MODEL_TIMEOUT_MS
+    this.timeoutMs = settings.timeoutMs ?? hubModelTimeoutMs()
   }
 
   get inFlight(): number { return this.active }
@@ -346,7 +363,7 @@ export class HubModelService {
         usage: { input_tokens: completion.usage?.inputTokens ?? 0, output_tokens: completion.usage?.outputTokens ?? 0 },
       }
     } catch (error) {
-      if (error instanceof CompletionDeadlineError) return failure('timeout', `the model did not answer within ${Math.round(this.timeoutMs / 1000)} seconds`)
+      if (error instanceof CompletionDeadlineError) return failure('timeout', `the model ${request.model} on profile ${profile.name} did not answer within ${Math.round(this.timeoutMs / 1000)} seconds; raise XERXES_HUB_MODEL_TIMEOUT_MS or choose a faster model`)
       if (controller.signal.aborted) return failure('provider_failed', 'the request was cancelled')
       return failure('provider_failed', this.safe(error, profile))
     } finally {

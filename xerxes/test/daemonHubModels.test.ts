@@ -312,7 +312,13 @@ test('provider failures and timeouts are typed and never echo the key or endpoin
 
     r.fake.failure = undefined
     r.fake.hangs = true
-    expect(await r.client.call('hub.model.complete', completion())).toMatchObject({ ok: false, code: 'timeout' })
+    const timedOut = await r.client.call('hub.model.complete', completion())
+    expect(timedOut).toMatchObject({ ok: false, code: 'timeout' })
+    // A bare "the model did not answer" left people unable to tell which model
+    // or profile was slow, or that the bound is a setting at all.
+    expect(String(timedOut.error)).toContain('gpt-5.1')
+    expect(String(timedOut.error)).toContain('work')
+    expect(String(timedOut.error)).toContain('XERXES_HUB_MODEL_TIMEOUT_MS')
   } finally { await r.stop() }
 })
 
