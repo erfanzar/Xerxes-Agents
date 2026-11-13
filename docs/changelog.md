@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.39 — 2026-11-13
+
+- **XERXES gets ten minutes for a model turn.** `hub.model.complete` aborted at a hard-coded 120 seconds, so a slow reasoning model was cut off mid-thought and reported as "the model did not answer within 120 seconds" instead of answering. The default is now 600 seconds, raisable with `XERXES_HUB_MODEL_TIMEOUT_MS` and clamped to 15 s–900 s, and the timeout names the model and profile and points at that setting.
+
 ## 0.8.38 — 2026-11-13
 
 - **One registry row per linked profile.** `register()` de-duplicated accounts by id only, so a later sign-in could add a row reusing an existing profile name: the profile stayed unique while the registry accumulated rows. The SSH sync receiver correctly refused the orphan (`profile.oauth_account_id !== accountId`), which surfaced as an account that could never sync. `list()`/`metadata()` now collapse to the row the profile owns, and `register()` drops any other row for that profile.
