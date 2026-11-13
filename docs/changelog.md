@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.38 — 2026-11-13
+
+- **One registry row per linked profile.** `register()` de-duplicated accounts by id only, so a later sign-in could add a row reusing an existing profile name: the profile stayed unique while the registry accumulated rows. The SSH sync receiver correctly refused the orphan (`profile.oauth_account_id !== accountId`), which surfaced as an account that could never sync. `list()`/`metadata()` now collapse to the row the profile owns, and `register()` drops any other row for that profile.
+- **Provider CLIs are ensured on this computer too.** Claude Code and Codex were only installed on SSH hosts. Startup now installs only the missing CLI, reports each failure separately, and probes `~/.bun/bin`, `~/.local/bin`, Homebrew and `/usr/local` as well as `PATH`, so an installed CLI is not reported missing.
+- **"Use via Mac" says what is actually wrong.** It claimed this computer had no `claude-code` profile when the profile existed but had no model chosen yet; it now says that and points at Models & Providers.
+
 ## 0.8.37 — 2026-11-13
 
 - **Google-hosted profiles report their context window.** Model discovery chose its endpoint, credentials and payload shape from the profile's wire label, so a profile pointed at `generativelanguage.googleapis.com` but labelled `openai` authenticated with a bearer token, got 401, and listed every model with no context or output limit. The endpoint now decides, as the completion path already did — all 49 Gemini models report their native limits.
