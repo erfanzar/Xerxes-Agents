@@ -39,10 +39,10 @@ export const HUB_MODEL_MAX_CONCURRENT = 2
 /**
  * How long the Hub waits for this daemon's provider call. Two minutes cut off
  * slow reasoning models mid-thought, which XERXES reported as "the model did
- * not answer within 120 seconds" and then stopped. Generous by default, and
+ * not answer within 120 seconds" and then stopped. Ten minutes by default, and
  * raisable per deployment without ever being unbounded.
  */
-export const HUB_MODEL_TIMEOUT_MS = 300_000
+export const HUB_MODEL_TIMEOUT_MS = 600_000
 export const HUB_MODEL_MIN_TIMEOUT_MS = 15_000
 export const HUB_MODEL_MAX_TIMEOUT_MS = 900_000
 
