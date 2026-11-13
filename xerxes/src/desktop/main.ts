@@ -30,6 +30,7 @@ import { localActiveProfile } from './main/profileSync.js'
 import { ProviderAccountDirectory } from './main/providerAccounts.js'
 import { spawnSecretWriter } from './main/remoteCredentials.js'
 import { ensureRemoteProviderClis } from './main/remoteProviderSetup.js'
+import { ensureLocalProviderClis } from './main/localProviderSetup.js'
 import { ProviderAccountRegistry } from '../auth/providerAccountRegistry.js'
 import { GlobalProviderAccounts } from './main/globalProviderAccounts.js'
 import { runBunProviderAccountLogin } from './main/providerAccountLogin.js'
@@ -1038,6 +1039,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
 
 void app.whenReady().then(async () => {
   app.setAboutPanelOptions({ applicationName: APP_NAME })
+  // A Claude Code / Codex profile cannot run on this computer without its CLI,
+  // and the desktop never inherited ~/.bun/bin. Install only what is missing,
+  // in the background: a failure here must not stop the app from opening.
+  void ensureLocalProviderClis({ onProgress: message => console.log(message) })
+    .then(status => console.log(`Provider CLIs ready: claude=${status.claude} codex=${status.codex}`))
+    .catch(error => console.warn('Provider CLI setup failed:', error instanceof Error ? error.message : error))
   // Offers new releases from GitHub; installs only when the person says so.
   const appUpdates = startAppUpdates({ settingsDirectory: xerxesHome(), version: app.getVersion() })
   // Hub cockpit: link this Mac, pair a phone and sign in to the XERXES tab.

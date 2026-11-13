@@ -249,7 +249,17 @@ export class DesktopProviderForwarding {
     if (typeof name !== 'string' || !name) throw new Error('Choose a provider profile to run on this computer.')
     const review = await this.inspect()
     const primary = review.profiles.find(profile => profile.name === name)
-    if (!primary) throw new Error(`This computer has no ${name} profile to share. Set it up in a local workspace's Models & Providers settings.`)
+    if (!primary) {
+      // A profile with no model yet is deliberately not shareable, which is a
+      // different problem from not having the profile at all. Saying "no
+      // profile" sent people to create one they already had.
+      const inventory = record(await this.local('provider.relay.inventory', {}))
+      const row = (Array.isArray(inventory.profiles) ? inventory.profiles : [])
+        .map(record).find(candidate => candidate.name === name)
+      const model = typeof row?.model === 'string' ? row.model.trim() : ''
+      if (row && !model) throw new Error(`The ${name} profile on this computer has no model chosen yet. Pick a model in Models & Providers, then choose Use via Mac again.`)
+      throw new Error(`This computer has no ${name} profile to share. Set it up in a local workspace's Models & Providers settings.`)
+    }
     if (!primary.supported) throw new Error(primary.setup || `${name} cannot run through this computer.`)
     if (review.running) throw new Error('This task or its agents are working. Wait until they finish before changing its provider.')
     await this.bindPrimary(review, primary)
