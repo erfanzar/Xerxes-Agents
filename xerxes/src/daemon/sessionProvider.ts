@@ -38,6 +38,15 @@ export function sessionProvider(profiles: Pick<ProfileStore, 'get' | 'list' | 'a
     return profile
   }
   if (!profiles.list().some(profile => profile.provider !== 'claude-code')) return undefined
+  // A profile that saved or discovered this exact id owns it. Check that
+  // before guessing a provider from the id: an id models.dev does not list
+  // (`gemini-4-carbon`) otherwise falls back to `openai` and lands on any
+  // OpenAI-wire profile, which then 404s "Model not exist".
+  const owner = profileOwningModel(profiles.list(), model)
+  if (owner && profileAcceptsModel(owner, model, 'claim')) {
+    session.metadata.provider_profile = owner.name
+    return owner
+  }
   let inferred = ''
   try { inferred = resolveProvider(model) } catch { /* Custom model names require a configured profile below. */ }
   const compatible = profiles.list().filter(p => profileAcceptsModel(p, model, 'claim'))

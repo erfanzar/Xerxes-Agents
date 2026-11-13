@@ -40,6 +40,24 @@ test('a resumed GPT chat resolves Codex even with a polluted active Kimi model',
     expect(profileAcceptsModel(profiles.get('codex')!,'codex/gpt-6-astra')).toBe(true)
   }finally{await rm(root,{recursive:true,force:true})}
 })
+test('a Gemini model routes to the Gemini profile, not an OpenAI-wire catch-all that 404s',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'xr-provider-gemini-'))
+  try{
+    const profiles=new ProfileStore(join(root,'profiles.json'))
+    profiles.save({name:'QwenPlan',provider:'openai',model:'deepseek-v4.1-flash-1017',apiKey:'fixture',baseUrl:'https://token-plan.example.invalid/compatible-mode/v1'})
+    profiles.save({name:'Gemini',provider:'gemini',model:'gemini-2.5-flash',apiKey:'fixture',baseUrl:'https://generativelanguage.googleapis.com/v1beta'})
+    profiles.replaceModelCapabilities('Gemini',{'gemini-2.5-flash':{context_limit:1048576},'gemini-4-carbon':{context_limit:1048576}})
+    profiles.setActive('QwenPlan')
+    // Before the fix both resolved to QwenPlan: an id models.dev did not list
+    // fell back to the `openai` provider and the OpenAI-wire profile claimed it.
+    for(const model of ['gemini-2.5-flash','gemini-4-carbon']){
+      const session={metadata:{} as Record<string,unknown>}
+      expect(sessionProvider(profiles,session,model)?.name).toBe('Gemini')
+      expect(session.metadata.provider_profile).toBe('Gemini')
+    }
+    expect(sessionProvider(profiles,{metadata:{}},'deepseek-v4.1-flash-1017')?.name).toBe('QwenPlan')
+  }finally{await rm(root,{recursive:true,force:true})}
+})
 test('HTML provider errors are concise and do not echo challenge page IPs or scripts',()=>{
   const message=httpErrorBody('<!DOCTYPE html><html>Cloudflare <script>secret()</script>Your IP address: 10.0.0.1</html>')
   expect(message).toContain('blocked by Cloudflare')
