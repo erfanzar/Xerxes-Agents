@@ -47,7 +47,7 @@ let fixtureWorkMonitor=false
 let fixtureCommandError=false
 let fixtureAgentError=false
 const cwd='/fixture/xerxes-workspace'
-const session=(i:number) => ({ id:`session-${i}`,key:`session-${i}`,title:['Review transport cancellation behavior','Improve workspace file navigation','Investigate provider retry handling'][i%3]+` ${i+1}`,status:'idle',age:`${i+1}m`,current:i===0,kind:'main',turns:i%5,messages:2,cwd,untitled:false })
+const session=(i:number) => ({ id:`session-${i}`,key:`session-${i}`,title:['Review transport cancellation behavior','Improve workspace file navigation','Investigate provider retry handling'][i%3]+` ${i+1}`,status:i===1?'working':i===2?'failed':'idle',age:`${i+1}m`,current:i===0,kind:'main',turns:i%5,messages:2,cwd,untitled:false })
 const long='Preserve every runtime integration and saved session. Review cancellation, reconnect behavior, command discovery and deeply nested file paths. Keep navigation available while work is running. '
 const skills=Array.from({length:167},(_,i)=>({name:`workspace-review-${String(i+1).padStart(3,'0')}`,description:`Review workspace behavior ${i+1}, including cancellation, keyboard access and saved sessions.`,kind:'skill',source:'fixture',enabled:true}))
 let schedules=Array.from({length:12},(_,i)=>({id:`schedule-${i}`,prompt:`Review workspace ${i+1}: ${long}`,schedule:'0 8 * * 1-5',timezone:'UTC',paused:i%3===0,execution_state:'idle',next_run_at:'2026-09-14T08:00:00Z',revision:1}))

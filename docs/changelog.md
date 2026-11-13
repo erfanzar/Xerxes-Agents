@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.40 — 2026-11-13
+
+- **Shading, redrawn.** The Shading style is rebuilt from a written design plan (`docs/shading-design.md`) instead of neutral near-black greys. It now uses a lapis ground and parchment text, and four glaze colours that only mark state. A working task gets a turquoise rule on its sidebar row, a waiting task a saffron one and a failed task a pomegranate one; idle tasks get none. The task title and wordmark use a serif face, numbers line up with `tabular-nums` instead of monospace, and the goal and folder rows above the composer are no longer separate boxes. Failure cards lead with a readable line and keep the provider's raw words below it. Both themes still clear WCAG AA on every surface.
+- **A Gemini model runs on the Gemini profile.** The model picker sends only the model id, so the daemon guessed the profile. An id models.dev does not list (`gemini-4-carbon`, and `gemini-2.5-flash` before the catalog loads) fell back to the `openai` provider, and an OpenAI-compatible profile such as QwenPlan took it, so the turn failed with `404 Model not exist` while the footer showed the Gemini model. A profile that saved or discovered the exact id now owns it before any guess.
+- **The update banner's buttons click where they are drawn.** The banner floats over the toolbar, which is the window's drag region, and in Electron the drag region won clicks on the overlapping part of each button. The banner and its contents are now excluded from it.
+
+- **Anthropic's `frontend-design` skill ships with Xerxes.** Vendored verbatim from `github.com/anthropics/skills` under Apache-2.0, with its `LICENSE.txt` alongside. It asks for a design plan, checks that plan against the brief, and names the tells of generated pages (the warm-cream-and-terracotta palette, the SaaS-card kit, all-caps eyebrows, `01 / 02 / 03` markers on content that is not a sequence) so a design is a choice rather than a default.
+
 ## 0.8.39 — 2026-11-13
 
 - **XERXES gets ten minutes for a model turn.** `hub.model.complete` aborted at a hard-coded 120 seconds, so a slow reasoning model was cut off mid-thought and reported as "the model did not answer within 120 seconds" instead of answering. The default is now 600 seconds, raisable with `XERXES_HUB_MODEL_TIMEOUT_MS` and clamped to 15 s–900 s, and the timeout names the model and profile and points at that setting.

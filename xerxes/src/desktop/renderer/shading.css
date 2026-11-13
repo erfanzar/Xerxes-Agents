@@ -35,33 +35,35 @@
    and popover; the test measures them. */
 :root[data-style='shading']:not(#shading){
   color-scheme:dark;
-  --x-backdrop:#0a0a0a;--x-screen:#0a0a0a;--x-chrome:#0f0f0f;--x-card:#171717;
-  --x-selected:#262626;--x-chip:#262626;--x-sunken:#111111;
-  --x-popover:#171717;--x-dialog:#171717;
-  --x-hairline:#ffffff1a;--x-divider:#ffffff10;--x-separator:#ffffff26;--x-seam:#ffffff1a;
-  --x-title:#fafafa;--x-prose:#e5e5e5;--x-strong:#ffffff;--x-secondary:#d4d4d4;
-  --x-meta:#a1a1a1;--x-caption:#a1a1a1;--x-numeric:#a1a1a1;
-  --x-accent:#e5e5e5;--x-accent-soft:#e5e5e514;--x-focus:#a1a1a1;
-  --x-working:#60a5fa;--x-activity:#a78bfa;--x-structure:#67e8f9;--x-fleet-blue:#60a5fa;
-  --x-on-accent:#171717;--x-inverse:#0a0a0a;
-  --x-done:#4ade80;--x-bridge:#4ade80;
-  --x-failed:#ff6467;--x-danger:#ff6467;--x-failed-text:#ff8a8c;--x-failed-bg:#ff646714;--x-failed-border:#ff646740;
-  --x-needs:#fbbf24;--x-needs-text:#fcd34d;--x-needs-bg:#fbbf2414;--x-needs-border:#fbbf2440;
-  --x-diff-add:#4ade8014;--x-diff-del:#ff646714;
-  --x-user-bubble:#212121;
-  --x-menubar:#0f0f0f;--x-menubar-edge:#ffffff1a;--x-menubar-fg:#a1a1a1;--x-menubar-strong:#fafafa;--x-menubar-meta:#a1a1a1;
+  /* Lapis night and parchment; turquoise, saffron, pomegranate and pistachio
+     glazes are reserved for state (docs/shading-design.md). */
+  --x-backdrop:#0e1424;--x-screen:#0e1424;--x-chrome:#0b101d;--x-card:#162036;
+  --x-selected:#1e2a45;--x-chip:#1a2540;--x-sunken:#0b101d;
+  --x-popover:#162036;--x-dialog:#162036;
+  --x-hairline:#f2ebdd1c;--x-divider:#f2ebdd10;--x-separator:#f2ebdd29;--x-seam:#f2ebdd1c;
+  --x-title:#f2ebdd;--x-prose:#e3dccd;--x-strong:#fffaf0;--x-secondary:#cfc8b8;
+  --x-meta:#9aa3b8;--x-caption:#9aa3b8;--x-numeric:#a9b1c4;
+  --x-accent:#f2ebdd;--x-accent-soft:#f2ebdd14;--x-focus:#4fd1c5;
+  --x-working:#4fd1c5;--x-activity:#4fd1c5;--x-structure:#8fb3e8;--x-fleet-blue:#4fd1c5;
+  --x-on-accent:#0e1424;--x-inverse:#0e1424;
+  --x-done:#8ccb7e;--x-bridge:#8ccb7e;
+  --x-failed:#f2727a;--x-danger:#f2727a;--x-failed-text:#f5959b;--x-failed-bg:#f2727a14;--x-failed-border:#f2727a47;
+  --x-needs:#f2b544;--x-needs-text:#f6c871;--x-needs-bg:#f2b54414;--x-needs-border:#f2b54447;
+  --x-diff-add:#8ccb7e17;--x-diff-del:#f2727a17;
+  --x-user-bubble:#1a2540;
+  --x-menubar:#0b101d;--x-menubar-edge:#f2ebdd1c;--x-menubar-fg:#9aa3b8;--x-menubar-strong:#f2ebdd;--x-menubar-meta:#9aa3b8;
   --x-lit:transparent;--x-elev:none;
-  --mac-control:#ffffff0d;--mac-toolbar:#0f0f0f;
-  --glass-navigation:#0f0f0f;--glass-overlay:#171717;--glass-edge:#ffffff1a;--glass-highlight:transparent;
+  --mac-control:#f2ebdd0d;--mac-toolbar:#0b101d;
+  --glass-navigation:#0b101d;--glass-overlay:#162036;--glass-edge:#f2ebdd1c;--glass-highlight:transparent;
   --glass-blur:none;--glass-control:none;--glass-shadow:none;
-  --mac-shadow:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
+  --mac-shadow:0 0 0 1px #f2ebdd1c,0 10px 30px -5px #05081099;
   --grad:none;--accent-soft:#ffffff0d;
-  --sh-ring:color-mix(in srgb,#737373 55%,transparent);
-  --sh-input:#ffffff26;
+  --sh-ring:color-mix(in srgb,#4fd1c5 45%,transparent);
+  --sh-input:#f2ebdd29;
   --sh-input-bg:transparent;
   --sh-shadow-xs:none;
   --sh-shadow-sm:none;
-  --sh-shadow-lg:0 0 0 1px #ffffff1a,0 10px 30px -5px #00000099;
+  --sh-shadow-lg:0 0 0 1px #f2ebdd1c,0 10px 30px -5px #05081099;
   --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Geist','Inter','SF Pro Text','Segoe UI',system-ui,sans-serif;
   --prose:var(--sans);
   --mono:'Geist Mono',ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,monospace;
@@ -71,32 +73,32 @@
 /* ── Tokens: light ─────────────────────────────────────────────────── */
 :root[data-style='shading'][data-theme='light']:not(#shading){
   color-scheme:light;
-  --x-backdrop:#ffffff;--x-screen:#ffffff;--x-chrome:#fafafa;--x-card:#ffffff;
-  --x-selected:#f0f0f0;--x-chip:#f5f5f5;--x-sunken:#fafafa;
-  --x-popover:#ffffff;--x-dialog:#ffffff;
-  --x-hairline:#e5e5e5;--x-divider:#f0f0f0;--x-separator:#d4d4d4;--x-seam:#e5e5e5;
-  --x-title:#0a0a0a;--x-prose:#262626;--x-strong:#000000;--x-secondary:#525252;
-  --x-meta:#6b6b6b;--x-caption:#6b6b6b;--x-numeric:#6b6b6b;
-  --x-accent:#171717;--x-accent-soft:#17171710;--x-focus:#a1a1a1;
-  --x-working:#1d4ed8;--x-activity:#6d28d9;--x-structure:#0e7490;--x-fleet-blue:#1d4ed8;
-  --x-on-accent:#fafafa;--x-inverse:#ffffff;
-  --x-done:#166534;--x-bridge:#166534;
-  --x-failed:#b91c1c;--x-danger:#b91c1c;--x-failed-text:#991b1b;--x-failed-bg:#dc26260d;--x-failed-border:#dc262633;
-  --x-needs:#92400e;--x-needs-text:#7c2d12;--x-needs-bg:#d977060f;--x-needs-border:#d9770633;
-  --x-diff-add:#16a34a14;--x-diff-del:#dc262612;
-  --x-user-bubble:#f0f0f0;
-  --x-menubar:#fafafa;--x-menubar-edge:#e5e5e5;--x-menubar-fg:#525252;--x-menubar-strong:#0a0a0a;--x-menubar-meta:#6b6b6b;
+  --x-backdrop:#f7f3ea;--x-screen:#f7f3ea;--x-chrome:#efe9dc;--x-card:#fffdf8;
+  --x-selected:#e6dfcf;--x-chip:#ece5d6;--x-sunken:#efe9dc;
+  --x-popover:#fffdf8;--x-dialog:#fffdf8;
+  --x-hairline:#14192b1f;--x-divider:#14192b12;--x-separator:#14192b2e;--x-seam:#14192b1f;
+  --x-title:#14192b;--x-prose:#232a3d;--x-strong:#0a0e1a;--x-secondary:#3d4457;
+  --x-meta:#4f5566;--x-caption:#4f5566;--x-numeric:#4f5566;
+  --x-accent:#1f3a8a;--x-accent-soft:#1f3a8a12;--x-focus:#0f6f68;
+  --x-working:#0f6f68;--x-activity:#0f6f68;--x-structure:#1f3a8a;--x-fleet-blue:#0f6f68;
+  --x-on-accent:#fffdf8;--x-inverse:#fffdf8;
+  --x-done:#2b6326;--x-bridge:#2b6326;
+  --x-failed:#a51f29;--x-danger:#a51f29;--x-failed-text:#8f1a23;--x-failed-bg:#a51f290f;--x-failed-border:#a51f2938;
+  --x-needs:#6e4800;--x-needs-text:#5f3e00;--x-needs-bg:#c68a1414;--x-needs-border:#c68a1440;
+  --x-diff-add:#2b632614;--x-diff-del:#a51f2912;
+  --x-user-bubble:#ece5d6;
+  --x-menubar:#efe9dc;--x-menubar-edge:#14192b1f;--x-menubar-fg:#3d4457;--x-menubar-strong:#14192b;--x-menubar-meta:#4f5566;
   --x-elev:none;
-  --mac-control:#0000000a;--mac-toolbar:#fafafa;
-  --glass-navigation:#fafafa;--glass-overlay:#ffffff;--glass-edge:#e5e5e5;
-  --mac-shadow:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
-  --accent-soft:#0000000a;
-  --sh-ring:color-mix(in srgb,#a1a1a1 50%,transparent);
-  --sh-input:#d4d4d4;
+  --mac-control:#14192b0a;--mac-toolbar:#efe9dc;
+  --glass-navigation:#efe9dc;--glass-overlay:#fffdf8;--glass-edge:#14192b1f;
+  --mac-shadow:0 0 0 1px #14192b1f,0 10px 15px -3px #14192b1a,0 4px 6px -4px #14192b1a;
+  --accent-soft:#14192b0a;
+  --sh-ring:color-mix(in srgb,#0f6f68 45%,transparent);
+  --sh-input:#14192b2e;
   --sh-input-bg:transparent;
   --sh-shadow-xs:none;
   --sh-shadow-sm:none;
-  --sh-shadow-lg:0 0 0 1px #e5e5e5,0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;
+  --sh-shadow-lg:0 0 0 1px #14192b1f,0 10px 15px -3px #14192b1a,0 4px 6px -4px #14192b1a;
 }
 
 /* ── Type: one sans face; code stays mono ─────────────────────────────
@@ -316,4 +318,54 @@
 
 /* ── Agent pane: a sub-agent's conversation, flat like the main feed (AgentInspector.tsx) ── */
 :root[data-style='shading']:not(#shading) .atelier .agent-inspector .stream.agent-transcript{background:transparent;border-color:var(--x-hairline)}
-:root[data-style='shading']:not(#shading) .atelier .agent-card__facts dd{font-family:var(--mono);font-size:11.5px}
+:root[data-style='shading']:not(#shading) .atelier .agent-card__facts dd{font-family:var(--sans);font-size:12.5px;font-variant-numeric:tabular-nums}
+
+/* ═══ Lapis & faience (docs/shading-design.md) ═══════════════════════
+   Later rules here override the flat base above at equal specificity. */
+
+/* Live state is the one loud thing: a glaze rule on the task row's left edge. */
+:root[data-style='shading']:not(#shading) .atelier .sess{position:relative}
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot:is([data-status='working'],[data-status='failed'],[data-status='waiting'],[data-status='needs_input'],[data-status='blocked']))::before{content:'';position:absolute;left:0;top:7px;bottom:7px;width:2px;border-radius:2px;background:var(--sh-state)}
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot[data-status='working']){--sh-state:var(--x-working)}
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot:is([data-status='waiting'],[data-status='needs_input'],[data-status='blocked'])){--sh-state:var(--x-needs)}
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot[data-status='failed']){--sh-state:var(--x-failed)}
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot[data-status='working'])::before{box-shadow:0 0 8px var(--x-working);animation:shading-breathe 2.4s ease-in-out infinite}
+/* The rule replaces the dot. */
+:root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot:is([data-status='working'],[data-status='failed'])) .sess__dot{display:none}
+:root[data-style='shading']:not(#shading) .atelier .sess__s{font:400 12px/1.35 var(--sans);color:var(--x-meta)}
+@keyframes shading-breathe{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* A second, distinct face in exactly two places: the task title and the wordmark. */
+:root[data-style='shading']:not(#shading) .atelier .chat__title{font:500 15.5px/1.2 ui-serif,'New York',Georgia,serif;letter-spacing:-.005em;color:var(--x-title)}
+:root[data-style='shading']:not(#shading) .atelier .welcome h1.welcome__wordmark,
+:root[data-style='shading']:not(#shading) .atelier .sidebar-wordmark{font-family:ui-serif,'New York',Georgia,serif;font-weight:600;letter-spacing:-.02em}
+
+/* The strips above the composer read as its quiet header rows, not boxes. */
+:root[data-style='shading']:not(#shading) .atelier :is(.composer-task-summary,.repobar){border:0!important;border-radius:0;padding-left:4px;padding-right:4px}
+:root[data-style='shading']:not(#shading) .atelier .composer-task-summary__label{font:600 12px/1.3 var(--sans);color:var(--x-meta)}
+:root[data-style='shading']:not(#shading) .atelier .composer-task-summary__status{font:400 12px/1.3 var(--sans);color:var(--x-meta)}
+
+/* Failure: a pomegranate edge, a readable first line, the provider's words below. */
+:root[data-style='shading']:not(#shading) .atelier .terr{background:var(--x-failed-bg);border:1px solid var(--x-failed-border);border-radius:10px;box-shadow:inset 3px 0 0 var(--x-failed)}
+:root[data-style='shading']:not(#shading) .atelier .terr__head{font:600 13.5px/1.3 var(--sans);color:var(--x-failed-text)}
+:root[data-style='shading']:not(#shading) .atelier .terr__body{font:400 13.5px/1.5 var(--sans);color:var(--x-prose);overflow-wrap:anywhere}
+:root[data-style='shading']:not(#shading) .atelier .terr details p{font:400 12px/1.55 var(--mono);color:var(--x-meta);overflow-wrap:anywhere}
+
+/* Primary action: parchment on lapis, lapis on parchment. Turquoise never decorates. */
+:root[data-style='shading']:not(#shading) .atelier .appbanner{background:var(--x-popover);border-color:var(--x-hairline)}
+:root[data-style='shading']:not(#shading) .atelier .appbanner__icon{background:var(--x-accent-soft);color:var(--x-title)}
+
+/* An agent's model is a quiet caption, not a code label. */
+:root[data-style='shading']:not(#shading) .atelier .agentname__kind{font-family:var(--sans);font-size:12px}
+
+/* Numbers line up without monospace. */
+:root[data-style='shading']:not(#shading) .atelier :is(.railcard__meta,.composer-task-summary__status,dd,td){font-variant-numeric:tabular-nums}
+
+/* Narrow windows: give the conversation room. */
+@media (max-width:760px){
+  :root[data-style='shading']:not(#shading) .atelier .msg-turn--user{max-width:92%}
+  :root[data-style='shading']:not(#shading) .atelier .chat__title{font-size:14px}
+}
+@media (prefers-reduced-motion:reduce){
+  :root[data-style='shading']:not(#shading) .atelier .sess:has(>.sess__dot[data-status='working'])::before{animation:none}
+}

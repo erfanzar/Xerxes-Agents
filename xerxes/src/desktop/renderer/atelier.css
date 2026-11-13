@@ -3001,7 +3001,11 @@ html,body,#root,.app.atelier{background:transparent}
 
 /* App update consent (GitHub releases): asks before it downloads anything. */
 /* The update banner: a slim bar at the top of the window, never over the task. */
-.atelier .appbanner{position:fixed;top:10px;left:50%;z-index:80;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;width:max-content;max-width:min(860px,calc(100vw - 32px));padding:6px 8px 6px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-dialog));box-shadow:0 6px 20px rgba(0,0,0,.12);transform:translateX(-50%);font:400 12.5px/1.4 var(--sans);color:var(--x-secondary)}
+.atelier .appbanner{position:fixed;top:10px;left:50%;z-index:80;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;width:max-content;max-width:min(860px,calc(100vw - 32px));padding:6px 8px 6px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-dialog));box-shadow:0 6px 20px rgba(0,0,0,.12);transform:translateX(-50%);font:400 12.5px/1.4 var(--sans);color:var(--x-secondary);-webkit-app-region:no-drag}
+/* The banner floats over the toolbar, which is the window's drag region. In
+   Electron a drag region wins over anything painted above it unless that
+   element opts out, so the overlapped part of each button ignored clicks. */
+.atelier .appbanner *{-webkit-app-region:no-drag}
 .atelier .appbanner__icon{display:inline-flex;flex:none;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:color-mix(in srgb,var(--x-accent) 16%,transparent);color:var(--x-accent)}
 .atelier .appbanner[data-phase='error'] .appbanner__icon{background:var(--x-failed-bg);color:var(--x-failed-text)}
 .atelier .appbanner__text{min-width:0;flex:1 1 280px}
