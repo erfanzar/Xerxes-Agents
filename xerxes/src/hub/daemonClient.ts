@@ -205,7 +205,9 @@ export class HubDaemonClient {
         if (unsent >= 0) { this.queuedBytes -= this.writes[unsent]!.bytes.length; this.writes.splice(unsent, 1) }
       }
       const abort = () => fail('aborted')
-      const timer = setTimeout(() => fail('timeout'), options.timeoutMs ?? this.options.requestTimeoutMs ?? 30_000)
+      // Infinity means no timer: setTimeout would treat it as 1 ms and fail at once.
+      const limit = options.timeoutMs ?? this.options.requestTimeoutMs ?? 30_000
+      const timer = Number.isFinite(limit) ? setTimeout(() => fail('timeout'), limit) : undefined
       this.pending.set(id, { resolve, reject, written: false, cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort) } })
       options.signal?.addEventListener('abort', abort, { once: true })
       this.writes.push({ id, bytes, offset: 0 }); this.queuedBytes += bytes.length; this.flush()

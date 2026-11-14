@@ -22,6 +22,7 @@ import { CodeRunContext, commandOf, isRunnableBlock } from './codeRun.js'
 import { CopyButton } from './CopyButton.js'
 import { Icon } from './Icon.js'
 import { ChatImage } from './ImageView.js'
+import { MathView, MermaidBlock, highlightCode } from './richMarkdown.js'
 
 /** Run beside Copy: types the command into an idle shell of the Terminal tab, or a new one. */
 function RunButton({ code }: { code: string }): ReactElement | null {
@@ -65,7 +66,7 @@ function CodeBlock({ code, language }: { code: string; language: string }): Reac
         </span>
       </figcaption>
       <pre className="md__code" data-lang={language || undefined}>
-        <code>{code}</code>
+        <code>{highlightCode(code, language)}</code>
       </pre>
     </figure>
   )
@@ -86,8 +87,11 @@ export function looksLikeFilePath(text: string): boolean {
   return dot > 0 && dot > text.lastIndexOf('/') + 1 && FILE_EXTENSIONS.has(text.slice(dot + 1).toLowerCase())
 }
 
-// code | image `![alt](src "title")` | bold | italic | link `[label](href "title")`
-const INLINE_RE = /(`[^`]+`)|(!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*(?:\s+"[^"]*")?\))/g
+// code | image `![alt](src "title")` | bold | italic | link `[label](href "title")` | math `$x^2$` / `\(x\)`
+// Inline math needs a non-space right after the opening `$` and right before
+// the closing one, and no word character after it, so prices ("$5 and $10")
+// and shell variables ("$HOME/$USER", "$PATH:$HOME") stay text.
+const INLINE_RE = /(`[^`]+`)|(!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]*(?:\s+"[^"]*")?\))|(\$[^\s$](?:[^$\n]*[^\s$])?\$(?!\w)|\\\([^\n]+?\\\))/g
 const IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/
 const LINK_RE = /^\[([^\]]+)\]\(([^)\s]*)(?:\s+"[^"]*")?\)$/
 
@@ -105,8 +109,12 @@ function inlinePieces(line: string, bareUrls = true): ReactElement[] {
   for (const match of line.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
     if (start > last) plain(line.slice(last, start))
-    const [raw, code, image, bold, italic, link] = match
-    if (code) {
+    const [raw, code, image, bold, italic, link, math] = match
+    if (math) {
+      const tex = math.startsWith('$') ? math.slice(1, -1) : math.slice(2, -2)
+      pieces.push(<MathView key={key++} tex={tex} display={false} />)
+    }
+    else if (code) {
       const text = code.slice(1, -1)
       // `out/summary.csv` in a reply opens that file, as a markdown file link does.
       pieces.push(looksLikeFilePath(text)
@@ -197,9 +205,40 @@ export function markdownBlocks(markdown: string, prefix = 'md'): ReactElement[] 
       // nothing, and a code block in a coding tool had no way to be copied.
       const code = body.join('\n')
       const language = fence[2] || ''
-      out.push(<CodeBlock key={`${prefix}-c${key++}`} code={code} language={language} />)
+      const lang = language.toLowerCase()
+      if (lang === 'mermaid') out.push(<MermaidBlock key={`${prefix}-c${key++}`} source={code} />)
+      else if (lang === 'math' || lang === 'latex' || lang === 'tex') out.push(<MathView key={`${prefix}-c${key++}`} tex={code} display />)
+      else out.push(<CodeBlock key={`${prefix}-c${key++}`} code={code} language={language} />)
       i = j
       continue
+    }
+
+    // Display math: `$$` on its own line (or `$$ … $$` on one line), and `\[ … \]`.
+    const mathOpen = /^\s*(\$\$|\\\[)(.*)$/.exec(line)
+    if (mathOpen) {
+      const close = mathOpen[1] === '$$' ? '$$' : '\\]'
+      const rest = mathOpen[2] ?? ''
+      const closeAt = rest.lastIndexOf(close)
+      if (closeAt >= 0 && rest.slice(closeAt + close.length).trim() === '') {
+        flushAll()
+        out.push(<MathView key={`${prefix}-m${key++}`} tex={rest.slice(0, closeAt).trim()} display />)
+        continue
+      }
+      let j = i + 1
+      const body: string[] = rest.trim() ? [rest] : []
+      for (; j < lines.length; j++) {
+        const next = lines[j] ?? ''
+        const at = next.indexOf(close)
+        if (at >= 0) { if (next.slice(0, at).trim()) body.push(next.slice(0, at)); break }
+        body.push(next)
+      }
+      // Without a closing marker this is prose that happens to start with $$.
+      if (j < lines.length) {
+        flushAll()
+        out.push(<MathView key={`${prefix}-m${key++}`} tex={body.join('\n').trim()} display />)
+        i = j
+        continue
+      }
     }
 
     // Table: a pipe row followed by a divider row. Cells carry inline spans.

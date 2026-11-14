@@ -117,6 +117,16 @@ describe('supervisor service', () => {
     expect(t.sent.some(item => item.type === 'supervisor.thread_event')).toBe(true)
   })
 
+  test('turn.cancel stops nothing when idle, rejects unknown params, and needs thread access', async () => {
+    const t = await configured()
+    const ctx = { context: t.identity.context('alice'), grants: t.identity.grantsFor('alice') }
+    await t.supervisor.handlers['supervisor.thread.open']!(ctx, {})
+    const idle = await t.supervisor.handlers['supervisor.turn.cancel']!(ctx, {})
+    expect(idle).toEqual({ thread_id: 'shared', cancelled: false })
+    await expect(Promise.resolve().then(() => t.supervisor.handlers['supervisor.turn.cancel']!(ctx, { force: true }))).rejects.toThrow('unknown parameter')
+    await expect(Promise.resolve().then(() => t.supervisor.handlers['supervisor.turn.cancel']!(ctx, { thread_id: 'private-someone-else' }))).rejects.toThrow()
+  })
+
   test('submitted shared-thread voice and text messages retain their own reply correlation through enqueue and wire events', async () => {
     const t = await configured()
     try {

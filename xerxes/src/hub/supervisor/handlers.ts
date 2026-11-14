@@ -36,6 +36,8 @@ export interface SupervisorHandlerCore {
     principal: UserPrincipal,
     input: { readonly threadId: string; readonly text: string; readonly source: MessageSource; readonly clientMessageId: string },
   ): { readonly message: ThreadMessage; readonly duplicate: boolean }
+  /** Stop the turn running on a thread (steer). Queued turns still run. */
+  cancel?(threadId: string): boolean
 }
 
 function exactKeys(params: Readonly<Record<string, unknown>>, allowed: readonly string[]): void {
@@ -107,6 +109,15 @@ export function createSupervisorHandlers(core: SupervisorHandlerCore): Superviso
     }
   }
 
+  /** `supervisor.turn.cancel {thread_id?}` -> `{thread_id, cancelled}`: stops the running turn so a queued message runs next. */
+  const cancel: HubMethodHandler = (ctx, params) => {
+    const principal = requireUser(ctx.context)
+    exactKeys(params, ['thread_id'])
+    const threadId = params.thread_id === undefined ? core.threads.ensureShared().id : readId(params.thread_id, 'thread_id')
+    core.threads.access(threadId, principal)
+    return { thread_id: threadId, cancelled: core.cancel?.(threadId) ?? false }
+  }
+
   const respond: HubMethodHandler = async (ctx, params) => {
     const action = await core.actions.respond(ctx.context, params)
     return { thread_id: action.threadId, confirmation: actionToWire(action) }
@@ -120,6 +131,7 @@ export function createSupervisorHandlers(core: SupervisorHandlerCore): Superviso
   return {
     'supervisor.thread.open': open,
     'supervisor.message.submit': submit,
+    'supervisor.turn.cancel': cancel,
     'supervisor.confirmation.respond': respond,
     'supervisor.action.status': status,
   }
@@ -136,6 +148,7 @@ export function createUnsupportedSupervisorHandlers(reason: string): SupervisorH
   return {
     'supervisor.thread.open': refuse,
     'supervisor.message.submit': refuse,
+    'supervisor.turn.cancel': refuse,
     'supervisor.confirmation.respond': refuse,
     'supervisor.action.status': refuse,
     'supervisor.autopilot.get': refuse,

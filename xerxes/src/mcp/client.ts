@@ -92,8 +92,14 @@ export class MCPClient {
   private stderrOutput = ''
   private stdoutReader: ReadableStreamDefaultReader<Uint8Array> | undefined
 
+  private readonly maxLineChars: number
+
   constructor(config: MCPServerConfig, private readonly options: MCPClientOptions = {}) {
     this.config = config
+    this.maxLineChars = config.maxLineChars ?? MAX_STDOUT_BUFFER_CHARS
+    if (!Number.isSafeInteger(this.maxLineChars) || this.maxLineChars < 1) {
+      throw new MCPConnectionError(`MCP server ${config.name} maxLineChars must be a positive integer`)
+    }
   }
 
   /** Open the configured transport, initialize it, and discover its capabilities. */
@@ -453,12 +459,12 @@ export class MCPClient {
         }
         buffer += decoder.decode(value, { stream: true })
         buffer = this.consumeLines(buffer)
-        if (buffer.length > MAX_STDOUT_BUFFER_CHARS) {
+        if (buffer.length > this.maxLineChars) {
           // A server that streams an unterminated line would otherwise grow
           // this buffer without bound. Fail the pending requests and close
           // the transport rather than letting memory balloon.
           const overflow = new MCPConnectionError(
-            `MCP server ${this.config.name} exceeded the ${MAX_STDOUT_BUFFER_CHARS} character stdout buffer without a complete line`,
+            `MCP server ${this.config.name} exceeded the ${this.maxLineChars} character stdout buffer without a complete line`,
           )
           this.connected = false
           this.rejectPending(overflow)

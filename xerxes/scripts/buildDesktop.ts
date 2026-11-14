@@ -41,6 +41,9 @@ async function buildDesktop(): Promise<void> {
     outdir: rendererOutput,
     target: 'browser',
     format: 'esm',
+    // Mermaid is imported only when a diagram appears; splitting keeps it
+    // (and its diagram types) in same-origin chunks instead of main.js.
+    splitting: true,
     minify: true,
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
@@ -103,7 +106,7 @@ async function buildDesktop(): Promise<void> {
     'utf8',
   )
   await writeFile(join(rendererOutput, 'theme.css'), themeStylesheet(), 'utf8')
-  for (const asset of ['index.html', 'app.css', 'atelier.css', 'shading.css', 'neo.css']) {
+  for (const asset of ['index.html', 'app.css', 'atelier.css', 'layout.css', 'shading.css', 'neo.css']) {
     await cp(join(packageDirectory, 'src', 'desktop', 'renderer', asset), join(rendererOutput, asset))
   }
   // Bundled background artwork (Settings → General → Background); CSP img-src 'self' covers it.

@@ -53,11 +53,14 @@ agent:
     - AskUserQuestionTool
     - AskAdvisor
     - SetInteractionModeTool
+    - EnterPlanModeTool
+    - ExitPlanModeTool
     - get_goal
     - create_goal
     - update_goal
     - SkillTool
     - TodoWriteTool
+    - ArtifactTool
     - ToolSearchTool
     - create_project_setup
   subagents:

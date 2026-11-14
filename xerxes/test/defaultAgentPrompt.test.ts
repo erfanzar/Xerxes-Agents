@@ -23,7 +23,10 @@ test('default agent prompt uses only current conditional tool names and stays bo
   // (codebase-design, python-types) are only one index line each, so they cannot carry it alone.
   // Raised for the user-requested one-path and explicit-configuration rules: agents added a
   // second code path beside the old one and read ad-hoc environment variables instead of inputs.
-  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_700)
+  // Raised for the user-requested artifact rule: the tool's own guidance alone left agents
+  // answering plans and explanations inline instead of writing an artifact first.
+  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_900)
+  expect(prompt).toContain('write a plan artifact before non-trivial work')
   expect(prompt).toContain('Prefer deep modules')
   expect(prompt).toContain('One job, one path')
   expect(prompt).toContain('read environment variables only when the user asks')

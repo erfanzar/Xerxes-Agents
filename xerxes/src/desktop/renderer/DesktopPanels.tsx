@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
+import { ArtifactsSection, SubagentsSection } from './RailSections.js'
+import { activityFleetRows } from './AgentRoster.js'
 import { pageIsBackground } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
 import { SimurghMark } from './SimurghMark.js'
@@ -50,6 +52,8 @@ import { trustAllSkills } from './catalogBulk.js'
 import { ActionDialog } from './ActionDialog.js'
 
 export type DesktopPanel =
+  | 'subagents'
+  | 'docs'
   | 'artifacts'
   | 'agents'
   | 'xerxes'
@@ -76,14 +80,28 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
   schedules: 'Jobs that run on their own in this workspace.',
 }
 /** Views that open in the task-context rail beside the conversation. */
-export type RailPanel = 'files' | 'outputs' | 'review' | 'terminal' | 'activity' | 'usage'
-export const RAIL_PANELS: readonly RailPanel[] = ['files', 'outputs', 'review', 'terminal', 'activity', 'usage']
+export type RailPanel = 'subagents' | 'docs' | 'files' | 'outputs' | 'review' | 'terminal' | 'activity' | 'usage'
+/** Section order first (Subagents, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
+export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'review' ? 'Git' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
+
+/** Whether the page is in the Shading style, following a switch made anywhere. Shading-only layout hangs off this. */
+export function useShadingStyle(): boolean {
+  const read = (): boolean => typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'shading'
+  const [shading, setShading] = useState(read)
+  useEffect(() => {
+    if (typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(() => setShading(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-style'] })
+    return () => observer.disconnect()
+  }, [])
+  return shading
+}
 
 function useRequest(snap: Snapshot) {
   const [busy, setBusy] = useState(false),
@@ -167,6 +185,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   reviewPath?: string
 }): ReactElement {
   const open = useDesktopNavigation()
+  const shading = useShadingStyle()
   // Without the toggle the window is too narrow for a side rail: it is already full width.
   const wide = filesExpanded || !toggleFilesExpanded
   // In a rail too narrow for every tab the row scrolls; keep the open one in view.
@@ -193,9 +212,11 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     return () => observer.disconnect()
   }, [panel])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <header>{<span className="desktop-rail__crumb"><span>Sections</span><Icon name="chevron" size={10} /><strong>{railTabName(panel)}</strong></span>}<nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
-      {panel === 'files' && <FilesPanel snap={snap} close={close} {...(filesTarget ? { target: filesTarget } : {})} />}
+      {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
+      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} />}
+      {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
@@ -228,6 +249,8 @@ export function DesktopSheet({
     }
   }, [])
   const names = {
+    subagents: 'Subagents',
+    docs: 'Artifacts',
     artifacts: 'Artifacts',
     agents: 'Specialists',
     xerxes: 'XERXES',
@@ -268,6 +291,8 @@ export function DesktopSheet({
         </header>
         <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
           {panel === 'artifacts' && <ArtifactsPanel snap={snap} />}
+          {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} />}
+          {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} onInspect={() => {}} />}
           {panel === 'agents' && <SpecialistsPanel snap={snap} />}
           {panel === 'extensions' && <ExtensionsPanel snap={snap} />}
           {panel === 'schedules' && <SchedulesPanel snap={snap} />}
@@ -1046,19 +1071,18 @@ export function BackgroundActivity({ rows, renderRow }: {
   // Unknown states remain visible: a new daemon state must not silently hide work.
   const current = rows.filter(row => !finishedActivityStates.has(text(row.state)))
   const finished = rows.filter(row => finishedActivityStates.has(text(row.state)))
-  // Once everything has finished, folding ALL of it away left the rail
-  // showing a single closed triangle — the accordion stack this redesign
-  // set out to remove. Keep the most recent few on screen and fold only
-  // the tail, which is what "past" should have meant all along.
-  const recent = current.length === 0 ? finished.slice(0, RECENT_ACTIVITY) : []
-  const history = finished.slice(recent.length)
-  const failures = history.filter(row => row.state === 'failed').length
+  // Claude Code's task list: a "Running N" group and a "Finished N" group, each
+  // a fold of cards. Finished stays open while nothing runs, so the panel is
+  // never a single closed triangle.
+  const failures = finished.filter(row => row.state === 'failed').length
   return <>
-    {current.map(renderRow)}
-    {recent.map(renderRow)}
-    {history.length > 0 && <details className="activity-history">
-      <summary><Icon name="chevron" size={12} />Earlier background activity <span>{history.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
-      <div className="activity-history__rows" role="region" aria-label="Earlier background activity" tabIndex={0}>{history.map(renderRow)}</div>
+    {current.length > 0 && <details className="activity-group-fold" open>
+      <summary><Icon name="chevron" size={12} />Running <span>{current.length}</span></summary>
+      <div className="activity-group-fold__rows" role="region" aria-label="Running background tasks">{current.map(renderRow)}</div>
+    </details>}
+    {finished.length > 0 && <details className="activity-group-fold" open={current.length === 0 || finished.length <= RECENT_ACTIVITY}>
+      <summary><Icon name="chevron" size={12} />Finished <span>{finished.length}{failures ? ` · ${failures} failed` : ''}</span></summary>
+      <div className="activity-group-fold__rows" role="region" aria-label="Finished background tasks" tabIndex={0}>{finished.map(renderRow)}</div>
     </details>}
   </>
 }
@@ -1133,11 +1157,7 @@ export function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
     <div className="studio-form activity-panel">
       <Feedback {...request} />
       {rows.length > 0 && (
-        <section className="railcard" aria-label="Background work">
-          <header className="railcard__head">
-            <span className="railcard__title">Background</span>
-            <span className="railcard__meta">{rows.length}</span>
-          </header>
+        <section className="railcard activity-tasks" aria-label="Background tasks">
           <BackgroundActivity rows={rows} renderRow={renderRow} />
         </section>
       )}
@@ -1290,7 +1310,14 @@ function lastUnsavedPath(cwd: string): string {
   return path
 }
 
-export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number } }): ReactElement {
+export function FilesPanel({ snap, close, target, changes = [] }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number }; changes?: Snapshot['changes'] }): ReactElement {
+  const shading = useShadingStyle()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [changedOpen, setChangedOpen] = useState(true)
+  // Shading: narrow card shows only the open file until this flips the tree in; a wide card hides the tree with it.
+  const [treeToggled, setTreeToggled] = useState(false)
+  // Changed files keyed workspace-relative (no `./`), for badges and folder dots in the tree.
+  const changedMap = new Map(changes.map(change => [workspaceFilePath(change.path, snap.cwd).replace(/^\.\//, ''), change.isNew ? 'A' as const : 'M' as const]))
   const [selected, setSelectedPath] = useState(() => target?.path ? workspaceFilePath(target.path, snap.cwd) : lastUnsavedPath(snap.cwd))
   // The path whose Source view is on, and the workbook sheet chosen for a path: both reset with the selection.
   const [sourceOf, setSourceOf] = useState('')
@@ -1369,34 +1396,51 @@ export function FilesPanel({ snap, close, target }: { snap: Pick<Snapshot, 'cwd'
   const isDocument = rendersAsDocument(selected)
   const fileActions = <FileActions path={selected} cwd={snap.cwd} remote={Boolean(snap.storageScope?.startsWith('ssh:'))} />
   return (
-    <div className={'file-browser' + (selected ? ' file-browser--preview' : '')}>
+    <div className={'file-browser' + (selected ? ' file-browser--preview' : '') + (treeToggled ? ' file-browser--tree' : '')}>
       <div className="file-browser__navigation">
       <div className="file-browser__location" title={snap.cwd}><Icon name="folder" size={16} /><strong>{needle.includes("/") ? needle : snap.cwd.split('/').filter(Boolean).at(-1) || 'Workspace'}</strong></div>
       <label className="file-browser__search"><Icon name="search" size={15} />
         <input aria-label="Filter workspace files by path" value={needle} onChange={(event) => { setSelected(''); setNeedle(event.target.value) }} placeholder="Find a file…" />
       </label>
       <div className="file-browser__entries">
-        <div hidden={Boolean(needle)}><WorkspaceFileTree key={snap.cwd + snap.sessionKey} sessionKey={snap.sessionKey} selected={selected} select={setSelected} /></div>
+        {!needle && changes.length > 0 && <div className="file-browser__changed" role="group" aria-label="Changed files">
+          <button className="file-browser__changed-head" aria-expanded={changedOpen} onClick={() => setChangedOpen(value => !value)}>
+            <Icon name="caretDown" size={10} /><span>Changed files</span><span className="file-browser__changed-count">{changes.length}</span>
+          </button>
+          {changedOpen && changes.map(change => {
+            const path = workspaceFilePath(change.path, snap.cwd)
+            const name = change.path.split('/').filter(Boolean).at(-1) ?? change.path
+            return <button key={change.path} className="file-browser__entry file-browser__changed-row" data-change={change.isNew ? 'added' : 'modified'} aria-selected={selected === path} title={change.path} onClick={() => setSelected(path)}>
+              <Icon name="file" size={13} /><span>{name}</span><span className="file-browser__badge" aria-label={change.isNew ? 'Added' : 'Modified'}>{change.isNew ? 'A' : 'M'}</span>
+            </button>
+          })}
+        </div>}
+        <div hidden={Boolean(needle)}><WorkspaceFileTree key={snap.cwd + snap.sessionKey} sessionKey={snap.sessionKey} selected={selected} select={setSelected} changed={changedMap} /></div>
         {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={setSelected} />}
       </div>
       </div>
-      {selected && <div className="file-browser__document"><div className="file-browser__selection">
-        <p title={selected}>{selected}{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
+      {selected && <div className="file-browser__document"><div className="file-browser__selection file-browser__pathbar">
+        <button className="file-browser__treebtn" aria-label="Toggle file tree" title="Show or hide the file tree" aria-pressed={treeToggled} onClick={() => setTreeToggled(value => !value)}><Icon name="sidebar" size={14} /></button>
+        <p title={selected}><span className="file-browser__dir">{(() => { const dir = selected.replace(/^\.\//, '').split('/').slice(0, -1).join('/'); return dir ? dir + '/' : '' })()}</span><strong>{selected.split('/').at(-1)}</strong>{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
         {dirty && <><button className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }) }}>Revert</button></>}
         {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
-        {view && <button className="file-browser__mode" aria-pressed={source} disabled={dirty && serverRendered} title={dirty && serverRendered ? 'Save or revert your changes to see the preview' : source ? 'Show the rendered view' : 'Edit the source'} onClick={() => setSourceOf(source ? '' : selected)}>{source ? 'Preview' : 'Source'}</button>}
-        {fileActions}
-        <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); if (!dirty) close() }} title={dirty ? 'Unsaved changes stay open here; the message reads the file as saved' : undefined}>Add to message</button>
+        {view && <button className="file-browser__mode" aria-pressed={source} disabled={dirty && serverRendered} onClick={() => setSourceOf(source ? '' : selected)}>{source ? 'Preview' : 'Source'}</button>}
+        <span className="file-browser__more">
+          <button aria-label="File actions" title="File actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(value => !value)}><Icon name="dots" size={14} /></button>
+          {menuOpen && <span className="file-browser__menu" role="menu" onClick={() => setMenuOpen(false)}>
+            {fileActions}
+            <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: '@' + JSON.stringify(selected.replace(/^@/, '')) })); if (!dirty) close() }}>Add to message</button>
+          </span>}
+        </span>
         <button className="file-browser__close" aria-label="Close file" title="Close file" onClick={() => setSelected('')}><Icon name="close" size={13} /></button>
       </div>
       {save.state === 'error' && <div className="file-browser__notice" role="alert"><span>{save.message}</span>{save.conflict && <button onClick={() => { if (file) keepUnsavedFile(snap.cwd, file, file.content); setSave({ state: 'idle' }); setReload(value => value + 1) }}>Reload file</button>}</div>}
       {readOnlyReason && <p className="file-browser__notice file-browser__notice--quiet">{readOnlyReason}</p>}
-      {/* Keyed by file and mode so each opens scrolled to its top-left. */}
       <section key={`${selected}:${source}:${reload}`} className="file-browser__preview" aria-label="File">
         <Feedback busy={!file && !rich && !previewError} error={previewError} />
         {rich ? <RichFilePreview preview={rich} requestedSheet={sheet} chooseSheet={index => setSheetOf({ path: selected, index })} actions={fileActions} />
           : file && (isDocument && !source
-          ? <FileDocument source={draft} />
+          ? <FileDocument source={draft} path={selected} />
           : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()} />)}
       </section></div>}
     </div>
@@ -1414,7 +1458,7 @@ export function htmlToMarkdown(markdown: string): string {
   const entity = (text: string): string => text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
   return markdown.split(/(^\s*(?:```|~~~)[^\n]*\n[\s\S]*?^\s*(?:```|~~~)\s*$)/m).map((part, index) => index % 2 ? part : entity(part
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<img\b[^>]*>/gi, tag => { const src = attribute(tag, 'src'); const alt = attribute(tag, 'alt') || src.split('/').pop() || 'image'; return src ? `[${alt}](${src})` : '' })
+    .replace(/<img\b[^>]*>/gi, tag => { const src = attribute(tag, 'src'); const alt = attribute(tag, 'alt') || src.split('/').pop() || 'image'; return src ? `![${alt}](${src})` : '' })
     .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (tag, inner: string) => { const href = attribute(tag, 'href'); const label = inner.replace(/<[^>]+>/g, '').trim() || href; return href && !/\]\(/.test(inner) ? `[${label}](${href})` : inner })
     .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level: string, inner: string) => `\n${'#'.repeat(Number(level))} ${inner.replace(/<[^>]+>/g, '').trim()}\n`)
     .replace(/<br\s*\/?>/gi, '\n')
@@ -1422,9 +1466,29 @@ export function htmlToMarkdown(markdown: string): string {
     .replace(/\n{3,}/g, '\n\n'))).join('')
 }
 
-function FileDocument({ source }: { source: string }): ReactElement {
+/**
+ * README images: a badge (`[![alt](img)](href)`) becomes a compact link chip,
+ * a remote image becomes a link (the renderer loads no remote images), and a
+ * relative image path resolves against the document's folder so it loads
+ * from the workspace like a chat image.
+ */
+export function documentImages(markdown: string, documentPath: string): string {
+  const dir = documentPath.replace(/^\.\//, '').split('/').slice(0, -1).join('/')
+  const resolve = (src: string): string => {
+    if (/^(?:[a-z]+:|\/|#)/i.test(src)) return src
+    const parts = (dir ? dir + '/' : '').concat(src.replace(/^\.\//, '')).split('/')
+    const out: string[] = []
+    for (const part of parts) { if (part === '..') out.pop(); else if (part && part !== '.') out.push(part) }
+    return out.join('/')
+  }
+  return markdown.split(/(^\s*(?:```|~~~)[^\n]*\n[\s\S]*?^\s*(?:```|~~~)\s*$)/m).map((part, index) => index % 2 ? part : part
+    .replace(/\[!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\]\(([^)\s]+)\)/g, (_, alt: string, _img: string, href: string) => `[${alt || 'badge'}](${href})`)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, alt: string, src: string) => /^https?:/i.test(src) ? `[${alt || 'image'}](${src})` : `![${alt}](${resolve(src)})`)).join('')
+}
+
+function FileDocument({ source, path = '' }: { source: string; path?: string }): ReactElement {
   const { fields, body: raw } = frontMatter(source)
-  const body = htmlToMarkdown(raw)
+  const body = documentImages(htmlToMarkdown(raw), path)
   return <article className="file-document" tabIndex={0} aria-label="Rendered document">
     {fields.length > 0 && <dl className="file-document__meta">{fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>}
     <Markdown text={body} className="md--document" />
@@ -1789,6 +1853,8 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
   useEffect(() => {
     if (snap.connection !== 'online') setCompacting('')
   }, [snap.connection])
+  // Idle, it only duplicated the rail's Activity button: show it only while something runs.
+  if (!compacting && !(counts && (counts.shells || counts.watchers))) return <></>
   return (
     <button title="Background activity" aria-label="Activity" className="studio-background" onClick={() => open('activity')} aria-live="polite">
       <Icon name="activity" /><span>

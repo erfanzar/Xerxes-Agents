@@ -197,6 +197,45 @@ test('MCPClient caps the stdio stdout line buffer and fails pending requests on 
   await client.disconnect()
 })
 
+const LARGE_REPLY_SERVER = String.raw`
+let buffer = ''
+process.stdin.on('data', chunk => {
+  buffer += chunk
+  let index
+  while ((index = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, index); buffer = buffer.slice(index + 1)
+    if (!line.trim()) continue
+    const message = JSON.parse(line)
+    if (message.id === undefined) continue
+    let result = {}
+    if (message.method === 'initialize') result = { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'big', version: '1' } }
+    else if (message.method === 'tools/list') result = { tools: [{ name: 'shot', inputSchema: { type: 'object' } }] }
+    else if (message.method === 'tools/call') result = { content: [{ type: 'text', text: 'x'.repeat(3 * 1024 * 1024) }] }
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\n')
+  }
+})
+`
+
+test('MCPClient accepts a per-server maxLineChars for servers with large single-line replies', async () => {
+  expect(() => new MCPClient({ name: 'bad', command: process.execPath, maxLineChars: 0 })).toThrow(/maxLineChars/)
+  const client = new MCPClient({
+    name: 'big',
+    command: process.execPath,
+    args: ['-e', LARGE_REPLY_SERVER],
+    timeoutMs: 10_000,
+    maxLineChars: 8 * 1024 * 1024,
+  })
+  try {
+    await client.connect()
+    const result = await client.callTool('shot', {})
+    const first = result.content[0]
+    expect(first?.type === 'text' ? first.text.length : 0).toBe(3 * 1024 * 1024)
+    expect(client.connected).toBeTrue()
+  } finally {
+    await client.disconnect()
+  }
+})
+
 test('MCP HTTP transports reject private and link-local URL literals unless explicitly allowed', async () => {
   for (const url of [
     'http://169.254.169.254/latest/meta-data',

@@ -9,11 +9,10 @@ export type ThemeChoice = 'system' | 'dark' | 'light'
  * The visual language, independent of light/dark and colour theme.
  * `neo` is the terminal-console look (one mono face, square corners,
  * hairlines, one purple accent) that neo.css draws under
- * `:root[data-style='neo']`, and what a fresh install shows; `classic` is the
- * earlier Xerxes design, kept for anyone who picks it. `shading` is Claude
- * Code's desktop layout in black, white and grey (flat panes split by
- * hairlines, a sans face) that shading.css draws under
- * `:root[data-style='shading']`.
+ * `:root[data-style='neo']`; `classic` is the earlier Xerxes design, kept for
+ * anyone who picks it. `shading` is the black, white and grey look (flat panes
+ * split by hairlines, a sans face) that shading.css draws under
+ * `:root[data-style='shading']`, and what a fresh install shows.
  */
 export const STYLES = ['classic', 'neo', 'shading'] as const
 export type StyleChoice = typeof STYLES[number]
@@ -23,7 +22,9 @@ export function isStyleChoice(value: unknown): value is StyleChoice {
   return STYLES.some(style => style === value)
 }
 /** A fresh install's style, and the style of any stored record that never chose one. */
-export const DEFAULT_STYLE: StyleChoice = 'neo'
+export const DEFAULT_STYLE: StyleChoice = 'shading'
+/** A fresh install's light/dark choice, and that of any stored record that never chose one. */
+export const DEFAULT_THEME: ThemeChoice = 'dark'
 export interface Appearance { readonly theme: ThemeChoice; readonly font: FontSize; readonly style: StyleChoice }
 /** Sizes are px; the labels are what the control shows. */
 export const FONT_LABELS: Record<FontSize, string> = { '11': 'XS', '12': 'S', '13': 'M', '15': 'L', '17': 'XL' }
@@ -34,7 +35,7 @@ export function parseAppearance(value: unknown): Appearance {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const font = FONT_SIZES.find(size => size === record.font)
   return {
-    theme: record.theme === 'dark' || record.theme === 'light' ? record.theme : 'system',
+    theme: record.theme === 'system' || record.theme === 'light' ? record.theme : DEFAULT_THEME,
     font: font ?? DEFAULT_FONT_SIZE,
     style: STYLES.find(style => style === record.style) ?? DEFAULT_STYLE,
   }

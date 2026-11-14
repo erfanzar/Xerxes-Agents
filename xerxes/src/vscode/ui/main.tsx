@@ -18,7 +18,7 @@ import { VscodeApp } from './VscodeApp.js'
 const root = document.documentElement
 /** The saved setting, stamped into the page by the extension and updated live. */
 const stamped = root.getAttribute('data-style-choice')
-let chosenStyle: StyleChoice = isStyleChoice(stamped) ? stamped : 'neo'
+let chosenStyle: StyleChoice = isStyleChoice(stamped) ? stamped : 'shading'
 
 /** VS Code marks the body vscode-light / vscode-dark / vscode-high-contrast(-light); follow it live. */
 const followTheme = (): void => {

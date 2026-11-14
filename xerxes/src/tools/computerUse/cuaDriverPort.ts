@@ -28,6 +28,8 @@ export function endedSessionId(result: MCPToolCallResult): string | undefined {
 /**
  * One lazy, runtime-owned stdio MCP connection. No retries of uncertain actions; the one retry is a
  * call the driver explicitly rejected unexecuted because its session had ended (revived first).
+ * A failed, timed-out or cancelled call drops the transport and the next call reconnects; only
+ * stop() closes the port for good.
  */
 export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
   private connecting: Promise<void> | undefined
@@ -35,6 +37,9 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
   private disposed = false
   private readonly closed = new AbortController()
   private closing: Promise<void> | undefined
+  private resetting: Promise<void> | undefined
+  /** Aborted when the current transport is dropped, releasing every caller still bound to it. */
+  private generation = new AbortController()
   private readonly timeoutMs: number
 
   constructor(
@@ -55,6 +60,8 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
   async start(signal?: AbortSignal): Promise<void> {
     this.check(signal)
     if (this.connected) return
+    if (this.resetting) await this.resetting
+    this.check(signal)
     if (!await this.isAvailable(signal)) throw new ComputerUseUnavailableError('CuaDriver binary is missing; set computer_use_cua_driver / XERXES_CUA_DRIVER to its absolute path')
     this.check(signal)
     this.connecting ??= this.bounded(() => this.client.connect(), signal).then(() => {
@@ -72,6 +79,20 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
     this.closed.abort()
     this.closing ??= this.client.disconnect()
     await this.closing
+  }
+
+  /**
+   * Drop a failed transport without disposing the port: the next call starts a fresh driver
+   * process. The failed call itself is never repeated, so an uncertain action is not re-sent.
+   */
+  private async reset(): Promise<void> {
+    this.connected = false
+    this.connecting = undefined
+    const dropped = this.generation
+    this.generation = new AbortController()
+    dropped.abort()
+    this.resetting ??= this.client.disconnect().finally(() => { this.resetting = undefined })
+    await this.resetting
   }
 
   async callTool(name: string, arguments_: JsonObject, signal?: AbortSignal): Promise<MCPToolCallResult> {
@@ -95,6 +116,7 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
 
   private async bounded<T>(invoke: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
     this.check(signal)
+    const generation = this.generation.signal
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let detach: (() => void) | undefined
@@ -109,18 +131,23 @@ export class MCPClientCuaDriverPort implements CuaDriverMcpPort {
           timer = setTimeout(() => fail(`CuaDriver timed out after ${this.timeoutMs}ms`), this.timeoutMs)
           const abort = (): void => fail('CuaDriver call cancelled')
           const close = (): void => fail('CuaDriver transport is closed')
+          const dropped = (): void => fail('CuaDriver transport was reset by another failed call')
           signal?.addEventListener('abort', abort, { once: true })
           this.closed.signal.addEventListener('abort', close, { once: true })
+          generation.addEventListener('abort', dropped, { once: true })
           detach = () => {
             signal?.removeEventListener('abort', abort)
             this.closed.signal.removeEventListener('abort', close)
+            generation.removeEventListener('abort', dropped)
           }
           if (signal?.aborted) abort()
           if (this.closed.signal.aborted) close()
+          if (generation.aborted) dropped()
         }),
       ])
     } catch (error) {
-      await this.stop()
+      // Only drop the transport this call was bound to; a newer connection stays up.
+      if (!this.disposed && this.generation.signal === generation) await this.reset()
       if (error instanceof ComputerUseUnavailableError) throw error
       throw new ComputerUseUnavailableError('CuaDriver is unavailable: ' + (error instanceof Error ? error.message : String(error)), error)
     } finally {

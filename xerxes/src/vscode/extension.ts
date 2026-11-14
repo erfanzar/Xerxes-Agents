@@ -55,10 +55,10 @@ export function activate(extension: vscode.ExtensionContext): void {
 
 type VscodeStyle = 'neo' | 'classic' | 'shading'
 
-/** Xerxes: Style. Neo unless the person chose Classic or Shading. */
+/** Xerxes: Style. Shading unless the person chose Classic or Neo. */
 function currentStyle(): VscodeStyle {
   const value = vscode.workspace.getConfiguration('xerxes').get<string>('style')
-  return value === 'classic' || value === 'shading' ? value : 'neo'
+  return value === 'classic' || value === 'neo' ? value : 'shading'
 }
 
 function nextStyle(style: VscodeStyle): VscodeStyle {
@@ -200,6 +200,8 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     <link rel="stylesheet" href="${asset('renderer/app.css')}" />
     <link rel="stylesheet" href="${asset('renderer/atelier.css')}" />
     <link rel="stylesheet" href="${asset('vscode.css')}" />
+    <!-- The one layout every style shares. -->
+    <link rel="stylesheet" href="${asset('renderer/layout.css')}" />
     <!-- The Shading style; inert unless data-style="shading". -->
     <link rel="stylesheet" href="${asset('renderer/shading.css')}" />
     <!-- Last: the Neo style; inert unless data-style="neo". -->

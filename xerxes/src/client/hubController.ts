@@ -64,6 +64,8 @@ export interface HubController {
   supervisorOpen(): Promise<void>
   supervisorSend(text: string, source?: 'text' | 'voice', messageId?: string): Promise<boolean>
   supervisorRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void>
+  /** Stops XERXES's running turn (steer); messages already queued still run. False when nothing was stopped. */
+  supervisorCancel(): Promise<boolean>
   /** Loads `hub.machines.list` into `state.machines`. */
   machinesList(): Promise<void>
   /** Loads `supervisor.config.get` into `state.supervisorConfig`. */
@@ -1215,6 +1217,17 @@ export function createHubController(options: HubControllerOptions): HubControlle
   const supervisorRespond = (confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void> =>
     respondToCard(supervisorThread, 'shared', confirmationId, decision)
 
+  /** `supervisor.turn.cancel`: an older Hub without the method answers false, never throws. */
+  async function supervisorCancel(): Promise<boolean> {
+    try {
+      const result = await connection.request('supervisor.turn.cancel', supervisorThread ? { thread_id: supervisorThread } : {})
+      return result.cancelled === true
+    } catch (error) {
+      store.dispatch({ type: 'supervisor', patch: { error: failureMessage(error) } })
+      return false
+    }
+  }
+
   /** Read what happened to a card (a read: safe to repeat). True once the outcome is known. */
   async function readCardOutcome(confirmationId: string, thread: 'shared' | 'autopilot'): Promise<boolean> {
     const status = await connection.request('supervisor.action.status', { confirmation_id: confirmationId })
@@ -1409,7 +1422,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     start, dispose, refreshInbox, openSession, closeSession, loadOlder, loadAgents, inspectAgent, closeAgent, resync,
     reconnectNow: () => { connection.reconnectNow() },
     submit, steer, stopTurn, decide, answerQuestion,
-    setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond,
+    setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond, supervisorCancel,
     machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet, loadAutopilot, setAutopilot,
     autopilotThreadOpen, autopilotThreadRespond, loadWatches, setWatch,
   }

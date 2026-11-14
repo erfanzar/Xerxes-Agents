@@ -75,7 +75,10 @@ export const SAFE_TOOLS = new Set([
   'skills_list', 'skill_view', 'session_search', 'search_memory', 'get_memory_statistics', 'consolidate_agent_memories',
   'agent_memory_read', 'agent_memory_list', 'agent_memory_search', 'agent_memory_status', 'TaskListTool', 'TaskGetTool',
   'TaskOutputTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ToolSearchTool', 'AskUserQuestionTool',
-  'SetInteractionModeTool', 'JSONProcessor', 'CSVProcessor', 'TextProcessor', 'Calculator', 'StatisticalAnalyzer',
+  // Entering plan mode only narrows what the session may do; an artifact is a session document under
+  // the Xerxes home, never a workspace file. ExitPlanModeTool is deliberately absent: leaving plan
+  // mode is the user's approval of the plan.
+  'SetInteractionModeTool', 'EnterPlanModeTool', 'ArtifactTool', 'JSONProcessor', 'CSVProcessor', 'TextProcessor', 'Calculator', 'StatisticalAnalyzer',
   'MathematicalFunctions', 'UnitConverter', 'DateTimeProcessor',
 ])
 

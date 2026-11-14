@@ -371,7 +371,7 @@ test('stdio MCP adapter connects lazily once, forwards structured content, and c
   await expect(port.callTool('click', {})).rejects.toThrow('closed')
 })
 
-test.each(['connect', 'call'] as const)('stdio adapter bounds %s timeout and closes without retrying', async phase => {
+test.each(['connect', 'call'] as const)('stdio adapter bounds %s timeout, drops the transport without retrying, and the next call reconnects', async phase => {
   const client = new FakeClient()
   client.hangConnect = phase === 'connect'
   client.hangCall = phase === 'call'
@@ -380,7 +380,30 @@ test.each(['connect', 'call'] as const)('stdio adapter bounds %s timeout and clo
   expect(client.connects).toBe(1)
   expect(client.disconnects).toBe(1)
   expect(client.signals.every(signal => signal.aborted)).toBe(true)
-  await expect(port.callTool('click', {})).rejects.toThrow('closed')
+  // The timed-out click is never re-sent; a later call starts a fresh driver connection.
+  client.hangConnect = false
+  client.hangCall = false
+  const callsBefore = client.signals.length
+  expect((await port.callTool('get_window_state', {})).structuredContent?.elements).toHaveLength(1)
+  expect(client.connects).toBe(2)
+  expect(client.signals.length).toBe(callsBefore + 1)
+})
+
+test('a transport failure (e.g. an oversized reply) does not dispose the port; only stop() does', async () => {
+  const client = new FakeClient()
+  let fail = true
+  const original = client.callTool.bind(client)
+  client.callTool = (name, args, options) => fail
+    ? Promise.reject(new Error('MCP server xerxes-cua-driver exceeded the 1048576 character stdout buffer without a complete line'))
+    : original(name, args, options)
+  const port = new MCPClientCuaDriverPort(client)
+  await expect(port.callTool('get_window_state', {})).rejects.toThrow('stdout buffer')
+  expect(client.disconnects).toBe(1)
+  fail = false
+  expect((await port.callTool('get_window_state', {})).isError).not.toBe(true)
+  expect(client.connects).toBe(2)
+  await port.stop()
+  await expect(port.callTool('get_window_state', {})).rejects.toThrow('closed')
 })
 
 test('a second caller can abort while waiting on another caller\'s shared handshake', async () => {

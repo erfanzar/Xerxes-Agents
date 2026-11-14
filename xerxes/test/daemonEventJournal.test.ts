@@ -72,6 +72,32 @@ test('subscribe installs before replay, then emits live without a boundary dupli
   await journal.close();
 });
 
+test('a backlog replay waits while the subscriber transport is backed up, then resumes', async () => {
+  const root = await directory();
+  const journal = new TransportEventJournal({ directory: root });
+  await journal.start();
+  for (let index = 0; index < 40; index++) journal.append({ project_dir: root, type: 'text_part', payload: { text: 'x'.repeat(2000) } });
+  await journal.flush();
+  const owner = {};
+  let blocked = true;
+  const checked: object[] = [];
+  const batches: { sequence: number }[][] = [];
+  const subscriptions = new EventSubscriptions(journal, undefined, candidate => { checked.push(candidate); return blocked; });
+  subscriptions.subscribe(owner, { project_dirs: [root], detail: 'conversation', max_batch_bytes: 4096, after_cursor: journal.cursor(0) },
+    (type, payload) => { if (type === 'event_batch' && Array.isArray(payload.events)) batches.push(payload.events as { sequence: number }[]); });
+  await Bun.sleep(80);
+  // Held back: nothing was pushed while the owner's queue was full, and the hook saw that owner.
+  expect(batches).toHaveLength(0);
+  expect(checked.every(candidate => candidate === owner)).toBe(true);
+  expect(checked.length).toBeGreaterThan(1);
+  blocked = false;
+  await Bun.sleep(120);
+  const sequences = batches.flat().map(event => event.sequence);
+  expect(sequences).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
+  subscriptions.close();
+  await journal.close();
+});
+
 test('retention expires cursors, write failures are observable, private frames are excluded', async () => {
   const root = await directory();
   let fail = false;

@@ -38,6 +38,7 @@ import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
 import { SupervisorPage } from './SupervisorPage.js'
+import { SectionsMenu } from './SectionsMenu.js'
 import { parseGoal } from './goalText.js'
 import { AppUpdatePrompt } from './AppUpdatePrompt.js'
 import { MacPermissionsNotice } from './MacPermissionsPanel.js'
@@ -51,7 +52,7 @@ import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { ModelSplitChip } from './TaskModels.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { BackgroundIndicator, DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, useShadingStyle, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
@@ -104,7 +105,7 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
 function railLabel(rail: RailPanel): string {
-  return rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
+  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -171,7 +172,8 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [narrowNavigation, setNarrowNavigation] = useState(false)
   const [windowWidth, setWindowWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
-  const narrow = windowWidth < 850
+  // The sidebar stays at 820 px; it only turns into a drawer below 640 px.
+  const narrow = windowWidth < 640
   const focused = narrow ? !narrowNavigation : layout.sidebarHidden
   const [railChoice, setRail] = useState<RailPanel | null | undefined>(undefined)
   const [filesExpanded, setFilesExpanded] = useState(false)
@@ -210,7 +212,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // the rail stays as it was.
     if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
+    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
@@ -231,6 +233,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {narrow && narrowNavigation && <div className="side-scrim" aria-hidden="true" onClick={() => setNarrowNavigation(false)} />}
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
+        {!rail && !snap.noWorkspace && <FloatingRail open={navigate} />}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
         {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
 
@@ -291,15 +294,31 @@ function SidebarToggle(): ReactElement {
   return <button className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}><Icon name="sidebar" /></button>
 }
 
-/** Search, background work and — while the rail is closed — Git and Files. */
-function WorkspaceTools({ snap, inspectorOpen }: { snap: Snapshot; inspectorOpen: boolean }): ReactElement {
-  const open = useDesktopNavigation()
+/**
+ * While the inspector is closed, a slim column of icons opens one of its
+ * sections. Hidden by default; the Shading style shows it (shading.css).
+ */
+function FloatingRail({ open }: { open: (panel: DesktopPanel) => void }): ReactElement {
+  // The rail: Subagents, Artifacts, Changes, Files, Terminal (then Activity).
+  const items = [
+    { panel: 'subagents', icon: 'agents', label: 'Subagents' },
+    { panel: 'docs', icon: 'stack', label: 'Artifacts' },
+    { panel: 'review', icon: 'changes', label: 'Changes' },
+    { panel: 'files', icon: 'folder', label: 'Files' },
+    { panel: 'terminal', icon: 'terminal', label: 'Terminal' },
+    { panel: 'activity', icon: 'activity', label: 'Activity' },
+  ] as const
+  return <nav className="floatrail" aria-label="Open a side panel">
+    <button type="button" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" size={16} /></button>
+    {items.map(item => <button key={item.panel} type="button" title={item.label} aria-label={item.label} onClick={() => open(item.panel)}><Icon name={item.icon} size={16} /></button>)}
+  </nav>
+}
+
+/** Search only below 761px; Activity, Changes and Files live in the floating rail and the Sections menu. */
+function WorkspaceTools(_props: { snap: Snapshot; inspectorOpen: boolean }): ReactElement {
   return <div className="top__actions" role="group" aria-label="Workspace tools">
-    <button title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
-    <BackgroundIndicator snap={snap} />
-    {!inspectorOpen && <>
-    <button title="Source control" onClick={() => open('review')}><Icon name="branch" /><span>Git</span></button>
-    <button title="Project files" aria-label="Project files" onClick={() => open('files')}><Icon name="sidebar" /></button></>}
+    {/* Below 761px the floating rail is hidden, so Search falls back to the top bar there (layout.css). */}
+    <button className="top__search" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
   </div>
 }
 
@@ -783,7 +802,6 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
           title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N, or ⇧⌘N to choose a preset and worktree)` : 'Start a new task (⌘N)'}
         ><Icon name="plus" /><span>New task</span><kbd>⌘ N</kbd></button>
         <button className={`studio-nav${page === "extensions" ? " is-selected" : ""}`} aria-pressed={page === 'extensions'} disabled={!online} onClick={() => open('extensions')}><Icon name="tools" /><span>Skills & tools</span><LearnedBadge snap={snap} /></button>
-        <button className={`studio-nav${page === "artifacts" ? " is-selected" : ""}`} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="folder" /><span>Artifacts</span></button>
         <button className={`studio-nav${page === "schedules" ? " is-selected" : ""}`} aria-pressed={page === 'schedules'} disabled={!online} onClick={() => open('schedules')}><Icon name="clock" /><span>Scheduled jobs</span></button>
         <input
           className="side__search"
@@ -977,6 +995,7 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
         {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
           Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
         </button>}
+        {!onPage && !agent && !snap.noWorkspace && <SectionsMenu snap={snap} />}
         {!chrome.sidebarVisible && <RuntimeStatus snap={snap} compact />}
         {!chrome.inspectorOpen && <WorkspaceTools snap={snap} inspectorOpen={false} />}
       </header>
@@ -1088,6 +1107,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
             <div key={`${snap.currentId}:${key}`} data-history-anchor={group[0]!.id}>
               {isDisclosedActivity(group, approval?.toolCallId) ? <ActivityGroup blocks={group} active={snap.turnActive && index === groups.length - 1} turnActive={snap.turnActive} /> : group.map(block => <BlockView key={block.id} block={block} />)}
               {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} policy={snap.permissionMode} inline />}
+              <FilesChangedCard group={group} changes={snap.changes} />
             </div>
           ))}
           {failedCard}
@@ -1967,7 +1987,17 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const vscode = isVscodeHost()
 
   return (
-    <div className="composer-wrap">
+    <div
+      className="composer-wrap"
+      onMouseDown={event => {
+        // The whole card is the click target: a press on its padding, the
+        // controls row's gaps or the folder row focuses the message box.
+        const target = event.target as HTMLElement
+        if (target.closest('button,a,input,textarea,select,[role="menu"],[role="dialog"],.hints,.composer__images')) return
+        event.preventDefault()
+        ref.current?.focus()
+      }}
+    >
       {hints && (
         <div className="hints">
           <div className="hints__header">
@@ -2026,6 +2056,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             attach(files)
           }}
           onKeyDown={e => {
+            // Shift+Tab switches between plan mode and normal mode, as in Claude Code.
+            if (e.key === 'Tab' && e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); store.togglePlanMode(); return }
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             else if (hints && hints.items.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
               // Hints own the arrows while open; the caret keeps them when closed.
@@ -2200,6 +2232,41 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
 }
 
 const hiddenRepoBars = new Set<string>()
+
+/**
+ * The end-of-turn summary of edited files. A turn that changed something
+ * ends in a checkpoint block; the files listed are the ones whose latest
+ * edit happened in that turn. Each row's counts are the file's session
+ * totals (what the review panel shows), so the header says so when a file
+ * was also edited earlier.
+ */
+export function FilesChangedCard({ group, changes }: { group: readonly Snapshot['blocks'][number][]; changes: Snapshot['changes'] }): ReactElement | null {
+  const checkpoint = group.find(block => block.kind === 'checkpoint')
+  if (!checkpoint || checkpoint.kind !== 'checkpoint') return null
+  const files = changes.filter(file => file.turn === checkpoint.turn)
+  if (!files.length) return null
+  const adds = files.reduce((sum, file) => sum + file.adds, 0)
+  const dels = files.reduce((sum, file) => sum + file.dels, 0)
+  return <section className="fileschanged" aria-label={`Files changed in turn ${checkpoint.turn}`}>
+    <header className="fileschanged__head">
+      <span>Files changed</span>
+      <span className="fileschanged__count">{files.length}</span>
+      <span className="fileschanged__add">+{adds}</span>
+      <span className="fileschanged__del">−{dels}</span>
+    </header>
+    <ul className="fileschanged__list">
+      {files.map(file => <li key={file.path}>
+        <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
+          <Icon name="file" size={13} />
+          <span className="fileschanged__path">{file.path}</span>
+          {file.isNew && <span className="fileschanged__new">new</span>}
+          <span className="fileschanged__add">+{file.adds}</span>
+          <span className="fileschanged__del">−{file.dels}</span>
+        </button>
+      </li>)}
+    </ul>
+  </section>
+}
 
 // ── Right rail ──────────────────────────────────────────────────────────
 

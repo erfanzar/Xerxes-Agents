@@ -1,0 +1,853 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Xerxes Desktop: the one layout every style shares (Classic, Neo, Shading).
+
+   Measured layout: inset right panel,
+   Sections, composer card, Settings page, file tree. Styles differ only in
+   colour, type and corners, which their own sheets set through tokens.
+   Rules: every selector starts with `:root` and carries `:not(#layout)`,
+   so it outranks atelier.css and app.css without editing them.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Defaults for the composer tokens Classic and Neo do not define. */
+/* Classic defines no popover surface; without this the shared menus were see-through there. Shading and Neo set their own (more specific). */
+:root:not(#layout){--x-popover:var(--x-dialog)}
+:root:not(#layout){--sh-composer:var(--x-card);--sh-composer-shadow:none;--sh-pill:var(--x-selected);--sh-card-edge:var(--x-hairline);--sh-switch-off:var(--x-separator);--sh-input:var(--x-separator);--sh-input-bg:transparent;--sh-ring:var(--x-focus);--sh-shadow-lg:var(--mac-shadow)}
+
+/* ── Geometry: thin scrollbars, a plain focus outline ─────────────── */
+:root:not(#layout) ::-webkit-scrollbar-thumb{border-width:4px}
+:root:not(#layout) .atelier .side{border-right:0}
+:root:not(#layout) .atelier .top{border-bottom:0}
+:root:not(#layout) .atelier .chat{margin:0;border:0;overflow:hidden}
+:root:not(#layout) .atelier .desktop-rail{margin:0;border:0;overflow:hidden}
+/* no header hairline; the title is a faint 6px chip. */
+:root:not(#layout) .atelier .chat__head{height:44px;min-height:44px;border-bottom:0}
+:root:not(#layout) .atelier .chat__title{font:400 13px/1 var(--sans);padding:5px 8px}
+:root:not(#layout) .atelier .desktop-rail>header{height:44px;min-height:44px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .desktop-rail>header button{font:400 13px/1 var(--sans)}
+:root:not(#layout) .atelier .desktop-rail>header nav>button:has(>svg){width:30px;height:28px;padding:0}
+/* ── Sidebar: quiet nav rows, muted folder labels, one line per task ── */
+:root:not(#layout) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button){height:30px;min-height:30px;padding:0 10px;gap:10px;border:0;font:400 13px/1 var(--sans)}
+:root:not(#layout) .atelier .newchat{justify-content:flex-start}
+:root:not(#layout) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button) svg{width:16px;height:16px}
+:root:not(#layout) .atelier .newchat kbd{border:0;opacity:.8}
+:root:not(#layout) .atelier .studio-nav.is-selected{font-weight:400}
+:root:not(#layout) .atelier .side__search{height:34px;border:1px solid transparent;font:400 14px/1 var(--sans)}
+:root:not(#layout) .atelier .wgroup{margin-top:18px}
+:root:not(#layout) .atelier .wgroup__cap{height:28px;min-height:28px;padding:0 10px;font:400 13px/1 var(--sans);text-transform:none}
+:root:not(#layout) .atelier .sess{min-height:30px;padding:0 10px;gap:10px}
+:root:not(#layout) .atelier .sess.is-current{font-weight:400}
+:root:not(#layout) .atelier .sess__t{font:400 13px/1.3 var(--sans)}
+/* No dot on an idle task; one while it works or failed. */
+:root:not(#layout) .atelier .sess__dot{display:none}
+:root:not(#layout) .atelier .sess__dot:is([data-status='working'],[data-status='failed']){display:block;flex:none;width:7px;height:7px;border:0}
+/* The one allowed status colour: a small green "connected" dot (atelier's .atelier .dot outranked .dot--done). */
+:root:not(#layout) .atelier .dot.dot--done{width:6px;height:6px}
+/* Page content keeps clear of the floating rail at the top right. */
+:root:not(#layout) .atelier .app__body:has(>.floatrail) .agents-workspace{padding-right:52px}
+/* Subagent box: one-line placeholder, and the footnote never pushed out of the card. */
+:root:not(#layout) .atelier .composer-wrap.agent-dock .composer__input::placeholder{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root:not(#layout) .atelier .composer-wrap.agent-dock .agent-dock__foot{flex-shrink:0;padding-bottom:4px;white-space:normal}
+:root:not(#layout) .atelier .rsec__agent .agent-dock{padding-bottom:12px}
+/* The pages have no hero card. */
+:root:not(#layout) .atelier .agents-hero{display:none}
+:root:not(#layout) .atelier .studio-side-bottom{border-top:1px solid var(--x-hairline)}
+/* Shading rows: title with the age right-aligned in muted 11px; the left rule, not a subline, carries state. */
+:root:not(#layout) .atelier .sess{align-items:center}
+:root:not(#layout) .atelier .sess__body{min-width:0;flex:1 1 auto}
+:root:not(#layout) .atelier .sess__t{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .side__list .sess>.sess__body>.sess__s{display:none}
+:root:not(#layout) .atelier .sess__age{display:block;flex:none;margin-left:8px;font:400 11px/1 var(--sans)}
+/* No wordmark in the sidebar; the history search is a quiet text row. */
+:root:not(#layout) .atelier .side__pad>.sidebar-wordmark{display:none}
+:root:not(#layout) .atelier .side__find{height:26px;padding:0 10px;font:400 12px/1 var(--sans);border:0}
+/* ── Overlays: a popover card with one large soft shadow ──────────── */
+:root:not(#layout) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop),
+:root:not(#layout) .runtime-popover{border:1px solid var(--sh-card-edge)}
+/* Popover rows: 24px, 11-13px labels, a rounded 6px hover fill. */
+:root:not(#layout) .atelier :is(.menu,.modelpop,.ctxpop,.fleetpop) :is(button,[role='menuitem'],[role='option']){min-height:26px}
+:root:not(#layout) .atelier .modal__side{border-right:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__side :is(button[aria-pressed='true'],button.is-selected,.mtab.is-on){font-weight:400}
+:root:not(#layout) .atelier .modal__side .mtab{min-height:30px;font:400 13px/1 var(--sans)}
+/* ── Labels: small and muted ──────────────────────────────────────── */
+:root:not(#layout) .atelier :is(.field>label,.studio-label,.wgroup__cap,.railcard__title,.modal__side .cap,.composer-task-summary__label,.composer-queue__heading){text-transform:none}
+:root:not(#layout) .atelier .railcard__title{font-weight:500}
+:root:not(#layout) .atelier .railcard__meta{font:var(--t-num)}
+:root:not(#layout) .atelier kbd{border:1px solid var(--x-hairline);font:500 11px/1.5 var(--sans);padding:0 5px}
+/* ── Tabs and segmented controls: a muted track, a raised pill ────── */
+/* no track; muted labels, the selected one on a 6px pill. */
+:root:not(#layout) .atelier .studio-segment{border:0;padding:0;gap:4px}
+:root:not(#layout) .atelier .studio-segment>button{border:0;border-bottom:0;font-weight:400}
+:root:not(#layout) .atelier .seg{border:0;padding:0;gap:4px}
+:root:not(#layout) .atelier .seg button{border:0;font-weight:400}
+/* ── Cards: hairline boxes, no shadow ─────────────────────────────── */
+:root:not(#layout) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.provcard,.pcard){border:1px solid var(--sh-card-edge)}
+:root:not(#layout) .atelier .palette-card{border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier :is(pre,.md pre){border:1px solid var(--x-hairline)}
+/* Inline code is a grey chip, as in Claude Code. */
+/* Inline code chips only: the code editor draws each line as its own <code>, and a chip per line made a jagged grey wall. */
+:root:not(#layout) .atelier :not(pre):not(.code-editor__row)>code:not(pre code){border:0;padding:.1em .4em;font-size:.88em}
+:root:not(#layout) .atelier .code-editor__row>code{border:0;padding:0 16px 0 0;font-size:inherit}
+/* Editor syntax palette (lowlight/highlight.js classes). Fixed hues, never the style accent:
+   Shading's accent is near-white, which made every keyword read as plain text. */
+:root:not(#layout){--syn-keyword:#c586c0;--syn-literal:#569cd6;--syn-string:#ce9178;--syn-number:#b5cea8;--syn-comment:#6a9955;--syn-function:#dcdcaa;--syn-type:#4ec9b0;--syn-builtin:#4fc1ff;--syn-variable:#9cdcfe;--syn-meta:#d7ba7d}
+:root[data-theme='light']:not(#layout){--syn-keyword:#af00db;--syn-literal:#0000ff;--syn-string:#a31515;--syn-number:#098658;--syn-comment:#008000;--syn-function:#795e26;--syn-type:#267f99;--syn-builtin:#0070c1;--syn-variable:#001080;--syn-meta:#795e26}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-keyword,.hljs-selector-tag,.hljs-doctag){color:var(--syn-keyword)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-literal,.hljs-variable.language_,.hljs-template-variable){color:var(--syn-literal)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-string,.hljs-regexp,.hljs-char,.hljs-subst .hljs-string){color:var(--syn-string)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-number,.hljs-symbol){color:var(--syn-number)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-comment,.hljs-quote){color:var(--syn-comment);font-style:italic}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-title.function_,.hljs-title.function_ *){color:var(--syn-function)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-title.class_,.hljs-type,.hljs-title.class_.inherited__){color:var(--syn-type)}
+:root:not(#layout) .atelier .code-editor__row .hljs-built_in{color:var(--syn-builtin)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-params,.hljs-attr,.hljs-property,.hljs-variable){color:var(--syn-variable)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-meta,.hljs-meta .hljs-keyword,.hljs-decorator){color:var(--syn-meta)}
+:root:not(#layout) .atelier .code-editor__row :is(.hljs-section,.hljs-name,.hljs-tag){color:var(--syn-keyword)}
+:root:not(#layout) .atelier .code-editor__row .hljs-addition{color:var(--syn-string)}
+:root:not(#layout) .atelier .code-editor__row .hljs-deletion{color:var(--x-failed)}
+/* The fallback tokenizer (unknown file types) uses the same palette. */
+:root:not(#layout) .atelier .code-editor__row .tok-keyword{color:var(--syn-keyword)}
+:root:not(#layout) .atelier .code-editor__row .tok-string{color:var(--syn-string)}
+:root:not(#layout) .atelier .code-editor__row .tok-number{color:var(--syn-number)}
+:root:not(#layout) .atelier .code-editor__row .tok-comment{color:var(--syn-comment)}
+/* The preview: long lines run off to the right and scroll, they never wrap. */
+:root:not(#layout) .atelier .desktop-rail .code-editor__row code,
+:root:not(#layout) .atelier .desktop-rail .code-editor__input{white-space:pre;overflow-wrap:normal}
+:root:not(#layout) .atelier .desktop-rail .code-editor{width:max-content;min-width:100%}
+/* ── Controls ─────────────────────────────────────────────────────────
+   .btn is Claude Code's grey button, .btn--solid the primary. */
+:root:not(#layout) .atelier .btn{border:1px solid transparent;font-weight:400}
+:root:not(#layout) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){border:1px solid var(--sh-input)}
+/* ── Conversation ─────────────────────────────────────────────────── */
+:root:not(#layout) .atelier :is(.msg,.agent-msg){font:var(--t-prose)}
+/* Tool activity is a muted line ("Ran 2 commands ▸"); it opens into a hairline box. */
+:root:not(#layout) .atelier .activity-group{border:0;padding:0;margin:2px 0}
+:root:not(#layout) .atelier .activity-group>summary{padding:3px 0}
+:root:not(#layout) .atelier .activity-group__body{margin:6px 0 10px;padding:0;border:1px solid var(--x-hairline);overflow:hidden}
+/* Each step: one muted line ("Grep  pattern ▸"), steps split by hairlines,
+   no icon, no "Done" badge; running and failed steps still say so. */
+:root:not(#layout) .atelier .activity-group__body>*:not(:first-child),
+:root:not(#layout) .atelier .activity-group__body :is(.execution-row,.filetool)+:is(.execution-row,.filetool){border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .activity-group__body .execution-row{padding:0}
+/* One line: name, command (ellipsis), diff, state, caret; a collapsed failure's error under it. */
+:root:not(#layout) .atelier .activity-group__body .execution-row>summary{display:grid;grid-template-columns:auto minmax(0,max-content) auto auto auto minmax(0,1fr);align-items:center;gap:4px 8px;padding:10px 14px}
+:root:not(#layout) .atelier .activity-group__body .execution-row__label{grid-column:1;grid-row:1}
+:root:not(#layout) .atelier .activity-group__body .execution-row__target{grid-column:2;grid-row:1}
+:root:not(#layout) .atelier .activity-group__body .execution-row__diff{grid-column:3;grid-row:1}
+:root:not(#layout) .atelier .activity-group__body .execution-row__state{grid-column:4;grid-row:1}
+:root:not(#layout) .atelier .activity-group__body .execution-row__disclosure{grid-column:5;grid-row:1}
+:root:not(#layout) .atelier .activity-group__body .execution-row__error{grid-column:1/-1;grid-row:2}
+/* Opened, the command lives in the "$" box and the error under the output: say each once. */
+:root:not(#layout) .atelier .activity-group__body .execution-row[open][data-command] .execution-row__target,
+:root:not(#layout) .atelier .activity-group__body .execution-row[open] .execution-row__error{display:none}
+:root:not(#layout) .atelier .activity-group__body .execution-row__label{flex:none;gap:0;font:400 13.5px/1.4 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .execution-row__label>svg{display:none}
+:root:not(#layout) .atelier .activity-group__body .execution-row__target{display:block;flex:0 1 auto;min-width:0;padding:0;border:0;font:400 12.5px/1.4 var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-line-clamp:unset}
+:root:not(#layout) .atelier .activity-group__body .execution-row[open] .execution-row__target{white-space:pre-wrap;overflow-wrap:anywhere}
+:root:not(#layout) .atelier .activity-group__body .execution-row__state{font:400 12px/1 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .execution-row[data-state='done'] .execution-row__state{display:none}
+:root:not(#layout) .atelier .activity-group__body .execution-row__error{padding-left:0;font:400 12.5px/1.5 var(--mono);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* Opened: a "$ command" box, then the output as plain mono text. */
+:root:not(#layout) .atelier .activity-group__body .execution{display:grid;gap:10px;margin:0;padding:0 14px 12px}
+:root:not(#layout) .atelier .activity-group__body .execution__command{margin:0;padding:10px 12px 10px 28px;border:1px solid var(--x-hairline);font:400 12.5px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+:root:not(#layout) .atelier .activity-group__body .execution__status{margin:0;font:400 12px/1.4 var(--sans)}
+/* Output and stderr are plain mono text inside the step, never boxed. */
+:root:not(#layout) .atelier .activity-group__body :is(.output-viewer__text,.execution__error pre){margin:0;padding:0;border:0;font:400 12px/1.65 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .execution__error{display:grid;gap:4px}
+:root:not(#layout) .atelier .activity-group__body .execution__error strong{font:400 12px/1.4 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body :is(.execution__actions,.execution__raw){font:400 12px/1.4 var(--sans)}
+/* Your own turn: a grey bubble with normal text. */
+:root:not(#layout) .atelier .msg--user{border:0;padding:10px 14px}
+/* The composer is one bordered box; the controls under it are plain text. */
+/* a borderless #232323 card (white with a soft shadow in light), radius 12. */
+:root:not(#layout) .atelier .composer-dock{border:1px solid transparent}
+:root:not(#layout) .atelier .composer__input{font:400 calc(var(--ui-font) + 1px)/1.5 var(--sans)}
+:root:not(#layout) .atelier .composer__send:disabled{opacity:1}
+:root:not(#layout) .atelier .composer__toolbar .cchip{height:28px;border:0;font-weight:400}
+/* Code inside a block is plain text: no inline chip, no tint, on every line. */
+:root:not(#layout) .atelier pre code{border:0;padding:0;font:inherit}
+:root:not(#layout) .atelier .md__codewrap{border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .md__codewrap .md__code{border:0}
+:root:not(#layout) .atelier .md__codebar{border-bottom:1px solid var(--x-hairline)}
+/* The composer is one card: the input on top, machine/folder/branch as its
+   second row. The DOM keeps RepoBar above the dock; flex order moves it
+   under, and :has() joins the two only when the bar is shown. */
+:root:not(#layout) .atelier .composer-wrap>.composer-dock{order:1}
+:root:not(#layout) .atelier .composer-wrap>.repobar{order:2}
+:root:not(#layout) .atelier .composer-wrap>.composer__toolbar{order:3}
+:root:not(#layout) .atelier .composer-wrap:has(>.repobar){gap:0}
+:root:not(#layout) .atelier .composer-wrap:has(>.repobar)>:is(.composer-status,.composer-task-summary){margin-bottom:6px}
+:root:not(#layout) .atelier .composer-wrap:has(>.repobar)>.composer-dock{border-bottom:0;clip-path:inset(-24px -24px 0 -24px)}
+:root:not(#layout) .atelier .composer-wrap>.repobar{min-height:32px;margin-bottom:6px;padding:2px 6px 6px 14px;border:1px solid transparent;border-top:0;clip-path:inset(0 -24px -24px -24px);font:400 11.5px/1 var(--sans)}
+/* Narrow: machine and folder chips shorten instead of wrapping. */
+:root:not(#layout) .atelier .repobar>*{min-width:0}
+:root:not(#layout) .atelier .repobar :is(.repobar__folder,.repobar__machine){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The composer row 2 is folder and branch only: counts live on the Files changed card, Review in Changes. */
+:root:not(#layout) .atelier .composer-wrap>.repobar :is(.repobar__diff,.repobar__action,.repobar__pr){display:none}
+/* Inspector closed: a floating icon rail on the right opens its sections. */
+:root:not(#layout) .atelier .app__body{position:relative}
+:root:not(#layout) .atelier .floatrail{position:absolute;top:12px;right:12px;z-index:5;display:flex;flex-direction:column;gap:0;padding:3px;border:1px solid var(--sh-card-edge);-webkit-app-region:no-drag}
+:root:not(#layout) .atelier .floatrail button{display:grid;place-items:center;width:28px;height:26px;padding:0;border:0;cursor:pointer}
+@media (max-width:760px){
+  :root:not(#layout) .atelier .floatrail{display:none}
+}
+/* Search sits at the top of the floating rail; the top-bar copy only shows where the rail is hidden. */
+@media (min-width:761px){
+  :root:not(#layout) .atelier .top__actions>.top__search{display:none}
+}
+/* Narrow window: the centred column no longer clears the floating rail, so keep its width free on the right. */
+@media (min-width:761px) and (max-width:1100px){
+  :root:not(#layout) .atelier .app__body:has(>.floatrail) .conversation-surface{padding-right:48px;box-sizing:border-box}
+}
+:root:not(#layout) .atelier .stream__col{margin-inline:auto}
+:root:not(#layout) .atelier .msg-turn--user{align-self:stretch;align-items:stretch;margin-left:0;width:100%;max-width:100%}
+:root:not(#layout) .atelier .msg-turn--user>.msg--user{align-self:stretch;width:auto;max-width:100%;margin:0}
+/* The strips above the composer (goal, folder) are quiet hairline rows, not filled bars. */
+:root:not(#layout) .atelier .composer-task-summary{border:1px solid var(--x-hairline)!important}
+/* ── Inspector: flat sections split by hairlines, as in Claude Code ── */
+:root:not(#layout) .atelier .desktop-rail .railcard{border:0;border-bottom:1px solid var(--x-hairline);margin:0;padding:14px 4px}
+:root:not(#layout) .atelier .desktop-rail .railcard+.railcard{margin-top:0}
+:root:not(#layout) .atelier .desktop-rail .railcard:last-child{border-bottom:0}
+/* ── Welcome: a tight bold wordmark with a soft fade-in ───────────── */
+:root:not(#layout) .atelier .welcome h1.welcome__wordmark,
+:root:not(#layout) .atelier .sidebar-wordmark{font-weight:700}
+:root:not(#layout) .atelier .agent-card__facts dd{font-size:12.5px}
+/* ═══ Lapis & faience (docs/shading-design.md) ═══════════════════════
+   Later rules here override the flat base above at equal specificity. */
+/* Live state is the one loud thing: a glaze rule on the task row's left edge. */
+:root:not(#layout) .atelier .sess{position:relative}
+/* Shading has no accent bar on rows: state shows only as the small grey dot. */
+:root:not(#layout) .atelier .sess::before{display:none!important}
+:root:not(#layout) .atelier .sess__s{font:400 12px/1.35 var(--sans)}
+/* A second, distinct face in exactly two places: the task title and the wordmark. */
+/* The chat title is system sans, 13pt, like the rest of the UI. */
+:root:not(#layout) .atelier .chat__title{font:400 13px/1.2 var(--sans)}
+:root:not(#layout) .atelier .welcome h1.welcome__wordmark,
+:root:not(#layout) .atelier .sidebar-wordmark{font-weight:600}
+/* The strips above the composer read as its quiet header rows, not boxes. */
+:root:not(#layout) .atelier .composer-task-summary{border:0!important;padding-left:4px;padding-right:4px}
+:root:not(#layout) .atelier .composer-task-summary__label{font:600 12px/1.3 var(--sans)}
+:root:not(#layout) .atelier .composer-task-summary__status{font:400 12px/1.3 var(--sans)}
+/* Failure: a pomegranate edge, a readable first line, the provider's words below. */
+:root:not(#layout) .atelier .terr{border:1px solid var(--x-failed-border)}
+:root:not(#layout) .atelier .terr__head{font:600 13.5px/1.3 var(--sans)}
+:root:not(#layout) .atelier .terr__body{font:400 13.5px/1.5 var(--sans);overflow-wrap:anywhere}
+:root:not(#layout) .atelier .terr details p{font:400 12px/1.55 var(--mono);overflow-wrap:anywhere}
+/* An agent's model is a quiet caption, not a code label. */
+:root:not(#layout) .atelier .agentname__kind{font-size:12px}
+/* Narrow windows: give the conversation room. */
+@media (max-width:760px){
+  :root:not(#layout) .atelier .msg-turn--user{max-width:92%}
+  :root:not(#layout) .atelier .chat__title{font-size:14px}
+}
+/* ── Tool activity: the flat muted lines ──
+   No outer card and no hairlines: one muted line per step. An opened step
+   indents under a thin left rule instead of opening boxes. */
+:root:not(#layout) .atelier .activity-group>summary{padding:2px 0;gap:4px;font:400 12.5px/1.5 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body{margin:2px 0 8px;padding:0;border:0;overflow:visible}
+:root:not(#layout) .atelier .activity-group__body>*:not(:first-child),
+:root:not(#layout) .atelier .activity-group__body :is(.execution-row,.filetool)+:is(.execution-row,.filetool){border-top:0}
+:root:not(#layout) .atelier .activity-group__body .execution-row>summary{padding:3px 0;gap:4px 6px}
+:root:not(#layout) .atelier .activity-group__body .execution-row__label{font:400 12.5px/1.5 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .execution-row__target{font:400 12px/1.5 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .execution-row[open]>.execution{margin:2px 0 8px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .activity-group__body .execution__command{margin:0 0 6px;padding:0;border:0;font:400 12px/1.6 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body :is(.execution__viewer,.output-viewer){margin:4px 0;padding:0;border:0;max-height:none;height:auto}
+/* The cap lives on the scrolling text, never its box: a 240px box around 360px of
+   unclipped text spilled over the rows below it. */
+:root:not(#layout) .atelier .activity-group__body :is(.output-viewer__text,.execution__viewer pre){max-height:240px;overflow:auto}
+:root:not(#layout) .atelier .activity-group__body .execution__viewer-actions{margin-top:4px;font:400 11.5px/1.4 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .execution__viewer-actions>span{display:none}
+:root:not(#layout) .atelier .activity-group__body .filetool{padding:3px 0;gap:4px}
+:root:not(#layout) .atelier .activity-group__body .filetool__head{gap:6px;font:400 12.5px/1.5 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .filetool__verb{font-weight:400}
+:root:not(#layout) .atelier .activity-group__body .filetool__path{padding:0;font:400 12px/1.5 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .filetool__toggle{padding:0 4px;font:400 12px/1.5 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .filetool__code{margin:2px 0 6px 6px;border:0;border-left:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .activity-group__body .filetool__code pre{padding:0 0 0 4px;max-height:240px;font:400 12px/1.55 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .filetool__gutter{opacity:.55}
+:root:not(#layout) .atelier .activity-group__body .filetool__more{border:0;padding:2px 0 2px 10px;font:400 11.5px/1.4 var(--sans)}
+:root:not(#layout) .atelier .activity-group__body .filetool__actions{opacity:0}
+:root:not(#layout) .atelier .activity-group__body .filetool:is(:hover,:focus-within) .filetool__actions{opacity:1}
+/* Shading has no raw-details block and no copy row: an invisible block still
+   takes space, so take both out of the layout. Copy buttons float over the
+   step's top-right corner on hover. */
+:root:not(#layout) .atelier .activity-group__body .execution__raw{display:none}
+:root:not(#layout) .atelier .activity-group__body .execution{position:relative}
+:root:not(#layout) .atelier .activity-group__body .execution__actions{position:absolute;top:0;right:0;margin:0;gap:10px;padding:0 0 0 8px;pointer-events:none}
+:root:not(#layout) .atelier .activity-group__body .execution:is(:hover,:focus-within) .execution__actions{pointer-events:auto}
+:root:not(#layout) .atelier .activity-group__body .execution__empty{margin:0;font:400 12px/1.5 var(--sans)}
+/* An opened step's output takes only the height it needs. */
+:root:not(#layout) .atelier .activity-group__body :is(.output-viewer,.output-viewer__text,.execution__viewer){height:auto;min-height:0}
+/* ── Composer: the one card ─────────────────────────────────────────
+   Row 1: the input, then the controls (+, mic, mode, model, effort) on the
+   same line; row 2: folder and branch. The DOM keeps three siblings, so a
+   grid lays them out and each paints its part of one rounded card. */
+/* Rows: strips above the card (hints 1, status 2, task summary 3), then the
+   card: images 4, input 5, controls 6 with send at the far right, folder and
+   branch 7. The dock and .composer become display:contents so the input and
+   send button are grid items; each card piece paints its own slice. Send
+   overlaps the controls row's right edge, so no gap ever shows behind it. */
+:root:not(#layout) .atelier .composer-wrap{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:0;row-gap:0}
+:root:not(#layout) .atelier .composer-wrap>*{grid-column:1/-1}
+:root:not(#layout) .atelier .composer-wrap>.hints{grid-row:1}
+:root:not(#layout) .atelier .composer-wrap>.composer-status{grid-row:2;margin-bottom:6px}
+:root:not(#layout) .atelier .composer-wrap>.composer-task-summary{grid-row:3;margin-bottom:6px}
+:root:not(#layout) .atelier .composer-wrap>.composer-dock,
+:root:not(#layout) .atelier .composer-wrap>.composer-dock>.composer{display:contents}
+:root:not(#layout) .atelier .composer-wrap :is(.composer__images,.composer__input,.composer__toolbar,.repobar){border:0;clip-path:none;margin:0}
+:root:not(#layout) .atelier .composer-wrap .composer__images{grid-column:1/-1;grid-row:4;padding:10px 14px 0}
+:root:not(#layout) .atelier .composer-wrap .composer__input{grid-column:1/-1;grid-row:5;width:100%;box-sizing:border-box;padding:12px 16px 4px}
+:root:not(#layout) .atelier .composer-wrap>.composer__toolbar{grid-row:6;display:flex;align-items:center;flex-wrap:nowrap;overflow:hidden;gap:2px;padding:2px 46px 6px 8px}
+:root:not(#layout) .atelier .composer-wrap .composer__send{grid-column:2;grid-row:6;align-self:center;justify-self:end;z-index:1;width:26px;height:26px;margin:0 10px 4px 0;padding:0;display:grid;place-items:center}
+:root:not(#layout) .atelier .composer-wrap>.repobar{grid-row:7;margin-bottom:6px}
+/* The card pieces share one width: atelier caps the toolbar and repobar at the
+   conversation width, which split the card on wide windows. Cap the grid instead. */
+:root:not(#layout) .atelier .composer-wrap{width:100%;max-width:var(--conversation-width);margin-inline:auto;box-sizing:border-box}
+:root:not(#layout) .atelier .composer-wrap>:is(.composer__toolbar,.repobar){width:auto;max-width:none}
+/* A big target: the message box itself is at least two lines tall, and the card's gaps focus it (App.tsx). */
+:root:not(#layout) .atelier .composer-wrap .composer__input{min-height:56px;cursor:text}
+:root:not(#layout) .atelier .composer-wrap{cursor:text}
+/* The composer floats over the end of the conversation: the strip behind it and the
+   Doing/Thinking/status rows are frosted glass, not a solid fill. */
+/* The frosted strip lives on a pseudo-element behind the composer: a mask on
+   .composer-wrap itself also clipped the slash/hint popup that opens above it. */
+/* The frosted layer sits only behind the composer stack; it no longer reaches up over the
+   conversation (a 56px fade there blurred the last "Working" line). */
+:root:not(#layout) .atelier .composer-wrap{position:relative;z-index:3;margin-top:0;padding-top:0;isolation:isolate}
+:root:not(#layout) .atelier .composer-wrap::before{position:absolute;inset:0;z-index:-1;pointer-events:none}
+/* "Hide finished" rides on the Finished header, right-aligned. */
+:root:not(#layout) .atelier .rsec__group>.rsec__toggle{margin-left:auto;height:20px;padding:0 4px;font-size:11.5px}
+:root:not(#layout) .atelier .rsec--agent{display:flex;flex-direction:column;min-height:0;height:100%}
+/* The transcript scrolls by itself (starting at its tail); the prompt box stays pinned under it. */
+:root:not(#layout) .atelier .rsec__agent{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+:root:not(#layout) .atelier .rsec__agent>.agent-inspector{flex:1;min-height:0;display:flex;flex-direction:column}
+:root:not(#layout) .atelier .rsec__agent .agent-transcript{flex:1;min-height:0;overflow:auto}
+:root:not(#layout) .atelier .rsec__agent .agent-dock{flex:none;padding:6px 8px 8px}
+/* The agent's dock reuses composer classes but is not the task composer: undo the Shading composer grid. */
+:root:not(#layout) .atelier .composer-wrap.agent-dock{display:block;margin:0;padding-top:0;isolation:auto}
+:root:not(#layout) .atelier .composer-wrap.agent-dock>.composer-dock{display:block;border:0}
+:root:not(#layout) .atelier .composer-wrap.agent-dock>.composer-dock>.composer{display:flex;flex-direction:row;align-items:flex-end;gap:6px;padding:8px 8px 8px 12px}
+:root:not(#layout) .atelier .composer-wrap.agent-dock .composer__input{flex:1;min-height:40px;padding:4px 0}
+:root:not(#layout) .atelier .composer-wrap.agent-dock .composer__send{grid-column:auto;grid-row:auto;align-self:flex-end;margin:0;width:28px;height:28px}
+:root:not(#layout) .atelier .composer-wrap.agent-dock .agent-dock__retry{width:auto;height:28px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .composer-wrap.agent-dock .agent-dock__foot{padding:6px 4px 0;font:400 11.5px/1.4 var(--sans)}
+:root:not(#layout) .atelier .composer-wrap>:is(.composer-status,.composer-task-summary){padding:4px 10px}
+:root:not(#layout) .atelier .stream{padding-bottom:80px}
+/* Jump to latest floats over the transcript while you are scrolled back: an opaque chip with its own edge
+   and shadow, so text never shows through it (the inherited 90% glass read as text colliding with text). */
+:root:not(#layout) .atelier .jump-latest{background:var(--x-popover);-webkit-backdrop-filter:none;backdrop-filter:none;border:1px solid var(--x-separator);box-shadow:var(--sh-shadow-lg);color:var(--x-title);z-index:6}
+/* No folder row: the controls row closes the card. */
+:root:not(#layout) .atelier .composer-wrap:not(:has(>.repobar))>.composer__toolbar{margin-bottom:6px}
+/* No controls row (the agent dock): send sits beside the input instead. */
+:root:not(#layout) .atelier .composer-wrap:not(:has(>.composer__toolbar)) .composer__input{padding-right:46px;padding-bottom:12px}
+:root:not(#layout) .atelier .composer-wrap:not(:has(>.composer__toolbar)) .composer__send{grid-row:5;align-self:end;margin-bottom:8px}
+:root:not(#layout) .atelier .composer__toolbar .cchip{flex:none;height:26px;padding:0 6px;font:400 12px/1 var(--sans)}
+/* Narrow: text chips give way (ellipsis) before anything slides under send. */
+:root:not(#layout) .atelier .composer__toolbar .cchip:not(.composer__icon){flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ── Inspector: the raised card, inset 8px from the window edges ──────
+   The flat base rule above stays for Classic parity; this one wins in
+   Shading because it is more specific (.app__body>). */
+:root:not(#layout) .atelier .app__body>.desktop-rail{margin:8px 8px 8px 0;border:1px solid var(--sh-card-edge);overflow:hidden}
+:root:not(#layout) .atelier .app__body>.desktop-rail>header{height:36px;min-height:36px;padding:0 6px;border-bottom:0;gap:2px}
+:root:not(#layout) .atelier .app__body>.desktop-rail>header button{width:26px;height:24px;min-width:24px;padding:0}
+:root:not(#layout) .atelier .app__body>.desktop-rail>header button svg{width:14px;height:14px}
+:root:not(#layout) .atelier .app__body>.desktop-rail>.studio-sheet-content{padding:0}
+/* Files: the two columns inside the card — a slim tree, then the file. */
+:root:not(#layout) .atelier .desktop-rail .file-browser{padding:0;height:100%}
+:root:not(#layout) .atelier .desktop-rail .file-browser--preview{display:grid;grid-template-columns:minmax(170px,32%) minmax(0,1fr);gap:0}
+:root:not(#layout) .atelier .desktop-rail .file-browser__navigation{padding:4px 6px 8px;min-height:0}
+:root:not(#layout) .atelier .desktop-rail .file-browser--preview .file-browser__navigation{max-height:none;height:100%;border-right:1px solid var(--x-hairline);padding-right:6px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__location{padding:4px 6px 6px;font:400 12px/1.3 var(--sans)}
+:root:not(#layout) .atelier .desktop-rail .file-browser__search{height:26px;margin:0 0 6px;padding:0 8px;border:1px solid var(--x-hairline);font-size:12px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__search input{font:400 12px/1 var(--sans)}
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry{height:24px;min-height:24px;margin:0;padding:2px 6px;font:400 12.5px/1.3 var(--sans)}
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry svg{width:13px;height:13px}
+/* The tree: 22px rows, the disclosure chevron leads (before the icon); files keep the same indent. */
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry{height:22px;min-height:22px;gap:5px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry>.file-tree__chevron{order:-1;display:inline-grid;place-items:center;width:12px;opacity:.7}
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry:not([aria-expanded])::before{flex:none;order:-1;width:12px}
+/* ── Changes: changed-file list on the left, diff on the right, even in the rail ── */
+:root:not(#layout) .atelier .desktop-rail .scm.scm--compact{display:grid;grid-template-columns:minmax(190px,34%) minmax(0,1fr)}
+:root:not(#layout) .atelier .desktop-rail .scm.scm--compact>.scm__side{border-right:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .scm__side{padding:6px 6px 10px;gap:4px}
+:root:not(#layout) .atelier .scm-group__toggle{height:24px;padding:0 6px;border:0;font:400 11.5px/1 var(--sans)}
+:root:not(#layout) .atelier .scm-file{min-height:22px;padding:0 4px 0 14px}
+:root:not(#layout) .atelier .scm-file__name{font:400 12.5px/1.3 var(--sans);flex:0 1 auto;min-width:0}
+:root:not(#layout) .atelier .scm-file__dir{font:400 11px/1 var(--sans)}
+/* The name keeps its full width; only the folder path (basis 0) gives way, so "agent.ts" never becomes "ag…". */
+:root:not(#layout) .atelier .scm-file__open{min-width:0;overflow:hidden}
+:root:not(#layout) .atelier .scm-file__dir{flex:1 1 0;min-width:0}
+/* The file list scrolls inside its column instead of running past the column's end. */
+:root:not(#layout) .atelier .desktop-rail .scm.scm--compact{grid-template-rows:minmax(0,1fr);min-height:0;height:100%}
+:root:not(#layout) .atelier .desktop-rail .scm.scm--compact>.scm__side{min-height:0;overflow:auto}
+:root:not(#layout) .atelier .scm-badge{display:inline-grid;place-items:center;width:15px;height:15px;border:1px solid currentColor;font:600 9px/1 var(--sans)}
+:root:not(#layout) .atelier .scm-tool{border:0}
+:root:not(#layout) .atelier .scm-branch{border:0;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .scm__diff>header{min-height:34px;padding:0 10px;border-bottom:1px solid var(--x-hairline);font:400 12px/1 var(--mono)}
+:root:not(#layout) .atelier .scm-review{border:0;font:400 12px/1 var(--sans)}
+/* The Changes column: the file list leads; the commit box and history follow, compact. */
+:root:not(#layout) .atelier .scm__side{display:flex;flex-direction:column;min-width:0}
+:root:not(#layout) .atelier .scm__side>.scm__head{order:0;display:flex;align-items:center;gap:4px;min-width:0}
+:root:not(#layout) .atelier .scm__side>.scm__head .scm-branch{flex:1 1 auto;min-width:72px;display:flex;align-items:center;gap:6px;overflow:hidden}
+:root:not(#layout) .atelier .scm__side>.scm__head .scm-branch>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .scm__side>.scm__head .scm__tools{flex:none;display:flex;gap:0}
+:root:not(#layout) .atelier .scm__side>.scm__groups{order:1}
+/* A grid track defaults to its content's width, so one long path pushed every group 186px past the window edge. */
+:root:not(#layout) .atelier .scm__groups{grid-template-columns:minmax(0,1fr)}
+:root:not(#layout) .atelier .scm-group{min-width:0}
+:root:not(#layout) .atelier .scm__side>.scm__status{order:2}
+:root:not(#layout) .atelier .scm__side>.scm__commit{order:3;margin-top:8px;padding-top:8px;border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .scm__side>.scm__history{order:4}
+:root:not(#layout) .atelier .scm__side>.scm-link{order:5}
+:root:not(#layout) .atelier .scm__commit textarea{min-height:56px;height:56px;padding:8px 10px;border:0;font:400 12px/1.4 var(--sans);resize:vertical}
+:root:not(#layout) .atelier .scm__commit-row{display:flex;gap:6px;margin-top:6px}
+/* A disabled primary must not read as the white primary pill. */
+:root:not(#layout) .atelier .scm__commit-row .btn:disabled{opacity:.6}
+/* The pages have no hero illustration or eyebrow label. */
+:root:not(#layout) .atelier :is(.agents-hero__mark,.agents-hero__eyebrow){display:none}
+:root:not(#layout) .atelier .scm__commit-row .btn{flex:1 1 0;min-width:0;height:28px;padding:0 8px;border:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:400 12px/1 var(--sans)}
+:root:not(#layout) .atelier .scm-review{width:100%;height:28px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root:not(#layout) .atelier .scm__history>summary{height:26px;padding:0 6px;font:400 11.5px/26px var(--sans)}
+:root:not(#layout) .atelier .scm-log__row{padding:4px 6px}
+:root:not(#layout) .atelier .scm-log__subject{font:400 12px/1.35 var(--sans)}
+:root:not(#layout) .atelier .scm-log__meta{font:400 10.5px/1.3 var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Narrow card: Changes is the list, commit box and history only; the diff
+   needs room, so it shows when the card is wide or expanded. */
+@container (max-width:520px){
+  :root:not(#layout) .atelier .desktop-rail .scm.scm--compact{display:flex;flex-direction:column}
+  :root:not(#layout) .atelier .desktop-rail .scm.scm--compact>.scm__side{flex:1;border-right:0;border-bottom:0}
+  :root:not(#layout) .atelier .desktop-rail .scm.scm--compact>.scm__diff{display:none}
+}
+/* ── Terminal: rounded tab pills with a live dot, quiet tool icons, no bar fill ── */
+:root:not(#layout) .atelier .term__bar{gap:4px;padding:6px 10px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .term-tab{height:28px;padding:0 4px 0 2px}
+:root:not(#layout) .atelier .term-tab>button:first-child{font:400 12.5px/1 var(--sans);gap:7px}
+:root:not(#layout) .atelier .term-tab>button:first-child>svg{display:none}
+:root:not(#layout) .atelier .term-tab>button:first-child::before{flex:none;width:7px;height:7px}
+:root:not(#layout) .atelier .term-tab__close{border:0}
+:root:not(#layout) .atelier .term__new{width:26px;height:26px;border:0}
+:root:not(#layout) .atelier .term__view{padding:6px 10px 0}
+/* ── Shading sections (Subagents, Artifacts): search field, group label, 26px rows, age right ── */
+:root:not(#layout) .atelier .rsec{display:flex;flex-direction:column;min-height:0;padding:0 6px 8px;font:400 12.5px/1.4 var(--sans)}
+:root:not(#layout) .atelier .rsec__search{display:flex;align-items:center;gap:8px;height:34px;margin:0 -6px 6px;padding:0 14px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .rsec__search input{flex:1;min-width:0;border:0;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .rsec__group{display:flex;gap:6px;align-items:center;height:24px;padding:4px 8px 0;font:400 11.5px/1 var(--sans)}
+:root:not(#layout) .atelier .rsec__row{display:flex;align-items:center;min-height:26px}
+:root:not(#layout) .atelier .rsec__open{display:flex;align-items:center;gap:7px;flex:1 1 auto;min-width:0;height:26px;padding:0 8px;border:0;text-align:left;font:inherit;cursor:pointer}
+:root:not(#layout) .atelier .rsec__open>svg{flex:none}
+:root:not(#layout) .atelier .rsec__name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .rsec__kind,:root:not(#layout) .atelier .rsec__state{flex:none;white-space:nowrap}
+:root:not(#layout) .atelier .rsec__age{flex:none;margin-left:auto;padding-left:8px;font:400 11px/1 var(--sans)}
+:root:not(#layout) .atelier .rsec__icon{display:inline-grid;place-items:center;flex:none;width:24px;height:24px;padding:0;border:0;cursor:pointer}
+:root:not(#layout) .atelier .rsec__pin{opacity:0}
+:root:not(#layout) .atelier .rsec__row:hover .rsec__pin,:root:not(#layout) .atelier .rsec__pin[aria-pressed='true']{opacity:1}
+:root:not(#layout) .atelier .rsec__toggle{display:flex;align-items:center;gap:4px;height:26px;padding:0 8px;border:0;font:400 12px/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .rsec__empty{padding:10px 8px;font:400 12px/1.5 var(--sans)}
+:root:not(#layout) .atelier .rsec--detail{padding:0}
+:root:not(#layout) .atelier .rsec__bar{display:flex;align-items:center;gap:6px;height:32px;padding:0 8px}
+:root:not(#layout) .atelier .rsec__title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .rsec__spacer{flex:1}
+:root:not(#layout) .atelier .rsec__meta{margin:0;padding:0 14px 8px;border-bottom:1px solid var(--x-hairline);font:400 11px/1.4 var(--sans)}
+:root:not(#layout) .atelier .rsec__body{padding:14px 18px 24px;overflow:auto;min-height:0}
+/* The artifact viewer fills the panel and scrolls once: the generic .md preview cap (380px, own scrollbar) cut documents in half. */
+:root:not(#layout) .atelier .rsec--detail{flex:1 1 auto;height:100%}
+:root:not(#layout) .atelier .rsec--detail>.rsec__body{flex:1 1 auto}
+:root:not(#layout) .atelier .rsec__body>.md{max-height:none;overflow:visible;padding:0}
+/* ── Background activity: one 28px row grammar for commands, watchers and the history fold ── */
+/* Claude Code's task list: "Running N" / "Finished N" folds, each task a rounded card. */
+:root:not(#layout) .atelier .activity-panel .activity-group-fold{margin:0 0 10px}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold>summary{display:flex;align-items:center;gap:8px;min-height:30px;padding:0 6px;list-style:none;cursor:pointer;font:400 13px/1 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold>summary::-webkit-details-marker{display:none}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold>summary>svg{flex:none;transition:transform 120ms ease}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold[open]>summary>svg{transform:rotate(90deg)}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold>summary>span{font-variant-numeric:tabular-nums}
+:root:not(#layout) .atelier .activity-panel .activity-group-fold__rows{display:flex;flex-direction:column;gap:8px;padding-top:4px}
+:root:not(#layout) .atelier .activity-panel .command-activity{margin:0;padding:0;border:0;border-radius:10px;background:var(--x-card);overflow:hidden}
+:root:not(#layout) .atelier .activity-panel .command-activity>summary{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px;border-radius:10px}
+:root:not(#layout) .atelier .activity-panel .command-activity[open]>summary{background:var(--x-selected);margin:6px 6px 0;min-height:38px;padding:0 8px}
+:root:not(#layout) .atelier .activity-panel .command-activity>summary>svg{flex:none;color:var(--x-meta);transition:transform 120ms ease}
+:root:not(#layout) .atelier .activity-panel .command-activity__dot{display:none}
+:root:not(#layout) .atelier .activity-panel .command-activity__preview{flex:1 1 auto;min-width:0;margin:0;padding:0;border:0;border-radius:0;background:none;font:400 13.5px/1.2 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .activity-panel :is(.command-activity__state,.command-activity__elapsed){flex:none;font:400 12.5px/1 var(--sans);font-variant-numeric:tabular-nums;color:var(--x-meta)}
+:root:not(#layout) .atelier .activity-panel .command-activity__body{display:flex;flex-direction:column;gap:12px;margin:0;padding:12px 14px 14px}
+/* Command and output share one 12px text inset; the command block is padded on every side so text never touches its edge. */
+:root:not(#layout) .atelier .activity-panel .command-activity__command{margin:0;max-height:168px;padding:10px 12px;border:0;border-radius:8px;background:var(--x-sunken);white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;font:400 12px/1.6 var(--mono);color:var(--x-prose)}
+:root:not(#layout) .atelier .activity-panel .command-activity__body .output-viewer--compact{margin:0;padding:0 12px;border:0;border-radius:0;background:none}
+:root:not(#layout) .atelier .activity-panel .command-activity__body .output-viewer--compact .output-viewer__text{max-height:220px;margin:0;padding:0;border:0;background:none;font:400 11.5px/1.6 var(--mono);color:var(--x-secondary)}
+:root:not(#layout) .atelier .activity-panel .command-activity__foot{display:flex;align-items:center;gap:12px;margin:2px 12px 0;padding-top:10px;border-top:1px solid var(--x-hairline);font:400 12.5px/1.5 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .activity-panel .command-activity__foot>span{flex:1 1 auto;min-width:0;margin-right:auto;overflow-wrap:anywhere}
+/* Buttons never shrink: a long sentence beside them squeezed "Refresh" into one letter per line. */
+:root:not(#layout) .atelier .activity-panel .command-activity__foot>button{flex:none;white-space:nowrap}
+:root:not(#layout) .atelier .activity-panel .command-activity[data-state=failed] .command-activity__elapsed{color:var(--x-failed)}
+:root:not(#layout) .atelier .activity-panel .command-activity__foot>button{padding:2px 0;border:0;background:none;font:inherit;color:var(--x-secondary);cursor:pointer}
+:root:not(#layout) .atelier .activity-panel .command-activity__foot>button:hover:not(:disabled){color:var(--x-title)}
+/* Watchers line up with commands: 28px (chevron column) + a 6px dot + 8px gap, so every name starts at 42px. */
+:root:not(#layout) .atelier .activity-panel .railcard .railrow{min-height:28px;padding:0 8px 0 28px;gap:8px;border-radius:6px}
+:root:not(#layout) .atelier .activity-panel .railcard .railrow__dot{display:inline-block;flex:none;width:6px;height:6px;border-radius:50%}
+/* Flat section, no card corners: the rounded card plus a bottom hairline drew curved lines across the rail. */
+:root:not(#layout) .atelier .activity-panel>.railcard{border:0;border-radius:0;background:transparent;padding:4px 0 8px}
+:root:not(#layout) .atelier .activity-panel .railcard .railrow__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .activity-panel .railcard .railrow__meta{flex:none;font:400 11px/1 var(--sans)}
+:root:not(#layout) .atelier .activity-panel .railcard__head{align-items:center;margin:0 0 4px;padding:0 8px}
+:root:not(#layout) .atelier .activity-panel .activity-history{margin:2px 0 0;padding:0;border:0}
+:root:not(#layout) .atelier .activity-panel .activity-history>summary{display:flex;align-items:center;gap:8px;min-height:28px;padding:0 8px;border-radius:6px;font:400 12px/1 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .activity-panel .activity-history>summary:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout) .atelier .activity-panel .rail-drawer{margin-top:8px;padding:6px 0 0;border:0;border-top:1px solid var(--x-hairline);border-radius:0;background:transparent}
+:root:not(#layout) .atelier .activity-panel .rail-drawer>summary{min-height:28px;padding:0 8px}
+:root:not(#layout) .atelier .activity-panel .activity-history__rows{max-height:360px}
+:root:not(#layout) .atelier .rsec__source{margin:0;padding:14px 16px;border:0;border-radius:8px;background:var(--x-sunken);white-space:pre-wrap;overflow-wrap:anywhere;font:400 12px/1.65 var(--mono)}
+:root:not(#layout) .atelier .rsec__source>code{padding:0;border:0;background:none;font:inherit;color:inherit}
+/* The Markdown source is highlighted with the editor palette: headings, emphasis, code and links stand out. */
+:root:not(#layout) .atelier .rsec__source :is(.hljs-section,.hljs-strong){color:var(--syn-keyword);font-weight:600}
+:root:not(#layout) .atelier .rsec__source :is(.hljs-code,.hljs-string){color:var(--syn-string)}
+:root:not(#layout) .atelier .rsec__source :is(.hljs-link,.hljs-symbol){color:var(--syn-builtin)}
+:root:not(#layout) .atelier .rsec__source :is(.hljs-bullet,.hljs-quote){color:var(--syn-meta)}
+:root:not(#layout) .atelier .rsec__source .hljs-emphasis{font-style:italic}
+/* Edit mode: one quiet field filling the panel; text actions in the header. */
+:root:not(#layout) .atelier .rsec__editor{display:block;box-sizing:border-box;width:100%;min-height:60vh;margin:0;padding:14px 16px;border:1px solid var(--x-hairline);border-radius:8px;outline:none;resize:vertical;background:var(--x-sunken);color:var(--x-prose);font:400 12.5px/1.65 var(--mono);tab-size:2}
+:root:not(#layout) .atelier .rsec__editor:focus{border-color:color-mix(in srgb,var(--x-title) 35%,transparent)}
+:root:not(#layout) .atelier .rsec__text{flex:none;height:24px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:500 12px/24px var(--sans);cursor:pointer;white-space:nowrap}
+:root:not(#layout) .atelier .rsec__text:hover:not(:disabled),:root:not(#layout) .atelier .rsec__text[aria-pressed='true']{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__text--primary{background:var(--x-title);color:var(--x-screen)}
+:root:not(#layout) .atelier .rsec__text--primary:hover:not(:disabled){background:var(--x-title);color:var(--x-screen);opacity:.88}
+:root:not(#layout) .atelier .rsec__text:disabled{opacity:.45;cursor:default}
+/* Copy feedback: the tick shows in the "done" colour for a moment. */
+/* Doubled class: each style's own .rsec__icon colour rule has equal weight and loads later. */
+:root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='copied']{color:var(--x-done);background:var(--x-chip)}
+:root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='failed']{color:var(--x-failed)}
+/* ── Files tree: type-coloured icons, change colours on names, M/A badges, dots on folders ── */
+:root:not(#layout) .atelier .file-tree__icon{display:inline-grid;place-items:center;flex:none}
+:root:not(#layout) .atelier .file-tree__icon svg{width:14px;height:14px}
+:root:not(#layout) .atelier .file-tree__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .file-tree__age{flex:none;margin-left:auto;padding-left:8px;font:400 11px/1 var(--sans)}
+:root:not(#layout) .atelier .file-tree__dot{flex:none;width:6px;height:6px;margin-right:4px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__entry>.file-tree__chevron{margin-left:0}
+/* "Sections › Files" breadcrumb leads the panel header; tab icons sit to its right. */
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb{display:flex;align-items:center;gap:4px;flex:1 1 auto;min-width:0;padding-left:8px;font:400 11px/1 var(--sans);white-space:nowrap;overflow:hidden}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb strong{font-weight:400}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb svg{opacity:.7}
+/* The breadcrumb never shrinks ("Sections › Acti" was clipped); the icon strip yields and scrolls instead. */
+:root:not(#layout) .atelier .desktop-rail>header>nav{flex:1 1 0;min-width:0;justify-content:flex-end;overflow-x:auto;scrollbar-width:none}
+:root:not(#layout) .atelier .desktop-rail>header>nav>button{flex:none}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb{flex:0 0 auto;overflow:visible;margin-right:12px}
+/* Changed files group: the only colour in the tree (blue modified, green added). */
+:root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .file-browser__changed-head{display:flex;align-items:center;gap:5px;width:100%;height:22px;padding:0 6px;border:0;font:400 11px/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .file-browser__changed-head[aria-expanded='false'] svg{transform:rotate(-90deg)}
+:root:not(#layout) .atelier .file-browser__changed-count{opacity:.8}
+:root:not(#layout) .atelier .desktop-rail .file-browser__changed-row{padding-left:18px}
+:root:not(#layout) .atelier .file-browser__badge{flex:none!important;display:inline-grid;place-items:center;width:15px;height:15px;border:1px solid currentColor;font:600 9px/1 var(--sans)}
+/* Path bar: muted folder, bright filename; actions live in the ··· menu. */
+:root:not(#layout) .atelier .desktop-rail .file-browser__pathbar{direction:ltr}
+:root:not(#layout) .atelier .desktop-rail .file-browser__pathbar p{direction:ltr;text-align:left}
+:root:not(#layout) .atelier .file-browser__pathbar p strong{font-weight:400}
+:root:not(#layout) .atelier .file-browser__more{position:relative;flex:none}
+:root:not(#layout) .atelier .file-browser__menu{position:absolute;top:calc(100% + 4px);right:0;z-index:20;display:flex;flex-direction:column;min-width:176px;padding:4px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__selection .file-browser__menu :is(button,a){justify-content:flex-start;width:100%;height:24px;text-align:left}
+:root:not(#layout) .atelier .file-browser__menu .file-browser__action-error{padding:4px 7px;font-size:11px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__document{min-width:0}
+/* The selection bar is one quiet line: muted path, borderless text actions. */
+:root:not(#layout) .atelier .desktop-rail .file-browser__selection{flex-wrap:nowrap;gap:2px;min-height:34px;padding:4px 6px 4px 12px;border-top:0;border-bottom:1px solid var(--x-hairline);font:400 12px/1.3 var(--sans)}
+:root:not(#layout) .atelier .desktop-rail .file-browser__selection p{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+/* The path bar is left-to-right: rtl moved a slash to the end ("docker-compose.yml/"). */
+:root:not(#layout) .atelier .desktop-rail .file-browser__selection.file-browser__pathbar p{direction:ltr}
+/* Shading has no folder-name header above the tree. */
+:root:not(#layout) .atelier .desktop-rail .file-browser__location{display:none}
+:root:not(#layout) .atelier .desktop-rail .file-browser__selection :is(button,a){flex:none;height:24px;padding:0 7px;border:0;font:400 12px/1 var(--sans);white-space:nowrap}
+:root:not(#layout) .atelier .desktop-rail .file-browser__preview{padding:8px 12px}
+/* Code: no per-line boxes, a quiet gutter. */
+:root:not(#layout) .atelier .desktop-rail .file-browser__preview :is(.cm-editor,.code-editor,pre){border:0;font-size:12px}
+:root:not(#layout) .atelier .desktop-rail .file-browser__preview .cm-gutters{border:0;opacity:.7}
+/* Narrow card with a file open: only the file. The tree comes back with the
+   path bar's sidebar button (file-browser--tree), and the card widens instead. */
+@container (max-width:520px){
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview{display:flex;flex-direction:column}
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview:not(.file-browser--tree)>.file-browser__navigation{display:none}
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview.file-browser--tree>.file-browser__document{display:none}
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview.file-browser--tree>.file-browser__navigation{flex:1;max-height:none;border:0}
+}
+/* Wide card: the same button hides the tree for a full-width file. */
+@container (min-width:521px){
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview.file-browser--tree{grid-template-columns:minmax(0,1fr)}
+  :root:not(#layout) .atelier .desktop-rail .file-browser--preview.file-browser--tree>.file-browser__navigation{display:none}
+}
+:root:not(#layout) .atelier .file-browser__treebtn{flex:none;display:inline-grid;place-items:center;width:24px;height:24px;padding:0!important;border:0}
+/* ── Settings: the page — a plain list on the left, quiet cards on the right ── */
+:root:not(#layout) .atelier .modal{width:min(980px,calc(100vw - 48px));height:min(720px,calc(100dvh - 56px));overflow:hidden}
+:root:not(#layout) .atelier .modal__side{flex-basis:210px;padding:12px 6px;gap:1px}
+:root:not(#layout) .atelier .modal__side .cap{display:flex;align-items:center;justify-content:space-between;padding:4px 8px 10px;font:500 13px/1 var(--sans)}
+:root:not(#layout) .atelier .modal__side .mtab{display:flex;align-items:center;width:100%;height:30px;padding:0 10px;border:0;text-align:left}
+/* The Settings sidebar: "← Back", then a Search Settings field, then the tabs. */
+:root:not(#layout) .atelier .modal__side .settings-back{display:flex;align-items:center;gap:6px;height:28px;margin:0 0 6px;padding:0 8px;border:0;font:400 13px/1 var(--sans);text-align:left}
+:root:not(#layout) .atelier .modal__side .settings-back__icon{display:inline-grid;transform:scaleX(-1)}
+:root:not(#layout) .atelier .modal__side .settings-search{display:flex;align-items:center;gap:6px;height:28px;margin:0 0 10px;padding:0 8px}
+:root:not(#layout) .atelier .modal__side .settings-search input{flex:1;min-width:0;border:0;font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .modal__sidefoot{padding:8px 10px;font:400 11.5px/1.4 var(--sans)}
+/* scrollbar-gutter keeps the centred 690px column at one left edge whether or not a tab scrolls. */
+:root:not(#layout) .atelier .modal__main{padding:28px 40px;overflow:auto;scrollbar-gutter:stable;font:400 13px/1.5 var(--sans)}
+:root:not(#layout) .atelier .modal__main>*{max-width:690px;margin-inline:auto}
+:root:not(#layout) .atelier .modal__title{font:600 16px/1.3 var(--sans);margin:0 auto 4px}
+:root:not(#layout) .atelier .modal__sub{font:400 12px/1.5 var(--sans);margin:0 auto 22px}
+/* One centred column: every direct child (title, sub, errors, fields, cards) shares the same left edge. */
+:root:not(#layout) .atelier .modal__main>*{box-sizing:border-box;width:100%;margin-left:auto!important;margin-right:auto!important}
+:root:not(#layout) .atelier .modal__main>:is(.field,.studio-error){margin-top:18px}
+:root:not(#layout) .atelier .modal__main .field>label{display:block;margin:0 0 8px;padding:0 2px}
+/* Presets: the card of rows — one surface, hairlines between rows, quiet text actions. */
+:root:not(#layout) .atelier .modal__main .pcardlist{display:flex;flex-direction:column;gap:0;overflow:hidden}
+:root:not(#layout) .atelier .modal__main .pcardlist>.pcard{display:flex;align-items:center;gap:12px;margin:0;padding:11px 14px;border:0}
+:root:not(#layout) .atelier .modal__main .pcardlist>.pcard+.pcard{border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .pcard__main{flex:1 1 auto;min-width:0;display:flex;align-items:flex-start;gap:0}
+:root:not(#layout) .atelier .modal__main .pcard__main>.dot{display:none}
+:root:not(#layout) .atelier .modal__main .pcard__text{display:flex;flex-direction:column;gap:2px;min-width:0}
+:root:not(#layout) .atelier .modal__main .pcard__name{font:400 12.5px/1.35 var(--sans);overflow-wrap:anywhere}
+:root:not(#layout) .atelier .modal__main .pcard__name code{font:400 11px/1 var(--mono);padding:0}
+:root:not(#layout) .atelier .modal__main .pcard__meta{font:400 11px/1.4 var(--sans);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+:root:not(#layout) .atelier .modal__main .pcard__actions{flex:none;display:flex;gap:2px;margin:0;opacity:1}
+:root:not(#layout) .atelier .modal__main .pcard:is(:hover,:focus-within) .pcard__actions{opacity:1}
+:root:not(#layout) .atelier .modal__main .pcard__actions .chipbtn{height:24px;padding:0 8px;border:0;font:400 11.5px/1 var(--sans)}
+/* Shading Settings: option groups are one card of rows, the selected row a fill plus ✓, no per-option boxes. */
+:root:not(#layout) .atelier .modal__main .optlist{display:flex;flex-direction:column;gap:0;overflow:hidden}
+:root[data-theme='light']:not(#layout) .atelier .modal__main .optlist{border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .optlist>.opt{margin:0;padding:11px 14px;border:0;text-align:left}
+:root:not(#layout) .atelier .modal__main .optlist>.opt+.opt{border-top:1px solid var(--x-hairline)}
+/* Selects: a quiet field, no outline (Shading ≈#151515, radius 6). */
+:root:not(#layout) .atelier .modal__main select{border:0;font:400 12.5px/1 var(--sans)}
+/* Every Settings page title has the same weight and size. */
+:root:not(#layout) .atelier .modal__main .hubphone>h3{font:600 14px/1.3 var(--sans);margin:0 0 4px}
+/* Agent intelligence and General groups sit in cards too. */
+:root:not(#layout) .atelier .modal__main .tierlist{display:flex;flex-direction:column;gap:8px}
+:root[data-theme='light']:not(#layout) .atelier .modal__main .tiercard{border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .pcard--add{width:100%;margin:0 0 6px;padding:11px 14px;border:0;text-align:left}
+/* No "daemon connected" footer in the settings nav. */
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single) .modal__sidefoot{display:none}
+:root:not(#layout) .atelier .modal__main :is(.field>label,.studio-label){font:400 12.5px/1.3 var(--sans);margin:18px 0 8px}
+:root:not(#layout) .atelier .modal__main :is(.studio-muted,.field__hint,.hint){font:400 11.5px/1.5 var(--sans)}
+/* Background/palette choices: compact tiles, not posters. */
+:root:not(#layout) .atelier .modal__main .palette-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+:root:not(#layout) .atelier .modal__main .palette-card{gap:2px;padding:6px 6px 8px;border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main :is(.palette-preview,.backdrop-preview){height:44px}
+:root:not(#layout) .atelier .modal__main .palette-card__label{margin-top:4px;font:500 12px/1.3 var(--sans)}
+:root:not(#layout) .atelier .modal__main .palette-card__desc{font:400 11px/1.35 var(--sans)}
+/* Settings is a page, not a dialog. The nav takes the sidebar's place,
+   the content fills the window, and nothing behind it dims or blurs. */
+:root:not(#layout) .backdrop:has(>.modal:not(.modal--single)){align-items:stretch;justify-content:stretch}
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single){width:100%;height:100%;max-width:none;max-height:none;border:0}
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{flex:0 0 var(--sidebar-width,240px);padding-top:44px;-webkit-app-region:drag}
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single)>.modal__side>*{-webkit-app-region:no-drag}
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single)>.modal__main{padding:44px 40px 40px}
+/* The close control reads as the "← Back": first in the nav, left-aligned. */
+:root:not(#layout) .atelier .backdrop>.modal:not(.modal--single) .modal__side .cap{flex-direction:row-reverse;justify-content:flex-end;gap:6px;padding:4px 6px 12px}
+/* ── Model/effort menu: the compact popover (~176px, 24px rows, 12px labels) ── */
+:root:not(#layout) .atelier .modelpop{border:0;padding:4px}
+:root:not(#layout) .atelier .modelpop--menu{width:208px}
+:root:not(#layout) .atelier .modelpop--menu .mmenu__row{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 8px;font:400 12px/1 var(--sans)}
+:root:not(#layout) .atelier .modelpop--menu .mmenu__value{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .modelpop--effort{width:240px}
+:root:not(#layout) .atelier .modelpop :is(.modelpop__foot){border-top:1px solid var(--x-hairline);font:400 11px/1.4 var(--sans)}
+/* Cards of rows: one #1f1f1f surface, hairlines between rows. */
+:root:not(#layout) .atelier .modal__main :is(.pcard,.provcard,.acard){padding:12px 14px}
+/* ── Shading is greys only: live state reads as muted text, not teal or red ── */
+:root:not(#layout) .atelier .activity-group>summary strong{font-weight:400}
+/* Header: the agent count and run-kind chip step back to muted text. */
+:root:not(#layout) .atelier .chat__head :is(.agent-menu,.chat__kind){font:400 12px/1 var(--sans);border:0}
+/* The chat header is the title and ⋯ only: agents live in Subagents, edits in Changes. */
+:root:not(#layout) .atelier .chat__head>:is(.agent-menu,.chat__kind,.chat__view){display:none}
+/* The Settings lists are cards of rows: #1f1f1f (dark) / hairline (light), radius 10, hairlines between rows. */
+:root:not(#layout) .atelier .modal__main .rowlist{border:0;padding:0 12px;margin-bottom:16px}
+:root[data-theme='light']:not(#layout) .atelier .modal__main .rowlist{border:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .rowlist>.row{padding:11px 0;border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .rowlist>.row:first-child{border-top:0}
+:root:not(#layout) .atelier .modal__main .tiercard{border:0}
+/* ── Header: Shading keeps one quiet row; side chips never squeeze the title ── */
+:root:not(#layout) .atelier .chat__head{gap:8px;min-width:0}
+:root:not(#layout) .atelier .chat__head>*{flex:none}
+:root:not(#layout) .atelier .chat__head .chat__title{flex:0 1 auto;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Narrow: the title wins; the view switcher and agent count step aside. */
+@media (max-width:1100px){
+  :root:not(#layout) .atelier .chat__head .chat__view{display:none}
+  :root:not(#layout) .atelier .chat__head .chat__title{flex:1 1 auto}
+}
+/* Activity summary rows stay on one line: the "· 1 failed" count never wraps. */
+:root:not(#layout) .atelier .activity-group>summary{min-width:0}
+:root:not(#layout) .atelier .activity-group>summary strong{flex-shrink:0;white-space:nowrap}
+/* Pages keep their content clear of the floating icon strip at the top right. */
+:root:not(#layout) .atelier .app__body:has(>.floatrail) .specialists{padding-right:52px}
+/* Settings: a section's description sits on the same left edge as its label and card. */
+:root:not(#layout) .atelier .modal__main .provider-accounts>.modal__sub{margin-left:0;padding-left:0}
+/* Sections menu: a header button, a list of sections with counts, and a hover preview beside it. */
+:root:not(#layout) .atelier .sections-menu{position:relative;flex:none;-webkit-app-region:no-drag}
+:root:not(#layout) .atelier .sections-menu__trigger{display:inline-flex;align-items:center;justify-content:center;width:28px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--x-meta);cursor:pointer}
+:root:not(#layout) .atelier .sections-menu__trigger:hover,:root:not(#layout) .atelier .sections-menu__trigger[aria-expanded='true']{color:var(--x-title);background:var(--mac-control)}
+:root:not(#layout) .atelier .sections-menu__list{position:absolute;top:calc(100% + 6px);right:0;z-index:40;width:216px;padding:4px;box-sizing:border-box;display:flex;flex-direction:column;gap:1px;border-radius:10px;background:var(--x-popover);box-shadow:var(--sh-shadow-lg)}
+:root:not(#layout) .atelier .sections-menu__row{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--x-title);font:400 13px/1 var(--sans);text-align:left;cursor:pointer}
+:root:not(#layout) .atelier .sections-menu__row>svg:first-child{color:var(--x-meta);flex:none}
+:root:not(#layout) .atelier .sections-menu__row>svg:last-child:not(:first-child){color:var(--x-meta);flex:none}
+:root:not(#layout) .atelier .sections-menu__row:is(:hover,:focus-visible,.is-hover){background:var(--x-selected)}
+:root:not(#layout) .atelier .sections-menu__label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .sections-menu__count{flex:none;font:400 11px/1 var(--sans);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout) .atelier .sections-menu__preview{position:absolute;right:calc(100% + 4px);z-index:41;width:300px;max-width:calc(100vw - 280px);max-height:min(480px,70vh);padding:6px;box-sizing:border-box;display:flex;flex-direction:column;gap:2px;border-radius:10px;background:var(--x-popover);box-shadow:var(--sh-shadow-lg)}
+:root:not(#layout) .atelier .sections-menu__items{display:flex;flex-direction:column;gap:1px;min-height:0;overflow-y:auto}
+:root:not(#layout) .atelier .sections-menu__search{display:flex;align-items:center;gap:6px;height:30px;padding:0 8px;margin-bottom:4px;border-bottom:1px solid var(--x-hairline);color:var(--x-meta)}
+:root:not(#layout) .atelier .sections-menu__search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--x-title);font:400 12.5px/1 var(--sans)}
+:root:not(#layout) .atelier .sections-menu__group{display:flex;align-items:center;gap:6px;height:24px;padding:0 8px;font:400 11px/1 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .sections-menu__item{display:flex;align-items:center;gap:8px;height:26px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--x-prose);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer;flex:none}
+:root:not(#layout) .atelier .sections-menu__item>svg{flex:none;color:var(--x-meta)}
+:root:not(#layout) .atelier .sections-menu__item:is(:hover,:focus-visible){background:var(--x-selected)}
+:root:not(#layout) .atelier .sections-menu__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .sections-menu__meta{flex:none;font:400 11px/1 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .sections-menu__badge{flex:none;display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;border:1px solid currentColor;font:600 9px/1 var(--sans)}
+:root:not(#layout) .atelier .sections-menu__badge[data-change='modified']{color:var(--x-structure)}
+:root:not(#layout) .atelier .sections-menu__badge[data-change='added']{color:var(--x-done)}
+:root:not(#layout) .atelier .sections-menu__dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--x-separator)}
+:root:not(#layout) .atelier .sections-menu__dot[data-live]{background:var(--x-working)}
+:root:not(#layout) .atelier .sections-menu__empty{margin:0;padding:8px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+/* Neutral colours for the shared parts: each style's tokens paint them; Shading and Neo refine them in their own sheets. */
+:root:not(#layout) .atelier .floatrail{background:var(--x-card)}
+:root:not(#layout) .atelier .floatrail button{background:transparent;color:var(--x-meta)}
+:root:not(#layout) .atelier .floatrail button:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__group>.rsec__toggle{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec{color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__search{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__search input{outline:none;background:transparent;color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__search input::placeholder{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__group{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__row:hover{background:var(--x-chip)}
+:root:not(#layout) .atelier .rsec__open{background:transparent;color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__open>svg{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__kind,:root:not(#layout) .atelier .rsec__state{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__age{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__icon{background:transparent;color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__icon:hover,:root:not(#layout) .atelier .rsec__icon[aria-pressed='true']{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__toggle{background:transparent;color:var(--x-secondary)}
+:root:not(#layout) .atelier .rsec__empty{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__bar{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__title{color:var(--x-title)}
+:root:not(#layout) .atelier .rsec__meta{color:var(--x-meta)}
+:root:not(#layout) .atelier .rsec__source{color:var(--x-secondary)}
+:root:not(#layout) .atelier .file-tree__icon{color:var(--x-meta)}
+:root:not(#layout) .atelier .file-tree__icon[data-type='ts']{color:#4f9cf0}
+:root:not(#layout) .atelier .file-tree__icon[data-type='js']{color:#e8c547}
+:root:not(#layout) .atelier .file-tree__icon[data-type='json']{color:#e8c547}
+:root:not(#layout) .atelier .file-tree__icon[data-type='css']{color:#a777e3}
+:root:not(#layout) .atelier .file-tree__icon[data-type='doc']{color:#6ea8fe}
+:root:not(#layout) .atelier .file-tree__icon[data-type='config']{color:#f0a04b}
+:root:not(#layout) .atelier .file-tree__icon[data-type='docker']{color:#4fa8e8}
+:root:not(#layout) .atelier .file-tree__icon[data-type='shell']{color:#7fc66b}
+:root:not(#layout) .atelier .file-tree__icon[data-type='image']{color:#d873b4}
+:root:not(#layout) .atelier .file-tree__name[data-change='modified']{color:#6ea8fe}
+:root:not(#layout) .atelier .file-tree__name[data-change='added']{color:#5fc28a}
+:root:not(#layout) .atelier .file-tree__badge[data-change='modified']{color:#6ea8fe}
+:root:not(#layout) .atelier .file-tree__badge[data-change='added']{color:#5fc28a}
+:root:not(#layout) .atelier .file-tree__age{color:var(--x-meta)}
+:root:not(#layout) .atelier .file-tree__dot{background:#6ea8fe}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb{color:var(--x-meta)}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__crumb strong{color:var(--x-title)}
+:root:not(#layout) .atelier .file-browser__changed-head{background:transparent;color:var(--x-meta)}
+:root:not(#layout) .atelier .file-browser__changed-count{color:var(--x-meta)}
+:root:not(#layout) .atelier .file-browser__changed-row[data-change='modified']>span:not(.file-browser__badge){color:#6ea8fe}
+:root:not(#layout) .atelier .file-browser__changed-row[data-change='added']>span:not(.file-browser__badge){color:#5fc28a}
+:root:not(#layout) .atelier .file-browser__changed-row[data-change='modified'] .file-browser__badge{color:#6ea8fe}
+:root:not(#layout) .atelier .file-browser__changed-row[data-change='added'] .file-browser__badge{color:#5fc28a}
+:root:not(#layout) .atelier .file-browser__pathbar .file-browser__dir{color:var(--x-meta)}
+:root:not(#layout) .atelier .file-browser__pathbar p strong{color:var(--x-title)}
+:root:not(#layout) .atelier .file-browser__menu{background:var(--x-popover)}
+:root:not(#layout) .atelier .file-browser__menu .file-browser__action-error{color:var(--x-meta)}
+:root:not(#layout) .atelier .file-browser__treebtn{background:transparent;color:var(--x-meta)}
+:root:not(#layout) .atelier .modal__side .settings-back{background:transparent;color:var(--x-secondary)}
+:root:not(#layout) .atelier .modal__side .settings-back:hover{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .modal__side .settings-search{background:var(--x-sunken);color:var(--x-meta)}
+:root:not(#layout) .atelier .modal__side .settings-search input{outline:none;background:transparent;color:var(--x-title)}
+
+/* ══ Settings: one system for every tab ═══════════════════════════════
+   Page title + one-line description; a small section label above each card;
+   cards of 50px rows (title + muted description, control on the right, a
+   hairline between rows); quiet text actions; one field style. Geometry here,
+   colours below under :where() so each style sheet's own rules still win. */
+:root:not(#layout) .atelier .modal__main :is(.modal__title,.hubphone>h3){font:600 15px/1.3 var(--sans);margin:0 auto 4px;letter-spacing:-.01em}
+:root:not(#layout) .atelier .modal__main .modal__sub{font:400 12.5px/1.5 var(--sans);margin:0 auto 24px}
+:root:not(#layout) .atelier .modal__main .provider-accounts>.modal__sub{margin:0 0 10px}
+/* Section label above a card (fields, presets groups, provider and run-mode sections). */
+:root:not(#layout) .atelier .modal__main .field>label,
+:root:not(#layout) .atelier .modal__main>section>.row__t{display:block;font:500 12px/1.3 var(--sans);margin:0 0 8px;padding:0 2px}
+:root:not(#layout) .atelier .modal__main>*+:is(.field,section,.rowlist,.tierlist,.row){margin-top:24px}
+:root:not(#layout) .atelier .modal__main>.modal__sub+*{margin-top:0}
+/* Cards. */
+:root:not(#layout) .atelier .modal__main :is(.rowlist,.pcardlist,.optlist){padding:0;border-radius:var(--r-md,10px);overflow:hidden}
+:root:not(#layout) .atelier .modal__main :is(.tiercard,.localpanel,.notice,.modecard),
+:root:not(#layout) .atelier .modal__main>.row{box-sizing:border-box;padding:12px 14px;border-radius:var(--r-md,10px)}
+/* Rows. */
+:root:not(#layout) .atelier .modal__main :is(.rowlist>.row,.optlist>.opt,.pcardlist>.pcard){display:flex;align-items:center;gap:12px;box-sizing:border-box;width:100%;min-height:50px;margin:0;padding:10px 14px;border:0;border-radius:0}
+:root:not(#layout) .atelier .modal__main .rowlist>.terminal-row{box-sizing:border-box;min-height:50px;margin:0;padding:10px 14px;border:0;border-radius:0}
+:root:not(#layout) .atelier .modal__main :is(.rowlist>.row,.rowlist>.terminal-row,.optlist>.opt,.pcardlist>.pcard)+:is(.row,.terminal-row,.opt,.pcard){border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .modal__main .optlist>.opt{flex-direction:column;align-items:flex-start;justify-content:center;gap:2px;text-align:left}
+/* atelier.css sizes the label as an 84px column; stacked, that became 84px of height per row. */
+:root:not(#layout) .atelier .modal__main .optlist>.opt>:is(.opt__label,.opt__desc){flex:none;width:100%}
+:root:not(#layout) .atelier .modal__main :is(.row__main,.pcard__main){flex:1 1 auto;min-width:0}
+:root:not(#layout) .atelier .modal__main :is(.row,.pcard)>:is(.switch,.btn,.chipbtn,.pcard__actions,.dot){flex:none}
+:root:not(#layout) .atelier .modal__main :is(.row__t,.opt__label,.pcard__name,.tiercard__name){font:500 13px/1.35 var(--sans)}
+:root:not(#layout) .atelier .modal__main :is(.row__s,.opt__desc,.pcard__meta,.tiercard__hint,.field__note,.studio-muted,.backdrop-note){font:400 11.5px/1.45 var(--sans)}
+:root:not(#layout) .atelier .modal__main>.field>:is(.field__note,.backdrop-note){margin:8px 2px 0}
+/* Controls. */
+:root:not(#layout) .atelier .modal__main :is(.btn,.chipbtn){display:inline-flex;align-items:center;justify-content:center;gap:6px;height:28px;min-height:28px;box-sizing:border-box;padding:0 12px;font:500 12px/1 var(--sans);border-radius:var(--r-sm,6px);white-space:nowrap}
+:root:not(#layout) .atelier .modal__main :is(.pcard__actions,.terminal-row__actions){display:flex;align-items:center;gap:0}
+:root:not(#layout) .atelier .modal__main :is(.pcard__actions,.terminal-row__actions) :is(.btn,.chipbtn){height:26px;min-height:26px;padding:0 8px}
+:root:not(#layout) .atelier .modal__main :is(select,input[type=text],input[type=search],input[type=number],.palette__in){box-sizing:border-box;height:30px;min-height:30px;padding:0 10px;font:400 12.5px/1 var(--sans);border-radius:var(--r-sm,6px)}
+:root:not(#layout) .atelier .modal__main input:not([type]){box-sizing:border-box;height:30px;min-height:30px;padding:0 10px;font:400 12.5px/1 var(--sans);border-radius:var(--r-sm,6px)}
+/* A row of actions under a card sits on its right edge. */
+:root:not(#layout) .atelier .modal__main>:is(div:not([class]),.lsp-actions){display:flex;justify-content:flex-end;align-items:center;gap:4px;margin-top:8px}
+:root:not(#layout) .atelier .modal__main>p.modal__sub:last-child{margin:12px 2px 0}
+/* General: compact swatch grids, one-line captions. */
+:root:not(#layout) .atelier .modal__main .palette-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:8px}
+:root:not(#layout) .atelier .modal__main .palette-card{min-width:0;padding:6px 6px 8px;border-radius:var(--r-md,10px);text-align:left}
+:root:not(#layout) .atelier .modal__main :is(.palette-preview,.backdrop-preview){height:40px;border-radius:var(--r-sm,6px)}
+:root:not(#layout) .atelier .modal__main :is(.palette-card__label,.palette-card__desc){display:block;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root:not(#layout) .atelier .modal__main .backdrop-custom{display:flex;align-items:center;gap:8px;margin-top:10px;font:400 12px/1 var(--sans)}
+:root:not(#layout) .atelier .modal__main .backdrop-custom input[type=color]{width:28px;height:28px;padding:0;border-radius:var(--r-sm,6px);cursor:pointer}
+/* Agent intelligence: each tier is a card with a header line and three fields side by side. */
+:root:not(#layout) .atelier .modal__main .tierlist{display:flex;flex-direction:column;gap:8px}
+:root:not(#layout) .atelier .modal__main .tiercard__head{display:flex;align-items:center;gap:10px;margin:0 0 10px}
+:root:not(#layout) .atelier .modal__main .tiercard__hint{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root:not(#layout) .atelier .modal__main .tiercard__fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+:root:not(#layout) .atelier .modal__main :is(.tiercard__fields .field,.tierdefault){display:flex;flex-direction:column;gap:5px;margin:0;font:400 11.5px/1.3 var(--sans)}
+:root:not(#layout) .atelier .modal__main .tierdefault{margin-top:16px}
+/* "New agents use" is one setting, not a page-wide bar: a compact field. */
+:root:not(#layout) .atelier .modal__main>.tierdefault{width:min(320px,100%);margin-left:0!important}
+/* Save/Revert: a right-aligned action row with breathing room above it. */
+:root:not(#layout) .atelier .modal__main>.approval__row{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:20px}
+/* "Clear" ends flush with the tier's fields. */
+:root:not(#layout) .atelier .modal__main .tiercard__head .chipbtn{margin-left:auto;margin-right:-8px}
+/* Models & Providers: run modes as three equal cards; the account login as one line. */
+:root:not(#layout) .atelier .modal__main .modecards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+:root:not(#layout) .atelier .modal__main .modecard{display:flex;flex-direction:column;align-items:flex-start;gap:6px;text-align:left;font:400 11.5px/1.45 var(--sans)}
+:root:not(#layout) .atelier .modal__main .localpanel{margin-top:8px}
+:root:not(#layout) .atelier .modal__main .provider-accounts__login{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+:root:not(#layout) .atelier .modal__main .provider-accounts__login>select{flex:0 0 170px}
+:root:not(#layout) .atelier .modal__main .provider-accounts__login>input{flex:1 1 160px;min-width:0}
+@media (max-width:900px){
+  :root:not(#layout) .atelier .modal__main :is(.modecards,.tiercard__fields){grid-template-columns:minmax(0,1fr)}
+}
+/* Colours (neutral tokens; Shading, Neo and Classic refine them in their own sheets). */
+:root:not(#layout) :where(.atelier .modal__main) :is(.rowlist,.pcardlist,.optlist,.tiercard,.localpanel,.notice,.modecard,.palette-card,.pcard--add),
+:root:not(#layout) :where(.atelier .modal__main)>.row{background:var(--x-card);box-shadow:inset 0 0 0 1px var(--sh-card-edge)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.modecard.is-current,.palette-card.is-on){box-shadow:inset 0 0 0 1.5px var(--x-focus)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.field>label,section>.row__t){color:var(--x-secondary)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.row__t,.opt__label,.pcard__name,.tiercard__name,.palette-card__label){color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.row__s,.opt__desc,.pcard__meta,.tiercard__hint,.field__note,.studio-muted,.backdrop-note,.modal__sub,.palette-card__desc){color:var(--x-meta)}
+:root:not(#layout) :where(.atelier .modal__main) .btn{background:var(--x-selected);border:1px solid var(--x-hairline);color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.btn--ghost,.chipbtn){background:transparent;border:0;color:var(--x-secondary)}
+:root:not(#layout) :where(.atelier .modal__main) :is(.btn--ghost,.chipbtn):hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__main) .btn--solid{background:var(--x-accent);border-color:transparent;color:var(--x-on-accent)}
+:root:not(#layout) :where(.atelier .modal__main) .chipbtn--danger{color:var(--x-failed-text)}
+:root:not(#layout) :where(.atelier .modal__main) :is(select,input[type=text],input[type=search],input[type=number],.palette__in){background:var(--x-sunken);box-shadow:inset 0 0 0 1px var(--x-hairline);color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__main) input:not([type]){background:var(--x-sunken);box-shadow:inset 0 0 0 1px var(--x-hairline);color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__main) .backdrop-custom input[type=color]{border:1px solid var(--x-hairline);background:none}
+:root:not(#layout) :where(.atelier .modal__side) .mtab{border-radius:var(--r-sm,6px);color:var(--x-secondary)}
+:root:not(#layout) :where(.atelier .modal__side) .mtab:hover{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) :where(.atelier .modal__side) .mtab.is-on{background:var(--x-selected);color:var(--x-title)}
+/* Light theme: the file-status blue/green above are dark-theme hues (≈2.2–2.4:1 on white); use the darker pair. */
+:root[data-theme='light']:not(#layout) .atelier :is(.file-tree__name,.file-tree__badge)[data-change='modified'],
+:root[data-theme='light']:not(#layout) .atelier .file-tree__icon[data-type='doc'],
+:root[data-theme='light']:not(#layout) .atelier .file-browser__changed-row[data-change='modified']>span{color:#2f6fd6}
+:root[data-theme='light']:not(#layout) .atelier :is(.file-tree__name,.file-tree__badge)[data-change='added'],
+:root[data-theme='light']:not(#layout) .atelier .file-browser__changed-row[data-change='added']>span{color:#1f8a4c}
+:root[data-theme='light']:not(#layout) .atelier .file-tree__dot{background:#2f6fd6}

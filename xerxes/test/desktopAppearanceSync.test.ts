@@ -20,10 +20,10 @@ test('changing the text size in one view never puts back the theme another view 
     saveAppearance({ theme: 'light' })
     // A second view, still showing dark, changes only the font.
     saveAppearance({ font: '15' })
-    // Never chose a style: Neo, the default.
-    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'neo' })
+    // Never chose a style: Shading, the default.
+    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'shading' })
     saveAppearance({ theme: 'system' })
-    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'neo' })
+    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'shading' })
     // The style is its own field: switching it keeps theme and font.
     saveAppearance({ style: 'classic' })
     expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'classic' })

@@ -154,6 +154,8 @@ export interface SupervisorViewProps {
   readonly hubLabel: string
   readonly now: number
   readonly onSend: (text: string) => Promise<boolean>
+  /** Stops XERXES's running turn (Stop, and the first half of Steer). Absent: no stop or steer. */
+  readonly onCancel?: () => Promise<boolean>
   readonly onRespond: (confirmationId: string, decision: 'confirm' | 'cancel') => void
   readonly onReopen: () => void
   readonly onOpenSettings: () => void
@@ -241,7 +243,8 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const thinking = supervisor.busy || supervisor.working === true || pending !== null
   // The running turn's steps; a finished turn's steps fold above its reply instead.
   const runningSteps = liveSteps(supervisor.steps, supervisor.messages)
-  const canSend = canType && live && !thinking && text.trim() !== ''
+  // While XERXES works, sending queues the message behind the running turn (the Hub runs them in order).
+  const canSend = canType && live && text.trim() !== ''
   // The task view's "Thinking… 3s" clock.
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [, setTick] = useState(0)
@@ -265,20 +268,25 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     element.style.height = 'auto'
     element.style.height = `${Math.min(element.scrollHeight, 220)}px`
   }
-  const submit = async (): Promise<void> => {
+  /** `queue`: behind the running turn (default). `steer`: stop the running turn, then send. */
+  const submit = async (mode: 'queue' | 'steer' = 'queue'): Promise<void> => {
     const message = text.trim()
-    if (message === '' || thinking || !live || unconfigured) return
-    // A chat clears the box and shows the message straight away.
-    setPending({ text: message, at: new Date().toISOString() })
+    if (message === '' || !live || unconfigured) return
+    const busy = thinking
+    // A chat clears the box and shows the message straight away; a queued one
+    // appears in the thread as soon as the Hub stores it.
+    if (!busy) setPending({ text: message, at: new Date().toISOString() })
     // Sending brings you back to the tail, even if you had scrolled up to read.
     scroll.scrollToLatest()
     setText('')
     requestAnimationFrame(grow)
+    if (busy && mode === 'steer') await props.onCancel?.()
     const sent = await onSend(message)
-    setPending(null)
+    if (!busy) setPending(null)
     // A failed send gives the draft back instead of losing it.
     if (!sent) setText(current => current || message)
   }
+  const canSteer = thinking && canSend && props.onCancel !== undefined
   return (
     <section className="supervisor" aria-label="XERXES">
       <header className="supervisor__bar">
@@ -406,7 +414,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
         </div>
       </div>
       {conversing && !showThread ? (
-        <form className="supervisor__dock" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
+        <form className="supervisor__dock composer-wrap" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
           <div className="composer-dock">
             <div className="composer">
               <label className="visually-hidden" htmlFor="supervisor-input">Message to XERXES</label>
@@ -416,20 +424,29 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                 className="composer__input"
                 rows={1}
                 value={text}
-                placeholder={unconfigured ? 'Choose a model first' : 'Ask XERXES…'}
+                placeholder={unconfigured ? 'Choose a model first' : thinking ? 'Queue a message, or steer XERXES…' : 'Ask XERXES…'}
                 disabled={!canType}
                 onChange={event => { setText(event.target.value); grow() }}
                 onKeyDown={event => {
-                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() }
+                  if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+                  event.preventDefault()
+                  // ⌘⏎ steers: stop the running turn and answer this instead.
+                  void submit(event.metaKey || event.ctrlKey ? 'steer' : 'queue')
                 }}
               />
-              <button type="submit" className="composer__send" aria-label={thinking ? 'Sending' : 'Send to XERXES'} title="Send (⏎ · ⇧⏎ newline)" disabled={!canSend}><Icon name="arrowUp" size={16} /></button>
+              {thinking && !text.trim() && props.onCancel !== undefined
+                ? <button type="button" className="composer__send composer__send--stop" aria-label="Stop XERXES" title="Stop this turn" onClick={() => { void props.onCancel?.() }}><Icon name="stop" size={18} /></button>
+                : <button type="submit" className="composer__send" aria-label={thinking ? 'Queue message' : 'Send to XERXES'} title={thinking ? 'Queue — runs after this turn (⏎) · ⌘⏎ steer' : 'Send (⏎ · ⇧⏎ newline)'} disabled={!canSend}><Icon name="arrowUp" size={16} /></button>}
             </div>
           </div>
-          <p className="supervisor__hint" title={autopilotChip === undefined ? DEFAULT_COMPOSER_HINT : AUTOPILOT_COMPOSER_HINT}>
-            {autopilotChip === undefined ? 'Acts for you; asks first when others are in the thread' : 'Autopilot on: acts at once'}
-            <span aria-hidden="true"> · </span>⏎ send · ⇧⏎ new line
-          </p>
+          <div className="composer__toolbar">
+            {canSteer ? <button type="button" className="cchip composer__text" title="Stop the running turn and answer this message now (⌘⏎)" onClick={() => { void submit('steer') }}>Steer now</button> : null}
+            <span className="cchip composer__text supervisor__hint" title={autopilotChip === undefined ? DEFAULT_COMPOSER_HINT : AUTOPILOT_COMPOSER_HINT}>
+              {autopilotChip === undefined ? 'Asks first when others are in the thread' : 'Autopilot on: acts at once'}
+            </span>
+            <span className="composer__flex" />
+            <button type="button" className={`cchip composer__text${unconfigured ? ' is-custom' : ''}`} title="XERXES's model — click to change" onClick={() => props.onChooserChange(true)}>{modelChipText(config)}</button>
+          </div>
         </form>
       ) : null}
     </section>
@@ -481,6 +498,7 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
       hubLabel={hubLabelFor(origin)}
       now={now}
       onSend={text => session.controller.supervisorSend(text, 'text')}
+      onCancel={() => session.controller.supervisorCancel()}
       onRespond={(id, decision) => { void session.controller.supervisorRespond(id, decision) }}
       onReopen={() => { void session.controller.supervisorOpen() }}
       onOpenSettings={onOpenSettings}

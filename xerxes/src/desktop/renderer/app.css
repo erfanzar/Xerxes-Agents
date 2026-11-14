@@ -1455,6 +1455,51 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .md__codewrap:hover .md__codebar .copybtn,
 .md__codebar .copybtn:focus-visible { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .md__codebar .copybtn { opacity: 1; } }
+
+/* Syntax highlighting (richMarkdown.tsx). Built from theme tokens, so every
+   style and colour theme gets a matching palette without its own rules. */
+.md__code .hljs-keyword, .md__code .hljs-selector-tag, .md__code .hljs-built_in, .md__code .hljs-type { color: var(--x-structure, var(--x-working)); }
+.md__code .hljs-string, .md__code .hljs-regexp, .md__code .hljs-addition, .md__code .hljs-attribute { color: var(--x-done); }
+.md__code .hljs-number, .md__code .hljs-literal, .md__code .hljs-symbol, .md__code .hljs-variable.language_ { color: var(--x-needs-text, var(--x-needs)); }
+.md__code .hljs-title, .md__code .hljs-title.function_, .md__code .hljs-title.class_, .md__code .hljs-section { color: var(--x-title); font-weight: 500; }
+.md__code .hljs-comment, .md__code .hljs-quote, .md__code .hljs-meta { color: var(--x-meta); font-style: italic; }
+.md__code .hljs-deletion { color: var(--x-failed-text, var(--x-failed)); }
+.md__code .hljs-attr, .md__code .hljs-property, .md__code .hljs-params { color: var(--x-secondary); }
+.md__code .hljs-emphasis { font-style: italic; }
+.md__code .hljs-strong { font-weight: 600; }
+
+/* Math: MathML in the prose flow; display math centred with a copy control. */
+.md__math { white-space: nowrap; }
+.md__math math { font-size: 1.05em; }
+.md__mathblock { position: relative; margin: 12px 0; padding: 12px 40px 12px 14px; border: 1px solid var(--x-hairline); border-radius: var(--r-md); overflow-x: auto; }
+.md__mathbody { text-align: center; }
+.md__mathbody math { font-size: 1.15em; }
+.md__mathblock .copybtn { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 120ms ease; }
+.md__mathblock:hover .copybtn, .md__mathblock .copybtn:focus-visible { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .md__mathblock .copybtn { opacity: 1; } }
+
+/* Mermaid: the drawn SVG as an image; the source stays one click away. */
+/* The floating section rail (App.tsx FloatingRail) is a Shading feature. */
+.floatrail { display: none; }
+
+/* Files changed: the end-of-turn list of edited files (App.tsx FilesChangedCard). */
+.fileschanged { margin: 10px 0 4px; border: 1px solid var(--x-hairline); border-radius: var(--r-lg, 14px); background: var(--x-card); overflow: hidden; }
+.fileschanged__head { display: flex; align-items: center; gap: 8px; padding: 10px 14px 6px; color: var(--x-meta); font: var(--ui-small) var(--sans); font-variant-numeric: tabular-nums; }
+.fileschanged__count { color: var(--x-secondary); }
+.fileschanged__list { list-style: none; margin: 0; padding: 0 6px 6px; }
+.fileschanged__row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; border-radius: var(--r-md, 10px); background: transparent; color: var(--x-secondary); font: var(--ui-small) var(--sans); font-variant-numeric: tabular-nums; text-align: left; cursor: pointer; }
+.fileschanged__row:hover { background: var(--x-selected); color: var(--x-title); }
+.fileschanged__row:focus-visible { outline: 2px solid var(--x-focus); outline-offset: -2px; }
+.fileschanged__row > svg { flex: none; color: var(--x-meta); }
+.fileschanged__path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.fileschanged__new { flex: none; color: var(--x-meta); }
+.fileschanged__add { flex: none; color: var(--x-done); }
+.fileschanged__del { flex: none; color: var(--x-failed-text, var(--x-failed)); }
+.md__mermaid .md__lang { text-transform: none; font-family: var(--sans); }
+.md__mermaid-view { display: flex; justify-content: center; padding: 16px; overflow-x: auto; }
+.md__mermaid-view img { max-width: 100%; height: auto; }
+.md__mermaid-note { margin: 0; padding: 8px 12px 0; color: var(--x-meta); font: var(--ui-small) var(--sans); }
+.md__mermaid[data-state='error'] .md__mermaid-note { color: var(--x-failed-text, var(--x-failed)); }
 .modelpop__error { margin: 4px 10px 8px; color: var(--x-fail-text, var(--x-failed)); font: var(--ui-small) var(--sans); }
 
 /* Return to the tail after reading back. */

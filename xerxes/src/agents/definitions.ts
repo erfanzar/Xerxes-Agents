@@ -602,8 +602,8 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
     'computer_use', 'AgentTool', 'PlanTool', 'SpawnAgents', 'Workflow', 'SendMessageTool',
     'TaskCreateTool', 'TaskGetTool', 'TaskListTool', 'TaskOutputTool', 'TaskStopTool',
     'TaskUpdateTool', 'AwaitAgents', 'CheckAgentMessages', 'PeekAgent', 'ResetAgent',
-    'HandoffTool', 'AskUserQuestionTool', 'AskAdvisor', 'SetInteractionModeTool', 'get_goal',
-    'create_goal', 'update_goal', 'SkillTool', 'TodoWriteTool', 'ToolSearchTool', 'create_project_setup',
+    'HandoffTool', 'AskUserQuestionTool', 'AskAdvisor', 'SetInteractionModeTool', 'EnterPlanModeTool', 'ExitPlanModeTool', 'get_goal',
+    'create_goal', 'update_goal', 'SkillTool', 'TodoWriteTool', 'ArtifactTool', 'ToolSearchTool', 'create_project_setup',
     'session_search', 'NotebookEditTool',
   ]
   const definitions: AgentDefinition[] = [
@@ -716,6 +716,8 @@ function hardcodedBuiltinDefinitions(): ReadonlyMap<string, AgentDefinition> {
       // the session stayed in plan mode refusing every write that followed.
       // ToolSearchTool stays so discovery keeps working under deferred loading.
       allowedTools: [
+        // The plan itself is written as an artifact the user reviews before approving.
+        'ArtifactTool',
         'AskUserQuestionTool',
         'ExitPlanModeTool',
         'GlobTool',

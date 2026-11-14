@@ -7,6 +7,9 @@ import type { JsonRpcPayload } from '../protocol/jsonRpc.js';
 import { resolveProjectDirectory } from './paths.js';
 import { EVENT_BATCH_BYTES, EVENT_HARD_BYTES, eventBytes, TransportEventJournal, type EventGapReason, type TransportEvent } from './transportEventJournal.js';
 
+/** How often a pump held back by a full write queue checks again. */
+const BACKPRESSURE_RETRY_MS = 20;
+
 interface Subscription {
   readonly id: string;
   readonly owner: object;
@@ -26,7 +29,13 @@ interface Subscription {
 export class EventSubscriptions {
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly unlisten: () => void;
-  constructor(private readonly journal: TransportEventJournal, private readonly maxQueueBytes = EVENT_HARD_BYTES) {
+  /**
+   * `blocked(owner)` reports that the owner's transport still has a large write queue. The pump
+   * then waits instead of pushing the next page: a backlog replay over a slow link (an SSH tunnel
+   * to a Hub) otherwise queued tens of MiB and the daemon dropped the client as too slow.
+   */
+  constructor(private readonly journal: TransportEventJournal, private readonly maxQueueBytes = EVENT_HARD_BYTES,
+    private readonly blocked: (owner: object) => boolean = () => false) {
     this.unlisten = journal.listen(events => {
       for (const subscription of this.subscriptions.values()) {
         if (!events) { this.gap(subscription, 'journal_unavailable'); continue; }
@@ -106,6 +115,10 @@ export class EventSubscriptions {
   }
   private pump(subscription: Subscription): void {
     if (subscription.paused || !this.subscriptions.has(subscription.id)) return;
+    if (this.blocked(subscription.owner)) {
+      subscription.timer = setTimeout(() => { subscription.timer = undefined; this.pump(subscription); }, BACKPRESSURE_RETRY_MS);
+      return;
+    }
     // Finish the original watermark first. Live commits remain in the journal until the next page.
     const checked = this.journal.checkCursor(subscription.cursor);
     if (checked.reason) { this.gap(subscription, checked.reason); return; }

@@ -642,6 +642,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
 
   const handlers = createSupervisorHandlers({
     threads, actions, modelId: () => options.model.id, usage: () => runner.usageSnapshot(), submit,
+    cancel: threadId => runner.cancel(threadId),
     ...(options.configStatus === undefined ? {} : { configStatus: options.configStatus }),
   })
 

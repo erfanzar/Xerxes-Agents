@@ -3,19 +3,30 @@
 
 import { expect, test } from 'bun:test'
 
-import { HUB_MODEL_MAX_TIMEOUT_MS, HUB_MODEL_MIN_TIMEOUT_MS, HUB_MODEL_TIMEOUT_MS, hubModelTimeoutMs } from '../src/daemon/hubModels.js'
+import { HUB_MODEL_MIN_TIMEOUT_MS, HUB_MODEL_TIMEOUT_MS, hubModelTimeoutMs } from '../src/daemon/hubModels.js'
+import { completeLlm, type LlmClient } from '../src/llms/client.js'
 
-test('the Hub model bound is long enough for a reasoning turn and can be raised', () => {
-  // Two minutes cut off slow reasoning models mid-thought; XERXES reported
-  // "the model did not answer within 120 seconds" and stopped.
-  expect(HUB_MODEL_TIMEOUT_MS).toBe(600_000)
-  expect(hubModelTimeoutMs({})).toBe(HUB_MODEL_TIMEOUT_MS)
-  expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: '900000' })).toBe(900_000)
+test('a XERXES model call has no time limit unless one is set explicitly', () => {
+  // Two, then ten minutes cut slow reasoning models off mid-thought.
+  expect(HUB_MODEL_TIMEOUT_MS).toBe(Number.POSITIVE_INFINITY)
+  expect(hubModelTimeoutMs({})).toBe(Number.POSITIVE_INFINITY)
+  expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: '3600000' })).toBe(3_600_000)
 })
 
-test('an out-of-range or malformed override falls back instead of disabling the bound', () => {
+test('an explicit override keeps a floor; a malformed one means no limit', () => {
   expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: '1000' })).toBe(HUB_MODEL_MIN_TIMEOUT_MS)
-  expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: '99999999' })).toBe(HUB_MODEL_MAX_TIMEOUT_MS)
   expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: 'soon' })).toBe(HUB_MODEL_TIMEOUT_MS)
   expect(hubModelTimeoutMs({ XERXES_HUB_MODEL_TIMEOUT_MS: '-5' })).toBe(HUB_MODEL_TIMEOUT_MS)
+})
+
+test('completeLlm with an infinite deadline still ends on the caller signal', async () => {
+  const client = {
+    stream: () => (async function* () { await new Promise(() => {}) })(),
+    complete: (_request: unknown, signal: AbortSignal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })),
+  } as unknown as LlmClient
+  const controller = new AbortController()
+  const pending = completeLlm(client, { model: 'm', messages: [] } as never, controller.signal, { timeoutMs: Number.POSITIVE_INFINITY })
+  await Bun.sleep(20)
+  controller.abort()
+  await expect(pending).rejects.toThrow()
 })

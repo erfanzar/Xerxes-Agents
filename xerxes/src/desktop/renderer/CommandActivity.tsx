@@ -20,6 +20,15 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
   const ended = typeof row.endedAt === 'number' ? row.endedAt : Date.now()
   const seconds = started === null ? null : Math.max(0, Math.floor((ended - started) / 1000))
   const elapsed = seconds === null ? '' : elapsedOf(seconds)
+  const fullCommand = text(detail?.command) || text(row.title)
+  // The daemon's label is the agent's description, or the first words of the command when none was given.
+  const label = text(row.label).trim()
+  const heading = label && !text(row.title).startsWith(label.replace(/…$/, '')) ? label : commandGist(text(row.title))
+  const state = text(row.state)
+  const endLabel = state === 'completed' ? 'Completed' : state === 'failed' ? 'Failed' : state ? state[0]!.toUpperCase() + state.slice(1) : 'Finished'
+  const outcome = !online ? 'Disconnected. Showing the retained output.'
+    : running ? 'Running. Updates every 2 seconds.'
+    : `${endLabel}${typeof row.exitCode === 'number' ? ` with exit code ${row.exitCode}` : ''}.`
   useEffect(() => {
     if (!open || !online) return
     let current = true
@@ -47,24 +56,28 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
         The old summary led with the words "Shell command" and pushed the
         command itself to a third line, so the least useful thing on the
         row was the most prominent. */}
-    <summary title={`${text(row.title)}\n${text(row.detail)}`}>
+    {/* Claude Code's task card: what the command is for (the agent's description, else the
+        command's gist), and its duration. The raw command waits inside. */}
+    <summary title={`${heading}\n${text(row.title)}`}>
       <Icon name="chevron" size={12}/>
-      <span className="command-activity__dot" aria-hidden="true" />
-      <code className="command-activity__preview">{commandGist(text(row.title))}</code>
+      {/* A span, not <code>: the inline-code chip style painted a grey pill behind every row. */}
+      <span className="command-activity__preview">{heading}</span>
       {!online
         ? <span className="command-activity__state">disconnected</span>
         : running ? <span className="command-activity__state">running</span> : null}
       {elapsed && <span className="command-activity__elapsed">{elapsed}</span>}
     </summary>
+    {/* Open: `$ command`, its output, a hairline, then one sentence saying how it ended. */}
     {open && <div className="command-activity__body">
-<details className="command-activity__source"><summary>Full command</summary><pre className="command-activity__command" aria-label="Full command" tabIndex={0}>{text(detail?.command) || text(row.title)}</pre></details>
-      <div className="command-activity__toolbar"><strong>{running ? 'Updates every 2 seconds' : 'Recorded output'}</strong><button disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>
+      <pre className="command-activity__command" aria-label="Full command" tabIndex={0}><span aria-hidden="true">$ </span>{fullCommand}</pre>
+      {(detail ? readableOutput(text(detail.output)).trim() : '') !== '' && <OutputViewer compact text={readableOutput(text(detail!.output))} />}
+      {error && <p role="alert" className="studio-error">{error}</p>}
+      <div className="command-activity__foot">
+        {/* One short outcome line; the command is already shown above, never repeated here. */}
+        <span>{outcome}{detail?.outputTruncated === true ? ' Showing the last part of its output.' : ''}</span>
+        {running && <button disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>}
         {running && detail?.canInterrupt === true && <button disabled={!online || busy} onClick={()=>void interrupt()}>{busy ? 'Requesting…' : 'Interrupt'}</button>}
       </div>
-      {!online && <p role="status">Disconnected. Retained output is shown; reconnect to refresh or control this command.</p>}
-      {error && <p role="alert" className="studio-error">{error}</p>}
-<OutputViewer text={detail ? readableOutput(text(detail.output)) : ''} empty={detail ? 'No output recorded yet.' : error ? 'Output is unavailable.' : 'Loading output…'} />
-      {detail?.outputTruncated === true && <p className="studio-muted">Showing the retained output tail.</p>}
     </div>}
   </details>
 }

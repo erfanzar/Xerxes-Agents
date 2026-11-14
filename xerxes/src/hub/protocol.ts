@@ -49,6 +49,8 @@ export const HUB_METHODS = [
   'hub.usage',
   'supervisor.thread.open',
   'supervisor.message.submit',
+  /** Stop the running XERXES turn (steer); queued messages still run. */
+  'supervisor.turn.cancel',
   'supervisor.confirmation.respond',
   'supervisor.action.status',
   'hub.machines.list',

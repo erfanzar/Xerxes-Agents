@@ -8,6 +8,7 @@ import { chooseStyle } from '../src/desktop/renderer/appearanceSync.js'
 import { applyBackdrop, contrast, isSolidStyle, neoBackdropNote, parseHex } from '../src/desktop/renderer/backdrop.js'
 
 const SHADING = new URL('../src/desktop/renderer/shading.css', import.meta.url)
+const LAYOUT = new URL('../src/desktop/renderer/layout.css', import.meta.url)
 
 /** Top-level selectors of a stylesheet (comments stripped, @media bodies included). */
 function selectorsOf(css: string): string[] {
@@ -38,7 +39,7 @@ test('Shading is a third style: parsed, labelled and stamped on the page', () =>
   expect(isStyleChoice('shading')).toBe(true)
   expect(isStyleChoice('retro')).toBe(false)
   expect(parseAppearance({ style: 'shading' }).style).toBe('shading')
-  expect(parseAppearance({ style: 'retro' }).style).toBe('neo')
+  expect(parseAppearance({ style: 'retro' }).style).toBe('shading')
   const attributes = new Map<string, string>()
   const root = { setAttribute: (k: string, v: string) => { attributes.set(k, v) }, removeAttribute: (k: string) => { attributes.delete(k) } }
   applyStyle('shading', root)
@@ -72,21 +73,55 @@ test('Shading ships in the app, the desktop build, the layout preview and the VS
   expect(extension).toContain("renderer/shading.css")
 })
 
-test("Shading is Claude Code's layout: flat panes, a quiet sidebar, a grey bubble, one bordered composer", async () => {
-  const css = await Bun.file(SHADING).text()
+test('the shared layout sheet applies to every style and ships everywhere the styles do', async () => {
+  const css = await Bun.file(LAYOUT).text()
+  const selectors = selectorsOf(css)
+  expect(selectors.length).toBeGreaterThan(100)
+  for (const selector of selectors) {
+    expect(selector).toStartWith(':root')
+    expect(selector).toContain(':not(#layout)')
+    // Layout is style-independent: no rule may target one style.
+    expect(selector).not.toContain('data-style')
+  }
+  const [html, build, preview, extension] = await Promise.all([
+    Bun.file(new URL('../src/desktop/renderer/index.html', import.meta.url)).text(),
+    Bun.file(new URL('../scripts/buildDesktop.ts', import.meta.url)).text(),
+    Bun.file(new URL('../scripts/previewDesktop.ts', import.meta.url)).text(),
+    Bun.file(new URL('../src/vscode/extension.ts', import.meta.url)).text(),
+  ])
+  const sheets = [...html.matchAll(/href="\.\/([\w.-]+\.css)"/g)].map(match => match[1])
+  // After atelier.css (so it wins), before the style sheets (so their colours win).
+  expect(sheets.indexOf('layout.css')).toBeGreaterThan(sheets.indexOf('atelier.css'))
+  expect(sheets.indexOf('layout.css')).toBeLessThan(sheets.indexOf('shading.css'))
+  expect(build).toContain("'layout.css'")
+  expect(preview).toContain("'layout.css'")
+  expect(extension).toContain('renderer/layout.css')
+})
+
+test("Shading layout: flat panes, a quiet sidebar, a grey bubble, one borderless composer card", async () => {
+  // Geometry lives in the shared layout.css; Shading's sheet adds colour, corners and shadows.
+  const [shading, layout] = await Promise.all([Bun.file(SHADING).text(), Bun.file(LAYOUT).text()])
+  const css = shading + layout
+  const body = (sheet: string, head: string): string => {
+    const start = sheet.indexOf(head)
+    return start < 0 ? '' : sheet.slice(start + head.length, sheet.indexOf('}', start))
+  }
   const rule = (selector: string) => {
-    const head = `:root[data-style='shading']:not(#shading) .atelier ${selector}{`
-    const start = css.indexOf(head)
-    if (start < 0) throw new Error(`missing Shading rule for ${selector}`)
-    return css.slice(start + head.length, css.indexOf('}', start))
+    const found = body(layout, `:root:not(#layout) .atelier ${selector}{`) + ';' + body(shading, `:root[data-style='shading']:not(#shading) .atelier ${selector}{`)
+    if (found === ';') throw new Error(`missing rule for ${selector}`)
+    return found
   }
-  // Flat panes: the conversation and the inspector sit edge to edge, no floating cards.
-  for (const surface of ['.chat', '.desktop-rail']) {
-    expect(rule(surface)).toContain('margin:0')
-    expect(rule(surface)).toContain('border-radius:0')
-    expect(rule(surface)).toContain('box-shadow:none')
-  }
-  expect(rule('.chat__head')).toContain('border-bottom:1px solid var(--x-hairline)')
+  // The conversation is a flat pane; the inspector is the card inset 8px from the window.
+  expect(rule('.chat')).toContain('margin:0')
+  expect(rule('.chat')).toContain('border-radius:0')
+  expect(rule('.chat')).toContain('box-shadow:none')
+  expect(rule('.app__body>.desktop-rail')).toContain('margin:8px 8px 8px 0')
+  expect(rule('.app__body>.desktop-rail')).toContain('border-radius:10px')
+  // Files: tree and file side by side inside that card.
+  expect(rule('.desktop-rail .file-browser--preview')).toContain('grid-template-columns')
+  // no header hairline; the title is a faint chip.
+  expect(rule('.chat__head')).toContain('border-bottom:0')
+  expect(rule('.chat__title')).toContain('border-radius:6px')
   // "New" is a quiet nav row, not a filled button.
   expect(rule('.newchat')).toContain('background:transparent')
   // Your own turn: a grey bubble with normal text.
@@ -94,8 +129,13 @@ test("Shading is Claude Code's layout: flat panes, a quiet sidebar, a grey bubbl
   expect(rule('.msg--user :is(.msg__text,.msg__text *)')).toContain('color:var(--x-title)')
   // Tool activity is a muted line, not a card.
   expect(rule('.activity-group')).toContain('border:0')
-  // One bordered composer; the controls under it are plain text.
-  expect(rule('.composer-dock')).toContain('border:1px solid var(--sh-input)')
+  // One borderless composer card (a soft shadow in light); the controls under it are plain text.
+  expect(rule('.composer-dock')).toContain('background:var(--sh-composer)')
+  expect(rule('.composer-dock')).toContain('border:1px solid transparent')
+  expect(rule('.composer-dock')).toContain('border-radius:12px')
+  // Segmented controls: no track, the selected option on a 6px pill.
+  expect(rule('.seg')).toContain('background:transparent')
+  expect(rule('.seg button.is-on')).toContain('background:var(--sh-pill)')
   expect(rule('.composer__toolbar .cchip')).toContain('border:0')
   expect(rule('.composer__toolbar .cchip')).toContain('background:transparent')
   // No soft shadows anywhere but popovers.

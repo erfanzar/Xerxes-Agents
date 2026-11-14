@@ -197,8 +197,9 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     ['unstaged', 'Changes', [...repo.unstaged, ...repo.untracked]],
   ] as const) : [], [repo])
 
-  // Picking a file in the rail opens the diff view, like the editor opens a diff tab.
-  const choose = (selection: ScmSelection): void => { setSelected(selection); if (!expanded) onExpand?.() }
+  // The diff shows beside the list right in the rail (every style shares this layout).
+  const inlineDiff = true
+  const choose = (selection: ScmSelection): void => { setSelected(selection) }
 
   // Keep the selection valid as the lists change; honour a deep link once.
   const linked = useRef('')
@@ -391,7 +392,7 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
         {onSnapshots && <button className="scm-link" onClick={onSnapshots}>Snapshots & restore…</button>}
       </div>
 
-      {expanded && <FileDiff scm={scm} selection={selected} repo={repo} />}
+      {(expanded || inlineDiff) && <FileDiff scm={scm} selection={selected} repo={repo} />}
     </div>
   )
 }
@@ -402,8 +403,9 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
   onStageAll: () => void; onUnstageAll: () => void; onDiscard: (files: readonly ScmFile[]) => void
 }): ReactElement {
   // File lists start folded so the commit box and history lead; a merge
-  // conflict blocks the commit, so that group is always shown open.
-  const [open, setOpen] = useState(group === 'conflicts')
+  // conflict blocks the commit, so that group is always shown open. In
+  // Shading the changed-file list leads the section, so it starts open.
+  const [open, setOpen] = useState(true)
   const staged = group === 'staged'
   return (
     <section className="scm-group">

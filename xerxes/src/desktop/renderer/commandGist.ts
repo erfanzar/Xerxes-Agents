@@ -27,6 +27,9 @@ export function commandGist(command: string): string {
       rest = rest.slice(1, -1).trim()
     }
   }
+  // Scripts open with setup statements (`export PATH=…; unset …; X=…; cd $X && …`).
+  // Skip those and start at the first statement that does the work.
+  rest = rest.slice(firstWorkStatement(rest)).trim() || rest
   // Leading `NAME=value` pairs are configuration, not the action — but only
   // drop them while something else remains. `FOO=1 BAR=2` with no command
   // after it *is* the content, and a regex that strips greedily from the
@@ -37,4 +40,30 @@ export function commandGist(command: string): string {
   while (first < tokens.length && assignment.test(tokens[first] ?? '')) first += 1
   const stripped = first < tokens.length ? tokens.slice(first).join(' ') : ''
   return stripped || rest || command.trim()
+}
+
+/** Statements that only prepare the environment: they name nothing the person cares about. */
+const SETUP_STATEMENT = /^(?:(?:export|unset|set|cd|pushd|source)\s|\.\s)|^[A-Za-z_][A-Za-z0-9_]*=\S*$/
+
+/**
+ * Offset of the first top-level statement (split on `;`, `&&`, `||` and newlines,
+ * outside quotes) that is not setup. 0 when there is none, so nothing is lost.
+ */
+function firstWorkStatement(script: string): number {
+  const starts: number[] = [0]
+  let quote = ''
+  for (let index = 0; index < script.length; index++) {
+    const char = script[index]!
+    if (quote) { if (char === quote) quote = ''; else if (char === '\\' && quote === '"') index++; continue }
+    if (char === '\\') { index++; continue }
+    if (char === '"' || char === "'") { quote = char; continue }
+    if (char === ';' || char === '\n') starts.push(index + 1)
+    else if ((char === '&' || char === '|') && script[index + 1] === char) { starts.push(index + 2); index++ }
+  }
+  for (let at = 0; at < starts.length; at++) {
+    const end = at + 1 < starts.length ? starts[at + 1]! : script.length
+    const statement = script.slice(starts[at], end).replace(/(?:;|&&|\|\|)\s*$/, '').trim()
+    if (statement && !SETUP_STATEMENT.test(statement)) return starts[at]!
+  }
+  return 0
 }

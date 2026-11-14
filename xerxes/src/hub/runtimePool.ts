@@ -98,8 +98,8 @@ export type HubDaemonMethod = (typeof HUB_DAEMON_METHODS)[number]
 /** Session-less methods that run the Hub's XERXES supervisor model on a daemon's own provider profiles. */
 export const HUB_MODEL_DAEMON_METHODS = ['hub.models.catalog', 'hub.models.options', 'hub.model.complete'] as const
 const MODEL_METHODS: ReadonlySet<string> = new Set(HUB_MODEL_DAEMON_METHODS)
-/** A completion is capped at 120 s on the daemon; leave room for the round trip. */
-const MODEL_CALL_TIMEOUT_MS = 130_000
+/** No Hub-side limit: the daemon owns the completion's lifetime; cancellation and a dropped lane still end it. */
+const MODEL_CALL_TIMEOUT_MS = Number.POSITIVE_INFINITY
 /** Separate from generic RPCs: only the lesson synchronizer may use this path. */
 export const HUB_LESSON_DAEMON_METHODS = ['lessons.shared.list', 'lessons.shared.apply'] as const
 export type HubLessonDaemonMethod = (typeof HUB_LESSON_DAEMON_METHODS)[number]

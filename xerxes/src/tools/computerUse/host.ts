@@ -13,6 +13,8 @@ import { MacOSComputerUsePort, resolveComputerUseCaptureBounds, type ComputerUse
 import type { ComputerUseToolsOptions } from './tool.js'
 
 export const DEFAULT_CUA_DRIVER = '/Applications/CuaDriver.app/Contents/MacOS/cua-driver'
+/** 32 MiB image bound in backend.ts plus room for the accessibility tree and JSON framing. */
+export const CUA_DRIVER_MAX_LINE_CHARS = 40 * 1024 * 1024
 
 export interface MacOSComputerUseHostOptions {
   readonly platform?: string
@@ -57,7 +59,10 @@ export class MacOSComputerUseHost {
     const selected = backend === 'auto' ? (platform === 'darwin' && exists(rawPath) ? 'cua' : 'macos') : backend
     if (selected === 'cua' && !this.driver) {
       const port = this.options.createDriver?.(rawPath) ?? new MCPClientCuaDriverPort(new MCPClient({
+        // A capture reply is one JSON line carrying a base64 screenshot plus the AX tree; large or
+        // high-DPI windows exceed the generic 1 MiB MCP line cap. Match the backend's image bound.
         name: 'xerxes-cua-driver', transport: 'stdio', command: rawPath, args: ['mcp'], timeoutMs: 30_000,
+        maxLineChars: CUA_DRIVER_MAX_LINE_CHARS,
       }), { isProvisioned: () => platform === 'darwin' && exists(rawPath), timeoutMs: 30_000 })
       this.driver = { path: rawPath, port }
     }

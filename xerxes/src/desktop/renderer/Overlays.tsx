@@ -56,6 +56,8 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
   const ref=useRef<HTMLDivElement>(null)
   useDialogFocus(ref, snap.settingsOpen)
+  // Shading: "← Back" and a tab search lead the Settings sidebar.
+  const [tabFilter, setTabFilter] = useState('')
   if (!snap.settingsOpen) return null
   // VS Code: one page with what a coding panel needs — models and providers,
   // how hard agents think, then approvals. No section tabs; the rest belongs
@@ -80,8 +82,11 @@ export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null
     <div className="backdrop">
       <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
         <div className="modal__side">
-          <div className="cap">Settings <button className="chipbtn" aria-label="Close settings" onClick={()=>store.closeSettings()}><Icon name="close" size={13} /></button></div>
-          {SETTINGS_TABS.map(tab => (
+          {<>
+                <button className="settings-back" aria-label="Close settings" onClick={() => store.closeSettings()}><span className="settings-back__icon"><Icon name="arrow" size={13} /></span><span>Back</span></button>
+                <label className="settings-search"><Icon name="search" size={13} /><input aria-label="Search Settings" placeholder="Search Settings" value={tabFilter} onChange={event => setTabFilter(event.target.value)} /></label>
+              </>}
+          {SETTINGS_TABS.filter(tab => !tabFilter.trim() || tab.label.toLowerCase().includes(tabFilter.trim().toLowerCase())).map(tab => (
             <button
               key={tab.id}
               className={`mtab${snap.settingsTab === tab.id ? ' is-on' : ''}`}
@@ -401,7 +406,7 @@ function StyleField(): ReactElement {
   const vscode = isVscodeHost()
   // VS Code keeps the choice in its own settings and stamps it on the page.
   const read = (): StyleChoice => typeof document === 'undefined' ? DEFAULT_STYLE
-    : vscode ? (isStyleChoice(document.documentElement.dataset?.styleChoice) ? document.documentElement.dataset.styleChoice as StyleChoice : 'neo')
+    : vscode ? (isStyleChoice(document.documentElement.dataset?.styleChoice) ? document.documentElement.dataset.styleChoice as StyleChoice : DEFAULT_STYLE)
     : loadAppearance().style
   const [style, setStyle] = useState<StyleChoice>(read)
   useEffect(() => {

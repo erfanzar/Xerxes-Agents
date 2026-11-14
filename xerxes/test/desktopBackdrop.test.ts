@@ -73,7 +73,7 @@ test('every bundled background ships in the repo, is stored by path, and derives
   expect(parseBackdrop({ kind: 'image', src: '../../etc/passwd', from: '#000', to: '#fff' })).toEqual({ kind: 'none' })
 })
 
-test('a fresh install opens transparent on macOS and solid elsewhere; choosing None is remembered', async () => {
+test('a fresh install opens with no background on every platform; choosing None is remembered', async () => {
   const { loadBackdrop, saveBackdrop, BACKDROP_KEY, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY } = await import('../src/desktop/renderer/backdrop.js')
   const store = new Map<string, string>()
   const original = globalThis.localStorage
@@ -83,7 +83,7 @@ test('a fresh install opens transparent on macOS and solid elsewhere; choosing N
   try {
     expect([DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY]).toEqual([70, 75])
     platform('MacIntel')
-    expect(loadBackdrop()).toEqual({ kind: 'transparent', chat: 100, panels: 0, blur: 0 })
+    expect(loadBackdrop()).toEqual({ kind: 'none' })
     platform('Win32')
     expect(loadBackdrop()).toEqual({ kind: 'none' })
     saveBackdrop({ kind: 'none' })

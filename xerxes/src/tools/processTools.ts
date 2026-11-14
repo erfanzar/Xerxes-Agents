@@ -85,6 +85,10 @@ export const EXEC_COMMAND_DEFINITION: ToolDefinition = {
           description: 'Run outside the command sandbox (for network access or changing a file that was there when the task started). Asks the user first.',
         },
         workdir: { type: 'string', default: '.', description: 'Workspace-relative working directory.' },
+        description: {
+          type: 'string',
+          description: 'Short human description of what the command does (for example "Watch worker 0 for 20 minutes"). Shown to the user in place of the raw command line in the background task list.',
+        },
         timeout_ms: {
           type: 'integer',
           default: DEFAULT_TIMEOUT_MS,
@@ -354,6 +358,9 @@ export async function executeCommand(
     throw new ValidationError('stdin', `must be at most ${MAX_STDIN_CHARS} characters; write larger input to a file and pass its path`, `${stdin.length} characters`)
   }
   const workdir = optionalString(inputs, 'workdir') ?? '.'
+  // The person reads the task list by what a command is for, not its argv (Claude Code's "description").
+  const description = optionalString(inputs, 'description')?.replace(/\s+/g, ' ').trim().slice(0, 120)
+  const taskName = description || [command, ...args].join(' ').slice(0, 60)
   const timeout = requireRange(optionalInteger(inputs, 'timeout_ms', DEFAULT_TIMEOUT_MS), 'timeout_ms', 1, 120_000)
   const maxOutputChars = requireRange(
     optionalInteger(inputs, 'max_output_chars', DEFAULT_MAX_OUTPUT_CHARS),
@@ -383,7 +390,7 @@ export async function executeCommand(
       command: startCommand,
       args: startArgs,
       cwd,
-      name: [command, ...args].join(' ').slice(0, 60),
+      name: taskName,
       ...(sandbox ? { env: sandbox.env } : {}),
     }
     return ownerSessionId === undefined
@@ -514,7 +521,7 @@ export async function executeCommand(
             ),
             stdout: stdoutBuffer,
             stderr: stderrBuffer,
-            name: [command, ...args].join(' ').slice(0, 60),
+            name: taskName,
             startedAt: childStartedAt,
           },
           handle => {

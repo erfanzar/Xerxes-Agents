@@ -23,7 +23,7 @@ export function stubController(overrides: Partial<HubController> = {}): HubContr
     loadAgents: noop, inspectAgent: noop, closeAgent() {}, resync: noop, reconnectNow() {},
     submit: async () => true, steer: async () => true, stopTurn: async () => true,
     decide: noop, answerQuestion: noop, setModel: noop, setGoal: noop, loadUsage: noop, setPresence() {},
-    supervisorOpen: noop, supervisorSend: async () => true, supervisorRespond: noop,
+    supervisorOpen: noop, supervisorSend: async () => true, supervisorRespond: noop, supervisorCancel: async () => true,
     machinesList: noop, supervisorConfigGet: noop, supervisorConfigOptions: noop, supervisorConfigSet: async () => true,
     loadAutopilot: noop, setAutopilot: async () => true, autopilotThreadOpen: noop, autopilotThreadRespond: noop,
     loadWatches: noop, setWatch: async () => true,

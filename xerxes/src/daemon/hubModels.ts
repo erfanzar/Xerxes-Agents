@@ -37,22 +37,21 @@ export const HUB_MODEL_DEFAULT_MAX_TOKENS = 2048
 export const HUB_MODEL_MAX_TOKENS = 8192
 export const HUB_MODEL_MAX_CONCURRENT = 2
 /**
- * How long the Hub waits for this daemon's provider call. Two minutes cut off
- * slow reasoning models mid-thought, which XERXES reported as "the model did
- * not answer within 120 seconds" and then stopped. Ten minutes by default, and
- * raisable per deployment without ever being unbounded.
+ * How long the Hub waits for this daemon's provider call. Fixed limits (two,
+ * then ten minutes) cut slow reasoning models off mid-thought, so by default
+ * there is none: a completion ends when it answers, fails, is cancelled or its
+ * connection closes. `XERXES_HUB_MODEL_TIMEOUT_MS` can still set one explicitly.
  */
-export const HUB_MODEL_TIMEOUT_MS = 600_000
+export const HUB_MODEL_TIMEOUT_MS = Number.POSITIVE_INFINITY
 export const HUB_MODEL_MIN_TIMEOUT_MS = 15_000
-export const HUB_MODEL_MAX_TIMEOUT_MS = 900_000
 
-/** `XERXES_HUB_MODEL_TIMEOUT_MS`, clamped; a malformed value keeps the default. */
+/** `XERXES_HUB_MODEL_TIMEOUT_MS` (at least 15 s) when set; otherwise no limit. */
 export function hubModelTimeoutMs(environment: Readonly<Record<string, string | undefined>> = process.env): number {
   const raw = environment.XERXES_HUB_MODEL_TIMEOUT_MS?.trim()
   if (!raw || !/^\d+$/.test(raw)) return HUB_MODEL_TIMEOUT_MS
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value <= 0) return HUB_MODEL_TIMEOUT_MS
-  return Math.min(HUB_MODEL_MAX_TIMEOUT_MS, Math.max(HUB_MODEL_MIN_TIMEOUT_MS, value))
+  return Math.max(HUB_MODEL_MIN_TIMEOUT_MS, value)
 }
 
 const MAX_MESSAGES = 500

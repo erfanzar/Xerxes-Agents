@@ -137,6 +137,8 @@ import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, resumeGo
 import { classifyError } from "../runtime/errorClassifier.js";
 import { parseAdvisorConfig } from "../runtime/advisorBudget.js";
 import { taskOutputFiles, taskOutputsOf, taskOutputsPayload } from "./taskOutputs.js";
+import { ArtifactStore } from "../session/artifacts.js";
+import { artifactsRpc } from "./artifactsRpc.js";
 import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
 import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
@@ -395,6 +397,8 @@ const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PENDING_SOCKET_REQUESTS = 1_024;
 const DEFAULT_MAX_PENDING_SOCKET_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_SOCKET_OUTPUT_BYTES = 16 * 1024 * 1024;
+/** Event pumps pause while a client's unwritten output is at least this large. */
+const SUBSCRIPTION_BACKPRESSURE_BYTES = 1024 * 1024;
 
 /**
  * Accepted client submission ids retained per session for reconnect-retry
@@ -509,6 +513,10 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   // Provider quota endpoints: slow networks must not stall the client's queue.
   "usage.report",
   "outputs.list",
+  "artifacts.list",
+  "artifacts.read",
+  "artifacts.pin",
+  "artifacts.update",
   "git.fetch",
   "git.pull",
   "git.push",
@@ -1006,7 +1014,7 @@ export interface DaemonServerOptions {
   readonly hubEnrollmentPath?: string;
   /** Test seam for `hub.model.complete`; production builds the client from the stored provider profile. */
   readonly hubModelClientFactory?: (model: string, profile: ProviderProfile) => LlmClient;
-  /** Test seam: wall-clock limit of one `hub.model.complete` (default 120 s). */
+  /** Test seam: wall-clock limit of one `hub.model.complete` (default: none). */
   readonly hubModelTimeoutMs?: number;
   /** Explicit native vision/provider-disclosure admission; images remain disabled without it. */
   readonly hubModelAuthorizeImages?: HubModelsOptions['authorizeImages'];
@@ -1063,6 +1071,8 @@ export interface DaemonServerOptions {
   /** Writable user-owned root used by the interactive `/skill-create` flow. */
   readonly skillDirectory?: string;
   readonly machineSettingsPath?: string;
+  /** Session artifacts read by `artifacts.*`; defaults to `<xerxes home>/artifacts`. */
+  readonly artifactStore?: ArtifactStore;
   /** Native skill registry used by `/skills`, `/skill`, and skill shorthand commands. */
   readonly skillRegistry?: SkillRegistry;
   /** Plugin slash commands share the daemon dispatch path rather than a Python fallback. */
@@ -1290,6 +1300,7 @@ export class DaemonServer {
   >();
   private readonly skillDirectory: string;
   private readonly machineSettingsPath: string;
+  private readonly artifactStore: ArtifactStore;
   private readonly slashPluginRegistry: SlashPluginRegistry;
   private readonly snapshotManagerFactory: (
     workspaceDirectory: string,
@@ -1366,6 +1377,7 @@ export class DaemonServer {
       this.learning.lessons.subscribe(workspace => this.learningChanged(workspace)),
     ] : [];
     this.machineSettingsPath = options.machineSettingsPath ?? join(xerxesHome(), 'machines.json');
+    this.artifactStore = options.artifactStore ?? new ArtifactStore();
     this.codexModelCatalog = options.codexModelCatalog ?? (async (profile, signal) => {
       const credential = await (profileSessionOptions(profile).codexSession ?? new CodexSession()).credential(signal);
       return fetchCodexModelCatalog(credential, {
@@ -1393,7 +1405,7 @@ export class DaemonServer {
       directory: join(daemonStateDirectory, 'transport-events'),
     });
     this.hubVerifier = new HubIdentityVerifier({ path: options.hubEnrollmentPath ?? join(daemonStateDirectory, 'hub-enrollments.json') });
-    this.eventSubscriptions = new EventSubscriptions(this.eventJournal);
+    this.eventSubscriptions = new EventSubscriptions(this.eventJournal, undefined, owner => this.outputBacklogged(owner));
     this.projectDirectory = options.projectDirectory
       ? resolveProjectDirectory(options.projectDirectory)
       : undefined;
@@ -2102,6 +2114,18 @@ export class DaemonServer {
     }
   }
 
+  /**
+   * Whether the socket behind a subscription owner (the raw connection, or the
+   * lease owner that one is bound to) has at least 1 MiB still waiting to be written.
+   */
+  private outputBacklogged(owner: object): boolean {
+    for (const connection of this.connections) {
+      if (connection !== owner && this.connectionLeases.owner(connection) !== owner) continue;
+      return connection.queuedOutputBytes >= SUBSCRIPTION_BACKPRESSURE_BYTES;
+    }
+    return false;
+  }
+
   private flushSocketOutput(connection: Connection): void {
     connection.outputBlocked = false;
     while (!connection.socket.destroyed && connection.outputQueue.length > 0) {
@@ -2753,6 +2777,12 @@ export class DaemonServer {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (!session) return { ok: false, error: "no active session" };
       return taskOutputsPayload(session.cwd, await taskOutputFiles(session.cwd, taskOutputsOf(session.metadata))) as JsonRpcPayload;
+    }
+    if (method === "artifacts.list" || method === "artifacts.read" || method === "artifacts.pin" || method === "artifacts.update") {
+      // Titled documents the agent saved with ArtifactTool, kept per session id.
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "no active session" };
+      return artifactsRpc(this.artifactStore, method, session.id, params);
     }
     if (method === "session.usage") {
       const session = this.runtime.sessionStatus(
@@ -7662,7 +7692,8 @@ export class DaemonServer {
       if (shell.label === USER_SHELL_LABEL) continue
       // Successful synchronous calls belong in the transcript, not activity history.
       if (!shell.running && shell.kind === 'foreground' && shell.exitCode === 0) continue;
-      rows.push({ id: shell.id, kind: 'shell', title: shell.command.slice(0, 2000), detail: shell.cwd,
+      // `label` is the agent's human description when it gave one (exec_command `description`).
+      rows.push({ id: shell.id, kind: 'shell', title: shell.command.slice(0, 2000), label: shell.label.slice(0, 200), detail: shell.cwd,
         state: shell.running ? 'running' : this.terminalRegistry?.wasCancelled(owner, shell.id) ? 'cancelled' : this.terminalRegistry?.wasInterrupted(owner, shell.id) ? 'interrupted' : shell.exitCode === 0 ? 'completed' : shell.exitCode === null ? 'interrupted' : 'failed',
         startedAt: shell.startedAt, endedAt: shell.endedAt ?? null, exitCode: shell.exitCode,
         action: shell.canKill ? 'stop' : null, scope: 'session' });
@@ -14069,7 +14100,7 @@ async function completePath(
   const directory = completionDirectory(prefix || ".", cwd);
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    return entries
+    const sorted = entries
       // A file browser shows dot entries (.github, .vscode, .env.example); a
       // typed completion only offers them once the user types the dot. The
       // repository database and Finder metadata are never worth browsing.
@@ -14082,17 +14113,29 @@ async function completePath(
         (entry) =>
           !base || entry.name.toLowerCase().startsWith(base.toLowerCase()),
       )
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .slice(offset, offset + 50)
-      .map((entry) => {
-        const directorySuffix = entry.isDirectory() ? "/" : "";
-        const label = `${entry.name}${directorySuffix}`;
-        return {
-          value: `${mention ? "@" : ""}${prefix}${label}`,
-          label,
-          meta: entry.isDirectory() ? "dir" : "file",
-        };
-      });
+      // A file browser pages folders first, then files, by name ignoring case
+      // and a leading dot, so a page boundary never splits the folder block.
+      .sort((left, right) => directoryBrowse
+        ? Number(right.isDirectory()) - Number(left.isDirectory())
+          || left.name.replace(/^\./, "").toLowerCase().localeCompare(right.name.replace(/^\./, "").toLowerCase())
+          || left.name.localeCompare(right.name)
+        : left.name.localeCompare(right.name))
+      .slice(offset, offset + 50);
+    const rows = await Promise.all(sorted.map(async (entry) => {
+      const directorySuffix = entry.isDirectory() ? "/" : "";
+      const label = `${entry.name}${directorySuffix}`;
+      // The browser shows each file's age; a stat failure just omits it.
+      const modified = directoryBrowse && !entry.isDirectory()
+        ? await stat(resolve(directory, entry.name)).then(info => new Date(info.mtimeMs).toISOString(), () => undefined)
+        : undefined;
+      return {
+        value: `${mention ? "@" : ""}${prefix}${label}`,
+        label,
+        meta: entry.isDirectory() ? "dir" : "file",
+        ...(modified ? { modified_at: modified } : {}),
+      };
+    }));
+    return rows;
   } catch (error) {
     if (directoryBrowse) throw error;
     return [];

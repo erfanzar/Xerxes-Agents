@@ -31,6 +31,23 @@ const EXTENSIONS: Record<string, keyof typeof LANGUAGES> = {
   toml: 'data', yaml: 'data', yml: 'data', ini: 'data', cfg: 'data', conf: 'data', env: 'data',
 }
 
+/** highlight.js grammar for a file (lowlight's `common` set), or '' when none fits. */
+const GRAMMARS: Record<string, string> = {
+  py: 'python', pyi: 'python', ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', json: 'json', jsonc: 'json',
+  go: 'go', rs: 'rust', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', hpp: 'cpp', java: 'java', kt: 'kotlin', swift: 'swift',
+  cs: 'csharp', rb: 'ruby', php: 'php', css: 'css', scss: 'scss', less: 'less', html: 'xml', xml: 'xml', svg: 'xml',
+  md: 'markdown', sh: 'bash', bash: 'bash', zsh: 'bash', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini',
+  sql: 'sql', diff: 'diff', patch: 'diff', lua: 'lua', pl: 'perl', r: 'r', graphql: 'graphql',
+}
+export function grammarFor(path: string): string {
+  const name = path.split('/').pop() ?? ''
+  if (name === 'Makefile') return 'makefile'
+  if (/^(Dockerfile|\.env.*)$/.test(name)) return 'bash'
+  const extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+  return GRAMMARS[extension] ?? ''
+}
+
 export function syntaxFor(path: string): Syntax {
   const name = path.split('/').pop() ?? ''
   if (/^(Dockerfile|Makefile|\.gitignore|\.dockerignore)$/.test(name)) return LANGUAGES.shell!

@@ -1486,8 +1486,8 @@ export interface CompleteLlmOptions {
   readonly preferStream?: boolean
   /**
    * Overall deadline in milliseconds, overriding
-   * {@link DEFAULT_COMPLETION_DEADLINE_MS}. A caller signal still aborts
-   * immediately and independently of this deadline.
+   * {@link DEFAULT_COMPLETION_DEADLINE_MS}. `Infinity` sets no deadline at all.
+   * A caller signal still aborts immediately and independently of this deadline.
    */
   readonly timeoutMs?: number
 }
@@ -1515,10 +1515,12 @@ export async function completeLlm(
   const timeoutMs = options.timeoutMs ?? DEFAULT_COMPLETION_DEADLINE_MS
   signal?.throwIfAborted()
   const recordUsage = chargeModelCall()
-  const deadline = AbortSignal.timeout(timeoutMs)
+  // Infinity means no deadline: only the caller's signal ends the call.
+  const deadline = Number.isFinite(timeoutMs) ? AbortSignal.timeout(timeoutMs) : undefined
   // Bun 1.3 provides AbortSignal.any; combining keeps one wire into the
   // transport while the deadline stays attributable for error translation.
-  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline
+  const parts = [signal, deadline].filter((part): part is AbortSignal => part !== undefined)
+  const combined = parts.length === 0 ? new AbortController().signal : parts.length === 1 ? parts[0]! : AbortSignal.any(parts)
 
   let onCombinedAbort: (() => void) | undefined
   try {
@@ -1531,7 +1533,7 @@ export async function completeLlm(
     recordUsage?.(result.usage)
     return result
   } catch (error) {
-    if (deadline.aborted && !signal?.aborted) {
+    if (deadline?.aborted && !signal?.aborted) {
       throw new CompletionDeadlineError(timeoutMs, { cause: error })
     }
     throw error

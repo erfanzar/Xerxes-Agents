@@ -295,13 +295,14 @@ function AgentDock({ id, title, active, online }: { id: string; title: string; a
         className="composer__input"
         rows={1}
         aria-label={active ? 'Message this agent' : 'Follow-up for retry'}
-        placeholder={active ? 'Message this agent — it reads it at its next step' : 'Optional instruction for a new attempt'}
+        placeholder={active ? 'Message this agent' : 'Continue this agent'}
         value={message}
         spellCheck={false}
         onChange={event => setMessage(event.target.value)}
         onKeyDown={event => {
-          // Enter sends while it runs; a settled agent is only retried by the button.
-          if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (active && message.trim()) void run('send') }
+          // Enter sends: a running agent reads it at its next step; a settled one
+          // continues in a new attempt that opens with this message.
+          if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (message.trim()) void run(active ? 'send' : 'retry') }
           // The window's Escape arms stopping the task's turn; here it only leaves the box.
           else if (event.key === 'Escape') { event.stopPropagation(); event.currentTarget.blur() }
         }}
@@ -310,12 +311,14 @@ function AgentDock({ id, title, active, online }: { id: string; title: string; a
         {active ? <>
           <button className="composer__send composer__send--stop" aria-label="Stop agent" title="Stop this agent — the task and its other agents keep running" disabled={busy !== ''} onClick={() => void run('stop')}><Icon name="stop" size={16} /></button>
           <button className="composer__send" aria-label="Send to agent" title="Send (⏎ · ⇧⏎ newline)" disabled={busy !== '' || !message.trim()} onClick={() => void run('send')}><Icon name="arrowUp" size={16} /></button>
-        </> : <button className="composer__send agent-dock__retry" aria-label="Retry agent" title="Start a new attempt of this agent" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="retry" size={14} /><span>{busy === 'retry' ? 'Retrying…' : 'Retry'}</span></button>}
+        </> : message.trim()
+          ? <button className="composer__send" aria-label="Send to agent" title="Send — the agent continues in a new attempt (⏎)" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="arrowUp" size={16} /></button>
+          : <button className="composer__send agent-dock__retry" aria-label="Retry agent" title="Start a new attempt of this agent" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="retry" size={14} /><span>{busy === 'retry' ? 'Retrying…' : 'Retry'}</span></button>}
       </div>
     </div></div>
     <div className="agent-dock__foot">{feedback
       ? <p role="status" data-error={feedback.failed || undefined}>{feedback.text}</p>
-      : <span>{active ? 'Stopping ends only this agent. The task and other agents keep running.' : 'This agent has finished. Retry starts a new attempt with your instruction.'}</span>}</div>
+      : <span>{active ? 'Stopping ends only this agent. The task and other agents keep running.' : 'This agent has finished. Sending a message continues it in a new attempt.'}</span>}</div>
   </fieldset>
 }
 

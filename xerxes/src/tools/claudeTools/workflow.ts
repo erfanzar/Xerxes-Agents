@@ -24,6 +24,7 @@ import {
 } from '../../operators/subagents.js'
 import { UserPromptManager } from '../../operators/userPrompt.js'
 import { resolveInteractionMode, type InteractionMode } from '../../runtime/interactionModes.js'
+import { ARTIFACT_KINDS, ArtifactStore, isArtifactKind, type ArtifactKind } from '../../session/artifacts.js'
 import type { AgentDefinition } from '../../agents/definitions.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalBoolean, optionalString, optionalStringArray, requiredString } from '../inputs.js'
@@ -243,6 +244,8 @@ export interface WorkflowHybridPlacement {
 
 export interface ClaudeWorkflowToolsOptions {
   readonly agentDefinitions?: readonly AgentDefinition[]
+  /** Where ArtifactTool keeps session artifacts; defaults to `<xerxes home>/artifacts`. */
+  readonly artifactStore?: ArtifactStore
   readonly agentResolver?: (name: string) => SpawnedAgentDescriptor | undefined
   /**
    * Hybrid placement of generated steps (M3.1). Absent, or returning
@@ -290,6 +293,22 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       },
     },
   }, ['todos']),
+  definition(
+    'ArtifactTool',
+    'Save a document for the user (a plan before non-trivial work, an explanation, analysis, review, report or spec) '
+    + 'as a titled artifact kept with this session and shown in the Artifacts panel. Not for one-line answers or files '
+    + 'that belong in the repository (use the file tools for those). To revise, call action "update" with the same id '
+    + 'instead of creating a duplicate.',
+    {
+      action: { type: 'string', enum: ['create', 'update'], description: 'create a new artifact, or update (replace) an existing one by id.' },
+      id: stringSchema('Artifact id returned by create. Required for update.'),
+      title: stringSchema('Short descriptive title. Required for create; on update it renames the artifact.'),
+      kind: { type: 'string', enum: [...ARTIFACT_KINDS], description: 'Content format. Default markdown.' },
+      language: stringSchema('Programming language when kind is code (e.g. typescript).'),
+      content: stringSchema('The complete document. Update replaces the whole content, so send all of it.'),
+    },
+    ['action', 'content'],
+  ),
   definition('AskUserQuestionTool', ASK_USER_POLICY + ' The turn blocks until they answer.', {
     question: stringSchema('Question shown to the user.'),
     options: ASK_USER_OPTIONS_SCHEMA,
@@ -331,6 +350,11 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
  * tool is added to CLAUDE_WORKFLOW_TOOL_DEFINITIONS without a record here.
  */
 export const CLAUDE_WORKFLOW_TOOL_CAPABILITIES: Readonly<Record<string, ToolCapabilities>> = Object.freeze({
+  // Writes only this session's artifact folder under the Xerxes home; an update
+  // keeps the record's id and bumps its version. Mutations are serialized per session.
+  ArtifactTool: capabilityRecord({
+    concurrencySafe: true, defer: true, destructive: false, openWorld: false, readOnly: false,
+  }),
   AskUserQuestionTool: capabilityRecord({
     concurrencySafe: false, defer: true, destructive: false, openWorld: true, readOnly: true,
   }),
@@ -422,6 +446,17 @@ function workflowToolHasHostPort(name: string, options: ClaudeWorkflowToolsOptio
  * loses its "only when explicitly requested" contract in the same stroke.
  */
 export const CLAUDE_WORKFLOW_TOOL_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
+  ArtifactTool:
+    'Use ArtifactTool by default for anything the user will read more than once; it lives with this session in the '
+      + 'Artifacts panel, apart from the chat. Plan first: before non-trivial work (a multi-step change, refactor, '
+      + 'migration, debugging or investigation) write the plan as an artifact, then work against it and update it as '
+      + 'steps finish or the plan changes. When the user asks you to explain, compare, review, analyse or teach '
+      + 'something, write the explanation as an artifact (headings, tables, code, mermaid diagrams) and keep the chat '
+      + 'reply to a short summary. Reports, specs, findings, reviews and decision records belong there too. Skip it only '
+      + 'for one-line answers, greetings and quick status replies, and for code or files that belong in the repository '
+      + '(write those with the file tools). When revising, call action "update" with the id you got back instead of '
+      + 'creating a duplicate. After creating or updating, mention the artifact in one sentence in your reply rather '
+      + 'than repeating its content.',
   PlanTool:
     'Use ONLY when the user explicitly asks for a multi-agent plan or decomposition; ordinary work '
       + 'belongs to your own tools. Steps execute as parallel subagents joined before this turn ends, '
@@ -473,9 +508,11 @@ function capabilityRecord(axes: {
 export class ClaudeWorkflowTools {
   readonly state: WorkflowState
   private readonly worktrees: WorktreeManager
+  private artifactStore: ArtifactStore | undefined
 
   constructor(private readonly options: ClaudeWorkflowToolsOptions, private readonly registry: ToolRegistry) {
     this.state = options.state ?? new WorkflowState()
+    this.artifactStore = options.artifactStore
     this.worktrees = options.worktreeManager ?? new NativeWorktreeManager(options.workspaceRoot ?? process.cwd())
   }
 
@@ -487,6 +524,7 @@ export class ClaudeWorkflowTools {
   ): Promise<unknown> {
     switch (name) {
       case 'TodoWriteTool': return this.todoWrite(inputs)
+      case 'ArtifactTool': return this.artifact(inputs, context)
       case 'AskUserQuestionTool': return this.askUser(inputs, signal)
       case 'EnterPlanModeTool': return this.enterPlanMode()
       case 'ExitPlanModeTool': return this.exitPlanMode()
@@ -502,6 +540,48 @@ export class ClaudeWorkflowTools {
 
   private todoWrite(inputs: JsonObject): string {
     return this.state.replaceTodos(parseTodos(inputs.todos))
+  }
+
+  /** Create or revise one artifact of the calling session. */
+  private async artifact(inputs: JsonObject, context: ToolExecutionContext): Promise<string> {
+    const sessionId = context.sessionId?.trim()
+    if (!sessionId) {
+      throw new ClientError('artifact', 'no session is attached to this call, so there is nowhere to keep an artifact; put the document in your reply or write it to a file instead')
+    }
+    const action = requiredString(inputs, 'action')
+    const kindInput = optionalString(inputs, 'kind')?.trim()
+    let kind: ArtifactKind | undefined
+    if (kindInput) {
+      if (!isArtifactKind(kindInput)) throw new ValidationError('kind', `must be one of ${ARTIFACT_KINDS.join(', ')}`, kindInput)
+      kind = kindInput
+    }
+    const language = optionalString(inputs, 'language')
+    const title = optionalString(inputs, 'title')
+    const content = requiredString(inputs, 'content')
+    const store = this.artifactStore ??= new ArtifactStore()
+    if (action === 'create') {
+      if (title === undefined || !title.trim()) throw new ValidationError('title', 'is required to create an artifact', title)
+      if (optionalString(inputs, 'id')?.trim()) {
+        throw new ValidationError('id', 'is only used with action "update"; omit it to create a new artifact')
+      }
+      const created = await store.create(sessionId, {
+        title, content, ...(kind === undefined ? {} : { kind }), ...(language === undefined ? {} : { language }),
+      })
+      return `Created artifact "${created.title}" (id ${created.id}, version ${created.version}). `
+        + `It is in the Artifacts panel; mention it briefly instead of repeating its content. Use action "update" with id ${created.id} to revise it.`
+    }
+    if (action === 'update') {
+      const id = optionalString(inputs, 'id')?.trim()
+      if (!id) throw new ValidationError('id', 'is required to update an artifact')
+      const updated = await store.update(sessionId, id, {
+        content,
+        ...(title === undefined || !title.trim() ? {} : { title }),
+        ...(kind === undefined ? {} : { kind }),
+        ...(language === undefined ? {} : { language }),
+      })
+      return `Updated artifact "${updated.title}" (id ${updated.id}, version ${updated.version}).`
+    }
+    throw new ValidationError('action', 'must be create or update', action)
   }
 
   private async askUser(inputs: JsonObject, signal?: AbortSignal): Promise<string> {

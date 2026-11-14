@@ -10,13 +10,18 @@
  */
 
 import { memo, useDeferredValue, useMemo, type ReactElement } from 'react'
-import { syntaxFor, tokenize } from './syntax.js'
+import { highlightLines, type LineSpan } from './codeHighlight.js'
+import { grammarFor, syntaxFor, tokenize } from './syntax.js'
 
-const Line = memo(function Line({ number, text, path }: { number: number; text: string; path: string }): ReactElement {
-  const tokens = useMemo(() => tokenize(text, syntaxFor(path)), [text, path])
+/** One row: lowlight's spans when the file's grammar is known, else the small line tokenizer. */
+const Line = memo(function Line({ number, text, path, spans }: { number: number; text: string; path: string; spans: readonly LineSpan[] | undefined }): ReactElement {
+  const tokens = useMemo(() => spans ? [] : tokenize(text, syntaxFor(path)), [spans, text, path])
+  const body = spans
+    ? spans.map((span, index) => span.className ? <span key={index} className={span.className}>{span.text}</span> : span.text)
+    : tokens.map((token, index) => token.kind === 'plain' ? token.text : <span key={index} className={`tok-${token.kind}`}>{token.text}</span>)
   return <div className="code-editor__row">
     <span className="code-editor__num" aria-hidden="true">{number}</span>
-    <code>{tokens.length ? tokens.map((token, index) => token.kind === 'plain' ? token.text : <span key={index} className={`tok-${token.kind}`}>{token.text}</span>) : ' '}</code>
+    <code>{body.length ? body : ' '}</code>
   </div>
 })
 
@@ -38,11 +43,13 @@ export function CodeEditor({ path, value, onChange, onSave, readOnly = false }: 
   // The coloured copy may trail a fast typist by a frame; the text itself never does.
   const painted = useDeferredValue(value)
   const lines = useMemo(() => painted.split('\n'), [painted])
+  // Whole-file grammar, so a docstring or block comment keeps its colour on every line it covers.
+  const highlighted = useMemo(() => highlightLines(painted, grammarFor(path)), [painted, path])
   const indent = useMemo(() => indentUnit(value, path), [value, path])
   return <div className="code-editor">
     <div className="code-editor__body">
       <div className="code-editor__paint" aria-hidden="true">
-        {lines.map((line, index) => <Line key={index} number={index + 1} text={line} path={path} />)}
+        {lines.map((line, index) => <Line key={index} number={index + 1} text={line} path={path} spans={highlighted?.[index]} />)}
       </div>
       <textarea
         className="code-editor__input"

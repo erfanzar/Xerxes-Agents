@@ -276,7 +276,8 @@ test('session edits, the plan and the log each render as a view with a way back'
       tab: 'changes',
     }),
   )
-  for (const needle of ['Activity', 'Git', 'Session edits', 'Conversation', 'src/a.ts', 'Keep all', 'Event log']) {
+  // The source-control rail section is labelled "Changes".
+  for (const needle of ['Activity', 'Changes', 'Session edits', 'Conversation', 'src/a.ts', 'Keep all', 'Event log']) {
     expect(tabs).toContain(needle)
   }
   expect(tabs).toContain('+12')
@@ -453,6 +454,27 @@ test('checkpoint markers and edit stats render in the activity feed', () => {
   expect(html).toContain('<details class="activity-group">')
   expect(html).not.toContain('Checkpoint')
   expect(html).not.toContain('turn 1 end')
+})
+
+test('a turn that edited files ends with a Files changed card listing only that turn', () => {
+  const html = render(
+    snapshot({
+      blocks: [
+        { kind: 'tools', id: 1, running: false, items: [{ id: 't1', verb: 'edit', arg: 'src/a.ts', dur: '0.7s', state: 'done', path: 'src/a.ts', diff: { adds: 21, dels: 6 } }] },
+        { kind: 'checkpoint', id: 2, turn: 2, adds: 21, dels: 6 },
+      ],
+      changes: [
+        { path: 'src/a.ts', adds: 21, dels: 6, isNew: false, hunks: [], turn: 2 },
+        { path: 'src/old.ts', adds: 3, dels: 1, isNew: false, hunks: [], turn: 1 },
+      ],
+    }),
+  )
+  // The inspector also lists every touched file; check only inside the card.
+  const card = /<section class="fileschanged"[\s\S]*?<\/section>/.exec(html)?.[0] ?? ''
+  expect(card).not.toBe('')
+  expect(card).toContain('src/a.ts')
+  expect(card).not.toContain('src/old.ts')
+  expect(card).toContain('+21')
 })
 
 test('the feed groups live reasoning and tools without constructing collapsed execution details', () => {

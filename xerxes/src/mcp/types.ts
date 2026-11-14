@@ -58,6 +58,12 @@ export interface MCPServerConfig {
    */
   readonly allowPrivateNetwork?: boolean
   readonly timeoutMs?: number
+  /**
+   * Longest single stdio JSON-RPC line accepted before the server is treated as
+   * runaway and killed (default 1 MiB). Raise it only for a known server whose
+   * replies legitimately carry large payloads, such as screenshots.
+   */
+  readonly maxLineChars?: number
   readonly protocolVersion?: string
   readonly clientInfo?: MCPImplementation
   readonly clientCapabilities?: MCPCapabilities

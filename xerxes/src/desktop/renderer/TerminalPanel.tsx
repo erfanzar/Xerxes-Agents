@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { Terminal as XTerm, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 
+
 import { desktopCall, desktopError, text, type RpcRecord } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { userShells, type ShellRow } from './terminalShells.js'
@@ -160,7 +161,7 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
         {(shells ?? []).map((row, index) => (
           <span key={row.id} className={`term-tab${row.id === active ? ' is-active' : ''}${row.running ? '' : ' is-exited'}`}>
             <button role="tab" aria-selected={row.id === active} onClick={() => setActive(row.id)} title={row.running ? 'Shell' : 'Exited'}>
-              <Icon name="terminal" size={12} /><span>Shell {index + 1}</span>
+              <Icon name="terminal" size={12} /><span>{`Terminal ${index + 1}`}</span>
             </button>
             <button className="term-tab__close" aria-label={closing.has(row.id) ? `Closing shell ${index + 1}` : `Close shell ${index + 1}`} title="Close shell" disabled={closing.has(row.id)} onClick={() => close(row.id)}>{closing.has(row.id) ? 'Closing…' : <Icon name="close" size={10} />}</button>
           </span>

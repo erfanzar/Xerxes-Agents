@@ -14,7 +14,16 @@ test('the rail shows what ran, not the wrapper it ran inside', () => {
     .toBe('pytest tests/')
   expect(commandGist('bash -lc "FOO=1 npm run build"')).toBe('npm run build')
   expect(commandGist('/bin/sh -c BAR=2 ls -la')).toBe('ls -la')
-  expect(commandGist('bash -c "cd /tmp && make -j8"')).toBe('cd /tmp && make -j8')
+  expect(commandGist('bash -c "cd /tmp && make -j8"')).toBe('make -j8')
+})
+
+test('setup statements (export, unset, assignments, cd) are skipped to the first real work', () => {
+  expect(commandGist('/bin/bash -c export PATH=/a:/b; unset FOO BAR; X=/repo/xerxes; cd $X && bun x tsc --noEmit -p tsconfig.json'))
+    .toBe('bun x tsc --noEmit -p tsconfig.json')
+  // Separators inside quotes are not statement boundaries.
+  expect(commandGist('export A=1; echo "a; b && c"')).toBe('echo "a; b && c"')
+  // A script that is only setup keeps all of it.
+  expect(commandGist('export A=1; cd /tmp')).toBe('export A=1; cd /tmp')
 })
 
 test('a plain command is left exactly as it is', () => {

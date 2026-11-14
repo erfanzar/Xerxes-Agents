@@ -41,10 +41,10 @@ test('long goals and eight agents retain all content without zero-turn noise', (
 
 test('appearance preferences validate stored choices independently of session state', async () => {
   const { parseAppearance } = await import('../src/desktop/renderer/appearance.js')
-  expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13', style: 'neo' })
+  expect(parseAppearance({ theme: 'light', font: '13' })).toEqual({ theme: 'light', font: '13', style: 'shading' })
   expect(parseAppearance({ theme: 'light', font: '13', style: 'classic' })).toEqual({ theme: 'light', font: '13', style: 'classic' })
-  // Unreadable choices fall back to a fresh install's defaults (XS text, Neo).
-  expect(parseAppearance({ theme: 'invalid', font: 90, style: 'retro' })).toEqual({ theme: 'system', font: '11', style: 'neo' })
+  // Unreadable choices fall back to a fresh install's defaults (XS text, Shading, Dark).
+  expect(parseAppearance({ theme: 'invalid', font: 90, style: 'retro' })).toEqual({ theme: 'dark', font: '11', style: 'shading' })
 })
 
 test('background history is collapsed while active and unknown states remain visible', () => {
@@ -55,13 +55,12 @@ test('background history is collapsed while active and unknown states remain vis
     { id: 'failed', state: 'failed', title: 'Failed command' },
   ]
   const html = renderToStaticMarkup(createElement(BackgroundActivity, { rows, renderRow: row => createElement('p', { key: String(row.id) }, String(row.title)) }))
-  const disclosure = html.indexOf('<details')
-  expect(html.indexOf('Live watch')).toBeLessThan(disclosure)
-  expect(html.indexOf('Needs input')).toBeLessThan(disclosure)
-  expect(html.indexOf('Archived watch')).toBeGreaterThan(disclosure)
+  // Claude Code's grouping: a "Running" fold, then a "Finished" fold.
+  const finishedFold = html.indexOf('aria-label="Finished background tasks"')
+  expect(html).toContain('aria-label="Running background tasks"')
+  expect(html.indexOf('Live watch')).toBeLessThan(finishedFold)
+  expect(html.indexOf('Needs input')).toBeLessThan(finishedFold)
+  expect(html.indexOf('Archived watch')).toBeGreaterThan(finishedFold)
   expect(html).toContain('2 · 1 failed')
-  expect(html).not.toContain('<details open')
-  // "Past" now means the tail beyond the few kept on screen.
-  expect(html).toContain('aria-label="Earlier background activity" tabindex="0"')
   expect(renderToStaticMarkup(createElement(BackgroundActivity, { rows: [], renderRow: () => createElement('p') }))).toBe('')
 })
