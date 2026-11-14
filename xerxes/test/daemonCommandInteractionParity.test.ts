@@ -134,23 +134,24 @@ test('daemon completion preserves command and path semantics while native skills
     await mkdir(join(directory, '.git'))
     client.send({ jsonrpc: '2.0', id: 101, method: 'complete', params: { path_prefix: './' } })
     const browsed = (await client.next(frame => frame.id === 101)).result?.completions as Array<{ label: string }>
+    // Browsed files carry their age (modified_at) for the desktop file tree; directories do not.
     expect(browsed).toEqual(expect.arrayContaining([
-      { value: './alpha.txt', label: 'alpha.txt', meta: 'file' },
+      { value: './alpha.txt', label: 'alpha.txt', meta: 'file', modified_at: expect.any(String) },
       { value: './folder with spaces/', label: 'folder with spaces/', meta: 'dir' },
       // Browsing shows dot entries, but not the repository database.
-      { value: './.hidden', label: '.hidden', meta: 'file' },
+      { value: './.hidden', label: '.hidden', meta: 'file', modified_at: expect.any(String) },
     ]))
     expect(browsed.map(entry => entry.label)).not.toContain('.git/')
 
     client.send({ jsonrpc: '2.0', id: 102, method: 'complete', params: { path_prefix: './folder with spaces/' } })
     expect((await client.next(frame => frame.id === 102)).result?.completions).toEqual([
-      { value: './folder with spaces/notes.txt', label: 'notes.txt', meta: 'file' },
+      expect.objectContaining({ value: './folder with spaces/notes.txt', label: 'notes.txt', meta: 'file' }),
     ])
     client.send({ jsonrpc: '2.0', id: 103, method: 'complete', params: { path_prefix: './missing-directory/' } })
     expect((await client.next(frame => frame.id === 103)).error).toBeDefined()
     client.send({ jsonrpc: '2.0', id: 104, method: 'complete', params: { path_prefix: 'my f' } })
     expect((await client.next(frame => frame.id === 104)).result?.completions).toEqual([
-      { value: 'my file.md', label: 'my file.md', meta: 'file' },
+      expect.objectContaining({ value: 'my file.md', label: 'my file.md', meta: 'file' }),
     ])
 
 
