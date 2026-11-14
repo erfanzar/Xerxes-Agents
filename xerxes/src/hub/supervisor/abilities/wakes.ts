@@ -15,7 +15,14 @@ interface WakeOptions {
   readonly authorized: (scope: NotebookScope) => boolean
   readonly deliver: (wake: Wake) => Promise<void>
   readonly onError?: (error: unknown) => void
+  /** A delivery claim older than this is recovered (default 15 min). */
+  readonly claimTtlMs?: number
+  /** Facts older than this (by their own time) are a replay and never wake (default 10 min). */
+  readonly replayWindowMs?: number
 }
+export const DEFAULT_CLAIM_TTL_MS = 15 * 60_000
+export const DEFAULT_REPLAY_WINDOW_MS = 10 * 60_000
+const MAX_CLAIM_ATTEMPTS = 2
 const KINDS: ReadonlySet<string> = new Set(['task_idle', 'goal_blocked', 'question_waiting', 'tests_failing', 'disk_threshold'])
 
 /** Durable timers and event receipts. Wakes are data-only observations, never C/D mandates. */
@@ -34,7 +41,8 @@ export class SupervisorWakes {
       CREATE TABLE IF NOT EXISTS hub_superagent_event_receipts (subscription TEXT NOT NULL, event TEXT NOT NULL, PRIMARY KEY(subscription,event));
       CREATE TABLE IF NOT EXISTS hub_superagent_disk_state (subscription TEXT PRIMARY KEY, above INTEGER NOT NULL CHECK(above IN (0,1)));
       CREATE TABLE IF NOT EXISTS hub_superagent_checkins (owner TEXT NOT NULL, thread TEXT NOT NULL,
-      workspace TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(owner,thread,workspace));`)
+      workspace TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(owner,thread,workspace));
+      CREATE TABLE IF NOT EXISTS hub_superagent_wake_claims (id TEXT PRIMARY KEY, claimed_at INTEGER NOT NULL, attempts INTEGER NOT NULL);`)
     this.refresh()
   }
 
@@ -87,10 +95,19 @@ export class SupervisorWakes {
       .run(scope.owner, scope.thread, scope.workspace, kind).changes === 1
   }
 
-  async observe(event: { id: string; workspace: string; kind: WakeKind; digest: string; value?: number }): Promise<void> {
+  async observe(event: { id: string; workspace: string; kind: WakeKind; digest: string; value?: number; at?: number; clear?: boolean }): Promise<void> {
     if (this.disposed || this.options.paused()) return
     if (event.id.length < 1 || event.id.length > 200 || event.digest.length > 1000 || !KINDS.has(event.kind)) throw new Error('Invalid subscription event')
     const subscriptions = this.db.query<Subscription, [string, string]>('SELECT * FROM hub_superagent_subscriptions WHERE workspace=? AND kind=?').all(event.workspace, event.kind)
+    if (event.clear === true) {
+      // The state ended (e.g. the goal is no longer blocked): a later real re-block wakes again.
+      for (const sub of subscriptions) {
+        this.db.query("DELETE FROM hub_superagent_event_receipts WHERE subscription=? AND substr(event,1,?)=?").run(sub.id, event.id.length, event.id)
+      }
+      return
+    }
+    // A replayed old fact (a Hub resync re-sending yesterday's events) never wakes anyone.
+    if (event.at !== undefined && Number.isFinite(event.at) && event.at < this.options.clock() - (this.options.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS)) return
     for (const sub of subscriptions) {
       if (!this.options.authorized(sub)) continue
       if (sub.kind === 'disk_threshold' && (event.value === undefined || !Number.isFinite(event.value) || event.value < 0 || event.value > 100)) continue
@@ -113,7 +130,10 @@ export class SupervisorWakes {
           if (Buffer.byteLength(reason + character) > 2000) break
           reason += character
         }
-        this.schedule(sub, { after: 0, reason })
+        // A burst of the same fact merges into the one wake still waiting to run.
+        const queued = this.db.query("SELECT 1 FROM hub_superagent_wakes WHERE owner=? AND thread=? AND workspace=? AND reason=? AND state='pending'")
+          .get(sub.owner, sub.thread, sub.workspace, reason)
+        if (!queued) this.schedule(sub, { after: 0, reason })
         if (sub.kind === 'disk_threshold') this.db.query('INSERT INTO hub_superagent_disk_state VALUES (?,1) ON CONFLICT(subscription) DO UPDATE SET above=1').run(sub.id)
         this.db.query('INSERT INTO hub_superagent_event_receipts VALUES (?,?)').run(sub.id, event.id)
       }).immediate()
@@ -136,6 +156,7 @@ export class SupervisorWakes {
     if (this.active !== undefined) return this.active
     const run = async (): Promise<void> => {
       if (this.disposed || this.options.paused()) return
+      this.recoverClaims()
       const rows = this.db.query<WakeRow, [number]>("SELECT * FROM hub_superagent_wakes WHERE state='pending' AND at<=? ORDER BY at,id LIMIT 100").all(this.options.clock())
       for (const row of rows) {
         if (this.disposed || this.options.paused()) break
@@ -143,7 +164,9 @@ export class SupervisorWakes {
           this.db.query("UPDATE hub_superagent_wakes SET state='blocked' WHERE id=? AND state='pending'").run(row.id); continue
         }
         if (this.db.query("UPDATE hub_superagent_wakes SET state='claimed' WHERE id=? AND state='pending'").run(row.id).changes !== 1) continue
-        // A claimed wake after a crash remains visibly claimed; it is never replayed as a side effect.
+        this.db.query(`INSERT INTO hub_superagent_wake_claims VALUES (?,?,1) ON CONFLICT(id)
+          DO UPDATE SET claimed_at=excluded.claimed_at, attempts=attempts+1`).run(row.id, this.options.clock())
+        // A claim left behind (crash, hung delivery) expires and is recovered by recoverClaims().
         try {
           await this.options.deliver({ ...row, state: 'claimed' })
           // Shutdown may close SQLite while delivery awaits the runner. Keep
@@ -167,6 +190,23 @@ export class SupervisorWakes {
     if (next === null) return
     this.timer = setTimeout(() => { void this.drain().catch(error => this.options.onError?.(error)) }, Math.max(1, Math.min(2147483647, next.at - this.options.clock())))
     this.timer.unref?.()
+  }
+
+  /**
+   * A claim older than the claim TTL never finished: re-queue it once (wakes are data-only
+   * observations), then mark it `expired` so a wake that keeps hanging cannot loop.
+   * A claim with no claim record (from before claims were timed) counts from its due time.
+   */
+  recoverClaims(): number {
+    const cutoff = this.options.clock() - (this.options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS)
+    const stale = this.db.query<{ id: string; attempts: number | null }, [number, number]>(`SELECT w.id, c.attempts FROM hub_superagent_wakes w
+      LEFT JOIN hub_superagent_wake_claims c ON c.id = w.id
+      WHERE w.state='claimed' AND ((c.claimed_at IS NULL AND w.at < ?) OR c.claimed_at < ?)`).all(cutoff, cutoff)
+    for (const row of stale) {
+      const next = (row.attempts ?? 1) < MAX_CLAIM_ATTEMPTS ? 'pending' : 'expired'
+      this.db.query("UPDATE hub_superagent_wakes SET state=? WHERE id=? AND state='claimed'").run(next, row.id)
+    }
+    return stale.length
   }
 
   dispose(): void { this.disposed = true; clearTimeout(this.timer); this.timer = undefined }
