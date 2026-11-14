@@ -27,6 +27,7 @@ import {
   type SupervisorStatusInput,
 } from './runner.js'
 import { createSupervisorToolRegistry, type SupervisorToolDeps } from './tools.js'
+import { ModelAvailability } from './modelAvailability.js'
 import { SuperagentAbilities } from './abilities/service.js'
 import { SuperagentControl } from './abilities/control.js'
 import { SubscriptionEvents } from './abilities/events.js'
@@ -149,6 +150,8 @@ export interface HubSupervisor {
   readonly autopilot: AutopilotSettings
   readonly waker: AutopilotWaker
   readonly watch: WatchService
+  /** Turns waiting for a model; `notify()` when a machine's health changes. */
+  readonly availability: ModelAvailability
   attachSink(sink: SupervisorEventSink | undefined): void
   close(): void
 }
@@ -204,6 +207,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
       : { principal_kind: 'user', principal_id: event.ownerId, display_name: threads.principalOrStored(event.ownerId)?.displayName ?? 'Hub owner' },
       action: `superagent.control.${event.kind}`, requestHash: event.hash, decision: 'allowed', outcome: 'n/a' }) })
   const controlledModel = control.model(options.model)
+  const availability = new ModelAvailability()
 
   /**
    * XERXES is the Hub owner's personal agent. When the owner is the one talking to it (or a Hub
@@ -503,6 +507,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
         ?.catch(error => report(error, 'supervisor stop push'))
     },
     onError: report,
+    availability,
   })
 
   const waker = new AutopilotWaker({
@@ -700,7 +705,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
 
   let closed = false
   return {
-    handlers: { ...handlers, ...autopilot.handlers, ...watch.handlers, ...controlHandlers }, voice, threads, actions, attention, digests, runner, autopilot, waker, watch,
+    handlers: { ...handlers, ...autopilot.handlers, ...watch.handlers, ...controlHandlers }, voice, threads, actions, attention, digests, runner, autopilot, waker, watch, availability,
     attachSink: sink => threads.setSink(sink),
     close() {
       if (closed) return

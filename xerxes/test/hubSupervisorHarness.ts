@@ -13,6 +13,7 @@ import {
   SupervisorRunner, type SupervisorModelPort, type SupervisorModelRequest, type SupervisorModelResponse, type SupervisorQuotas, type SupervisorStatusPort,
 } from '../src/hub/supervisor/runner.js'
 import { createSupervisorToolRegistry } from '../src/hub/supervisor/tools.js'
+import type { ModelAvailability } from '../src/hub/supervisor/modelAvailability.js'
 import { SupervisorThreads, type SupervisorEventType, type UserPrincipal } from '../src/hub/supervisor/threads.js'
 import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 import { FakeIdentity, registerCleanup, standardUsers } from './hubHarness.js'
@@ -145,7 +146,7 @@ export function makeWorld(options: { modelSetSessionOnly?: boolean; expiryMs?: n
 }
 export type World = ReturnType<typeof makeWorld>
 
-export function makeRunner(world: World, model: SupervisorModelPort, options: { quotas?: Partial<SupervisorQuotas>; onStopped?: (info: unknown) => void; status?: SupervisorStatusPort } = {}) {
+export function makeRunner(world: World, model: SupervisorModelPort, options: { quotas?: Partial<SupervisorQuotas>; onStopped?: (info: unknown) => void; status?: SupervisorStatusPort; availability?: ModelAvailability } = {}) {
   return new SupervisorRunner({
     threads: world.threads,
     registry: world.registry,
@@ -156,6 +157,7 @@ export function makeRunner(world: World, model: SupervisorModelPort, options: { 
     ...(options.quotas === undefined ? {} : { quotas: options.quotas }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
     ...(options.status === undefined ? {} : { status: options.status }),
+    ...(options.availability === undefined ? {} : { availability: options.availability }),
   })
 }
 

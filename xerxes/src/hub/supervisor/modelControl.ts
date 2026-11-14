@@ -14,6 +14,7 @@ import type { HubMethodHandler } from '../server.js'
 import type { HubSigner } from '../signer.js'
 import { SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID } from './audit.js'
 import type { SupervisorModelPort, SupervisorModelRequest, SupervisorModelResponse } from './runner.js'
+import { ModelUnavailableError } from './modelAvailability.js'
 
 /**
  * Which model XERXES runs on is chosen at runtime, not by environment variables.
@@ -318,7 +319,7 @@ export class SupervisorModelControl {
       }
       if (!FAILOVER_SKIP_CODES.has(outcome.error.code)) throw new Error(refusalMessage(outcome))
     }
-    throw new Error(`${configuredLabel} is offline and no other online machine offers ${stored.profile}/${stored.model}.`)
+    throw new ModelUnavailableError(`${configuredLabel} is offline and no other online machine offers ${stored.profile}/${stored.model}.`)
   }
 
   private setFailover(from: string, next: { readonly machineId: string; readonly label: string } | undefined): void {

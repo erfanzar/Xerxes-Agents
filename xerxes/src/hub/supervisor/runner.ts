@@ -11,6 +11,7 @@ import { ABILITY_SPECS } from './abilities/catalog.js'
 import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abilities/captureSink.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
 import { DEFAULT_TURN_IDLE_MS, IdleTimeoutError, normalizeIdleMs, startIdleWatchdog } from './idleWatchdog.js'
+import { ModelUnavailableError, type ModelAvailability } from './modelAvailability.js'
 import { MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
 /**
@@ -220,6 +221,8 @@ export interface SupervisorRunnerOptions {
   readonly clock?: () => number
   readonly onStopped?: (info: SupervisorStoppedInfo) => void
   readonly onError?: (error: unknown, context: string) => void
+  /** When set, a turn whose model is unavailable waits here instead of failing. */
+  readonly availability?: ModelAvailability
 }
 
 const CONTEXT_MESSAGES = 40
@@ -425,6 +428,7 @@ export class SupervisorRunner {
       // audience so reopening the thread can show the finished turn's work.
       const turnId = `turn-${this.clock().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       let stepSeq = 0
+      let waitingNoticed = false
       const step = (payload: SupervisorStepDraft): void => {
         const record = { turnId, at: new Date(this.clock()).toISOString(), ...payload }
         threads.recordStep(threadId, record, [requester.id])
@@ -445,6 +449,22 @@ export class SupervisorRunner {
           watchdog.touch()
         } catch (error) {
           if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
+          const availability = this.options.availability
+          if (error instanceof ModelUnavailableError && availability !== undefined) {
+            // Never drop the person's message or the wake: keep the turn (later ones stay queued
+            // behind it), say so once, and retry when a machine offering the model is back.
+            if (!waitingNoticed) {
+              waitingNoticed = true
+              const { message } = threads.append({ threadId, role: 'system', text: `XERXES is waiting for its model: ${clip(error.message, 200)} Your request is queued and will run when a machine offering the model is back online.` })
+              threads.emit(threadId, 'supervisor.thread_event', { message: messageToWire(message) })
+            }
+            counts.modelCalls -= 1
+            try { await availability.wait(controller.signal) } catch {
+              return this.aborted(controller, threadId, requester, counts)
+            }
+            watchdog.touch()
+            continue
+          }
           this.options.onError?.(error, 'supervisor model')
           return this.finishWith(threadId, requester, 'model_error', counts, `it could not reach its model (${clip(error instanceof Error ? error.message : String(error), 160)})`)
         }

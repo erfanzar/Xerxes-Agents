@@ -279,6 +279,8 @@ export function createHubService(options: HubServiceOptions): HubService {
   const onHealth = (workspaceId: string, health: PoolHealth): void => {
     append(workspaceId, { health: health.state, degraded: health.degraded })
     if (health.state === 'online') lessonSync?.workspaceOnline()
+    // A machine may offer XERXES's model again: waiting turns retry now, not at the next interval.
+    if (health.state === 'online') supervisor?.availability.notify()
   }
 
   async function teardown(): Promise<void> {
