@@ -10,6 +10,7 @@ import { SUPERVISOR_TOOLS, assertSupervisorToolCeiling } from './schemas.js'
 import { ABILITY_SPECS } from './abilities/catalog.js'
 import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abilities/captureSink.js'
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
+import { DEFAULT_TURN_IDLE_MS, IdleTimeoutError, normalizeIdleMs, startIdleWatchdog } from './idleWatchdog.js'
 import { MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
 
 /**
@@ -39,7 +40,11 @@ export interface SupervisorQuotas {
   readonly maxModelCallsPerTurn: number
   readonly maxTokensPerTurn: number
   readonly maxOutputTokens: number
-  readonly maxTurnMs: number
+  /**
+   * Silence that ends a turn: no model call or tool activity for this long.
+   * Never a wall-clock cap on the whole turn. `Infinity` disables it.
+   */
+  readonly turnIdleMs: number
   readonly windowMs: number
   readonly maxTokensPerWindow?: number
   /** Needs a model port that reports cost. Unknown cost is never counted as zero. */
@@ -52,7 +57,7 @@ export const DEFAULT_SUPERVISOR_QUOTAS: SupervisorQuotas = Object.freeze({
   maxTokensPerTurn: Number.POSITIVE_INFINITY,
   // The daemon's hub.model.complete ceiling (HUB_MODEL_MAX_TOKENS).
   maxOutputTokens: 8_192,
-  maxTurnMs: Number.POSITIVE_INFINITY,
+  turnIdleMs: DEFAULT_TURN_IDLE_MS,
   windowMs: 24 * 60 * 60 * 1000,
 })
 
@@ -273,10 +278,8 @@ export class SupervisorRunner {
 
   constructor(private readonly options: SupervisorRunnerOptions) {
     this.clock = options.clock ?? Date.now
-    this.quotas = {
-      ...DEFAULT_SUPERVISOR_QUOTAS,
-      ...options.quotas,
-    }
+    const merged = { ...DEFAULT_SUPERVISOR_QUOTAS, ...options.quotas }
+    this.quotas = { ...merged, turnIdleMs: normalizeIdleMs(options.quotas?.turnIdleMs) }
     // The ceiling is checked here, not left to the caller: a registry with a forbidden or extra tool never runs.
     const names = options.registry.definitions().map(definition => definition.function.name)
     assertSupervisorToolCeiling(names)
@@ -372,8 +375,8 @@ export class SupervisorRunner {
 
     const controller = new AbortController()
     this.active.set(threadId, controller)
-    // setTimeout(Infinity) fires at once, so an unbounded turn gets no timer at all.
-    const timer = Number.isFinite(this.quotas.maxTurnMs) ? setTimeout(() => controller.abort(new Error('timeout')), this.quotas.maxTurnMs) : undefined
+    // No wall-clock cap: the turn ends only after real silence, or when the owner stops it.
+    const watchdog = startIdleWatchdog(controller, this.quotas.turnIdleMs)
     threads.setWorking(threadId, true)
     let captureSink: CaptureTurnSink | undefined
     const captureRoute = model.captures
@@ -437,7 +440,9 @@ export class SupervisorRunner {
         counts.modelCalls += 1
         try {
           if (captureSink !== undefined && captureRoute !== undefined) messages.push(...captureSink.drain(captureRoute.destination))
+          watchdog.touch()
           response = await model.complete({ system: this.options.persona, messages, tools, maxTokens: this.quotas.maxOutputTokens, signal: controller.signal })
+          watchdog.touch()
         } catch (error) {
           if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
           this.options.onError?.(error, 'supervisor model')
@@ -488,8 +493,10 @@ export class SupervisorRunner {
           step({ id: stepId, kind: 'tool', tool: call.function.name, text: label, state: 'running' })
           let content: string
           let failed = false
+          watchdog.touch()
           try {
             content = await registry.execute(call, { metadata: { [TURN_METADATA_KEY]: state } }, controller.signal)
+            watchdog.touch()
           } catch (error) {
             if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)
             failed = true
@@ -507,7 +514,7 @@ export class SupervisorRunner {
       }
     } finally {
       captureSink?.close()
-      clearTimeout(timer)
+      watchdog.stop()
       this.active.delete(threadId)
       this.replyTo.delete(threadId)
       // After shutdown the database may already be closed; there is nobody left to tell.
@@ -552,8 +559,8 @@ export class SupervisorRunner {
 
   private aborted(controller: AbortController, threadId: string, requester: UserPrincipal, counts: { toolCalls: number; modelCalls: number }): SupervisorTurnResult {
     const reason = controller.signal.reason
-    if (reason instanceof Error && reason.message === 'timeout') {
-      return this.finishWith(threadId, requester, 'timeout', counts, `the turn took longer than ${Math.round(this.quotas.maxTurnMs / 1000)} seconds`)
+    if (reason instanceof IdleTimeoutError) {
+      return this.finishWith(threadId, requester, 'timeout', counts, `${reason.message}; the turn was idle, not just long`)
     }
     return this.finishWith(threadId, requester, 'cancelled', counts)
   }

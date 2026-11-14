@@ -63,6 +63,8 @@ void DEFAULT_SUPERVISOR_MAX_TOKENS_PER_WINDOW
 export const SUPERVISOR_ENV = Object.freeze({
   profile: 'XERXES_HUB_SUPERVISOR_PROFILE',
   model: 'XERXES_HUB_SUPERVISOR_MODEL',
+  /** Silence (ms) that ends an XERXES turn; `off` or `0` disables it. Default 30 minutes. */
+  idleMs: 'XERXES_HUB_SUPERVISOR_IDLE_MS',
 })
 
 export const SUPERVISOR_SETUP_HINT =

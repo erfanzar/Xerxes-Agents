@@ -939,7 +939,7 @@ describe('Watch updates and bounds', () => {
 
   test('no default token bound is added; a configured one is kept', () => {
     expect(withDefaultSpendBound(undefined)).toEqual({})
-    expect(withDefaultSpendBound({ maxTurnMs: 5000 })).toEqual({ maxTurnMs: 5000 })
+    expect(withDefaultSpendBound({ turnIdleMs: 5000 })).toEqual({ turnIdleMs: 5000 })
     expect(withDefaultSpendBound({ maxTokensPerWindow: 10 })).toEqual({ maxTokensPerWindow: 10 })
   })
 })

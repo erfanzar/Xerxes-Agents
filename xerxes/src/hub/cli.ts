@@ -11,6 +11,7 @@ import { runHubIdentityCli } from './identity/cli.js'
 import { createHubService, type HubService } from './service.js'
 import { loadOrCreateHubSigner } from './signer.js'
 import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort, watchStallFromEnvironment } from './supervisor/index.js'
+import { idleMsFromEnvironment } from './supervisor/idleWatchdog.js'
 import { createVoiceRuntimeConfig } from './voice/providerFactory.js'
 import type { VoiceRuntimeConfig } from './voice/config.js'
 import { HubVoiceModelStore, VoiceModelsUnavailable } from './voice/modelStore.js'
@@ -89,6 +90,7 @@ Environment: XERXES_HUB_HOST, XERXES_HUB_PORT, XERXES_HUB_PUBLIC_ORIGINS (the ph
 required for pairing), XERXES_HUB_VAPID_SUBJECT (mailto: or https: contact; required for push).
 XERXES_HUB_SUPERVISOR_PROFILE + XERXES_HUB_SUPERVISOR_MODEL enable the XERXES supervisor (a provider
 profile name and a cheap, tool-capable model id). Unset, the supervisor answers "unsupported".
+XERXES_HUB_SUPERVISOR_IDLE_MS ends an XERXES turn only after that much silence (default 30 min; off = never).
 XERXES_HUB_VOICE_ENABLED=true turns on voice (also needs the supervisor); providers and keys come from
 XERXES_HUB_VOICE_STT_*, _TTS_*, _REALTIME_* and XERXES_VOICE_<STT|TTS|REALTIME>_API_KEY. Audio is never stored.
 
@@ -120,7 +122,8 @@ export function supervisorConfigFromEnvironment(
   }
   try {
     const client = createLlmClient(model, { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url }, profileSessionOptions(profile))
-    return { kind: 'configured', model: createLlmModelPort(client, model) }
+    const turnIdleMs = idleMsFromEnvironment(environment[SUPERVISOR_ENV.idleMs])
+    return { kind: 'configured', model: createLlmModelPort(client, model), ...(turnIdleMs === undefined ? {} : { quotas: { turnIdleMs } }) }
   } catch (error) {
     return { kind: 'unconfigured', reason: `The supervisor model could not be created: ${error instanceof Error ? error.message : String(error)}` }
   }

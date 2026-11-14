@@ -117,7 +117,8 @@ describe('supervisor runner', () => {
     expect(runner.quotas.maxToolCallsPerTurn).toBe(Number.POSITIVE_INFINITY)
     expect(runner.quotas.maxModelCallsPerTurn).toBe(Number.POSITIVE_INFINITY)
     expect(runner.quotas.maxTokensPerTurn).toBe(Number.POSITIVE_INFINITY)
-    expect(runner.quotas.maxTurnMs).toBe(Number.POSITIVE_INFINITY)
+    // No wall-clock cap: only a generous silence window (30 min by default).
+    expect(runner.quotas.turnIdleMs).toBe(30 * 60_000)
     const result = await runner.enqueue(turn(world))
     expect(result.stop).toBe('completed')
     expect(result.toolCalls).toBe(40)
@@ -230,8 +231,9 @@ describe('supervisor runner', () => {
       id: 'm', reportsCost: false,
       complete: request => new Promise((_, reject) => request.signal?.addEventListener('abort', () => reject(new Error('aborted')))),
     }
-    const result = await makeRunner(world, model, { quotas: { maxTurnMs: 30 } }).enqueue(turn(world))
+    const result = await makeRunner(world, model, { quotas: { turnIdleMs: 30 } }).enqueue(turn(world))
     expect(result.stop).toBe('timeout')
+    expect(world.threads.messagesFor('shared', 'alice').at(-1)!.text).toContain('idle, not just long')
   })
 
   test('a model failure stops the turn with a readable notice', async () => {
