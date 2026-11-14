@@ -89,9 +89,78 @@ test('a stuck claim expires, is re-queued once, then marked expired', async () =
     clock.now += 61_000
     wakes.recoverClaims()
     expect(state()).toBe('expired')
-    // A legacy claim with no claim record recovers from its due time.
     hang = false
-    db.query("INSERT INTO hub_superagent_wakes VALUES ('legacy','o','t','w',?,'old','claimed')").run(clock.now - 120_000)
-    expect(wakes.recoverClaims()).toBe(1)
   } finally { wakes.dispose(); db.close() }
+})
+
+test('a legacy claimed wake with no claim record is expired, never replayed', async () => {
+  const clock = { now: NOW }
+  const db = new Database(':memory:')
+  const delivered: string[] = []
+  const wakes = new SupervisorWakes(db, { clock: () => clock.now, paused: () => false, authorized: () => true, claimTtlMs: 60_000,
+    deliver: async wake => { delivered.push(wake.id) } })
+  try {
+    db.query("INSERT INTO hub_superagent_wakes VALUES ('legacy','o','t','w',?,'old','claimed')").run(clock.now - 3 * 86_400_000)
+    // A recent legacy claim (inside the TTL) is left alone for now.
+    db.query("INSERT INTO hub_superagent_wakes VALUES ('fresh','o','t','w',?,'new','claimed')").run(clock.now - 1000)
+    await wakes.drain()
+    const state = (id: string) => db.query<{ state: string }, [string]>('SELECT state FROM hub_superagent_wakes WHERE id=?').get(id)!.state
+    expect(state('legacy')).toBe('expired')
+    expect(state('fresh')).toBe('claimed')
+    expect(delivered).toEqual([])
+  } finally { wakes.dispose(); db.close() }
+})
+
+test('a timed claim is redelivered exactly once, marked as a retry', async () => {
+  const clock = { now: NOW }
+  const db = new Database(':memory:')
+  const deliveries: { id: string; retry: boolean }[] = []
+  let hang = true
+  const wakes = new SupervisorWakes(db, { clock: () => clock.now, paused: () => false, authorized: () => true, claimTtlMs: 60_000,
+    deliver: async wake => { deliveries.push({ id: wake.id, retry: wake.retry === true }); if (hang) await new Promise(() => {}) } })
+  try {
+    const wake = wakes.schedule({ owner: 'o', thread: 't', workspace: 'w' }, { after: 0, reason: 'check' })
+    void wakes.drain()
+    await Bun.sleep(5)
+    // The first delivery hangs; the drain never settles, so recover directly and drain on a fresh instance.
+    clock.now += 61_000
+    const second = new SupervisorWakes(db, { clock: () => clock.now, paused: () => false, authorized: () => true, claimTtlMs: 60_000,
+      deliver: async w => { deliveries.push({ id: w.id, retry: w.retry === true }); if (hang) await new Promise(() => {}) } })
+    void second.drain()
+    await Bun.sleep(5)
+    expect(deliveries).toEqual([{ id: wake.id, retry: false }, { id: wake.id, retry: true }])
+    // The retry hangs too: after the TTL it is expired, never a third delivery.
+    clock.now += 61_000
+    hang = false
+    const third = new SupervisorWakes(db, { clock: () => clock.now, paused: () => false, authorized: () => true, claimTtlMs: 60_000,
+      deliver: async w => { deliveries.push({ id: w.id, retry: w.retry === true }) } })
+    await third.drain()
+    expect(deliveries).toHaveLength(2)
+    expect(db.query<{ state: string }, [string]>('SELECT state FROM hub_superagent_wakes WHERE id=?').get(wake.id)!.state).toBe('expired')
+    second.dispose(); third.dispose()
+  } finally { wakes.dispose(); db.close() }
+})
+
+test('a replayed old unblocked status does not clear the live blocked receipt', async () => {
+  const clock = { now: NOW }
+  const { db, wakes, delivered } = setup(clock)
+  try {
+    const blocked = { goal: 'ship it', goal_phase: 'blocked' }
+    await wakes.observe(subscriptionEvent(status(1, blocked))!); await wakes.drain()
+    expect(delivered).toHaveLength(1)
+    // A resync replays yesterday's active status...
+    await wakes.observe(subscriptionEvent(status(2, { goal: 'ship it', goal_phase: 'active' }, '2026-11-13T10:00:00Z'))!)
+    // ...then the live status is still blocked: no extra wake.
+    await wakes.observe(subscriptionEvent(status(3, blocked))!); await wakes.drain()
+    expect(delivered).toHaveLength(1)
+  } finally { wakes.dispose(); db.close() }
+})
+
+test('the goal_blocked id ignores a non-string goal with changing fields', () => {
+  const a = subscriptionEvent(status(1, { goal_phase: 'blocked', goal: { objective: 'x', round: 3, updated_at: 'a' } }))!
+  const b = subscriptionEvent(status(2, { goal_phase: 'blocked', goal: { objective: 'x', round: 4, updated_at: 'b' } }))!
+  expect(a.id).toBe(b.id)
+  const c = subscriptionEvent(status(3, { goal_phase: 'blocked', goal: 'ship it' }))!
+  const d = subscriptionEvent(status(4, { goal_phase: 'blocked', goal: 'ship it', goal_revision: 2 }))!
+  expect(c.id).not.toBe(d.id)
 })

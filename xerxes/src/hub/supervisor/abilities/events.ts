@@ -42,7 +42,11 @@ export function subscriptionEvent(event: SubscriptionEventInput): SubscriptionSi
   }
   if (event.type === 'status_update' && event.payload.goal_phase === 'blocked') {
     const p = event.payload
-    const state = sha([p.goal_revision ?? null, p.goal ?? null, p.blocked_reason ?? p.goal_blocked_reason ?? null])
+    // Only fields that stay fixed while the goal stays blocked: the daemon sends `goal` as the
+    // objective string. A non-string goal (an object with round/progress/updated_at) is ignored,
+    // so a changing field can never mint a new id; revision and reason count only when scalar.
+    const scalar = (value: unknown): string | number | null => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)) ? value : null
+    const state = sha([scalar(p.goal_revision), typeof p.goal === 'string' ? p.goal : null, scalar(p.blocked_reason ?? p.goal_blocked_reason)])
     return { id: `${goalBlockedTaskKey(event.workspace_id, event.session_id)}${state}`, workspace: event.workspace_id, kind: 'goal_blocked',
       digest: `goal_blocked for task ${JSON.stringify((event.session_id ?? 'workspace').slice(0, 200))}`, ...at }
   }

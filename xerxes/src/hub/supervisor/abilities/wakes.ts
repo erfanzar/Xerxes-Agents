@@ -6,7 +6,11 @@ import { randomUUID } from 'node:crypto'
 import type { NotebookScope } from './memory.js'
 
 export type WakeKind = 'task_idle' | 'goal_blocked' | 'question_waiting' | 'tests_failing' | 'disk_threshold'
-export interface Wake extends NotebookScope { readonly id: string; readonly at: number; readonly reason: string; readonly state: string }
+export interface Wake extends NotebookScope {
+  readonly id: string; readonly at: number; readonly reason: string; readonly state: string
+  /** A redelivery after an earlier claim expired: that attempt may already have acted. */
+  readonly retry?: boolean
+}
 interface WakeRow { id: string; owner: string; thread: string; workspace: string; at: number; reason: string; state: string }
 interface Subscription extends NotebookScope { readonly id: string; readonly kind: WakeKind; readonly threshold: number | null }
 interface WakeOptions {
@@ -99,6 +103,9 @@ export class SupervisorWakes {
     if (this.disposed || this.options.paused()) return
     if (event.id.length < 1 || event.id.length > 200 || event.digest.length > 1000 || !KINDS.has(event.kind)) throw new Error('Invalid subscription event')
     const subscriptions = this.db.query<Subscription, [string, string]>('SELECT * FROM hub_superagent_subscriptions WHERE workspace=? AND kind=?').all(event.workspace, event.kind)
+    // A replayed old fact (a Hub resync re-sending yesterday's events) never wakes anyone, and
+    // never clears a state either: an old unblocked status must not reset today's blocked receipt.
+    if (event.at !== undefined && Number.isFinite(event.at) && event.at < this.options.clock() - (this.options.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS)) return
     if (event.clear === true) {
       // The state ended (e.g. the goal is no longer blocked): a later real re-block wakes again.
       for (const sub of subscriptions) {
@@ -106,8 +113,6 @@ export class SupervisorWakes {
       }
       return
     }
-    // A replayed old fact (a Hub resync re-sending yesterday's events) never wakes anyone.
-    if (event.at !== undefined && Number.isFinite(event.at) && event.at < this.options.clock() - (this.options.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS)) return
     for (const sub of subscriptions) {
       if (!this.options.authorized(sub)) continue
       if (sub.kind === 'disk_threshold' && (event.value === undefined || !Number.isFinite(event.value) || event.value < 0 || event.value > 100)) continue
@@ -166,9 +171,10 @@ export class SupervisorWakes {
         if (this.db.query("UPDATE hub_superagent_wakes SET state='claimed' WHERE id=? AND state='pending'").run(row.id).changes !== 1) continue
         this.db.query(`INSERT INTO hub_superagent_wake_claims VALUES (?,?,1) ON CONFLICT(id)
           DO UPDATE SET claimed_at=excluded.claimed_at, attempts=attempts+1`).run(row.id, this.options.clock())
+        const attempts = this.db.query<{ attempts: number }, [string]>('SELECT attempts FROM hub_superagent_wake_claims WHERE id=?').get(row.id)?.attempts ?? 1
         // A claim left behind (crash, hung delivery) expires and is recovered by recoverClaims().
         try {
-          await this.options.deliver({ ...row, state: 'claimed' })
+          await this.options.deliver({ ...row, state: 'claimed', ...(attempts > 1 ? { retry: true } : {}) })
           // Shutdown may close SQLite while delivery awaits the runner. Keep
           // the durable claim (unknown outcome), never touch the closed host.
           if (this.disposed) return
@@ -193,9 +199,11 @@ export class SupervisorWakes {
   }
 
   /**
-   * A claim older than the claim TTL never finished: re-queue it once (wakes are data-only
-   * observations), then mark it `expired` so a wake that keeps hanging cannot loop.
-   * A claim with no claim record (from before claims were timed) counts from its due time.
+   * A timed claim older than the claim TTL never finished. Its outcome is unknown, so it is
+   * re-queued at most once and redelivered marked `retry` (the turn is told the earlier attempt
+   * may already have acted); a second stale claim is marked `expired` so a hanging wake cannot loop.
+   * A claim with no claim record (from before claims were timed) is never replayed: it is
+   * marked `expired`, once its due time is older than the TTL.
    */
   recoverClaims(): number {
     const cutoff = this.options.clock() - (this.options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS)
@@ -203,7 +211,7 @@ export class SupervisorWakes {
       LEFT JOIN hub_superagent_wake_claims c ON c.id = w.id
       WHERE w.state='claimed' AND ((c.claimed_at IS NULL AND w.at < ?) OR c.claimed_at < ?)`).all(cutoff, cutoff)
     for (const row of stale) {
-      const next = (row.attempts ?? 1) < MAX_CLAIM_ATTEMPTS ? 'pending' : 'expired'
+      const next = row.attempts !== null && row.attempts < MAX_CLAIM_ATTEMPTS ? 'pending' : 'expired'
       this.db.query("UPDATE hub_superagent_wakes SET state=? WHERE id=? AND state='claimed'").run(next, row.id)
     }
     return stale.length
