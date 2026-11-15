@@ -905,6 +905,8 @@ export class AgentTurnRunner implements TurnRunner {
           : (requiresLocal || /^claude[-_]code\//i.test(attemptModel)) && sessionEffort ? { effort: 'none' } : undefined
         const calibration = promptCalibration(contextCalibrationRatio(session.metadata, attemptModel))
         let projectedPrompt: number | undefined
+        // Set when a quota error moved the session to a sibling account; announced with the retry.
+        let failoverNotice: string | undefined
         const turnEvents = withActiveSession(session, runTurn({
         turnId: session.activeTurnId,
         agentId: promptAgent?.name ?? session.agentId,
@@ -966,7 +968,9 @@ export class AgentTurnRunner implements TurnRunner {
             return () => {
               if (!failoverStarted && this.options.accountFailover) {
                 failoverStarted = true
-                void this.options.accountFailover(session, attemptModel, 'quota').catch(() => undefined)
+                void this.options.accountFailover(session, attemptModel, 'quota')
+                  .then(switched => { if (switched) failoverNotice = `Switched to ${switched.to}: ${switched.reason}.` })
+                  .catch(() => undefined)
               }
               return this.options.resolveSessionProvider?.(session, attemptModel)?.llm
             }
@@ -1082,6 +1086,11 @@ export class AgentTurnRunner implements TurnRunner {
         let sawContent = false
         let restartWithFallback = false
         for await (const item of multiplexTurnEvents(turnEvents, this.options.subagentEvents, session.id)) {
+          // The retry after a quota failover names the account it moved to.
+          if (failoverNotice && item.kind === 'turn' && item.event.type === 'provider_retry' && !item.event.final) {
+            yield { type: 'notification', payload: { level: 'info', message: failoverNotice } }
+            failoverNotice = undefined
+          }
           if (!sawContent && item.kind === 'turn') {
             const event = item.event
             // Waiting and compaction must be visible before model output exists.
