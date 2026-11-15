@@ -58,6 +58,33 @@ function windowMeter(window: UsageWindowView, profile: UsageProfileView, now: nu
   return <Meter key={window.label + (window.detail ?? '')} label={windowLabel(window)} percent={window.usedPercent} note={windowNote(window)} reset={resetIn(window, profile.fetchedAt, now)} />
 }
 
+export type UsageGroupKind = 'claude' | 'codex' | 'gemini' | 'other'
+const GROUP_ORDER: readonly UsageGroupKind[] = ['claude', 'codex', 'gemini', 'other']
+export const USAGE_GROUP_LABEL: Record<UsageGroupKind, string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', other: 'Other' }
+
+/** Which family a profile belongs to, from its wire provider (Claude sign-ins run on claude-code or anthropic). */
+export function usageGroupOf(provider: string): UsageGroupKind {
+  const name = provider.trim().toLowerCase()
+  if (name === 'claude-code' || name === 'anthropic') return 'claude'
+  if (name === 'openai-codex' || name === 'codex') return 'codex'
+  if (name === 'gemini' || name === 'google') return 'gemini'
+  return 'other'
+}
+
+/** The most-used window's percent; unknown usage sorts after any known headroom. */
+function peakUse(profile: UsageProfileView): number {
+  return profile.windows.length ? Math.max(...profile.windows.map(window => window.usedPercent)) : 101
+}
+
+/** Groups in a fixed order (empty ones dropped); inside one, the active profile first, then most headroom. */
+export function groupUsageProfiles(profiles: readonly UsageProfileView[]): readonly { readonly kind: UsageGroupKind; readonly profiles: readonly UsageProfileView[] }[] {
+  return GROUP_ORDER.map(kind => ({
+    kind,
+    profiles: profiles.filter(profile => usageGroupOf(profile.provider) === kind)
+      .sort((a, b) => Number(b.active) - Number(a.active) || peakUse(a) - peakUse(b) || a.label.localeCompare(b.label)),
+  })).filter(group => group.profiles.length > 0)
+}
+
 export function ProfileCard({ profile, now }: { profile: UsageProfileView; now: number }): ReactElement {
   const account = [usageSourceLabel(profile.source, profile.provider), profile.plan].filter(Boolean).join(' · ')
   return <li className="usage-plan" data-status={profile.status} data-active={profile.active || undefined}>
@@ -152,7 +179,10 @@ export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
       {error && <p className="usage__error" role="alert">{error}</p>}
       {!report && !error && <p className="usage__empty" role="status">{online ? 'Checking your plans…' : 'Plan usage appears when the runtime is connected.'}</p>}
       {report && !profiles.length && <p className="usage__empty">No provider profiles yet. Add one from the model picker to see its limits here.</p>}
-      {profiles.length > 0 && <ul className="usage-plans">{profiles.map(profile => <ProfileCard key={profile.profile} profile={profile} now={now} />)}</ul>}
+      {groupUsageProfiles(profiles).map(group => <div className="usage-group" key={group.kind} data-kind={group.kind}>
+        <div className="usage-group__head"><span>{USAGE_GROUP_LABEL[group.kind]}</span><span className="usage-group__count">{group.profiles.length}</span></div>
+        <ul className="usage-plans">{group.profiles.map(profile => <ProfileCard key={profile.profile} profile={profile} now={now} />)}</ul>
+      </div>)}
     </section>
     {report?.models && <ModelSpend models={report.models} since={report.modelsSince} />}
   </div>

@@ -27,7 +27,8 @@ import { TerminalsCard } from './TerminalsPanel.js'
 import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
-import { ProviderAccountsCenter, type AccountSlot } from './ProviderAccountsCenter.js'
+import { ProviderAccountsCenter } from './ProviderAccountsCenter.js'
+import { USAGE_GROUP_LABEL, usageGroupOf, type UsageGroupKind } from './UsagePanel.js'
 import { RunModeSection } from './RunModeSection.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
@@ -813,10 +814,10 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
-/** Sign-ins (built-in Claude Code/codex and every Claude/Codex account) group above API keys. */
-function subscriptionRow(provider: ProviderRow, slots: ReadonlyMap<string, AccountSlot>): boolean {
-  const kind = slots.get(provider.name)?.account.kind
-  return provider.signsIn || (kind !== undefined && kind !== 'api_key')
+/** The same families as the Usage tab: Claude Code, Codex, Gemini, then everything else. */
+const PROVIDER_GROUP_RANK: Record<UsageGroupKind, number> = { claude: 0, codex: 1, gemini: 2, other: 3 }
+function providerGroup(provider: ProviderRow): UsageGroupKind {
+  return usageGroupOf(provider.provider)
 }
 
 function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
@@ -873,11 +874,11 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
           </div>
         </div>
       )}
-      {[...snap.providers].sort((a, b) => Number(!subscriptionRow(a, slots)) - Number(!subscriptionRow(b, slots))).map((provider, index, sorted) => {
+      {[...snap.providers].sort((a, b) => PROVIDER_GROUP_RANK[providerGroup(a)] - PROVIDER_GROUP_RANK[providerGroup(b)] || Number(b.active) - Number(a.active)).map((provider, index, sorted) => {
         const row = providerRowState(snap, provider)
         const slot = slots.get(provider.name)
-        const group = subscriptionRow(provider, slots) ? 'Subscriptions' : 'API keys'
-        const heading = index === 0 || (subscriptionRow(sorted[index - 1]!, slots) ? 'Subscriptions' : 'API keys') !== group
+        const group = USAGE_GROUP_LABEL[providerGroup(provider)]
+        const heading = index === 0 || providerGroup(sorted[index - 1]!) !== providerGroup(provider)
         const name = provider.label || provider.name
         const tone = row.chip === 'Mac not connected' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
         return (

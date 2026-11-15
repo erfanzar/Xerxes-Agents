@@ -887,6 +887,10 @@
 /* One Providers list: group labels span the grid; an account's usage sits under its row. */
 :root:not(#layout) .atelier .provgrid>.provgroup{grid-column:1/-1;margin:10px 2px 0;color:var(--x-meta);font:500 11px/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
 :root:not(#layout) .atelier .provgrid>.provgroup:first-child{margin-top:2px}
+/* Usage tab: plans grouped by family (Claude Code, Codex, Gemini, Other), the same label grammar as the agent groups. */
+:root:not(#layout) .atelier .usage-group+.usage-group{margin-top:12px}
+:root:not(#layout) .atelier .usage-group__head{display:flex;align-items:center;gap:6px;margin:4px 2px 6px;color:var(--x-meta);font:500 11px/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
+:root:not(#layout) .atelier .usage-group__count{font-variant-numeric:tabular-nums;letter-spacing:0}
 :root:not(#layout) .atelier .provcard>.provider-account__usage{padding:0 14px 12px 62px}
 /* The active row's buttons line up with every other row: the old 80px gutter was for floating icon tools. */
 :root:not(#layout) .atelier .provcard.provider-account.is-current .provcard__main{padding-right:14px}
