@@ -24,7 +24,7 @@ import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from 
 import { PanelDivider, usePanelLayout } from './layout.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
-import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
+import { activitySummary, approvalTitle, liveActivityPhrase, thinkingHeadingOf } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { ArtifactToast, latestArtifactId } from './ArtifactCard.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
@@ -132,7 +132,12 @@ const turnDurOf = (seconds: number): string => elapsedOf(seconds)
 function composerPhraseOf(snap: Snapshot): string {
   if (snap.networkRetrying) return 'Retrying connection…'
   if (snap.approval || snap.question) return 'Waiting for you'
-  return currentActionOf(snap)?.verb ?? 'Thinking…'
+  const action = currentActionOf(snap)?.verb
+  if (action) return action
+  // While the model reasons, its latest **Heading** says what it is working on.
+  const last = snap.blocks.at(-1)
+  const heading = last?.kind === 'thinking' && last.streaming ? thinkingHeadingOf(last.text) : undefined
+  return heading ? `${heading}…` : 'Thinking…'
 }
 
 function ttftOf(milliseconds: number): string {

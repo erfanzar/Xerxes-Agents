@@ -88,6 +88,18 @@ export function toolPhrase(item: Pick<ToolItem, 'name' | 'verb' | 'arg' | 'path'
 }
 
 /**
+ * The newest `**Heading**` a model wrote in its reasoning summary (Gemini,
+ * Claude and OpenAI summaries title each step that way), e.g.
+ * "Analyzing Technical Details". Undefined when the reasoning has none.
+ */
+export function thinkingHeadingOf(text: string): string | undefined {
+  let heading: string | undefined
+  // Only a line that is wholly bold is a heading; bold words inside a sentence are not.
+  for (const match of text.matchAll(/^[ \t]*\*\*([^*\n]{3,80}?)\*\*[ \t]*$/gm)) heading = match[1]!.trim()
+  return heading || undefined
+}
+
+/**
  * What the group is doing right now. The newest running call wins; with
  * nothing running, live reasoning or still-working subagents explain the
  * wait, and otherwise the model is deciding its next step.
@@ -97,7 +109,7 @@ export function liveActivityPhrase(blocks: readonly Block[]): string {
   const running = tools.findLast(item => item.state === 'working')
   if (running) return toolPhrase(running)
   const last = blocks.at(-1)
-  if (last?.kind === 'thinking' && last.streaming) return 'Thinking'
+  if (last?.kind === 'thinking' && last.streaming) return thinkingHeadingOf(last.text) ?? 'Thinking'
   const working = blocks.reduce((total, block) => total + (block.kind === 'agents'
     ? block.members.filter(member => member.status === 'working' || member.status === 'running').length
     : 0), 0)
