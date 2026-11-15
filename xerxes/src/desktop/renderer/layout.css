@@ -564,7 +564,9 @@
 :root:not(#layout) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain{display:flex;align-items:center;gap:6px;flex:1 1 auto;width:auto;min-width:0;height:26px;padding:0 4px 0 8px;border:0;background:none;color:inherit;font:400 12px/1 var(--sans);cursor:pointer}
 :root:not(#layout) .atelier .desktop-rail__tabmain>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 :root:not(#layout) .atelier .desktop-rail__tabmain>svg{flex:none}
-:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabclose{display:inline-grid;place-items:center;flex:none;width:18px;min-width:18px;height:18px;margin-right:4px;padding:0;border:0;border-radius:5px;background:none;color:inherit;opacity:0;cursor:pointer}
+:root:not(#layout) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabclose{display:inline-grid;place-items:center;flex:none;width:18px;min-width:18px;height:18px;margin-right:4px;padding:0;border:0;border-radius:5px;background:none;color:inherit;cursor:pointer}
+/* Hidden at low specificity so hover/selected/focus below can show it (the selected tab always has its ×). */
+:root:not(#layout) .atelier .desktop-rail__tabclose{opacity:0}
 :root:not(#layout) .atelier .desktop-rail__tab:hover>.desktop-rail__tabclose,:root:not(#layout) .atelier .desktop-rail__tab[data-selected]>.desktop-rail__tabclose,:root:not(#layout) .atelier .desktop-rail__tabclose:focus-visible{opacity:.8}
 :root:not(#layout) .atelier .desktop-rail__tabclose:hover{background:var(--x-hairline)}
 :root:not(#layout) .atelier .rail-add{position:relative;flex:none}
@@ -581,6 +583,10 @@
 :root:not(#layout) .atelier .rail-add__menu{position:absolute;top:calc(100% + 4px);right:0;z-index:40;display:flex;flex-direction:column;min-width:180px;padding:4px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
 :root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;height:28px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
 :root:not(#layout) .atelier .rail-add__item:hover,:root:not(#layout) .atelier .rail-add__item:focus-visible{background:var(--x-chip)}
+/* Plan ready card: open the plan, refine it with a note, or continue with it. */
+:root:not(#layout) .atelier .approval--plan .plan-approval__open{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;margin:2px 0 8px}
+:root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea{box-sizing:border-box;width:100%;min-height:44px;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 13px/1.4 var(--sans);resize:vertical}
+:root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea:focus{outline:none;border-color:var(--x-meta)}
 /* Changed files group: the only colour in the tree (blue modified, green added). */
 :root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline)}
 :root:not(#layout) .atelier .file-browser__changed-head{display:flex;align-items:center;gap:5px;width:100%;height:22px;padding:0 6px;border:0;font:400 11px/1 var(--sans);cursor:pointer}

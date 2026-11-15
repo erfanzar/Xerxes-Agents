@@ -66,7 +66,7 @@ const PLAN_MODE_TOOL_DEFINITIONS: Readonly<Record<string, { readonly definition:
         type: 'function',
         function: {
           name: 'EnterPlanModeTool',
-          description: 'Enter plan mode for the active session: research and planning only, mutations are refused. Use it before new features, multi-file or architectural changes, or when requirements are unclear or several approaches are valid; skip it for small, clear fixes and in objective mode.',
+          description: 'Enter plan mode for the active session: research and planning only, mutations are refused. Enter it on your own, without being asked, before new features, multi-file or architectural changes, or when requirements are unclear or several approaches are valid; skip it for small, clear fixes and in objective mode. Write the plan as an artifact, then call ExitPlanModeTool: the user gets a card to continue with the plan or refine it.',
           parameters: { type: 'object', additionalProperties: false, properties: {} },
         },
       }),
@@ -78,7 +78,7 @@ const PLAN_MODE_TOOL_DEFINITIONS: Readonly<Record<string, { readonly definition:
         function: {
           name: 'ExitPlanModeTool',
           description:
-            'Leave plan mode and return the active session to code mode. Call this once the user has approved the plan.',
+            'Ask to leave plan mode once the plan is written (as an artifact). The user sees a "Plan ready" card and either continues with the plan (the session returns to code mode) or refuses with feedback (stay in plan mode and revise the plan). Do not ask for approval in prose.',
           parameters: { type: 'object', additionalProperties: false, properties: {} },
         },
       }),

@@ -1522,7 +1522,56 @@ function ApprovalFields({ entries }: { entries: readonly [string, unknown][] }):
   )
 }
 
-function ApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
+/** Leaving plan mode is a plan decision, not a tool permission: it gets the plan card. */
+export function isPlanExitApproval(approval: Pick<NonNullable<Snapshot['approval']>, 'toolName' | 'action'>): boolean {
+  return /^ExitPlanMode(Tool)?$/.test(approval.toolName || approval.action || '')
+}
+
+function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
+  return isPlanExitApproval(props.approval) ? <PlanApprovalCard approval={props.approval} /> : <ToolApprovalCard {...props} />
+}
+
+/**
+ * The plan is ready: continue with it in one click, or send a note that keeps
+ * planning. Refining rejects the exit (the session stays in plan mode) and
+ * queues the note as a steer, so the agent revises the same plan.
+ */
+export function PlanApprovalCard({ approval }: { approval: NonNullable<Snapshot['approval']> }): ReactElement {
+  const open = useDesktopNavigation()
+  const [note, setNote] = useState('')
+  const card = useRef<HTMLDivElement>(null)
+  useEffect(() => { card.current?.focus() }, [approval.id])
+  const refine = (): void => {
+    const text = note.trim()
+    if (!text) return
+    store.approve(approval.id, 'deny')
+    void store.steer(`Keep planning; do not execute yet. Revise the plan with this feedback: ${text}`)
+    setNote('')
+  }
+  return (
+    <div ref={card} tabIndex={-1} className="approval approval--plan" role="alertdialog" aria-modal="false" aria-label="Plan ready"
+      onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !note.trim()) { event.preventDefault(); store.approve(approval.id, 'allow_once') } }}>
+      <div className="approval__head">
+        <span className="approval__dot" aria-hidden="true" />
+        <span className="approval__title">Plan ready</span>
+        <button className="approval__dismiss" title="Hide until you decide — the plan stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
+      </div>
+      <p className="approval__reason">Read the plan, then continue with it or tell the agent what to change.</p>
+      <button className="btn btn--ghost plan-approval__open" onClick={() => open('docs')}><Icon name="file" size={13} /> Open the plan</button>
+      <div className="plan-approval__refine">
+        <textarea aria-label="Refine the plan" placeholder="Refine the plan… (what to change, add or drop)" rows={2} value={note}
+          onChange={event => setNote(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); refine() } }} />
+      </div>
+      <div className="approval__row">
+        <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Continue with the plan</button>
+        <button className="btn" disabled={!note.trim()} onClick={refine}>Refine plan <kbd>⏎</kbd></button>
+      </div>
+    </div>
+  )
+}
+
+function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
   const card = useRef<HTMLDivElement>(null)
   // role="alertdialog" that never takes focus announces nothing, and the
   // 1/2/3 keys it advertises are dropped while the composer (auto-focused
