@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.42 — 2026-11-15
+
+- **Plan ready: continue or refine.** When the agent finishes a plan, it no longer asks for Allow/Deny. A "Plan ready" card offers **Continue with the plan**, a box to refine the plan with a note (the agent stays in plan mode and revises it), and a link that opens the plan artifact. The agent enters plan mode on its own for larger or unclear tasks, and the `run-research` skill now plans first and updates its plan artifact after every step.
+- **Right panel tabs.** The right panel keeps open views as tabs with a **+** menu of every view. Each file opens in its own tab, so several files stay open side by side, and every tab has a visible close button. A new **Background** tab lists background shells and watchers, and the terminal splits side by side or stacked, with a Clear button. The panel header adapts to the panel's own width.
+- **Artifacts you can find.** A saved artifact appears as a card in the conversation with an Open button, a toast offers Open when the panel shows something else, and a system notification for a new artifact or a failed task opens what it is about when clicked.
+- **Xerxes colours are the fresh-install colour theme again.**
+- **Fix:** live conversation blocks no longer reuse ids seeded from older history, which caused duplicate React keys.
+
 ## 0.8.41 — 2026-11-15
 
 - **XERXES keeps working until it is done.** A Hub supervisor turn no longer ends on a wall-clock limit. It ends only after real silence: 30 minutes with no model call or tool activity by default, set with `XERXES_HUB_SUPERVISOR_IDLE_MS` (`off` disables it). The owner's stop, pause and kill controls and every daily cap are unchanged.
