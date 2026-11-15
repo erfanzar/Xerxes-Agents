@@ -8,6 +8,19 @@ import { BlockBuilder, blocksFromStoredMessages } from '../src/desktop/renderer/
 // Pure fold tests: wire events in, display blocks out. No sockets, no React.
 
 describe('BlockBuilder', () => {
+  test('reset with seeded blocks never reuses their ids for live runs', () => {
+    const seeded = blocksFromStoredMessages([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'answer' },
+    ])
+    const b = new BlockBuilder()
+    b.reset([...seeded])
+    b.pushUser('next')
+    b.push('text_part', { text: 'reply' })
+    const ids = b.all().map(block => block.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
   test('text deltas accumulate into one agent block', () => {
     const b = new BlockBuilder()
     b.push('text_part', { text: 'hel' })

@@ -486,6 +486,9 @@ export class BlockBuilder {
   /** Replace the whole fold (session open/resume hydration). */
   reset(blocks: Block[] = []): void {
     this.blocks = blocks
+    // Seeded blocks (legacy replay) carry ids from another builder; live runs
+    // must mint past them or React sees two groups with one key.
+    for (const block of blocks) if (block.id >= this.seq) this.seq = block.id + 1
     this.runs = []
     this.tools.clear()
     this.agentsCard = null
