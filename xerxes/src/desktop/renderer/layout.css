@@ -888,6 +888,8 @@
 :root:not(#layout) .atelier .provgrid>.provgroup{grid-column:1/-1;margin:10px 2px 0;color:var(--x-meta);font:500 11px/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
 :root:not(#layout) .atelier .provgrid>.provgroup:first-child{margin-top:2px}
 :root:not(#layout) .atelier .provcard>.provider-account__usage{padding:0 14px 12px 62px}
+/* The active row's buttons line up with every other row: the old 80px gutter was for floating icon tools. */
+:root:not(#layout) .atelier .provcard.provider-account.is-current .provcard__main{padding-right:14px}
 @media (max-width:900px){
   :root:not(#layout) .atelier .modal__main :is(.modecards,.tiercard__fields){grid-template-columns:minmax(0,1fr)}
 }
