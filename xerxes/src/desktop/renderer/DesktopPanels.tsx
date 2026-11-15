@@ -3,7 +3,7 @@
 
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
 import { ArtifactsSection, SubagentsSection } from './RailSections.js'
-import { tabKey, type RailPanel, type RailTab } from './railTabs.js'
+import { railFitOf, tabKey, type RailFit, type RailPanel, type RailTab } from './railTabs.js'
 import { activityFleetRows } from './AgentRoster.js'
 import { pageIsBackground } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
@@ -225,7 +225,17 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   useEffect(() => {
     strip.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
   }, [currentKey, shownTabs.length])
-  return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
+  // The panel's own width, not the window's, decides how much its header shows.
+  const aside = useRef<HTMLElement>(null)
+  const [fit, setFit] = useState<RailFit>('wide')
+  useEffect(() => {
+    const element = aside.current
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => setFit(railFitOf(element.getBoundingClientRect().width)))
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  return <aside ref={aside} data-fit={fit} className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
     <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views">{shownTabs.map(tab => {
       const key = tabKey(tab), name = tab.title || railTabName(tab.panel), selected = key === currentKey
       return <div key={key} className="desktop-rail__tab" data-selected={selected || undefined}>

@@ -3,7 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
-import { MAX_RAIL_TABS, closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from '../src/desktop/renderer/railTabs.js'
+import { MAX_RAIL_TABS, railFitOf, closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from '../src/desktop/renderer/railTabs.js'
 
 test('a section and one artifact are separate tabs; reopening one keeps a single copy', () => {
   let tabs: readonly RailTab[] = []
@@ -27,6 +27,13 @@ test('the strip is bounded and never drops the active tab', () => {
   for (let i = 0; i < MAX_RAIL_TABS + 3; i++) tabs = openTab(tabs, { panel: 'docs', item: `a${i}` }, 'files')
   expect(tabs.length).toBe(MAX_RAIL_TABS)
   expect(tabs.map(tabKey)).toContain('files')
+})
+
+test('the panel width picks how much the header shows', () => {
+  expect(railFitOf(600)).toBe('wide')
+  expect(railFitOf(460)).toBe('wide')
+  expect(railFitOf(420)).toBe('compact')
+  expect(railFitOf(359)).toBe('narrow')
 })
 
 test('an artifact tab takes its title; an empty title keeps the old one', () => {

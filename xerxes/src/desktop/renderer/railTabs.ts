@@ -18,6 +18,13 @@ export interface RailTab {
   readonly title?: string
 }
 
+/** How much the right panel's header shows at its current width. */
+export type RailFit = 'wide' | 'compact' | 'narrow'
+/** Below 460px tab titles shorten and item headers wrap; below 360px inactive tabs are icons only. */
+export function railFitOf(width: number): RailFit {
+  return width < 360 ? 'narrow' : width < 460 ? 'compact' : 'wide'
+}
+
 /** Most tabs kept open; opening one more drops the oldest that is not active. */
 export const MAX_RAIL_TABS = 10
 

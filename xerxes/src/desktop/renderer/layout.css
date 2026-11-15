@@ -568,6 +568,16 @@
 :root:not(#layout) .atelier .desktop-rail__tab:hover>.desktop-rail__tabclose,:root:not(#layout) .atelier .desktop-rail__tab[data-selected]>.desktop-rail__tabclose,:root:not(#layout) .atelier .desktop-rail__tabclose:focus-visible{opacity:.8}
 :root:not(#layout) .atelier .desktop-rail__tabclose:hover{background:var(--x-hairline)}
 :root:not(#layout) .atelier .rail-add{position:relative;flex:none}
+/* A narrower panel: shorter tab titles and an item header that wraps (title row, then actions);
+   the narrowest keeps only the active tab's title. Driven by the panel's own width (data-fit). */
+:root:not(#layout) .atelier .desktop-rail[data-fit='compact'] .desktop-rail__tab{max-width:120px}
+:root:not(#layout) .atelier .desktop-rail[data-fit='narrow'] .desktop-rail__tab:not([data-selected])>.desktop-rail__tabmain>span{display:none}
+:root:not(#layout) .atelier .desktop-rail[data-fit='narrow'] .desktop-rail__tab:not([data-selected])>.desktop-rail__tabmain{padding:0 6px}
+:root:not(#layout) .atelier .desktop-rail[data-fit='narrow'] .desktop-rail__tab[data-selected]{max-width:140px}
+:root:not(#layout) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec__bar{flex-wrap:wrap;height:auto;min-height:32px;row-gap:2px;padding:4px 8px}
+:root:not(#layout) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec__bar>.rsec__title{flex:1 1 calc(100% - 48px)}
+:root:not(#layout) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec__bar>.rsec__spacer{display:none}
+:root:not(#layout) .atelier .desktop-rail[data-fit='narrow'] .term__tool>span{display:none}
 :root:not(#layout) .atelier .rail-add__menu{position:absolute;top:calc(100% + 4px);right:0;z-index:40;display:flex;flex-direction:column;min-width:180px;padding:4px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
 :root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;gap:8px;width:auto;height:30px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
 :root:not(#layout) .atelier .rail-add__item:hover,:root:not(#layout) .atelier .rail-add__item:focus-visible{background:var(--x-chip)}
