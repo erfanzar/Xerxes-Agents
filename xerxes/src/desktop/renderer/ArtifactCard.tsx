@@ -7,7 +7,7 @@
  * then go hunting for in the Artifacts section.
  */
 
-import { memo, type ReactElement } from 'react'
+import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
 import { Icon } from './Icon.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
 import type { ToolItem } from './types.js'
@@ -22,6 +22,13 @@ export interface ArtifactRef {
 
 const RESULT = /^(Created|Updated) artifact "(.*)" \(id ([A-Za-z0-9_-]+), version (\d+)\)/s
 
+/** The artifact an ArtifactTool result text names; null for anything else. */
+export function parseArtifactResult(result: string): Omit<ArtifactRef, 'kind'> | null {
+  const match = RESULT.exec(result.trim())
+  if (!match) return null
+  return { action: match[1] === 'Created' ? 'created' : 'updated', title: match[2]!, id: match[3]!, version: Number(match[4]) }
+}
+
 /** The artifact a finished ArtifactTool call saved, read from its result; null otherwise. */
 export function artifactOfTool(item: Pick<ToolItem, 'name' | 'state' | 'output' | 'input'>): ArtifactRef | null {
   if (item.name !== 'ArtifactTool' || item.state !== 'done') return null
@@ -33,6 +40,37 @@ export function artifactOfTool(item: Pick<ToolItem, 'name' | 'state' | 'output' 
     if (input && typeof input === 'object' && typeof (input as { kind?: unknown }).kind === 'string') kind = (input as { kind: string }).kind
   } catch { /* the result alone names the artifact */ }
   return { action: match[1] === 'Created' ? 'created' : 'updated', title: match[2]!, id: match[3]!, version: Number(match[4]), kind }
+}
+
+/**
+ * "New artifact: <title> — Open", shown for a few seconds when the current
+ * task saves an artifact while the right panel is not already on Artifacts.
+ */
+export function ArtifactToast({ sessionId, showingArtifacts }: { sessionId: string; showingArtifacts: boolean }): ReactElement | null {
+  const open = useDesktopNavigation()
+  const [toast, setToast] = useState<Omit<ArtifactRef, 'kind'> | null>(null)
+  const showing = useRef(showingArtifacts)
+  showing.current = showingArtifacts
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const off = window.xerxes.onEvent(({ type, payload }) => {
+      if (type !== 'tool_result' || payload.name !== 'ArtifactTool' || payload.permitted === false) return
+      if (typeof payload.session_id === 'string' && payload.session_id !== sessionId) return
+      const saved = parseArtifactResult(typeof payload.result === 'string' ? payload.result : '')
+      if (!saved || showing.current) return
+      setToast(saved)
+      clearTimeout(timer)
+      timer = setTimeout(() => setToast(null), 8000)
+    })
+    return () => { off(); clearTimeout(timer) }
+  }, [sessionId])
+  if (!toast) return null
+  return <div className="artifact-toast" role="status" aria-live="polite">
+    <span className="artifact-card__icon"><Icon name="file" size={14} /></span>
+    <span className="artifact-toast__text"><strong>{toast.action === 'created' ? 'New artifact' : 'Artifact updated'}</strong><span>{toast.title}</span></span>
+    <button className="artifact-card__open" onClick={() => { open('docs', toast.id); setToast(null) }}>Open</button>
+    <button className="artifact-toast__close" aria-label="Dismiss" onClick={() => setToast(null)}><Icon name="close" size={12} /></button>
+  </div>
 }
 
 const kindLabel = (kind: string): string => kind === 'markdown' ? 'Document' : kind === 'code' ? 'Code' : kind === 'html' ? 'HTML' : 'Text'

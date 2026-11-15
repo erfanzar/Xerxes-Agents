@@ -26,6 +26,7 @@ import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
+import { ArtifactToast } from './ArtifactCard.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
 import { AgentDetailsCard, AgentInspector } from './AgentInspector.js'
@@ -252,6 +253,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {!rail && !snap.noWorkspace && <FloatingRail open={navigate} />}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
         {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
+        {!snap.noWorkspace && <ArtifactToast sessionId={snap.currentId} showingArtifacts={rail === 'docs'} />}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which

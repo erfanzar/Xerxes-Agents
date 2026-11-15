@@ -523,6 +523,13 @@
 :root:not(#layout) .atelier .artifact-card__meta{font:400 12px/1.35 var(--sans);color:var(--x-meta)}
 :root:not(#layout) .atelier .artifact-card__open{flex:none;height:28px;padding:0 12px;border:1px solid var(--x-hairline);border-radius:7px;background:transparent;color:var(--x-title);font:500 12px/26px var(--sans);cursor:pointer;white-space:nowrap}
 :root:not(#layout) .atelier .artifact-card__open:hover{background:var(--x-chip)}
+/* The new-artifact toast: bottom-right, above the composer, never over the rail's header. */
+:root:not(#layout) .atelier .artifact-toast{position:fixed;right:20px;bottom:96px;z-index:60;display:flex;align-items:center;gap:10px;max-width:min(420px,calc(100vw - 40px));padding:10px 10px 10px 12px;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
+:root:not(#layout) .atelier .artifact-toast__text{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;font:400 12px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .artifact-toast__text strong{font:500 12.5px/1.35 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .artifact-toast__text span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .artifact-toast__close{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--x-meta);cursor:pointer}
+:root:not(#layout) .atelier .artifact-toast__close:hover{background:var(--x-chip);color:var(--x-title)}
 /* ── Files tree: type-coloured icons, change colours on names, M/A badges, dots on folders ── */
 :root:not(#layout) .atelier .file-tree__icon{display:inline-grid;place-items:center;flex:none}
 :root:not(#layout) .atelier .file-tree__icon svg{width:14px;height:14px}
