@@ -12,9 +12,25 @@ export interface NotifyEvent {
   readonly payload: Record<string, unknown>
 }
 
+/** Where a click on the notification takes the user. */
+export interface NotifyTarget {
+  readonly sessionId?: string
+  readonly panel?: 'docs'
+  readonly artifactId?: string
+}
+
 export interface NotifyDecision {
   readonly title: string
   readonly body: string
+  readonly target?: NotifyTarget
+}
+
+const ARTIFACT_RESULT = /^(Created|Updated) artifact "(.*)" \(id ([A-Za-z0-9_-]+), version (\d+)\)/s
+
+/** The click target for an event: its session, plus anything more specific. */
+function targetOf(payload: Record<string, unknown>, extra: Omit<NotifyTarget, 'sessionId'> = {}): NotifyTarget {
+  const sessionId = text(payload.session_id)
+  return { ...(sessionId ? { sessionId } : {}), ...extra }
 }
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
@@ -37,15 +53,30 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
       // opposite of what happened.
       if (payload.unstarted === true) return null
       if (payload.cancelled === true) {
-        return { title: 'Task stopped', body: 'The current task was interrupted before it finished.' }
+        return { title: 'Task stopped', body: 'The current task was interrupted before it finished.', target: targetOf(payload) }
       }
-      return { title: 'Task finished', body: 'The current task completed.' }
+      if (payload.failed === true || text(payload.error)) {
+        return { title: 'Task failed', body: truncate(text(payload.error) || 'The current task ended with an error.'), target: targetOf(payload) }
+      }
+      return { title: 'Task finished', body: 'The current task completed.', target: targetOf(payload) }
+    }
+    case 'tool_result': {
+      // A saved artifact: clicking opens it, so nobody has to go looking for it.
+      if (text(payload.name) !== 'ArtifactTool' || payload.permitted === false) return null
+      const match = ARTIFACT_RESULT.exec(text(payload.result))
+      if (!match) return null
+      const updated = match[1] === 'Updated'
+      return {
+        title: updated ? 'Artifact updated' : 'New artifact',
+        body: truncate(`${match[2]}${updated ? ` (v${match[4]})` : ''} — click to read it`),
+        target: targetOf(payload, { panel: 'docs', artifactId: match[3]! }),
+      }
     }
     case 'approval_request': {
       const description = text(payload.description) ||
         `${text(payload.name)} ${text(payload.tool_name)}`.trim()
       if (!description) return null
-      return { title: 'Approval needed', body: truncate(description) }
+      return { title: 'Approval needed', body: truncate(description), target: targetOf(payload) }
     }
     case 'question_request': {
       const questions = Array.isArray(payload.questions) ? payload.questions : []
@@ -54,7 +85,7 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
           item !== null && typeof item === 'object' && text((item as Record<string, unknown>).question) !== '',
       )
       if (!first) return null
-      return { title: 'Xerxes has a question', body: truncate(text(first.question)) }
+      return { title: 'Xerxes has a question', body: truncate(text(first.question)), target: targetOf(payload) }
     }
     default:
       return null

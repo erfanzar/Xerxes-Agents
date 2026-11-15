@@ -37,6 +37,24 @@ describe('native notification decisions', () => {
     expect(shouldNotify(event, { enabled: true, anyWindowFocused: false })).toMatchObject({ title: 'Task finished' })
   })
 
+  test('a saved artifact pings with a click target that opens it; its task is the target session', () => {
+    const created = notificationFor({ type: 'tool_result', payload: { session_id: 's1', name: 'ArtifactTool', permitted: true, result: 'Created artifact "Plan (v2)" (id c2b490e7ea, version 1). It is in the Artifacts panel.' } })
+    expect(created).toMatchObject({ title: 'New artifact', target: { sessionId: 's1', panel: 'docs', artifactId: 'c2b490e7ea' } })
+    expect(created?.body).toContain('Plan (v2)')
+    expect(notificationFor({ type: 'tool_result', payload: { name: 'ArtifactTool', result: 'Updated artifact "Plan" (id abc, version 3).' } }))
+      .toMatchObject({ title: 'Artifact updated', body: expect.stringContaining('(v3)') })
+    // Other tools, refused calls and failures stay quiet.
+    expect(notificationFor({ type: 'tool_result', payload: { name: 'exec_command', result: 'Created artifact "x" (id a, version 1)' } })).toBeNull()
+    expect(notificationFor({ type: 'tool_result', payload: { name: 'ArtifactTool', permitted: false, result: 'Created artifact "x" (id a, version 1)' } })).toBeNull()
+    expect(notificationFor({ type: 'tool_result', payload: { name: 'ArtifactTool', result: 'Tool execution failed: no session' } })).toBeNull()
+  })
+
+  test('a finished, failed or waiting task carries its session as the click target', () => {
+    expect(notificationFor({ type: 'turn_end', payload: { session_id: 's9' } })).toMatchObject({ title: 'Task finished', target: { sessionId: 's9' } })
+    expect(notificationFor({ type: 'turn_end', payload: { session_id: 's9', error: 'provider 500' } })).toMatchObject({ title: 'Task failed', body: 'provider 500' })
+    expect(notificationFor({ type: 'question_request', payload: { session_id: 's9', questions: [{ question: 'Which?' }] } })).toMatchObject({ target: { sessionId: 's9' } })
+  })
+
   test('interrupted turns report stopped, unstarted turns stay quiet', () => {
     // Mirrors the TUI bell policy: a cancelled turn is not a completion, and
     // an unstarted submission has nothing to report at all.

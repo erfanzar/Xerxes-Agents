@@ -223,7 +223,20 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // Tasks, Agents and XERXES are independent destinations. Every explicit
   // session open returns to Tasks, including reopening the current session;
   // the desktop connection's sessionKey does not change between sessions.
-  useEffect(() => { setPanel(null); setPage(null); setSelectedAgent('') }, [snap.cwd, snap.currentId, snap.sessionOpenRevision])
+  // A clicked notification: open its task, then the artifact it names. The open
+  // above resets the panels, so the artifact waits until that reset has run.
+  const pendingArtifact = useRef<{ sessionId?: string; artifactId: string } | null>(null)
+  useEffect(() => window.xerxes.onNavigate?.(target => {
+    const current = store.getSnapshot().currentId
+    if (target.artifactId) pendingArtifact.current = { artifactId: target.artifactId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) }
+    if (target.sessionId && target.sessionId !== current) { void store.openSession(target.sessionId); return }
+    if (target.artifactId) { pendingArtifact.current = null; navigate('docs', target.artifactId) }
+  }), [])
+  useEffect(() => {
+    setPanel(null); setPage(null); setSelectedAgent('')
+    const pending = pendingArtifact.current
+    if (pending && (!pending.sessionId || pending.sessionId === snap.currentId)) { pendingArtifact.current = null; navigate('docs', pending.artifactId) }
+  }, [snap.cwd, snap.currentId, snap.sessionOpenRevision])
   useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>

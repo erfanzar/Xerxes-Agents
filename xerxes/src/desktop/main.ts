@@ -125,7 +125,7 @@ function appIcon(): ReturnType<typeof nativeImage.createFromPath> | undefined {
 
 let notificationsEnabled = true
 
-function maybeNotify(window: BrowserWindow, type: string, payload: Record<string, unknown>): void {
+function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>): void {
   if (!notificationsEnabled || !Notification.isSupported()) return
   if (window.isDestroyed() || window.isFocused())
     return
@@ -137,6 +137,8 @@ function maybeNotify(window: BrowserWindow, type: string, payload: Record<string
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+    // Open what the notification was about: its task, and an artifact when there is one.
+    if (decision.target && !contents.isDestroyed()) contents.send('desktop:navigate', decision.target)
   })
   ping.show()
 }
@@ -474,7 +476,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   surfaceSessions.set(id, session)
   activateSurface(id)
   const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => {
-    maybeNotify(window, type, payload)
+    maybeNotify(window, contents, type, payload)
     // A turn that ended (perhaps because access was lost while it ran, after
     // an app restart) leaves the conversation idle: bind it again now, so a
     // Retry works instead of failing the same way.

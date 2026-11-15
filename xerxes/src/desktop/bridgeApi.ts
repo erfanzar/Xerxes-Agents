@@ -97,6 +97,22 @@ export function createBridge(transport: BridgeTransport) {
     }
     return transport.on('desktop:menu', listener)
   },
+  /** A clicked notification: open its task, and an artifact when it names one. */
+  onNavigate(handler: (target: { sessionId?: string; panel?: 'docs'; artifactId?: string }) => void): () => void {
+    const id = (value: unknown): string | undefined =>
+      typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) ? value : undefined
+    const listener = (target: unknown) => {
+      if (!target || typeof target !== 'object') return
+      const raw = target as Record<string, unknown>
+      const sessionId = id(raw.sessionId), artifactId = id(raw.artifactId)
+      handler({
+        ...(sessionId ? { sessionId } : {}),
+        ...(raw.panel === 'docs' ? { panel: 'docs' as const } : {}),
+        ...(artifactId ? { artifactId } : {}),
+      })
+    }
+    return transport.on('desktop:navigate', listener)
+  },
   getResumeSession(): Promise<string | null> {
     return transport.invoke('desktop:resume') as Promise<string | null>
   },

@@ -29,6 +29,8 @@ export interface XerxesBridge {
   onWindowChrome?(handler: (state: { trafficLights: boolean }) => void): () => void
   /** Menu items the main process routes to the focused shell. */
   onMenuCommand?(handler: (command: string) => void): () => void
+  /** A clicked notification names a task and maybe an artifact to open. */
+  onNavigate?(handler: (target: { sessionId?: string; panel?: 'docs'; artifactId?: string }) => void): () => void
   getContextScope?(): Promise<string>
   getContextHost?(): Promise<string | null>
   getContexts?(): Promise<WorkspaceContext[]>
