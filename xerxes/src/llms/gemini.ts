@@ -142,6 +142,7 @@ export function messagesToGemini(messages: readonly ChatMessage[]): GeminiMessag
         })
       }
       attachAssistantSignature(parts, message.thinking_signature)
+      requireCallSignature(parts)
       appendContent(contents, 'model', parts)
       index += 1
       continue
@@ -451,6 +452,22 @@ function assistantContentParts(message: Extract<ChatMessage, { role: 'assistant'
     })
   }
   return parts
+}
+
+/**
+ * Google's documented placeholder for a function call whose real signature is
+ * unknown (history from another provider, a compacted or older transcript, a
+ * step recorded before signatures were kept). Without it Gemini 3+ rejects the
+ * whole request with "Function call is missing a thought_signature".
+ */
+export const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator'
+
+/** The first functionCall of every model turn must carry a signature; give it the placeholder when it has none. */
+function requireCallSignature(parts: GeminiPart[]): void {
+  const index = parts.findIndex(part => 'functionCall' in part)
+  const call = parts[index]
+  if (call === undefined || !('functionCall' in call) || call.thoughtSignature) return
+  parts[index] = { ...call, thoughtSignature: GEMINI_SKIP_SIGNATURE }
 }
 
 function attachAssistantSignature(parts: GeminiPart[], signature: string | undefined): void {

@@ -400,6 +400,9 @@ interface VertexContent {
   role: 'model' | 'user'
 }
 
+/** Google's placeholder for a function call whose real thought signature is unknown. */
+const VERTEX_SKIP_SIGNATURE = 'skip_thought_signature_validator'
+
 /** pi-ai thought-signature validation: base64 TYPE_BYTES only, same-model replay. */
 function isValidThoughtSignature(signature: string | undefined): signature is string {
   if (!signature) return false
@@ -468,7 +471,8 @@ export function vertexContentsFromMessages(
         // as a thought part, carrying a stored signature when it is valid
         // base64 (pi-ai only replays same-model signatures — Xerxes messages
         // do not record the originating model, so validity is the gate).
-        const signature = isValidThoughtSignature(message.thinking_signature)
+        // With tool calls the signature belongs on the first functionCall part (below).
+        const signature = isValidThoughtSignature(message.thinking_signature) && !message.tool_calls?.length
           ? message.thinking_signature
           : undefined
         parts.push({
@@ -477,14 +481,20 @@ export function vertexContentsFromMessages(
           ...(signature ? { thoughtSignature: signature } : {}),
         })
       }
-      for (const call of message.tool_calls ?? []) {
+      for (const [index, call] of (message.tool_calls ?? []).entries()) {
         toolNamesById.set(call.id, call.function.name)
+        // Gemini 3+ rejects a replayed model turn whose first functionCall has no
+        // signature. Use the stored one, else Google's documented placeholder.
+        const callSignature = index === 0
+          ? (isValidThoughtSignature(message.thinking_signature) ? message.thinking_signature : VERTEX_SKIP_SIGNATURE)
+          : undefined
         parts.push({
           functionCall: {
             args: parseToolArguments(call.function.arguments),
             ...(requiresToolCallId(modelId) ? { id: call.id } : {}),
             name: call.function.name,
           },
+          ...(callSignature ? { thoughtSignature: callSignature } : {}),
         })
       }
       if (parts.length) contents.push({ role: 'model', parts })

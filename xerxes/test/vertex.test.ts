@@ -76,8 +76,9 @@ test('payload conversion mirrors the native generateContent shape', () => {
       role: 'model',
       parts: [
         { text: 'deploying' },
-        { thought: true, text: 'internal plan', thoughtSignature: 'c2ln' },
-        { functionCall: { args: { name: 'api' }, name: 'deploy' } },
+        // With tool calls, Gemini 3 requires the signature on the first functionCall part.
+        { thought: true, text: 'internal plan' },
+        { functionCall: { args: { name: 'api' }, name: 'deploy' }, thoughtSignature: 'c2ln' },
       ],
     },
     {

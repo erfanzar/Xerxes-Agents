@@ -4,7 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import { ProviderError } from '../src/core/errors.js'
-import { GeminiClient, messagesToGemini } from '../src/llms/gemini.js'
+import { GEMINI_SKIP_SIGNATURE, GeminiClient, messagesToGemini } from '../src/llms/gemini.js'
 import { createLlmClient, type CompletionRequest } from '../src/llms/client.js'
 import { classifyError } from '../src/runtime/errorClassifier.js'
 
@@ -544,3 +544,20 @@ function textSseResponse(text: string, chunkSizes: readonly number[] = []): Resp
     },
   }), { headers: { 'Content-Type': 'text/event-stream' } })
 }
+
+test('a replayed tool call with no stored signature gets the placeholder, so Gemini 3 accepts old or relayed history', () => {
+  const payload = messagesToGemini([
+    { role: 'user', content: 'go' },
+    { role: 'assistant', content: '', tool_calls: [
+      { id: 'a', type: 'function', function: { name: 'GrepTool', arguments: { pattern: 'x' } } },
+      { id: 'b', type: 'function', function: { name: 'ReadFile', arguments: { file_path: 'y' } } },
+    ] },
+    { role: 'tool', tool_call_id: 'a', name: 'GrepTool', content: 'r1' },
+    { role: 'tool', tool_call_id: 'b', name: 'ReadFile', content: 'r2' },
+  ])
+  const model = payload.contents.find(content => content.role === 'model')!
+  const calls = model.parts.filter(part => 'functionCall' in part)
+  expect(calls[0]).toMatchObject({ thoughtSignature: GEMINI_SKIP_SIGNATURE })
+  // Only the first call of a step carries it.
+  expect('thoughtSignature' in calls[1]!).toBe(false)
+})
