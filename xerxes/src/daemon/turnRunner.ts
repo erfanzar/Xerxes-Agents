@@ -173,6 +173,8 @@ export interface AgentTurnRunnerOptions {
   readonly memory?: Memory
   readonly memoryMinChars?: number
   readonly resolveSessionProvider?: (session: DaemonSession, model: string) => { llm: LlmClient; createLlmForModel?: (model: string) => LlmClient; providerOverrides?: ProviderOverrides; contextLimit?: number | undefined; maxOutputTokens?: (model: string) => number | undefined }
+  /** Same-family account failover (Codex↔Codex, Claude↔Claude): before a turn near the limit, and after a quota error. */
+  readonly accountFailover?: (session: DaemonSession, model: string, reason: 'preflight' | 'quota') => Promise<{ readonly from: string; readonly to: string; readonly reason: string } | undefined>
   readonly llm: LlmClient
   /** Provider-reported context capacity for this profile/model; absent means unknown. */
   readonly contextLimit?: number
@@ -464,6 +466,15 @@ export class AgentTurnRunner implements TurnRunner {
     this.liveStates.delete(session.id)
     if (this.options.beforeTurn) {
       try { await this.options.beforeTurn(session) } catch { /* bounded host preparation; never fails the turn */ }
+      signal.throwIfAborted()
+    }
+    // An account near its limit hands the turn to a sibling sign-in with room, and says so.
+    if (this.options.accountFailover && !Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) {
+      const preflightModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
+      try {
+        const switched = await this.options.accountFailover(session, preflightModel, 'preflight')
+        if (switched) yield { type: 'notification', payload: { level: 'info', message: `Switched to ${switched.to}: ${switched.reason}.` } }
+      } catch { /* best effort: the turn runs on the current account */ }
       signal.throwIfAborted()
     }
     const configuredModel = this.options.agentDefinitions?.get(session.agentId)?.model || session.model || this.options.model
@@ -948,7 +959,18 @@ export class AgentTurnRunner implements TurnRunner {
         // changed (switched account, new login, edited key): rebuild from the
         // live profile so the loop can compare and retry as the new identity.
         ...(!requiresLocal && this.options.resolveSessionProvider ? {
-          refreshLlm: () => this.options.resolveSessionProvider?.(session, attemptModel)?.llm,
+          // After a quota error the loop polls this for a new credential; the first poll starts a
+          // same-family failover, and once it re-pins the session the next poll returns the new account.
+          refreshLlm: (() => {
+            let failoverStarted = false
+            return () => {
+              if (!failoverStarted && this.options.accountFailover) {
+                failoverStarted = true
+                void this.options.accountFailover(session, attemptModel, 'quota').catch(() => undefined)
+              }
+              return this.options.resolveSessionProvider?.(session, attemptModel)?.llm
+            }
+          })(),
         } : {}),
         // A local engine Xerxes started is reloaded once if it loses the model.
         ...(recoverEngine ? { recoverEngine } : {}),

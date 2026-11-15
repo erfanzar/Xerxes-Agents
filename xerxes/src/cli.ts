@@ -51,6 +51,8 @@ import type { DaemonInteractionBoard } from "./daemon/interactions.js";
 import { daemonPaths, recallMemoryDirectory, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { agentProvider, profileAcceptsModel, sessionProvider } from './daemon/sessionProvider.js';
+import { createAccountFailover } from './daemon/accountFailoverWiring.js';
+import { parseFailoverSettings } from './runtime/accountFailover.js';
 import { BoundaryRegistry, createOutboundGateFactory, createSessionBoundaryFactory } from './daemon/sessionBoundary.js';
 import { outboundApprovalPort } from './daemon/outboundGate.js';
 import { createTurnRouter } from './daemon/turnRouting.js';
@@ -2550,6 +2552,8 @@ function daemonRuntime(
       // built; a turn waits briefly for it so its first step can call them.
       ...(managedPluginHost ? { beforeTurn: (session: DaemonSession) => managedPluginHost.project.whenReady(session.cwd || workspaceRoot) } : {}),
       ...(host.remoteProviderBindings ? { remoteProviderBindings: host.remoteProviderBindings } : {}),
+      // runtime.account_failover (on|off, default on) and runtime.account_failover_threshold (default 95).
+      accountFailover: createAccountFailover({ profiles: profileStore, settings: () => parseFailoverSettings({ ...config.runtime, ...settings }) }),
       resolveSessionProvider: (session, model) => {
         if (!session.metadata.provider_profile && (config.runtime.provider || config.runtime.base_url || config.runtime.api_key)) return { llm };
         const profile = sessionProvider(profileStore, session, model);
