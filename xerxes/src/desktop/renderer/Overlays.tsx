@@ -900,7 +900,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
             <span className="provcard__tools">
               {confirmDelete === provider.name ? (
                 <>
-                  <button className="btn btn--danger" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
+                  <button className="btn btn--danger" disabled={snap.turnActive} onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
                   <button className="btn" onClick={() => setConfirmDelete(null)}>Keep</button>
                 </>
               ) : (
@@ -914,11 +914,11 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                   {snap.storageScope?.startsWith('ssh:') && provider.signsIn && provider.ready === true && (!row.inUse || row.viaMac) && !snap.turnActive && (
                     <button className="btn" disabled={!!snap.providerSwitching} title={`run this task on the host's own ${name} sign-in`} onClick={() => store.useHostProvider(provider.name)}>Run on the server</button>
                   )}
-                  {slot?.sync && <button className="btn" title={`Sync ${name} to this SSH host`} onClick={slot.sync}>Sync to SSH</button>}
+                  {slot?.sync && <button className="btn" disabled={snap.turnActive || slot.busy} title={`Sync ${name} to this SSH host`} onClick={slot.sync}>Sync to SSH</button>}
                   <button className="btn" disabled={snap.turnActive} title={`Edit ${name}`} onClick={() => setForm(provider.name)}>Edit</button>
                   {/* A signed-in account's Remove also clears its credential; deleting only the profile would be relinked. */}
                   {!provider.active && (
-                    <button className="btn" disabled={snap.turnActive} title={`Delete ${name}`} onClick={() => slot?.remove ? slot.remove() : setConfirmDelete(provider.name)}>Remove</button>
+                    <button className="btn" disabled={snap.turnActive || slot?.busy === true} title={`Delete ${name}`} onClick={() => slot?.remove ? slot.remove() : setConfirmDelete(provider.name)}>Remove</button>
                   )}
                 </>
               )}

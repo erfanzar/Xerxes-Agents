@@ -56,6 +56,80 @@ test('a signed-in account whose linked profile vanished is relinked, not hidden'
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
+const CODEX_URL = 'https://chatgpt.com/backend-api/codex'
+const fixtureCatalog = async () => ['plan-model-a', 'plan-model-b']
+
+test('a Claude account on the broken anthropic transport moves to claude-code, keeping every other field', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-repair-claude-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile, {}, { codexModels: fixtureCatalog })
+    const legacy = await registry.create('claude', 'Personal')
+    const chosen = await registry.create('claude', 'Prism')
+    const store = new ProfileStore(profilesFile)
+    // Old default pair: transport and model both legacy.
+    store.save({ name: legacy.profileName, apiKey: '', model: 'claude-sonnet-4-5', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', setActive: false, oauthAccountId: legacy.id, sampling: { temperature: 0.3 } })
+    store.updateModelCapabilities(legacy.profileName, 'claude-sonnet-4-5', { contextLimit: 123_000 })
+    // The person chose another model on the broken transport: only the transport changes.
+    store.save({ name: chosen.profileName, apiKey: '', model: 'claude-opus-4-1', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', setActive: false, oauthAccountId: chosen.id })
+
+    await registry.list()
+    const after = new ProfileStore(profilesFile)
+    expect(after.get(legacy.profileName)).toMatchObject({ provider: 'claude-code', model: 'claude-code/sonnet', base_url: 'https://api.anthropic.com', oauth_account_id: legacy.id, sampling: { temperature: 0.3 } })
+    expect(after.get(legacy.profileName)?.model_overrides?.['claude-sonnet-4-5']).toEqual({ context_limit: 123_000 })
+    expect(after.get(chosen.profileName)).toMatchObject({ provider: 'claude-code', model: 'claude-opus-4-1' })
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a claude-code account choosing claude-sonnet-4-5 is never reverted', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-repair-keep-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile, {}, { codexModels: fixtureCatalog })
+    const account = await registry.create('claude', 'Personal')
+    new ProfileStore(profilesFile).updateConnection(account.profileName, { model: 'claude-sonnet-4-5' })
+    await registry.list()
+    await registry.list()
+    expect(new ProfileStore(profilesFile).get(account.profileName)).toMatchObject({ provider: 'claude-code', model: 'claude-sonnet-4-5' })
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a Codex account takes its live catalog model; only the exact legacy id is repaired', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-repair-codex-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile, {}, { codexModels: fixtureCatalog })
+    const created = await registry.create('codex', 'Erfan')
+    const store = new ProfileStore(profilesFile)
+    store.updateConnection(created.profileName, { model: 'gpt-5.6-codex' })
+    await registry.list()
+    expect(new ProfileStore(profilesFile).get(created.profileName)).toMatchObject({ model: 'plan-model-a', base_url: CODEX_URL })
+    // A model the person picked later is kept.
+    new ProfileStore(profilesFile).updateConnection(created.profileName, { model: 'gpt-6-astra' })
+    await registry.list()
+    expect(new ProfileStore(profilesFile).get(created.profileName)?.model).toBe('gpt-6-astra')
+    // Unreachable catalog: the legacy id stays rather than being guessed.
+    const offline = new ProviderAccountRegistry(root, profilesFile, {}, { codexModels: async () => { throw new Error('offline') } })
+    new ProfileStore(profilesFile).updateConnection(created.profileName, { model: 'gpt-5.6-codex' })
+    await offline.list()
+    expect(new ProfileStore(profilesFile).get(created.profileName)?.model).toBe('gpt-5.6-codex')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a relinked Codex profile uses the live catalog model', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-relink-live-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile, {}, { codexModels: fixtureCatalog })
+    const account = await registry.create('codex', 'Erfan')
+    await mkdir(join(root, account.id, '.codex'), { recursive: true })
+    await writeFile(join(root, account.id, '.codex', 'auth.json'), JSON.stringify({ tokens: { access_token: 'fixture' } }))
+    new ProfileStore(profilesFile).delete(account.profileName)
+    await registry.list()
+    expect(new ProfileStore(profilesFile).get(account.profileName)?.model).toBe('plan-model-a')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
 test('registering an account cannot leave two rows for the same linked profile', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-unique-'))
   try {
@@ -98,7 +172,8 @@ test('multiple OAuth accounts have isolated directories and switchable profiles'
     expect(JSON.stringify(claudePayload)).toContain('claude-refresh')
     expect(JSON.stringify(codexPayload)).toContain('codex-refresh')
     expect(claudePayload.kind === 'claude' && claudePayload.profile.oauth_account_id).toBe(claude.id)
-    const connection = runtimeConnection({ channels: {}, control: {}, maxConcurrentTurns: 1, projectDirectory: directory, runtime: {}, workspace: {} }, linked[0])
+    // A Claude sign-in runs through the Claude Code transport, used once the person picked it.
+    const connection = runtimeConnection({ channels: {}, control: {}, maxConcurrentTurns: 1, projectDirectory: directory, runtime: {}, workspace: {} }, linked[0], { claudeCodeChosen: true, claudeCodeInstalled: () => true })
     expect(connection?.oauthAccountId).toBe(claude.id)
     expect(registry.sessionOptions(claude.id).anthropicOAuthSession?.storedPath()).toBe(join(claudeDir, 'auth', 'anthropic-oauth.json'))
     await registry.remove(codex.id)

@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { ProfileStore, type ProviderProfile } from '../bridge/profiles.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { AnthropicOAuthSession } from './anthropicOAuth.js'
-import { CodexSession, codexAuthHeaders, importCodexCliTokens } from './codexAuth.js'
+import { CodexSession, codexAuthHeaders, fetchCodexModelCatalog, importCodexCliTokens } from './codexAuth.js'
 import { loginWithChatGpt, openInBrowser } from './codexLogin.js'
 import { CredentialStorage } from './storage.js'
 import { fetchClaudeUsage, fetchCodexUsage, type ProviderUsageReport, type UsageRequestOptions } from './usage.js'
@@ -49,10 +49,27 @@ function apiAccountSummary(profile: ProviderProfile): ProviderAccountSummary {
   return { id: `api:${profile.name}`, kind: 'api_key', label: profile.name, profileName: profile.name, createdAt: '', provider: profile.provider, model: profile.model }
 }
 
+/**
+ * A Claude sign-in runs through the Claude Code transport (the account's own
+ * isolated CLAUDE_CONFIG_DIR): the raw Messages API answered a subscription
+ * token with a bare 429 and listed no models for it. A Codex sign-in takes
+ * the first model of its own live, plan-scoped catalog; this id is used only
+ * when that catalog could not be read (offline at sign-in, tests).
+ */
+const CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
+const CODEX_UNREACHABLE_CATALOG_MODEL = 'gpt-6.1-sol'
 function defaultBase(kind: OAuthAccountKind): { provider: string; baseUrl: string; model: string } {
-  if (kind === 'codex') return { provider: 'openai-codex', baseUrl: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-codex' }
-  if (kind === 'claude-code') return { provider: 'claude-code', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' }
-  return { provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' }
+  if (kind === 'codex') return { provider: 'openai-codex', baseUrl: CODEX_BASE_URL, model: CODEX_UNREACHABLE_CATALOG_MODEL }
+  return { provider: 'claude-code', baseUrl: 'https://api.anthropic.com', model: 'claude-code/sonnet' }
+}
+
+/** Exact defaults earlier builds wrote, verified broken by a real request (2026-11-15). */
+const LEGACY_CODEX_MODEL = 'gpt-5.6-codex'
+const LEGACY_CLAUDE_MODEL = 'claude-sonnet-4-5'
+
+export interface ProviderAccountRegistryOptions {
+  /** The model ids a Codex account's plan offers, live. Injected in tests. */
+  readonly codexModels?: (accountId: string) => Promise<readonly string[]>
 }
 
 /** Isolated OAuth account directories plus the existing named API-key profiles. */
@@ -61,7 +78,38 @@ export class ProviderAccountRegistry {
     private readonly root = join(xerxesHome(), 'provider-accounts'),
     private readonly profilesFile = join(xerxesHome(), 'profiles.json'),
     private readonly environment: Readonly<Record<string, string | undefined>> = process.env,
+    private readonly options: ProviderAccountRegistryOptions = {},
   ) {}
+
+  /** The first model of the account's live Codex catalog, or undefined when it cannot be read. */
+  private async liveCodexModel(id: string): Promise<string | undefined> {
+    try {
+      if (this.options.codexModels) return (await this.options.codexModels(id))[0]
+      const signal = AbortSignal.timeout(10_000)
+      const credential = await this.sessionOptions(id).codexSession.credential(signal)
+      return (await fetchCodexModelCatalog(credential, { baseUrl: CODEX_BASE_URL, signal }))[0]?.id
+    } catch { return undefined }
+  }
+
+  /**
+   * Repair a signed-in account profile that still carries a broken legacy
+   * default, changing only that: a Claude account on the raw `anthropic`
+   * transport moves to `claude-code` (its model is kept unless it is exactly
+   * the old default); a Codex account on exactly `gpt-5.6-codex` takes its
+   * live catalog's model. Anything else the person chose is left alone, and
+   * a profile on the claude-code transport is never touched.
+   */
+  private async repairLegacyDefaults(account: ProviderAccountMetadata, linked: ProviderProfile, store: ProfileStore): Promise<void> {
+    if (linked.oauth_account_id !== account.id || linked.api_key.trim()) return
+    if (account.kind === 'claude' && linked.provider === 'anthropic') {
+      store.updateConnection(account.profileName, { provider: 'claude-code', ...(linked.model === LEGACY_CLAUDE_MODEL ? { model: 'claude-code/sonnet' } : {}) })
+      return
+    }
+    if (account.kind === 'codex' && linked.model === LEGACY_CODEX_MODEL) {
+      const model = await this.liveCodexModel(account.id)
+      if (model) store.updateConnection(account.profileName, { model })
+    }
+  }
 
   private directory(id: string): string {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid provider account id')
@@ -124,14 +172,17 @@ export class ProviderAccountRegistry {
     const credential = account.kind === 'codex' ? join(directory, '.codex', 'auth.json') : join(directory, 'auth', 'anthropic-oauth.json')
     if (!await stat(credential).then(info => info.isFile(), () => false)) return
     const defaults = defaultBase(account.kind)
-    store.save({ name: account.profileName, apiKey: '', model: defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: account.id })
+    const live = account.kind === 'codex' ? await this.liveCodexModel(account.id) : undefined
+    store.save({ name: account.profileName, apiKey: '', model: live ?? defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: account.id })
   }
 
   async list(): Promise<readonly ProviderAccountSummary[]> {
     const oauth = await this.accounts()
     const store = new ProfileStore(this.profilesFile)
     for (const account of oauth) {
-      if (!store.get(account.profileName)) await this.relinkMissingProfile(account, store)
+      const linked = store.get(account.profileName)
+      if (!linked) { await this.relinkMissingProfile(account, store); continue }
+      await this.repairLegacyDefaults(account, linked, store)
     }
     const profiles = store.list()
     const result: ProviderAccountSummary[] = []
@@ -185,7 +236,7 @@ export class ProviderAccountRegistry {
     return { id, kind, label: clean, profileName, createdAt: new Date().toISOString() }
   }
 
-  private async register(account: ProviderAccountMetadata): Promise<ProviderAccountMetadata> {
+  private async register(account: ProviderAccountMetadata, model?: string): Promise<ProviderAccountMetadata> {
     const document = await this.document(), profileStore = new ProfileStore(this.profilesFile)
     let registered = account
     if (profileStore.get(account.profileName)) {
@@ -195,7 +246,7 @@ export class ProviderAccountRegistry {
       registered = { ...account, profileName }
     }
     const defaults = defaultBase(registered.kind)
-    profileStore.save({ name: registered.profileName, apiKey: '', model: defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: registered.id })
+    profileStore.save({ name: registered.profileName, apiKey: '', model: model ?? defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: registered.id })
     try {
       await this.saveDocument({ accounts: [...document.accounts.filter(row => row.id !== registered.id && row.profileName !== registered.profileName), registered] })
     } catch (error) {
@@ -238,7 +289,8 @@ export class ProviderAccountRegistry {
       ? (await importCodexCliTokens({ CODEX_HOME: join(directory, '.codex') }, directory))?.toRecord()
       : await new AnthropicOAuthSession({ xerxesHome: directory }).stored()
     if (!credential) throw new Error('Provider account has no saved credential')
-    const registered = await this.register(account)
+    // The credential is readable now, so the plan's own catalog picks the model.
+    const registered = await this.register(account, account.kind === 'codex' ? await this.liveCodexModel(id) : undefined)
     await rm(this.pendingPath(id), { force: true })
     return registered
   }

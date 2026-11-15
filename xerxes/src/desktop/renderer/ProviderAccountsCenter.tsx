@@ -10,7 +10,7 @@ import type { XerxesBridge } from './types.js'
 
 export interface AccountRow {id:string;kind:string;label:string;profileName:string;provider:string;model:string;available:boolean}
 /** What a provider row borrows from its signed-in account: usage, Sync and Remove (which also clears the credential). */
-export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly remove?:()=>void;readonly sync?:()=>void}
+export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly busy:boolean;readonly remove?:()=>void;readonly sync?:()=>void}
 interface AccountList {accounts:readonly AccountRow[];can_sync:boolean;destination:string|null}
 interface UsageWindow {label:string;used_percent:number;resets_at:string|null;detail:string|null}
 interface SyncReview {review:string;account_id:string;destination:string}
@@ -164,7 +164,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
   }
   const removable=(account:AccountRow)=>account.kind!=='api_key'||account.provider==='gemini'
   const slots=new Map<string,AccountSlot>((list?.accounts??[]).map(account=>[account.profileName,{
-    account, usage:usageOf(account),
+    account, usage:usageOf(account), busy,
     ...(removable(account)?{remove:()=>{actionRequest.current+=1;setAction({kind:'remove',account,phase:'ready',error:''})}}:{}),
     ...(list?.can_sync?{sync:()=>void reviewSync(account)}:{}),
   }]))

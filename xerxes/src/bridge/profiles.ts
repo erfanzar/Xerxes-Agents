@@ -310,6 +310,27 @@ export class ProfileStore {
     return updated
   }
 
+  /**
+   * Change only the provider and/or model of one saved profile. Every other
+   * field (endpoint, key, sampling, capability caches, user overrides, trust,
+   * account link) is kept, unlike save(), which rebuilds the profile. One
+   * synchronous read-modify-write: no await between the read and the rename.
+   */
+  updateConnection(name: string, changes: { readonly provider?: string; readonly model?: string }): ProviderProfile | undefined {
+    name = canonicalProfileName(name)
+    const document = this.load()
+    const existing = Object.hasOwn(document.profiles, name) ? document.profiles[name] : undefined
+    if (!existing) return undefined
+    const updated: ProviderProfile = {
+      ...existing,
+      ...(changes.provider ? { provider: changes.provider } : {}),
+      ...(changes.model ? { model: changes.model } : {}),
+    }
+    document.profiles[name] = updated
+    this.write(document)
+    return updated
+  }
+
   delete(name: string): boolean {
     name = canonicalProfileName(name)
     const document = this.load()
