@@ -73,6 +73,10 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
       }
     }
     case 'approval_request': {
+      // Leaving plan mode is the plan review, not a tool permission.
+      if (/^ExitPlanMode(Tool)?$/.test(text(payload.tool_name) || text(payload.name) || text(payload.action))) {
+        return { title: 'Plan ready', body: 'Continue with the plan or refine it.', target: targetOf(payload) }
+      }
       const description = text(payload.description) ||
         `${text(payload.name)} ${text(payload.tool_name)}`.trim()
       if (!description) return null
@@ -90,6 +94,19 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
     default:
       return null
   }
+}
+
+/**
+ * A goal reaching complete or blocked. `status_update` repeats the phase on
+ * every turn, so only a change from the previous phase seen for that session counts.
+ */
+export function goalPhaseNotification(previous: string | undefined, payload: Record<string, unknown>): NotifyDecision | null {
+  const phase = text(payload.goal_phase)
+  if (!phase || phase === previous) return null
+  const goal = truncate(text(payload.goal) || 'The goal')
+  if (phase === 'complete') return { title: 'Goal complete', body: goal, target: targetOf(payload) }
+  if (phase === 'blocked') return { title: 'Goal blocked — needs you', body: goal, target: targetOf(payload) }
+  return null
 }
 
 /** The gate around the display: preference first, then focus. */

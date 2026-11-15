@@ -44,7 +44,7 @@ import {
   type RemoteConnection,
   type RemoteTarget,
 } from './main/remote.js'
-import { notificationFor } from './main/notify.js'
+import { goalPhaseNotification, notificationFor, type NotifyDecision } from './main/notify.js'
 import { createCliRunner } from './main/hubCli.js'
 import { createHubCockpit } from './main/hubCockpit.js'
 import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
@@ -125,11 +125,21 @@ function appIcon(): ReturnType<typeof nativeImage.createFromPath> | undefined {
 
 let notificationsEnabled = true
 
+/** Last goal phase seen per session, so a repeated status_update never pings twice. */
+const goalPhases = new Map<string, string>()
+
 function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>): void {
+  // Tracked even while focused, so returning focus never replays an old phase change.
+  let goalDecision: NotifyDecision | null = null
+  if (type === 'status_update' && typeof payload.goal_phase === 'string') {
+    const key = typeof payload.session_id === 'string' ? payload.session_id : ''
+    goalDecision = goalPhaseNotification(goalPhases.get(key), payload)
+    goalPhases.set(key, payload.goal_phase)
+  }
   if (!notificationsEnabled || !Notification.isSupported()) return
   if (window.isDestroyed() || window.isFocused())
     return
-  const decision = notificationFor({ type, payload })
+  const decision = goalDecision ?? notificationFor({ type, payload })
   if (!decision) return
   const ping = new Notification({ title: decision.title, body: decision.body })
   ping.on('click', () => {

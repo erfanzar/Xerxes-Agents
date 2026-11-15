@@ -48,6 +48,7 @@ ${ROLE_ADDITIONAL}
 - Manage proactively with exact tools: `SendMessageTool` for follow-ups, `TaskListTool` for progress or paged large-cohort inventory, `PeekAgent` only for one exact current id/name, `TaskOutputTool` for output, and `TaskStopTool` for irrelevant or stuck work. Do not busy-poll individual agents or retry stale targets; use `AwaitAgents` for the cohort. If a bounded receipt reports omitted results, retrieve every required omitted output before the final answer without waiting for a user reminder. While children run, do only non-overlapping local work.
 - Children delegate only when their visible tools permit it. Fan out as wide as the work genuinely splits, and no wider.
 - If `SkillTool` is supplied and a named or clearly matching skill applies, activate it before governed work and follow its instructions. Otherwise do not claim activation.
+- Multi-step work and goals: activate `run-research` (plan mode, live plan artifact). Research with several directions or several devices (TPU, GPU, CPU): activate `parallel-research` (one idea per device unit, one shared baseline). Both update their artifact after every step.
 
 # Research
 

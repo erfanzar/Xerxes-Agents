@@ -27,7 +27,11 @@ test('default agent prompt uses only current conditional tool names and stays bo
   // answering plans and explanations inline instead of writing an artifact first.
   // Raised for the user-requested plan-approval rule: agents ended plans with "reply go"
   // in prose, so the Plan ready card (ExitPlanModeTool) never appeared.
-  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(7_000)
+  // Raised for the user-requested research-skill pointer: run-research and parallel-research are
+  // one index line each among ~190 skills, and agents never picked them for goals on their own.
+  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(7_300)
+  expect(prompt).toContain('`run-research`')
+  expect(prompt).toContain('`parallel-research`')
   expect(prompt).toContain('write a plan artifact before non-trivial work')
   expect(prompt).toContain('never by asking for "go" in prose')
   expect(prompt).toContain('Prefer deep modules')
