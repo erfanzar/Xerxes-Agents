@@ -64,6 +64,7 @@ export type DesktopPanel =
   | 'files'
   | 'review'
   | 'terminal'
+  | 'background'
   | 'usage'
   | 'outputs'
   | 'workspace'
@@ -82,11 +83,11 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
 }
 export type { RailPanel } from './railTabs.js'
 /** Section order first (Subagents, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
-export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'outputs', 'activity', 'usage']
+export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'background', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', background: 'hourglass', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
@@ -241,6 +242,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
       {panel === 'outputs' && <OutputsPanel snap={snap} />}
+      {panel === 'background' && <ActivityPanel snap={snap} backgroundOnly />}
       {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
     </div>
   </aside>
@@ -284,6 +286,7 @@ export function DesktopSheet({
     outputs: 'Outputs',
     workspace: 'Workspace',
     snapshots: 'Snapshots',
+    background: 'Background',
   }
   return (
     <div
@@ -1107,7 +1110,8 @@ export function BackgroundActivity({ rows, renderRow }: {
   </>
 }
 
-export function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
+/** `backgroundOnly`: the Background tab — every shell and watcher with live output, nothing else. */
+export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot; backgroundOnly?: boolean }): ReactElement {
   const request = useRequest(snap),
     [rows, setRows] = useState<RpcRecord[]>([]),
     [loaded, setLoaded] = useState(false),
@@ -1173,6 +1177,12 @@ export function ActivityPanel({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )
 
+  if (backgroundOnly) return <div className="studio-form activity-panel background-panel">
+    <Feedback {...request} />
+    {rows.length > 0
+      ? <section className="railcard activity-tasks" aria-label="Background tasks"><BackgroundActivity rows={rows} renderRow={renderRow} /></section>
+      : loaded && <div className="activity-idle" role="status"><Icon name="hourglass" size={22} /><strong>No background work</strong><p>Shells and watchers the agent starts in the background appear here with their live output.</p></div>}
+  </div>
   return (
     <div className="studio-form activity-panel">
       <Feedback {...request} />

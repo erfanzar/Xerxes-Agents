@@ -107,7 +107,7 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
 function railLabel(rail: RailPanel): string {
-  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'usage' ? 'Usage' : 'Activity'
+  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'background' ? 'Background' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -230,7 +230,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // the rail stays as it was.
     if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
+    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'background' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
