@@ -198,6 +198,16 @@ test('always-approval tools prompt in every mode including the accept-all YOLO d
   expect(permissionDisposition(call('computer_use', { action: 'capture' }), 'auto')).toBe('prompt')
 })
 
+test('leaving plan mode always asks the user, even under accept-all, so the Plan ready card shows', () => {
+  const exit = call('ExitPlanModeTool', {})
+  for (const mode of ['accept-all', 'auto', 'manual', 'plan', undefined] as const) {
+    expect(permissionDisposition(exit, mode)).toBe('prompt')
+  }
+  // Entering plan mode only narrows what the session may do.
+  expect(permissionDisposition(call('EnterPlanModeTool', {}), 'accept-all')).toBe('allow')
+  expect(permissionDisposition(exit, 'accept-all', { check: () => 'deny' })).toBe('deny')
+})
+
 test('always-approval tier respects policy denials and only an explicit host bypass disables it', () => {
   const cron = call('ScheduleCronTool', { schedule: '0 9 * * *', prompt: 'daily report' })
 

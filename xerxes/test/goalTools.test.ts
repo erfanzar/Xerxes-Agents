@@ -220,6 +220,13 @@ test('the policy tells the model to run the check in the turn that completes', (
   expect(policy).toContain('at least 3 consecutive goal rounds')
 })
 
+test('the policy keeps one goal artifact updated after every round and evidence', () => {
+  const policy = goalPolicyPrompt(3)
+  expect(policy).toContain('keep one goal artifact')
+  expect(policy).toContain('after every round, milestone and recorded evidence')
+  expect(policy).toContain('Result or Blocker section')
+})
+
 test('a round that is not the goal\'s current one carries no concluding authority', async () => {
   const h = harness()
   await h.call('create_goal', { objective: 'ship' })

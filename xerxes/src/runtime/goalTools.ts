@@ -234,6 +234,12 @@ export function goalPolicyPrompt(blockedAfterConsecutiveRounds: number): string 
     `condition has persisted for at least ${blockedAfterConsecutiveRounds} consecutive goal rounds, and`,
     'describe that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work',
     'is not blocked.',
+    'When ArtifactTool is available, keep one goal artifact as the user\'s live view of the goal. Create it',
+    'right after create_goal (objective, criteria as a checklist, plan steps), then update that same id',
+    'after every round, milestone and recorded evidence: tick criteria and steps ([x] done, [~] in progress,',
+    '[ ] pending), add one or two evidence lines (command and result, file changed, finding), and note plan',
+    'changes and why. Before completing or blocking the goal, add a Result or Blocker section to it. Keep',
+    'chat replies short and point at the artifact instead of repeating it.',
   ].join('\n')
 }
 

@@ -156,6 +156,11 @@ export function permissionDisposition(
     && options?.bypassAlwaysApprove !== true) {
     return 'prompt'
   }
+  // Leaving plan mode is the user's approval of the plan (the Plan ready card),
+  // not a tool permission: auto-allowing it under YOLO skipped the card entirely.
+  if (name === 'ExitPlanModeTool' && options?.bypassAlwaysApprove !== true) {
+    return 'prompt'
+  }
   if (mode === 'accept-all') {
     return 'allow'
   }

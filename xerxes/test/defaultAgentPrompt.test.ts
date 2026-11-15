@@ -25,8 +25,11 @@ test('default agent prompt uses only current conditional tool names and stays bo
   // second code path beside the old one and read ad-hoc environment variables instead of inputs.
   // Raised for the user-requested artifact rule: the tool's own guidance alone left agents
   // answering plans and explanations inline instead of writing an artifact first.
-  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(6_900)
+  // Raised for the user-requested plan-approval rule: agents ended plans with "reply go"
+  // in prose, so the Plan ready card (ExitPlanModeTool) never appeared.
+  expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(7_000)
   expect(prompt).toContain('write a plan artifact before non-trivial work')
+  expect(prompt).toContain('never by asking for "go" in prose')
   expect(prompt).toContain('Prefer deep modules')
   expect(prompt).toContain('One job, one path')
   expect(prompt).toContain('read environment variables only when the user asks')
