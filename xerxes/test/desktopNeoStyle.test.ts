@@ -115,8 +115,6 @@ function withPage<T>(run: (root: ReturnType<typeof fakeRoot>, store: Map<string,
   const store = new Map<string, string>()
   const root = fakeRoot()
   const saved = { localStorage: globalThis.localStorage, window: (globalThis as { window?: unknown }).window, document: (globalThis as { document?: unknown }).document, raf: globalThis.requestAnimationFrame, Image: (globalThis as { Image?: unknown }).Image }
-    // Xerxes's own colours unless a test picks a theme (a fresh install would get Mono).
-  store.set('xerxes.desktop.palette.v1', 'xerxes')
 globalThis.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } } as unknown as Storage
   Object.assign(globalThis, {
     window: { matchMedia: () => ({ matches: false }) },
@@ -183,8 +181,8 @@ test('a colour theme applies in Neo, over a background\'s colours, and the trans
     expect(root.styles.get('--x-accent')).toBe('dark' in catppuccin ? catppuccin.dark.primary : '')
     for (const name of PICTURE_TOKENS) expect(root.styles.has(name)).toBe(false)
 
-    // An explicit `undefined` palette falls back to the stored one, so store Xerxes's own colours.
-    store.set('xerxes.desktop.palette.v1', 'xerxes')
+    // An explicit `undefined` palette falls back to the stored one, so clear it.
+    store.delete('xerxes.desktop.palette.v1')
     applyBackdrop({ kind: 'transparent' }, page, undefined)
     expect(root.attributes.has('data-backdrop')).toBe(false)
     expect(root.attributes.has('data-backdrop-colors')).toBe(false)

@@ -59,20 +59,18 @@ export const PALETTES: readonly Palette[] = [
 
 export const PALETTE_KEY = 'xerxes.desktop.palette.v1'
 
-/** Stored when the user picks Xerxes's own colours. */
+/** Stored when the user picks Xerxes's own colours — also what a fresh install uses. */
 const XERXES_COLOURS = 'xerxes'
-/** A fresh install's colour theme. */
-export const DEFAULT_PALETTE = 'mono'
 
 /**
- * The stored palette; Mono on a fresh install. Undefined means Xerxes's own
- * colours: an explicit Xerxes choice, or a stored name no longer shipped.
+ * The stored palette, or undefined for Xerxes's own colours: a fresh
+ * install, an explicit Xerxes choice, and a stored name no longer shipped.
  */
 export function loadPalette(): Palette | undefined {
   let name: string | null
   try { name = localStorage.getItem(PALETTE_KEY) } catch { name = null }
-  if (name === XERXES_COLOURS) return undefined
-  return PALETTES.find(palette => palette.name === (name ?? DEFAULT_PALETTE))
+  if (name === null || name === XERXES_COLOURS) return undefined
+  return PALETTES.find(palette => palette.name === name)
 }
 
 /** Remember a palette; undefined means Xerxes's own colours (kept explicitly). */

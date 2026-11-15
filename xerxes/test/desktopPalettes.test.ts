@@ -48,13 +48,13 @@ test('the terminal font accepts font lists and refuses anything that could escap
   expect(UI_SCALES).toEqual([90, 100, 110, 125, 150, 175])
 })
 
-test('a fresh install uses Mono; Xerxes colours and a picked theme are remembered', async () => {
+test('a fresh install uses Xerxes\'s own colours; a picked theme is remembered', async () => {
   const { loadPalette, savePalette } = await import('../src/desktop/renderer/palettes.js')
   const store = new Map<string, string>()
   const original = globalThis.localStorage
   globalThis.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) }, removeItem: (k: string) => { store.delete(k) } } as unknown as Storage
   try {
-    expect(loadPalette()?.name).toBe('mono')
+    expect(loadPalette()).toBeUndefined()
     savePalette('nous')
     expect(loadPalette()?.name).toBe('nous')
     savePalette(undefined)
