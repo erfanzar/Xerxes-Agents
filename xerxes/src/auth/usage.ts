@@ -87,7 +87,16 @@ async function fetchJson(
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal
   try {
     const fetcher = options.fetchImplementation ?? (globalThis.fetch as UsageFetch)
-    const response = await fetcher(url, { headers, method: 'GET', redirect: 'error', signal })
+    let response: Response
+    try {
+      response = await fetcher(url, { headers, method: 'GET', redirect: 'error', signal })
+    } catch (error) {
+      // A bare "TypeError: fetch failed" told nobody what broke; name the host and the network cause.
+      if (signal.aborted) throw error
+      const cause = (error as { cause?: { code?: unknown; message?: unknown } } | undefined)?.cause
+      const detail = typeof cause?.code === 'string' ? cause.code : typeof cause?.message === 'string' ? cause.message : ''
+      throw new Error(`Could not reach ${new URL(url).host} for ${provider} usage${detail ? ` (${detail})` : ''}. Check the network and try again.`, { cause: error })
+    }
     signal.throwIfAborted()
     if (!response.ok) {
       await response.body?.cancel()

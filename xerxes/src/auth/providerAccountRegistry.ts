@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { ProfileStore, type ProviderProfile } from '../bridge/profiles.js'
@@ -113,9 +113,27 @@ export class ProviderAccountRegistry {
     return [...byProfile.values()]
   }
 
+  /**
+   * A signed-in account whose linked profile vanished (another writer rewrote
+   * profiles.json) was silently dropped from every list, so Use and Sync were
+   * unreachable while its credential sat on disk. Relink it with the defaults
+   * it was registered with; an account with no saved sign-in stays hidden.
+   */
+  private async relinkMissingProfile(account: ProviderAccountMetadata, store: ProfileStore): Promise<void> {
+    const directory = this.directory(account.id)
+    const credential = account.kind === 'codex' ? join(directory, '.codex', 'auth.json') : join(directory, 'auth', 'anthropic-oauth.json')
+    if (!await stat(credential).then(info => info.isFile(), () => false)) return
+    const defaults = defaultBase(account.kind)
+    store.save({ name: account.profileName, apiKey: '', model: defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: account.id })
+  }
+
   async list(): Promise<readonly ProviderAccountSummary[]> {
     const oauth = await this.accounts()
-    const profiles = new ProfileStore(this.profilesFile).list()
+    const store = new ProfileStore(this.profilesFile)
+    for (const account of oauth) {
+      if (!store.get(account.profileName)) await this.relinkMissingProfile(account, store)
+    }
+    const profiles = store.list()
     const result: ProviderAccountSummary[] = []
     for (const account of oauth) {
       const profile = profiles.find(row => row.name === account.profileName)

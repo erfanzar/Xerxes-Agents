@@ -464,6 +464,9 @@
 :root:not(#layout) .atelier .rsec--detail{flex:1 1 auto;height:100%}
 :root:not(#layout) .atelier .rsec--detail>.rsec__body{flex:1 1 auto}
 :root:not(#layout) .atelier .rsec__body>.md{max-height:none;overflow:visible;padding:0}
+/* Editing: the textarea takes the whole body and scrolls itself, instead of a 60vh box with dead space under it. */
+:root:not(#layout) .atelier .rsec--detail>.rsec__body:has(>.rsec__editor){display:flex;flex-direction:column;overflow:hidden;padding:10px 12px 12px}
+:root:not(#layout) .atelier .rsec--detail>.rsec__body>.rsec__editor{flex:1 1 auto;min-height:0;height:auto;resize:none;overflow:auto}
 /* ── Background activity: one 28px row grammar for commands, watchers and the history fold ── */
 /* Claude Code's task list: "Running N" / "Finished N" folds, each task a rounded card. */
 :root:not(#layout) .atelier .activity-panel .activity-group-fold{margin:0 0 10px}

@@ -34,6 +34,28 @@ test('a duplicate account row for one profile never hides the account the profil
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
+test('a signed-in account whose linked profile vanished is relinked, not hidden', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-relink-'))
+  try {
+    const root = join(directory, 'accounts'), profilesFile = join(directory, 'profiles.json')
+    const registry = new ProviderAccountRegistry(root, profilesFile)
+    const signedIn = await registry.create('codex', 'Erfan')
+    const signedOut = await registry.create('codex', 'Omid')
+    await mkdir(join(root, signedIn.id, '.codex'), { recursive: true })
+    await writeFile(join(root, signedIn.id, '.codex', 'auth.json'), JSON.stringify({ tokens: { access_token: 'fixture' } }))
+    // Another writer rewrote profiles.json without either linked profile.
+    const store = new ProfileStore(profilesFile)
+    store.delete(signedIn.profileName)
+    store.delete(signedOut.profileName)
+
+    const listed = await registry.list()
+    expect(listed.map(account => account.id)).toContain(signedIn.id)
+    expect(new ProfileStore(profilesFile).get(signedIn.profileName)?.oauth_account_id).toBe(signedIn.id)
+    // No saved sign-in: nothing to relink, so it stays hidden.
+    expect(listed.map(account => account.id)).not.toContain(signedOut.id)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
 test('registering an account cannot leave two rows for the same linked profile', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-account-unique-'))
   try {
