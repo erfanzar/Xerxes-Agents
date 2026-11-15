@@ -197,8 +197,9 @@ test('the main window does not render a diagnostic footer', () => {
  expect(html).not.toContain('ctx 0k/262k')
   // Statistics live in the Activity card, collapsed; the rail opens on Activity.
   expect(html).toContain('<dl class="session-diagnostics session-diagnostics__values" aria-label="Session statistics">')
- expect(html).toContain('<button aria-pressed="true" aria-label="Activity" title="Activity">')
- expect(html).toContain('<button aria-pressed="false" aria-label="Usage" title="Usage">')
+ // The rail opens on an Activity tab; every other view is one + menu away.
+ expect(html).toContain('<button role="tab" aria-selected="true" class="desktop-rail__tabmain" title="Activity">')
+ expect(html).toContain('aria-label="Open a view"')
  expect(html).toContain('Workspace runtime: Connected')
  expect(html).not.toContain('daemon connected')
  expect(html).not.toContain('build-notice')
@@ -276,8 +277,8 @@ test('session edits, the plan and the log each render as a view with a way back'
       tab: 'changes',
     }),
   )
-  // The source-control rail section is labelled "Changes".
-  for (const needle of ['Activity', 'Changes', 'Session edits', 'Conversation', 'src/a.ts', 'Keep all', 'Event log']) {
+  // The rail opens on its Activity tab; Changes is reached through the + menu.
+  for (const needle of ['Activity', 'Session edits', 'Conversation', 'src/a.ts', 'Keep all', 'Event log']) {
     expect(tabs).toContain(needle)
   }
   expect(tabs).toContain('+12')
@@ -1150,7 +1151,8 @@ test('welcome offers draft starters while navigation retains accessible button n
   expect(html).toContain('Research a question')
   expect(html).toContain('Make a plan')
   expect(html).toContain('Build something')
-  expect(html).toContain('<button aria-pressed="false" aria-label="Files" title="Files">')
+  expect(html).toContain('aria-label="Open a view"')
+  expect(html).toContain('aria-label="Close Activity"')
   expect(html).toContain('aria-label="Toggle sidebar"')
   expect(html).toContain('aria-hidden="true"')
 })
@@ -1364,8 +1366,8 @@ test('every agent row carries a state word so the column edge stays straight', (
 test('the Usage tab is about accounts; this task\'s statistics live in the Activity card', () => {
   const snap = snapshot({ connection: 'online', model: 'gpt-5.3-codex', turnCount: 3, llmSteps: 4, toolSteps: 5, llmDurationMs: 42_000, toolDurationMs: 7_000, ttftMs: 640, tokensPerSecond: 58.4, cacheHitRate: 0.82, cacheReadTokens: 240_000, cacheWriteTokens: 12_000, inputTokens: 51_000, costUsd: 0.37, contextTokens: 64_000, contextMax: 256_000 } as Partial<Snapshot>)
   const usage = renderToStaticMarkup(createElement(DesktopRail, { panel: 'usage', snap, close: () => {}, activityDetails: null }))
-  expect(usage).toContain('<button aria-pressed="false" aria-label="Activity" title="Activity">')
-  expect(usage).toContain('<button aria-pressed="true" aria-label="Usage" title="Usage">')
+  expect(usage).toContain('<button role="tab" aria-selected="true" class="desktop-rail__tabmain" title="Usage">')
+  expect(usage).not.toContain('title="Activity"')
   expect(usage).toContain('Plans &amp; keys')
   expect(usage).toContain('Checking your plans')
   // No second copy of the session numbers to drift out of step.

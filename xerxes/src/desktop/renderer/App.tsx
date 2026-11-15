@@ -27,6 +27,7 @@ import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
 import { ArtifactToast } from './ArtifactCard.js'
+import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
 import { AgentDetailsCard, AgentInspector } from './AgentInspector.js'
@@ -176,7 +177,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // The sidebar stays at 820 px; it only turns into a drawer below 640 px.
   const narrow = windowWidth < 640
   const focused = narrow ? !narrowNavigation : layout.sidebarHidden
-  const [railChoice, setRail] = useState<RailPanel | null | undefined>(undefined)
+  /** The active right-panel tab's key (railTabs.ts); undefined until the user opens or closes one. */
+  const [railChoice, setRailChoice] = useState<string | null | undefined>(undefined)
+  const [railTabs, setRailTabs] = useState<readonly RailTab[]>([])
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
   /** A file to open in Files (a tool row's path); the count re-opens the same one. */
@@ -187,7 +190,18 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
   // Show activity on entry without covering the conversation in a narrow window.
   // An explicit open/close choice survives session changes and resizing.
-  const rail = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
+  const railKey = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
+  const rail: RailPanel | null = railKey ? panelOfKey(railKey) : null
+  // The entry tab (Activity) is shown before anything was opened explicitly.
+  const shownTabs = rail && railKey && !railTabs.some(tab => tabKey(tab) === railKey) ? openTab(railTabs, { panel: rail }, railKey) : railTabs
+  /** Open (or focus) a tab: a section, or one item inside it such as an artifact. Null closes the panel. */
+  const setRail = (next: RailPanel | null, item?: string): void => {
+    if (next === null) { setRailChoice(null); return }
+    const tab: RailTab = item ? { panel: next, item } : { panel: next }
+    const key = tabKey(tab)
+    setRailTabs(openTab(shownTabs, tab, key))
+    setRailChoice(key)
+  }
   const toggleSidebar = () => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })
   // In a narrow window (the VS Code sidebar, a small app window) the task
   // list is a drawer over the conversation: picking a task closes it.
@@ -216,7 +230,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // the rail stays as it was.
     if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next)
+    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
@@ -252,7 +266,10 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
         {!rail && !snap.noWorkspace && <FloatingRail open={navigate} />}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} tabs={shownTabs} activeKey={railKey ?? rail}
+          onSelectTab={key => setRailChoice(key)}
+          onCloseTab={key => { const next = closeTab(shownTabs, key, railKey ?? rail); setRailTabs(next.tabs); setRailChoice(next.active) }}
+          onRetitle={(key, title) => setRailTabs(tabs => retitleTab(tabs, key, title))} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
         {!snap.noWorkspace && <ArtifactToast sessionId={snap.currentId} showingArtifacts={rail === 'docs'} />}
 
       </div>

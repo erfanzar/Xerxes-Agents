@@ -3,6 +3,7 @@
 
 import { WorkspaceFileTree } from './WorkspaceFileTree.js'
 import { ArtifactsSection, SubagentsSection } from './RailSections.js'
+import { tabKey, type RailPanel, type RailTab } from './railTabs.js'
 import { activityFleetRows } from './AgentRoster.js'
 import { pageIsBackground } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
@@ -79,8 +80,7 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
   artifacts: 'Files this task wrote or changed, and its exportable transcript.',
   schedules: 'Jobs that run on their own in this workspace.',
 }
-/** Views that open in the task-context rail beside the conversation. */
-export type RailPanel = 'subagents' | 'docs' | 'files' | 'outputs' | 'review' | 'terminal' | 'activity' | 'usage'
+export type { RailPanel } from './railTabs.js'
 /** Section order first (Subagents, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
 export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
@@ -176,7 +176,32 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget, artifactTarget }: {
+/** The rail's + button: a menu of every view, each opening (or focusing) its tab. */
+function RailAddMenu({ onPick }: { onPick: (panel: RailPanel) => void }): ReactElement {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const away = (event: MouseEvent): void => { if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false) }
+    // Escape closes the menu only; it must not reach the turn-cancel shortcut.
+    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false) } }
+    document.addEventListener('mousedown', away)
+    window.addEventListener('keydown', escape, true)
+    return () => { document.removeEventListener('mousedown', away); window.removeEventListener('keydown', escape, true) }
+  }, [open])
+  return <div className="rail-add" ref={root}>
+    <button className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}><Icon name="plus" size={14} /></button>
+    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{RAIL_PANELS.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}><Icon name={RAIL_ICONS[value]} size={14} /><span>{railTabName(value)}</span></button>)}</div>}
+  </div>
+}
+
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget, artifactTarget, tabs, activeKey, onSelectTab, onCloseTab, onRetitle }: {
+  /** The open tabs (railTabs.ts) and the active one's key; without them the rail shows `panel` alone. */
+  tabs?: readonly RailTab[]
+  activeKey?: string
+  onSelectTab?: (key: string) => void
+  onCloseTab?: (key: string) => void
+  onRetitle?: (key: string, title: string) => void
   /** A file to open in Files; a new `count` opens it again. */
   filesTarget?: { readonly path: string; readonly count: number }
   /** An artifact to open in Artifacts; a new `count` opens it again. */
@@ -190,34 +215,27 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   const shading = useShadingStyle()
   // Without the toggle the window is too narrow for a side rail: it is already full width.
   const wide = filesExpanded || !toggleFilesExpanded
-  // In a rail too narrow for every tab the row scrolls; keep the open one in view.
-  const tabs = useRef<HTMLElement>(null)
-  // Which edges have tabs scrolled out of sight; only those fade.
-  const [hidden, setHidden] = useState('')
-  const measureTabs = () => {
-    const nav = tabs.current
-    if (!nav) return
-    const more = nav.scrollWidth - nav.clientWidth
-    setHidden(more <= 1 ? '' : [nav.scrollLeft > 1 ? 'start' : '', nav.scrollLeft < more - 1 ? 'end' : ''].filter(Boolean).join(' '))
-  }
+  // The open tabs: the default single section when the caller keeps none.
+  const shownTabs: readonly RailTab[] = tabs && tabs.length ? tabs : [{ panel }]
+  const currentKey = activeKey ?? panel
+  const item = shownTabs.find(tab => tabKey(tab) === currentKey)?.item
+  // A tab strip wider than the rail scrolls; keep the active tab in view.
+  const strip = useRef<HTMLElement>(null)
   useEffect(() => {
-    const reveal = () => {
-      tabs.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-      measureTabs()
-    }
-    reveal()
-    const nav = tabs.current
-    if (!nav || typeof ResizeObserver === 'undefined') return
-    // Narrowing the rail must not push the open tab out of sight.
-    const observer = new ResizeObserver(reveal)
-    observer.observe(nav)
-    return () => observer.disconnect()
-  }, [panel])
+    strip.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [currentKey, shownTabs.length])
   return <aside className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header>{<span className="desktop-rail__crumb"><span>Sections</span><Icon name="chevron" size={10} /><strong>{railTabName(panel)}</strong></span>}<nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
-    <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
+    <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views">{shownTabs.map(tab => {
+      const key = tabKey(tab), name = tab.title || railTabName(tab.panel), selected = key === currentKey
+      return <div key={key} className="desktop-rail__tab" data-selected={selected || undefined}>
+        <button role="tab" aria-selected={selected} className="desktop-rail__tabmain" title={name} onClick={() => onSelectTab ? onSelectTab(key) : open(tab.panel)}><Icon name={RAIL_ICONS[tab.panel]} size={14} /><span>{name}</span></button>
+        <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}><Icon name="close" size={10} /></button>
+      </div>
+    })}</nav><RailAddMenu onPick={value => open(value)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    <div className="studio-sheet-content" key={`${currentKey}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
-      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} {...(artifactTarget ? { target: artifactTarget } : {})} />}
+      {/* An artifact tab shows that one artifact and takes its title; the Artifacts tab lists them. */}
+      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} {...(item ? { target: { id: item, count: artifactTarget?.count ?? 0 }, onTitle: (title: string) => onRetitle?.(currentKey, title) } : {})} />}
       {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
