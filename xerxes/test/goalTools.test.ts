@@ -225,6 +225,7 @@ test('the policy keeps one goal artifact updated after every round and evidence'
   expect(policy).toContain('keep one goal artifact')
   expect(policy).toContain('after every round, milestone and recorded evidence')
   expect(policy).toContain('Result or Blocker section')
+  expect(policy).toContain('parallel-research skill')
 })
 
 test('a round that is not the goal\'s current one carries no concluding authority', async () => {

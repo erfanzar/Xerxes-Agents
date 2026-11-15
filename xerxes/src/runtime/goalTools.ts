@@ -240,6 +240,9 @@ export function goalPolicyPrompt(blockedAfterConsecutiveRounds: number): string 
     '[ ] pending), add one or two evidence lines (command and result, file changed, finding), and note plan',
     'changes and why. Before completing or blocking the goal, add a Result or Blocker section to it. Keep',
     'chat replies short and point at the artifact instead of repeating it.',
+    'For a research, tuning or optimization goal with several directions worth trying, load the',
+    'parallel-research skill: inventory the devices, give each independent unit one grounded idea, and',
+    'compare every result against one baseline on the same harness.',
   ].join('\n')
 }
 
