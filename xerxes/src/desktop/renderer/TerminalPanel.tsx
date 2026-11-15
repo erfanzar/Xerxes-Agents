@@ -66,7 +66,9 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
   // Guards against two automatic opens racing (e.g. a reconnect during the first open).
   const started = useRef(false)
 
-  const open = useCallback(async (): Promise<void> => {
+  /** Two shells side by side (row) or stacked (column): the active one plus `second`. */
+  const [split, setSplit] = useState<{ readonly dir: 'row' | 'column'; readonly second: string } | null>(null)
+  const open = useCallback(async (splitDir?: 'row' | 'column'): Promise<void> => {
     setOpening(true); setError('')
     try {
       const size = { cols: 100, rows: 30 }
@@ -74,7 +76,8 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
       const id = text(result.terminal_id)
       if (!id) throw new Error('The runtime did not return a terminal')
       setShells(current => [...(current ?? []), { id, running: true }])
-      setActive(id)
+      if (splitDir) setSplit({ dir: splitDir, second: id })
+      else setActive(id)
     } catch (failure) {
       const message = failure instanceof Error ? failure.message : String(failure)
       setError(/Unknown method: terminal\.open/.test(message) ? 'The running workspace runtime is older than this app. Update it from the runtime status in the sidebar to use terminals here.' : message)
@@ -151,6 +154,13 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
     })
   }
 
+  // A split only holds while both of its shells are still open and distinct.
+  const paneSplit = split && split.second !== active && (shells ?? []).some(row => row.id === split.second) ? split : null
+  /** Which pane Clear applies to: the last one clicked, else the active tab. */
+  const [focusedPane, setFocusedPane] = useState('')
+  const [clears, setClears] = useState(0)
+  useEffect(() => { if (!paneSplit || (focusedPane !== active && focusedPane !== paneSplit.second)) setFocusedPane(active) }, [active, paneSplit?.second])
+
   const markExited = useCallback((id: string) => {
     setShells(current => (current ?? []).map(row => row.id === id ? { ...row, running: false } : row))
   }, [])
@@ -167,20 +177,31 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
           </span>
         ))}
         <button className="term__new" aria-label="New shell" title="New shell" disabled={opening} onClick={() => void open()}><Icon name="plus" size={13} /></button>
+        <span className="term__spacer" />
+        {split
+          ? <button className="term__tool" aria-label="Close split" title="Close split" onClick={() => setSplit(null)}><Icon name="close" size={12} /><span>Unsplit</span></button>
+          : <>
+            <button className="term__tool" aria-label="Split side by side" title="Split side by side" disabled={opening || !active} onClick={() => void open('row')}><Icon name="half" size={13} /></button>
+            <button className="term__tool term__tool--stack" aria-label="Split top and bottom" title="Split top and bottom" disabled={opening || !active} onClick={() => void open('column')}><Icon name="half" size={13} /></button>
+          </>}
+        <button className="term__tool" aria-label="Clear terminal" title="Clear terminal" disabled={!active} onClick={() => setClears(value => value + 1)}><Icon name="trash" size={13} /></button>
       </div>
       {(shells ?? []).map((row, index) => closeErrors[row.id] && <div key={row.id} className="term__error" role="alert"><span>Could not close shell {index + 1}: {closeErrors[row.id]}</span><button className="btn" disabled={closing.has(row.id)} onClick={() => close(row.id)}>Retry close</button></div>)}
       {error && <div className="term__error" role="alert"><span>{error}</span><button className="btn" onClick={() => { started.current = false; setAttempt(value => value + 1) }}>Try again</button></div>}
       {shells !== null && shells.length === 0 && !opening && !error && (
         <div className="term__empty"><Icon name="terminal" size={22} /><p>No shell open.</p><button className="btn" onClick={() => void open()}>Open a shell</button></div>
       )}
-      {(shells ?? []).map(row => (
-        <XtermView key={row.id} snap={snap} terminalId={row.id} visible={row.id === active} onExit={markExited} />
-      ))}
+      <div className="term__panes" data-split={paneSplit?.dir}>
+        {(shells ?? []).map(row => (
+          <XtermView key={row.id} snap={snap} terminalId={row.id} visible={row.id === active || row.id === paneSplit?.second} onExit={markExited}
+            clears={row.id === focusedPane ? clears : 0} onFocusPane={() => setFocusedPane(row.id)} order={row.id === paneSplit?.second ? 2 : 1} />
+        ))}
+      </div>
     </div>
   )
 }
 
-function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; terminalId: string; visible: boolean; onExit: (id: string) => void }): ReactElement {
+function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane, order = 1 }: { snap: Snapshot; terminalId: string; visible: boolean; onExit: (id: string) => void; clears?: number; onFocusPane?: () => void; order?: number }): ReactElement {
   const host = useRef<HTMLDivElement>(null)
   const term = useRef<XTerm | null>(null)
   const fit = useRef<FitAddon | null>(null)
@@ -302,10 +323,13 @@ function XtermView({ snap, terminalId, visible, onExit }: { snap: Snapshot; term
     })
   }, [visible])
 
+  // Clear wipes this pane's scrollback (the shell's own state is untouched).
+  useEffect(() => { if (clears > 0) term.current?.clear() }, [clears])
+
   // xterm opens in an unpadded host: the fit addon sizes rows from its
   // parent's box, and padding there made it propose a row that got clipped.
   return (
-    <div className="term__view" hidden={!visible} onClick={() => term.current?.focus()}>
+    <div className="term__view" hidden={!visible} style={{ order }} onClick={() => { onFocusPane?.(); term.current?.focus() }}>
       {linkError && <div className="term__error" role="alert"><span>{linkError}</span><button className="btn" onClick={event => { event.stopPropagation(); setLinkError(null) }}>Dismiss</button></div>}
       <div className="term__host" ref={host} />
     </div>

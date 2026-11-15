@@ -427,6 +427,17 @@
 :root:not(#layout) .atelier .term-tab__close{border:0}
 :root:not(#layout) .atelier .term__new{width:26px;height:26px;border:0}
 :root:not(#layout) .atelier .term__view{padding:6px 10px 0}
+/* Terminal toolbar (split, clear) and the one- or two-pane area. */
+:root:not(#layout) .atelier .term__spacer{flex:1 1 auto;min-width:8px}
+:root:not(#layout) .atelier .term__tool{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:none;min-width:26px;height:26px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:400 12px/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .term__tool:hover:not(:disabled){background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .term__tool:disabled{opacity:.4;cursor:default}
+:root:not(#layout) .atelier .term__tool--stack>svg{transform:rotate(90deg)}
+:root:not(#layout) .atelier .term__panes{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0}
+:root:not(#layout) .atelier .term__panes[data-split='row']{flex-direction:row}
+:root:not(#layout) .atelier .term__panes>.term__view{flex:1 1 0;min-width:0;min-height:0}
+:root:not(#layout) .atelier .term__panes[data-split='row']>.term__view+.term__view:not([hidden]){border-left:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .term__panes[data-split='column']>.term__view+.term__view:not([hidden]){border-top:1px solid var(--x-hairline)}
 /* ── Shading sections (Subagents, Artifacts): search field, group label, 26px rows, age right ── */
 :root:not(#layout) .atelier .rsec{display:flex;flex-direction:column;min-height:0;padding:0 6px 8px;font:400 12.5px/1.4 var(--sans)}
 :root:not(#layout) .atelier .rsec__search{display:flex;align-items:center;gap:8px;height:34px;margin:0 -6px 6px;padding:0 14px;border-bottom:1px solid var(--x-hairline)}
