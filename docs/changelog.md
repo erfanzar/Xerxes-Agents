@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.45 — 2026-11-16
+
+- **Gemini: no more "Function call is missing a thought_signature".** Every replayed model turn now signs its first function call: with the signature Gemini returned, or, for history that has none (older, compacted, relayed or from another provider), Google's documented skip placeholder. Fixed for both the Gemini API and Vertex. Conversations that already hit the error work again after Retry.
+- **The spinner says what the model is working on.** While a model reasons, the activity line and the composer status show its latest bold heading ("Analyzing Technical Details", "Reviewing Algorithm Enhancements") instead of just "Thinking".
+
 ## 0.8.44 — 2026-11-16
 
 - **Usage and Providers grouped by family.** The Usage tab and Settings → Providers list accounts under Claude Code, Codex, Gemini and Other, with the account in use first.
