@@ -7,6 +7,13 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.43 — 2026-11-15
+
+- **Goals keep a live artifact.** A goal's agent writes one artifact with the objective, criteria and plan, updates it after every round, milestone and piece of evidence, and ends it with a Result or Blocker section.
+- **Parallel research.** A new `parallel-research` skill inventories every TPU, GPU and CPU unit, gives each independent unit one grounded idea in its own agent, and compares every result against one shared baseline. The system prompt now names `run-research` and `parallel-research`, and research goals point to the latter.
+- **Plans are approved through the Plan ready card, in every permission mode.** Under accept-all, leaving plan mode used to be approved automatically, so the card never appeared. The agent is also told never to ask for "go" in chat.
+- **More notifications.** "Plan ready" when a plan waits for you, and "Goal complete" / "Goal blocked — needs you" once when a goal changes state. Clicking opens the task.
+
 ## 0.8.42 — 2026-11-15
 
 - **Plan ready: continue or refine.** When the agent finishes a plan, it no longer asks for Allow/Deny. A "Plan ready" card offers **Continue with the plan**, a box to refine the plan with a note (the agent stays in plan mode and revises it), and a link that opens the plan artifact. The agent enters plan mode on its own for larger or unclear tasks, and the `run-research` skill now plans first and updates its plan artifact after every step.
