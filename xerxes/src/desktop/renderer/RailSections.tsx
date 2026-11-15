@@ -71,7 +71,7 @@ function SectionSearch({ placeholder, value, onChange }: { placeholder: string; 
   return <label className="rsec__search"><Icon name="search" size={13} /><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
 }
 
-export function ArtifactsSection({ sessionKey, online, onTitle }: { sessionKey: string; online: boolean; onTitle?: (title: string) => void }): ReactElement {
+export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sessionKey: string; online: boolean; onTitle?: (title: string) => void; target?: { readonly id: string; readonly count: number } }): ReactElement {
   const [rows, setRows] = useState<readonly ArtifactRow[]>([])
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
@@ -131,6 +131,21 @@ export function ArtifactsSection({ sessionKey, online, onTitle }: { sessionKey: 
       .then(result => { const art = record(result.artifact); setOpen({ row: artifactRowsOf([art])[0] ?? row, content: text(art.content) }); setSource(false); setDraft(null) })
       .catch(reason => setError(desktopError(reason)))
   }
+  // A transcript card, toast or notification names one artifact: open it straight away.
+  useEffect(() => {
+    if (!online || !target?.id) return
+    let live = true
+    setError('')
+    void desktopCall(window.xerxes, sessionKey, 'artifacts.read', { id: target.id })
+      .then(result => {
+        if (!live) return
+        const art = record(result.artifact)
+        const row = artifactRowsOf([art])[0]
+        if (row) { setOpen({ row, content: text(art.content) }); setSource(false); setDraft(null) }
+      })
+      .catch(reason => { if (live) setError(desktopError(reason)) })
+    return () => { live = false }
+  }, [target?.id, target?.count, sessionKey, online])
   const pin = (row: ArtifactRow): void => {
     void desktopCall(window.xerxes, sessionKey, 'artifacts.pin', { id: row.id, pinned: !row.pinned })
       .then(() => { setReload(value => value + 1); if (open?.row.id === row.id) setOpen({ ...open, row: { ...open.row, pinned: !row.pinned } }) })

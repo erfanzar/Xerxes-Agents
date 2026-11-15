@@ -180,6 +180,8 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const [reviewPath, setReviewPath] = useState('')
   /** A file to open in Files (a tool row's path); the count re-opens the same one. */
   const [filesTarget, setFilesTarget] = useState({ path: '', count: 0 })
+  /** An artifact to open in Artifacts (a transcript card's id); the count re-opens the same one. */
+  const [artifactTarget, setArtifactTarget] = useState({ id: '', count: 0 })
   const [selectedAgent, setSelectedAgent] = useState('')
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
   // Show activity on entry without covering the conversation in a narrow window.
@@ -206,6 +208,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
     if (next === 'files' && filePath) setFilesTarget(target => ({ path: filePath, count: target.count + 1 }))
+    if (next === 'docs' && filePath) setArtifactTarget(target => ({ id: filePath, count: target.count + 1 }))
     // A link to one file's changes opens straight into the diff view.
     if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
     // An agent opens in the conversation's place (DeepSeek Harness's layout);
@@ -235,7 +238,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
         {!rail && !snap.noWorkspace && <FloatingRail open={navigate} />}
         {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
+        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which

@@ -176,9 +176,11 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
-export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget }: {
+export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded = false, toggleFilesExpanded, setExpanded, reviewPath = '', filesTarget, artifactTarget }: {
   /** A file to open in Files; a new `count` opens it again. */
   filesTarget?: { readonly path: string; readonly count: number }
+  /** An artifact to open in Artifacts; a new `count` opens it again. */
+  artifactTarget?: { readonly id: string; readonly count: number }
   panel: RailPanel; snap: Snapshot; close: () => void; activityDetails: ReactNode; filesExpanded?: boolean; toggleFilesExpanded?: () => void
   /** Present when the window is wide enough to choose between rail and full width. */
   setExpanded?: (value: boolean) => void
@@ -215,7 +217,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     <header>{<span className="desktop-rail__crumb"><span>Sections</span><Icon name="chevron" size={10} /><strong>{railTabName(panel)}</strong></span>}<nav ref={tabs} onScroll={measureTabs} data-hidden={hidden || undefined} aria-label="Task context views">{RAIL_PANELS.map(value => <button key={value} aria-pressed={panel === value} aria-label={railTabName(value)} title={railTabName(value)} onClick={() => open(value)}><Icon name={RAIL_ICONS[value]} size={16} /></button>)}</nav>{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
-      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} />}
+      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} {...(artifactTarget ? { target: artifactTarget } : {})} />}
       {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} {...(filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}

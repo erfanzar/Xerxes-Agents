@@ -10,6 +10,7 @@ import { CopyButton } from './CopyButton.js'
 import { FileToolRow, fileToolOf } from './FileToolRow.js'
 import { ToolImages } from './ImageView.js'
 import { chatImageTypeOf } from '../chatMediaShared.js'
+import { ArtifactCard, artifactOfTool } from './ArtifactCard.js'
 
 function record(text: string): Record<string, unknown> | null {
   try {
@@ -68,6 +69,9 @@ export function ToolCallsSection({ items, label = 'Tool calls' }: { items: reado
 }
 
 export const ToolCallRow = memo(function ToolCallRow({ item, label }: { item: ToolItem; label: string }): ReactElement {
+  // A saved artifact is a card with an Open button, not a tool row to decode.
+  const artifact = artifactOfTool(item)
+  if (artifact) return <ArtifactCard artifact={artifact} />
   const file = fileToolOf(item)
   // A read of an image file shows the picture (ToolImages), not its bytes as text lines.
   if (file?.kind === 'read' && chatImageTypeOf(file.path)) return <GenericToolRow item={item} label={label} />

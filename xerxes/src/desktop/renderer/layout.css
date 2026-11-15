@@ -515,6 +515,14 @@
 /* Doubled class: each style's own .rsec__icon colour rule has equal weight and loads later. */
 :root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='copied']{color:var(--x-done);background:var(--x-chip)}
 :root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='failed']{color:var(--x-failed)}
+/* An artifact saved in the conversation: one quiet card with an Open button. */
+:root:not(#layout) .atelier .artifact-card{display:flex;align-items:center;gap:12px;max-width:520px;margin:6px 0;padding:10px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card)}
+:root:not(#layout) .atelier .artifact-card__icon{display:inline-grid;place-items:center;flex:none;width:32px;height:32px;border-radius:8px;background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .artifact-card__main{display:flex;flex-direction:column;align-items:flex-start;gap:2px;flex:1 1 auto;min-width:0;padding:0;border:0;background:none;text-align:left;cursor:pointer}
+:root:not(#layout) .atelier .artifact-card__title{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px/1.35 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .artifact-card__meta{font:400 12px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .artifact-card__open{flex:none;height:28px;padding:0 12px;border:1px solid var(--x-hairline);border-radius:7px;background:transparent;color:var(--x-title);font:500 12px/26px var(--sans);cursor:pointer;white-space:nowrap}
+:root:not(#layout) .atelier .artifact-card__open:hover{background:var(--x-chip)}
 /* ── Files tree: type-coloured icons, change colours on names, M/A badges, dots on folders ── */
 :root:not(#layout) .atelier .file-tree__icon{display:inline-grid;place-items:center;flex:none}
 :root:not(#layout) .atelier .file-tree__icon svg{width:14px;height:14px}
