@@ -257,7 +257,21 @@
 :root:not(#layout) .atelier .result-fields>div:last-child{border-bottom:0}
 /* The cap lives on the scrolling text, never its box: a 240px box around 360px of
    unclipped text spilled over the rows below it. */
-:root:not(#layout) .atelier .activity-group__body :is(.output-viewer__text,.execution__viewer pre){max-height:240px;overflow:auto}
+/* Inside the conversation an output box is never a scroll area: a scroll gesture that
+   starts over it would latch onto it and stop moving the page (macOS keeps the whole
+   gesture on the first scroller). It shows a capped preview instead; "Show all" grows it
+   in place and expand opens it full screen. */
+:root:not(#layout) .atelier .activity-group__body :is(.output-viewer__text,.execution__viewer,.execution__viewer pre,.filetool__code pre){overflow:hidden;overscroll-behavior:auto}
+:root:not(#layout) .atelier .activity-group__body :is(.output-viewer__text,.execution__viewer pre){max-height:240px}
+:root:not(#layout) .atelier .activity-group__body .output-viewer--compact[data-full] .output-viewer__text,
+:root:not(#layout) .atelier .activity-group__body .execution__viewer[data-expanded],
+:root:not(#layout) .atelier .activity-group__body .execution__viewer[data-expanded] pre{max-height:none}
+/* File previews are already cut to 14 lines in code ("Show more"), so their box needs no cap. */
+:root:not(#layout) .atelier .activity-group__body .filetool__code pre{max-height:none}
+/* Elsewhere (the Background panel) the output box still scrolls, so no "Show all". */
+:root:not(#layout) .atelier .output-viewer__more{display:none}
+:root:not(#layout) .atelier .activity-group__body .output-viewer__more{display:inline-block;justify-self:start;margin:4px 0 0;padding:0;border:0;background:none;color:var(--x-secondary);font:400 11.5px/1.4 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .output-viewer__more:hover{color:var(--x-title);text-decoration:underline}
 :root:not(#layout) .atelier .activity-group__body .execution__viewer-actions{margin-top:4px;font:400 11.5px/1.4 var(--sans)}
 :root:not(#layout) .atelier .activity-group__body .execution__viewer-actions>span{display:none}
 :root:not(#layout) .atelier .activity-group__body .filetool{padding:3px 0;gap:4px}
@@ -266,7 +280,7 @@
 :root:not(#layout) .atelier .activity-group__body .filetool__path{padding:0;font:400 12px/1.5 var(--mono)}
 :root:not(#layout) .atelier .activity-group__body .filetool__toggle{padding:0 4px;font:400 12px/1.5 var(--sans)}
 :root:not(#layout) .atelier .activity-group__body .filetool__code{margin:2px 0 6px 6px;border:0;border-left:1px solid var(--x-hairline)}
-:root:not(#layout) .atelier .activity-group__body .filetool__code pre{padding:0 0 0 4px;max-height:240px;font:400 12px/1.55 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .filetool__code pre{padding:0 0 0 4px;font:400 12px/1.55 var(--mono)}
 :root:not(#layout) .atelier .activity-group__body .filetool__gutter{opacity:.55}
 :root:not(#layout) .atelier .activity-group__body .filetool__more{border:0;padding:2px 0 2px 10px;font:400 11.5px/1.4 var(--sans)}
 :root:not(#layout) .atelier .activity-group__body .filetool__actions{opacity:0}

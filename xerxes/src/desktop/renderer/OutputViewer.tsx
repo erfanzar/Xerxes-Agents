@@ -41,6 +41,9 @@ export function readableOutput(raw: string): string {
   return plainTerminalText(raw)
 }
 
+/** Lines a compact (in-conversation) preview shows before "Show all". */
+const PREVIEW_LINES = 14
+
 /** Shared log surface. Polling updates never move the user's reading position. */
 export function OutputViewer({ text, label = 'Output', empty = 'No output recorded yet.', compact = false }: {
   text: string; label?: string; empty?: string
@@ -49,6 +52,7 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
 }): ReactElement {
   const [wrap, setWrap] = useState(true)
   const [expanded, setExpanded] = useState(false)
+  const [full, setFull] = useState(false)
   const [copied, setCopied] = useState('')
   const dialog = useRef<HTMLDialogElement>(null)
   const expandButton = useRef<HTMLButtonElement>(null)
@@ -67,8 +71,11 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
     <header><h2>{label}</h2>{controls}<button autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
     {body}
   </dialog>, document.body)
-  if (compact) return <section className="output-viewer output-viewer--compact" aria-label={`${label} viewer`}>
+  // A preview is capped (about 14 lines) and does not scroll, so the wheel keeps moving the page.
+  const lineCount = text ? text.split('\n').length : 0
+  if (compact) return <section className="output-viewer output-viewer--compact" aria-label={`${label} viewer`} data-full={full || undefined}>
     {body}
+    {lineCount > PREVIEW_LINES && <button className="output-viewer__more" aria-expanded={full} onClick={() => setFull(value => !value)}>{full ? 'Show less' : `Show all ${lineCount.toLocaleString()} lines`}</button>}
     <div className="output-viewer__actions">
       <button disabled={!text} onClick={copy} aria-label={copied || 'Copy output'} title={copied || 'Copy output'}><Icon name={copied === 'Copied' ? 'check' : 'copy'} size={13}/></button>
       <button ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} title={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={13}/></button>
