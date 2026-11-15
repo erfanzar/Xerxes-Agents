@@ -579,7 +579,7 @@
 :root:not(#layout) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec__bar>.rsec__spacer{display:none}
 :root:not(#layout) .atelier .desktop-rail[data-fit='narrow'] .term__tool>span{display:none}
 :root:not(#layout) .atelier .rail-add__menu{position:absolute;top:calc(100% + 4px);right:0;z-index:40;display:flex;flex-direction:column;min-width:180px;padding:4px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
-:root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;gap:8px;width:auto;height:30px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
+:root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;height:28px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
 :root:not(#layout) .atelier .rail-add__item:hover,:root:not(#layout) .atelier .rail-add__item:focus-visible{background:var(--x-chip)}
 /* Changed files group: the only colour in the tree (blue modified, green added). */
 :root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline)}

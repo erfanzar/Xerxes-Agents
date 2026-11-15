@@ -54,7 +54,7 @@ import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { ModelSplitChip } from './TaskModels.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, useShadingStyle, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, useShadingStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
@@ -195,9 +195,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // The entry tab (Activity) is shown before anything was opened explicitly.
   const shownTabs = rail && railKey && !railTabs.some(tab => tabKey(tab) === railKey) ? openTab(railTabs, { panel: rail }, railKey) : railTabs
   /** Open (or focus) a tab: a section, or one item inside it such as an artifact. Null closes the panel. */
-  const setRail = (next: RailPanel | null, item?: string): void => {
+  const setRail = (next: RailPanel | null, item?: string, title?: string): void => {
     if (next === null) { setRailChoice(null); return }
-    const tab: RailTab = item ? { panel: next, item } : { panel: next }
+    const tab: RailTab = item ? { panel: next, item, ...(title ? { title } : {}) } : { panel: next }
     const key = tabKey(tab)
     setRailTabs(openTab(shownTabs, tab, key))
     setRailChoice(key)
@@ -230,7 +230,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // the rail stays as it was.
     if (next === 'activity' && filePath) { setSelectedAgent(filePath); setPage(null); setPanel(null); return }
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
-    if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'background' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
+    // Every file gets its own tab, so two files stay open side by side.
+    if (next === 'files' && filePath) { const path = workspaceFilePath(filePath, snap.cwd); setRail('files', path, path.split('/').filter(Boolean).at(-1) ?? path) }
+    else if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'background' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)

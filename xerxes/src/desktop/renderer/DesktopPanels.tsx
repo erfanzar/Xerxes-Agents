@@ -247,7 +247,8 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
       {/* An artifact tab shows that one artifact and takes its title; the Artifacts tab lists them. */}
       {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} {...(item ? { target: { id: item, count: artifactTarget?.count ?? 0 }, onTitle: (title: string) => onRetitle?.(currentKey, title) } : {})} />}
-      {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} {...(filesTarget ? { target: filesTarget } : {})} />}
+      {/* A file tab shows its own file; picking another file opens it in a new tab. */}
+      {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} onOpen={path => open('files', path)} {...(item ? { target: { path: item, count: 0 } } : filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
       {panel === 'terminal' && <TerminalPanel snap={snap} />}
       {panel === 'usage' && <UsagePanel snap={snap} />}
@@ -1350,7 +1351,9 @@ function lastUnsavedPath(cwd: string): string {
   return path
 }
 
-export function FilesPanel({ snap, close, target, changes = [] }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number }; changes?: Snapshot['changes'] }): ReactElement {
+export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number }; changes?: Snapshot['changes']
+  /** Open a picked file in its own tab instead of replacing the one shown here. */
+  onOpen?: (path: string) => void }): ReactElement {
   const shading = useShadingStyle()
   const [menuOpen, setMenuOpen] = useState(false)
   const [changedOpen, setChangedOpen] = useState(true)
@@ -1386,6 +1389,11 @@ export function FilesPanel({ snap, close, target, changes = [] }: { snap: Pick<S
     if (dirty && !window.confirm(`Discard your unsaved changes to ${file?.path ?? selected}?`)) return
     if (file) keepUnsavedFile(snap.cwd, file, file.content)
     setSelectedPath(path)
+  }
+  /** A file picked in the tree or the changed list: its own tab when tabs exist, else shown here. */
+  const pick = (path: string): void => {
+    if (path && onOpen && path !== selected) onOpen(path)
+    else setSelected(path)
   }
   useEffect(() => { if (target?.path) setSelected(workspaceFilePath(target.path, snap.cwd)) }, [target?.count])
   useEffect(() => { setSave({ state: 'idle' }) }, [selected])
@@ -1450,13 +1458,13 @@ export function FilesPanel({ snap, close, target, changes = [] }: { snap: Pick<S
           {changedOpen && changes.map(change => {
             const path = workspaceFilePath(change.path, snap.cwd)
             const name = change.path.split('/').filter(Boolean).at(-1) ?? change.path
-            return <button key={change.path} className="file-browser__entry file-browser__changed-row" data-change={change.isNew ? 'added' : 'modified'} aria-selected={selected === path} title={change.path} onClick={() => setSelected(path)}>
+            return <button key={change.path} className="file-browser__entry file-browser__changed-row" data-change={change.isNew ? 'added' : 'modified'} aria-selected={selected === path} title={change.path} onClick={() => pick(path)}>
               <Icon name="file" size={13} /><span>{name}</span><span className="file-browser__badge" aria-label={change.isNew ? 'Added' : 'Modified'}>{change.isNew ? 'A' : 'M'}</span>
             </button>
           })}
         </div>}
-        <div hidden={Boolean(needle)}><WorkspaceFileTree key={snap.cwd + snap.sessionKey} sessionKey={snap.sessionKey} selected={selected} select={setSelected} changed={changedMap} /></div>
-        {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={setSelected} />}
+        <div hidden={Boolean(needle)}><WorkspaceFileTree key={snap.cwd + snap.sessionKey} sessionKey={snap.sessionKey} selected={selected} select={pick} changed={changedMap} /></div>
+        {needle && <WorkspaceFileTree key={snap.cwd + snap.sessionKey + needle} path={needle.startsWith('./') ? needle : './' + needle} sessionKey={snap.sessionKey} selected={selected} select={pick} />}
       </div>
       </div>
       {selected && <div className="file-browser__document"><div className="file-browser__selection file-browser__pathbar">
