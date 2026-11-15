@@ -883,61 +883,47 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         return (
         <Fragment key={provider.name}>
         {heading && <div className="provgroup">{group}</div>}
-        <div className={`provcard${row.inUse ? ' is-current' : ''}`}>
-          <button
-            className="provcard__main"
-            disabled={row.inUse || snap.turnActive || !!snap.providerSwitching}
-            title={
-              row.inUse
-                ? row.viaMac ? 'this task runs on this computer through this profile' : 'active profile — new tasks start here'
-                : snap.turnActive
-                  ? 'wait for the running turn to finish'
-                  : row.viaMac
-                    ? `run this task through ${name} on this computer`
-                    : `make ${name} the active profile`
-            }
-            onClick={() => store.selectProvider(provider.name)}
-          >
-            <span className="provcard__avatar" aria-hidden="true">{row.viaMac ? <Icon name="laptop" size={15} /> : name.slice(0, 1).toUpperCase()}</span>
+        {/* The account-card look: name + kind badge, model, provider line, text buttons, usage below. */}
+        <div className={`provcard provider-account${row.inUse ? ' is-current' : ''}`}>
+          <div className="provcard__main">
             <span className="provcard__text">
               <span className="provcard__title">
-                <span className="provcard__name">{name}</span>
+                <span className="provcard__name">{slot && slot.account.kind !== 'api_key' ? slot.account.label : name}</span>
+                <span className="provcard__badge provcard__badge--quiet">{slot ? slot.account.kind : provider.signsIn ? 'sign-in' : 'api_key'}</span>
                 {row.chip ? <span className={`provcard__badge provcard__badge--${tone}`}>{row.chip}</span> : null}
-                {provider.local !== undefined && <span className="provcard__badge provcard__badge--quiet">{provider.local ? 'on this machine' : 'cloud'}</span>}
+                {provider.local === true && <span className="provcard__badge provcard__badge--quiet">on this machine</span>}
                 {snap.runMode?.mode === 'hybrid' && snap.runMode.worker?.profile === provider.name && <span className="provcard__badge provcard__badge--quiet">Hybrid lead</span>}
               </span>
-              <span className="provcard__model">{provider.model || 'Model chosen when used'}</span>
+              <span className="provcard__model">{provider.name} · {provider.model || 'model chosen when used'}</span>
               <span className="provcard__meta">{provider.provider} · {row.status}</span>
             </span>
-            {!row.inUse && !snap.turnActive
-              ? <span className="provcard__use">{row.viaMac ? 'Use via Mac' : 'Use'}</span>
-              : null}
-          </button>
-          {/* The host's sign-in can be selected before any relay exists, too. */}
-          {snap.storageScope?.startsWith('ssh:') && provider.signsIn && provider.ready === true && (!row.inUse || row.viaMac) && !snap.turnActive && (
-            <button className="provcard__use provcard__use--host" disabled={!!snap.providerSwitching}
-              title={`run this task on the host's own ${name} sign-in`}
-              onClick={() => store.useHostProvider(provider.name)}>Run on the server</button>
-          )}
-          <span className="provcard__tools">
-            {confirmDelete === provider.name ? (
-              <>
-                <button className="provcard__confirm" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
-                <button className="provcard__keep" onClick={() => setConfirmDelete(null)}>Keep</button>
-              </>
-            ) : (
-              <>
-                <button className="provcard__tool" disabled={snap.turnActive} title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => setForm(provider.name)}><Icon name="note" size={14} /></button>
-                {/* This app confirms killing a terminal; deleting a stored
-                    credential profile was a single unguarded click. */}
-                {slot?.sync && <button className="provcard__tool" title={`Sync ${name} to this SSH host`} aria-label={`Sync ${name} to SSH`} onClick={slot.sync}><Icon name="arrowUp" size={14} /></button>}
-                {/* A signed-in account's Remove also clears its credential; deleting only the profile would be relinked. */}
-                {!provider.active && (
-                  <button className="provcard__tool provcard__tool--danger" disabled={snap.turnActive} title={`Delete ${name}`} aria-label={`Delete ${name}`} onClick={() => slot?.remove ? slot.remove() : setConfirmDelete(provider.name)}><Icon name="trash" size={14} /></button>
-                )}
-              </>
-            )}
-          </span>
+            <span className="provcard__tools">
+              {confirmDelete === provider.name ? (
+                <>
+                  <button className="btn btn--danger" onClick={() => { setConfirmDelete(null); store.deleteProvider(provider.name) }}>Delete for good</button>
+                  <button className="btn" onClick={() => setConfirmDelete(null)}>Keep</button>
+                </>
+              ) : (
+                <>
+                  {!row.inUse && (
+                    <button className="btn" disabled={snap.turnActive || !!snap.providerSwitching}
+                      title={snap.turnActive ? 'wait for the running turn to finish' : row.viaMac ? `run this task through ${name} on this computer` : `make ${name} the active profile`}
+                      onClick={() => store.selectProvider(provider.name)}>{row.viaMac ? 'Use via Mac' : 'Use'}</button>
+                  )}
+                  {/* The host's sign-in can be selected before any relay exists, too. */}
+                  {snap.storageScope?.startsWith('ssh:') && provider.signsIn && provider.ready === true && (!row.inUse || row.viaMac) && !snap.turnActive && (
+                    <button className="btn" disabled={!!snap.providerSwitching} title={`run this task on the host's own ${name} sign-in`} onClick={() => store.useHostProvider(provider.name)}>Run on the server</button>
+                  )}
+                  {slot?.sync && <button className="btn" title={`Sync ${name} to this SSH host`} onClick={slot.sync}>Sync to SSH</button>}
+                  <button className="btn" disabled={snap.turnActive} title={`Edit ${name}`} onClick={() => setForm(provider.name)}>Edit</button>
+                  {/* A signed-in account's Remove also clears its credential; deleting only the profile would be relinked. */}
+                  {!provider.active && (
+                    <button className="btn" disabled={snap.turnActive} title={`Delete ${name}`} onClick={() => slot?.remove ? slot.remove() : setConfirmDelete(provider.name)}>Remove</button>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
           {slot?.usage}
         </div>
         </Fragment>

@@ -354,7 +354,7 @@ test('the settings modal opens on its cards and reads daemon state', () => {
   expect(models).toContain('z-ai/glm-5.2')
   // Provider rows are live switches, not a static list.
   expect(models).toContain('Providers</div>')
-  expect(models).toContain('<span class="provcard__use">Use</span>')
+  expect(models).toContain('>Use</button>')
   expect(models).toContain('title="make zai the active profile"')
   // TUI parity: the profile CRUD surface the /provider flow offers.
   expect(models).toContain('Add provider')
@@ -398,7 +398,7 @@ test('SSH provider settings offer host sign-in before a Mac relay exists and kee
         expect(html).toContain('Use via Mac')
       }
       expect(renderProviders({ turnActive: true })).not.toContain('Run on the server')
-      expect(renderProviders({ providerSwitching: name })).toMatch(/<button class="provcard__use provcard__use--host" disabled=""[^>]*>Run on the server<\/button>/)
+      expect(renderProviders({ providerSwitching: name })).toMatch(/<button class="btn" disabled=""[^>]*>Run on the server<\/button>/)
     }
   } finally {
     if (previous) Object.defineProperty(globalThis, 'window', previous)
@@ -919,7 +919,7 @@ test('feed rows are scoped (.frow) and provider rows stack name over detail', as
   // Provider cards: name over model over detail, Edit, and no Delete on the
   // active profile.
   expect(models).toContain('provcard__main')
-  expect(models).toContain('<span class="provcard__model">glm-5.2</span>')
+  expect(models).toContain('<span class="provcard__model">zai · glm-5.2</span>')
   expect(models).toContain('in use')
   expect(models).toContain('title="Edit zai"')
   expect(models).not.toContain('title="Delete zai"')
