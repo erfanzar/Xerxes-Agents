@@ -201,6 +201,9 @@ export interface ModelsDevQuery {
  * The models.dev answer for one model of one profile, or undefined when
  * models.dev does not describe it unambiguously.
  */
+/** Xerxes provider names whose models.dev provider id differs. */
+const MODELS_DEV_PROVIDER_IDS: Readonly<Record<string, string>> = { gemini: 'google' }
+
 export function findInModelsDev(providers: readonly ModelsDevProvider[], query: ModelsDevQuery): LiveModelCapability | undefined {
   const model = query.model.trim()
   if (!model) return undefined
@@ -224,7 +227,10 @@ export function findInModelsDev(providers: readonly ModelsDevProvider[], query: 
   // model — its window can differ from the vendor's, so an id match alone
   // does not describe it.
   if (endpoint && isLocalEndpoint(endpoint)) return undefined
-  const named = providers.find(provider => provider.id === query.provider?.trim().toLowerCase())
+  // Xerxes and models.dev name some vendors differently: Xerxes' `gemini` is models.dev's `google`.
+  const wanted = query.provider?.trim().toLowerCase()
+  const catalogId = wanted ? MODELS_DEV_PROVIDER_IDS[wanted] ?? wanted : undefined
+  const named = providers.find(provider => provider.id === catalogId)
   const byName = named ? lookup(named) : undefined
   if (byName) return byName
   const everywhere = providers.map(lookup).filter((found): found is LiveModelCapability => found !== undefined)
