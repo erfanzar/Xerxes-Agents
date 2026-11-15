@@ -273,7 +273,8 @@
    step's top-right corner on hover. */
 :root:not(#layout) .atelier .activity-group__body .execution__raw{display:none}
 :root:not(#layout) .atelier .activity-group__body .execution{position:relative}
-:root:not(#layout) .atelier .activity-group__body .execution__actions{position:absolute;top:0;right:0;margin:0;gap:10px;padding:0 0 0 8px;pointer-events:none}
+/* In flow, under the output: floated over the top-right it covered the command text in narrow panels (the subagent view). */
+:root:not(#layout) .atelier .activity-group__body .execution__actions{position:static;display:flex;justify-content:flex-end;flex-wrap:wrap;margin:0;gap:10px;padding:0;pointer-events:none}
 :root:not(#layout) .atelier .activity-group__body .execution:is(:hover,:focus-within) .execution__actions{pointer-events:auto}
 :root:not(#layout) .atelier .activity-group__body .execution__empty{margin:0;font:400 12px/1.5 var(--sans)}
 /* An opened step's output takes only the height it needs. */
@@ -883,6 +884,10 @@
 :root:not(#layout) .atelier .modal__main .provider-accounts__login{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 :root:not(#layout) .atelier .modal__main .provider-accounts__login>select{flex:0 0 170px}
 :root:not(#layout) .atelier .modal__main .provider-accounts__login>input{flex:1 1 160px;min-width:0}
+/* One Providers list: group labels span the grid; an account's usage sits under its row. */
+:root:not(#layout) .atelier .provgrid>.provgroup{grid-column:1/-1;margin:10px 2px 0;color:var(--x-meta);font:500 11px/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
+:root:not(#layout) .atelier .provgrid>.provgroup:first-child{margin-top:2px}
+:root:not(#layout) .atelier .provcard>.provider-account__usage{padding:0 14px 12px 62px}
 @media (max-width:900px){
   :root:not(#layout) .atelier .modal__main :is(.modecards,.tiercard__fields){grid-template-columns:minmax(0,1fr)}
 }

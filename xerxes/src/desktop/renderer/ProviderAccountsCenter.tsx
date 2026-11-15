@@ -1,14 +1,16 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { desktopError } from './desktopRpc.js'
 import { CopyButton } from './CopyButton.js'
 import { ActionDialog } from './ActionDialog.js'
 import type { XerxesBridge } from './types.js'
 
-interface AccountRow {id:string;kind:string;label:string;profileName:string;provider:string;model:string;available:boolean}
+export interface AccountRow {id:string;kind:string;label:string;profileName:string;provider:string;model:string;available:boolean}
+/** What a provider row borrows from its signed-in account: usage, Sync and Remove (which also clears the credential). */
+export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly remove?:()=>void;readonly sync?:()=>void}
 interface AccountList {accounts:readonly AccountRow[];can_sync:boolean;destination:string|null}
 interface UsageWindow {label:string;used_percent:number;resets_at:string|null;detail:string|null}
 interface SyncReview {review:string;account_id:string;destination:string}
@@ -63,7 +65,11 @@ export function GeminiAccountForm({busy,save}:{busy:boolean;save:(label:string,a
   </form>
 }
 
-export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnActive,changed}:{accounts?:XerxesBridge['accounts'];onAccountLogin?:XerxesBridge['onAccountLogin'];sessionKey:string;turnActive:boolean;changed:()=>void}) {
+export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnActive,changed,rows,shownProfiles}:{accounts?:XerxesBridge['accounts'];onAccountLogin?:XerxesBridge['onAccountLogin'];sessionKey:string;turnActive:boolean;changed:()=>void
+  /** The one Providers list: the caller renders each profile row with its account slot. */
+  rows?:(slots:ReadonlyMap<string,AccountSlot>)=>ReactNode
+  /** Profiles the caller already shows; their accounts are not listed a second time. */
+  shownProfiles?:ReadonlySet<string>}) {
   const alive=useRef(true), [list,setList]=useState<AccountList|null>(null), [usage,setUsage]=useState<Record<string,unknown>>({})
   const [kind,setKind]=useState<'claude'|'codex'|'gemini'>('claude'), [label,setLabel]=useState(''), [busy,setBusy]=useState(false), [error,setError]=useState('')
   const [action,setAction]=useState<AccountAction|null>(null), actionRequest=useRef(0)
@@ -145,9 +151,30 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       if(alive.current&&actionRequest.current===request)setAction({kind:action.kind,account:action.account,phase:'ready',error:desktopError(error)})
     }
   }
-  return <section className="provider-accounts" aria-label="Provider accounts">
-    <div className="row__t">Provider accounts</div>
-    <p className="modal__sub">One account center for this Mac and every SSH workspace. Each Claude/Codex login has isolated credentials. Gemini is API-key only; no Gemini OAuth or subscription quota readback is supported.</p>
+  /** Usage lines for one account. API-key profiles with no quota adapter say nothing rather than explain why. */
+  const usageOf=(account:AccountRow):ReactNode=>{
+    const report=usage[account.id] as {status?:string;reason?:string;windows?:UsageWindow[];recorded?:RecordedUsage}|undefined
+    const quiet=account.kind==='api_key'&&(!report||report.status==='unknown')&&!report?.recorded
+    if(quiet)return null
+    return <div className="provider-account__usage">
+      {report?.windows?.map(window=><span key={window.label}>{formatAccountUsageWindow(window)}</span>)}
+      {(!report||report.status==='unknown')&&<span>{report?.reason||'Loading usage…'}</span>}
+      {report?.recorded&&<AccountRecordedUsage report={report.recorded}/>}
+    </div>
+  }
+  const removable=(account:AccountRow)=>account.kind!=='api_key'||account.provider==='gemini'
+  const slots=new Map<string,AccountSlot>((list?.accounts??[]).map(account=>[account.profileName,{
+    account, usage:usageOf(account),
+    ...(removable(account)?{remove:()=>{actionRequest.current+=1;setAction({kind:'remove',account,phase:'ready',error:''})}}:{}),
+    ...(list?.can_sync?{sync:()=>void reviewSync(account)}:{}),
+  }]))
+  const merged=Boolean(rows)
+  const unlisted=(list?.accounts??[]).filter(account=>!shownProfiles?.has(account.profileName))
+  return <section className="provider-accounts" aria-label={merged?'Providers':'Provider accounts'}>
+    <div className="row__t">{merged?'Providers':'Provider accounts'}</div>
+    <p className="modal__sub">{merged
+      ? 'Sign in to Claude or Codex (each login keeps its own credentials), or save a Gemini API key. Other API keys and endpoints use Add provider below.'
+      : 'One account center for this Mac and every SSH workspace. Each Claude/Codex login has isolated credentials. Gemini is API-key only; no Gemini OAuth or subscription quota readback is supported.'}</p>
     <div className="provider-accounts__login">
       <select className="palette__in" aria-label="Account provider" value={kind} onChange={event=>{const value=event.target.value;if(value==='claude'||value==='codex'||value==='gemini')setKind(value)}} disabled={busy}>
         <option value="claude">Claude</option><option value="codex">Codex</option><option value="gemini">Gemini (API key)</option>
@@ -158,8 +185,8 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
     {kind==='gemini'&&<GeminiAccountForm busy={busy||!accounts} save={saveGemini}/>}
     {(signingIn||loginUrl)&&<ProviderLoginLink url={loginUrl} busy={signingIn} write={text=>accounts!('copy-login-link',{url:text})}/>}
     {error&&<p role="alert" className="studio-error">{error}</p>}
-    {list?.accounts.map(account=>{
-      const report=usage[account.id] as {status?:string;reason?:string;windows?:UsageWindow[];recorded?:RecordedUsage}|undefined
+    {rows?.(slots)}
+    {unlisted.map(account=>{
       return <div className="provcard provider-account" key={account.id}>
         <div className="provcard__main">
           <span className="provcard__text">
@@ -169,18 +196,14 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
           </span>
           <span className="provcard__tools">
             <button className="btn" disabled={busy||turnActive||!account.available} onClick={()=>void activate(account.id)}>Use</button>
-            {list.can_sync&&<button className="btn" disabled={busy} onClick={()=>void reviewSync(account)}>Sync to SSH</button>}
-            {(account.kind!=='api_key'||account.provider==='gemini')&&<button className="btn" disabled={busy} onClick={()=>{actionRequest.current+=1;setAction({kind:'remove',account,phase:'ready',error:''})}}>Remove</button>}
+            {list?.can_sync&&<button className="btn" disabled={busy} onClick={()=>void reviewSync(account)}>Sync to SSH</button>}
+            {removable(account)&&<button className="btn" disabled={busy} onClick={()=>slots.get(account.profileName)?.remove?.()}>Remove</button>}
           </span>
         </div>
-        <div className="provider-account__usage">
-          {report?.windows?.map(window=><span key={window.label}>{formatAccountUsageWindow(window)}</span>)}
-          {(!report||report.status==='unknown')&&<span>{report?.reason||'Loading usage…'}</span>}
-          {report?.recorded&&<AccountRecordedUsage report={report.recorded}/>}
-        </div>
+        {usageOf(account)}
       </div>
     })}
-    {list&&!list.accounts.length&&<p className="studio-muted">No accounts yet. Sign in above or choose Gemini to save a named API-key account.</p>}
+    {!merged&&list&&!list.accounts.length&&<p className="studio-muted">No accounts yet. Sign in above or choose Gemini to save a named API-key account.</p>}
     {action&&<ActionDialog
       title={action.phase==='done'?(action.kind==='sync'?'Account synced':'Account removed'):(action.kind==='sync'?`Sync ${action.account.label} to SSH`:`Remove ${action.account.label}?`)}
       confirmLabel={action.phase==='done'?'Done':action.kind==='remove'?'Remove account':!action.review&&action.phase==='ready'?'Review sync again':'Confirm sync'}

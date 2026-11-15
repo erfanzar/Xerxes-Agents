@@ -12,7 +12,7 @@
  */
 
 import { createPortal } from 'react-dom'
-import { createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
+import { Fragment, createContext, useContext, useId, type ReactNode, useLayoutEffect, useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { saveAppearance, loadAppearance, isStyleChoice, DEFAULT_FONT_SIZE, DEFAULT_STYLE, FONT_SIZES, FONT_LABELS, STYLES, STYLE_LABELS, type StyleChoice } from './appearance.js'
 import { chooseStyle } from './appearanceSync.js'
@@ -27,7 +27,7 @@ import { TerminalsCard } from './TerminalsPanel.js'
 import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
-import { ProviderAccountsCenter } from './ProviderAccountsCenter.js'
+import { ProviderAccountsCenter, type AccountSlot } from './ProviderAccountsCenter.js'
 import { RunModeSection } from './RunModeSection.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
@@ -813,6 +813,12 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
+/** Sign-ins (built-in Claude Code/codex and every Claude/Codex account) group above API keys. */
+function subscriptionRow(provider: ProviderRow, slots: ReadonlyMap<string, AccountSlot>): boolean {
+  const kind = slots.get(provider.name)?.account.kind
+  return provider.signsIn || (kind !== undefined && kind !== 'api_key')
+}
+
 function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
   const groups = useMemo(() => groupModels(snap.models), [snap.models])
   /** false = closed, true = new profile, a name = editing that profile. */
@@ -828,7 +834,6 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       {/* Private and Hybrid run Bonsai on the workspace host, so the choice is offered for this Mac only. */}
       {!snap.storageScope?.startsWith('ssh:') && <RunModeSection snap={snap} />}
-      <ProviderAccountsCenter accounts={typeof window === 'undefined' ? undefined : window.xerxes.accounts} onAccountLogin={typeof window === 'undefined' ? undefined : window.xerxes.onAccountLogin} sessionKey={snap.sessionKey} turnActive={snap.turnActive} changed={()=>void store.loadModels(true)}/>
       <p className="modal__sub">
         Change the session model from the composer. Using a profile makes it the one that does the work. Profiles are stored in <code>~/.xerxes/profiles.json</code> on the workspace host.
       </p>
@@ -848,7 +853,9 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         )}
       </div>
 
-      <div className="row__t">Providers</div>
+      {/* One Providers list: sign-ins and API keys share rows; a signed-in account adds its usage, Sync and Remove. */}
+      <ProviderAccountsCenter accounts={typeof window === 'undefined' ? undefined : window.xerxes.accounts} onAccountLogin={typeof window === 'undefined' ? undefined : window.xerxes.onAccountLogin} sessionKey={snap.sessionKey} turnActive={snap.turnActive} changed={()=>void store.loadModels(true)}
+        shownProfiles={new Set(snap.providers.map(provider => provider.name))} rows={slots => <>
       {snap.providerSwitching && <p role="status">Switching to {snap.providerSwitching}…</p>}
       {snap.providerSwitchError && <p role="alert" className="studio-error">{snap.providerSwitchError}</p>}
       {snap.providerError && <div role="alert" className="studio-error">{snap.providerError}<button onClick={() => void store.loadProviders()}>Retry loading providers</button></div>}
@@ -866,12 +873,17 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
           </div>
         </div>
       )}
-      {snap.providers.map(provider => {
+      {[...snap.providers].sort((a, b) => Number(!subscriptionRow(a, slots)) - Number(!subscriptionRow(b, slots))).map((provider, index, sorted) => {
         const row = providerRowState(snap, provider)
+        const slot = slots.get(provider.name)
+        const group = subscriptionRow(provider, slots) ? 'Subscriptions' : 'API keys'
+        const heading = index === 0 || (subscriptionRow(sorted[index - 1]!, slots) ? 'Subscriptions' : 'API keys') !== group
         const name = provider.label || provider.name
         const tone = row.chip === 'Mac not connected' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
         return (
-        <div key={provider.name} className={`provcard${row.inUse ? ' is-current' : ''}`}>
+        <Fragment key={provider.name}>
+        {heading && <div className="provgroup">{group}</div>}
+        <div className={`provcard${row.inUse ? ' is-current' : ''}`}>
           <button
             className="provcard__main"
             disabled={row.inUse || snap.turnActive || !!snap.providerSwitching}
@@ -918,13 +930,17 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                 <button className="provcard__tool" disabled={snap.turnActive} title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => setForm(provider.name)}><Icon name="note" size={14} /></button>
                 {/* This app confirms killing a terminal; deleting a stored
                     credential profile was a single unguarded click. */}
+                {slot?.sync && <button className="provcard__tool" title={`Sync ${name} to this SSH host`} aria-label={`Sync ${name} to SSH`} onClick={slot.sync}><Icon name="arrowUp" size={14} /></button>}
+                {/* A signed-in account's Remove also clears its credential; deleting only the profile would be relinked. */}
                 {!provider.active && (
-                  <button className="provcard__tool provcard__tool--danger" disabled={snap.turnActive} title={`Delete ${name}`} aria-label={`Delete ${name}`} onClick={() => setConfirmDelete(provider.name)}><Icon name="trash" size={14} /></button>
+                  <button className="provcard__tool provcard__tool--danger" disabled={snap.turnActive} title={`Delete ${name}`} aria-label={`Delete ${name}`} onClick={() => slot?.remove ? slot.remove() : setConfirmDelete(provider.name)}><Icon name="trash" size={14} /></button>
                 )}
               </>
             )}
           </span>
+          {slot?.usage}
         </div>
+        </Fragment>
       )})}
       {form === false && (
         <button className="provcard provcard--add" disabled={snap.turnActive} onClick={() => setForm(true)}>
@@ -933,6 +949,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         </button>
       )}
       </div>
+      </>} />
 
       {form !== false && (
         <ProviderForm
