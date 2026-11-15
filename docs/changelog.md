@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.44 — 2026-11-16
+
+- **Usage and Providers grouped by family.** The Usage tab and Settings → Providers list accounts under Claude Code, Codex, Gemini and Other, with the account in use first.
+- **Account auto-switch within a family.** When a Codex or Claude Code account reaches 95% of a usage window, or a request hits its limit, the turn moves to a sibling account of the same kind with room, and the chat names both accounts. Off with `runtime.account_failover: off`; threshold `runtime.account_failover_threshold`.
+- **Gemini.** Thinking-effort levels are offered again (low/medium/high on Gemini 3, on/off on 2.5). A Gemini key's usage card shows requests sent today, the last limit Google reported with its reset, and a link to your AI Studio limits.
+- **Sync all providers to an SSH host** in one confirmation, next to Refresh provider status.
+- **Plan ready card.** Open the plan opens the plan itself, the card uses the plain card look with less wasted space, and the strip behind the prompt box lets the conversation show through.
+- **Fixes:** the Artifacts list no longer drops its own answer during a busy turn, so new artifacts appear; scrolling over tool output moves the conversation (long output shows a preview with Show all); structured tool results no longer draw a doubled divider; the artifact editor fills the panel; signed-in accounts whose profile was lost are relinked.
+
 ## 0.8.43 — 2026-11-15
 
 - **Goals keep a live artifact.** A goal's agent writes one artifact with the objective, criteria and plan, updates it after every round, milestone and piece of evidence, and ends it with a Result or Blocker section.
