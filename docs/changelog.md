@@ -7,6 +7,18 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.41 — 2026-11-15
+
+- **XERXES keeps working until it is done.** A Hub supervisor turn no longer ends on a wall-clock limit. It ends only after real silence: 30 minutes with no model call or tool activity by default, set with `XERXES_HUB_SUPERVISOR_IDLE_MS` (`off` disables it). The owner's stop, pause and kill controls and every daily cap are unchanged.
+- **No model, no dropped request.** When no online machine offers XERXES's model, the turn now waits instead of failing. It says so once in the thread, keeps later messages and wakes queued behind it, and retries when a machine comes back online (or every 30 s).
+- **No more wake storms.** A blocked goal wakes XERXES once per real change of state (task, goal and reason), not once per Hub resync. Replayed old events never wake or reset anything, a burst of the same fact merges into one wake, and a wake stuck as "claimed" is retried once (marked as a retry) and then expired. A claim of unknown outcome from before this release is never replayed.
+- **Desktop: one layout for every style.** Shading, Neo and Classic share one layout sheet; styles differ only in colour and type. Fresh installs start in Shading, Dark, no background, with the Mono colour theme.
+- **Real syntax highlighting in the file editor.** The editor uses the same grammar engine as chat code blocks (about 40 file types) with a fixed dark and light palette, so keywords, types, functions, decorators and multi-line docstrings are all coloured.
+- **Editable artifacts.** The artifact viewer gains Edit with Save and Cancel (`artifacts.update`), a highlighted Source view, and a visible tick when Copy succeeds.
+- **Background panel.** Running and Finished folds; each command card is titled by the work it does, not its setup lines.
+- **Plan mode.** The agent can enter plan mode itself, and Shift+Tab toggles it in the composer.
+- **Hub link survives a backlog.** The daemon's event pump waits while a client has unwritten output, so a Hub catching up over SSH is no longer dropped.
+
 ## 0.8.40 — 2026-11-13
 
 - **Shading, redrawn.** The Shading style is rebuilt from a written design plan (`docs/shading-design.md`) instead of neutral near-black greys. It now uses a lapis ground and parchment text, and four glaze colours that only mark state. A working task gets a turquoise rule on its sidebar row, a waiting task a saffron one and a failed task a pomegranate one; idle tasks get none. The task title and wordmark use a serif face, numbers line up with `tabular-nums` instead of monospace, and the goal and folder rows above the composer are no longer separate boxes. Failure cards lead with a readable line and keep the provider's raw words below it. Both themes still clear WCAG AA on every surface.
