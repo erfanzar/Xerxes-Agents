@@ -16,6 +16,7 @@ import { Markdown } from './markdown.js'
 import { copyToClipboard } from './CopyButton.js'
 import { highlightCode } from './richMarkdown.js'
 import { desktopCall, desktopError, record, text } from './desktopRpc.js'
+import { createListPoll, type ListPoll } from './listPoll.js'
 import { agentKindLabel, agentState } from './AgentRoster.js'
 import { AgentInspector } from './AgentInspector.js'
 import type { SessionRow } from './types.js'
@@ -105,25 +106,30 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
       .finally(() => setSaving(false))
   }
   const unsupported = useRef(false)
+  // A slow list call (queued behind a busy turn) is never discarded by the next poll tick.
+  const listPoll = useRef<ListPoll | null>(null)
+  listPoll.current ??= createListPoll(
+    key => desktopCall(window.xerxes, key, 'artifacts.list'),
+    result => { setRows(artifactRowsOf(result.artifacts)); setError(''); setLoaded(true) },
+    reason => {
+      const message = desktopError(reason)
+      // An older runtime has no artifact methods: say what to do, not the raw RPC error.
+      const outdated = /unknown method/i.test(message)
+      if (outdated) unsupported.current = true
+      setError(outdated ? 'outdated' : message)
+      setLoaded(true)
+    },
+  )
   useEffect(() => {
     if (!online || unsupported.current) return
-    let live = true
-    void desktopCall(window.xerxes, sessionKey, 'artifacts.list')
-      .then(result => { if (live) { setRows(artifactRowsOf(result.artifacts)); setError(''); setLoaded(true) } })
-      .catch(reason => {
-        if (!live) return
-        const message = desktopError(reason)
-        // An older runtime has no artifact methods: say what to do, not the raw RPC error.
-        const outdated = /unknown method/i.test(message)
-        if (outdated) unsupported.current = true
-        setError(outdated ? 'outdated' : message)
-        setLoaded(true)
-      })
-    // Artifacts arrive mid-turn; a cheap list poll keeps the section current
-    // (not against a runtime that doesn't have the method).
-    const timer = setInterval(() => { if (!unsupported.current) setReload(value => value + 1) }, 5000)
-    return () => { live = false; clearInterval(timer) }
+    listPoll.current?.request(sessionKey)
   }, [sessionKey, online, reload])
+  // Artifacts arrive mid-turn; a cheap list poll keeps the section current
+  // (not against a runtime that doesn't have the method).
+  useEffect(() => {
+    const timer = setInterval(() => { if (!unsupported.current) setReload(value => value + 1) }, 5000)
+    return () => clearInterval(timer)
+  }, [])
   useEffect(() => { onTitle?.(open?.row.title ?? '') }, [open?.row.title])
   const show = (row: ArtifactRow): void => {
     setError('')
