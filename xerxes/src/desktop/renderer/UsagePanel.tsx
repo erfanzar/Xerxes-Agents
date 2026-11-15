@@ -96,7 +96,7 @@ export function ProfileCard({ profile, now }: { profile: UsageProfileView; now: 
       {profile.balance && <span className="usage-plan__balance">{profile.balance}</span>}
     </div>
     {profile.windows.length > 0 && <div className="usage-plan__windows">{profile.windows.map(window => windowMeter(window, profile, now))}</div>}
-    {profile.facts && profile.facts.length > 0 && <dl className="usage-plan__facts">{profile.facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>}
+    {profile.facts && profile.facts.length > 0 && <dl className="usage-plan__facts">{profile.facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{/^https:\/\//.test(fact.value) ? <a href={fact.value} target="_blank" rel="noreferrer">Open in AI Studio</a> : fact.value}</dd></div>)}</dl>}
     {profile.status === 'error' && <p className="usage-plan__message" role="status">{profile.message || 'Usage is unavailable right now.'}</p>}
     {profile.status === 'unsupported' && <p className="usage-plan__message usage-plan__message--quiet">This provider doesn't publish usage limits or a balance.</p>}
     {profile.status === 'ok' && !profile.windows.length && !profile.balance && !profile.facts?.length && <p className="usage-plan__message usage-plan__message--quiet">No limits reported for this plan.</p>}

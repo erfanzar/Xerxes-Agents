@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto'
 import { profileLabel } from '../bridge/profiles.js'
 import { ConfigurationError } from '../core/errors.js'
 import { ProviderAccountRegistry } from './providerAccountRegistry.js'
+import { geminiKeyId, geminiUsageLedger, type GeminiUsageLedger } from '../llms/geminiUsage.js'
 
 import {
   fetchSubscriptionUsage,
@@ -201,6 +202,8 @@ export interface BuildUsageReportOptions extends UsageRequestOptions {
   readonly fetchUsage?: typeof fetchSubscriptionUsage
   readonly fetchBalance?: typeof fetchApiBalance
   readonly accountUsage?: (id: string, options: UsageRequestOptions) => Promise<ProviderUsageReport>
+  /** Gemini's observed-usage ledger (tests inject their own). */
+  readonly geminiLedger?: GeminiUsageLedger
   /**
    * Profiles listed whether or not the user ever signed in (the built-in
    * `claude-code` and `codex`). When they are not active and have no session, they
@@ -222,6 +225,10 @@ export async function buildUsageReport(
   const pending = new Map<string, Promise<SourceReport>>()
   const entries = await Promise.all(profiles.map(async (profile): Promise<UsageProfileEntry | null> => {
     const base = { profile: profile.name, label: profileLabel(profile.name), provider: profile.provider, model: profile.model, active: profile.active === true }
+    // Gemini keys have no quota endpoint: report what Xerxes observed (requests today, the last 429) plus the AI Studio link.
+    if (profile.provider.trim().toLowerCase() === 'gemini' && profile.api_key?.trim()) {
+      return { ...base, status: 'ok', windows: [], facts: (options.geminiLedger ?? geminiUsageLedger).facts(geminiKeyId(profile.api_key)), fetchedAt: Date.now() }
+    }
     const source = usageSourceFor(profile.provider, profile.base_url)
     if (!source) {
       return { ...base, status: 'unsupported', windows: [], message: 'This provider does not publish usage limits or a balance Xerxes can read.' }

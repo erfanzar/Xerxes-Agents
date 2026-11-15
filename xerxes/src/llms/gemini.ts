@@ -11,6 +11,7 @@ import type { CompletionRequest, FetchImplementation, LlmClient, LlmCompletion, 
 import { internalSseData } from './client.js'
 import { bareModel, getApiKey } from './providerRegistry.js'
 import { credentialFingerprint } from './credentialFingerprint.js'
+import { geminiKeyId, geminiUsageLedger } from './geminiUsage.js'
 
 /** Root REST endpoint for Gemini's native Generate Content API. */
 export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
@@ -251,8 +252,10 @@ export class GeminiClient implements LlmClient {
       }
       throw new ProviderError('gemini', 'completion request failed before receiving a response', error)
     }
+    geminiUsageLedger.recordCall(geminiKeyId(this.apiKey))
     if (!response.ok) {
       const body = await response.text()
+      if (response.status === 429) geminiUsageLedger.recordLimit(geminiKeyId(this.apiKey), body, bareModel(request.model))
       const status = response.statusText ? ` ${response.statusText}` : ''
       throw geminiHttpError(
         `completion request failed (${response.status}${status}): ${body.slice(0, 4_096)}`
@@ -315,8 +318,10 @@ export class GeminiClient implements LlmClient {
       }
       throw new ProviderError('gemini', 'stream request failed before receiving a response', error)
     }
+    geminiUsageLedger.recordCall(geminiKeyId(this.apiKey))
     if (!response.ok) {
       const body = await response.text()
+      if (response.status === 429) geminiUsageLedger.recordLimit(geminiKeyId(this.apiKey), body, bareModel(request.model))
       const status = response.statusText ? ` ${response.statusText}` : ''
       throw geminiHttpError(
         `stream request failed (${response.status}${status}): ${body.slice(0, 4_096)}`
