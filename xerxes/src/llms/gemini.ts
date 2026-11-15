@@ -441,22 +441,26 @@ function appendContent(contents: GeminiContent[], role: GeminiContent['role'], p
 function assistantContentParts(message: Extract<ChatMessage, { role: 'assistant' }>): GeminiPart[] {
   const parts = contentToGeminiParts(message.content)
   if (message.thinking) {
+    // With tool calls the signature belongs on the first functionCall part
+    // (attachAssistantSignature); Gemini 3 rejects a call replayed without one.
+    const signOnThought = message.thinking_signature && !message.tool_calls?.length
     parts.unshift({
       text: message.thinking,
       thought: true,
-      ...(message.thinking_signature ? { thoughtSignature: message.thinking_signature } : {}),
+      ...(signOnThought ? { thoughtSignature: message.thinking_signature } : {}),
     })
   }
   return parts
 }
 
 function attachAssistantSignature(parts: GeminiPart[], signature: string | undefined): void {
-  if (!signature || parts.some(part => 'thoughtSignature' in part && part.thoughtSignature === signature)) {
-    return
-  }
+  if (!signature) return
   const functionCallIndex = parts.findIndex(part => 'functionCall' in part)
   const targetIndex = functionCallIndex >= 0 ? functionCallIndex : 0
   const target = parts[targetIndex]
+  // Skip only when the part that needs it already carries it: a signed thought
+  // part must not leave the first function call unsigned.
+  if (target && 'thoughtSignature' in target && target.thoughtSignature === signature) return
   if (target === undefined) {
     throw new ConfigurationError('messages', 'Gemini assistant signature has no content part to preserve')
   }

@@ -55,9 +55,10 @@ test('Gemini conversion separates system instructions and preserves native tool 
       {
         role: 'model',
         parts: [
-          { text: 'Need a source read.', thought: true, thoughtSignature: 'thought-1' },
+          { text: 'Need a source read.', thought: true },
           { text: 'I will inspect it.' },
-          { functionCall: { id: 'call-1', name: 'ReadFile', args: { path: 'README.md' } } },
+          // Gemini 3 requires the signature on the first functionCall part when replaying tool calls.
+          { functionCall: { id: 'call-1', name: 'ReadFile', args: { path: 'README.md' } }, thoughtSignature: 'thought-1' },
         ],
       },
       {
