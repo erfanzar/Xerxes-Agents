@@ -325,6 +325,7 @@ const scenario = (name:string) => {
     {role:'assistant',content:'I’ll review the workspace and report specific findings.'},
   ])})
   if(name==='Approval keyboard')patch({approval:{id:'approval-fixture',action:'read_file',description:'Read a selected local file'}})
+  if(name==='Plan ready')patch({turnActive:true,blocks:[...blocks,{kind:'tools',id:20,running:false,items:[{id:'plan-artifact',verb:'Artifact',name:'ArtifactTool',arg:'Plan: grouped usage',dur:'1s',state:'done',input:'{"action":"create","kind":"markdown"}',output:'Created artifact "Plan: grouped usage" (id planfix001, version 1)'}]}],approval:{id:'plan-fixture',action:'ExitPlanModeTool',toolName:'ExitPlanModeTool',description:'Leave plan mode'}})
   if(name==='Question keyboard')patch({question:{requestId:'question-fixture',items:[{id:'scope',question:'Choose the scope',options:['Selected files','Whole workspace'],allowFreeform:false},{id:'notes',question:'Any constraints?',options:[],allowFreeform:true,placeholder:'Your constraints'}]}})
   if(name==='Plan keyboard')patch({question:{requestId:'plan-keyboard',items:[{id:'answer',question:'Review the plan',options:['Approve plan — start acting','Keep planning'],allowFreeform:true}]},plan:{items:[],turn:1,markdown:'# Proposed plan\nReview the selected files before editing.'}})
   if(name==='Streaming')patch({turnActive:true,turnSeconds:42,blocks:[blocks[0]!,{...blocks[1]!,streaming:true} as Snapshot['blocks'][number]]})
