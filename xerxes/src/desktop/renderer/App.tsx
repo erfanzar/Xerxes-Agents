@@ -26,7 +26,7 @@ import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { ArtifactToast } from './ArtifactCard.js'
+import { ArtifactToast, latestArtifactId } from './ArtifactCard.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
@@ -1527,8 +1527,9 @@ export function isPlanExitApproval(approval: Pick<NonNullable<Snapshot['approval
   return /^ExitPlanMode(Tool)?$/.test(approval.toolName || approval.action || '')
 }
 
-function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
-  return isPlanExitApproval(props.approval) ? <PlanApprovalCard approval={props.approval} /> : <ToolApprovalCard {...props} />
+function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean; blocks?: readonly Block[] }): ReactElement {
+  const { blocks, ...rest } = props
+  return isPlanExitApproval(props.approval) ? <PlanApprovalCard approval={props.approval} planId={latestArtifactId(blocks ?? store.getSnapshot().blocks)} /> : <ToolApprovalCard {...rest} />
 }
 
 /**
@@ -1536,7 +1537,7 @@ function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; poli
  * planning. Refining rejects the exit (the session stays in plan mode) and
  * queues the note as a steer, so the agent revises the same plan.
  */
-export function PlanApprovalCard({ approval }: { approval: NonNullable<Snapshot['approval']> }): ReactElement {
+export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<Snapshot['approval']>; planId?: string | undefined }): ReactElement {
   const open = useDesktopNavigation()
   const [note, setNote] = useState('')
   const card = useRef<HTMLDivElement>(null)
@@ -1556,16 +1557,15 @@ export function PlanApprovalCard({ approval }: { approval: NonNullable<Snapshot[
         <span className="approval__title">Plan ready</span>
         <button className="approval__dismiss" title="Hide until you decide — the plan stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
       </div>
-      <p className="approval__reason">Read the plan, then continue with it or tell the agent what to change.</p>
-      <button className="btn btn--ghost plan-approval__open" onClick={() => open('docs')}><Icon name="file" size={13} /> Open the plan</button>
+      {/* Opens the plan itself (the newest artifact this conversation saved), not just the list. */}
+      <button className="plan-approval__open" onClick={() => open('docs', planId)}><Icon name="file" size={13} /> Open the plan</button>
       <div className="plan-approval__refine">
-        <textarea aria-label="Refine the plan" placeholder="Refine the plan… (what to change, add or drop)" rows={2} value={note}
+        <textarea aria-label="Refine the plan" placeholder="Refine the plan… (what to change, add or drop)" rows={1} value={note}
           onChange={event => setNote(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); refine() } }} />
-      </div>
-      <div className="approval__row">
-        <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Continue with the plan</button>
-        <button className="btn" disabled={!note.trim()} onClick={refine}>Refine plan <kbd>⏎</kbd></button>
+        {note.trim()
+          ? <button className="btn" onClick={refine}>Refine <kbd>⏎</kbd></button>
+          : <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Continue with the plan</button>}
       </div>
     </div>
   )

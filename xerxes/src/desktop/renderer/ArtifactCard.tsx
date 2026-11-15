@@ -10,7 +10,7 @@
 import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
 import { Icon } from './Icon.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
-import type { ToolItem } from './types.js'
+import type { Block, ToolItem } from './types.js'
 
 export interface ArtifactRef {
   readonly id: string
@@ -40,6 +40,19 @@ export function artifactOfTool(item: Pick<ToolItem, 'name' | 'state' | 'output' 
     if (input && typeof input === 'object' && typeof (input as { kind?: unknown }).kind === 'string') kind = (input as { kind: string }).kind
   } catch { /* the result alone names the artifact */ }
   return { action: match[1] === 'Created' ? 'created' : 'updated', title: match[2]!, id: match[3]!, version: Number(match[4]), kind }
+}
+
+/** The id of the newest artifact this conversation saved, read from its transcript; undefined when none. */
+export function latestArtifactId(blocks: readonly Block[]): string | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index]!
+    if (block.kind !== 'tools') continue
+    for (let item = block.items.length - 1; item >= 0; item -= 1) {
+      const artifact = artifactOfTool(block.items[item]!)
+      if (artifact) return artifact.id
+    }
+  }
+  return undefined
 }
 
 /**

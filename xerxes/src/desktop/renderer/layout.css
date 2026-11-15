@@ -588,8 +588,15 @@
 :root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;height:28px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
 :root:not(#layout) .atelier .rail-add__item:hover,:root:not(#layout) .atelier .rail-add__item:focus-visible{background:var(--x-chip)}
 /* Plan ready card: open the plan, refine it with a note, or continue with it. */
-:root:not(#layout) .atelier .approval--plan .plan-approval__open{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;margin:2px 0 8px}
-:root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea{box-sizing:border-box;width:100%;min-height:44px;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 13px/1.4 var(--sans);resize:vertical}
+/* A plan decision is not a risky tool approval: the plain card look, no warning tint, and tight spacing. */
+:root:not(#layout) .atelier .approval.approval--plan{border:1px solid var(--x-hairline);background:var(--x-card);box-shadow:var(--x-elev);padding:10px 12px;gap:8px}
+:root:not(#layout) .atelier .approval--plan .approval__dot{background:var(--x-accent);box-shadow:none;animation:none}
+:root:not(#layout) .atelier .approval--plan .approval__title{color:var(--x-title);text-transform:none;letter-spacing:0;font:600 13px/1.2 var(--sans)}
+:root:not(#layout) .atelier .approval--plan .plan-approval__open{justify-self:start;display:inline-flex;align-items:center;gap:6px;margin:0;padding:0;border:0;background:none;color:var(--x-secondary);font:500 12.5px/1.4 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .approval--plan .plan-approval__open:hover{color:var(--x-title);text-decoration:underline}
+:root:not(#layout) .atelier .approval--plan .plan-approval__refine{display:flex;align-items:flex-end;gap:8px}
+:root:not(#layout) .atelier .approval--plan .plan-approval__refine>.btn{flex:none;white-space:nowrap}
+:root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;min-height:32px;max-height:140px;padding:6px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 13px/1.4 var(--sans);resize:none;field-sizing:content}
 :root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea:focus{outline:none;border-color:var(--x-meta)}
 /* Changed files group: the only colour in the tree (blue modified, green added). */
 :root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline)}

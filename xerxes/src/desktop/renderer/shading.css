@@ -202,7 +202,8 @@
 :root[data-style='shading']:not(#shading) .atelier :is(pre,.md pre){background:var(--x-sunken);border-radius:10px}
 :root[data-style='shading']:not(#shading) .atelier :not(pre):not(.code-editor__row)>code:not(pre code){background:var(--x-chip);border-radius:6px;color:var(--x-title)}
 :root[data-style='shading']:not(#shading) .atelier .code-editor__row>code{background:none;border-radius:0;color:inherit}
-:root[data-style='shading']:not(#shading) .atelier .approval{border-color:var(--x-needs-border);box-shadow:inset 3px 0 0 var(--x-needs)}
+:root[data-style='shading']:not(#shading) .atelier .approval:not(.approval--plan){border-color:var(--x-needs-border);box-shadow:inset 3px 0 0 var(--x-needs)}
+:root[data-style='shading']:not(#shading) .atelier .approval.approval--plan{border-color:transparent;border-radius:12px;background:var(--sh-composer);box-shadow:var(--sh-composer-shadow)}
 :root[data-style='shading']:not(#shading) .atelier .btn{background:var(--x-chip);color:var(--x-title);border-radius:10px;box-shadow:none;transition:background-color 150ms ease,color 150ms ease}
 :root[data-style='shading']:not(#shading) .atelier .btn:hover:not(:disabled){background:color-mix(in srgb,var(--x-title) 14%,var(--x-chip));color:var(--x-title)}
 :root[data-style='shading']:not(#shading) .atelier :is(.btn--solid,.studio-primary,.approval .btn--solid){background:var(--x-accent);color:var(--x-on-accent);border-color:var(--x-accent);border-radius:10px;box-shadow:none}
@@ -318,7 +319,7 @@
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap>.composer__toolbar{border-radius:0}
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap>.repobar{border-radius:0 0 12px 12px}
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap{background:transparent}
-:root[data-style='shading']:not(#shading) .atelier .composer-wrap::before{content:'';background:color-mix(in srgb,var(--x-screen) 72%,transparent);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+:root[data-style='shading']:not(#shading) .atelier .composer-wrap::before{content:'';background:color-mix(in srgb,var(--x-screen) 28%,transparent);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
 :root[data-style='shading']:not(#shading) .atelier .rsec__group>.rsec__toggle{color:var(--x-meta)}
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap.agent-dock::before{content:none}
 :root[data-style='shading']:not(#shading) .atelier .composer-wrap.agent-dock>.composer-dock{border-radius:12px;background:var(--sh-composer);box-shadow:var(--sh-composer-shadow)}
