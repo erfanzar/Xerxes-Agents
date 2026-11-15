@@ -832,7 +832,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Models & Providers</h2>
-      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
+      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} accounts={window.xerxes.accounts} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       {/* Private and Hybrid run Bonsai on the workspace host, so the choice is offered for this Mac only. */}
       {!snap.storageScope?.startsWith('ssh:') && <RunModeSection snap={snap} />}
       <p className="modal__sub">

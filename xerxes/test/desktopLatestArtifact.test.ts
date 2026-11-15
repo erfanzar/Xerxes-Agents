@@ -20,3 +20,18 @@ test('the Plan ready card opens the newest artifact this conversation saved, not
   expect(latestArtifactId(blocks)).toBe('bbbbbb2222')
   expect(latestArtifactId([{ kind: 'agent', id: 1, text: 'no artifacts', streaming: false }])).toBeUndefined()
 })
+
+test('a goal or report artifact updated after the plan does not replace the plan', () => {
+  const enter: ToolItem = { ...artifactTool('z', 'z'), name: 'EnterPlanModeTool', output: 'Entered plan mode' }
+  const updated = (id: string, title: string): ToolItem => ({ ...artifactTool(id, title), output: `Updated artifact "${title}" (id ${id}, version 4)` })
+  const blocks: Block[] = [
+    { kind: 'tools', id: 1, running: false, items: [artifactTool('oldplan111', 'Plan: last week')] },
+    { kind: 'tools', id: 2, running: false, items: [enter] },
+    { kind: 'tools', id: 3, running: false, items: [artifactTool('newplan222', 'Plan: grouped usage')] },
+    { kind: 'tools', id: 4, running: false, items: [updated('goalart333', 'Goal: UI inspection')] },
+  ]
+  expect(latestArtifactId(blocks)).toBe('newplan222')
+  // No plan artifact in this round: the one created in the round, not the goal update.
+  const unnamed: Block[] = [blocks[1]!, { kind: 'tools', id: 5, running: false, items: [artifactTool('design4444', 'Design notes')] }, blocks[3]!]
+  expect(latestArtifactId(unnamed)).toBe('design4444')
+})

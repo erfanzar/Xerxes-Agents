@@ -42,17 +42,32 @@ export function artifactOfTool(item: Pick<ToolItem, 'name' | 'state' | 'output' 
   return { action: match[1] === 'Created' ? 'created' : 'updated', title: match[2]!, id: match[3]!, version: Number(match[4]), kind }
 }
 
-/** The id of the newest artifact this conversation saved, read from its transcript; undefined when none. */
+/**
+ * The artifact the Plan ready card should open, read from the transcript.
+ * Within the current plan round (since the last EnterPlanModeTool call), a
+ * "Plan…" artifact wins over a report or goal artifact updated later; then
+ * any artifact created in that round; then the newest artifact at all.
+ * Undefined when the loaded transcript names none (the card then opens the list).
+ */
 export function latestArtifactId(blocks: readonly Block[]): string | undefined {
+  let newest: ArtifactRef | undefined, created: ArtifactRef | undefined, titled: ArtifactRef | undefined
+  let inRound = true
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index]!
     if (block.kind !== 'tools') continue
     for (let item = block.items.length - 1; item >= 0; item -= 1) {
-      const artifact = artifactOfTool(block.items[item]!)
-      if (artifact) return artifact.id
+      const tool = block.items[item]!
+      if (/^EnterPlanMode(Tool)?$/.test(tool.name)) { inRound = false; continue }
+      const artifact = artifactOfTool(tool)
+      if (!artifact) continue
+      newest ??= artifact
+      if (!inRound) continue
+      if (/^plan\b/i.test(artifact.title)) titled ??= artifact
+      if (artifact.action === 'created') created ??= artifact
     }
+    if (!inRound && newest) break
   }
-  return undefined
+  return (titled ?? created ?? newest)?.id
 }
 
 /**

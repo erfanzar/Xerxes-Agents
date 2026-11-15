@@ -6,13 +6,56 @@ import type { XerxesBridge } from './types.js'
 import { desktopError } from './desktopRpc.js'
 import { relaySummary } from './RelayBadge.js'
 import type { ProviderRelayView } from './store.js'
+import { ActionDialog } from './ActionDialog.js'
+import type { AccountRow } from './ProviderAccountsCenter.js'
+
+/** One account in a "Sync all" batch: its one-use transfer review, then its outcome. */
+interface SyncItem { readonly account: AccountRow; readonly review?: string; readonly error?: string; readonly done?: boolean }
+interface SyncAll { readonly phase: 'reviewing' | 'ready' | 'working' | 'done'; readonly items: readonly SyncItem[]; readonly destination: string; readonly error: string }
 
 interface Review {
   review: string; destination: string; workspace: string; sessionKey: string;
   profiles: readonly ShareableLocalProfile[]; running: boolean; remoteProfile: string; model: string;
   source: string; expiresAt?: number; sharedProfiles: string[];
 }
-export function RemoteProviders({remote, relay, changed}: {remote?: XerxesBridge['remote']; relay?: ProviderRelayView | null; changed?: () => void}) {
+export function RemoteProviders({remote, relay, changed, accounts}: {remote?: XerxesBridge['remote']; relay?: ProviderRelayView | null; changed?: () => void; accounts?: XerxesBridge['accounts']}) {
+  const [syncAll,setSyncAll] = useState<SyncAll | null>(null)
+  // Review every account first (one review each, nothing sent), then one confirmation sends them all.
+  const reviewAll = async () => {
+    if (!accounts) return
+    setSyncAll({phase:'reviewing',items:[],destination:'',error:''})
+    try {
+      const list = await accounts('list',{}) as {ok?:boolean;error?:string;accounts?:AccountRow[];can_sync?:boolean;destination?:string|null}
+      if (list.ok===false) throw new Error(list.error || 'Could not load provider accounts')
+      if (!list.can_sync) throw new Error('This workspace cannot receive synced accounts.')
+      const items: SyncItem[] = []
+      for (const account of list.accounts ?? []) {
+        try {
+          const result = await accounts('sync-review',{accountId:account.id}) as {ok?:boolean;error?:string;review?:string}
+          if (result.ok===false || typeof result.review!=='string') throw new Error(result.error || 'Could not review sync')
+          items.push({account,review:result.review})
+        } catch (error) { items.push({account,error:desktopError(error)}) }
+      }
+      if (alive.current) setSyncAll({phase:'ready',items,destination:list.destination ?? '',error:items.length ? '' : 'There are no accounts to sync.'})
+    } catch (error) { if (alive.current) setSyncAll({phase:'ready',items:[],destination:'',error:desktopError(error)}) }
+  }
+  const confirmAll = async () => {
+    if (!syncAll || !accounts) return
+    if (syncAll.phase==='done') { setSyncAll(null); return }
+    if (syncAll.phase!=='ready') return
+    setSyncAll({...syncAll,phase:'working'})
+    const items: SyncItem[] = []
+    for (const item of syncAll.items) {
+      if (!item.review) { items.push(item); continue }
+      // Reviews are one-use: a failed transfer is reported, never replayed.
+      try {
+        const result = await accounts('sync',{review:item.review,confirm:true}) as {ok?:boolean;error?:string}
+        if (result.ok===false) throw new Error(result.error || 'Could not synchronize account')
+        items.push({account:item.account,done:true})
+      } catch (error) { items.push({account:item.account,error:desktopError(error)}) }
+    }
+    if (alive.current) { setSyncAll({...syncAll,phase:'done',items}); changed?.() }
+  }
   const [review,setReview] = useState<Review | null>(null)
   const [error,setError] = useState(''), [busy,setBusy] = useState(false), [editing,setEditing] = useState(false)
   const [selected,setSelected] = useState<string[]>([]), [primary,setPrimary] = useState('')
@@ -47,7 +90,10 @@ export function RemoteProviders({remote, relay, changed}: {remote?: XerxesBridge
     </div>}
     {error && <p className="studio-error" role="alert">{error} <button className="btn" disabled={busy} onClick={()=>void act(()=>read(true))}>Refresh setup</button></p>}
     {!review ? <p role="status">{error ? 'Provider setup could not be loaded.' : 'Reading local provider setup…'}</p> : <>
-      <button className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
+      <div className="row__actions">
+        <button className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
+        {accounts && <button className="btn" disabled={busy || review.running || syncAll!==null} title="Copy every signed-in account and saved key from this Mac to this SSH host" onClick={()=>void reviewAll()}>Sync all providers to this host</button>}
+      </div>
       <p><strong>{review.source==='remote' ? 'Remote credentials' : review.source==='local' && (review.expiresAt ?? 0)>Date.now() ? 'Local credentials · access enabled' : 'Local credentials · access needs renewal'}</strong><br/>
         Code and tools: {review.destination} · {review.workspace}</p>
       <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Choose and confirm each account you want bound to this host, or choose local access below to keep credentials on this computer.` : `Provider requests and authentication run on this computer. Access runs until ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'this window disconnects'}, renews while this window stays connected, and resumes when it reconnects. Remote credentials are never used as a fallback.`}</p>
@@ -74,5 +120,19 @@ export function RemoteProviders({remote, relay, changed}: {remote?: XerxesBridge
         })}>Enable local access for this task</button><button className="btn" onClick={()=>setEditing(false)}>Cancel</button></div>
       </fieldset>}
     </>}
+    {syncAll && <ActionDialog
+      title={syncAll.phase==='done' ? 'Providers synced' : `Sync all providers to ${syncAll.destination || 'this SSH host'}`}
+      confirmLabel={syncAll.phase==='done' ? 'Done' : `Sync ${syncAll.items.filter(item=>item.review).length} accounts`}
+      busyLabel="Syncing accounts…" busy={syncAll.phase==='working'} done={syncAll.phase==='done'} error={syncAll.error}
+      disabled={syncAll.phase==='reviewing' || (syncAll.phase==='ready' && !syncAll.items.some(item=>item.review))}
+      onConfirm={()=>void confirmAll()} onCancel={()=>setSyncAll(null)}>
+      {syncAll.phase==='reviewing' ? <p role="status">Preparing a transfer review for each account…</p> : <>
+        <ul className="remote-providers__synclist">{syncAll.items.map(item=><li key={item.account.id}>
+          <strong>{item.account.label}</strong> · {item.account.profileName}
+          {item.done ? ' · synced' : item.error ? ` · ${item.error}` : syncAll.phase==='working' ? ' · …' : ''}
+        </li>)}</ul>
+        {syncAll.phase==='ready' && <p className="studio-muted">Each account’s credential and linked profile are sent over SSH. Same-named remote profiles are replaced.</p>}
+      </>}
+    </ActionDialog>}
   </section>
 }
