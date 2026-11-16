@@ -4083,7 +4083,11 @@ export class DaemonServer {
       if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING) && params.for_model_selection === true) {
         return {ok:true,local_setup:true,profiles:localProviderSelections(session.metadata).map(route => ({name:route.profile,provider:'local relay',model:route.model,active:route.profile === (session.metadata.local_provider_profile ?? localProviderSelections(session.metadata)[0]?.profile)}))};
       }
-      const rows = this.profileStore.list().map(profilePayload);
+      // "Active" is the profile THIS conversation runs on. A conversation keeps its own pin, so the
+      // daemon-wide default (changed from another conversation) must not be shown as what it uses:
+      // that made a broken pinned sign-in look already switched, and re-picking it did nothing.
+      const pinnedName = session ? this.sessionProfileName(session) : null;
+      const rows = this.profileStore.list().map(profile => profilePayload(pinnedName ? { ...profile, active: profile.name === pinnedName } : profile));
       // False while only the built-in Claude Code fallback is "active": nothing runs on it until chosen.
       const activeChosen = this.profileStore.activeIsExplicit();
       // Asked for by an SSH window deciding whether this host's own sign-in can run

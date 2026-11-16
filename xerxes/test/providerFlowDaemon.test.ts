@@ -201,6 +201,15 @@ test("daemon routes interactive provider setup through native question replies w
     expect(JSON.stringify(listed.result)).not.toContain("environment-must-not-leak");
     expect(profileStore.get("daemon-profile")?.api_key).toBe("");
 
+    // Another conversation changes the daemon-wide default. This conversation is
+    // still pinned to daemon-profile, so Settings must keep showing that as active.
+    profileStore.save({ name: "other-default", apiKey: "", model: "other-model", provider: "openai", baseUrl: "https://other.example/v1", setActive: true });
+    client.send({ jsonrpc: "2.0", id: 90, method: "provider_list", params: {} });
+    const pinnedRows = ((await client.next((frame) => frame.id === 90)).result?.profiles ?? []) as { name: string; active: boolean }[];
+    expect(pinnedRows.find(row => row.name === "daemon-profile")?.active).toBe(true);
+    expect(pinnedRows.find(row => row.name === "other-default")?.active).toBe(false);
+    profileStore.setActive("daemon-profile");
+
     // Edit sheets can discover one exact saved profile without switching the
     // active runtime connection or receiving any credential material.
     client.send({
