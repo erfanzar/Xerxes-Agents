@@ -39,6 +39,7 @@ import {
 import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
+import { BrowserPanel } from './BrowserPanel.js'
 import { completionItemsOf, type Completer } from './codeCompletion.js'
 
 /** Completion for one Python file through the daemon's lsp.complete; a failure shows no popup. */
@@ -74,6 +75,7 @@ export type DesktopPanel =
   | 'review'
   | 'terminal'
   | 'background'
+  | 'browser'
   | 'usage'
   | 'outputs'
   | 'workspace'
@@ -92,11 +94,11 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
 }
 export type { RailPanel } from './railTabs.js'
 /** Section order first (Subagents, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
-export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'background', 'outputs', 'activity', 'usage']
+export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'browser', 'background', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', background: 'hourglass', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', browser: 'cloud', background: 'hourglass', activity: 'activity', usage: 'clock' }
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'browser' ? 'Browser' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
@@ -263,6 +265,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
       {panel === 'usage' && <UsagePanel snap={snap} />}
       {panel === 'outputs' && <OutputsPanel snap={snap} />}
       {panel === 'background' && <ActivityPanel snap={snap} backgroundOnly />}
+      {panel === 'browser' && <BrowserPanel />}
       {panel === 'activity' && <>{activityDetails}<ActivityPanel snap={snap} /></>}
     </div>
   </aside>
@@ -307,6 +310,7 @@ export function DesktopSheet({
     workspace: 'Workspace',
     snapshots: 'Snapshots',
     background: 'Background',
+    browser: 'Browser',
   }
   return (
     <div

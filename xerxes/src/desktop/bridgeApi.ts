@@ -161,6 +161,20 @@ export function createBridge(transport: BridgeTransport) {
     }
     return transport.invoke('desktop:accounts', action, cleanParams(params))
   },
+  /** The right panel's Browser tab and the SSH workspace's port forwards. */
+  browser(action: unknown, params: unknown = {}): Promise<unknown> {
+    if (typeof action !== 'string' || !['state', 'open', 'back', 'forward', 'reload', 'stop', 'bounds', 'external', 'reset', 'ports', 'port-forward', 'unforward'].includes(action)) {
+      return Promise.reject(new Error('Unknown browser action'))
+    }
+    return transport.invoke('desktop:browser', action, cleanParams(params))
+  },
+  onBrowserState(handler: unknown): () => void {
+    if (typeof handler !== 'function') throw new TypeError('handler must be a function')
+    return transport.on('desktop:browser-state', value => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return
+      try { (handler as (state: unknown) => void)(value) } catch { /* a renderer fault must not break the bridge */ }
+    })
+  },
   onAccountLogin(handler: unknown): () => void {
     if (typeof handler !== 'function') throw new TypeError('handler must be a function')
     return transport.on('desktop:account-login', value => {

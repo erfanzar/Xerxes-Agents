@@ -41,6 +41,9 @@ export interface XerxesBridge {
   /** create-gemini accepts user-entered label/apiKey/model only; replies never contain a key. */
   accounts?(action: 'list' | 'login' | 'relogin' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove', params?: Record<string, unknown>): Promise<unknown>
   onAccountLogin?(handler: (event: { type: 'authorization_url'; login_id: string; url: string }) => void): () => void
+  /** Browser tab (sandboxed native view; on SSH workspaces its traffic leaves from the host) and port forwards. */
+  browser?(action: 'state' | 'open' | 'back' | 'forward' | 'reload' | 'stop' | 'bounds' | 'external' | 'reset' | 'ports' | 'port-forward' | 'unforward', params?: Record<string, unknown>): Promise<unknown>
+  onBrowserState?(handler: (state: unknown) => void): () => void
   /** Hub cockpit: link this Mac, pair a phone, sign in to the Hub (see hubShared.ts). */
   hubCockpit?(action: string, params?: Record<string, unknown>): Promise<unknown>
   onHubSocket?(handler: (event: HubSocketEvent) => void): () => void

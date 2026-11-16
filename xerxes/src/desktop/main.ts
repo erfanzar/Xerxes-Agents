@@ -34,6 +34,8 @@ import { ensureLocalProviderClis } from './main/localProviderSetup.js'
 import { ProviderAccountRegistry } from '../auth/providerAccountRegistry.js'
 import { GlobalProviderAccounts } from './main/globalProviderAccounts.js'
 import { runBunProviderAccountLogin } from './main/providerAccountLogin.js'
+import { RemoteNetwork } from './main/remoteNetwork.js'
+import { BrowserTab } from './main/browserTab.js'
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
@@ -387,7 +389,15 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   let accountDirectory: ProviderAccountDirectory | null = null
   let globalAccounts: GlobalProviderAccounts | null = null
   let globalAccountsTarget: string | undefined
+  // The SSH workspace's network (browser-tab SOCKS + port forwards) and the Browser tab's page.
+  let remoteNetwork: RemoteNetwork | null = null
+  let browserTab: BrowserTab | null = null
+  const networkOf = (): RemoteNetwork | null => remoteMachine ? (remoteNetwork ??= new RemoteNetwork(remoteMachine)) : null
   const closeProviderForwarding = () => {
+    // A workspace change or close ends its tunnels and drops the page that used them.
+    browserTab?.reset()
+    remoteNetwork?.close()
+    remoteNetwork = null
     accountDirectory = null
     globalAccounts = null
     globalAccountsTarget = undefined
@@ -507,6 +517,28 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   const chromeState = () => ({ trafficLights: process.platform === 'darwin' && !window.isFullScreen() })
   const sendChrome = () => { if (!contents.isDestroyed()) contents.send('desktop:window-chrome', chromeState()) }
   handle('desktop:window-chrome', () => chromeState())
+  handle('desktop:browser', async (_event, action: unknown, params: Record<string, unknown> = {}) => {
+    if (window.isDestroyed()) throw new Error('Workspace window is closed')
+    const tab = browserTab ??= new BrowserTab(window, networkOf, state => { if (!contents.isDestroyed()) contents.send('desktop:browser-state', state) })
+    const args = params && typeof params === 'object' ? params : {}
+    switch (action) {
+      case 'state': return tab.state()
+      case 'open': return tab.open(args.url)
+      case 'back': case 'forward': case 'reload': case 'stop': return tab.navigate(action)
+      case 'bounds': tab.setBounds(args.rect ?? null); return { ok: true }
+      case 'external': await tab.openExternal(); return { ok: true }
+      case 'reset': tab.reset(); return { ok: true }
+      case 'ports': return { via: remoteMachine?.alias ?? null, ports: remoteNetwork?.list() ?? [] }
+      case 'port-forward': {
+        const network = networkOf()
+        if (!network) throw new Error('Port forwarding needs an SSH workspace; local ports are already on this computer')
+        const local = await network.forward(args.remote)
+        return { ok: true, remote: Number(args.remote), local, url: `http://localhost:${local}/` }
+      }
+      case 'unforward': remoteNetwork?.stop(args.remote); return { ok: true }
+      default: throw new Error('Unknown browser action')
+    }
+  })
   window.on('enter-full-screen', sendChrome)
   window.on('leave-full-screen', sendChrome)
   contents.once('destroyed', () => { window.removeListener('enter-full-screen', sendChrome); window.removeListener('leave-full-screen', sendChrome) })
@@ -1000,6 +1032,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     windowRoutes.remove(id)
     detachDaemon(id)
     closeProviderForwarding()
+    browserTab?.close()
+    browserTab = null
     daemon?.dispose()
     remoteAttempt?.abort()
     voiceRequest?.abort()

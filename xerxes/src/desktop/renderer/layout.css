@@ -125,6 +125,25 @@
 :root:not(#layout) .atelier .code-completion__kind{flex:0 0 12px;text-align:center;color:var(--x-meta)}
 :root:not(#layout) .atelier .code-completion__label{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--x-title)}
 :root:not(#layout) .atelier .code-completion__detail{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;text-align:right;color:var(--x-meta);font-size:.9em}
+/* Browser tab: address bar, "traffic leaves from" line, ports list; the page is a native view laid over __page. */
+:root:not(#layout) .atelier .browser-panel{display:flex;flex-direction:column;gap:6px;height:100%;min-height:0;padding:8px 10px}
+:root:not(#layout) .atelier .browser-panel__bar{display:flex;align-items:center;gap:4px;min-width:0}
+:root:not(#layout) .atelier .browser-panel__bar>button{flex:0 0 26px;width:26px;height:26px;display:grid;place-items:center;padding:0;border:0;border-radius:6px;background:transparent;color:var(--x-meta)}
+:root:not(#layout) .atelier .browser-panel__bar>button:not(:disabled):hover{background:var(--x-chip,transparent);color:var(--x-title)}
+:root:not(#layout) .atelier .browser-panel__bar>button:disabled{opacity:.4}
+:root:not(#layout) .atelier .browser-panel__back svg{transform:scaleX(-1)}
+:root:not(#layout) .atelier .browser-panel__address{flex:1 1 auto;min-width:0;height:28px;box-sizing:border-box;padding:0 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 12px/1 var(--mono)}
+:root:not(#layout) .atelier .browser-panel__via{display:flex;align-items:center;gap:6px;margin:0;color:var(--x-meta);font-size:11.5px}
+:root:not(#layout) .atelier .browser-panel__via.is-remote strong{color:var(--x-title)}
+:root:not(#layout) .atelier .browser-panel__error{margin:0;color:var(--x-failed);font-size:12px}
+:root:not(#layout) .atelier .browser-panel__ports{display:flex;flex-direction:column;gap:4px;padding:6px 0;border-top:1px solid var(--x-hairline);border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .browser-panel__ports form{display:flex;gap:6px}
+:root:not(#layout) .atelier .browser-panel__ports input{flex:1 1 auto;min-width:0;height:26px;padding:0 8px;border:1px solid var(--x-hairline);border-radius:6px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 12px/1 var(--mono)}
+:root:not(#layout) .atelier .browser-panel__port{display:flex;align-items:center;gap:6px;font-size:12px;min-width:0}
+:root:not(#layout) .atelier .browser-panel__port>span:first-child{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout) .atelier .browser-panel__portstate{color:var(--x-meta)}
+:root:not(#layout) .atelier .browser-panel__port[data-state='failed'] .browser-panel__portstate{color:var(--x-failed)}
+:root:not(#layout) .atelier .browser-panel__page{flex:1 1 auto;min-height:120px;border:1px solid var(--x-hairline);border-radius:8px;display:grid;place-items:center;background:var(--x-sunken,transparent)}
 :root:not(#layout) .atelier .code-completion__doc{margin:0;padding:6px 10px;border-top:1px solid var(--x-hairline);max-height:120px;overflow:auto;white-space:pre-wrap;color:var(--x-prose);font-size:.9em}
 /* ── Controls ─────────────────────────────────────────────────────────
    .btn is Claude Code's grey button, .btn--solid the primary. */
