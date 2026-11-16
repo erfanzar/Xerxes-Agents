@@ -117,6 +117,8 @@
    "inputs use the UI font" rule outranks a plain inherit, which drew the caret and selection in a
    narrower sans font, offset from the visible monospace text. */
 :root:not(#layout) .atelier .code-editor .code-editor__input{font:inherit;letter-spacing:inherit;font-variant-ligatures:inherit;font-feature-settings:inherit}
+/* The transparent input covers the whole editor, so the global focus ring drew a frame around all the code. The caret is the focus cue. */
+:root:not(#layout) .atelier .code-editor .code-editor__input:is(:focus,:focus-visible){outline:none;box-shadow:none}
 /* Completion popup at the caret. */
 :root:not(#layout) .atelier .code-completion{position:absolute;z-index:20;min-width:240px;max-width:min(520px,90%);border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-popover,var(--x-screen));box-shadow:0 8px 24px rgba(0,0,0,.28);font:inherit;overflow:hidden}
 :root:not(#layout) .atelier .code-completion ul{list-style:none;margin:0;padding:4px 0;max-height:220px;overflow-y:auto}

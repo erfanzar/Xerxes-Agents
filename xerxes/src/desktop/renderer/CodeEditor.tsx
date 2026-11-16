@@ -35,10 +35,10 @@ export function indentUnit(text: string, path: string): string {
   return ' '.repeat(smallest === 2 || smallest === 4 ? smallest : /\.py$/.test(path) ? 4 : 2)
 }
 
-interface Popup { readonly items: readonly CompletionItemView[]; readonly top: number; readonly left: number }
+interface Popup { readonly items: readonly CompletionItemView[]; readonly top: number; readonly left: number; readonly width: number }
 
 /** Where the caret's line sits inside the editor body, for a monospace textarea. */
-function caretPoint(element: HTMLTextAreaElement, offset: number): { top: number; left: number } {
+function caretPoint(element: HTMLTextAreaElement, offset: number): { top: number; left: number; width: number } {
   const style = getComputedStyle(element)
   const lineHeight = Number.parseFloat(style.lineHeight) || 20
   let width = 7.5
@@ -47,7 +47,18 @@ function caretPoint(element: HTMLTextAreaElement, offset: number): { top: number
     if (context) { context.font = style.font || `${style.fontSize} ${style.fontFamily}`; width = context.measureText('M').width || width }
   } catch { /* Measurement is best effort; the default width keeps the popup near the caret. */ }
   const { line, character } = cursorPosition(element.value, offset)
-  return { top: element.offsetTop + (line + 1) * lineHeight + 2, left: (Number.parseFloat(style.paddingLeft) || 0) + character * width }
+  let left = (Number.parseFloat(style.paddingLeft) || 0) + character * width
+  let popupWidth = 420
+  // Keep the list inside the visible part of the panel: on a long or scrolled line the caret's
+  // column can be past the panel's right edge.
+  const scroller = element.closest('.file-browser__preview')
+  if (scroller instanceof HTMLElement && scroller.clientWidth > 0) {
+    popupWidth = Math.max(200, Math.min(420, scroller.clientWidth - 16))
+    const minLeft = scroller.scrollLeft + 8
+    const maxLeft = scroller.scrollLeft + scroller.clientWidth - popupWidth - 8
+    left = Math.max(minLeft, Math.min(left, maxLeft))
+  }
+  return { top: element.offsetTop + (line + 1) * lineHeight + 2, left, width: popupWidth }
 }
 
 export function CodeEditor({ path, value, onChange, onSave, readOnly = false, complete, onFormat }: {
@@ -173,7 +184,7 @@ export function CodeEditor({ path, value, onChange, onSave, readOnly = false, co
           }
         }}
       />
-      {open && popup && <div className="code-completion" role="listbox" aria-label="Completions" style={{ top: popup.top, left: popup.left }}>
+      {open && popup && <div className="code-completion" role="listbox" aria-label="Completions" style={{ top: popup.top, left: popup.left, width: popup.width, maxWidth: popup.width }}>
         <ul>
           {shown.map((item, index) => <li key={item.label + index} role="option" aria-selected={item === chosen}
             className={item === chosen ? 'is-active' : undefined}
