@@ -113,6 +113,10 @@
 :root:not(#layout) .atelier .desktop-rail .code-editor__row code,
 :root:not(#layout) .atelier .desktop-rail .code-editor__input{white-space:pre;overflow-wrap:normal}
 :root:not(#layout) .atelier .desktop-rail .code-editor{width:max-content;min-width:100%}
+/* The editor's transparent input must use the exact font of the painted copy under it. Each style's
+   "inputs use the UI font" rule outranks a plain inherit, which drew the caret and selection in a
+   narrower sans font, offset from the visible monospace text. */
+:root:not(#layout) .atelier .code-editor .code-editor__input{font:inherit;letter-spacing:inherit;font-variant-ligatures:inherit;font-feature-settings:inherit}
 /* ── Controls ─────────────────────────────────────────────────────────
    .btn is Claude Code's grey button, .btn--solid the primary. */
 :root:not(#layout) .atelier .btn{border:1px solid transparent;font-weight:400}
