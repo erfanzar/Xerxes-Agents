@@ -26,7 +26,7 @@ import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase, thinkingHeadingOf } from './activityPhrase.js'
 import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { ArtifactToast, latestArtifactId } from './ArtifactCard.js'
+import { ArtifactCard, ArtifactToast, artifactOfTool, latestArtifactId } from './ArtifactCard.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
@@ -1324,13 +1324,17 @@ export function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot
   const running = active || tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming) || turnActive && liveAgents > 0
   const [expanded, setExpanded] = useState(false)
   const [inspected, setInspected] = useState(false)
-  return <details className={`activity-group${running ? ' is-running' : ''}`} open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
+  const artifacts = tools.flatMap(item => { const artifact = artifactOfTool(item); return artifact ? [artifact] : [] })
+  return <><details className={`activity-group${running ? ' is-running' : ''}`} open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
     {/* One quiet line, the chevron trailing the text: "Ran 3 commands, read a file ›". */}
     <summary>{running
       ? <span className="activity-group__live"><span className="activity-group__working">Working</span><LivePhrase text={liveActivityPhrase(blocks)} /></span>
       : <span className="activity-group__done">{activitySummary(blocks)}{liveAgents > 0 && <span className="activity-group__pending"> · {liveAgents} agent{liveAgents === 1 ? '' : 's'} still running</span>}</span>}{failures > 0 && <strong>{failures} failed</strong>}<Icon name="chevron" size={13} /></summary>
     <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.id} block={block} />)}</div>
   </details>
+  {/* A saved artifact is a result the user must see: while the group is collapsed its card stays outside it. */}
+  {!expanded && artifacts.map(artifact => <ArtifactCard key={`${artifact.id}:${artifact.version}`} artifact={artifact} />)}
+  </>
 }
 
 /**
