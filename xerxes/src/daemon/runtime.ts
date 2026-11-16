@@ -4,6 +4,11 @@ import type { LspSettingsView } from '../lsp/settings.js';
 import { readTurnOutcome, turnOutcomeReason, type TurnOutcomeReason } from '../types/turnOutcome.js';
 import { readContextControls, type ContextControls } from '../context/controls.js';
 import type { LspServerHealth } from '../lsp/manager.js';
+import type { LspCompletionItem } from '../lsp/host.js';
+import type { PythonCompletionRequest } from '../lsp/pythonCompletion.js';
+
+export type CodeCompletionRequest = PythonCompletionRequest;
+export interface CodeCompletionResult { readonly items: readonly LspCompletionItem[]; readonly incomplete: boolean }
 
 import { join, resolve } from "node:path";
 
@@ -361,6 +366,8 @@ export interface DaemonRuntime {
   saveLspSettings?(request: unknown, signal?: AbortSignal): Promise<LspSettingsView | undefined>;
   releaseLsp?(sessionKey: string, name: string): Promise<boolean>;
   lspHealth?(sessionKey: string): Promise<readonly LspServerHealth[] | undefined>;
+  /** Editor completion on unsaved text, in the session's workspace; undefined when no host is wired. */
+  completeCode?(sessionKey: string, request: CodeCompletionRequest, signal?: AbortSignal): Promise<CodeCompletionResult | undefined>;
   cancelAllTurns(): number;
   cancelTurn(sessionKey: string): boolean;
   /** The running turn's messages so far (see TurnRunner.liveMessages); undefined when idle. */
@@ -512,6 +519,7 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly saveLspSettings?: (request: unknown, signal?: AbortSignal) => Promise<LspSettingsView>;
   readonly releaseLsp?: (cwd: string, name: string) => Promise<void>;
   readonly lspHealth?: (cwd: string) => Promise<readonly LspServerHealth[]>;
+  readonly completeCode?: (cwd: string, request: CodeCompletionRequest, signal?: AbortSignal) => Promise<CodeCompletionResult>;
   readonly backgroundCommands?: DaemonBackgroundCommandLifecycle;
   readonly baseUrl?: string;
   readonly buildId?: string;
@@ -1558,6 +1566,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   async lspHealth(sessionKey: string): Promise<readonly LspServerHealth[] | undefined> {
     const session = this.sessionStatus(sessionKey);
     return session ? this.options.lspHealth?.(session.cwd) : undefined;
+  }
+
+  async completeCode(sessionKey: string, request: CodeCompletionRequest, signal?: AbortSignal): Promise<CodeCompletionResult | undefined> {
+    const session = this.sessionStatus(sessionKey);
+    return session && this.options.completeCode ? this.options.completeCode(session.cwd, request, signal) : undefined;
   }
 
   toolInventory(sessionKey: string): readonly RuntimeToolInventoryEntry[] | undefined {

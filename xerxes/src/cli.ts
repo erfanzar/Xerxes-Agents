@@ -182,6 +182,7 @@ import { EditFeedback } from "./runtime/editFeedback.js";
 import { LspSettingsStore } from "./lsp/settingsStore.js";
 import { lspSettingsView, saveLspSettings } from "./lsp/settings.js";
 import { loadConfiguredLsp } from "./lsp/configured.js";
+import { createPythonCompletion } from "./lsp/pythonCompletion.js";
 import { addLspToolToBuiltinAgents, registerConfiguredLspTool } from "./tools/lspTools.js";
 import { startConfiguredMcpServers } from "./mcp/configured.js";
 import { McpSettingsStore } from "./mcp/settingsStore.js";
@@ -2049,6 +2050,8 @@ function daemonRuntime(
   const learning = host.learning ?? createLearningServices(workspaceRoot, host.skillRegistry);
   const lspManager = loadConfiguredLsp(xerxesHome());
   const lspSettingsStore = new LspSettingsStore(join(xerxesHome(), "lsp.json"));
+  // Editor completion: installed on first use under ~/.xerxes/lsp, never at startup.
+  const pythonCompletion = createPythonCompletion(xerxesHome());
   const hooksForWorkspace = workspaceShellHooks({
     home: xerxesHome(),
     allowWorkspace: process.env.XERXES_ALLOW_WORKSPACE_CONFIG === "1"
@@ -2833,6 +2836,7 @@ function daemonRuntime(
     saveLspSettings: (request, signal) => saveLspSettings(lspManager, lspSettingsStore, request, signal),
     lspHealth: cwd => lspManager.health(cwd),
     releaseLsp: (cwd, name) => lspManager.release(cwd, name),
+    completeCode: (cwd, request, signal) => pythonCompletion.complete(cwd, request, signal),
     ...(host.buildId ? { buildId: host.buildId } : {}),
     currentProjectDirectory: workspaceRoot,
     runtimeSettings: initialSettings,
@@ -2852,7 +2856,10 @@ function daemonRuntime(
         try { await computerUseHost.dispose(); }
         finally {
           try { await lspManager.close(); }
-          finally { await auditEmitter?.close(); }
+          finally {
+            try { await pythonCompletion.close(); }
+            finally { await auditEmitter?.close(); }
+          }
         }
       }
     },

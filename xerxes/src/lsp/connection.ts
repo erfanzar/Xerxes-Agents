@@ -11,6 +11,11 @@ export interface LspConnectionOptions {
   readonly env?: Record<string, string>
   readonly timeoutMs?: number
   readonly onNotification?: (method: string, params: unknown) => void
+  /**
+   * Answer a request the server sends to the client (workspace/configuration,
+   * window/workDoneProgress/create…). Return undefined for "not supported".
+   */
+  readonly onRequest?: (method: string, params: unknown) => { readonly result: unknown } | undefined
 }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -124,7 +129,11 @@ export class LspConnection {
       if ('result' in message || 'error' in message) throw new Error('Invalid JSON-RPC request')
       if ('id' in message) {
         if (typeof message.id === 'string' ? message.id.length > 128 : !Number.isSafeInteger(message.id)) throw new Error('Invalid server request ID')
-        void this.send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Client method not supported' } }).catch(() => this.fail(new Error('Cannot respond to language server request')))
+        let answer: { readonly result: unknown } | undefined
+        try { answer = this.options.onRequest?.(message.method, message.params) } catch { answer = undefined }
+        void this.send(answer
+          ? { jsonrpc: '2.0', id: message.id, result: answer.result ?? null }
+          : { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Client method not supported' } }).catch(() => this.fail(new Error('Cannot respond to language server request')))
       } else this.options.onNotification?.(message.method, message.params)
       return
     }

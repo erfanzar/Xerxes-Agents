@@ -1233,6 +1233,7 @@ export class DaemonServer {
   private get mcpManager(): MCPManager | undefined { return this.workspaceContext.getStore()?.mcpManager ?? this.default_mcpManager; }
   private readonly mcpSettingsStore: McpSettingsStore | undefined;
   private readonly lspSettingsUpdates = new Map<DaemonTransportConnection, AbortController>();
+  private readonly codeCompletions = new Map<DaemonTransportConnection, AbortController>();
   private readonly mcpSettingsUpdates = new Map<DaemonTransportConnection, AbortController>();
   private readonly maxSocketFrameBytes: number;
   private readonly maxPendingSocketRequests: number;
@@ -3119,6 +3120,28 @@ export class DaemonServer {
         const servers = await this.runtime.lspHealth?.(key);
         return servers === undefined ? { ok: false, error: "LSP health host unavailable" } : { ok: true, servers };
       } catch { return { ok: false, error: "Cannot inspect language servers for this workspace" }; }
+    }
+    if (method === "lsp.complete") {
+      const key = sessionKey(connection, params);
+      if (!this.runtime.sessionStatus(key)) return { ok: false, error: "Active session required" };
+      const path = typeof params.path === "string" ? params.path.trim() : "";
+      if (!path || path.length > 4096) return { ok: false, code: "invalid_request", error: "A file path is required" };
+      if (typeof params.text !== "string" || params.text.length > 1_048_576) return { ok: false, code: "invalid_request", error: "Completion text must be a string of at most 1 MiB" };
+      const line = Number(params.line), character = Number(params.character);
+      if (!Number.isSafeInteger(line) || !Number.isSafeInteger(character) || line < 0 || character < 0) return { ok: false, code: "invalid_request", error: "line and character must be nonnegative integers" };
+      if (!this.runtime.completeCode) return { ok: false, code: "unavailable", error: "Code completion host unavailable" };
+      // Only the newest request per connection matters while someone types.
+      this.codeCompletions.get(connection)?.abort();
+      const controller = new AbortController();
+      this.codeCompletions.set(connection, controller);
+      try {
+        const result = await this.runtime.completeCode(key, { filePath: path, text: params.text, line, character }, controller.signal);
+        if (!result) return { ok: false, code: "unavailable", error: "Code completion host unavailable" };
+        return { ok: true, items: result.items.map(item => ({ ...item })), incomplete: result.incomplete };
+      } catch (error) {
+        if (controller.signal.aborted) return { ok: false, code: "cancelled", error: "Superseded by a newer completion request" };
+        return { ok: false, code: "failed", error: errorMessage(error).slice(0, 500) };
+      } finally { if (this.codeCompletions.get(connection) === controller) this.codeCompletions.delete(connection); }
     }
     if (method === "mcp.status") return { ok: true, configured: !!this.mcpManager, servers: this.mcpStatusRecord() };
     if (method === "mcp.settings.get" || method === "mcp.settings.save") {
@@ -12758,6 +12781,8 @@ export class DaemonServer {
     if (!background) this.disconnectedGoalOwners.add(connection);
     this.lspSettingsUpdates.get(connection)?.abort();
     this.mcpSettingsUpdates.get(connection)?.abort();
+    this.codeCompletions.get(connection)?.abort();
+    this.codeCompletions.delete(connection);
     // Only cancel turns this connection actually submitted: on a shared
     // session key, another client's disconnect must not kill a live turn.
     for (const [key, owner] of this.turnOwners) {

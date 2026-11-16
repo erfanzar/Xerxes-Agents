@@ -13,10 +13,24 @@ export interface LspConnectionPort {
   notify(method: string, params?: unknown): Promise<void>
   close(): Promise<void>
 }
-export interface LspHostOptions extends Omit<LspConnectionOptions, 'onNotification'> {
+export interface LspHostOptions extends Omit<LspConnectionOptions, 'onNotification' | 'onRequest'> {
   readonly languageId: string
   readonly connectionFactory?: (options: LspConnectionOptions) => LspConnectionPort
+  /** Answers to workspace/configuration, by section (e.g. python → { pythonPath }). */
+  readonly configuration?: Readonly<Record<string, unknown>>
 }
+/** One completion item, bounded and stripped to what an editor popup needs. */
+export interface LspCompletionItem {
+  readonly label: string
+  readonly kind?: number
+  readonly detail?: string
+  readonly documentation?: string
+  readonly insertText: string
+  /** Replaced span on the request line, as UTF-16 character offsets. */
+  readonly replace?: { readonly start: number; readonly end: number }
+  readonly sortText?: string
+}
+export const LSP_COMPLETION_LIMIT = 100
 interface Document { text: string; version: number; diagnostics?: unknown[]; diagnosticError?: string }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const methods = { definition: ['textDocument/definition', 'definitionProvider'], references: ['textDocument/references', 'referencesProvider'], hover: ['textDocument/hover', 'hoverProvider'], symbols: ['textDocument/documentSymbol', 'documentSymbolProvider'] } as const
@@ -48,12 +62,23 @@ export class LspHost implements LspAdapter {
       ...(options.args ? { args: options.args } : {}), ...(options.env ? { env: options.env } : {}),
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
       onNotification: (method, params) => host.notification(method, params),
+      onRequest: (method, params) => {
+        if (method === 'workspace/configuration') {
+          const items = record(params) && Array.isArray(params.items) ? params.items : []
+          return { result: items.map(item => (record(item) && typeof item.section === 'string' ? options.configuration?.[item.section] : undefined) ?? {}) }
+        }
+        if (method === 'window/workDoneProgress/create' || method === 'client/registerCapability' || method === 'client/unregisterCapability') return { result: null }
+        return undefined
+      },
     })
     try {
       const result = await host.connection.request('initialize', {
         processId: process.pid, rootUri: pathToFileURL(root).href,
         workspaceFolders: [{ uri: pathToFileURL(root).href, name: root.split(/[\\/]/).at(-1) }],
-        capabilities: { general: { positionEncodings: ['utf-16'] }, textDocument: { synchronization: { dynamicRegistration: false }, publishDiagnostics: { versionSupport: true } } },
+        capabilities: { general: { positionEncodings: ['utf-16'] },
+          workspace: { configuration: true, workspaceFolders: true },
+          textDocument: { synchronization: { dynamicRegistration: false }, publishDiagnostics: { versionSupport: true },
+            completion: { completionItem: { snippetSupport: false, documentationFormat: ['plaintext', 'markdown'] }, contextSupport: true } } },
       }, signal)
       if (!record(result) || !record(result.capabilities)) throw new Error('Language server returned invalid initialization capabilities')
       host.capabilities = result.capabilities
@@ -137,6 +162,57 @@ export class LspHost implements LspAdapter {
     })
   }
 
+  /**
+   * Completion at a position of the editor's current (possibly unsaved) text.
+   * The text is synchronized as the document's content; the file on disk is
+   * only used to resolve and scope the path.
+   */
+  async complete(request: { readonly filePath: string; readonly text: string; readonly line: number; readonly character: number }, signal?: AbortSignal): Promise<{ readonly items: readonly LspCompletionItem[]; readonly incomplete: boolean }> {
+    if (this.closed || !this.connection.connected) throw new Error('Language server unavailable; restart its host')
+    if (!this.capabilities.completionProvider) throw new Error('Language server does not support completion')
+    if (typeof request.text !== 'string' || request.text.length > 1_048_576) throw new Error('Completion text exceeds 1 MiB')
+    if (!Number.isSafeInteger(request.line) || !Number.isSafeInteger(request.character) || request.line < 0 || request.character < 0) throw new Error('LSP positions must be nonnegative integers')
+    const lines = request.text.split('\n')
+    if (request.line >= lines.length || request.character > lines[request.line]!.replace(/\r$/, '').length) throw new Error('LSP position is outside the document')
+    if (signal?.aborted) throw new DOMException('LSP request cancelled', 'AbortError')
+    if (this.pending >= 32) throw new Error('Language server workspace queue is full')
+    this.pending++
+    const operation = this.queue.then(async () => {
+      if (signal?.aborted) throw new DOMException('LSP request cancelled', 'AbortError')
+      if (this.closed || !this.connection.connected) throw new Error('Language server unavailable; restart its host')
+      const path = await this.paths.resolve(request.filePath)
+      const uri = pathToFileURL(path).href
+      const old = this.documents.get(uri)
+      if (!old || old.text !== request.text) {
+        if (this.sequence >= 2_147_483_647) throw new Error('LSP document version limit reached; restart its host')
+        const version = ++this.sequence
+        if (!old && this.documents.size >= 32) {
+          const oldest = this.documents.keys().next().value!
+          await this.connection.notify('textDocument/didClose', { textDocument: { uri: oldest } })
+          this.documents.delete(oldest)
+        }
+        this.documents.set(uri, { text: request.text, version })
+        try {
+          await this.connection.notify(old ? 'textDocument/didChange' : 'textDocument/didOpen', old
+            ? { textDocument: { uri, version }, contentChanges: [{ text: request.text }] }
+            : { textDocument: { uri, version, languageId: this.languageId, text: request.text } })
+        } catch (error) { this.documents.delete(uri); this.closed = true; await this.connection.close(); throw error }
+      }
+      const result = await this.connection.request('textDocument/completion', {
+        textDocument: { uri }, position: { line: request.line, character: request.character }, context: { triggerKind: 1 },
+      }, signal)
+      return completionItems(result, request.line)
+    }).finally(() => { this.pending-- })
+    this.queue = operation.then(() => {}, () => {})
+    if (!signal) return operation
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException('LSP request cancelled', 'AbortError'))
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+      operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+    })
+  }
+
   async close(): Promise<void> { this.closed = true; for (const wake of this.diagnosticWaiters.values()) wake(); this.diagnosticWaiters.clear(); this.documents.clear(); await this.connection.close() }
 
   private waitForDiagnostics(uri: string, document: Document, milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -176,6 +252,31 @@ export class LspHost implements LspAdapter {
     }
     document.diagnostics = diagnostics; delete document.diagnosticError
   }
+}
+/** Normalize a CompletionList / CompletionItem[] into at most LSP_COMPLETION_LIMIT editor items. */
+export function completionItems(result: unknown, line: number): { readonly items: readonly LspCompletionItem[]; readonly incomplete: boolean } {
+  const raw = Array.isArray(result) ? result : record(result) && Array.isArray(result.items) ? result.items : []
+  const incomplete = record(result) && result.isIncomplete === true
+  const clip = (value: unknown, limit: number): string | undefined => typeof value === 'string' && value ? value.slice(0, limit) : undefined
+  const items: LspCompletionItem[] = []
+  for (const item of raw) {
+    if (!record(item) || typeof item.label !== 'string' || !item.label) continue
+    const edit = record(item.textEdit) ? item.textEdit : undefined
+    const range = edit && record(edit.range) ? edit.range : edit && record(edit.replace) ? edit.replace : undefined
+    const sameLine = range && position(range.start) && position(range.end) && range.start.line === line && range.end.line === line
+    const insertText = (edit && typeof edit.newText === 'string' ? edit.newText : typeof item.insertText === 'string' ? item.insertText : item.label).slice(0, 4096)
+    const documentation = typeof item.documentation === 'string' ? item.documentation : record(item.documentation) ? item.documentation.value : undefined
+    items.push({
+      label: item.label.slice(0, 256), insertText,
+      ...(typeof item.kind === 'number' && Number.isSafeInteger(item.kind) ? { kind: item.kind } : {}),
+      ...(clip(item.detail, 512) ? { detail: clip(item.detail, 512)! } : {}),
+      ...(clip(documentation, 4096) ? { documentation: clip(documentation, 4096)! } : {}),
+      ...(sameLine ? { replace: { start: range.start.character, end: range.end.character } } : {}),
+      ...(clip(item.sortText, 256) ? { sortText: clip(item.sortText, 256)! } : {}),
+    })
+  }
+  items.sort((a, b) => (a.sortText ?? a.label).localeCompare(b.sortText ?? b.label))
+  return { items: items.slice(0, LSP_COMPLETION_LIMIT), incomplete: incomplete || items.length > LSP_COMPLETION_LIMIT }
 }
 function position(value: unknown): value is { line: number; character: number } {
   return record(value) && Number.isSafeInteger(value.line) && Number.isSafeInteger(value.character) && Number(value.line) >= 0 && Number(value.character) >= 0

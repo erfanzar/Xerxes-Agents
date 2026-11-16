@@ -39,6 +39,15 @@ import {
 import { store, type Snapshot } from './store.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
+import { completionItemsOf, type Completer } from './codeCompletion.js'
+
+/** Completion for one Python file through the daemon's lsp.complete; a failure shows no popup. */
+function pythonCompleter(sessionKey: string, path: string): Completer {
+  return async (text, line, character) => {
+    const result = await window.xerxes.call('lsp.complete', { session_key: sessionKey, path, text, line, character }) as { ok?: boolean; items?: unknown }
+    return result && result.ok !== false ? completionItemsOf(result.items) : []
+  }
+}
 import { FileActions, renderedViewOf, requestPreview, RichFilePreview, type RichPreview } from './FilePreview.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { Icon, type IconName } from './Icon.js'
@@ -1489,7 +1498,8 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
         {rich ? <RichFilePreview preview={rich} requestedSheet={sheet} chooseSheet={index => setSheetOf({ path: selected, index })} actions={fileActions} />
           : file && (isDocument && !source
           ? <FileDocument source={draft} path={selected} />
-          : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()} />)}
+          : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()}
+            {...(/\.pyi?$/.test(selected) ? { complete: pythonCompleter(snap.sessionKey, selected) } : {})} />)}
       </section></div>}
     </div>
   )

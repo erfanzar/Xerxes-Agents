@@ -5,9 +5,9 @@ import { basename } from 'node:path'
 import type { LspAdapter, LspRequest } from '../tools/claudeTools/search.js'
 import { WorkspacePathResolver } from '../tools/pathSafety.js'
 import { parseLspConfig, type LspServerConfig } from './config.js'
-import { LspHost, type LspHostOptions } from './host.js'
+import { LspHost, type LspCompletionItem, type LspHostOptions } from './host.js'
 
-type Host = LspAdapter & { readonly connected?: boolean; close(): Promise<void> }
+type Host = LspAdapter & { readonly connected?: boolean; close(): Promise<void>; complete?: LspHost['complete'] }
 interface Entry { controller: AbortController; host: Promise<Host>; resolved?: Host; stopping?: Promise<void>; cleanupFailed?: boolean }
 export interface LspServerHealth {
   readonly name: string
@@ -94,12 +94,22 @@ export class LspManager {
   forWorkspace(root: string): LspAdapter {
     return { execute: (request, signal) => this.execute(root, request, signal) }
   }
+  /** Completion on the editor's unsaved text; the path only selects and scopes the server. */
+  async complete(root: string, request: { readonly filePath: string; readonly text: string; readonly line: number; readonly character: number }, signal?: AbortSignal): Promise<{ readonly items: readonly LspCompletionItem[]; readonly incomplete: boolean }> {
+    const { host, filePath } = await this.hostFor(root, request.filePath, signal)
+    if (!host.complete) throw new Error('Language server does not support completion')
+    return host.complete({ ...request, filePath }, signal)
+  }
   private async execute(root: string, request: LspRequest, signal?: AbortSignal): Promise<unknown> {
+    const { host, filePath } = await this.hostFor(root, request.filePath, signal)
+    return host.execute({ ...request, filePath }, signal)
+  }
+  private async hostFor(root: string, requestedPath: string, signal?: AbortSignal): Promise<{ host: Host; filePath: string }> {
     if (this.closing) throw new Error('LSP manager is closed')
     if (signal?.aborted) throw cancelled()
     if (this.reconfiguring) throw new Error('LSP settings update in progress; retry shortly')
     const canonical = await realpath(root)
-    const filePath = await new WorkspacePathResolver(canonical).resolve(request.filePath)
+    const filePath = await new WorkspacePathResolver(canonical).resolve(requestedPath)
     if (this.reconfiguring) throw new Error('LSP settings update in progress; retry shortly')
     const name = basename(filePath)
     const server = this.servers.filter(server => server.enabled && server.extensions.some(ext => name.endsWith(ext)))
@@ -132,7 +142,7 @@ export class LspManager {
     if (entry.stopping || entry.cleanupFailed || this.entries.get(key) !== entry) throw new Error('Language server was released during this request; retry')
     if (this.closing) throw new Error('LSP manager is closed')
     if (signal?.aborted) throw cancelled()
-    return host.execute({ ...request, filePath }, signal)
+    return { host, filePath }
   }
   close(): Promise<void> {
     if (this.closing) return this.closing
