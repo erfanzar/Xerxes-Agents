@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.46 — 2026-11-16
+
+- **Sign in again.** Every Claude and Codex account in Settings → Providers has a Sign in again button. It renews a broken or expired login in place, keeping the same account, profile and model. If the open SSH workspace already has that account, its copy is replaced with the new login. No other host is written.
+- **Settings shows the provider this conversation actually uses.** Each conversation keeps its own provider. Settings used to mark the default for new conversations as active instead, so after you changed the default in another conversation, a conversation still on a broken sign-in looked already switched, and picking that provider did nothing.
+- **Artifacts stay visible when a tool group is collapsed.** An artifact saved inside a collapsed "Read 2 files and used 1 other tool" group now shows its card right below the group's summary line, so you no longer have to expand the group to find it.
+
 ## 0.8.45 — 2026-11-16
 
 - **Gemini: no more "Function call is missing a thought_signature".** Every replayed model turn now signs its first function call: with the signature Gemini returned, or, for history that has none (older, compacted, relayed or from another provider), Google's documented skip placeholder. Fixed for both the Gemini API and Vertex. Conversations that already hit the error work again after Retry.
