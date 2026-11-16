@@ -54,7 +54,7 @@ import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { ModelSplitChip } from './TaskModels.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, useDesktopNavigation, useShadingStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, RAIL_PANELS, useDesktopNavigation, useShadingStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
@@ -107,7 +107,7 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
 function railLabel(rail: RailPanel): string {
-  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'background' ? 'Background' : rail === 'usage' ? 'Usage' : 'Activity'
+  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'background' ? 'Background' : rail === 'browser' ? 'Browser' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -237,7 +237,8 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (next === 'activity') requestAnimationFrame(() => document.querySelector('.desktop-rail .studio-sheet-content')?.scrollTo({ top: 0 }))
     // Every file gets its own tab, so two files stay open side by side.
     if (next === 'files' && filePath) { const path = workspaceFilePath(filePath, snap.cwd); setRail('files', path, path.split('/').filter(Boolean).at(-1) ?? path) }
-    else if (next === 'subagents' || next === 'docs' || next === 'files' || next === 'outputs' || next === 'review' || next === 'terminal' || next === 'background' || next === 'activity' || next === 'usage') setRail(next, next === 'docs' ? filePath : undefined)
+    // Every right-panel view opens as a tab; the list is the one source, so a new view cannot fall through to a dialog.
+    else if (next !== null && (RAIL_PANELS as readonly string[]).includes(next)) setRail(next as RailPanel, next, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
