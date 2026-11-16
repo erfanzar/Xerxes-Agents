@@ -877,6 +877,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         if (!event.sender.isDestroyed()) event.sender.send('desktop:account-login', { type: 'authorization_url', login_id: loginId, url })
       })
     }
+    if (action === 'relogin') {
+      const loginId = String(params.loginId ?? '')
+      if (!/^[a-f0-9-]{36}$/.test(loginId)) throw new Error('A login id is required')
+      return accounts.relogin(String(params.accountId ?? ''), url => {
+        if (!event.sender.isDestroyed()) event.sender.send('desktop:account-login', { type: 'authorization_url', login_id: loginId, url })
+      })
+    }
     if (action === 'copy-login-link') {
       const url = String(params.url ?? '')
       if (new URL(url).protocol !== 'https:') throw new Error('Only an HTTPS sign-in link can be copied')

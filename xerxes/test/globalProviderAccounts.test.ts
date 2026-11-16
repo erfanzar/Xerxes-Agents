@@ -267,3 +267,37 @@ test('legacy official Gemini OpenAI roots normalize before local/SSH availabilit
     await expect(remote.activate(accountId, 's1')).resolves.toEqual({ ok: true })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
+
+test('Sign in again renews the login in place and refreshes only an SSH host that already holds it', async () => {
+  const { directory, registry, account, publicProfile, changeCredential } = await fixture('claude')
+  try {
+    const writes: unknown[] = []
+    let held = true
+    const call = async (method: string) => {
+      if (method === 'runtime.status') return { provider_account_isolation_v1_supported: true }
+      if (method === 'provider_list') return { profiles: held ? [publicProfile] : [] }
+      return { ok: true }
+    }
+    const relogin = async (_method: string, params: Record<string, unknown>) => {
+      expect(params.account_id).toBe(account.id)
+      await changeCredential('Renewed')
+      return { ok: true }
+    }
+    const center = new GlobalProviderAccounts(registry, target, call, relogin, () => 1000, async payload => {
+      writes.push(payload)
+      return JSON.stringify({ ok: true, profile: account.profileName })
+    })
+    const synced = await center.relogin(account.id)
+    expect(synced).toEqual({ ok: true, synced: target.target })
+    expect(writes).toHaveLength(1)
+    expect(JSON.stringify(writes)).toContain('fixture-secret-Renewed')
+    expect(JSON.stringify(synced)).not.toContain('fixture-secret')
+    expect(await center.list()).toMatchObject({ accounts: [{ available: true }] })
+    held = false
+    expect(await center.relogin(account.id)).toEqual({ ok: true, synced: null })
+    expect(writes).toHaveLength(1)
+    const local = new GlobalProviderAccounts(registry, undefined, call, relogin)
+    expect(await local.relogin(account.id)).toEqual({ ok: true, synced: null })
+    await expect(local.relogin('missing')).rejects.toThrow('not found')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})

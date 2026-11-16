@@ -199,15 +199,43 @@ export class GlobalProviderAccounts {
       throw new Error('Account sync review expired; review it again')
     }
     this.review = undefined
-    this.syncedAccounts.delete(review.accountId)
+    return this.pushToRemote(review.accountId)
+  }
+
+  /**
+   * Renew a broken or expired sign-in in place: same account, same profile, a
+   * fresh login. When the open SSH workspace already holds this account, the
+   * new credential replaces its copy there too; no other host is written.
+   */
+  async relogin(accountId: string, onAuthorizationUrl: (url: string) => void = () => {}): Promise<Record<string, unknown>> {
+    const account = (await this.registry.list()).find(row => row.id === accountId)
+    if (!account) throw new Error('Provider account not found')
+    if (account.kind === 'api_key') throw new Error('Only a Claude or Codex sign-in can be renewed; edit an API key instead')
+    const result = await this.loginCall('provider_account.login', { account_id: accountId }, onAuthorizationUrl)
+    if (result.ok === false) throw new Error(typeof result.error === 'string' ? result.error : 'OAuth sign-in failed')
+    if (!this.remote) return { ok: true, synced: null }
+    let held = false
+    try {
+      const providers = await this.call('provider_list', {})
+      held = providers.ok !== false && Array.isArray(providers.profiles) && providers.profiles.some(row => record(row) && row.name === account.profileName)
+    } catch { /* An unreachable host keeps its old copy; the local login is still renewed. */ }
+    if (!held) return { ok: true, synced: null }
+    try { await this.pushToRemote(accountId); return { ok: true, synced: this.remote.target } }
+    catch (error) { return { ok: true, synced: null, sync_error: error instanceof Error ? error.message : 'Sync failed' } }
+  }
+
+  private async pushToRemote(accountId: string): Promise<Record<string, unknown>> {
+    const remote = this.remote
+    if (!remote) throw new Error('Open an SSH workspace to synchronize accounts')
+    this.syncedAccounts.delete(accountId)
     await this.requireRemoteAccountIsolation()
     // Which step failed is safe to say; the failure's own message may quote the
     // credential, so it is never surfaced.
     let stage: 'transfer' | 'receipt' | 'identity' | 'reload' = 'transfer'
     try {
-      const payload = await this.registry.syncPayload(review.accountId)
+      const payload = await this.registry.syncPayload(accountId)
       const identity = accountIdentity(payload)
-      const receipt = this.writer ? await this.writer(payload) : await spawnSecretWriter(this.remote, payload, new AbortController().signal)
+      const receipt = this.writer ? await this.writer(payload) : await spawnSecretWriter(remote, payload, new AbortController().signal)
       stage = 'receipt'
       const profile = remoteProfileReceipt(receipt)
       stage = 'identity'
@@ -215,8 +243,8 @@ export class GlobalProviderAccounts {
       stage = 'reload'
       const reloaded = await this.call('runtime.reload', {})
       if (reloaded.ok === false) throw new Error('Remote profile reload failed')
-      this.syncedAccounts.set(review.accountId, identity)
-      return { ok: true, profile, destination: this.remote.target }
+      this.syncedAccounts.set(accountId, identity)
+      return { ok: true, profile, destination: remote.target }
     } catch {
       throw new Error(`Provider account sync was not acknowledged (${syncStageHint(stage)}); review the transfer again before retrying`)
     }

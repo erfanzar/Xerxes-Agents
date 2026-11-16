@@ -916,6 +916,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                     <button className="btn" disabled={!!snap.providerSwitching} title={`run this task on the host's own ${name} sign-in`} onClick={() => store.useHostProvider(provider.name)}>Run on the server</button>
                   )}
                   {slot?.sync && <button className="btn" disabled={snap.turnActive || slot.busy} title={`Sync ${name} to this SSH host`} onClick={slot.sync}>Sync to SSH</button>}
+                  {slot?.relogin && <button className="btn" disabled={slot.busy} title={`Sign in to ${name} again; the open SSH host's copy is refreshed too`} onClick={slot.relogin}>Sign in again</button>}
                   <button className="btn" disabled={snap.turnActive} title={`Edit ${name}`} onClick={() => setForm(provider.name)}>Edit</button>
                   {/* A signed-in account's Remove also clears its credential; deleting only the profile would be relinked. */}
                   {!provider.active && (

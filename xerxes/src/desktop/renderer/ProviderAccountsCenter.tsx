@@ -10,7 +10,9 @@ import type { XerxesBridge } from './types.js'
 
 export interface AccountRow {id:string;kind:string;label:string;profileName:string;provider:string;model:string;available:boolean}
 /** What a provider row borrows from its signed-in account: usage, Sync and Remove (which also clears the credential). */
-export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly busy:boolean;readonly remove?:()=>void;readonly sync?:()=>void}
+export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly busy:boolean;readonly remove?:()=>void;readonly sync?:()=>void
+  /** Renew a broken or expired Claude/Codex sign-in in place (and refresh the open SSH host's copy). */
+  readonly relogin?:()=>void}
 interface AccountList {accounts:readonly AccountRow[];can_sync:boolean;destination:string|null}
 interface UsageWindow {label:string;used_percent:number;resets_at:string|null;detail:string|null}
 interface SyncReview {review:string;account_id:string;destination:string}
@@ -107,6 +109,24 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       throw error
     } finally {if(alive.current)setSigningIn(false)}
   })
+  const [notice,setNotice]=useState('')
+  const relogin=(account:AccountRow)=>run(async()=>{
+    setSigningIn(true);setNotice('')
+    loginId.current=globalThis.crypto.randomUUID()
+    setLoginUrl('')
+    try {
+      const result=await accounts!('relogin',{accountId:account.id,loginId:loginId.current}) as {ok?:boolean;error?:string;synced?:string|null;sync_error?:string}
+      if(result.ok===false)throw new Error(result.error||'Sign-in failed')
+      setLoginUrl('');loginId.current=''
+      if(alive.current)setNotice(result.synced?`${account.label} signed in again and synced to ${result.synced}.`
+        :result.sync_error?`${account.label} signed in again on this Mac. Sync to SSH failed: ${result.sync_error}`
+        :`${account.label} signed in again.`)
+      await load();changed()
+    } catch(error) {
+      setLoginUrl('');loginId.current=''
+      throw error
+    } finally {if(alive.current)setSigningIn(false)}
+  })
   const saveGemini=async(label:string,apiKey:string,model:string)=>{
     setBusy(true);setError('')
     try {
@@ -167,6 +187,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
     account, usage:usageOf(account), busy,
     ...(removable(account)?{remove:()=>{actionRequest.current+=1;setAction({kind:'remove',account,phase:'ready',error:''})}}:{}),
     ...(list?.can_sync?{sync:()=>void reviewSync(account)}:{}),
+    ...(account.kind!=='api_key'?{relogin:()=>void relogin(account)}:{}),
   }]))
   const merged=Boolean(rows)
   const unlisted=(list?.accounts??[]).filter(account=>!shownProfiles?.has(account.profileName))
@@ -185,6 +206,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
     {kind==='gemini'&&<GeminiAccountForm busy={busy||!accounts} save={saveGemini}/>}
     {(signingIn||loginUrl)&&<ProviderLoginLink url={loginUrl} busy={signingIn} write={text=>accounts!('copy-login-link',{url:text})}/>}
     {error&&<p role="alert" className="studio-error">{error}</p>}
+    {notice&&<p role="status" className="studio-muted">{notice}</p>}
     {rows?.(slots)}
     {unlisted.map(account=>{
       return <div className="provcard provider-account" key={account.id}>
