@@ -183,6 +183,7 @@ import { LspSettingsStore } from "./lsp/settingsStore.js";
 import { lspSettingsView, saveLspSettings } from "./lsp/settings.js";
 import { loadConfiguredLsp } from "./lsp/configured.js";
 import { createPythonCompletion } from "./lsp/pythonCompletion.js";
+import { ruffFormat } from "./lsp/ruffFormat.js";
 import { addLspToolToBuiltinAgents, registerConfiguredLspTool } from "./tools/lspTools.js";
 import { startConfiguredMcpServers } from "./mcp/configured.js";
 import { McpSettingsStore } from "./mcp/settingsStore.js";
@@ -2837,6 +2838,7 @@ function daemonRuntime(
     lspHealth: cwd => lspManager.health(cwd),
     releaseLsp: (cwd, name) => lspManager.release(cwd, name),
     completeCode: (cwd, request, signal) => pythonCompletion.complete(cwd, request, signal),
+    formatCode: (cwd, request, signal) => ruffFormat(cwd, request, signal),
     ...(host.buildId ? { buildId: host.buildId } : {}),
     currentProjectDirectory: workspaceRoot,
     runtimeSettings: initialSettings,

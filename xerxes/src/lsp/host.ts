@@ -271,7 +271,7 @@ export function completionItems(result: unknown, line: number): { readonly items
       ...(typeof item.kind === 'number' && Number.isSafeInteger(item.kind) ? { kind: item.kind } : {}),
       ...(clip(item.detail, 512) ? { detail: clip(item.detail, 512)! } : {}),
       ...(clip(documentation, 4096) ? { documentation: clip(documentation, 4096)! } : {}),
-      ...(sameLine ? { replace: { start: range.start.character, end: range.end.character } } : {}),
+      ...(sameLine && range && position(range.start) && position(range.end) ? { replace: { start: range.start.character, end: range.end.character } } : {}),
       ...(clip(item.sortText, 256) ? { sortText: clip(item.sortText, 256)! } : {}),
     })
   }

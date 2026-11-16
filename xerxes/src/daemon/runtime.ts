@@ -6,6 +6,7 @@ import { readContextControls, type ContextControls } from '../context/controls.j
 import type { LspServerHealth } from '../lsp/manager.js';
 import type { LspCompletionItem } from '../lsp/host.js';
 import type { PythonCompletionRequest } from '../lsp/pythonCompletion.js';
+import type { FormatRequest, FormatResult } from '../lsp/ruffFormat.js';
 
 export type CodeCompletionRequest = PythonCompletionRequest;
 export interface CodeCompletionResult { readonly items: readonly LspCompletionItem[]; readonly incomplete: boolean }
@@ -368,6 +369,8 @@ export interface DaemonRuntime {
   lspHealth?(sessionKey: string): Promise<readonly LspServerHealth[] | undefined>;
   /** Editor completion on unsaved text, in the session's workspace; undefined when no host is wired. */
   completeCode?(sessionKey: string, request: CodeCompletionRequest, signal?: AbortSignal): Promise<CodeCompletionResult | undefined>;
+  /** Editor formatting (Ruff for Python) in the session's workspace; undefined when no host is wired. */
+  formatCode?(sessionKey: string, request: FormatRequest, signal?: AbortSignal): Promise<FormatResult | undefined>;
   cancelAllTurns(): number;
   cancelTurn(sessionKey: string): boolean;
   /** The running turn's messages so far (see TurnRunner.liveMessages); undefined when idle. */
@@ -520,6 +523,7 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly releaseLsp?: (cwd: string, name: string) => Promise<void>;
   readonly lspHealth?: (cwd: string) => Promise<readonly LspServerHealth[]>;
   readonly completeCode?: (cwd: string, request: CodeCompletionRequest, signal?: AbortSignal) => Promise<CodeCompletionResult>;
+  readonly formatCode?: (cwd: string, request: FormatRequest, signal?: AbortSignal) => Promise<FormatResult>;
   readonly backgroundCommands?: DaemonBackgroundCommandLifecycle;
   readonly baseUrl?: string;
   readonly buildId?: string;
@@ -1571,6 +1575,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   async completeCode(sessionKey: string, request: CodeCompletionRequest, signal?: AbortSignal): Promise<CodeCompletionResult | undefined> {
     const session = this.sessionStatus(sessionKey);
     return session && this.options.completeCode ? this.options.completeCode(session.cwd, request, signal) : undefined;
+  }
+
+  async formatCode(sessionKey: string, request: FormatRequest, signal?: AbortSignal): Promise<FormatResult | undefined> {
+    const session = this.sessionStatus(sessionKey);
+    return session && this.options.formatCode ? this.options.formatCode(session.cwd, request, signal) : undefined;
   }
 
   toolInventory(sessionKey: string): readonly RuntimeToolInventoryEntry[] | undefined {

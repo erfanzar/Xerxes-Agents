@@ -12,7 +12,7 @@
 
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { highlightLines, type LineSpan } from './codeHighlight.js'
-import { completionEdit, completionKindTag, completionPrefix, cursorPosition, filterCompletions, shouldComplete, type Completer, type CompletionItemView } from './codeCompletion.js'
+import { completionEdit, completionKindTag, completionPrefix, cursorPosition, filterCompletions, newlineIndent, shouldComplete, type Completer, type CompletionItemView } from './codeCompletion.js'
 import { grammarFor, syntaxFor, tokenize } from './syntax.js'
 
 /** One row: lowlight's spans when the file's grammar is known, else the small line tokenizer. */
@@ -50,7 +50,9 @@ function caretPoint(element: HTMLTextAreaElement, offset: number): { top: number
   return { top: element.offsetTop + (line + 1) * lineHeight + 2, left: (Number.parseFloat(style.paddingLeft) || 0) + character * width }
 }
 
-export function CodeEditor({ path, value, onChange, onSave, readOnly = false, complete }: {
+export function CodeEditor({ path, value, onChange, onSave, readOnly = false, complete, onFormat }: {
+  /** Format the whole file (Shift+Option+F); omitted means no formatter for this file. */
+  onFormat?: () => void
   path: string
   value: string
   onChange: (value: string) => void
@@ -141,8 +143,21 @@ export function CodeEditor({ path, value, onChange, onSave, readOnly = false, co
             if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) { event.preventDefault(); accept(chosen); return }
             if (event.key === 'Escape') { event.preventDefault(); close(); return }
           }
-          if (complete && !readOnly && event.key === ' ' && event.ctrlKey) {
-            // Ctrl+Space asks explicitly, wherever the caret is.
+          if (onFormat && !readOnly && event.altKey && event.shiftKey && event.code === 'KeyF') {
+            // Shift+Option+F formats the file (Ruff for Python).
+            event.preventDefault()
+            onFormat()
+            return
+          }
+          if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !readOnly) {
+            // Keep the line's indentation (one level deeper after `:`), inserted so undo still works.
+            event.preventDefault()
+            const element = event.currentTarget
+            document.execCommand('insertText', false, '\n' + newlineIndent(element.value, element.selectionStart, indent))
+            return
+          }
+          if (complete && !readOnly && event.code === 'Space' && (event.ctrlKey || event.altKey)) {
+            // Option+Space (or Ctrl+Space) asks explicitly, wherever the caret is.
             event.preventDefault()
             const element = event.currentTarget, offset = element.selectionStart, id = ++request.current
             const { line, character } = cursorPosition(element.value, offset)

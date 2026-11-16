@@ -6,7 +6,31 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { completionEdit, completionItemsOf, completionPrefix, cursorPosition, filterCompletions, shouldComplete } from '../src/desktop/renderer/codeCompletion.js'
+import { completionEdit, completionItemsOf, completionPrefix, cursorPosition, filterCompletions, newlineIndent, shouldComplete } from '../src/desktop/renderer/codeCompletion.js'
+import { findRuff, ruffFormat } from '../src/lsp/ruffFormat.js'
+
+test('names with digits keep completing, and Enter keeps the line indentation', () => {
+  expect(shouldComplete('A1', 2)).toBe(true)
+  expect(shouldComplete('x = 12', 6)).toBe(false)
+  expect(newlineIndent('\t\t\t\tx = 1', 9, '    ')).toBe('\t\t\t\t')
+  expect(newlineIndent('    if ok:', 10, '    ')).toBe('        ')
+  expect(newlineIndent('def f():  # note', 16, '    ')).toBe('    ')
+  expect(newlineIndent('plain', 5, '    ')).toBe('')
+})
+
+test('Ruff formats unsaved text inside the workspace and refuses paths outside it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-ruff-'))
+  try {
+    const ruff = await findRuff(root)
+    if (ruff) {
+      const result = await ruffFormat(root, { filePath: 'a.py', text: 'x=[1,2 ,3]\n' })
+      expect(result.text).toBe('x = [1, 2, 3]\n')
+    }
+    await expect(ruffFormat(root, { filePath: '../escape.py', text: 'x=1\n' })).rejects.toThrow()
+    await expect(ruffFormat(root, { filePath: 'a.txt', text: 'x' })).rejects.toThrow('Python')
+    await expect(ruffFormat(root, { filePath: 'a.py', text: 'x=1\n' }, undefined, join(root, 'no-ruff'))).rejects.toThrow()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 import { completionItems, LspHost, LSP_COMPLETION_LIMIT } from '../src/lsp/host.js'
 import type { LspConnectionOptions } from '../src/lsp/connection.js'
 import { installPythonLsp, pythonConfiguration } from '../src/lsp/pythonCompletion.js'

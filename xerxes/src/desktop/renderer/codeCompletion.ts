@@ -59,7 +59,16 @@ export function shouldComplete(text: string, offset: number): boolean {
   // A name (not a number like `1.`) or a closing bracket right before the dot.
   if (last === '.') return /(?<![0-9A-Za-z_])[A-Za-z_][A-Za-z0-9_]*\.$|[)\]]\.$/.test(line)
   if (last === ' ') return /^\s*(from\s+[\w.]+\s+import|import|from)\s+$/.test(line)
-  return /[A-Za-z_]/.test(last) && completionPrefix(text, offset).length >= 1
+  // Any name character, digits included once a name has started (`A1`, `x2`).
+  return /[A-Za-z0-9_]/.test(last) && completionPrefix(text, offset).length >= 1
+}
+
+/** Leading whitespace of the caret's line, plus one indent unit after a line ending in `:` (Python blocks). */
+export function newlineIndent(text: string, offset: number, unit: string): string {
+  const { lineStart } = cursorPosition(text, offset)
+  const before = text.slice(lineStart, offset)
+  const indent = /^[ \t]*/.exec(before)?.[0] ?? ''
+  return /:\s*(#.*)?$/.test(before) ? indent + unit : indent
 }
 
 /** Items matching the typed prefix: exact-case starts first, then case-insensitive, then contains. */

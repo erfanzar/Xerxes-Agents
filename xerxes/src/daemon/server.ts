@@ -3143,6 +3143,18 @@ export class DaemonServer {
         return { ok: false, code: "failed", error: errorMessage(error).slice(0, 500) };
       } finally { if (this.codeCompletions.get(connection) === controller) this.codeCompletions.delete(connection); }
     }
+    if (method === "code.format") {
+      const key = sessionKey(connection, params);
+      if (!this.runtime.sessionStatus(key)) return { ok: false, error: "Active session required" };
+      const path = typeof params.path === "string" ? params.path.trim() : "";
+      if (!path || path.length > 4096) return { ok: false, code: "invalid_request", error: "A file path is required" };
+      if (typeof params.text !== "string" || params.text.length > 1_048_576) return { ok: false, code: "invalid_request", error: "Text must be a string of at most 1 MiB" };
+      if (!this.runtime.formatCode) return { ok: false, code: "unavailable", error: "Formatting host unavailable; update this workspace's runtime" };
+      try {
+        const result = await this.runtime.formatCode(key, { filePath: path, text: params.text });
+        return result ? { ok: true, text: result.text, formatter: result.formatter } : { ok: false, code: "unavailable", error: "Formatting host unavailable" };
+      } catch (error) { return { ok: false, code: "failed", error: errorMessage(error).slice(0, 500) }; }
+    }
     if (method === "mcp.status") return { ok: true, configured: !!this.mcpManager, servers: this.mcpStatusRecord() };
     if (method === "mcp.settings.get" || method === "mcp.settings.save") {
       const store = this.mcpSettingsStore, manager = this.mcpManager;

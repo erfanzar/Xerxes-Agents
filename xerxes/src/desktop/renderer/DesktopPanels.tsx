@@ -1453,6 +1453,20 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
       setSave({ state: 'error', message: desktopError(error), conflict: false })
     }
   }
+  /** Ruff on the workspace's machine; the result replaces the draft (unsaved) so Revert and undo still apply. */
+  const [formatting, setFormatting] = useState(false)
+  const formatFile = async (): Promise<void> => {
+    if (!file || !editable || formatting || !/\.pyi?$/.test(selected)) return
+    const formatSelection = selection.current, source = draft
+    setFormatting(true)
+    try {
+      const result = await desktopCall(window.xerxes, snap.sessionKey, 'code.format', { path: file.path, text: source })
+      if (selection.current !== formatSelection) return
+      if (typeof result.text === 'string' && result.text !== source) { setDraft(result.text); setSave({ state: 'idle' }) }
+    } catch (error) {
+      if (selection.current === formatSelection) setSave({ state: 'error', message: desktopError(error), conflict: false })
+    } finally { setFormatting(false) }
+  }
   const [needle, setNeedle] = useState('')
   const isDocument = rendersAsDocument(selected)
   const fileActions = <FileActions path={selected} cwd={snap.cwd} remote={Boolean(snap.storageScope?.startsWith('ssh:'))} />
@@ -1485,6 +1499,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
         <p title={selected}><span className="file-browser__dir">{(() => { const dir = selected.replace(/^\.\//, '').split('/').slice(0, -1).join('/'); return dir ? dir + '/' : '' })()}</span><strong>{selected.split('/').at(-1)}</strong>{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
         {dirty && <><button className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }) }}>Revert</button></>}
         {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
+        {editable && /\.pyi?$/.test(selected) && !rich && <button className="file-browser__format" disabled={formatting} title="Format with Ruff (⇧⌥F)" onClick={() => void formatFile()}>{formatting ? 'Formatting…' : 'Format'}</button>}
         {view && <button className="file-browser__mode" aria-pressed={source} disabled={dirty && serverRendered} onClick={() => setSourceOf(source ? '' : selected)}>{source ? 'Preview' : 'Source'}</button>}
         <span className="file-browser__more">
           <button aria-label="File actions" title="File actions" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(value => !value)}><Icon name="dots" size={14} /></button>
@@ -1503,7 +1518,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
           : file && (isDocument && !source
           ? <FileDocument source={draft} path={selected} />
           : <CodeEditor path={selected} value={draft} readOnly={!editable} onChange={value => { setDraft(value); if (save.state !== 'saving') setSave({ state: 'idle' }) }} onSave={() => void saveFile()}
-            {...(/\.pyi?$/.test(selected) ? { complete: pythonCompleter(snap.sessionKey, selected) } : {})} />)}
+            {...(/\.pyi?$/.test(selected) ? { complete: pythonCompleter(snap.sessionKey, selected), onFormat: () => void formatFile() } : {})} />)}
       </section></div>}
     </div>
   )
