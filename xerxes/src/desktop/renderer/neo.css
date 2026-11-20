@@ -98,32 +98,18 @@
 :root[data-style='neo']:not(#neo) .atelier .activity-group__body{margin:0;padding:6px 12px 10px}
 /* The user's turn is a quoted block with a purple rule, not a bubble. */
 :root[data-style='neo']:not(#neo) .atelier .msg--user{background:var(--x-user-bubble);border:0;box-shadow:inset 2px 0 0 var(--x-accent);padding:8px 14px}
-/* The composer reads as a prompt line: `❯` then the input. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap{background:var(--x-screen)}
-:root[data-style='neo']:not(#neo) .atelier .composer-dock{background:var(--x-card);border:1px solid var(--x-separator);transition:border-color 150ms ease,box-shadow 150ms ease}
-:root[data-style='neo']:not(#neo) .atelier .composer-dock:focus-within{border-color:var(--neo-accent-line);box-shadow:inset 2px 0 0 var(--x-accent)}
+/* The composer uses the shared Vibes layout (vibes.css): a framed input box with the controls
+   unframed below it. Neo only adds its prompt glyph `❯` and mono type. The old Neo card (a fill on
+   the toolbar and one frame drawn around input and toolbar together) fought that layout and boxed
+   the controls inside the prompt. */
 :root[data-style='neo']:not(#neo) .atelier .composer::before{content:'❯';font:700 14px/1.45 var(--mono);color:var(--x-accent)}
 /* The composer is a grid (layout.css) and .composer is display:contents, so the
    prompt glyph is its own grid item: pin it over the input's first line. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap>.composer-dock>.composer::before{grid-column:1;grid-row:5;align-self:start;justify-self:start;padding:12px 0 0 14px;pointer-events:none;z-index:1}
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock) .composer__input{padding-left:32px}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap>.composer-dock>.composer::before{grid-column:1;grid-row:5;align-self:start;justify-self:start;padding:12px 0 0 16px;pointer-events:none;z-index:1}
 /* The subagent box is a flex row: the glyph sits on the input's first line, not below it. */
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock>.composer::before{flex:none;align-self:flex-start;padding:5px 0}
-/* The shared layout makes .composer-dock display:contents, so its fill and border never paint.
-   Paint the card on its pieces instead: a card-coloured block framed by one hairline, accent edge on focus. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock){--neo-edge:var(--x-separator)}
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock):focus-within{--neo-edge:var(--neo-accent-line)}
-/* One fill on every piece (images, input, controls, repo bar), no per-piece edges: they made seams. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock) :is(.composer__images,.composer__input,.composer__toolbar),
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock)>.repobar{background:var(--x-card);box-shadow:none}
-/* The repo bar is the card's last row, split from the controls by a hairline, not a separate slab. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock)>.repobar{margin-bottom:6px;border-top:1px solid var(--x-hairline)}
-/* One frame drawn once around the whole stack (grid rows 4–7), with the focus bar down its full left edge. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock)::after{content:'';grid-column:1/-1;grid-row:4/8;z-index:2;pointer-events:none;border:1px solid var(--neo-edge);transition:border-color 150ms ease,box-shadow 150ms ease}
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock):has(>.repobar)::after{margin-bottom:6px}
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock):focus-within::after{box-shadow:inset 2px 0 0 var(--x-accent)}
 /* The subagent box keeps its dock (display:block there): frame it directly. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock{background:var(--x-card);border:1px solid var(--x-separator)}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock{border:1px solid var(--x-separator)}
 :root[data-style='neo']:not(#neo) .atelier .composer__input{font:400 14px/1.45 var(--mono)}
 /* The dock's border and accent edge already show focus; the generic Neo focus
    ring drew a second box hard against the typed text. */
