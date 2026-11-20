@@ -295,7 +295,10 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes::before{content:'';position:absolute;left:8px;top:26px;bottom:2px;width:2px;background:linear-gradient(to bottom,color-mix(in srgb,var(--x-accent) 65%,transparent),transparent 85%)}
 :root[data-style='vibes']:not(#vibes) .atelier .supervisor__message--xerxes::before{border-radius:2px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head{height:20px;gap:10px;margin-left:-28px}
-:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__avatar{width:18px;height:18px;border:0;border-radius:0;background:transparent;color:var(--x-accent);filter:drop-shadow(0 0 6px color-mix(in srgb,var(--x-accent) 55%,transparent))}
+/* The mark sits on a small quiet tile in the title colour. A blue glow on the bare bird read as a smudge. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__avatar{width:20px;height:20px;border:1px solid var(--x-hairline);background:var(--x-chip);color:var(--x-title);filter:none}
+:root[data-style='vibes']:not(#vibes) .atelier .xmsg__avatar{border-radius:6px}
+:root[data-style='neo']:not(#vibes) .atelier .xmsg__avatar{border-radius:0}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__who{font:600 11px/1 var(--sans);letter-spacing:.18em;background:linear-gradient(90deg,var(--x-accent),var(--x-working));-webkit-background-clip:text;background-clip:text;color:transparent}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head time{font:400 11.5px/1 var(--sans);color:var(--x-meta);opacity:.55;transition:opacity 120ms ease}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes:is(:hover,:focus-within) .xmsg__head time{opacity:1}
@@ -312,6 +315,10 @@
 :root[data-style='vibes']:not(#vibes) .atelier .modal.xcontrols{border-radius:12px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xcontrols__tab{border:0;background:transparent;font:400 13px/1.3 var(--sans);color:var(--x-prose)}
 :root[data-style='vibes']:not(#vibes) .atelier .xcontrols__tab{border-radius:6px}
+/* XERXES controls rows have two lines (name, then state). The Settings nav rule pins every side row to one
+   centred 28px line, which cut the state in half and centred both lines; these rows grow and sit left. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal.xcontrols>.modal__side .mtab.xcontrols__tab{height:auto;min-height:44px;padding:6px 10px;flex-direction:column;align-items:flex-start;justify-content:center;gap:2px;text-align:left;line-height:1.3}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal.xcontrols>.modal__side .xcontrols__hint{font:400 12px/1.3 var(--sans);color:var(--x-meta)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xcontrols__tab:is(:hover,[aria-selected='true'],[aria-current='true']){background:var(--x-selected);color:var(--x-title)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal{background:var(--x-dialog)}
 :root[data-style='vibes']:not(#vibes) .atelier .modal{border-radius:14px}

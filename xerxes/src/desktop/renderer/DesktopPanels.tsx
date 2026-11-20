@@ -786,7 +786,8 @@ function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
             Install plugin
           </button>
           <button
-            disabled={snap.turnActive}
+            disabled={snap.connection !== 'online'}
+            title={snap.turnActive ? 'Opens Creator mode beside the running task' : undefined}
             onClick={() => {
               open(null)
               store.startCreatorMode()

@@ -309,7 +309,9 @@ export function createBridge(transport: BridgeTransport) {
     if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId))) return Promise.reject(new TypeError('invalid session identity'))
     const fresh = options !== null && typeof options === 'object' && (options as { fresh?: unknown }).fresh === true
     const existingOnly = options !== null && typeof options === 'object' && (options as { existingOnly?: unknown }).existingOnly === true
-    return transport.invoke('desktop:new-window', dir, resumeSessionId, fresh || undefined, existingOnly || undefined) as Promise<unknown>
+    const preset = options !== null && typeof options === 'object' ? (options as { agentPreset?: unknown }).agentPreset : undefined
+    if (preset !== undefined && (typeof preset !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(preset) || !fresh)) return Promise.reject(new TypeError('invalid agent preset'))
+    return transport.invoke('desktop:new-window', dir, resumeSessionId, fresh || undefined, existingOnly || undefined, preset) as Promise<unknown>
   },
   /** macOS: blur what is behind the window (native material) or show it clear. */
   setWindowBlur(on: unknown): void {
@@ -333,6 +335,10 @@ export function createBridge(transport: BridgeTransport) {
   /** True once, for a window opened to start a fresh task. */
   startsFresh(): Promise<boolean> {
     return transport.invoke('desktop:starts-fresh') as Promise<boolean>
+  },
+  /** The agent preset a fresh-task view was opened with (Creator mode mid-turn), once; else null. */
+  freshPreset(): Promise<string | null> {
+    return transport.invoke('desktop:fresh-preset') as Promise<string | null>
   },
 
   /** Enter a workspace by absolute folder path (sidebar header click). */

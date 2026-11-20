@@ -71,9 +71,11 @@ export interface XerxesBridge {
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
   /** existingOnly: bring forward a view already showing the session, else open nothing (resolves null). */
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean }): Promise<unknown>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean; agentPreset?: string }): Promise<unknown>
   /** True once, for a window opened to start a fresh task. */
   startsFresh?(): Promise<boolean>
+  /** The agent preset a fresh-task window was opened with, once; null otherwise. */
+  freshPreset?(): Promise<string | null>
   /** UI scale: zoom this window's page (0.5–3). */
   setZoomFactor?(factor: number): void
   /** macOS: blur what is behind the window (native material) or show it clear. */

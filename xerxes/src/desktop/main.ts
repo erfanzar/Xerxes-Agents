@@ -381,7 +381,7 @@ function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: 
   }, undefined, host)
 }
 
-function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow, startFresh = false): BrowserWindow {
+function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: SavedWindow, initialSessionId?: string, host?: BrowserWindow, startFresh = false, startPreset?: string): BrowserWindow {
   let daemon: DaemonRpc | null = null
   let remote: RemoteConnection | null = null
   let remoteMachine: RemoteTarget | null = null
@@ -690,6 +690,13 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     startsFresh = false
     return fresh
   })
+  // The preset a fresh view starts with (Creator mode opened while a turn ran), asked once.
+  let freshPreset = startFresh ? startPreset ?? null : null
+  handle('desktop:fresh-preset', () => {
+    const preset = freshPreset
+    freshPreset = null
+    return preset
+  })
   let voiceRequest: AbortController | null = null
   handle('desktop:voice', async (_event, action: unknown, value: unknown) => {
     if (action === 'cancel') {
@@ -990,9 +997,11 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (remoteMachine) return { ok: false, error: 'This file is on the SSH host, so it cannot be opened on this computer.' }
     return performFileAction(request, { openPath: path => shell.openPath(path), showItemInFolder: path => shell.showItemInFolder(path) })
   })
-  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown, existingOnly?: unknown) => {
+  handle('desktop:new-window', async (_event, directory?: unknown, sessionId?: unknown, fresh?: unknown, existingOnly?: unknown, agentPreset?: unknown) => {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256 || /[\x00-\x1f]/.test(sessionId))) throw new TypeError('Invalid session identity')
     if (fresh !== undefined && typeof fresh !== 'boolean') throw new TypeError('Invalid new-window option')
+    if (agentPreset !== undefined && (typeof agentPreset !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(agentPreset) || fresh !== true)) throw new TypeError('Invalid agent preset')
+    const preset = typeof agentPreset === 'string' ? agentPreset : undefined
     if (fresh === true && sessionId !== undefined) throw new TypeError('A fresh task window cannot also resume a session')
     if (directory !== undefined && (typeof directory !== 'string' || !isAbsolute(directory) || /[\x00-\x1f]/.test(directory))) throw new TypeError('Invalid workspace directory')
     if (existingOnly === true) {
@@ -1015,12 +1024,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     } else if (remoteMachine && picked === selectedWorkspace) {
       const savedWindow = windowStates.get(id)?.()
       if (!savedWindow) throw new Error('Remote workspace is not ready')
-      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window, fresh === true)
+      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window, fresh === true, preset)
     } else if (sessionId) openWorkspaceView(window, picked, sessionId as string)
     // A fresh task opens as another view in THIS window (like opening a
     // second chat mid-turn does), never as a new OS window; the running task
     // keeps its own view.
-    else if (fresh === true) createWorkspaceWindow(picked, undefined, undefined, window, true)
+    else if (fresh === true) createWorkspaceWindow(picked, undefined, undefined, window, true, preset)
     else createWorkspaceWindow(picked)
     return picked
   })

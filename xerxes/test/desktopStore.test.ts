@@ -2311,6 +2311,30 @@ describe('new task during a running turn', () => {
     expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializes)
     expect(store.getSnapshot().workspaceError ?? null).toBeNull()
   })
+
+  test('Creator mode mid-turn opens a fresh Creator view instead of doing nothing', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    const opened: Array<{ dir: string | undefined; resume: string | undefined; options: Record<string, unknown> | undefined }> = []
+    Object.assign(bridge, { openWorkspaceWindow: async (dir?: string, resume?: string, options?: Record<string, unknown>) => { opened.push({ dir, resume, options }) } })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    bridge.push('turn_begin', { text: 'Long task' })
+    const before = store.getSnapshot()
+    const initializes = bridge.calls.filter(call => call.method === 'initialize').length
+    store.startCreatorMode()
+    await Bun.sleep(10)
+    expect(opened).toEqual([{ dir: before.cwd || undefined, resume: undefined, options: { fresh: true, agentPreset: 'creator' } }])
+    expect(store.getSnapshot().turnActive).toBe(true)
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializes)
+  })
+
+  test('a fresh view opened with a preset starts its session on that preset', async () => {
+    const bridge = new FakeBridge(method => method === 'initialize' ? initializeResult : { ok: true, sessions: [] })
+    Object.assign(bridge, { startsFresh: async () => true, freshPreset: async () => 'creator' })
+    withWindow(bridge)
+    const store = new Store(); store.start(bridge); await Bun.sleep(10)
+    expect(bridge.calls.find(call => call.method === 'initialize')?.params).toMatchObject({ agent_id: 'creator' })
+  })
 })
 
 describe('interaction response ownership', () => {

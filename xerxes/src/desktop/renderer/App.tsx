@@ -2370,7 +2370,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )}
       {snap.compacting && !snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite"><AgentOrb size={20} state="working" /><span className="streamstatus__phrase">{snap.compacting}</span></div>}
-      {snap.submissionPending && !snap.turnActive && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
+      {/* One status row at a time: every .composer-status shares the composer grid's row, so a
+          "Sending…" shown during compaction was drawn over "Compacting…". The message is sent after it. */}
+      {snap.submissionPending && !snap.turnActive && !snap.compacting && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
       {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`} role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} />{snap.stopArmed
         ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>
         : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}

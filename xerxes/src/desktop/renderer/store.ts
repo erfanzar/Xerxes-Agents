@@ -1211,10 +1211,12 @@ export class Store {
 
   private initializeLive(workspace: string): void {
     this.patch({ cwd: workspace })
-    void Promise.all([this.bridge.getResumeSession?.(), this.bridge.startsFresh?.()]).then(async ([explicitId, fresh]) => {
+    void Promise.all([this.bridge.getResumeSession?.(), this.bridge.startsFresh?.(), this.bridge.freshPreset?.()]).then(async ([explicitId, fresh, preset]) => {
       const id = explicitId || (workspace && !fresh ? selectedSession((this.frame.storageScope ?? '') + workspace) : null)
+      // A fresh view opened for Creator mode (while another task ran) starts on that preset.
+      const start: Record<string, unknown> = id ? { resume_session_id: id } : fresh && preset ? { agent_id: preset } : {}
       try {
-        return await this.initializeSelfHealing(id ? { resume_session_id: id } : {})
+        return await this.initializeSelfHealing(start)
       } catch (error) {
         // Old desktop builds could save a session under the wrong workspace.
         // Keep the daemon's isolation check: never move or rebind that history.
@@ -1765,6 +1767,14 @@ export class Store {
 
   /** Start an unmistakable blank Creator mode session from the shell chrome. */
   startCreatorMode(): void {
+    if (this.frame.connection !== 'online') { this.patch({ workspaceError: 'Not connected to this workspace yet.' }); return }
+    // Like New task: a running turn keeps this view, so Creator mode opens as
+    // another view of this workspace. The button used to sit disabled mid-turn.
+    if (this.frame.turnActive) {
+      if (!this.bridge.openWorkspaceWindow) { this.patch({ workspaceError: 'This desktop build cannot open another window. Relaunch the updated app.' }); return }
+      void this.bridge.openWorkspaceWindow(this.frame.cwd || undefined, undefined, { fresh: true, agentPreset: 'creator' }).catch(error => this.fail(error))
+      return
+    }
     void this.beginFreshTask('creator')
   }
 
@@ -3372,6 +3382,7 @@ export class Store {
       return window.xerxes.openWorkspaceWindow(directory, resumeSessionId, options)
     },
     startsFresh: () => window.xerxes.startsFresh?.() ?? Promise.resolve(false),
+    freshPreset: () => window.xerxes.freshPreset?.() ?? Promise.resolve(null),
     chooseWorkspace: () => window.xerxes.chooseWorkspace?.() ?? Promise.resolve(null),
     useWorkspace: (dir, resumeSessionId) => window.xerxes.useWorkspace?.(dir, resumeSessionId) ?? Promise.resolve(null),
     getWorkspace: () => window.xerxes.getWorkspace?.() ?? Promise.resolve(''),
@@ -4848,12 +4859,14 @@ export interface XerxesLike {
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
-  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean }): Promise<unknown>
+  openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean; agentPreset?: string }): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>
   getResumeSession?(): Promise<string | null>
   /** True for a window opened to start a fresh task: skip the remembered chat. */
   startsFresh?(): Promise<boolean>
+  /** The agent preset that fresh window starts with (Creator mode opened mid-turn). */
+  freshPreset?(): Promise<string | null>
 }
 
 export const store = new Store()
