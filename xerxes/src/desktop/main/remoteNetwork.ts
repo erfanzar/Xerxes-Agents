@@ -164,6 +164,28 @@ export class RemoteNetwork {
  * `8080` becomes http; anything without a scheme gets http unless it looks
  * like a public name. Only http(s) is ever loaded.
  */
+/**
+ * What the Browser tab says when a page fails to load. Over an SSH workspace
+ * Chromium reports every refused or unreachable destination as the same
+ * opaque ERR_SOCKS_CONNECTION_FAILED (-120), which read as "the tunnel is
+ * broken" when the tunnel was fine and nothing listened at the address.
+ * The raw code stays at the end for diagnosis.
+ */
+export function browserLoadError(code: number, description: string, url: string, via: string | null): string {
+  let host = ''
+  try { host = new URL(url).host } catch { /* keep the generic wording */ }
+  const target = host || 'this address'
+  const raw = `${description} (${code})`
+  // The local SOCKS listener (or its SSH process) itself did not answer.
+  if (via && code === -130) return `The connection to ${via} is down. Reload to reconnect. ${raw}`
+  // ssh -D refuses the CONNECT when the destination refuses, times out or does not resolve on the remote.
+  if (via && [-120, -121, -102, -104, -105, -109, -118].includes(code)) {
+    return `${via} could not reach ${target}. Nothing accepted the connection there: the service may be stopped, on another port, or listening only on localhost. ${raw}`
+  }
+  if ([-102, -105, -109, -118].includes(code)) return `Could not reach ${target}. ${raw}`
+  return raw
+}
+
 export function browserUrl(input: string): string {
   const text = input.trim()
   if (!text) throw new Error('Type an address')

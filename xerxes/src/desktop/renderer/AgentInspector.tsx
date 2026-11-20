@@ -213,8 +213,8 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
         {info?.error && <p className="studio-error">{info.error}</p>}
         {error && <div role="alert" className="studio-error"><p>{error}</p><button disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
       </div>
-      {!scroll.following && blocks.length > 0 && <button className="jump-latest" onClick={scroll.scrollToLatest}>
-        {active ? 'Still working — jump to latest' : 'Jump to latest'} <Icon name="chevron" size={12} />
+      {!scroll.following && blocks.length > 0 && <button className="jump-latest" data-working={active || undefined} title={active ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scroll.scrollToLatest}>
+        <span className="jump-latest__label">{active ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
       </button>}
     </div>
     {info?.provisional

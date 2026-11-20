@@ -14,7 +14,7 @@
 
 import { session as electronSession, shell, WebContentsView, type BrowserWindow, type Session } from 'electron'
 
-import { browserUrl, type RemoteNetwork } from './remoteNetwork.js'
+import { browserLoadError, browserUrl, type RemoteNetwork } from './remoteNetwork.js'
 
 export interface BrowserState {
   readonly url: string
@@ -98,7 +98,7 @@ export class BrowserTab {
     contents.on('will-navigate', (event, url) => { if (!/^https?:/i.test(url)) event.preventDefault() })
     const active = () => this.view === view && !this.closed
     const send = () => { if (active()) this.emit() }
-    contents.on('did-start-loading', () => { if (active()) { this.error = undefined; send() } })
+    contents.on('did-start-loading', () => { if (active()) { this.error = undefined; this.place(); send() } })
     contents.on('did-stop-loading', send)
     contents.on('did-navigate', (_event, url) => {
       if (active() && /^https?:\/\//i.test(url)) this.retryUrl = ''
@@ -109,7 +109,9 @@ export class BrowserTab {
     contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
       if (active() && isMainFrame && code !== -3) {
         if (/^https?:\/\//i.test(url)) this.retryUrl = url
-        this.error = `${description} (${code})`
+        this.error = browserLoadError(code, description, url, this.network()?.label ?? null)
+        // Chromium's own error page is a blank white sheet; the panel explains the failure instead.
+        this.place()
         send()
       }
     })
@@ -173,7 +175,7 @@ export class BrowserTab {
   private place(): void {
     const view = this.view
     if (!view || this.window.isDestroyed()) return
-    if (this.shown && this.bounds) {
+    if (this.shown && this.bounds && !this.error) {
       // Re-adding keeps it above the workspace view that the window may have restacked.
       this.window.contentView.addChildView(view)
       view.setBounds(this.bounds)

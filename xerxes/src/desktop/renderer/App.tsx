@@ -1270,8 +1270,8 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           back was to drag into a 64px band by hand, and a turn that kept
           streaming gave no sign it had moved on without you. */}
       {!following && blocks.length > 0 && (
-        <button className="jump-latest" onClick={scrollToLatest}>
-          {snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} <Icon name="chevron" size={12} />
+        <button className="jump-latest" data-working={snap.turnActive || undefined} title={snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scrollToLatest}>
+          <span className="jump-latest__label">{snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
         </button>
       )}
     </div>
@@ -1651,35 +1651,96 @@ function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; poli
  * planning. Refining rejects the exit (the session stays in plan mode) and
  * queues the note as a steer, so the agent revises the same plan.
  */
+type PlanChoice = 'accept-all' | 'manual' | 'keep'
+
+/** Claude Code's exit-plan choices (2.1.329): proceed auto-accepting edits, proceed asking for each, or keep planning. */
+export const PLAN_CHOICES: readonly { readonly value: PlanChoice; readonly label: string; readonly detail: string }[] = [
+  { value: 'accept-all', label: 'Yes, and auto-accept edits', detail: 'Edits and commands run without asking' },
+  { value: 'manual', label: 'Yes, manually approve edits', detail: 'Each change asks you first' },
+  { value: 'keep', label: 'No, keep planning', detail: 'Tell the agent what to change' },
+]
+
+/**
+ * The plan is ready, shown the way Claude Code shows it: the plan itself in
+ * the card (folded to a preview, unfolds in place, opens beside the chat),
+ * then "Would you like to proceed?" with its three answers. Proceeding sets
+ * the permission mode the person picked; keeping planning rejects the exit
+ * (the session stays in plan mode) and queues the note as a steer.
+ */
 export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<Snapshot['approval']>; planId?: string | undefined }): ReactElement {
   const open = useDesktopNavigation()
+  const [choice, setChoice] = useState<PlanChoice>('accept-all')
   const [note, setNote] = useState('')
+  const [plan, setPlan] = useState<{ readonly title: string; readonly content: string } | null>(null)
+  const [expanded, setExpanded] = useState(false)
   const card = useRef<HTMLDivElement>(null)
   useEffect(() => { card.current?.focus() }, [approval.id])
-  const refine = (): void => {
-    const text = note.trim()
-    if (!text) return
-    store.approve(approval.id, 'deny')
-    void store.steer(`Keep planning; do not execute yet. Revise the plan with this feedback: ${text}`)
-    setNote('')
+  useEffect(() => {
+    setPlan(null)
+    if (!planId) return
+    let live = true
+    void desktopCall(window.xerxes, store.getSnapshot().sessionKey, 'artifacts.read', { id: planId })
+      .then(result => {
+        const art = result.artifact
+        if (!live || !art || typeof art !== 'object') return
+        const row = art as Record<string, unknown>
+        if (typeof row.content === 'string' && row.content.trim()) setPlan({ title: typeof row.title === 'string' ? row.title : 'Plan', content: row.content })
+      })
+      // Unreadable plan: the card still offers "Open the plan".
+      .catch(() => {})
+    return () => { live = false }
+  }, [planId])
+  const submit = (): void => {
+    if (choice === 'keep') {
+      const text = note.trim()
+      if (!text) return
+      store.approve(approval.id, 'deny')
+      void store.steer(`Keep planning; do not execute yet. Revise the plan with this feedback: ${text}`)
+      setNote('')
+      return
+    }
+    store.approve(approval.id, 'allow_once')
+    store.setPermissionMode(choice)
   }
+  const canSubmit = choice !== 'keep' || note.trim() !== ''
   return (
-    <div ref={card} tabIndex={-1} className="approval approval--plan" role="alertdialog" aria-modal="false" aria-label="Plan ready"
-      onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !note.trim()) { event.preventDefault(); store.approve(approval.id, 'allow_once') } }}>
-      <div className="approval__head">
-        <span className="approval__dot" aria-hidden="true" />
-        <span className="approval__title">Plan ready</span>
-        <button className="approval__dismiss" title="Hide until you decide — the plan stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
+    <div ref={card} tabIndex={-1} className="plancard" role="alertdialog" aria-modal="false" aria-label="Plan ready"
+      onKeyDown={event => {
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); return }
+        if (event.target instanceof HTMLTextAreaElement) return
+        const index = ['1', '2', '3'].indexOf(event.key)
+        if (index >= 0) { event.preventDefault(); setChoice(PLAN_CHOICES[index]!.value) }
+      }}>
+      <div className="plancard__head">
+        <span className="plancard__dot" aria-hidden="true" />
+        <span className="plancard__title">Ready to code?</span>
+        <span className="plancard__tag">Plan ready</span>
+        <button type="button" className="plancard__hide" title="Hide until you decide; the plan stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
       </div>
-      {/* Opens the plan itself (the newest artifact this conversation saved), not just the list. */}
-      <button className="plan-approval__open" onClick={() => open('docs', planId)}><Icon name="file" size={13} /> Open the plan</button>
-      <div className="plan-approval__refine">
-        <textarea aria-label="Refine the plan" placeholder="Refine the plan… (what to change, add or drop)" rows={1} value={note}
-          onChange={event => setNote(event.target.value)}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); refine() } }} />
-        {note.trim()
-          ? <button className="btn" onClick={refine}>Refine <kbd>⏎</kbd></button>
-          : <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Continue with the plan</button>}
+      {plan
+        ? <section className="plancard__plan" aria-label={plan.title}>
+            <div className={`plancard__doc${expanded ? ' is-open' : ''}`}><Markdown text={plan.content} className="md--compact" /></div>
+            <div className="plancard__tools">
+              <button type="button" onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show the whole plan'}</button>
+              <button type="button" onClick={() => open('docs', planId)}><Icon name="file" size={12} /> Open beside the chat</button>
+            </div>
+          </section>
+        // Opens the plan itself (the newest plan artifact of this round), not just the list.
+        : <button type="button" className="plancard__open" onClick={() => open('docs', planId)}><Icon name="file" size={13} /> Open the plan</button>}
+      <p className="plancard__ask">Would you like to proceed?</p>
+      <div className="plancard__opts" role="radiogroup" aria-label="How to proceed">
+        {PLAN_CHOICES.map((option, index) => (
+          <button key={option.value} type="button" role="radio" aria-checked={choice === option.value} className="plancard__opt" onClick={() => setChoice(option.value)}>
+            <kbd>{index + 1}</kbd>
+            <span className="plancard__text"><span className="plancard__label">{option.label}</span><span className="plancard__detail">{option.detail}</span></span>
+          </button>
+        ))}
+      </div>
+      {choice === 'keep' && <textarea className="plancard__note" aria-label="Refine the plan" placeholder="Tell the agent what to change, add or drop" rows={2} value={note} autoFocus
+        onChange={event => setNote(event.target.value)}
+        onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} />}
+      <div className="plancard__actions">
+        <button type="button" className="plancard__submit" disabled={!canSubmit} onClick={submit}>{choice === 'keep' ? 'Send feedback' : 'Continue with the plan'} <kbd>⌘</kbd><kbd>↵</kbd></button>
       </div>
     </div>
   )

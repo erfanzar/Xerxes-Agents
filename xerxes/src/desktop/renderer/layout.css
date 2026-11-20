@@ -146,6 +146,10 @@
 :root:not(#layout) .atelier .browser-panel__portstate{color:var(--x-meta)}
 :root:not(#layout) .atelier .browser-panel__port[data-state='failed'] .browser-panel__portstate{color:var(--x-failed)}
 :root:not(#layout) .atelier .browser-panel__page{flex:1 1 auto;min-height:120px;border:1px solid var(--x-hairline);border-radius:8px;display:grid;place-items:center;background:var(--x-sunken,transparent)}
+/* A failed load hides the native page (Chromium's blank sheet) and explains itself here. */
+:root:not(#layout) .atelier .browser-panel__failed{display:grid;justify-items:center;gap:8px;max-width:440px;padding:16px;text-align:center}
+:root:not(#layout) .atelier .browser-panel__failed strong{font:500 14px/1.4 var(--sans);color:var(--x-title);overflow-wrap:anywhere}
+:root:not(#layout) .atelier .browser-panel__failed p{margin:0;font:400 12.5px/1.5 var(--sans);color:var(--x-secondary);overflow-wrap:anywhere}
 :root:not(#layout) .atelier .code-completion__doc{margin:0;padding:6px 10px;border-top:1px solid var(--x-hairline);max-height:120px;overflow:auto;white-space:pre-wrap;color:var(--x-prose);font-size:.9em}
 /* ── Controls ─────────────────────────────────────────────────────────
    .btn is Claude Code's grey button, .btn--solid the primary. */
@@ -646,7 +650,43 @@
 :root:not(#layout) .atelier .rail-add__menu{position:absolute;top:calc(100% + 4px);right:0;z-index:40;display:flex;flex-direction:column;min-width:180px;padding:4px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
 :root:not(#layout) .atelier .desktop-rail>header .rail-add__menu>button.rail-add__item{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;height:28px;padding:0 10px;border:0;border-radius:6px;background:none;color:var(--x-title);font:400 12.5px/1 var(--sans);text-align:left;cursor:pointer}
 :root:not(#layout) .atelier .rail-add__item:hover,:root:not(#layout) .atelier .rail-add__item:focus-visible{background:var(--x-chip)}
-/* Plan ready card: open the plan, refine it with a note, or continue with it. */
+/* Plan card, as Claude Code shows it: "Ready to code?", the plan itself (a folded preview that unfolds
+   in place), "Would you like to proceed?" and its three numbered answers. */
+:root:not(#layout) .atelier .plancard{display:grid;gap:10px;padding:12px 14px;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-card);box-shadow:var(--x-elev);outline:none}
+:root:not(#layout) .atelier .plancard:focus-visible{border-color:var(--x-focus)}
+:root:not(#layout) .atelier .plancard__head{display:flex;align-items:center;gap:8px}
+:root:not(#layout) .atelier .plancard__dot{width:7px;height:7px;border-radius:50%;background:var(--x-accent);flex:none}
+:root:not(#layout) .atelier .plancard__title{font:600 14px/1.3 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .plancard__tag{font:400 12px/1 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .plancard__hide{margin-left:auto;display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:none;color:var(--x-meta);cursor:pointer}
+:root:not(#layout) .atelier .plancard__hide:hover{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout) .atelier .plancard__plan{border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-sunken,transparent);overflow:hidden}
+:root:not(#layout) .atelier .plancard__doc{position:relative;max-height:200px;overflow:hidden;padding:10px 14px}
+:root:not(#layout) .atelier .plancard__doc:not(.is-open)::after{content:'';position:absolute;inset:auto 0 0 0;height:48px;background:linear-gradient(transparent,var(--x-sunken,var(--x-card)));pointer-events:none}
+:root:not(#layout) .atelier .plancard__doc.is-open{max-height:min(60vh,640px);overflow:auto}
+:root:not(#layout) .atelier .plancard__doc .md{max-height:none;overflow:visible;padding:0;font-size:13px}
+:root:not(#layout) .atelier .plancard__tools{display:flex;gap:4px;padding:4px 6px;border-top:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .plancard__tools>button,:root:not(#layout) .atelier .plancard__open{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:0;border-radius:6px;background:none;color:var(--x-secondary);font:500 12px/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .plancard__open{justify-self:start;padding:0}
+:root:not(#layout) .atelier :is(.plancard__tools>button,.plancard__open):hover{color:var(--x-title);background:var(--x-chip)}
+:root:not(#layout) .atelier .plancard__ask{margin:2px 0 0;font:500 13px/1.4 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .plancard__opts{display:grid;gap:2px}
+:root:not(#layout) .atelier .plancard__opt{display:flex;align-items:flex-start;gap:10px;width:100%;padding:7px 10px;border:1px solid transparent;border-radius:8px;background:none;text-align:left;cursor:pointer}
+:root:not(#layout) .atelier .plancard__opt:hover{background:var(--x-chip)}
+:root:not(#layout) .atelier .plancard__opt[aria-checked='true']{border-color:var(--x-accent);background:var(--x-accent-soft)}
+:root:not(#layout) .atelier .plancard__opt>kbd{flex:none;display:grid;place-items:center;width:18px;height:18px;margin-top:1px;border:1px solid var(--x-hairline);border-radius:5px;font:500 11px/1 var(--sans);color:var(--x-meta);background:none}
+:root:not(#layout) .atelier .plancard__opt[aria-checked='true']>kbd{border-color:var(--x-accent);color:var(--x-accent)}
+:root:not(#layout) .atelier .plancard__text{display:grid;gap:2px;min-width:0}
+:root:not(#layout) .atelier .plancard__label{font:500 13px/1.35 var(--sans);color:var(--x-title)}
+:root:not(#layout) .atelier .plancard__detail{font:400 12px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout) .atelier .plancard__note{box-sizing:border-box;width:100%;min-height:56px;max-height:160px;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 13px/1.4 var(--sans);resize:none;field-sizing:content}
+:root:not(#layout) .atelier .plancard__note:focus{outline:none;border-color:var(--x-focus)}
+:root:not(#layout) .atelier .plancard__actions{display:flex;justify-content:flex-end}
+:root:not(#layout) .atelier .plancard__submit{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-on-accent,#fff);font:500 13px/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .plancard__submit:disabled{opacity:.45;cursor:default}
+:root:not(#layout) .atelier .plancard__submit kbd{font:500 11px/1 var(--sans);opacity:.75;background:none;border:0;padding:0}
+:root[data-style='neo']:not(#layout) .atelier :is(.plancard,.plancard__plan,.plancard__opt,.plancard__note,.plancard__submit,.plancard__opt>kbd){border-radius:0}
+/* Plan ready card (legacy class names, kept for other surfaces). */
 /* A plan decision is not a risky tool approval: the plain card look, no warning tint, and tight spacing. */
 :root:not(#layout) .atelier .approval.approval--plan{border:1px solid var(--x-hairline);background:var(--x-card);box-shadow:var(--x-elev);padding:10px 12px;gap:8px}
 :root:not(#layout) .atelier .approval--plan .approval__dot{background:var(--x-accent);box-shadow:none;animation:none}

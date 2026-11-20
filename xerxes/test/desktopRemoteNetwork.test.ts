@@ -6,7 +6,7 @@ import type { ChildProcess } from 'node:child_process'
 
 import { expect, test } from 'bun:test'
 
-import { browserUrl, forwardArgs, MAX_PORT_FORWARDS, RemoteNetwork, validRemotePort } from '../src/desktop/main/remoteNetwork.js'
+import { browserLoadError, browserUrl, forwardArgs, MAX_PORT_FORWARDS, RemoteNetwork, validRemotePort } from '../src/desktop/main/remoteNetwork.js'
 
 const machine = { alias: 'tpu', target: 'erfan@tpu.example.test', workspacePath: '/home/erfan/proj' }
 
@@ -54,6 +54,16 @@ test('port validation and the address the tab loads', () => {
   expect(() => browserUrl('file:///etc/passwd')).toThrow('http')
   expect(() => browserUrl('javascript:alert(1)')).toThrow()
   expect(() => browserUrl('  ')).toThrow()
+})
+
+test('a refused address over SSH says the destination refused, not just the opaque SOCKS code', () => {
+  const refused = browserLoadError(-120, 'ERR_SOCKS_CONNECTION_FAILED', 'http://10.164.2.31:9090/', 'v5p-128-develop')
+  expect(refused).toContain('v5p-128-develop could not reach 10.164.2.31:9090')
+  expect(refused).toContain('service may be stopped')
+  expect(refused).toEndWith('ERR_SOCKS_CONNECTION_FAILED (-120)')
+  expect(browserLoadError(-130, 'ERR_PROXY_CONNECTION_FAILED', 'http://localhost:8080/', 'tpu')).toContain('connection to tpu is down')
+  expect(browserLoadError(-102, 'ERR_CONNECTION_REFUSED', 'http://localhost:3000/', null)).toBe('Could not reach localhost:3000. ERR_CONNECTION_REFUSED (-102)')
+  expect(browserLoadError(-3, 'ERR_ABORTED', 'not a url', null)).toBe('ERR_ABORTED (-3)')
 })
 
 test('forwards reuse one process per port, list their state and stop on request', async () => {

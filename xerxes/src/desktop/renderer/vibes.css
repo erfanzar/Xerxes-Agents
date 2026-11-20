@@ -288,6 +288,25 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock{padding:8px 20px 12px;background:var(--x-screen)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock>:is(.composer-dock,.composer__toolbar){box-sizing:border-box;width:100%;max-width:768px;margin-left:auto;margin-right:auto}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock .supervisor__hint{max-width:none;margin:0;text-align:left;color:var(--x-meta)}
+/* XERXES speaks with a signature, not a chat avatar: the mark sits in a gutter with a soft glow, the
+   name is a tracked wordmark in the accent, and a fading accent rail runs down beside the reply so
+   the supervisor's voice reads apart from a task chat. The time stays quiet until hover. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes{position:relative;padding-left:28px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes::before{content:'';position:absolute;left:8px;top:26px;bottom:2px;width:2px;background:linear-gradient(to bottom,color-mix(in srgb,var(--x-accent) 65%,transparent),transparent 85%)}
+:root[data-style='vibes']:not(#vibes) .atelier .supervisor__message--xerxes::before{border-radius:2px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head{height:20px;gap:10px;margin-left:-28px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__avatar{width:18px;height:18px;border:0;border-radius:0;background:transparent;color:var(--x-accent);filter:drop-shadow(0 0 6px color-mix(in srgb,var(--x-accent) 55%,transparent))}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__who{font:600 11px/1 var(--sans);letter-spacing:.18em;background:linear-gradient(90deg,var(--x-accent),var(--x-working));-webkit-background-clip:text;background-clip:text;color:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head time{font:400 11.5px/1 var(--sans);color:var(--x-meta);opacity:.55;transition:opacity 120ms ease}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes:is(:hover,:focus-within) .xmsg__head time{opacity:1}
+/* Jump to latest: Claude's small round ↓ button instead of a wide pill lying over the text. The words
+   stay in the tooltip and for screen readers; a running turn tints the ring. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .jump-latest{width:32px;height:32px;padding:0;gap:0;justify-content:center;background:var(--x-popover);border:1px solid var(--x-separator);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .jump-latest{border-radius:50%}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .jump-latest[data-working]{border-color:var(--x-working);color:var(--x-working)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .jump-latest__label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+/* The agent's message box spans the same column as its conversation (the task composer does the same). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap.agent-dock{max-width:calc(var(--conversation-width) + 48px)}
 /* The controls dialog (Model, Autopilot, Watch) uses the Settings frame. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal.xcontrols{background:var(--x-popover);border:1px solid var(--x-hairline)}
 :root[data-style='vibes']:not(#vibes) .atelier .modal.xcontrols{border-radius:12px}

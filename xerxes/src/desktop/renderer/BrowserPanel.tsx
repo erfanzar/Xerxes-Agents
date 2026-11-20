@@ -124,7 +124,7 @@ export function BrowserPanel(): ReactElement {
       <Icon name={via ? 'cloud' : 'laptop'} size={12} />
       {via ? <>Traffic leaves from <strong>{via}</strong>. localhost here is that machine.</> : <>Traffic leaves from this computer.</>}
     </p>
-    {(error || state?.error) && <p className="browser-panel__error" role="alert">{error || state?.error}</p>}
+    {error && <p className="browser-panel__error" role="alert">{error}</p>}
     {showPorts && <section className="browser-panel__ports" aria-label="Forwarded ports">
       {via ? <form onSubmit={event => { event.preventDefault(); void forward() }}>
         <input aria-label="Remote port" inputMode="numeric" placeholder={`Port on ${via}`} value={portInput} onChange={event => setPortInput(event.target.value.replace(/[^0-9]/g, '').slice(0, 5))} />
@@ -140,6 +140,11 @@ export function BrowserPanel(): ReactElement {
     </section>}
     <div ref={page} className="browser-panel__page" aria-label={state?.title || 'Page'}>
       {!state?.url && <p className="studio-muted">Type an address, or just a port such as <code>8080</code>.</p>}
+      {state?.url && state.error && <div className="browser-panel__failed" role="alert">
+        <strong>Couldn’t open {displayUrl(state.url)}</strong>
+        <p>{state.error}</p>
+        <button type="button" className="btn" onClick={() => void run(() => bridge.browser!('reload'))}>Try again</button>
+      </div>}
     </div>
   </div>
 }
