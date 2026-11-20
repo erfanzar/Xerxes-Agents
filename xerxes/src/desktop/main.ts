@@ -46,7 +46,7 @@ import {
   type RemoteConnection,
   type RemoteTarget,
 } from './main/remote.js'
-import { goalPhaseNotification, notificationFor, type NotifyDecision } from './main/notify.js'
+import { shouldNotify } from './main/notify.js'
 import { createCliRunner } from './main/hubCli.js'
 import { createHubCockpit } from './main/hubCockpit.js'
 import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
@@ -121,34 +121,32 @@ function appIcon(): ReturnType<typeof nativeImage.createFromPath> | undefined {
 }
 
 // ── Native notifications + launch at login ──────────────────────────────
-// Needs-input (approval, question) and task-finished moments deserve a ping
-// only when the user is NOT already looking at the app — the preference and
-// the focus gate both live here in the main process, next to the event pipe.
+// Local and SSH workspace events share the same native display policy.
 
 let notificationsEnabled = true
 
 /** Last goal phase seen per session, so a repeated status_update never pings twice. */
 const goalPhases = new Map<string, string>()
 
-function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>): void {
-  // Tracked even while focused, so returning focus never replays an old phase change.
-  let goalDecision: NotifyDecision | null = null
+function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>, stillBound: () => boolean): void {
+  // Track transitions even when notifications are off, so enabling them never replays one.
+  let previousGoalPhase: string | undefined
   if (type === 'status_update' && typeof payload.goal_phase === 'string') {
     const key = typeof payload.session_id === 'string' ? payload.session_id : ''
-    goalDecision = goalPhaseNotification(goalPhases.get(key), payload)
+    previousGoalPhase = goalPhases.get(key)
     goalPhases.set(key, payload.goal_phase)
   }
-  if (!notificationsEnabled || !Notification.isSupported()) return
-  if (window.isDestroyed() || window.isFocused())
-    return
-  const decision = goalDecision ?? notificationFor({ type, payload })
+  if (window.isDestroyed() || !Notification.isSupported()) return
+  const decision = shouldNotify({ type, payload }, { enabled: notificationsEnabled, anyWindowFocused: window.isFocused() }, previousGoalPhase)
   if (!decision) return
   const ping = new Notification({ title: decision.title, body: decision.body })
   ping.on('click', () => {
-    if (window.isDestroyed()) return
+    if (window.isDestroyed() || contents.isDestroyed() || !stillBound()) return
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
+    // The host may still be showing another retained local or SSH workspace.
+    activateSurface(contents.id)
     // Open what the notification was about: its task, and an artifact when there is one.
     if (decision.target && !contents.isDestroyed()) contents.send('desktop:navigate', decision.target)
   })
@@ -507,7 +505,11 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   surfaceSessions.set(id, session)
   activateSurface(id)
   const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => {
-    maybeNotify(window, contents, type, payload)
+    // Some session-bound events omit the id. Capture the owning task now,
+    // before a later session.open changes what this surface shows.
+    const current = session.current
+    maybeNotify(window, contents, type, current && payload.session_id === undefined ? { ...payload, session_id: current } : payload,
+      () => workspaceSurfaces.has(id) && daemon === next)
     // A turn that ended (perhaps because access was lost while it ran, after
     // an app restart) leaves the conversation idle: bind it again now, so a
     // Retry works instead of failing the same way.

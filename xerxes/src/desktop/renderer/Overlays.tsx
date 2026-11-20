@@ -583,7 +583,7 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
       <div className="row">
         <div className="row__main">
           <div className="row__t">Notifications</div>
-          <div className="row__s">When a task needs you or finishes, while Xerxes is in the background</div>
+          <div className="row__s">Show system notifications when a task needs you, stops, fails, or finishes</div>
         </div>
         <button
           className={`switch${notifications ? ' is-on' : ''}`}

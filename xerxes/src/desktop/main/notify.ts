@@ -7,6 +7,8 @@
  * headlessly while the display side stays in main.ts.
  */
 
+import { turnOutcomeLabel, turnOutcomeReason } from '../../types/turnOutcome.js'
+
 export interface NotifyEvent {
   readonly type: string
   readonly payload: Record<string, unknown>
@@ -52,11 +54,15 @@ export function notificationFor(event: NotifyEvent): NotifyDecision | null {
       // time guard cut off, an unstarted submission) tells the user the
       // opposite of what happened.
       if (payload.unstarted === true) return null
-      if (payload.cancelled === true) {
+      const reason = turnOutcomeReason(payload.stop_reason)
+      if (payload.cancelled === true || reason === 'aborted') {
         return { title: 'Task stopped', body: 'The current task was interrupted before it finished.', target: targetOf(payload) }
       }
-      if (payload.failed === true || text(payload.error)) {
+      if (reason === 'provider_failed' || reason === 'turn_failed' || payload.failed === true || text(payload.error)) {
         return { title: 'Task failed', body: truncate(text(payload.error) || 'The current task ended with an error.'), target: targetOf(payload) }
+      }
+      if (reason && reason !== 'completed' && reason !== 'objective_verified') {
+        return { title: 'Task stopped', body: turnOutcomeLabel(reason), target: targetOf(payload) }
       }
       return { title: 'Task finished', body: 'The current task completed.', target: targetOf(payload) }
     }
@@ -113,8 +119,13 @@ export function goalPhaseNotification(previous: string | undefined, payload: Rec
 export function shouldNotify(
   event: NotifyEvent,
   state: { readonly enabled: boolean; readonly anyWindowFocused: boolean },
+  previousGoalPhase?: string,
 ): NotifyDecision | null {
   if (!state.enabled) return null
-  if (state.anyWindowFocused) return null
-  return notificationFor(event)
+  // Task outcomes and requests for attention matter even while working in the app.
+  // Artifact saves, by contrast, already appear in the workspace.
+  if (state.anyWindowFocused && event.type === 'tool_result') return null
+  return event.type === 'status_update'
+    ? goalPhaseNotification(previousGoalPhase, event.payload)
+    : notificationFor(event)
 }

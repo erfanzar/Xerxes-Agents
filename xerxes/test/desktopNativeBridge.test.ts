@@ -33,7 +33,17 @@ describe('native notification decisions', () => {
   test('the gate: preference first, then window focus', () => {
     const event = { type: 'turn_end', payload: {} }
     expect(shouldNotify(event, { enabled: false, anyWindowFocused: false })).toBeNull()
-    expect(shouldNotify(event, { enabled: true, anyWindowFocused: true })).toBeNull()
+    const foreground = { enabled: true, anyWindowFocused: true }
+    expect(shouldNotify(event, foreground)?.title).toBe('Task finished')
+    expect(shouldNotify({ type: 'approval_request', payload: { name: 'WriteFile' } }, foreground)?.title).toBe('Approval needed')
+    expect(shouldNotify({ type: 'question_request', payload: { questions: [{ question: 'Which?' }] } }, foreground)?.body).toBe('Which?')
+    const goal = { type: 'status_update', payload: { goal_phase: 'blocked' } }
+    expect(shouldNotify(goal, foreground, 'active')?.title).toBe('Goal blocked — needs you')
+    expect(shouldNotify(goal, foreground, 'blocked')).toBeNull()
+    expect(shouldNotify(goal, { ...foreground, enabled: false }, 'active')).toBeNull()
+    const artifact = { type: 'tool_result', payload: { name: 'ArtifactTool', result: 'Created artifact "Plan" (id a, version 1)' } }
+    expect(shouldNotify(artifact, foreground)).toBeNull()
+    expect(shouldNotify(artifact, { ...foreground, anyWindowFocused: false })?.title).toBe('New artifact')
     expect(shouldNotify(event, { enabled: true, anyWindowFocused: false })).toMatchObject({ title: 'Task finished' })
   })
 
@@ -53,6 +63,15 @@ describe('native notification decisions', () => {
     expect(notificationFor({ type: 'turn_end', payload: { session_id: 's9' } })).toMatchObject({ title: 'Task finished', target: { sessionId: 's9' } })
     expect(notificationFor({ type: 'turn_end', payload: { session_id: 's9', error: 'provider 500' } })).toMatchObject({ title: 'Task failed', body: 'provider 500' })
     expect(notificationFor({ type: 'question_request', payload: { session_id: 's9', questions: [{ question: 'Which?' }] } })).toMatchObject({ target: { sessionId: 's9' } })
+  })
+
+  test.each([
+    ['completed', 'Task finished'], ['objective_verified', 'Task finished'],
+    ['provider_failed', 'Task failed'], ['turn_failed', 'Task failed'],
+    ['aborted', 'Task stopped'], ['tool_budget_exhausted', 'Task stopped'],
+  ])('daemon turn_end stop_reason %s reports %s in foreground', (stop_reason, title) => {
+    expect(shouldNotify({ type: 'turn_end', payload: { session_id: 's1', stop_reason } }, { enabled: true, anyWindowFocused: true }))
+      .toMatchObject({ title, target: { sessionId: 's1' } })
   })
 
   test('interrupted turns report stopped, unstarted turns stay quiet', () => {
