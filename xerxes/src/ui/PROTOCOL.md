@@ -1427,6 +1427,25 @@ same lifecycle through the native slash handler. It may interrupt requests using
 that host. It does not modify configuration, replay requests or immediately start
 a replacement. The next request may initialize a new host after cleanup succeeds.
 
+### Editor completion and formatting
+
+These serve the desktop file editor. Both require an active session (the normal
+session selector) and take `{ path, text }`: `path` is non-empty and at most
+4096 characters, and `text` is the editor's current, possibly unsaved, buffer
+of at most 1 MiB. Invalid input returns `{ ok: false, code: 'invalid_request', error }`.
+
+`lsp.complete` also takes nonnegative integer `line` and `character` (0-based)
+and returns `{ ok: true, items, incomplete }` from the workspace's language
+server. Only the newest request per connection runs: a newer one aborts the
+previous one, which answers `{ ok: false, code: 'cancelled' }`. A missing host
+answers `code: 'unavailable'` and a server error answers `code: 'failed'` with
+a message clipped to 500 characters.
+
+`code.format` returns `{ ok: true, text, formatter }` with the formatted
+buffer and the name of the formatter used. It never writes the file; the
+editor applies the text. Missing host support answers `code: 'unavailable'`
+and formatter errors answer `code: 'failed'`.
+
 ### Language-server settings RPC
 
 `lsp.settings.get` requires an active session and returns `{ ok: true, revision,
