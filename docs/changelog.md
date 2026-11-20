@@ -7,6 +7,11 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.51 — 2026-11-20
+
+- **Cache numbers no longer double count.** On OpenAI-compatible streams, a frame reporting 1,000 input tokens before a later frame said 700 were cached was counted as 1,000 fresh plus 700 cached. It now ends as 300 fresh plus 700 cached.
+- **One cache hit rate everywhere.** The cost tracker and the terminal status bar left cache writes out of the denominator, so 100 read and 100 written showed 100% there and 50% in the daemon and Desktop. All of them now divide reads by fresh + read + written input.
+
 ## 0.8.50 — 2026-11-20
 
 - **XERXES on Slack.** The Hub can connect XERXES to Slack as the signed-in user (OAuth install, user scopes only). It talks only in one-to-one DMs with peers you approve, through a policy-gated transport, and the supervisor gets Slack tools. Desktop has the Slack settings. Setup: `docs/supervisor-slack.md`.
