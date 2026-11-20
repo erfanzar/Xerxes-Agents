@@ -1699,8 +1699,7 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
       setNote('')
       return
     }
-    store.approve(approval.id, 'allow_once')
-    store.setPermissionMode(choice)
+    store.approvePlan(approval.id, choice)
   }
   const canSubmit = choice !== 'keep' || note.trim() !== ''
   return (
@@ -1715,7 +1714,7 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
         <span className="plancard__dot" aria-hidden="true" />
         <span className="plancard__title">Ready to code?</span>
         <span className="plancard__tag">Plan ready</span>
-        <button type="button" className="plancard__hide" title="Hide until you decide; the plan stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
+        <button type="button" className="plancard__hide" title="Hide this card without stopping the plan timer" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
       </div>
       {plan
         ? <section className="plancard__plan" aria-label={plan.title}>
@@ -1728,6 +1727,7 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
         // Opens the plan itself (the newest plan artifact of this round), not just the list.
         : <button type="button" className="plancard__open" onClick={() => open('docs', planId)}><Icon name="file" size={13} /> Open the plan</button>}
       <p className="plancard__ask">Would you like to proceed?</p>
+      {approval.autoAcceptAt !== undefined && <p>If you don’t respond by {new Date(approval.autoAcceptAt).toLocaleTimeString()}, the plan will proceed with edits and commands automatically approved (3-minute timeout).</p>}
       <div className="plancard__opts" role="radiogroup" aria-label="How to proceed">
         {PLAN_CHOICES.map((option, index) => (
           <button key={option.value} type="button" role="radio" aria-checked={choice === option.value} className="plancard__opt" onClick={() => setChoice(option.value)}>

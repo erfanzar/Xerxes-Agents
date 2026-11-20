@@ -274,6 +274,8 @@ export interface SessionRow {
 // ── Approval ────────────────────────────────────────────────────────────
 
 export interface Approval {
+  /** Desktop's absolute unattended-plan deadline, in Unix milliseconds. */
+  readonly autoAcceptAt?: number
   readonly id: string
   readonly action: string
   readonly description: string

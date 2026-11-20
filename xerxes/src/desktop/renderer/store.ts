@@ -1805,7 +1805,25 @@ export class Store {
       .finally(() => { this.openingFreshTask = false })
   }
 
+  private planTimer: ReturnType<typeof setTimeout> | undefined
+
+  approvePlan(requestId: string, mode: 'accept-all' | 'manual'): void {
+    const pending = this.frame.approval
+    if (pending?.id !== requestId || !/^ExitPlanMode(Tool)?$/.test(pending.toolName || pending.action)) return
+    this.respondApproval(requestId, 'allow_once', mode)
+  }
+
   approve(requestId: string, response: ApprovalResponse): void {
+    this.respondApproval(requestId, response)
+  }
+
+  private respondApproval(requestId: string, response: ApprovalResponse, planMode?: 'accept-all' | 'manual'): void {
+    const pending = this.frame.approval
+    if (pending?.id !== requestId) return
+    if (pending.autoAcceptAt !== undefined) {
+      const { autoAcceptAt: _deadline, ...manualOnly } = pending
+      this.patch({ approval: manualOnly })
+    }
     const sessionKey = this.sessionKey
     const sessionId = this.frame.currentId
     const isCurrent = () => this.sessionKey === sessionKey && this.frame.currentId === sessionId
@@ -1818,6 +1836,11 @@ export class Store {
     void this.bridge
       .call('permission_response', { request_id: requestId, response: wire })
       .then(result => {
+        // approval_response can remove the card before the RPC reply. Only
+        // the daemon-confirmed winner may change this session's policy.
+        if (planMode && result.ok === true && this.sessionKey === sessionKey && this.frame.currentId === sessionId) {
+          this.setPermissionMode(planMode)
+        }
         if (!isCurrent()) return
         // Clear only on confirmation: a refused response (unknown id, another
         // connection owns it) leaves the request pending daemon-side, and
@@ -4461,7 +4484,9 @@ export class Store {
       }
       case 'approval_request': {
         const id = str(payload.id) || str(payload.request_id)
-        if (!id) break
+        if (!id || this.frame.approval?.id === id) break
+        const name = str(payload.tool_name) || str(payload.name) || str(payload.action)
+        const autoAcceptAt = /^ExitPlanMode(Tool)?$/.test(name) ? Date.now() + 180_000 : undefined
         // The daemon attaches the real arguments as `inputs` (and older
         // builds as `arguments`). Keep them structured for the card to
         // render per tool; the flat description is only the last resort.
@@ -4476,6 +4501,7 @@ export class Store {
         this.patch({
           approval: {
             id,
+            ...(autoAcceptAt === undefined ? {} : { autoAcceptAt }),
             action: str(payload.action),
             description,
             ...(str(payload.tool_call_id) ? { toolCallId: str(payload.tool_call_id) } : {}),
@@ -4776,6 +4802,7 @@ export class Store {
   // ── Snapshot plumbing ────────────────────────────────────────────────
 
   private patch(merge: Partial<Snapshot> | Record<string, unknown>): void {
+    const before = this.frame
     this.frame = this.frozen({
       ...this.frame,
       ...merge,
@@ -4784,6 +4811,17 @@ export class Store {
       turnCount: this.turnCount,
       snippets: this.snippets,
     })
+    const pending = this.frame.approval
+    if (pending !== before.approval || before.currentId !== this.frame.currentId || this.frame.connection === 'offline') {
+      clearTimeout(this.planTimer)
+      this.planTimer = undefined
+      if (pending !== before.approval && pending?.autoAcceptAt !== undefined && this.frame.connection !== 'offline') {
+        const { isCurrent } = this.captureSessionRequest()
+        this.planTimer = setTimeout(() => {
+          if (isCurrent() && this.frame.approval === pending) this.approvePlan(pending.id, 'accept-all')
+        }, Math.max(0, pending.autoAcceptAt - Date.now()))
+      }
+    }
     if ('currentId' in merge || 'cwd' in merge) rememberSession((this.frame.storageScope ?? '') + this.frame.cwd, this.frame.currentId)
     // Structural change (connection, approval, tab, session): render now.
     // Only the per-token streaming path below is allowed to wait a frame.

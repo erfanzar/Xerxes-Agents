@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from 'bun:test'
 
 import { daemonCompatibilityWarning } from '../src/desktop/renderer/buildInfo.js'
 import { STOP_CONFIRM_MS, Store, type XerxesLike } from '../src/desktop/renderer/store.js'
@@ -2625,6 +2625,41 @@ describe('pending interactions are bounded by their turn', () => {
     await Bun.sleep(10)
     return { bridge, store }
   }
+
+  test('unattended plan chooses the first option at three minutes, not before', async () => {
+    const { bridge, store } = await start()
+    bridge.respondWith(() => ({ ok: true }))
+    jest.useFakeTimers()
+    try {
+      bridge.push('approval_request', { id: 'plan', tool_name: 'ExitPlanModeTool' })
+      expect(store.getSnapshot().approval?.autoAcceptAt).toBe(Date.now() + 180_000)
+      jest.advanceTimersByTime(179_999)
+      expect(bridge.calls.some(c => c.method === 'permission_response')).toBe(false)
+      bridge.push('approval_request', { id: 'plan', tool_name: 'ExitPlanModeTool' })
+      jest.advanceTimersByTime(1)
+      await Promise.resolve()
+      expect(bridge.calls.filter(c => c.method === 'permission_response').map(c => c.params)).toEqual([{ request_id: 'plan', response: 'approve' }])
+      expect(bridge.calls.some(c => c.params.command === '/permissions accept-all')).toBe(true)
+    } finally { jest.useRealTimers() }
+  })
+
+  test.each(['cancel', 'manual', 'replace', 'answered', 'refused'])('unattended plan never escalates after %s', async action => {
+    const { bridge, store } = await start()
+    bridge.respondWith(() => ({ ok: action !== 'refused' }))
+    jest.useFakeTimers()
+    try {
+      bridge.push('approval_request', { id: 'plan', action: 'ExitPlanMode' })
+      if (action === 'cancel') store.cancel()
+      if (action === 'manual') store.approvePlan('plan', 'manual')
+      if (action === 'answered') bridge.push('approval_response', { request_id: 'plan' })
+      if (action === 'replace') bridge.push('approval_request', { id: 'exec', tool_name: 'Bash' })
+      jest.advanceTimersByTime(180_000)
+      await Promise.resolve()
+      expect(bridge.calls.filter(c => c.method === 'permission_response')).toHaveLength(['manual', 'refused'].includes(action) ? 1 : 0)
+      expect(bridge.calls.some(c => c.params.command === '/permissions manual')).toBe(action === 'manual')
+      expect(bridge.calls.some(c => c.params.command === '/permissions accept-all')).toBe(false)
+    } finally { jest.useRealTimers() }
+  })
 
   test('turn_end clears an approval that was never answered', async () => {
     const { bridge, store } = await start()
