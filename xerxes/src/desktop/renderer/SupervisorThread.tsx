@@ -11,7 +11,6 @@ import { AgentOrb } from './AgentOrb.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
-import { SimurghMark } from './SimurghMark.js'
 
 /**
  * The XERXES conversation, shared by Chat and Activity. People and XERXES get
@@ -107,7 +106,6 @@ function MessageRow({ message, now, pending = false }: { readonly message: Super
     return (
       <li className="supervisor__message supervisor__message--xerxes">
         <div className="xmsg__head">
-          <span className="xmsg__avatar" aria-hidden="true"><SimurghMark size={17} /></span>
           <span className="xmsg__who">XERXES</span>
           <span>{voice}</span>
           {time}

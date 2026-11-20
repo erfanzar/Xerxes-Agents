@@ -288,17 +288,14 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock{padding:8px 20px 12px;background:var(--x-screen)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock>:is(.composer-dock,.composer__toolbar){box-sizing:border-box;width:100%;max-width:768px;margin-left:auto;margin-right:auto}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock .supervisor__hint{max-width:none;margin:0;text-align:left;color:var(--x-meta)}
-/* XERXES speaks with a signature, not a chat avatar: the mark sits in a gutter with a soft glow, the
-   name is a tracked wordmark in the accent, and a fading accent rail runs down beside the reply so
-   the supervisor's voice reads apart from a task chat. The time stays quiet until hover. */
+/* XERXES speaks with a signature, not a chat avatar: no mark at all, the name is a tracked wordmark
+   in the accent, and a fading accent rail runs down beside the reply so the supervisor's voice reads
+   apart from a task chat. The time stays quiet until hover. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes{position:relative;padding-left:28px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes::before{content:'';position:absolute;left:8px;top:26px;bottom:2px;width:2px;background:linear-gradient(to bottom,color-mix(in srgb,var(--x-accent) 65%,transparent),transparent 85%)}
 :root[data-style='vibes']:not(#vibes) .atelier .supervisor__message--xerxes::before{border-radius:2px}
-:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head{height:20px;gap:10px;margin-left:-28px}
-/* The mark sits on a small quiet tile in the title colour. A blue glow on the bare bird read as a smudge. */
-:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__avatar{width:20px;height:20px;border:1px solid var(--x-hairline);background:var(--x-chip);color:var(--x-title);filter:none}
-:root[data-style='vibes']:not(#vibes) .atelier .xmsg__avatar{border-radius:6px}
-:root[data-style='neo']:not(#vibes) .atelier .xmsg__avatar{border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head{height:20px;gap:10px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes::before{top:4px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__who{font:600 11px/1 var(--sans);letter-spacing:.18em;background:linear-gradient(90deg,var(--x-accent),var(--x-working));-webkit-background-clip:text;background-clip:text;color:transparent}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xmsg__head time{font:400 11.5px/1 var(--sans);color:var(--x-meta);opacity:.55;transition:opacity 120ms ease}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__message--xerxes:is(:hover,:focus-within) .xmsg__head time{opacity:1}
