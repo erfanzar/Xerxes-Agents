@@ -10,6 +10,7 @@ import { ProviderError } from '../src/core/errors.js'
 import { profileAcceptsModel } from '../src/daemon/sessionProvider.js'
 import { runtimeConnection } from '../src/daemon/runtimeConnection.js'
 import {
+  CACHE_MARK_RETRY_MS,
   ClaudeCodeClient,
   claudeCodeArgv,
   claudeCodeFailure,
@@ -24,6 +25,7 @@ import {
   toolParameterTypes,
   MAX_NATIVE_CALL_RETRIES,
   NATIVE_CALL_CORRECTION,
+  type CacheMarkStepDown,
   type ClaudeCodeLauncher,
 } from '../src/llms/claudeCode.js'
 import { createLlmClient, type LlmDelta } from '../src/llms/client.js'
@@ -385,6 +387,34 @@ test('a 5m mark still refused falls back to no mark of ours, and the step succee
   expect((await collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content: 'hi' }] }))).text).toBe('Done.')
   const marks = inputs.map(input => (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).every(block => block.cache_control === undefined) ? 'none' : (JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>).at(-1)?.cache_control?.ttl)
   expect(marks).toEqual(['1h', '5m', 'none'])
+})
+
+test('a stepped-down cache mark is reported and 1h is tried again after five minutes, never kept for the whole connection', async () => {
+  const rejection = "API Error: 400 messages.1.content.0.cache_control.ttl: a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block. Note that blocks are processed in the following order: `tools`, `system`, `messages`."
+  const refused = fakeLauncher([result({ is_error: true, result: rejection, api_error_status: 400 })])
+  const working = fakeLauncher([textDelta('Done.'), result()])
+  const inputs: string[] = []
+  const reports: CacheMarkStepDown[] = []
+  let launches = 0
+  let now = 1_000_000
+  const launch: ClaudeCodeLauncher = (argv, spawn) => {
+    inputs.push(spawn.input)
+    return (launches++ < 2 ? refused : working).launch(argv, spawn)
+  }
+  const client = new ClaudeCodeClient({ executable: '/bin/claude', launch, workingDirectory: '/tmp', environment: { PATH: '/bin' }, now: () => now, onCacheMark: event => reports.push(event) })
+  const ask = (content: string) => collect(client.stream({ model: 'claude-code/opus', messages: [{ role: 'user', content }] }))
+  const marks = () => inputs.map(input => {
+    const content = JSON.parse(input).message.content as Array<{ cache_control?: { ttl: string } }>
+    return content.every(block => block.cache_control === undefined) ? 'none' : content.at(-1)?.cache_control?.ttl
+  })
+  expect((await ask('hi')).text).toBe('Done.')
+  expect(reports).toEqual([{ from: '1h', to: '5m', model: 'claude-code/opus' }, { from: '5m', to: 'none', model: 'claude-code/opus' }])
+  now += 60_000
+  await ask('again')
+  now += CACHE_MARK_RETRY_MS
+  await ask('later')
+  // Within the window the refused mark stays off; after it, the full 1h mark is back.
+  expect(marks()).toEqual(['1h', '5m', 'none', 'none', '1h'])
 })
 
 test('only the last transcript block carries the cache mark, so each step extends the previous entry', () => {

@@ -18,7 +18,7 @@
  * reuses the unchanged prefix from step to step instead of re-reading it.
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,6 +61,10 @@ export type ClaudeCodeLauncher = (argv: readonly string[], options: {
 export interface ClaudeCodeClientOptions {
   /** `claude` executable; defaults to `CLAUDE_CODE_CLI`, then PATH and the installers' locations. */
   readonly executable?: string
+  /** Clock for the cache-mark retry window (tests). */
+  readonly now?: () => number
+  /** Told each time the API refuses our transcript cache mark and it steps down; defaults to a log line. */
+  readonly onCacheMark?: (event: CacheMarkStepDown) => void
   readonly environment?: Readonly<Record<string, string | undefined>>
   /** A named account may not read the global keychain or borrow ambient auth. */
   readonly isolatedAuth?: boolean
@@ -180,6 +184,31 @@ export type TranscriptCacheMark = TranscriptCacheTtl | 'none'
 export function withTranscriptCacheMark(blocks: readonly InputBlock[], ttl: TranscriptCacheMark = '1h'): InputBlock[] {
   if (ttl === 'none') return [...blocks]
   return blocks.map((block, index) => index === blocks.length - 1 ? { ...block, cache_control: { type: 'ephemeral', ttl } } : block)
+}
+
+/** One refusal of our transcript cache mark: the mark it had and the one it steps down to. */
+export interface CacheMarkStepDown {
+  readonly from: TranscriptCacheMark
+  readonly to: TranscriptCacheMark
+  readonly model: string
+}
+
+/**
+ * How long a stepped-down mark is kept before 1h is tried again. A step-down
+ * used to last for the client's whole life: with no mark of ours, cache reads
+ * stopped at the system prompt (91,849 tokens) and every later step re-wrote
+ * the whole conversation, ~300K tokens a call, for ten hours (2026-11-20).
+ * Re-probing costs at most one refused launch per window.
+ */
+export const CACHE_MARK_RETRY_MS = 5 * 60_000
+
+/** Each step-down appends a line to ~/.xerxes/claude-code/cache-marks.jsonl; it used to leave no trace. */
+function recordCacheMark(event: CacheMarkStepDown): void {
+  try {
+    const directory = join(xerxesHome(), 'claude-code')
+    mkdirSync(directory, { recursive: true })
+    appendFileSync(join(directory, 'cache-marks.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n')
+  } catch { /* A diagnostic line must never fail the model call. */ }
 }
 
 /** The next mark to try after the API refused the TTL order: 1h, then 5m, then none. */
@@ -1029,8 +1058,12 @@ export class ClaudeCodeClient implements LlmClient {
   private readonly workingDirectory: string | undefined
   private readonly isolatedAuth: boolean
   private readonly subscriptionSession: AnthropicOAuthSession | undefined
+  private readonly now: () => number
+  private readonly reportCacheMark: (event: CacheMarkStepDown) => void
 
   constructor(options: ClaudeCodeClientOptions = {}) {
+    this.now = options.now ?? Date.now
+    this.reportCacheMark = options.onCacheMark ?? recordCacheMark
     this.environment = options.environment ?? process.env
     this.launch = options.launch ?? launchClaudeCode
     this.executableOverride = options.executable
@@ -1071,6 +1104,8 @@ export class ClaudeCodeClient implements LlmClient {
    * Text the failed attempt already showed is not shown twice.
    */
   async *stream(request: CompletionRequest, signal?: AbortSignal): AsyncIterable<LlmDelta> {
+    // A step-down is kept only for CACHE_MARK_RETRY_MS, then 1h is tried again.
+    if (this.transcriptCacheTtl !== '1h' && this.now() - this.cacheMarkSince >= CACHE_MARK_RETRY_MS) this.transcriptCacheTtl = '1h'
     let shown = ''
     for (let attempt = 0; ; attempt += 1) {
       let retraced = ''
@@ -1101,10 +1136,13 @@ export class ClaudeCodeClient implements LlmClient {
         // A 400 before any reply: our mark disagrees with Claude Code's own
         // markers on this request. Try 5m, then no mark of ours at all (on
         // alham the 5m retry was refused too, with a 1h block after it, and
-        // the step failed). Kept for this client's later steps.
+        // the step failed). Kept for CACHE_MARK_RETRY_MS of later steps, then
+        // 1h is tried again; each step-down is reported.
         const next = isCacheTtlOrderRejection(error) && !signal?.aborted ? nextTranscriptCacheMark(this.transcriptCacheTtl) : undefined
         if (next !== undefined) {
+          this.reportCacheMark({ from: this.transcriptCacheTtl, to: next, model: request.model })
           this.transcriptCacheTtl = next
+          this.cacheMarkSince = this.now()
           attempt -= 1
           continue
         }
@@ -1123,6 +1161,8 @@ export class ClaudeCodeClient implements LlmClient {
   private nativeTools = true
   /** Our transcript cache mark; stepped down (1h, 5m, none) each time the API refuses the TTL order. */
   private transcriptCacheTtl: TranscriptCacheMark = '1h'
+  /** When the mark last stepped down. */
+  private cacheMarkSince = 0
 
   private async *attempt(request: CompletionRequest, signal: AbortSignal | undefined, correction: string | undefined): AsyncIterable<LlmDelta> {
     signal?.throwIfAborted()
