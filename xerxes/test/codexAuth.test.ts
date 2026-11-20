@@ -544,7 +544,11 @@ test('codex requests carry OAuth headers and omit the parameters the backend rej
       model: 'codex/gpt-5.3-codex',
       messages: [{ role: 'system', content: 'Preserve the summary facts.' }, { role: 'user', content: 'Summarize.' }],
     })) { /* Drain the second request. */ }
-    expect(seenBody.instructions).toBe('Preserve the summary facts.')
+    // The system prompt leads `input` as a developer message so it is part of the cached
+    // prefix; `instructions` stays one fixed line (the whole prompt there was never cached).
+    expect(seenBody.instructions).toBe('You are a helpful assistant.')
+    expect((seenBody.input as unknown[])[0]).toEqual({ role: 'developer', content: 'Preserve the summary facts.' })
+    expect((seenBody.input as unknown[])[1]).toEqual({ role: 'user', content: 'Summarize.' })
     await compactionCompletionPort(client, 'codex/gpt-5.3-codex')({ prompt: 'Summarize this conversation without losing pending work.', maxTokens: 1024, temperature: 0, stream: false })
     expect(seenBody.instructions).toBe('You are a helpful assistant.')
   })

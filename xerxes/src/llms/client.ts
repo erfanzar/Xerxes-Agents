@@ -1930,6 +1930,9 @@ function wireToolNames(
   }
 }
 
+/** The fixed `instructions` the Codex subscription backend requires; the real system prompt rides in `input`. */
+export const CODEX_INSTRUCTIONS = 'You are a helpful assistant.'
+
 function responsesPayload(
   request: CompletionRequest,
   providerName: ProviderName,
@@ -1996,7 +1999,14 @@ function responsesPayload(
     // never reports cached_tokens — the API simply doesn't track them.
     // Unlike the public Responses endpoint, the subscription backend expects
     // instructions even for user-only requests (including context compaction).
-    payload.instructions = systemPrompt || 'You are a helpful assistant.'
+    //
+    // The system prompt goes first in `input` as a developer message, and
+    // `instructions` carries only a fixed line. With the whole prompt in
+    // `instructions`, every round left exactly the prompt's size uncached
+    // (a 164K-character prompt: ~39K tokens a round), while cache reads
+    // only ever covered the conversation before it.
+    payload.instructions = CODEX_INSTRUCTIONS
+    if (systemPrompt) payload.input = [{ role: 'developer', content: systemPrompt }, ...(payload.input as unknown[])]
     delete payload.max_output_tokens
     delete payload.temperature
     delete payload.top_p
