@@ -175,3 +175,27 @@ test('background and theme card descriptions wrap instead of being cut off', asy
   expect(rule).not.toContain('nowrap')
   expect(rule).not.toContain('ellipsis')
 })
+
+test('Vibes keeps Claude greys only without a background or colour theme, and dialogs follow either', async () => {
+  // Hard-coded greys (#1f1f1f Settings, #303030 menus, …) beat the derived tokens, so a purple
+  // background left Settings, menus and buttons flat grey.
+  const css = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map(match => ({ selector: match[1]!.trim(), body: match[2]! }))
+  const fixed = rules.filter(rule => /^:root\[data-style='vibes'\]/.test(rule.selector) && /(^|;)\s*(background|border-color|border-left-color|border-right-color):#[0-9a-f]{3,8}/i.test(rule.body))
+  expect(fixed.length).toBeGreaterThan(10)
+  for (const rule of fixed) {
+    for (const part of rule.selector.split(/,\s*(?=:root)/)) {
+      expect(part).toContain(':not([data-backdrop]):not([data-palette])')
+    }
+  }
+  const { paletteTokens, PALETTES } = await import('../src/desktop/renderer/palettes.js')
+  const tokens = deriveTheme({ kind: 'image', src: 'backgrounds/background-5.jpg', from: '#691ede', to: '#5217b1', accent: '#7220ef' })!.tokens
+  expect(tokens['--x-dialog']).toMatch(/^#[0-9a-f]{6}$/i)
+  // Artemisia's dialog is purple, not neutral grey: blue clearly above green.
+  const [r, g, b] = parseHex(tokens['--x-dialog']!)!
+  expect(b - g).toBeGreaterThan(10)
+  expect(r - g).toBeGreaterThan(5)
+  const palette = PALETTES.find(entry => entry.name === 'catppuccin')!
+  const colors = 'dark' in palette ? palette.dark : palette.only
+  expect(paletteTokens(colors)['--x-dialog']).toBe(colors.popover)
+})

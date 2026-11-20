@@ -11,7 +11,11 @@
  * other. Light / Dark / System picks a two-mode palette's variant; a
  * single-mode palette (Cyberpunk, Midnight…) is always its own mode.
  *
- * Except `claude` (Xerxes's own), the palettes are Hermes Agent's desktop themes (MIT, Copyright (c) 2025
+ * `toxic-forest`, `electric-night`, `afterglow` and `mahogany` are built from palette cards the user
+ * supplied: the background is the card's darkest swatch (or a deeper shade of it when that swatch is too
+ * bright to carry text, as in Electric Night), its brightest readable swatch is the accent, and
+ * the other surfaces are steps of the background. Swatches that fail AA as text or fill are not used verbatim.
+ * Except those and `claude` (Xerxes's own), the palettes are Hermes Agent's desktop themes (MIT, Copyright (c) 2025
  * Nous Research), several of them forks of their VS Code originals (GitHub,
  * Catppuccin, Everforest, Solarized). Values are copied, not re-derived; keep
  * them in step with the upstream rather than hand-editing hexes.
@@ -55,6 +59,11 @@ export const PALETTES: readonly Palette[] = [
   { name: 'mono', label: 'Mono', description: 'Clean grayscale — minimal and focused', only: { background: '#0e0e0e', foreground: '#eaeaea', card: '#141414', muted: '#1e1e1e', mutedForeground: '#808080', popover: '#181818', primary: '#eaeaea', primaryForeground: '#0e0e0e', accent: '#222222', border: '#2a2a2a', destructive: '#a84040', sidebarBackground: '#0a0a0a', userBubble: '#1a1a1a' } },
   { name: 'slate', label: 'Slate', description: 'Cool slate blue — focused developer theme', only: { background: '#0d1117', foreground: '#c9d1d9', card: '#161b22', muted: '#21262d', mutedForeground: '#8b949e', popover: '#1c2128', primary: '#c9d1d9', primaryForeground: '#0d1117', accent: '#1e2530', border: '#30363d', destructive: '#cf4848', sidebarBackground: '#090d13', userBubble: '#1e2a38' } },
   { name: 'cyberpunk', label: 'Cyberpunk', description: 'Neon green on black — matrix terminal', only: { background: '#000a00', foreground: '#00ff41', card: '#001200', muted: '#001a00', mutedForeground: '#1a8a30', popover: '#001000', primary: '#00ff41', primaryForeground: '#000a00', accent: '#002000', border: '#003000', destructive: '#ff003c', sidebarBackground: '#000600', userBubble: '#001400' } },
+  // From palette cards Erfan supplied (2026-11-20); see the header for how swatches map to roles.
+  { name: 'toxic-forest', label: 'Toxic Forest', description: 'Deep teal with acid lime and yellow', only: { background: '#0b2027', foreground: '#eef3d6', card: '#0f2a33', muted: '#13323c', mutedForeground: '#a3b8a4', popover: '#0e2730', primary: '#eef800', primaryForeground: '#0b2027', accent: '#1f3d22', border: '#21424a', destructive: '#ff6b5c', sidebarBackground: '#081a20', userBubble: '#173a26' } },
+  { name: 'electric-night', label: 'Electric Night', description: 'Ultraviolet with cyan and hot pink', only: { background: '#14083d', foreground: '#e8f7fd', card: '#1d0e57', muted: '#251266', mutedForeground: '#a6b8ec', popover: '#1b0d52', primary: '#4cc9f0', primaryForeground: '#14083d', accent: '#2e1580', border: '#3a0ca3', destructive: '#ff007f', sidebarBackground: '#100631', userBubble: '#2a1a86' } },
+  { name: 'afterglow', label: 'Afterglow', description: 'Smoky black, plum and indigo, pale olive light', only: { background: '#24201a', foreground: '#ebeacb', card: '#2c2722', muted: '#352d35', mutedForeground: '#b0a3c8', popover: '#2a2520', primary: '#c8c793', primaryForeground: '#24201a', accent: '#3f2548', border: '#4a3e4e', destructive: '#e5736b', sidebarBackground: '#1c1914', userBubble: '#2d2b5e' } },
+  { name: 'mahogany', label: 'Mahogany', description: 'Rich mahogany and espresso, lavender and amethyst', only: { background: '#3d1919', foreground: '#efeaf6', card: '#4a2020', muted: '#542727', mutedForeground: '#c6b2c8', popover: '#462020', primary: '#9798c5', primaryForeground: '#3d1919', accent: '#5e2c2c', border: '#6d4f48', destructive: '#ff8f8a', sidebarBackground: '#331414', userBubble: '#5a2f4f' } },
 ]
 
 export const PALETTE_KEY = 'xerxes.desktop.palette.v1'
@@ -129,6 +138,7 @@ export function paletteTokens(colors: PaletteColors, levels?: { readonly chat: n
     '--mac-control': translucent(colors.muted, Math.max(cards, 0.9)),
     '--glass-overlay': translucent(colors.popover, 0.96),
     '--x-popover': colors.popover,
+    '--x-dialog': colors.popover,
     '--x-seam': colors.border,
     '--x-hairline': translucent(colors.border, 0.85),
     '--x-divider': translucent(colors.border, 0.5),

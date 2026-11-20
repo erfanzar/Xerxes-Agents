@@ -224,6 +224,8 @@ export function deriveTheme(backdrop: Exclude<Backdrop, { kind: 'none' } | { kin
       // the translucent tokens let the transcript read through the list.
       // Depth sits between a card and the panel under it, so it matches both.
       '--x-popover': toHex(surface(mode === 'dark' ? 0.7 : 0.9)),
+      // Settings and other dialogs: opaque, a step deeper than a popover, in the background's colour.
+      '--x-dialog': toHex(surface(mode === 'dark' ? 0.74 : 0.9)),
       '--x-accent': toHex(accent),
       '--x-focus': toHex(accent),
       '--x-working': toHex(accent),

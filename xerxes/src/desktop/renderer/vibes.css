@@ -445,14 +445,16 @@
    27pt tall, the open mode #4a4a4a on a #353535 track (ref 13, measured). */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__head{gap:4px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode{margin-left:auto;display:inline-flex;gap:0;padding:1px;-webkit-app-region:no-drag}
-:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode{border-radius:8px;background:#353535}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode{border-radius:8px}
+/* Claude's measured greys apply only to plain dark Vibes: a background or colour theme owns every surface. */
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .vibes-mode{background:#353535}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button{display:inline-grid;place-items:center;width:29px;height:25px;padding:0;border:0;background:transparent;color:var(--x-secondary);cursor:pointer}
 :root[data-style='vibes']:not(#vibes) .atelier .vibes-mode>button{border-radius:7px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button:hover{color:var(--x-title)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button.is-selected{color:var(--x-title)}
-:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode>button.is-selected{background:#4a4a4a}
-:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .vibes-mode{background:var(--x-chip)}
-:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .vibes-mode>button.is-selected{background:var(--x-card)}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .vibes-mode>button.is-selected{background:#4a4a4a}
+:root:is([data-style='vibes'],[data-style='neo']):is([data-theme='light'],[data-backdrop],[data-palette]):not(#vibes) .atelier .vibes-mode{background:var(--x-chip)}
+:root:is([data-style='vibes'],[data-style='neo']):is([data-theme='light'],[data-backdrop],[data-palette]):not(#vibes) .atelier .vibes-mode>button.is-selected{background:var(--x-card)}
 :root[data-style='vibes'][data-theme='light']:not(#vibes) .atelier .vibes-mode>button.is-selected{box-shadow:0 0 0 1px var(--x-hairline)}
 /* ── Claude Code sidebar (Vibes renders VibesSideNav and a one-row footer) ── */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-side{display:flex;flex-direction:column;gap:0;padding:4px 8px 12px}
@@ -478,9 +480,9 @@
    Claude opens it beside the sidebar; here it stays inside, because the sidebar clips overflow. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu{top:calc(100% + 3px);padding:5px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button{height:30px}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu{background:#303030;border-color:#383838}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu>hr{background:#454545}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu>button:is(:hover,:focus-visible):not(:disabled){background:#3a3a3a}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .vibes-nav__menu{background:#303030;border-color:#383838}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .vibes-nav__menu>hr{background:#454545}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .vibes-nav__menu>button:is(:hover,:focus-visible):not(:disabled){background:#3a3a3a}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav>.side__search{margin-top:6px}
 /* Groups: grey project name and chevron; no ages; the + only on hover. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__list{padding:8px 8px 12px}
@@ -514,8 +516,8 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar{margin-bottom:0;padding-top:8px}
 /* Measured edge to edge: 44pt tall (y 1046–1089) with a 1pt #404040 edge. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{min-height:44px;padding-top:11px;padding-bottom:11px}
-:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:#404040}
-:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:var(--x-separator)}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:#404040}
+:root:is([data-style='vibes'],[data-style='neo']):is([data-theme='light'],[data-backdrop],[data-palette]):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:var(--x-separator)}
 /* Side panel header: Claude Code shows right-aligned 28pt icon tabs, the open one filled.
    The tab name stays the button's title and accessible name; close appears on hover or focus. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header>nav.desktop-rail__tabs{justify-content:flex-end;gap:4px}
@@ -523,8 +525,8 @@
 :root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain{border-radius:6px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{color:var(--x-title)}
-:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:#2a2a2a}
-:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:var(--x-selected)}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:#2a2a2a}
+:root:is([data-style='vibes'],[data-style='neo']):is([data-theme='light'],[data-backdrop],[data-palette]):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:var(--x-selected)}
 /* Every header control is a 28pt icon button on a 32pt pitch (measured: x 1604–1784). */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header>button,
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .rail-add>button{width:28px;min-width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
@@ -595,17 +597,22 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button[data-level='2']{padding-left:20px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button[data-level='3']{padding-left:32px;color:var(--x-meta)}
 /* Measured: the side panel divider is #303030 below the header line (the line itself stays #353535). */
-:root[data-style='vibes']:not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:#303030}
-:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:var(--x-hairline)}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:#303030}
+:root:is([data-style='vibes'],[data-style='neo']):is([data-theme='light'],[data-backdrop],[data-palette]):not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:var(--x-hairline)}
 /* Claude Code shows the conversation's scrollbar only while you point at it, like a macOS overlay scrollbar. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream::-webkit-scrollbar-thumb{background-color:transparent}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream:hover::-webkit-scrollbar-thumb{background-color:color-mix(in srgb,var(--x-title) 22%,transparent)}
 /* Measured (live capture, "Create PR"): primary buttons are a neutral #3b3b3b fill with light text,
    not an accent colour. Dark only; the light theme has not been measured. */
 :root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary){color:var(--x-title);border-color:transparent}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary){background:#3b3b3b}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier :is(.btn--solid,.studio-primary){background:#3b3b3b}
 :root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){color:var(--x-title)}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:#454545;filter:none}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:#454545;filter:none}
+/* Under a background or colour theme the same neutral button takes the theme's selected surface. */
+:root[data-style='vibes']:is([data-backdrop],[data-palette]):not(#vibes) .atelier :is(.btn--solid,.studio-primary){background:var(--x-selected);color:var(--x-title);border-color:transparent}
+:root[data-style='vibes']:is([data-backdrop],[data-palette]):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:color-mix(in srgb,var(--x-selected) 85%,var(--x-title));color:var(--x-title);filter:none}
+/* The user bubble and composer are Claude greys in plain Vibes; a background or theme tints them. */
+:root[data-style='vibes']:is([data-backdrop],[data-palette]):not(#vibes){--x-user-bubble:var(--x-card);--sh-composer:var(--x-card)}
 /* Settings (ref 25): a centred 1022×800 dialog over the window dimmed to half brightness, not a
    full-window page. Nav column 211pt #191919 with a #303030 divider; content #1f1f1f; 1pt #2a2a2a edge. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .backdrop:has(>.modal:not(.modal--single)){align-items:center;justify-content:center}
@@ -614,19 +621,19 @@
 :root[data-style='vibes']:not(#vibes) .atelier .backdrop>.modal:not(.modal--single){border-radius:12px;box-shadow:var(--mac-shadow)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{flex:0 0 211px;padding-top:16px;-webkit-app-region:no-drag;border-right:1px solid var(--x-hairline)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__main{padding:24px 32px 32px}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single){background:#1f1f1f;border-color:#2a2a2a}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{background:#191919;border-right-color:#303030}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .backdrop>.modal:not(.modal--single){background:#1f1f1f;border-color:#2a2a2a}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{background:#191919;border-right-color:#303030}
 /* Settings nav (ref 25): 28pt rows inset to x 405–583 (16pt from the dialog edge, 17pt from the divider);
    the open section is a quiet #252424 fill, not the brighter sidebar selection. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{padding-left:15px;padding-right:17px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side .mtab{min-height:28px;height:28px;padding-top:0;padding-bottom:0;box-sizing:border-box}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side :is(.mtab.is-on,button[aria-pressed='true'],button.is-selected){background:#252424}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side :is(.mtab.is-on,button[aria-pressed='true'],button.is-selected){background:#252424}
 /* Menus (ref 07): #303030 popover with a 1pt #383838 edge, 28pt rows of 13px text, #454545 separators. */
 :root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier .menu{padding:4px}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu{background:#303030;border-color:#383838}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu .menu__sep{background:#454545}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .menu{background:#303030;border-color:#383838}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .menu .menu__sep{background:#454545}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .menu .menu__item{min-height:28px;padding:0 10px;font:400 13px/1.2 var(--sans)}
-:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu .menu__item:hover{background:#3a3a3a}
+:root[data-style='vibes']:not([data-theme='light']):not([data-backdrop]):not([data-palette]):not(#vibes) .atelier .menu .menu__item:hover{background:#3a3a3a}
 /* Files (ref 05): the filter sits on the plain panel, no filled box; its hairline edge stays. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .file-browser__search{background:transparent}
 :root[data-style='vibes']:not(#vibes) .atelier .desktop-rail .file-browser__search{border-radius:6px}

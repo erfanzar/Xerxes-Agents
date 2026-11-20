@@ -7,7 +7,7 @@ import { parseTerminalFont, UI_SCALES } from '../src/desktop/renderer/displayPre
 import { PALETTES, paletteTokens, paletteVariant } from '../src/desktop/renderer/palettes.js'
 
 test('every theme has the colours the app paints, in both variants it offers', () => {
-  expect(PALETTES.map(palette => palette.name)).toEqual(['claude', 'nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk'])
+  expect(PALETTES.map(palette => palette.name)).toEqual(['claude', 'nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk', 'toxic-forest', 'electric-night', 'afterglow', 'mahogany'])
   for (const palette of PALETTES) {
     for (const wanted of ['light', 'dark'] as const) {
       const { colors } = paletteVariant(palette, wanted)
@@ -15,6 +15,22 @@ test('every theme has the colours the app paints, in both variants it offers', (
         expect(colors[key]).toBeTruthy()
       }
     }
+  }
+})
+
+test('the palette-card themes are dark and readable: body text AAA, meta text and accent AA', async () => {
+  const { contrast, parseHex } = await import('../src/desktop/renderer/backdrop.js')
+  for (const name of ['toxic-forest', 'electric-night', 'afterglow', 'mahogany']) {
+    const palette = PALETTES.find(entry => entry.name === name)!
+    const { colors, mode } = paletteVariant(palette, 'light')
+    expect(mode).toBe('dark')
+    const on = (fg: string, bg: string) => contrast(parseHex(fg)!, parseHex(bg)!)
+    for (const surface of [colors.background, colors.card, colors.popover, colors.userBubble!, colors.sidebarBackground!]) {
+      expect(on(colors.foreground, surface)).toBeGreaterThanOrEqual(7)
+    }
+    expect(on(colors.mutedForeground, colors.background)).toBeGreaterThanOrEqual(4.5)
+    expect(on(colors.primary, colors.background)).toBeGreaterThanOrEqual(4.5)
+    expect(on(colors.primaryForeground, colors.primary)).toBeGreaterThanOrEqual(4.5)
   }
 })
 
