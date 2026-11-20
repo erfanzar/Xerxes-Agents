@@ -79,7 +79,7 @@ export interface HubServiceOptions {
   readonly store?: HubEventStoreOptions
   readonly supervisor?: HubServiceSupervisorConfig
   /** Optional Hub-only Slack OAuth settings. Never passed to a model or client. */
-  readonly slack?: Pick<HubSlackOptions, 'oauth' | 'fetch'>
+  readonly slack?: Pick<HubSlackOptions, 'oauth' | 'brokerOrigin' | 'brokerEnrollmentToken' | 'fetch'>
   /**
    * Voice ports and settings (createVoiceRuntimeConfig). The voice socket is served
    * only when identity, a configured supervisor and at least one enabled voice mode
@@ -365,7 +365,7 @@ export function createHubService(options: HubServiceOptions): HubService {
               identity, isHubOwner: options.isHubOwner, publicOrigins: exposure.publicOrigins,
               ...(options.server?.clock === undefined ? {} : { now: options.server.clock }) })
           } catch {
-            report(new Error('Slack setup is unavailable. Check the OAuth settings and the HTTPS Hub origin.'), 'Slack setup')
+            report(new Error('Slack setup is unavailable. Check the managed broker or self-hosted OAuth settings.'), 'Slack setup')
           }
         }
         subscriptions = new SubscriptionManager(store, {

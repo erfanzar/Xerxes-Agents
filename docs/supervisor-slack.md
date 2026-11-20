@@ -2,7 +2,23 @@
 
 The Hub Slack transport acts as the connected Slack **user**, not as a bot. Slack may grant user scopes across the workspace; Xerxes narrows their use to one-to-one DMs with explicitly approved peers. An OAuth grant by itself does not approve any peer or authorize automatic sending. Use this only with a workspace and account whose administrators and users have agreed to the integration.
 
-## Slack app setup
+## Connect from the app (no Hub settings)
+
+Every Hub that has this build accepts your own Slack app's user token. No server environment variables, redirect URL or broker are needed:
+
+1. In Desktop, open **XERXES → Slack** and click **Create XERXES app in Slack**. Slack opens with a manifest already filled in. It requests only the six user scopes (`users:read`, `users:read.email`, `im:write`, `im:read`, `im:history`, `chat:write`), with no bot and token rotation off. Pick your workspace, click **Next**, then click **Create**. If Slack opens without the details, choose **From a manifest** and paste the manifest from **Copy manifest**.
+2. In the new app, open **OAuth & Permissions**, click **Install to Workspace**, then click **Allow**.
+3. Paste the **User OAuth Token** (`xoxp-…`) into the panel and click **Connect**.
+
+The Hub checks the token with Slack's `auth.test` before it stores anything. The token must belong to a real user, not a bot, and carry exactly the six scopes above. The panel then shows the workspace and member IDs it found. Nothing is saved until you click **Confirm Slack account**. The token goes only to the Hub, as the Hub owner, and never appears in a reply, audit record or the renderer's state. **Disconnect** removes it from the Hub. To revoke the token, also uninstall the app in Slack.
+
+## Choose managed or self-hosted sign-in
+
+An operator can select managed sign-in with [`XERXES_HUB_SLACK_BROKER_ORIGIN`](managed-slack-service.md), a trusted HTTPS broker origin. Managed sign-in requires a matching operator-provisioned enrollment secret (32 random bytes encoded as unpadded base64url): `XERXES_HUB_SLACK_BROKER_ENROLLMENT_TOKEN` on the Hub and `XERXES_SLACK_BROKER_ENROLLMENT_TOKEN` on the broker. The Hub sends it as a Bearer credential on both start and redeem, never to the browser or renderer. If the Hub is configured for managed sign-in but has no enrollment secret, managed sign-in is unavailable and does not fall back to self-hosted OAuth. Neither the owner nor the desktop enters Slack app credentials. With no broker origin configured, use the self-hosted app setup below.
+
+For either mode, after browser authorization, verify the pending workspace and user IDs in Xerxes and explicitly confirm them. The Hub does not save the Slack credential or connect the account until you confirm that exact identity.
+
+## Self-hosted Slack app setup
 
 1. Create a dedicated Slack app for your workspace. In **OAuth & Permissions → Redirect URLs**, add `https://YOUR-HUB-HOST/api/hub/v1/slack/oauth/callback`, replacing the host with an explicitly configured Hub HTTPS origin. The same URL must be used during authorization and code exchange. Do not use the existing Slack bot/channel adapter's credentials.
 2. Under **OAuth & Permissions → User Token Scopes**, add only the scopes below. Leave the bot scopes empty. Do not enable token rotation or install the app at the organization level; this transport accepts only workspace user grants without refresh tokens. If your workspace requires app approval, obtain that approval before connecting.

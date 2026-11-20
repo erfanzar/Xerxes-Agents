@@ -50,6 +50,8 @@ async function buildDesktop(): Promise<void> {
     minify: true,
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
+      // Release-owned public origin only; never bundle Hub enrollment or Slack credentials.
+      __XERXES_SLACK_BROKER_ORIGIN__: JSON.stringify(process.env.XERXES_DESKTOP_SLACK_BROKER_ORIGIN ?? ''),
       __XERXES_DESKTOP_VERSION__: JSON.stringify(desktopVersion),
       __XERXES_DESKTOP_PROTOCOL__: String(DAEMON_PROTOCOL_VERSION),
       __XERXES_EXPECTED_DAEMON_BUILD_ID__: JSON.stringify(expectedDaemonBuildId),

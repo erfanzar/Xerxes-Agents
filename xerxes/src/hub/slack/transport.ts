@@ -3,12 +3,12 @@
 
 import { SlackCredentialStore } from './credentials.js'
 import { checkAbort, SlackHttp, type SlackFetch } from './http.js'
-import { parseUserGrant, SlackOAuthState, type SlackOAuthCallback, type SlackOAuthConfig, type SlackOAuthStart } from './oauth.js'
+import { parseScopedUserGrant, parseUserGrant, SlackOAuthState, type SlackOAuthCallback, type SlackOAuthConfig, type SlackOAuthStart, type SlackUserGrant } from './oauth.js'
 import {
   SlackTransportError, type SlackDirectMessage, type SlackIdentity, type SlackMessage, type SlackPeer, type SlackPeerApproval,
   type SlackPeerOperation, type SlackProfile, type SlackTransport,
 } from './types.js'
-import { channelId, identity, record, timestamp, userId } from './wire.js'
+import { channelId, identity, record, timestamp, userId, userToken } from './wire.js'
 
 export * from './types.js'
 export type { SlackFetch, SlackOAuthConfig, SlackOAuthStart, SlackOAuthCallback }
@@ -75,15 +75,41 @@ export class HubSlackTransport implements SlackTransport {
   }
 
   async completeOAuth(binding: string, callback: SlackOAuthCallback, signal?: AbortSignal): Promise<SlackIdentity> {
+    const grant = await this.verifyOAuth(binding, callback, signal)
+    await this.saveGrant(grant, signal)
+    return grant.account
+  }
+
+  /** Exchange and verify, without writing any credential before the Hub owner's review. */
+  async verifyOAuth(binding: string, callback: SlackOAuthCallback, signal?: AbortSignal): Promise<SlackUserGrant> {
     checkAbort(signal)
     const { body, authorization, expected } = this.#oauth.consume(binding, callback)
     const data = await this.#http.request('oauth.v2.access', authorization, body, signal)
-    const { account, token } = parseUserGrant(data)
-    if (expected && !sameAccount(expected, account)) throw new SlackTransportError('identity_mismatch')
-    await this.#checkIdentity(account, `Bearer ${token}`, signal)
+    const grant = parseUserGrant(data)
+    if (expected && !sameAccount(expected, grant.account)) throw new SlackTransportError('identity_mismatch')
+    await this.verifyGrant(grant, signal)
+    return grant
+  }
+
+  /**
+   * Verify a user token pasted by the Hub owner, without storing it. Slack must report a real
+   * (non-bot) user and exactly the required user scopes; anything else fails closed.
+   */
+  async verifyUserToken(token: string, signal?: AbortSignal): Promise<SlackUserGrant> {
     checkAbort(signal)
-    await this.#credentials.save(account, token, signal)
-    return account
+    if (!userToken(token)) throw new SlackTransportError('invalid_request')
+    const { data, scopes } = await this.#http.requestWithScopes('auth.test', `Bearer ${token}`, new URLSearchParams(), signal)
+    if (data.bot_id !== undefined || data.is_enterprise_install === true) throw new SlackTransportError('oauth_unsupported')
+    return parseScopedUserGrant(data.team_id, data.user_id, token, scopes)
+  }
+
+  async verifyGrant(grant: SlackUserGrant, signal?: AbortSignal): Promise<void> {
+    await this.#checkIdentity(grant.account, `Bearer ${grant.token}`, signal)
+  }
+
+  async saveGrant(grant: SlackUserGrant, signal?: AbortSignal): Promise<void> {
+    checkAbort(signal)
+    await this.#credentials.save(grant.account, grant.token, signal)
   }
 
   /** Removes the local credential only. Does not revoke the Slack grant remotely. */

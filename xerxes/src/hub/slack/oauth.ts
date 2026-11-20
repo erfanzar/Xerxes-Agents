@@ -5,7 +5,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { SlackTransportError, type SlackIdentity } from './types.js'
 import { identity, record, teamId, userId, userToken } from './wire.js'
 
-const USER_SCOPES = ['users:read', 'users:read.email', 'im:write', 'im:read', 'im:history', 'chat:write'] as const
+/** The exact user scopes XERXES needs; also used to pre-fill the in-app Slack app manifest. */
+export const USER_SCOPES = ['users:read', 'users:read.email', 'im:write', 'im:read', 'im:history', 'chat:write'] as const
 const STATE_TTL_MS = 10 * 60_000
 const MAX_PENDING = 256
 
@@ -81,13 +82,19 @@ export class SlackOAuthState {
   }
 }
 
-export function parseUserGrant(data: Record<string, unknown>): { account: SlackIdentity; token: string } {
+export interface SlackUserGrant { readonly account: SlackIdentity; readonly token: string }
+
+export function parseScopedUserGrant(team: unknown, user: unknown, token: unknown, scope: unknown): SlackUserGrant {
+  if (!teamId(team) || !userId(user) || !userToken(token) || typeof scope !== 'string') throw new SlackTransportError('oauth_unsupported')
+  const granted = new Set(scope.split(',').map(value => value.trim()))
+  if (granted.size !== USER_SCOPES.length || USER_SCOPES.some(value => !granted.has(value))) throw new SlackTransportError('oauth_unsupported')
+  return { account: { teamId: team, userId: user }, token }
+}
+
+export function parseUserGrant(data: Record<string, unknown>): SlackUserGrant {
   const team = record(data.team)
   const user = record(data.authed_user)
-  if (data.is_enterprise_install === true || data.access_token !== undefined || !teamId(team?.id) || !userId(user?.id)
-    || user.token_type !== 'user' || !userToken(user.access_token) || typeof user.scope !== 'string'
+  if (data.is_enterprise_install === true || data.access_token !== undefined || user?.token_type !== 'user'
     || user.refresh_token !== undefined || user.expires_in !== undefined) throw new SlackTransportError('oauth_unsupported')
-  const granted = new Set(user.scope.split(',').map(scope => scope.trim()))
-  if (granted.size !== USER_SCOPES.length || USER_SCOPES.some(scope => !granted.has(scope))) throw new SlackTransportError('oauth_unsupported')
-  return { account: { teamId: team.id, userId: user.id }, token: user.access_token }
+  return parseScopedUserGrant(team?.id, user.id, user.access_token, user.scope)
 }

@@ -6,9 +6,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { HubRequestError } from '../src/client/hubConnection.js'
 import { initialHubState, type HubState } from '../src/client/hubStore.js'
-import { createSupervisorSlackClient, slackUnavailable, type SlackContact } from '../src/client/supervisorSlack.js'
+import { createSupervisorSlackClient, slackCreateAppUrl, slackUnavailable, SlackBrokerUnavailable, type SlackContact } from '../src/client/supervisorSlack.js'
 import { SupervisorView } from '../src/desktop/renderer/SupervisorPage.js'
-import { SlackDirectMessage } from '../src/desktop/renderer/SupervisorSlack.js'
+import { SlackDirectMessage, SlackTokenSetup } from '../src/desktop/renderer/SupervisorSlack.js'
 import type { HubSlackMethod } from '../src/hub/protocol.js'
 
 const contact = { team_id: 'T01TEST', user_id: 'U01PEER', display_name: 'Jordan', mode: 'draft' } satisfies SlackContact
@@ -18,9 +18,9 @@ const dest = { team_id: contact.team_id, user_id: contact.user_id }
 const draft = { id: 'draft-1', text: 'Hello, Jordan.\n  Reviewed text.' }
 const dm = { ...dest, messages: [], drafts: [draft] }
 
-function fake(replies: Partial<Record<HubSlackMethod, unknown>> = {}) {
+function fake(replies: Partial<Record<HubSlackMethod, unknown>> = {}, trustedBrokerOrigin?: string) {
   const calls: [HubSlackMethod, Readonly<Record<string, unknown>>][] = []
-  const client = createSupervisorSlackClient({ allowed: () => true, request: async (method, params) => {
+  const client = createSupervisorSlackClient({ ...(trustedBrokerOrigin === undefined ? {} : { trustedBrokerOrigin }), allowed: () => true, request: async (method, params) => {
     calls.push([method, params])
     if (!Object.hasOwn(replies, method)) throw new Error(`Unexpected RPC: ${method}`)
     return replies[method]
@@ -74,11 +74,54 @@ test('review sends exactly the selected pending draft; a response that still lis
 test('OAuth accepts only the Slack authorize endpoint with an OAuth state', async () => {
   const replies = { 'supervisor.slack.connect': { authorize_url: 'https://slack.com/oauth/v2/authorize?state=fake' } }
   const { client } = fake(replies)
-  expect(await client.connect()).toBe(replies['supervisor.slack.connect'].authorize_url)
+  expect(await client.connect()).toEqual({ url: replies['supervisor.slack.connect'].authorize_url })
   for (const url of ['https://slack.com.evil.test/oauth/v2/authorize?state=fake', 'https://slack.com/redirect?state=fake',
-    'https://slack.com/oauth/v2/authorize', 'https://fake@slack.com/oauth/v2/authorize?state=fake']) {
+    'https://slack.com/oauth/v2/authorize', 'https://fake@slack.com/oauth/v2/authorize?state=fake',
+    'https://slack.com/oauth/v2/authorize?state=fake&state=other', 'http://slack.com/oauth/v2/authorize?state=fake']) {
     replies['supervisor.slack.connect'].authorize_url = url
-    await expect(client.connect()).rejects.toThrow('Invalid Slack response')
+    await expect(client.connect()).rejects.toThrow()
+  }
+})
+
+test('managed Slack requires locally pinned HTTPS broker and keeps the pairing code separate', async () => {
+  const trusted = 'https://broker.example.test'
+  const reply = { authorize_url: `${trusted}/v1/slack/authorize?id=fixture`, pairing_code: 'ABCDEFGHIJKLMNOPQRSTUV',
+    broker_origin: trusted, expires_at: 1_800_000_000_000, access_token: 'never-returned' }
+  const replies = { 'supervisor.slack.connect': reply }
+  await expect(fake(replies).client.connect()).rejects.toBeInstanceOf(SlackBrokerUnavailable)
+  const { client } = fake(replies, trusted)
+  expect(await client.connect()).toEqual({ url: reply.authorize_url, pairingCode: reply.pairing_code, expiresAt: reply.expires_at })
+  for (const url of [`${trusted}.evil.test/v1/slack/authorize?id=fixture`, `${trusted}/redirect?id=fixture`,
+    `${trusted}/v1/slack/authorize?id=fixture&redirect=https://evil.test`,
+    `${trusted}/v1/slack/authorize?id=fixture&id=extra`, `${trusted}/v1/slack/authorize?id=${reply.pairing_code}`]) {
+    reply.authorize_url = url
+    await expect(client.connect()).rejects.toThrow()
+  }
+})
+
+test('browser authorization stays pending and confirmation sends only the two reviewed IDs', async () => {
+  const pending = { configured: true, connection: null, contacts: [], pending_identity: { ...account, access_token: 'not-for-desktop' } }
+  const replies = { 'supervisor.slack.status': pending, 'supervisor.slack.confirm_connection': status }
+  const { client, calls } = fake(replies)
+  const afterBrowser = await client.status()
+  expect(afterBrowser.connection).toBeNull()
+  expect(afterBrowser.pending_identity).toEqual(account)
+  expect(calls).toEqual([['supervisor.slack.status', {}]])
+  if (!afterBrowser.pending_identity) throw new Error('Missing pending identity')
+  expect(await client.confirmConnection(afterBrowser.pending_identity)).toEqual(status)
+  expect(calls.at(-1)).toEqual(['supervisor.slack.confirm_connection', account])
+  replies['supervisor.slack.confirm_connection'] = { ...status, connection: dest }
+  await expect(client.confirmConnection(account)).rejects.toThrow('Invalid Slack response')
+  pending.pending_identity.team_id = 'https://example.test'
+  await expect(client.status()).rejects.toThrow('Invalid Slack response')
+})
+
+test('Slack denial and expiry do not expose broker details', async () => {
+  for (const oauth_status of ['denied', 'expired']) {
+    const { client } = fake({ 'supervisor.slack.status': {
+      configured: true, connection: null, contacts: [], pending_identity: null, oauth_status, error: 'private broker details',
+    } })
+    expect(await client.status()).toEqual({ configured: true, connection: null, contacts: [], oauth_status })
   }
 })
 
@@ -117,4 +160,28 @@ test('Slack navigation is owner-only; the isolated DM does not have a shared com
   expect(html).not.toContain('Message to XERXES')
   expect(html).not.toContain('Send to Slack')
   expect(calls).toEqual([])
+})
+
+test('connecting with a pasted token sends only the trimmed user token and needs a pending identity back', async () => {
+  const pending = { configured: true, browser_sign_in: false, connection: null, contacts: [], pending_identity: account }
+  const replies: Partial<Record<HubSlackMethod, unknown>> = { 'supervisor.slack.connect_token': pending }
+  const { client, calls } = fake(replies)
+  for (const bad of ['xoxb-bot', 'nope', '']) await expect(client.connectToken(bad)).rejects.toThrow('xoxp-')
+  expect(calls).toEqual([])
+  expect(await client.connectToken('  xoxp-abc-123 ')).toEqual({ ...pending, pending_identity: account })
+  expect(calls).toEqual([['supervisor.slack.connect_token', { token: 'xoxp-abc-123' }]])
+  replies['supervisor.slack.connect_token'] = status
+  await expect(client.connectToken('xoxp-abc-123')).rejects.toThrow('Invalid Slack response')
+})
+
+test('token setup is three in-app steps with a pre-filled Slack app link and a masked token field', () => {
+  const html = renderToStaticMarkup(<SlackTokenSetup disabled={false} openApp={() => {}} onSubmit={() => {}} />)
+  expect(html).toContain('Create XERXES app in Slack')
+  expect(html).toContain('Copy manifest')
+  expect(html).toContain('type="password"')
+  expect(html).toContain('User OAuth Token')
+  expect(html.match(/<li>/g)).toHaveLength(3)
+  const url = new URL(slackCreateAppUrl())
+  expect(url.origin + url.pathname).toBe('https://api.slack.com/apps')
+  expect(JSON.parse(url.searchParams.get('manifest_json') ?? '{}').oauth_config.scopes.user).toContain('chat:write')
 })

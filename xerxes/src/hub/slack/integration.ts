@@ -10,6 +10,9 @@ import type { HubMethodHandler } from '../server.js'
 import { SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID } from '../supervisor/audit.js'
 import type { SupervisorSlackPort } from '../supervisor/slackTools.js'
 import type { UserPrincipal } from '../supervisor/threads.js'
+import { SLACK_BROKER_ORIGIN_ENV, readSlackBrokerOrigin, SlackBroker, type SlackBrokerAttempt } from './broker.js'
+import { USER_SCOPES, type SlackUserGrant } from './oauth.js'
+import { userToken } from './wire.js'
 import { SlackPolicy, type SlackInbox } from './policy.js'
 import { HubSlackTransport, SlackTransportError, type SlackFetch, type SlackIdentity, type SlackOAuthConfig, type SlackPeer } from './transport.js'
 
@@ -17,6 +20,12 @@ export const SLACK_CALLBACK_PATH = '/api/hub/v1/slack/oauth/callback'
 const CLIENT_ID = 'XERXES_HUB_SLACK_CLIENT_ID'
 const CLIENT_SECRET = 'XERXES_HUB_SLACK_CLIENT_SECRET'
 const REDIRECT_URI = 'XERXES_HUB_SLACK_REDIRECT_URI'
+const FLOW_TTL_MS = 10 * 60_000
+
+export function slackBrokerFromEnvironment(env: Readonly<Record<string, string | undefined>>): string | undefined {
+  const origin = env[SLACK_BROKER_ORIGIN_ENV]?.trim()
+  return origin ? readSlackBrokerOrigin(origin) : undefined
+}
 
 export function slackOAuthFromEnvironment(env: Readonly<Record<string, string | undefined>>): SlackOAuthConfig | undefined {
   const clientId = env[CLIENT_ID]?.trim()
@@ -41,6 +50,9 @@ export interface HubSlackOptions {
   readonly isHubOwner: (id: string) => boolean
   readonly publicOrigins: readonly string[]
   readonly oauth?: SlackOAuthConfig
+  /** Operator-configured trust anchor; never selected by a remote user or broker reply. */
+  readonly brokerOrigin?: string
+  readonly brokerEnrollmentToken?: string
   readonly fetch?: SlackFetch
   readonly now?: () => number
 }
@@ -102,12 +114,23 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
   // Validate the operator's settings at startup; per-owner instances keep credentials and OAuth state disjoint.
   const oauthForOwner = (ownerId: string) => new HubSlackTransport({ ...transportOptions(ownerId), ...oauthOptions })
   if (options.oauth !== undefined) oauthForOwner('validation-only')
+  const managed = options.brokerOrigin !== undefined
+  const broker = options.brokerOrigin === undefined || !options.brokerEnrollmentToken ? undefined
+    : new SlackBroker(options.brokerOrigin, options.brokerEnrollmentToken, options.fetch)
+  // Browser sign-in needs operator settings; pasting your own app's user token (connect_token) never does.
+  const browserSignIn = managed ? broker !== undefined : redirect !== undefined
   const db = new Database(options.databasePath, { create: true, strict: true })
   const active = new Set<Promise<unknown>>()
   const shutdown = new AbortController()
-  type Flow = { owner: string; deviceId: string; sessionId: string; stateHash: string; expiresAt: number; binding: string; abort: AbortController; oauth: HubSlackTransport }
+  type Phase = { kind: 'busy' }
+    | { kind: 'self_hosted'; stateHash: string; binding: string }
+    | { kind: 'managed'; attempt: SlackBrokerAttempt; pollAt: number }
+    | { kind: 'review'; grant: SlackUserGrant }
+  type Flow = {
+    owner: string; deviceId: string; sessionId: string; expiresAt: number; abort: AbortController
+    oauth: HubSlackTransport; timer: ReturnType<typeof setTimeout>; phase: Phase
+  }
   let pending: Flow | undefined
-  let exchanging: Flow | undefined
   const disconnecting = new Set<string>()
   const epochs = new Map<string, AbortController>()
   const now = options.now ?? Date.now
@@ -134,13 +157,26 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     }) })
   } catch (error) { db.close(); throw error }
 
+  const clearFlow = (flow: Flow): void => {
+    clearTimeout(flow.timer)
+    flow.abort.abort()
+    if (pending === flow) pending = undefined
+  }
+  const cancelFlow = (flow: Flow): void => {
+    // A busy flow must settle (including credential rollback) before another can start.
+    if (flow.phase.kind === 'busy') flow.abort.abort()
+    else clearFlow(flow)
+  }
+  const usable = (flow: Flow): boolean => !flow.abort.signal.aborted && flow.expiresAt > now() && isOwner(flow.owner)
+  const bound = (context: AuthenticatedContext, principal: UserPrincipal): Flow | undefined => {
+    const flow = pending
+    if (flow && !usable(flow)) { cancelFlow(flow); return undefined }
+    return flow?.owner === principal.id && flow.deviceId === principal.deviceId && flow.sessionId === context.browserSessionId ? flow : undefined
+  }
   const offRevoked = options.identity.onRevoked(event => {
-    for (const flow of [pending, exchanging]) {
-      if (flow?.owner !== event.principalId || (event.deviceId !== undefined && flow.deviceId !== event.deviceId)
-        || (event.browserSessionId !== undefined && flow.sessionId !== event.browserSessionId)) continue
-      flow.abort.abort()
-      if (pending === flow) pending = undefined
-    }
+    const flow = pending
+    if (flow?.owner === event.principalId && (event.deviceId === undefined || flow.deviceId === event.deviceId)
+      && (event.browserSessionId === undefined || flow.sessionId === event.browserSessionId)) cancelFlow(flow)
     if (event.deviceId === undefined && event.browserSessionId === undefined) {
       epochs.get(event.principalId)?.abort()
       epochs.delete(event.principalId)
@@ -150,12 +186,37 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     active.add(promise)
     return promise.finally(() => { active.delete(promise) })
   }
-  const status = (principal: UserPrincipal): Record<string, unknown> => {
+  const wireIdentity = (account: SlackIdentity) => ({ team_id: account.teamId, user_id: account.userId })
+  const status = (context: AuthenticatedContext, principal: UserPrincipal): Record<string, unknown> => {
     owner(principal)
     const account = accountOf(principal.id)
     const contacts = account === undefined ? [] : policy.listContacts(principal).filter(contact => sameAccount(account, contact))
-    return { configured: redirect !== undefined, connection: account === undefined ? null : { team_id: account.teamId, user_id: account.userId },
+    const phase = bound(context, principal)?.phase
+    return { configured: true, browser_sign_in: browserSignIn, connection: account === undefined ? null : wireIdentity(account),
+      pending_identity: phase?.kind === 'review' ? wireIdentity(phase.grant.account) : null,
       contacts: contacts.map(row => ({ team_id: row.teamId, user_id: row.peerId, display_name: row.displayName, mode: row.mode })) }
+  }
+  const review = (flow: Flow, grant: SlackUserGrant): void => {
+    if (!usable(flow) || !team(grant.account.teamId) || !user(grant.account.userId)) throw new SlackTransportError('invalid_state')
+    flow.phase = { kind: 'review', grant }
+  }
+  const pollBroker = async (flow: Flow, attempt: SlackBrokerAttempt, socketSignal?: AbortSignal): Promise<void> => {
+    if (!broker) return
+    flow.phase = { kind: 'busy' }
+    const signal = AbortSignal.any([flow.abort.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+    try {
+      const result = await broker.redeem(attempt, signal).catch((error: unknown) => {
+        if (!(error instanceof SlackTransportError) || error.code !== 'rate_limited' || !usable(flow)) throw error
+        flow.phase = { kind: 'managed', attempt, pollAt: now() + Math.max(2, error.retryAfterSeconds ?? 2) * 1000 }
+        return undefined
+      })
+      signal.throwIfAborted()
+      if (result?.status === 'ready') {
+        await flow.oauth.verifyGrant(result.grant, signal)
+        signal.throwIfAborted()
+        review(flow, result.grant)
+      } else if (result?.status === 'pending' && usable(flow)) flow.phase = { kind: 'managed', attempt, pollAt: now() + 2000 }
+    } finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
   }
   const peerFor = (id: string, teamId: unknown, peerId: unknown): SlackPeer => {
     if (!team(teamId) || !user(peerId)) throw new HubProtocolError('invalid_request', 'Exact Slack team and user IDs are required.')
@@ -171,21 +232,102 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     const principal = owner(context.principal)
     socketSignal?.throwIfAborted()
     const id = principal.id
-    if (method === 'supervisor.slack.status') { requireKeys(params); return status(principal) }
+    if (method === 'supervisor.slack.status') {
+      requireKeys(params)
+      const flow = bound(context, principal)
+      if (flow?.phase.kind === 'managed' && flow.phase.pollAt <= now()) await pollBroker(flow, flow.phase.attempt, socketSignal)
+      socketSignal?.throwIfAborted()
+      return status(context, principal)
+    }
     if (method === 'supervisor.slack.connect') {
       requireKeys(params)
-      if (!redirect) throw new HubProtocolError('unconfigured', 'Slack OAuth is not configured on this Hub.')
-      await audit(context, method)
-      owner(principal); socketSignal?.throwIfAborted()
-      if (accountOf(id) || exchanging || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect the current Slack account or finish the connection first.')
-      if (pending && pending.expiresAt > now() && isOwner(pending.owner)) throw new HubProtocolError('conflict', 'Slack authorization is already pending. Finish it or wait for it to expire.')
-      const binding = randomUUID()
-      const oauth = oauthForOwner(id)
-      const { authorizeUrl, expiresAt } = oauth.beginOAuth(binding)
-      const state = new URL(authorizeUrl).searchParams.get('state')
-      if (!state) throw new HubProtocolError('unavailable', 'Could not start Slack authorization.')
-      pending = { owner: id, deviceId: principal.deviceId, sessionId: context.browserSessionId, stateHash: digest(state), expiresAt, binding, abort: new AbortController(), oauth }
-      return { authorize_url: authorizeUrl }
+      if (managed && broker === undefined) throw new HubProtocolError('unavailable', 'Managed Slack sign-in is unavailable on this Hub.')
+      if (!browserSignIn) throw new HubProtocolError('unconfigured', 'Browser sign-in is not set up on this Hub. Connect with your own Slack app instead.')
+      if (pending && !usable(pending)) cancelFlow(pending)
+      if (accountOf(id) || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect the current Slack account before connecting another.')
+      if (pending) throw new HubProtocolError('conflict', 'Slack authorization is already pending. Finish it or wait for it to expire.')
+      const flow: Flow = { owner: id, deviceId: principal.deviceId, sessionId: context.browserSessionId, expiresAt: now() + FLOW_TTL_MS,
+        abort: new AbortController(), oauth: oauthForOwner(id), phase: { kind: 'busy' }, timer: setTimeout(() => cancelFlow(flow), FLOW_TTL_MS) }
+      flow.timer.unref()
+      pending = flow
+      const signal = AbortSignal.any([flow.abort.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+      try {
+        await audit(context, method)
+        owner(principal); signal.throwIfAborted()
+        if (broker) {
+          const { authorizeUrl, attempt, pairingCode } = await broker.start(signal)
+          if (!usable(flow)) throw new SlackTransportError('invalid_state')
+          signal.throwIfAborted()
+          flow.phase = { kind: 'managed', attempt, pollAt: now() }
+          return { authorize_url: authorizeUrl, expires_at: flow.expiresAt, ...(pairingCode === undefined ? {} : { pairing_code: pairingCode }) }
+        }
+        const binding = randomUUID()
+        const { authorizeUrl } = flow.oauth.beginOAuth(binding)
+        const state = new URL(authorizeUrl).searchParams.get('state')
+        if (!state) throw new SlackTransportError('invalid_state')
+        flow.phase = { kind: 'self_hosted', stateHash: digest(state), binding }
+        return { authorize_url: authorizeUrl }
+      } finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
+    }
+    if (method === 'supervisor.slack.connect_token') {
+      requireKeys(params, 'token')
+      const token = typeof params.token === 'string' ? params.token.trim() : ''
+      if (!userToken(token)) {
+        throw new HubProtocolError('invalid_request', 'Paste the User OAuth Token from your Slack app. It starts with xoxp-.')
+      }
+      if (pending && !usable(pending)) cancelFlow(pending)
+      if (accountOf(id) || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect the current Slack account before connecting another.')
+      if (pending) throw new HubProtocolError('conflict', 'A Slack connection is already waiting. Confirm it or wait for it to expire.')
+      const flow: Flow = { owner: id, deviceId: principal.deviceId, sessionId: context.browserSessionId, expiresAt: now() + FLOW_TTL_MS,
+        abort: new AbortController(), oauth: oauthForOwner(id), phase: { kind: 'busy' }, timer: setTimeout(() => cancelFlow(flow), FLOW_TTL_MS) }
+      flow.timer.unref()
+      pending = flow
+      const signal = AbortSignal.any([flow.abort.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+      try {
+        // The audit names the method only; the token never reaches an audit record, log or reply.
+        await audit(context, method)
+        owner(principal); signal.throwIfAborted()
+        let grant: SlackUserGrant
+        try { grant = await flow.oauth.verifyUserToken(token, signal) } catch (error) {
+          if (!(error instanceof SlackTransportError)) throw error
+          if (error.code === 'oauth_unsupported') {
+            throw new HubProtocolError('invalid_request', `This token must be a user token (not a bot token) with exactly these User Token Scopes: ${USER_SCOPES.join(', ')}.`)
+          }
+          if (error.code === 'slack_rejected' || error.code === 'invalid_request') {
+            throw new HubProtocolError('invalid_request', 'Slack did not accept this token. Copy the User OAuth Token again from your Slack app’s OAuth & Permissions page.')
+          }
+          throw error
+        }
+        owner(principal); signal.throwIfAborted()
+        review(flow, grant)
+        return status(context, principal)
+      } finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
+    }
+    if (method === 'supervisor.slack.confirm_connection') {
+      requireKeys(params, 'team_id', 'user_id')
+      if (!team(params.team_id) || !user(params.user_id)) throw new HubProtocolError('invalid_request', 'Exact Slack account IDs are required.')
+      const expected = { teamId: params.team_id, userId: params.user_id }
+      const flow = bound(context, principal)
+      if (flow?.phase.kind !== 'review' || !sameAccount(flow.phase.grant.account, expected)) {
+        throw new HubProtocolError('not_found', 'No matching Slack account is awaiting confirmation on this device.')
+      }
+      const { grant } = flow.phase
+      flow.phase = { kind: 'busy' }
+      const signal = AbortSignal.any([flow.abort.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+      let saved = false
+      try {
+        await audit(context, method, [expected.teamId, expected.userId]); owner(principal); signal.throwIfAborted()
+        if (!usable(flow) || accountOf(id)) throw new SlackTransportError('invalid_state')
+        await flow.oauth.saveGrant(grant, signal)
+        saved = true
+        owner(principal); signal.throwIfAborted()
+        if (!usable(flow)) throw new SlackTransportError('invalid_state')
+        db.query('INSERT INTO hub_slack_connection VALUES (?, ?, ?)').run(id, expected.teamId, expected.userId)
+      } catch (error) {
+        if (saved) await flow.oauth.disconnect(expected)
+        throw error
+      } finally { clearFlow(flow) }
+      return status(context, principal)
     }
     if (method === 'supervisor.slack.disconnect') {
       requireKeys(params, 'team_id', 'user_id')
@@ -202,9 +344,8 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
         epochs.get(id)?.abort(); epochs.delete(id)
         await oauthForOwner(id).disconnect(account)
       } finally { disconnecting.delete(id) }
-      return status(principal)
+      return status(context, principal)
     }
-    if (!redirect) throw new HubProtocolError('unconfigured', 'Slack OAuth is not configured on this Hub.')
     const extra = method === 'supervisor.slack.contact.mode' ? ['mode'] : method === 'supervisor.slack.draft.send' ? ['draft_id', 'text'] : []
     requireKeys(params, 'team_id', 'user_id', ...extra)
     const peer = peerFor(id, params.team_id, params.user_id)
@@ -236,7 +377,7 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
         return dmToWire(policy.readInbox(principal, peer))
       }
     }
-    return status(principal)
+    return status(context, principal)
   })().catch((error: unknown) => { throw rpcError(error) }))
 
   const callback = async (request: Request): Promise<Response> => {
@@ -251,26 +392,20 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     if (url.pathname !== SLACK_CALLBACK_PATH) return response(404, 'Not found.')
     const states = url.searchParams.getAll('state')
     const state = states[0]
-    if (!flow || states.length !== 1 || !state || !/^[A-Za-z0-9_-]{43}$/u.test(state) || digest(state) !== flow.stateHash
-      || flow.expiresAt <= now() || !isOwner(flow.owner)) return response(400, 'Invalid or expired Slack authorization. Return to Xerxes.')
-    // The external browser need not share desktop cookies. The unguessable state binds it to the audited owner initiation.
-    pending = undefined
-    exchanging = flow
+    if (!flow || flow.phase.kind !== 'self_hosted' || states.length !== 1 || !state || !/^[A-Za-z0-9_-]{43}$/u.test(state)
+      || digest(state) !== flow.phase.stateHash || !usable(flow)) return response(400, 'Invalid or expired Slack authorization. Return to Xerxes.')
+    // OAuth state binds the browser exchange, not the identity the owner intends to connect.
+    const { binding } = flow.phase
+    flow.phase = { kind: 'busy' }
     try {
       const codes = url.searchParams.getAll('code')
       const errors = url.searchParams.getAll('error')
-      const account = await flow.oauth.completeOAuth(flow.binding, { state,
-        ...(codes.length === 1 && errors.length === 0 && codes[0] !== undefined ? { code: codes[0] } : { error: 'denied' }) },
-      AbortSignal.any([shutdown.signal, flow.abort.signal]))
-      if (!team(account.teamId) || !user(account.userId) || flow.abort.signal.aborted || !isOwner(flow.owner)) {
-        await flow.oauth.disconnect(account)
-        return response(400, 'Slack authorization could not be saved. Return to Xerxes.')
-      }
-      try { db.query('INSERT INTO hub_slack_connection VALUES (?, ?, ?)').run(flow.owner, account.teamId, account.userId) }
-      catch (error) { await flow.oauth.disconnect(account); throw error }
-      return response(200, 'Slack is connected. Return to Xerxes.')
+      const grant = await flow.oauth.verifyOAuth(binding, { state,
+        ...(codes.length === 1 && errors.length === 0 && codes[0] !== undefined ? { code: codes[0] } : { error: 'denied' }) }, flow.abort.signal)
+      review(flow, grant)
+      return response(200, 'Return to Xerxes to verify and confirm your Slack account.')
     } catch { return response(400, 'Slack authorization did not complete. Return to Xerxes.') }
-    finally { exchanging = undefined }
+    finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
   }
 
   const tools: SupervisorSlackPort = {
@@ -295,15 +430,17 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
   return {
     handlers: {
       'supervisor.slack.status': run('supervisor.slack.status'), 'supervisor.slack.connect': run('supervisor.slack.connect'),
+      'supervisor.slack.connect_token': run('supervisor.slack.connect_token'),
+      'supervisor.slack.confirm_connection': run('supervisor.slack.confirm_connection'),
       'supervisor.slack.disconnect': run('supervisor.slack.disconnect'), 'supervisor.slack.contact.lookup': run('supervisor.slack.contact.lookup'),
       'supervisor.slack.contact.confirm': run('supervisor.slack.contact.confirm'), 'supervisor.slack.contact.remove': run('supervisor.slack.contact.remove'),
       'supervisor.slack.contact.mode': run('supervisor.slack.contact.mode'), 'supervisor.slack.dm.open': run('supervisor.slack.dm.open'),
       'supervisor.slack.draft.send': run('supervisor.slack.draft.send'),
     },
-    ...(redirect === undefined ? {} : { tools }),
+    tools,
     callback: request => track(callback(request)),
     close: () => closing ??= (async () => {
-      shutdown.abort(); offRevoked(); pending = undefined
+      shutdown.abort(); offRevoked(); if (pending) clearFlow(pending)
       await Promise.allSettled(active)
       db.close()
     })(),

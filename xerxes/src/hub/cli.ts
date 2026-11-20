@@ -9,7 +9,8 @@ import { exposureConfigFromEnvironment } from './exposure.js'
 import { createHubIdentity } from './identity/index.js'
 import { runHubIdentityCli } from './identity/cli.js'
 import { createHubService, type HubService } from './service.js'
-import { slackOAuthFromEnvironment } from './slack/integration.js'
+import { SLACK_BROKER_ENROLLMENT_ENV } from './slack/broker.js'
+import { slackBrokerFromEnvironment, slackOAuthFromEnvironment } from './slack/integration.js'
 import { loadOrCreateHubSigner } from './signer.js'
 import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort, watchStallFromEnvironment } from './supervisor/index.js'
 import { idleMsFromEnvironment } from './supervisor/idleWatchdog.js'
@@ -512,9 +513,19 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
           ...(vapidSubject ? { vapidSubject } : {}),
           onListenerError: error => err(`Hub identity listener failed: ${error instanceof Error ? error.message : String(error)}`),
         })
-        let slackOAuth: ReturnType<typeof slackOAuthFromEnvironment>
-        try { slackOAuth = slackOAuthFromEnvironment(environment) }
-        catch (error) { err(`Hub Slack is off: ${error instanceof Error ? error.message : 'invalid settings'}`) }
+        let slack: Parameters<typeof createHubService>[0]['slack']
+        try {
+          const brokerOrigin = slackBrokerFromEnvironment(environment)
+          // When the operator selects a broker, fail closed instead of silently falling back to another OAuth app.
+          if (brokerOrigin !== undefined) {
+            const brokerEnrollmentToken = environment[SLACK_BROKER_ENROLLMENT_ENV]?.trim()
+            if (!brokerEnrollmentToken) err(`Managed Slack sign-in is unavailable: set ${SLACK_BROKER_ENROLLMENT_ENV} on the Hub host.`)
+            slack = { brokerOrigin, ...(brokerEnrollmentToken ? { brokerEnrollmentToken } : {}) }
+          } else {
+            const oauth = slackOAuthFromEnvironment(environment)
+            if (oauth !== undefined) slack = { oauth }
+          }
+        } catch (error) { err(`Hub Slack is off: ${error instanceof Error ? error.message : 'invalid settings'}`) }
         // Voice is opt-in (XERXES_HUB_VOICE_ENABLED=true plus provider keys). A bad
         // setting is reported and voice stays off; the rest of the Hub still runs.
         let voice: VoiceRuntimeConfig | undefined
@@ -544,7 +555,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
             prefetchVoiceModels: true,
             exposure: exposureConfigFromEnvironment(environment),
             supervisor: supervisorConfigFromEnvironment(environment),
-            ...(slackOAuth === undefined ? {} : { slack: { oauth: slackOAuth } }),
+            ...(slack === undefined ? {} : { slack }),
             ...(voice === undefined ? {} : { voice }),
             sendPush: (userId, message) => identity.admin.sendPush(userId, message),
             isHubOwner: userId => identity.admin.ownerUserId() === userId,

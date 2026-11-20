@@ -3424,6 +3424,11 @@ html,body,#root,.app.atelier{background:transparent}
 .xslack__ids,.xslack__message-meta{color:var(--x-meta);font:var(--t-caption);overflow-wrap:anywhere}
 .xslack__ids code{color:var(--x-secondary);font-family:var(--mono)}
 .xslack__text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.xslack__steps{margin:0;padding-left:20px;display:grid;gap:14px;width:100%;box-sizing:border-box}
+.xslack__steps li{display:grid;justify-items:start;gap:6px;min-width:0}
+.xslack__steps li::marker{color:var(--x-meta);font-weight:600}
+.xslack__steps code{font-family:var(--mono);color:var(--x-secondary)}
+.xslack__setup input[type=password]{width:min(360px,100%)}
 /* Empty state: a mark, one sentence, three one-tap questions. */
 .xempty{display:flex;flex-direction:column;align-items:center;gap:8px;margin:14vh auto 0;max-width:460px;text-align:center;color:var(--x-meta);font:var(--t-body)}
 .xempty--wait{margin-top:14vh}

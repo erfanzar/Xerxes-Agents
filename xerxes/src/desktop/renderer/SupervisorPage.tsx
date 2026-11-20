@@ -477,13 +477,19 @@ interface Session {
   disposeSockets(): void
 }
 
+// Optional trusted origin baked into the Desktop build by the release operator.
+// An absent setting deliberately does not grant trust to a Hub-supplied origin.
+declare const __XERXES_SLACK_BROKER_ORIGIN__: string | undefined
+
 function createSession(api: CockpitApi, wsUrl: string): Session {
   const hubStore = createHubStore(undefined, { coalesceMs: 50 })
   const sockets = createCockpitSockets(api)
   // The socket lives in the main process: it opens the saved Hub with its own
   // Origin and cookies, whatever URL is named here.
   const connection = new HubConnection({ url: wsUrl, socketFactory: sockets.factory, ensureSession: cockpitEnsureSession(api) })
+  const brokerOrigin = typeof __XERXES_SLACK_BROKER_ORIGIN__ === 'string' ? __XERXES_SLACK_BROKER_ORIGIN__ : undefined
   const slack = createSupervisorSlackClient({
+    ...(brokerOrigin === undefined ? {} : { trustedBrokerOrigin: brokerOrigin }),
     allowed: () => connection.status().state === 'live' && isHubOwner(hubStore.getSnapshot()),
     request: (method, params) => connection.request(method, params),
   })

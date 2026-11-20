@@ -17,7 +17,7 @@ export function checkAbort(signal?: AbortSignal): void {
   if (signal?.aborted) throw new SlackTransportError('aborted')
 }
 
-async function parseBody(response: Response, signal: AbortSignal | null | undefined): Promise<Record<string, unknown>> {
+export async function parseSlackJson(response: Response, signal: AbortSignal | null | undefined, maxBytes = MAX_RESPONSE_BYTES): Promise<Record<string, unknown>> {
   if (!response.body) throw new SlackTransportError('invalid_response')
   const reader = response.body.getReader()
   const cancel = (): void => { void reader.cancel().catch(() => {}) }
@@ -30,11 +30,11 @@ async function parseBody(response: Response, signal: AbortSignal | null | undefi
       const next = await reader.read()
       if (next.done) break
       bytes += next.value.byteLength
-      if (bytes > MAX_RESPONSE_BYTES) throw new SlackTransportError('invalid_response')
+      if (bytes > maxBytes) throw new SlackTransportError('invalid_response')
       text += decoder.decode(next.value, { stream: true })
     }
     const parsed = record(JSON.parse(text + decoder.decode()))
-    if (!parsed || typeof parsed.ok !== 'boolean') throw new SlackTransportError('invalid_response')
+    if (!parsed) throw new SlackTransportError('invalid_response')
     return parsed
   } catch {
     cancel()
@@ -51,6 +51,11 @@ export class SlackHttp {
   }
 
   async request(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return (await this.requestWithScopes(method, authorization, input, signal)).data
+  }
+
+  /** Same request, plus the scopes Slack reports for this token in the `x-oauth-scopes` header. */
+  async requestWithScopes(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<{ data: Record<string, unknown>; scopes: string }> {
     checkAbort(signal)
     const url = new URL(`https://slack.com/api/${method}`)
     const headers = new Headers({ authorization, accept: 'application/json' })
@@ -72,16 +77,16 @@ export class SlackHttp {
       aborter.signal.addEventListener('abort', () => reject(aborter.signal.reason), { once: true })
     })
     try {
-      const data = await Promise.race([deadline, this.#exchange(method, url.toString(), init)])
+      const result = await Promise.race([deadline, this.#exchange(method, url.toString(), init)])
       checkAbort(signal)
-      return data
+      return result
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', cancel)
     }
   }
 
-  async #exchange(method: SlackMethod, url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  async #exchange(method: SlackMethod, url: string, init: RequestInit): Promise<{ data: Record<string, unknown>; scopes: string }> {
     let response: Response
     try { response = await this.fetchPort(url, init) } catch { throw new SlackTransportError('network_error') }
     if (init.signal?.aborted || response.redirected || !response.ok) {
@@ -94,8 +99,9 @@ export class SlackHttp {
       }
       throw new SlackTransportError('slack_rejected')
     }
-    const data = await parseBody(response, init.signal)
-    if (data.ok === true) return data
+    const data = await parseSlackJson(response, init.signal)
+    if (typeof data.ok !== 'boolean') throw new SlackTransportError('invalid_response')
+    if (data.ok === true) return { data, scopes: (response.headers.get('x-oauth-scopes') ?? '').slice(0, 4096) }
     if (data.error === 'ratelimited') throw new SlackTransportError('rate_limited')
     if ((method === 'users.info' && data.error === 'user_not_found') || (method === 'users.lookupByEmail' && data.error === 'users_not_found')) {
       throw new SlackTransportError('not_found')

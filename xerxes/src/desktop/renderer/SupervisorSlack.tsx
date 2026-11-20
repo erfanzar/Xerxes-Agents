@@ -3,7 +3,76 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
-import { isSlackUserId, sameSlackContact, slackUnavailable, type SlackContact, type SlackDm, type SlackDraft, type SlackIdentity, type SlackStatus, type SupervisorSlackClient } from '../../client/supervisorSlack.js'
+import { HubRequestError } from '../../client/hubConnection.js'
+import {
+  isSlackUserId, isSlackUserToken, sameSlackContact, slackAppManifest, slackCreateAppUrl, slackUnavailable,
+  type SlackContact, type SlackDm, type SlackDraft, type SlackIdentity, type SlackStatus, type SupervisorSlackClient,
+} from '../../client/supervisorSlack.js'
+import { copyToClipboard } from './CopyButton.js'
+
+const SLACK_UNAVAILABLE = 'Managed Slack sign-in is currently unavailable.'
+const HUB_TOO_OLD = 'Your Hub runs an older Xerxes that can’t connect Slack from this app. Update the Hub, then press Refresh.'
+
+/** A message the owner can act on; Hub messages for these codes are written for people and never carry the token. */
+function tokenError(reason: unknown): string {
+  if (reason instanceof HubRequestError) {
+    if (reason.code === 'unknown_method' || (reason.code === 'invalid_request' && reason.message.startsWith('unknown hub method'))) return HUB_TOO_OLD
+    if (reason.code === 'invalid_request' || reason.code === 'conflict') return reason.message
+    if (reason.code === 'unavailable' || reason.code === 'rate_limited') return `${reason.message} Try again in a moment.`
+  }
+  if (reason instanceof Error && reason.message.startsWith('Paste the User OAuth Token')) return reason.message
+  return 'Could not connect this token. Press Refresh to check the Hub, then try again.'
+}
+
+/** Three steps, all in the app: create the owner's own Slack app, install it, paste its user token. */
+export function SlackTokenSetup({ disabled, openApp, onSubmit }: {
+  readonly disabled: boolean
+  readonly openApp: () => void
+  readonly onSubmit: (token: string) => void
+}): ReactElement {
+  const [token, setToken] = useState('')
+  const [copied, setCopied] = useState<string>()
+  const value = token.trim()
+  const valid = isSlackUserToken(value)
+  return <form className="xslack__card xslack__setup" aria-label="Connect your Slack account" onSubmit={event => {
+    event.preventDefault()
+    if (disabled || !valid) return
+    // The token never stays in renderer state after it is handed to the Hub.
+    setToken('')
+    onSubmit(value)
+  }}>
+    <ol className="xslack__steps">
+      <li>
+        <strong>Create your XERXES app in Slack.</strong>
+        <span>Slack opens with everything filled in. Pick your workspace, click <em>Next</em>, then <em>Create</em>.</span>
+        <div className="xslack__actions">
+          <button type="button" className="btn btn--solid" disabled={disabled} onClick={openApp}>Create XERXES app in Slack</button>
+          <button type="button" className="btn" disabled={disabled}
+            onClick={() => void copyToClipboard(slackAppManifest()).then(ok => setCopied(ok ? 'Manifest copied.' : 'Could not copy the manifest.'))}>Copy manifest</button>
+        </div>
+        <span className="studio-muted">If Slack opens without the details, choose <em>From a manifest</em> and paste the copied manifest.</span>
+        {copied ? <span className="studio-muted" role="status">{copied}</span> : null}
+      </li>
+      <li>
+        <strong>Install it to your workspace.</strong>
+        <span>In the new app, open <em>OAuth &amp; Permissions</em>, click <em>Install to Workspace</em>, then <em>Allow</em>.</span>
+      </li>
+      <li>
+        <strong>Paste the User OAuth Token.</strong>
+        <span>It’s on the same page and starts with <code>xoxp-</code>.</span>
+        <div className="xslack__actions">
+          <input type="password" aria-label="Slack User OAuth Token" value={token} placeholder="xoxp-…" autoComplete="off" spellCheck={false}
+            disabled={disabled} onChange={event => setToken(event.target.value)} />
+          <button type="submit" className="btn btn--solid" disabled={disabled || !valid}>Connect</button>
+        </div>
+        {value && !valid ? <span className="studio-muted">That isn’t a user token. Copy the one labelled <em>User OAuth Token</em>, starting with <code>xoxp-</code>.</span> : null}
+      </li>
+    </ol>
+    <p className="studio-muted">XERXES acts as you in Slack, only in direct messages with people you approve, and replies start as drafts for your review. The token stays on your Hub; Disconnect removes it.</p>
+  </form>
+}
+const SLACK_EXPIRED = 'Slack sign-in expired. Start again to connect.'
+const SLACK_DENIED = 'Slack sign-in was declined. Nothing was connected.'
 
 /** A local, single-flight request. Ignore completions after this screen is left. */
 function useSlackRequest(): {
@@ -66,14 +135,27 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
   const [error, setError] = useState<string>()
   const [oauthUntil, setOAuthUntil] = useState(0)
   const [oauthNote, setOAuthNote] = useState<string>()
+  const [brokerPairing, setBrokerPairing] = useState<{ origin: string; code: string }>()
   const [userId, setUserId] = useState('')
   const [change, setChange] = useState<Change>()
   const [selected, setSelected] = useState<SlackContact>()
   const account = status?.connection ?? null
+  const pending = status?.pending_identity
+  // Hubs that report browser_sign_in also accept a pasted user token; older Hubs only offer browser sign-in.
+  const tokenSetup = status?.browser_sign_in !== undefined
+  const browserSignIn = status?.browser_sign_in ?? status?.configured ?? false
   const contact = selected === undefined ? undefined : status?.contacts.find(row => sameSlackContact(row, selected))
   const accept = useCallback((next: SlackStatus): void => {
     setStatus(next)
-    if (next.connection !== null) { setOAuthUntil(0); setOAuthNote(undefined) }
+    if (next.connection !== null || next.pending_identity !== undefined || !next.configured) {
+      setOAuthUntil(0)
+      setOAuthNote(undefined)
+      setBrokerPairing(undefined)
+    } else if (next.oauth_status === 'denied' || next.oauth_status === 'expired') {
+      setOAuthUntil(0)
+      setOAuthNote(next.oauth_status === 'denied' ? SLACK_DENIED : SLACK_EXPIRED)
+      setBrokerPairing(undefined)
+    }
   }, [])
   const refresh = useCallback((): void => {
     run(async current => {
@@ -82,34 +164,68 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
       if (current()) { accept(next); setError(undefined) }
     }, reason => {
       setStatus(undefined)
-      setError(slackUnavailable(reason) ? 'This Hub does not support Slack controls. Update the Hub, then refresh.' : 'Could not read Slack status from the Hub.')
+      setError(slackUnavailable(reason) ? SLACK_UNAVAILABLE : 'Could not read Slack status from the Hub.')
     })
   }, [accept, client, run])
   useEffect(refresh, [refresh])
   useEffect(() => {
-    if (oauthUntil === 0 || busy || status?.connection) return
+    if (oauthUntil === 0 || busy) return
     const timer = setTimeout(() => {
-      if (Date.now() < oauthUntil) refresh()
-      else {
+      if (Date.now() >= oauthUntil) {
         setOAuthUntil(0)
-        setOAuthNote('Still waiting for Slack. Finish in your browser and choose Refresh, or start again.')
+        setOAuthNote('Slack sign-in took too long. Refresh its status or start again.')
+        setBrokerPairing(undefined)
       }
-    }, 3_000)
+      // Read the Hub at the deadline as well: Slack may already be waiting for confirmation.
+      refresh()
+    }, Math.max(0, Math.min(3_000, oauthUntil - Date.now())))
     return () => clearTimeout(timer)
-  }, [busy, oauthUntil, refresh, status?.connection])
+  }, [busy, oauthUntil, refresh])
 
-  function connect(): void {
+  function connectWithToken(token: string): void {
+    if (account !== null || pending !== undefined) return
     run(async current => {
       setError(undefined)
       setOAuthNote(undefined)
-      const url = await client.connect()
+      const next = await client.connectToken(token)
+      if (current()) accept(next)
+    }, reason => setError(tokenError(reason)))
+  }
+  function openCreateApp(): void {
+    run(async () => {
+      setError(undefined)
+      if (!(await openOAuth(slackCreateAppUrl()))) throw new Error('Browser not opened')
+    }, () => setError('Could not open Slack in your browser. Use Copy manifest and create the app at api.slack.com/apps.'))
+  }
+  function connect(): void {
+    if (!browserSignIn || account !== null || pending !== undefined || oauthUntil > 0) return
+    run(async current => {
+      setError(undefined)
+      setOAuthNote(undefined)
+      setBrokerPairing(undefined)
+      const { url, expiresAt, pairingCode } = await client.connect()
       if (!current()) return
+      const deadline = expiresAt ?? Date.now() + (pairingCode === undefined ? 120_000 : 10 * 60_000)
+      if (deadline <= Date.now()) { setOAuthNote(SLACK_EXPIRED); return }
       if (!(await openOAuth(url))) throw new Error('Browser not opened')
       if (current()) {
-        setOAuthUntil(Date.now() + 120_000)
-        setOAuthNote('Finish authorizing in your browser. This screen will check for the connection.')
+        setOAuthUntil(deadline)
+        if (pairingCode !== undefined) setBrokerPairing({ origin: new URL(url).origin, code: pairingCode })
+        setOAuthNote('Finish signing in to Slack in your browser, then return here to confirm your account.')
       }
-    }, () => setError('Could not open Slack authorization. Refresh to check the connection before trying again.'))
+    }, reason => setError(slackUnavailable(reason)
+      ? SLACK_UNAVAILABLE : 'Could not open Slack sign-in. Refresh to check its status before trying again.'))
+  }
+  function confirmConnection(): void {
+    if (pending === undefined) return
+    run(async current => {
+      setError(undefined)
+      const next = await client.confirmConnection(pending)
+      if (current()) accept(next)
+    }, () => {
+      setStatus(undefined)
+      setError('Could not confirm this Slack account. Refresh to check whether the request expired or the account is connected.')
+    })
   }
   function lookup(): void {
     if (account === null || !isSlackUserId(userId.trim())) return
@@ -144,13 +260,27 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
     {status === undefined ? (error ? null : <p role="status">Reading Slack status…</p>) : <>
       <div className="xslack__card xslack__row">
         <div>
-          <h3>{account === null ? 'Not connected' : account.team_name || 'Connected to Slack'}</h3>
+          <h3>{account !== null ? account.team_name || 'Connected to Slack' : pending !== undefined ? 'Awaiting confirmation' : 'Not connected'}</h3>
           {account !== null ? <ExactIds contact={account} /> : null}
-          {account === null && !status.configured ? <p>Configure Slack OAuth on the Hub before connecting.</p> : null}
+          {account === null && pending === undefined
+            ? <p>{tokenSetup ? 'Connect XERXES to your Slack account in three steps.' : browserSignIn ? 'Sign in to Slack to connect your account.' : HUB_TOO_OLD}</p> : null}
         </div>
         {account !== null ? <button type="button" className="btn" disabled={locked} onClick={() => setChange({ kind: 'disconnect' })}>Disconnect</button>
-          : <button type="button" className="btn btn--solid" disabled={locked || !status.configured || oauthUntil > 0} onClick={connect}>Connect Slack</button>}
+          : pending === undefined && browserSignIn ? <button type="button" className={tokenSetup ? 'btn' : 'btn btn--solid'} disabled={locked || oauthUntil > 0} onClick={connect}>Sign in with Slack</button> : null}
       </div>
+      {account === null && pending === undefined && tokenSetup && oauthUntil === 0
+        ? <SlackTokenSetup disabled={locked} openApp={openCreateApp} onSubmit={connectWithToken} /> : null}
+      {pending !== undefined ? <section className="xslack__card xslack__confirm" aria-label="Confirm your Slack account">
+        <h4>Confirm your Slack account</h4>
+        <ExactIds contact={pending} />
+        <p>Confirm only if these IDs match the Slack workspace and account you just authorized. If they don’t match, do not confirm.</p>
+        <button type="button" className="btn btn--solid" disabled={busy} onClick={confirmConnection}>Confirm Slack account</button>
+      </section> : null}
+      {brokerPairing !== undefined ? <section className="xslack__card" aria-label="Slack pairing code">
+        <h4>Slack pairing code</h4>
+        <p>Enter this code only on <strong>{brokerPairing.origin}</strong> in the browser. Do not share it.</p>
+        <code>{brokerPairing.code}</code>
+      </section> : null}
       {oauthNote ? <p className="notice" role="status">{oauthNote}</p> : null}
       {account !== null && change?.kind === 'disconnect' ? <ConfirmSlack title="Disconnect this Slack account?" action="Disconnect Slack" disabled={busy}
         onCancel={() => setChange(undefined)} onConfirm={() => mutate(() => client.disconnect(account))}>
