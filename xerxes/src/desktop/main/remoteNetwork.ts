@@ -74,7 +74,7 @@ export function forwardArgs(machine: RemoteTarget, forward: { kind: 'socks'; loc
   return [...sshOptions, '-N', '-T', '-o', 'ExitOnForwardFailure=yes', '-o', 'GatewayPorts=no', ...bind, '--', sshDestination(machine.target)]
 }
 
-interface Running { child: ChildProcess; local: number; state: 'starting' | 'ready' | 'failed'; error?: string; ready: Promise<number> }
+interface Running { child?: ChildProcess; stopped?: boolean; local: number; state: 'starting' | 'ready' | 'failed'; error?: string; ready: Promise<number> }
 
 export class RemoteNetwork {
   private socks: Running | undefined
@@ -114,15 +114,16 @@ export class RemoteNetwork {
     const row = this.forwards.get(remote)
     if (!row) return
     this.forwards.delete(remote)
-    row.child.kill('SIGTERM')
+    row.stopped = true
+    row.child?.kill('SIGTERM')
   }
 
   close(): void {
     if (this.closed) return
     this.closed = true
     this.controller.abort()
-    this.socks?.child.kill('SIGTERM')
-    for (const row of this.forwards.values()) row.child.kill('SIGTERM')
+    this.socks?.child?.kill('SIGTERM')
+    for (const row of this.forwards.values()) row.child?.kill('SIGTERM')
     this.forwards.clear()
     this.socks = undefined
   }
@@ -131,6 +132,8 @@ export class RemoteNetwork {
     const row = { local: 0, state: 'starting' } as Running
     row.ready = (async () => {
       const local = await (this.ports.freePort ?? freeLoopbackPort)(preferred)
+      if (this.closed) throw new Error('The SSH workspace is closed')
+      if (row.stopped) throw new Error('The SSH forward was stopped')
       row.local = local
       const child = (this.ports.spawn ?? (args => spawn('ssh', [...args], { stdio: ['ignore', 'ignore', 'pipe'] })))(forwardArgs(this.machine, spec(local)))
       row.child = child

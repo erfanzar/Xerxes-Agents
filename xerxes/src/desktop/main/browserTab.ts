@@ -36,6 +36,10 @@ export class BrowserTab {
   private shown = false
   private error: string | undefined
   private closed = false
+  private generation = 0
+  private routeSetup: Promise<WebContentsView> | undefined
+  private proxyPort: number | undefined
+  private retryUrl = ''
 
   constructor(
     private readonly window: BrowserWindow,
@@ -45,16 +49,37 @@ export class BrowserTab {
 
   private async ensure(): Promise<WebContentsView> {
     if (this.closed || this.window.isDestroyed()) throw new Error('The window is closed')
-    if (this.view && !this.view.webContents.isDestroyed()) return this.view
-    // In-memory partition (no "persist:"): cookies and storage die with the tab.
-    const ses: Session = electronSession.fromPartition(`xerxes-browser-${process.pid}-${++partitions}`)
+    if (this.routeSetup) return this.routeSetup
+    const setup = this.prepare(this.generation)
+    this.routeSetup = setup
+    try { return await setup }
+    finally { if (this.routeSetup === setup) this.routeSetup = undefined }
+  }
+
+  private async prepare(generation: number): Promise<WebContentsView> {
     const network = this.network()
-    if (network) {
-      const port = await network.socksPort()
-      // "<-loopback>" removes Chromium's implicit localhost bypass, so localhost
-      // goes through the tunnel too; socks5 resolves names on the remote side.
-      await ses.setProxy({ proxyRules: `socks5://127.0.0.1:${port}`, proxyBypassRules: '<-loopback>' })
+    const stillCurrent = () => {
+      if (generation !== this.generation || network !== this.network() || this.closed || this.window.isDestroyed()) {
+        throw new Error('The Browser workspace changed; open the address again')
+      }
     }
+    const existing = this.view && !this.view.webContents.isDestroyed() ? this.view : null
+    // The SSH process can die while the native view is still alive. Its owner
+    // replaces a failed listener on demand; refresh the route before navigating.
+    const port = network ? await network.socksPort() : undefined
+    stillCurrent()
+    // In-memory partition (no "persist:"): cookies and storage die with the tab.
+    const ses: Session = existing?.webContents.session ?? electronSession.fromPartition(`xerxes-browser-${process.pid}-${++partitions}`)
+    if (port !== undefined && (!existing || this.proxyPort !== port)) {
+      // A single fixed SOCKS proxy, with Chromium's implicit localhost bypass
+      // removed. An unavailable proxy must never make the tab connect directly.
+      await ses.setProxy({ mode: 'fixed_servers', proxyRules: `socks5://127.0.0.1:${port}`, proxyBypassRules: '<-loopback>' })
+      stillCurrent()
+      if (existing) await ses.closeAllConnections()
+      stillCurrent()
+    }
+    this.proxyPort = port
+    if (existing) return existing
     ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
     ses.setPermissionCheckHandler(() => false)
     ses.on('will-download', event => event.preventDefault())
@@ -63,20 +88,30 @@ export class BrowserTab {
       webviewTag: false, safeDialogs: true, spellcheck: false,
     } })
     const contents = view.webContents
+    // WebRTC UDP isn't carried by the workspace SOCKS route.
+    if (network) contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
     contents.setWindowOpenHandler(({ url }) => {
       // Popups open in this tab, through the same route; never in a new window.
       if (/^https?:/i.test(url)) void contents.loadURL(url)
       return { action: 'deny' }
     })
     contents.on('will-navigate', (event, url) => { if (!/^https?:/i.test(url)) event.preventDefault() })
-    const send = () => this.emit()
-    contents.on('did-start-loading', () => { this.error = undefined; send() })
+    const active = () => this.view === view && !this.closed
+    const send = () => { if (active()) this.emit() }
+    contents.on('did-start-loading', () => { if (active()) { this.error = undefined; send() } })
     contents.on('did-stop-loading', send)
-    contents.on('did-navigate', send)
+    contents.on('did-navigate', (_event, url) => {
+      if (active() && /^https?:\/\//i.test(url)) this.retryUrl = ''
+      send()
+    })
     contents.on('did-navigate-in-page', send)
     contents.on('page-title-updated', send)
-    contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
-      if (isMainFrame && code !== -3) { this.error = `${description} (${code})`; send() }
+    contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+      if (active() && isMainFrame && code !== -3) {
+        if (/^https?:\/\//i.test(url)) this.retryUrl = url
+        this.error = `${description} (${code})`
+        send()
+      }
     })
     contents.on('render-process-gone', () => { this.error = 'The page crashed; reload it'; send() })
     this.view = view
@@ -87,7 +122,7 @@ export class BrowserTab {
   state(): BrowserState {
     const contents = this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
     return {
-      url: contents?.getURL() ?? '', title: contents?.getTitle() ?? '', loading: contents?.isLoading() ?? false,
+      url: this.retryUrl || contents?.getURL() || '', title: contents?.getTitle() ?? '', loading: contents?.isLoading() ?? false,
       canGoBack: contents?.navigationHistory.canGoBack() ?? false, canGoForward: contents?.navigationHistory.canGoForward() ?? false,
       via: this.network()?.label ?? null, ...(this.error ? { error: this.error } : {}),
     }
@@ -97,21 +132,32 @@ export class BrowserTab {
 
   async open(input: unknown): Promise<BrowserState> {
     const url = browserUrl(String(input ?? ''))
-    const view = await this.ensure()
+    const generation = this.generation
+    this.retryUrl = url
     this.error = undefined
-    view.webContents.loadURL(url).catch(() => { /* did-fail-load reports it */ })
-    this.emit()
+    try {
+      const view = await this.ensure()
+      if (view !== this.view || generation !== this.generation) throw new Error('The Browser workspace changed; open the address again')
+      void view.webContents.loadURL(url).catch(() => { /* did-fail-load reports it */ })
+    } finally {
+      if (generation === this.generation) this.emit()
+    }
     return this.state()
   }
 
-  navigate(action: 'back' | 'forward' | 'reload' | 'stop'): BrowserState {
+  async navigate(action: 'back' | 'forward' | 'reload' | 'stop'): Promise<BrowserState> {
     const contents = this.view?.webContents
-    if (contents && !contents.isDestroyed()) {
-      if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack()
-      else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward()
-      else if (action === 'reload') contents.reload()
-      else if (action === 'stop') contents.stop()
-    }
+    if (action === 'reload' && this.retryUrl) return this.open(this.retryUrl)
+    if (!contents || contents.isDestroyed()) return this.state()
+    if (action === 'stop') { contents.stop(); return this.state() }
+    if (action === 'back' && !contents.navigationHistory.canGoBack()) return this.state()
+    if (action === 'forward' && !contents.navigationHistory.canGoForward()) return this.state()
+    const view = await this.ensure()
+    if (view !== this.view || view.webContents !== contents) return this.state()
+    this.retryUrl = ''
+    if (action === 'reload') contents.reload()
+    else if (action === 'back') contents.navigationHistory.goBack()
+    else contents.navigationHistory.goForward()
     return this.state()
   }
 
@@ -137,7 +183,7 @@ export class BrowserTab {
 
   /** Public pages can open in the system browser; a tunnelled localhost would not resolve there. */
   async openExternal(): Promise<void> {
-    const url = this.state().url
+    const url = this.view?.webContents.getURL() ?? ''
     if (!/^https?:/i.test(url)) return
     const host = new URL(url).hostname
     if (this.network() && /^(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
@@ -149,6 +195,10 @@ export class BrowserTab {
   /** Drop the page and its session (used when the workspace changes or closes). */
   reset(): void {
     const view = this.view
+    this.generation++
+    this.routeSetup = undefined
+    this.proxyPort = undefined
+    this.retryUrl = ''
     this.view = null
     this.error = undefined
     if (view) {

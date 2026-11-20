@@ -99,6 +99,18 @@ test('a forward that never becomes ready is killed and reported', async () => {
   expect(network.list()[0]?.state).toBe('failed')
 })
 
+test('closing a workspace while allocating its SOCKS port never starts ssh', async () => {
+  const port = Promise.withResolvers<number>()
+  const network = new RemoteNetwork(machine, {
+    freePort: () => port.promise,
+    spawn: () => { throw new Error('ssh must not start after close') },
+  })
+  const ready = network.socksPort()
+  network.close()
+  port.resolve(41000)
+  await expect(ready).rejects.toThrow('workspace is closed')
+})
+
 test('at most MAX_PORT_FORWARDS ports per workspace', async () => {
   const { network } = fixture()
   for (let port = 0; port < MAX_PORT_FORWARDS; port++) await network.forward(20000 + port)
