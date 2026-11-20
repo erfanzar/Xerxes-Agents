@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.50 — 2026-11-20
+
+- **XERXES on Slack.** The Hub can connect XERXES to Slack as the signed-in user (OAuth install, user scopes only). It talks only in one-to-one DMs with peers you approve, through a policy-gated transport, and the supervisor gets Slack tools. Desktop has the Slack settings. Setup: `docs/supervisor-slack.md`.
+- **Unattended plans proceed after three minutes.** A plan card nobody answers proceeds with its first option (accept edits) after three minutes, and the card shows the deadline. Answering, cancelling, hiding a refused reply or a newer request disarms the timer.
+- **Notifications while the app is focused.** A task that stops, fails, finishes or needs you now notifies even while Xerxes is in front, with the reason it stopped. Clicking a notification shows its workspace.
+- **XERXES replies without the bird mark.** The name and the accent rail carry the signature.
+- **Neo prompt bar fixed.** Neo still drew its old card (a frame around the input and the controls together, and a filled toolbar) on top of the shared layout, so the controls sat boxed inside the prompt. Neo now uses the shared layout, a framed input with the controls unframed below it, and keeps its `❯` prompt and mono type.
+- **Pasted screenshots line up with your message.** The thumbnail's link box grew to the screenshot's full width, which pushed the image far left of the bubble. The image now ends on the same right edge as your message, in Vibes and Neo.
+
 ## 0.8.49 — 2026-11-20
 
 - **Codex prompt cache covers the system prompt.** The ChatGPT subscription backend never cached the `instructions` field, so every round re-sent the whole system prompt uncached (a 164K-character prompt cost about 39K uncached tokens a round). The system prompt now leads the request as a developer message, where it becomes part of the cached prefix; `instructions` keeps one fixed line.
