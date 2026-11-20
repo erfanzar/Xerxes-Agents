@@ -82,3 +82,11 @@ test('background history is collapsed while active and unknown states remain vis
   expect(html).toContain('2 · 1 failed')
   expect(renderToStaticMarkup(createElement(BackgroundActivity, { rows: [], renderRow: () => createElement('p') }))).toBe('')
 })
+
+test('the agent message box stays centred under the agent conversation, not pinned to the left edge', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/layout.css', import.meta.url)).text()
+  const rule = css.match(/\.composer-wrap\.agent-dock\{([^}]*)\}/)?.[1] ?? ''
+  expect(rule).toContain('display:block')
+  // `margin:0` here cancelled the composer's `margin-inline:auto` and left the box at the pane's left edge.
+  expect(rule).toMatch(/margin:0 auto(;|$)/)
+})

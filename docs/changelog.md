@@ -15,6 +15,7 @@ describe the earlier implementation and are not current setup instructions.
 - **Claude Code prompt cache.** When the API refused Xerxes' cache marker once, the marker stayed off for the whole connection, so every call rewrote the whole conversation into the cache. It now comes back after five minutes, and each refusal is logged to `~/.xerxes/claude-code/cache-marks.jsonl`.
 - **Plan first with Accept all decides without a card.** Read-only calls run; anything that could change files or start agents is refused with a reason instead of asking.
 - **Browser tab over SSH.** WebRTC and stopped port forwards fail with a clear message instead of hanging.
+- **The agent message box is centred.** In an agent's view, "Message this agent" sat at the pane's left edge while the conversation above it was centred.
 
 ## 0.8.46 — 2026-11-16
 

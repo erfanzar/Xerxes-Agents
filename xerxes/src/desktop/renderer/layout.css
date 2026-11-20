@@ -375,8 +375,10 @@
 :root:not(#layout) .atelier .rsec__agent>.agent-inspector{flex:1;min-height:0;display:flex;flex-direction:column}
 :root:not(#layout) .atelier .rsec__agent .agent-transcript{flex:1;min-height:0;overflow:auto}
 :root:not(#layout) .atelier .rsec__agent .agent-dock{flex:none;padding:6px 8px 8px}
-/* The agent's dock reuses composer classes but is not the task composer: undo the Shading composer grid. */
-:root:not(#layout) .atelier .composer-wrap.agent-dock{display:block;margin:0;padding-top:0;isolation:auto}
+/* The agent's dock reuses composer classes but is not the task composer: undo the composer grid.
+   It keeps the centring margin, though: `margin:0` pinned the box to the pane's left edge while the
+   agent's conversation stayed centred above it. */
+:root:not(#layout) .atelier .composer-wrap.agent-dock{display:block;margin:0 auto;padding-top:0;isolation:auto}
 :root:not(#layout) .atelier .composer-wrap.agent-dock>.composer-dock{display:block;border:0}
 :root:not(#layout) .atelier .composer-wrap.agent-dock>.composer-dock>.composer{display:flex;flex-direction:row;align-items:flex-end;gap:6px;padding:8px 8px 8px 12px}
 :root:not(#layout) .atelier .composer-wrap.agent-dock .composer__input{flex:1;min-height:40px;padding:4px 0}
