@@ -664,6 +664,18 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().sessionOpenRevision).toBe(revision + 2)
   })
 
+  test('clicking the task that is mid-turn still counts as an open, so the view returns to its chat', async () => {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    bridge.push('turn_begin', { text: 'go' })
+    expect(store.getSnapshot().turnActive).toBe(true)
+    const revision = store.getSnapshot().sessionOpenRevision
+    const initializes = bridge.calls.filter(call => call.method === 'initialize').length
+    await store.openSession(store.getSnapshot().currentId)
+    // App resets the page (XERXES, Customize…) on this revision; the running turn is not re-bound.
+    expect(store.getSnapshot().sessionOpenRevision).toBe(revision + 1)
+    expect(bridge.calls.filter(call => call.method === 'initialize')).toHaveLength(initializes)
+  })
+
   test('runtime update reports waiting and errors and resumes the original session', async () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     let outcome: Record<string, unknown> = { ok: false, busy: true }

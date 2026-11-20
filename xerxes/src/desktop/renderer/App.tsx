@@ -253,7 +253,10 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     const current = store.getSnapshot().currentId
     if (target.artifactId) pendingArtifact.current = { artifactId: target.artifactId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) }
     if (target.sessionId && target.sessionId !== current) { void store.openSession(target.sessionId); return }
-    if (target.artifactId) { pendingArtifact.current = null; navigate('docs', target.artifactId) }
+    if (target.artifactId) { pendingArtifact.current = null; navigate('docs', target.artifactId); return }
+    // This view's own task was clicked (from another view, or a notification):
+    // show its chat, never the page (XERXES, Customize…) the view was left on.
+    if (target.sessionId) navigate(null)
   }), [])
   useEffect(() => {
     setPanel(null); setPage(null); setSelectedAgent('')

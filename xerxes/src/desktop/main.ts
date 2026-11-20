@@ -324,12 +324,23 @@ function scheduleWindowSave(): void {
   saveTimer = setTimeout(persistWindows, 250)
 }
 
+/**
+ * Tell a retained view that one of its tasks was clicked. Activating a view
+ * only shows it as it was left, so a view last on XERXES (or another page)
+ * came back on that page instead of the chat that was clicked.
+ */
+function showTask(id: number, sessionId: string): void {
+  const surface = workspaceSurfaces.get(id)
+  const contents = surface?.view?.webContents ?? surface?.host.webContents
+  if (contents && !contents.isDestroyed()) contents.send('desktop:navigate', { sessionId })
+}
+
 function openWorkspaceView(host: BrowserWindow, directory: string, sessionId?: string): void {
   const views = [...workspaceSurfaces].flatMap(([id, surface]) => {
     const state = windowStates.get(id)?.()
     return state && surface.host === host ? [{ ...state, cwd: surfaceSessions.get(id)?.cwd ?? null, isDestroyed: () => host.isDestroyed(),
       isMinimized: () => host.isMinimized(), restore: () => host.restore(),
-      show: () => host.show(), focus: () => { host.focus(); activateSurface(id) } }] : []
+      show: () => host.show(), focus: () => { host.focus(); activateSurface(id); if (sessionId) showTask(id, sessionId) } }] : []
   })
   if (!activateWorkspaceView(views, directory, sessionId)) createWorkspaceWindow(directory, undefined, sessionId, host)
 }
@@ -364,7 +375,7 @@ function remoteViewOf(host: BrowserWindow, machine: RemoteTarget, sessionId?: st
 
 function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
   const existing = remoteViewOf(host, machine, sessionId)
-  if (existing !== undefined) { activateSurface(existing); return }
+  if (existing !== undefined) { activateSurface(existing); if (sessionId) showTask(existing, sessionId); return }
   createWorkspaceWindow(null, { workspace: null, remote: machine, sessionId: sessionId ?? null,
     bounds: host.getNormalBounds(), maximized: host.isMaximized(), fullscreen: host.isFullScreen(),
   }, undefined, host)

@@ -1594,7 +1594,9 @@ export class Store {
     try {
       const row = [...this.frame.sessions, ...this.frame.live].find(session => session.id === id) ?? known
       if (this.frame.turnActive) {
-        if (id === this.frame.currentId) return false
+        // Clicking the running task is still an explicit open: the view returns
+        // to its chat (App resets the page on this revision) without re-binding.
+        if (id === this.frame.currentId) { this.patch({ sessionOpenRevision: this.frame.sessionOpenRevision + 1 }); return false }
         if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open another session window. Relaunch the updated app.')
         await this.bridge.openWorkspaceWindow(row?.cwd || this.frame.cwd, id)
         return false
