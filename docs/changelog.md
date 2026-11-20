@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.48 — 2026-11-20
+
+- **Claude Code prompt cache stays warm with pasted screenshots.** Claude Code resizes any image over 4,784 tokens (one per 28×28 tile), even when both sides are under 2000px. A resized image stopped the cache at the system prompt, so every later round rewrote the whole conversation. Xerxes now sends images at exactly the size Claude Code would pick, so it passes them through untouched.
+- **Plan card like Claude Code's.** "Ready to code?" shows the plan itself in the card (a preview that unfolds, or opens beside the chat), then "Would you like to proceed?" with three answers: auto-accept edits, approve each edit, or keep planning with feedback. Keys 1–3 pick, ⌘↵ continues.
+- **Jump to latest is a small round button** in Vibes and Neo instead of a wide pill lying over the text.
+- **The agent message box spans the agent's conversation column.**
+- **XERXES messages have their own signature:** the mark with a soft glow, a tracked gradient wordmark and an accent rail beside each reply.
+- **Browser explains a refused address.** Over an SSH workspace, an address nothing listens on now says which machine could not reach it and why, with Try again, instead of a raw ERR_SOCKS_CONNECTION_FAILED over a blank white page.
+
 ## 0.8.47 — 2026-11-20
 
 - **Vibes is the default style, and Neo shares its layout.** Shading and Classic are retired on Desktop and in VS Code. A saved Shading or Classic choice opens as Vibes, and VS Code's `xerxes.style` setting still accepts the old values. Neo keeps its own mono font, square corners and purple accent over the same layout. Backgrounds (pictures, gradients, the transparent window) work in both styles and are off by default.

@@ -362,7 +362,7 @@ export class MistralClient implements LlmClient {
       Accept: accept,
       Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
-      'User-Agent': 'xerxes-agents/0.8.47',
+      'User-Agent': 'xerxes-agents/0.8.48',
     }
     if (this.promptCaching && request.sessionId) {
       headers['x-affinity'] = request.sessionId
