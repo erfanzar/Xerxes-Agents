@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { expect, test } from 'bun:test'
 import { encode as encodePng } from 'fast-png'
-import { fitImage, imageSize, MAX_IMAGE_EDGE } from '../src/core/imageFit.js'
+import { fitImage, fittedImageSize, imageSize, imageTokens, MAX_IMAGE_EDGE, MAX_IMAGE_TOKENS } from '../src/core/imageFit.js'
 
 const png = (width: number, height: number, channels: 3 | 4 = 4, alpha = 255): string => {
   const data = new Uint8Array(width * height * channels)
@@ -23,6 +23,18 @@ test('an oversized screenshot is scaled to the edge Claude Code passes through, 
   expect(imageSize(Buffer.from(first.data, 'base64'))).toEqual({ width: MAX_IMAGE_EDGE, height: 1299, format: 'jpeg' })
   // A fresh copy of the same image (no shared string) gives identical bytes.
   expect(fitImage({ mediaType: 'image/png', data: input.data.slice() }).data).toBe(first.data)
+})
+
+test('an image under the edge but over Claude Code\'s token budget is scaled to the size Claude Code would display', () => {
+  // The paste that broke the cache: 1940×2000 is 5040 tokens; Claude Code showed it "displayed at 1901x1960".
+  expect(imageTokens(1940, 2000)).toBe(5040)
+  expect(fittedImageSize(1940, 2000)).toEqual([1901, 1960])
+  expect(imageTokens(1901, 1960)).toBeLessThanOrEqual(MAX_IMAGE_TOKENS)
+  // Within both limits nothing changes, so Claude Code passes it through.
+  expect(fittedImageSize(1901, 1960)).toEqual([1901, 1960])
+  expect(fittedImageSize(1200, 800)).toEqual([1200, 800])
+  const out = fitImage({ mediaType: 'image/png', data: png(1940, 2000, 3) })
+  expect(imageSize(Buffer.from(out.data, 'base64'))).toEqual({ width: 1901, height: 1960, format: 'jpeg' })
 })
 
 test('an image that already fits is passed through untouched', () => {

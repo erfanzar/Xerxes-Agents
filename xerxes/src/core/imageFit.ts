@@ -20,6 +20,48 @@ import jpeg from 'jpeg-js'
 export const MAX_IMAGE_EDGE = 2000
 /** Largest image the API accepts: 5 MB of base64 is 3.75 MB of bytes. */
 export const MAX_IMAGE_BYTES = 3_750_000
+/**
+ * Claude Code also resizes an image that costs more than this many tokens
+ * (`image_limits.maxImageTokens` in Claude Code 2.1.329), even under the edge
+ * limit: a 1940×2000 paste (5040 tokens) came back "displayed at 1901x1960"
+ * and the cache stopped at the system prompt from then on.
+ */
+export const MAX_IMAGE_TOKENS = 4784
+const IMAGE_TILE = 28
+
+/** Claude Code's token estimate for an image: one per 28×28 tile. */
+export function imageTokens(width: number, height: number): number {
+  return width <= 0 || height <= 0 ? 0 : Math.ceil(width / IMAGE_TILE) * Math.ceil(height / IMAGE_TILE)
+}
+
+/** Round half to even, as Claude Code does when it keeps the aspect ratio. */
+function roundHalfEven(value: number): number {
+  const whole = Math.floor(value)
+  const fraction = value - whole
+  return fraction > 0.5 || (fraction === 0.5 && whole % 2 === 1) ? whole + 1 : whole
+}
+
+/**
+ * The size Claude Code would display `width`×`height` at: within the edge,
+ * then the largest size within the token budget, found the same way Claude
+ * Code finds it (a search on the longer side). Sent at this size, Claude Code
+ * passes the image through untouched.
+ */
+export function fittedImageSize(width: number, height: number): [number, number] {
+  let w = width, h = height
+  if (w > MAX_IMAGE_EDGE) { h = Math.round(h * MAX_IMAGE_EDGE / w); w = MAX_IMAGE_EDGE }
+  if (h > MAX_IMAGE_EDGE) { w = Math.round(w * MAX_IMAGE_EDGE / h); h = MAX_IMAGE_EDGE }
+  if (imageTokens(w, h) <= MAX_IMAGE_TOKENS) return [w, h]
+  if (h > w) { const [short, long] = fittedImageSize(h, w); return [long, short] }
+  const ratio = w / h
+  let low = 1, high = w
+  while (low + 1 < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (imageTokens(middle, Math.max(roundHalfEven(middle / ratio), 1)) <= MAX_IMAGE_TOKENS) low = middle
+    else high = middle
+  }
+  return [low, Math.max(roundHalfEven(low / ratio), 1)]
+}
 
 export interface ImageData64 {
   readonly mediaType: string
@@ -38,13 +80,14 @@ export function fitImage(image: ImageData64): ImageData64 {
   const bytes = Buffer.from(image.data, 'base64')
   const size = imageSize(bytes)
   if (!size) return image
-  if (Math.max(size.width, size.height) <= MAX_IMAGE_EDGE && bytes.length <= MAX_IMAGE_BYTES) return image
+  const [width, height] = fittedImageSize(size.width, size.height)
+  if (width === size.width && height === size.height && bytes.length <= MAX_IMAGE_BYTES) return image
   const key = createHash('sha256').update(image.data).digest('hex')
   const known = fitted.get(key)
   if (known) return known
   let result: ImageData64
   try {
-    result = scaled(bytes, size.format)
+    result = scaled(bytes, size.format, width, height)
   } catch {
     return image
   }
@@ -74,10 +117,9 @@ export function imageSize(bytes: Uint8Array): { width: number; height: number; f
   return undefined
 }
 
-function scaled(bytes: Uint8Array, format: 'png' | 'jpeg'): ImageData64 {
+function scaled(bytes: Uint8Array, format: 'png' | 'jpeg', width: number, height: number): ImageData64 {
   const source = format === 'png' ? pngRgba(bytes) : jpegRgba(bytes)
-  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(source.width, source.height))
-  const target = scale < 1 ? boxScaled(source, Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale))) : source
+  const target = width !== source.width || height !== source.height ? boxScaled(source, width, height) : source
   for (const quality of [90, 80, 70, 60]) {
     const encoded = jpeg.encode({ data: Buffer.from(target.data.buffer, target.data.byteOffset, target.data.byteLength), width: target.width, height: target.height }, quality).data
     if (encoded.length <= MAX_IMAGE_BYTES || quality === 60) return { mediaType: 'image/jpeg', data: Buffer.from(encoded).toString('base64') }
