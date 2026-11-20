@@ -926,6 +926,14 @@ export class AgentTurnRunner implements TurnRunner {
         ...(this.options.replyBudgetFor ? { replyBudget: this.options.replyBudgetFor(attemptModel) } : {}),
         permissionMode,
         permissionModeProvider,
+        // Accept all does not override Plan first's restrictions. Refuse managed
+        // delegation in this combination instead of asking for an exception.
+        blockPlanDelegation: name => DELEGATING_TOOLS.has(name)
+          && normalizeInteractionMode(session.interactionMode) === 'plan'
+          && (permissionModeValue(session.permissionMode) ?? sessionPermissionMode ?? DEFAULT_PERMISSION_MODE) === 'accept-all',
+        // Accept all means "don't ask": Plan first then refuses changes instead of prompting.
+        planAcceptAll: () => ['plan', 'researcher'].includes(normalizeInteractionMode(session.interactionMode))
+          && (permissionModeValue(session.permissionMode) ?? sessionPermissionMode ?? DEFAULT_PERMISSION_MODE) === 'accept-all',
         ...(providerDefaults?.temperature !== undefined ? { temperature: providerDefaults.temperature } : {}),
         ...(providerDefaults?.serviceTier !== undefined ? { serviceTier: providerDefaults.serviceTier } : {}),
         ...(thinkingRequest === undefined ? {} : { thinking: thinkingRequest }),
@@ -2281,6 +2289,7 @@ function daemonEventFromStream(
           tool_name: event.request.toolCall.function.name,
           description: event.request.description,
           inputs: event.request.inputs,
+          permission_mode: state.metadata.permission_mode,
         },
       }
     case 'tool_end':

@@ -2694,8 +2694,10 @@ test('approval requests carry the tool inputs, cwd and reason', async () => {
 })
 
 /**
+    permission_mode: 'plan',
  * `changes` used to be written only by the live tool_call event, so a
  * reopened task claimed nothing had changed while the git panel listed the
+  expect(approval?.permissionMode).toBe('plan')
  * same files as dirty — and session-scoped undo had nothing to act on.
  */
 test('reopening a task refolds its edits from stored history', async () => {

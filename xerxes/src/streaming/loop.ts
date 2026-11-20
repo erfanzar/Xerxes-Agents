@@ -362,6 +362,10 @@ export interface TurnRequest {
    * immediately instead of leaving the turn on the mode captured at its start.
    */
   readonly permissionModeProvider?: () => PermissionMode
+  /** Live host decision to refuse a delegation under Plan instead of prompting. */
+  readonly blockPlanDelegation?: (toolName: string) => boolean
+  /** Live: Plan first with Accept all decides every call without a card. */
+  readonly planAcceptAll?: () => boolean
   /** Why this completion is being made; drives cost attribution and retry policy. */
   readonly querySource?: QuerySource
   readonly sessionId?: string
@@ -715,6 +719,11 @@ export async function* runTurn(
       if (dependencies.refreshTools) {
         try { turnTools = dependencies.refreshTools(turnTools) } catch { /* keep the previous list */ }
       }
+      // Use the same offer for the request and its reply, even if the user
+      // changes modes in flight. Execution still checks the live policy.
+      const visibleTools = forceToolFreeSummary ? [] : request.blockPlanDelegation
+        ? turnTools?.filter(tool => !request.blockPlanDelegation?.(tool.function.name))
+        : turnTools
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const message = steerMessage('[steer from user]', steer)
         if (message) state.messages.push(message)
@@ -798,7 +807,7 @@ export async function* runTurn(
           roundFirstStreamTokenAt = undefined
           roundStreamedBytes = 0
           roundCompletedAt = 0
-          const promptTokens = roughPromptTokens(state.messages, forceToolFreeSummary ? [] : turnTools)
+          const promptTokens = roughPromptTokens(state.messages, visibleTools)
           yield { type: 'provider_wait', active: true, promptTokens }
           let awaitingOutput = true
           try {
@@ -807,7 +816,7 @@ export async function* runTurn(
                 completionRequest(
                   request,
                   state.messages,
-                  forceToolFreeSummary ? [] : turnTools,
+                  visibleTools,
                   outputTokenOverride,
                   dependencies.roundOutputRoom?.(),
                 ),
@@ -1186,7 +1195,6 @@ export async function* runTurn(
       for (const visible of deduplication.events) yield visible
       const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
       const providerToolCalls = roundToolCalls
-      const visibleTools = forceToolFreeSummary ? [] : turnTools
       const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, visibleTools)
       roundToolCalls = exposed
       const assistant: ChatMessage = {
@@ -1446,20 +1454,34 @@ export async function* runTurn(
           repairedCall,
           hookMutation(beforeResult, repairedCall.function.arguments),
         ))
+        const liveMode = request.permissionModeProvider?.() ?? permissionMode
+        const blockPlanDelegation = liveMode === 'plan' && request.blockPlanDelegation?.(effectiveCall.function.name) === true
+        const planAcceptAll = liveMode === 'plan' && request.planAcceptAll?.() === true
+        const gate = permissionGateOptions(dependencies, permissionMode)
         const permission = permissionDisposition(
           effectiveCall,
-          request.permissionModeProvider?.() ?? permissionMode,
+          liveMode,
           dependencies.policy,
           request.agentId,
-          permissionGateOptions(dependencies, permissionMode),
+          blockPlanDelegation || planAcceptAll
+            ? { ...gate, ...(blockPlanDelegation ? { blockPlanDelegation } : {}), ...(planAcceptAll ? { planAcceptAll } : {}) }
+            : gate,
         )
         if (permission === 'deny') {
           const boundaryReason = dependencies.dataBoundary?.reason?.(effectiveCall, request.agentId)
+          // Name Plan first only when it, not a policy or boundary, refused the call.
+          const refusedByPlan = planAcceptAll && !blockPlanDelegation
+            && permissionDisposition(effectiveCall, liveMode, dependencies.policy, request.agentId, gate) !== 'deny'
+          const detail = boundaryReason ?? (blockPlanDelegation
+            ? 'Plan first with Accept all does not start agents. Continue using the available read-only tools.'
+            : refusedByPlan
+              ? 'Plan first is read-only: this call could change files or state, so it was refused without asking. Continue with read-only tools, or leave plan mode to make changes.'
+              : undefined)
           decisions.push({
             call,
             kind: 'denied',
             reason: 'policy_denied',
-            ...(boundaryReason === undefined ? {} : { detail: boundaryReason }),
+            ...(detail === undefined ? {} : { detail }),
           })
           continue
         }

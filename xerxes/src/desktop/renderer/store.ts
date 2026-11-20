@@ -4472,6 +4472,7 @@ export class Store {
             ...(str(payload.reason) ? { reason: str(payload.reason) } : {}),
           },
           interactionHidden: false,
+            ...(str(payload.permission_mode) ? { permissionMode: str(payload.permission_mode) } : {}),
         })
         break
       }

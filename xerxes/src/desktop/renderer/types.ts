@@ -278,6 +278,8 @@ export interface Approval {
   /** The streamed tool call this decision attaches to, when known. */
   readonly toolCallId?: string
   readonly toolName?: string
+  /** The effective policy that gated this particular call. */
+  readonly permissionMode?: string
   /**
    * The tool's actual arguments. The daemon has always attached these; the
    * renderer used to drop them and re-stringify `arguments` into the

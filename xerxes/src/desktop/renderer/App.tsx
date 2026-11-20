@@ -1609,7 +1609,7 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
         <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>3</kbd></button>
       </div>
       <p className="approval__cwd" title={approval.cwd || undefined}>
-        <span className="appr-policy">Policy: {policy || 'runtime default'}</span>{approval.cwd && <> · in {approval.cwd}</>}
+        <span className="appr-policy">Policy: {(approval.permissionMode ?? policy) || 'runtime default'}</span>{approval.cwd && <> · in {approval.cwd}</>}
       </p>
     </div>
   )

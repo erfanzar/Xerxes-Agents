@@ -43,6 +43,14 @@ export interface PermissionGateOptions {
    * Defaults to false; hosts must opt in consciously.
    */
   readonly bypassAlwaysApprove?: boolean
+  /** A host may refuse automatic delegation in Plan rather than request an override. */
+  readonly blockPlanDelegation?: boolean
+  /**
+   * Plan first chosen together with Accept all. Plan stays read-only, but the
+   * user has already said not to ask: non-mutating calls run and anything that
+   * could change the workspace is refused, so no approval card appears.
+   */
+  readonly planAcceptAll?: boolean
   /**
    * The data boundary's opinion on a call (see `security/dataBoundary.ts`).
    * Consulted after a policy denial and before every mode shortcut, so it
@@ -83,6 +91,18 @@ export const SAFE_TOOLS = new Set([
 ])
 
 const WRITING_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'AppendFile'])
+
+/**
+ * Tools whose effects stay inside Xerxes' own session, goal, lesson and memory
+ * state, or that only read. Plan first with Accept all runs them without a
+ * card; any other tool that is not already safe is refused there.
+ */
+export const PLAN_ACCEPT_ALL_TOOLS = new Set([
+  'SkillTool', 'TodoWriteTool', 'lesson_list', 'lesson_recall', 'lesson_record',
+  'get_goal', 'create_goal', 'update_goal', 'session_search', 'list_available_models',
+  'agent_memory_write', 'agent_memory_append', 'agent_memory_journal',
+  'WebScraper', 'RSSReader', 'check_command', 'list_commands', 'pty_list',
+])
 
 interface DirectCommand {
   readonly args: readonly string[]
@@ -177,7 +197,10 @@ export function permissionDisposition(
   }
   const command = commandInput(name, call.function.arguments)
   if (mode === 'plan') {
-    return command && isSafeCommandInput(command) ? 'allow' : 'prompt'
+    if (options?.blockPlanDelegation) return 'deny'
+    if (command && isSafeCommandInput(command)) return 'allow'
+    if (options?.planAcceptAll) return !command && PLAN_ACCEPT_ALL_TOOLS.has(name) ? 'allow' : 'deny'
+    return 'prompt'
   }
   if (command) {
     return isSafeCommandInput(command) ? 'allow' : 'prompt'
