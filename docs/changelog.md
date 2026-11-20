@@ -7,6 +7,15 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.47 — 2026-11-20
+
+- **Vibes is the default style, and Neo shares its layout.** Shading and Classic are retired on Desktop and in VS Code. A saved Shading or Classic choice opens as Vibes, and VS Code's `xerxes.style` setting still accepts the old values. Neo keeps its own mono font, square corners and purple accent over the same layout. Backgrounds (pictures, gradients, the transparent window) work in both styles and are off by default.
+- **Claude-style cards and pages.** Questions and permission requests use one card: "Needs your input", the question on a header band, radio rows, and Skip/Submit or Deny/Allow for this session/Allow once. Artifacts open as documents with a large title, date and version labels and an outline. The Artifacts page lists the documents the agent saved instead of changed files. Customize, Artifacts, Scheduled and Specialists are full pages with no grey sheet. Each side panel keeps its own width and has a minimum.
+- **Clicking a task always shows its chat.** A view that was left on the XERXES page (or another page) used to come back on that page when you clicked one of its tasks.
+- **Claude Code prompt cache.** When the API refused Xerxes' cache marker once, the marker stayed off for the whole connection, so every call rewrote the whole conversation into the cache. It now comes back after five minutes, and each refusal is logged to `~/.xerxes/claude-code/cache-marks.jsonl`.
+- **Plan first with Accept all decides without a card.** Read-only calls run; anything that could change files or start agents is refused with a reason instead of asking.
+- **Browser tab over SSH.** WebRTC and stopped port forwards fail with a clear message instead of hanging.
+
 ## 0.8.46 — 2026-11-16
 
 - **Sign in again.** Every Claude and Codex account in Settings → Providers has a Sign in again button. It renews a broken or expired login in place, keeping the same account, profile and model. If the open SSH workspace already has that account, its copy is replaced with the new login. No other host is written.
