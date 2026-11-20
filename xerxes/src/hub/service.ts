@@ -19,6 +19,7 @@ import type { HubEventSink, UpstreamEvent } from './ports.js'
 import { HubRuntimePool, type PoolWorkspace, type HubRuntimePoolOptions, type PoolHealth } from './runtimePool.js'
 import { HubServer, type HubServerOptions } from './server.js'
 import type { HubSigner } from './signer.js'
+import { createHubSlackIntegration, type HubSlackIntegration, type HubSlackOptions } from './slack/integration.js'
 import { SubscriptionManager, type SubscriptionManagerOptions } from './subscriptions.js'
 import {
   SUPERVISOR_SETUP_HINT, SupervisorGrantOverlay, createHubSupervisor, createUnsupportedSupervisorHandlers, withDefaultSpendBound,
@@ -77,6 +78,8 @@ export interface HubServiceOptions {
   readonly subscriptions?: Omit<SubscriptionManagerOptions, 'grantsForPrincipal'>
   readonly store?: HubEventStoreOptions
   readonly supervisor?: HubServiceSupervisorConfig
+  /** Optional Hub-only Slack OAuth settings. Never passed to a model or client. */
+  readonly slack?: Pick<HubSlackOptions, 'oauth' | 'fetch'>
   /**
    * Voice ports and settings (createVoiceRuntimeConfig). The voice socket is served
    * only when identity, a configured supervisor and at least one enabled voice mode
@@ -209,6 +212,7 @@ export function createHubService(options: HubServiceOptions): HubService {
   let server: HubServer | undefined
   let supervisor: HubSupervisor | undefined
   let modelControl: SupervisorModelControl | undefined
+  let slack: HubSlackIntegration | undefined
   let lessonSync: HubLessonSync | undefined
   let tunnel: HubTunnelHandle | undefined
   let settled: Promise<void> = Promise.resolve()
@@ -298,6 +302,7 @@ export function createHubService(options: HubServiceOptions): HubService {
     await attempt(() => pool?.stop())
     await attempt(() => settled)
     await attempt(() => supervisor?.close())
+    await attempt(() => slack?.close())
     await attempt(() => modelControl?.close())
     await attempt(() => subscriptions?.close())
     await attempt(() => router?.close())
@@ -354,6 +359,15 @@ export function createHubService(options: HubServiceOptions): HubService {
         for (const workspace of snapshot.workspaces) remember(workspace)
         store = new HubEventStore(options.paths.databasePath, options.store)
         const identity = options.identity
+        if (identity !== undefined && options.isHubOwner !== undefined) {
+          try {
+            slack = createHubSlackIntegration({ ...options.slack, databasePath: options.paths.databasePath, stateDir: options.paths.stateDir,
+              identity, isHubOwner: options.isHubOwner, publicOrigins: exposure.publicOrigins,
+              ...(options.server?.clock === undefined ? {} : { now: options.server.clock }) })
+          } catch {
+            report(new Error('Slack setup is unavailable. Check the OAuth settings and the HTTPS Hub origin.'), 'Slack setup')
+          }
+        }
         subscriptions = new SubscriptionManager(store, {
           ...options.subscriptions,
           ...(identity === undefined ? {} : { grantsForPrincipal: (principalId: string) => identity.grantsFor(principalId) }),
@@ -435,6 +449,7 @@ export function createHubService(options: HubServiceOptions): HubService {
               onEvents: observer => journal.onEvents(observer),
             },
             model: control.port,
+            ...(slack?.tools === undefined ? {} : { slack: slack.tools }),
             configStatus: () => control.describe(),
             // Native sampling is model-free and does no RPC until an owner subscribes.
             diskPolling: {},
@@ -488,6 +503,7 @@ export function createHubService(options: HubServiceOptions): HubService {
         server = new HubServer({
           ...options.server,
           ...(voiceRoute === undefined ? {} : { voice: voiceRoute }),
+          ...(slack === undefined ? {} : { slack }),
           voiceModels,
           methodHandlers: { ...options.server?.methodHandlers, ...supervisorHandlers },
           hubId: options.signer.hubId,

@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import type { ConnectionStatus } from '../../client/bridge.js'
 import { HubConnection } from '../../client/hubConnection.js'
+import { createSupervisorSlackClient, type SupervisorSlackClient } from '../../client/supervisorSlack.js'
+import { SupervisorSlack } from './SupervisorSlack.js'
 import { AUTOPILOT_COMPOSER_HINT, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { createHubController, type AutopilotInput, type HubController, type SupervisorConfigInput, type SupervisorOptionsInput, type WatchInput } from '../../client/hubController.js'
 import { activeAutopilotRows, autopilotPendingCount, autopilotThreadAvailable, createHubStore, isHubOwner, orderTasks, type HubState, type HubStore, type SupervisorConfigState } from '../../client/hubStore.js'
@@ -151,6 +153,7 @@ export function SignInFailed({ message, denied, onRetry, onSignInAgain, onOpenSe
 export interface SupervisorViewProps {
   readonly state: HubState
   readonly controlClient?: SuperagentControlClient
+  readonly slack?: { readonly client: SupervisorSlackClient; readonly openOAuth: (url: string) => Promise<boolean> }
   readonly hubLabel: string
   readonly now: number
   readonly onSend: (text: string) => Promise<boolean>
@@ -207,6 +210,10 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const note = connectionNote(state.connection)
   const [text, setText] = useState('')
   const [safetyOpen, setSafetyOpen] = useState(false)
+  const [slackOpen, setSlackOpen] = useState(false)
+  const slack = isHubOwner(state) && supervisor.phase !== 'unsupported' ? props.slack : undefined
+  const showSlack = slackOpen && slack !== undefined
+  useEffect(() => { if (slack === undefined) setSlackOpen(false) }, [slack])
   const safetyAvailable = props.controlClient !== undefined && isHubOwner(state)
   const unconfigured = config.status === 'unconfigured'
   // An unconfigured XERXES keeps its chooser in the page; everything else opens the controls dialog.
@@ -259,7 +266,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const showPending = pending !== null && !(supervisor.messages.at(-1)?.role !== 'xerxes' && lastUser?.text === pending.text)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // Follow the tail while it grows (replies, live steps, cards), as the task view does; scrolling up pauses it.
-  const scroll = useTranscriptScroll(showThread ? 'autopilot' : 'shared', { more: false, automatic: false, load: async () => undefined })
+  const scroll = useTranscriptScroll(showSlack ? 'slack' : showThread ? 'autopilot' : 'shared', { more: false, automatic: false, load: async () => undefined })
   const openCards = supervisor.confirmations.filter(isOpenCard)
   const records = supervisor.confirmations.filter(card => !isOpenCard(card))
   const grow = (): void => {
@@ -290,13 +297,20 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   return (
     <section className="supervisor" aria-label="XERXES">
       <header className="supervisor__bar">
-        {threadAvailable ? (
+        {threadAvailable || slack !== undefined ? (
           <div className="xseg" role="group" aria-label="XERXES view">
-            <button type="button" aria-pressed={!showThread} onClick={() => { if (showThread) props.onAutopilotThreadChange?.(false) }}>Chat</button>
-            <button type="button" aria-pressed={showThread} onClick={() => { if (!showThread) props.onAutopilotThreadChange?.(true) }}>
+            <button type="button" aria-pressed={!showThread && !showSlack} onClick={() => {
+              setSlackOpen(false)
+              if (showThread) props.onAutopilotThreadChange?.(false)
+            }}>Chat</button>
+            {threadAvailable ? <button type="button" aria-pressed={showThread && !showSlack} onClick={() => {
+              setSlackOpen(false)
+              if (!showThread) props.onAutopilotThreadChange?.(true)
+            }}>
               Activity
               {threadPending > 0 ? <span className="supervisor__badge" aria-label={pendingBadgeLabel(threadPending)}>{threadPending}</span> : null}
-            </button>
+            </button> : null}
+            {slack !== undefined ? <button type="button" aria-pressed={showSlack} onClick={() => { closeControls(); setSlackOpen(true) }}>Slack</button> : null}
           </div>
         ) : null}
         <span className="supervisor__flex" />
@@ -356,7 +370,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           )}
         </SupervisorControls>
       )}
-      {note || inlineChooser || (!watch.unsupported && watch.rows.some(row => row.enabled)) ? (
+      {!showSlack && (note || inlineChooser || (!watch.unsupported && watch.rows.some(row => row.enabled))) ? (
         <div className="supervisor__panel">
           {note ? <p role="status" className="notice">{note}</p> : null}
           {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
@@ -372,9 +386,12 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           ) : null}
         </div>
       ) : null}
-      <div className="supervisor__stream" ref={scroll.ref}>
+      <div key={showSlack ? 'slack' : 'thread'} className="supervisor__stream" ref={showSlack ? undefined : scroll.ref}>
         <div className="supervisor__col">
-          {showThread ? (
+          {showSlack ? (live
+            ? <SupervisorSlack key={state.selfUserId} client={slack.client} openOAuth={slack.openOAuth} />
+            : <p role="status" className="notice">{note ?? 'Reconnect to the Hub to open Slack.'}</p>
+          ) : showThread ? (
             <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
           ) : supervisor.phase === 'unsupported' ? (
             <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
@@ -413,7 +430,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           )}
         </div>
       </div>
-      {conversing && !showThread ? (
+      {conversing && !showThread && !showSlack ? (
         <form className="supervisor__dock composer-wrap" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
           <div className="composer-dock">
             <div className="composer">
@@ -456,6 +473,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
 interface Session {
   readonly store: HubStore
   readonly controller: HubController
+  readonly slack: SupervisorSlackClient
   disposeSockets(): void
 }
 
@@ -465,7 +483,15 @@ function createSession(api: CockpitApi, wsUrl: string): Session {
   // The socket lives in the main process: it opens the saved Hub with its own
   // Origin and cookies, whatever URL is named here.
   const connection = new HubConnection({ url: wsUrl, socketFactory: sockets.factory, ensureSession: cockpitEnsureSession(api) })
-  return { store: hubStore, controller: createHubController({ connection, store: hubStore }), disposeSockets: sockets.dispose }
+  const slack = createSupervisorSlackClient({
+    allowed: () => connection.status().state === 'live' && isHubOwner(hubStore.getSnapshot()),
+    request: (method, params) => connection.request(method, params),
+  })
+  return { store: hubStore, controller: createHubController({ connection, store: hubStore }), slack, disposeSockets: sockets.dispose }
+}
+
+async function openSlackOAuth(url: string): Promise<boolean> {
+  return (await window.xerxes?.openExternal?.(url)) === true
 }
 
 function Connected({ api, origin, wsUrl, onOpenSettings }: {
@@ -495,6 +521,7 @@ function Connected({ api, origin, wsUrl, onOpenSettings }: {
     <SupervisorView
       state={state}
       controlClient={session.controller.superagentControl}
+      slack={{ client: session.slack, openOAuth: openSlackOAuth }}
       hubLabel={hubLabelFor(origin)}
       now={now}
       onSend={text => session.controller.supervisorSend(text, 'text')}

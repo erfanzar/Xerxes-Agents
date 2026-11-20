@@ -9,6 +9,7 @@ import { exposureConfigFromEnvironment } from './exposure.js'
 import { createHubIdentity } from './identity/index.js'
 import { runHubIdentityCli } from './identity/cli.js'
 import { createHubService, type HubService } from './service.js'
+import { slackOAuthFromEnvironment } from './slack/integration.js'
 import { loadOrCreateHubSigner } from './signer.js'
 import { SUPERVISOR_ENV, SUPERVISOR_SETUP_HINT, autopilotCheckInFromEnvironment, createLlmModelPort, watchStallFromEnvironment } from './supervisor/index.js'
 import { idleMsFromEnvironment } from './supervisor/idleWatchdog.js'
@@ -511,6 +512,9 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
           ...(vapidSubject ? { vapidSubject } : {}),
           onListenerError: error => err(`Hub identity listener failed: ${error instanceof Error ? error.message : String(error)}`),
         })
+        let slackOAuth: ReturnType<typeof slackOAuthFromEnvironment>
+        try { slackOAuth = slackOAuthFromEnvironment(environment) }
+        catch (error) { err(`Hub Slack is off: ${error instanceof Error ? error.message : 'invalid settings'}`) }
         // Voice is opt-in (XERXES_HUB_VOICE_ENABLED=true plus provider keys). A bad
         // setting is reported and voice stays off; the rest of the Hub still runs.
         let voice: VoiceRuntimeConfig | undefined
@@ -540,6 +544,7 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
             prefetchVoiceModels: true,
             exposure: exposureConfigFromEnvironment(environment),
             supervisor: supervisorConfigFromEnvironment(environment),
+            ...(slackOAuth === undefined ? {} : { slack: { oauth: slackOAuth } }),
             ...(voice === undefined ? {} : { voice }),
             sendPush: (userId, message) => identity.admin.sendPush(userId, message),
             isHubOwner: userId => identity.admin.ownerUserId() === userId,

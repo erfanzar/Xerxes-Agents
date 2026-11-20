@@ -25,6 +25,21 @@ export const HUB_LIMITS = Object.freeze({
   maxIdLength: 200,
 })
 
+export const HUB_SLACK_METHODS = [
+  'supervisor.slack.status',
+  'supervisor.slack.connect',
+  'supervisor.slack.disconnect',
+  'supervisor.slack.contact.lookup',
+  'supervisor.slack.contact.confirm',
+  'supervisor.slack.contact.remove',
+  'supervisor.slack.contact.mode',
+  'supervisor.slack.dm.open',
+  'supervisor.slack.draft.send',
+] as const
+export type HubSlackMethod = (typeof HUB_SLACK_METHODS)[number]
+const SLACK_METHOD_SET: ReadonlySet<string> = new Set(HUB_SLACK_METHODS)
+export function isHubSlackMethod(method: string): method is HubSlackMethod { return SLACK_METHOD_SET.has(method) }
+
 export const HUB_METHODS = [
   'hub.hello',
   'hub.workspaces.list',
@@ -64,6 +79,7 @@ export const HUB_METHODS = [
   /** Human owner control; never a model tool or an agent command. */
   'supervisor.control.get',
   'supervisor.control.set',
+  ...HUB_SLACK_METHODS,
   /** A task's subagents (`session.read`). */
   'agents.list',
   /** One subagent's steps (`session.read`), bounded by the frame budget. */
@@ -108,6 +124,7 @@ export type HubErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'invalid_request'
+  | 'unknown_method'
   | 'frame_too_large'
   | 'unavailable'
   | 'conflict'
@@ -270,6 +287,9 @@ export function parseHubRequestFrame(text: string, maxBytes: number = HUB_LIMITS
   if (value.kind !== 'request') throw new HubProtocolError('invalid_request', 'client frames must be requests', id)
   if (id === null) throw new HubProtocolError('invalid_request', 'request id must be a non-empty string of at most 200 characters')
   if (!isHubMethod(value.method)) {
+    if (typeof value.method === 'string' && value.method.startsWith('supervisor.slack.')) {
+      throw new HubProtocolError('unknown_method', 'unknown Hub Slack method', id)
+    }
     throw new HubProtocolError('invalid_request', `unknown hub method ${JSON.stringify(value.method)}`, id)
   }
   if (value.params !== undefined && !isRecord(value.params)) {

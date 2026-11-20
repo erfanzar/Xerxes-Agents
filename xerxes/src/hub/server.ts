@@ -23,10 +23,11 @@ import {
 import { aggregateUsage, type WorkspaceProjection } from './projections.js'
 import {
   HUB_LIMITS, HUB_PROTOCOL_VERSION, HubProtocolError, encodeHubFrame, hubError, hubEvent, hubResponse,
-  isRecord, parseHubRequestFrame, readId, readIdList, utf8ByteLength,
+  isHubSlackMethod, isRecord, parseHubRequestFrame, readId, readIdList, utf8ByteLength,
   type HubCommandResult, type HubEvent, type HubEventFrame, type HubEventType, type HubMethod, type HubRequestFrame, type HubResponseFrame, type HubServerFrame,
 } from './protocol.js'
 import type { PoolHealth } from './runtimePool.js'
+import { SLACK_CALLBACK_PATH } from './slack/integration.js'
 import type { SubscriptionManager, SubscriptionSink } from './subscriptions.js'
 import { voiceSocketData, type HubVoiceRoute, type VoiceSocketData } from './voice/route.js'
 
@@ -57,6 +58,8 @@ export interface HubWorkspaceView {
 export interface HubMethodContext {
   readonly context: AuthenticatedContext
   readonly grants: readonly HubGrant[]
+  /** Present on socket-bound private Slack RPCs. */
+  readonly signal?: AbortSignal
 }
 /** Plug-in for methods owned by the identity or supervisor subsystems. */
 export type HubMethodHandler = (context: HubMethodContext, params: Readonly<Record<string, unknown>>) => Record<string, unknown> | Promise<Record<string, unknown>>
@@ -83,6 +86,7 @@ export interface HubServerOptions {
   readonly rateLimit?: { readonly principal?: RateWindow; readonly api?: RateWindow; readonly assets?: RateWindow }
   readonly presenceTtlMs?: number
   readonly methodHandlers?: Readonly<Partial<Record<HubMethod, HubMethodHandler>>>
+  readonly slack?: Pick<import('./slack/integration.js').HubSlackIntegration, 'callback' | 'handlers'>
   /** Voice endpoint; absent means the voice path is not served (the phone hides its talk button). */
   readonly voice?: HubVoiceRoute
   /** Same-origin on-phone model cache, independent of provider-backed voice. */
@@ -103,6 +107,7 @@ interface Conn {
   readonly subs: Map<string, SubscriptionScope>
   inflight: number
   closed: boolean
+  readonly slackAbort: AbortController
 }
 /** One Bun.serve carries both the Hub protocol socket and the voice socket. */
 type SocketData = Conn | VoiceSocketData
@@ -445,6 +450,7 @@ export class HubServer {
         return this.secure(json(429, { error: 'rate_limited' }, { 'retry-after': String(Math.ceil(window.windowMs / 1000)) }))
       }
       const info = this.httpInfo(request, address)
+      if (path === SLACK_CALLBACK_PATH && this.options.slack !== undefined) return this.secure(await this.options.slack.callback(request))
       if (path === HUB_WS_PATH) return await this.upgrade(request, server, info, address)
       if (this.options.voice !== undefined && path === this.options.voice.path) return await this.upgradeVoice(request, server, info, this.options.voice)
       // Keep the original path for traversal rejection: URL.pathname normalizes dot segments.
@@ -533,7 +539,7 @@ export class HubServer {
     if (this.conns.size >= (this.options.maxConnections ?? 512) || perPrincipal >= (this.options.maxConnectionsPerPrincipal ?? 16)) {
       return this.secure(json(429, { error: 'too_many_connections' }, { 'retry-after': '5' }))
     }
-    const conn: Conn = { kind: 'hub', id: crypto.randomUUID(), context, address, ws: undefined, subs: new Map(), inflight: 0, closed: false }
+    const conn: Conn = { kind: 'hub', id: crypto.randomUUID(), context, address, ws: undefined, subs: new Map(), inflight: 0, closed: false, slackAbort: new AbortController() }
     if (!server.upgrade(request, { data: conn })) return this.secure(json(400, { error: 'upgrade_failed' }))
     return undefined
   }
@@ -588,6 +594,7 @@ export class HubServer {
 
   private onClose(conn: Conn): void {
     conn.closed = true
+    conn.slackAbort.abort()
     for (const id of conn.subs.keys()) {
       try { this.options.subscriptions.unsubscribe(id) } catch (error) { this.options.onError?.(error, 'unsubscribe on close') }
     }
@@ -682,6 +689,11 @@ export class HubServer {
 
   private handle(conn: Conn, frame: HubRequestFrame): Handled | Promise<Handled> {
     const params = frame.params
+    if (isHubSlackMethod(frame.method)) {
+      const handler = this.options.slack?.handlers[frame.method]
+      if (!handler) throw new HubProtocolError('unknown_method', 'Slack is not available on this Hub')
+      return Promise.resolve(handler({ context: conn.context, grants: [], signal: conn.slackAbort.signal }, params)).then(result => ({ result }))
+    }
     const custom = this.options.methodHandlers?.[frame.method]
     if (custom !== undefined) {
       return Promise.resolve(custom({ context: conn.context, grants: this.grants(conn) }, params)).then(result => ({ result }))
@@ -1239,6 +1251,7 @@ export class HubServer {
       if (principal.id !== event.principalId) continue
       if (event.deviceId !== undefined && !(principal.kind === 'user' && principal.deviceId === event.deviceId)) continue
       if (event.browserSessionId !== undefined && conn.context.browserSessionId !== event.browserSessionId) continue
+      conn.slackAbort.abort()
       // Tell the client why before closing; the reason text stays internal.
       this.sendFrame(conn, hubEvent('hub.revoked' satisfies HubEventType, { principal_id: principal.id, reason: 'revoked' }))
       for (const id of conn.subs.keys()) this.options.subscriptions.unsubscribe(id)

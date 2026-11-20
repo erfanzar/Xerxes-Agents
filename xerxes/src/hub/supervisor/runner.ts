@@ -12,7 +12,8 @@ import type { CaptureTurnSink, CaptureDestination, CaptureSource } from './abili
 import { TURN_METADATA_KEY, type SupervisorTurnState } from './tools.js'
 import { DEFAULT_TURN_IDLE_MS, IdleTimeoutError, normalizeIdleMs, startIdleWatchdog } from './idleWatchdog.js'
 import { ModelUnavailableError, type ModelAvailability } from './modelAvailability.js'
-import { MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
+import { AUTOPILOT_THREAD_PREFIX, MAX_MESSAGE_CHARS, messageToWire, stepToWire, type SupervisorStepDraft, type SupervisorThreads, type ThreadMessage, type UserPrincipal } from './threads.js'
+import { createPrivateSlackTools, SLACK_LIST_TOOL, SLACK_PREPARE_TOOL, type SupervisorSlackPort } from './slackTools.js'
 
 /**
  * Runs supervisor turns on an injected, explicitly configured model.
@@ -204,6 +205,7 @@ export interface SupervisorStoppedInfo {
 export interface SupervisorRunnerOptions {
   readonly threads: SupervisorThreads
   readonly registry: ToolRegistry
+  readonly slack?: SupervisorSlackPort
   readonly model: SupervisorModelPort
   /** The XERXES persona (agents/default/supervisor.md). */
   readonly persona: string
@@ -421,7 +423,13 @@ export class SupervisorRunner {
         : undefined
       if (inReplyTo === undefined) this.replyTo.delete(threadId)
       else this.replyTo.set(threadId, inReplyTo)
-      const tools = registry.definitions()
+      const slack = this.options.slack
+      const isPrivateSlackTurn = (): boolean => slack !== undefined && input.trigger === undefined && requester.hubOwner
+        && state.othersInContext === false && !threadId.startsWith(AUTOPILOT_THREAD_PREFIX)
+        && input.causalMessageId !== undefined && stored.some(message => message.id === input.causalMessageId && message.role === 'user' && message.authorId === requester.id)
+        && threads.get(threadId)?.kind === 'private' && thread.ownerId === requester.id && slack.isOwner(requester.id)
+      const slackTools = slack !== undefined && isPrivateSlackTurn() ? createPrivateSlackTools(slack) : undefined
+      const tools = [...registry.definitions(), ...(slackTools?.definitions() ?? [])]
       let turnTokens = 0
       // Steps go only to the person this turn answers: tool arguments can name
       // tasks other people may not read. Keep a bounded copy with that same
@@ -515,7 +523,15 @@ export class SupervisorRunner {
           let failed = false
           watchdog.touch()
           try {
-            content = await registry.execute(call, { metadata: { [TURN_METADATA_KEY]: state } }, controller.signal)
+            if (call.function.name === SLACK_LIST_TOOL || call.function.name === SLACK_PREPARE_TOOL) {
+              if (slackTools === undefined || !isPrivateSlackTurn()) {
+                state.denial = 'Slack tools require a private turn from the current Hub owner.'
+                throw new Error(state.denial)
+              }
+              content = await slackTools.execute(call, { metadata: { slackOwner: requester.id, slackCausalId: input.causalMessageId } }, controller.signal)
+            } else {
+              content = await registry.execute(call, { metadata: { [TURN_METADATA_KEY]: state } }, controller.signal)
+            }
             watchdog.touch()
           } catch (error) {
             if (controller.signal.aborted) return this.aborted(controller, threadId, requester, counts)

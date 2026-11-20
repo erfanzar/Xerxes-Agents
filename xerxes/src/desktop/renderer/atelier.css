@@ -3407,6 +3407,23 @@ html,body,#root,.app.atelier{background:transparent}
 .supervisor__panel{flex:none;max-height:40%;overflow-y:auto;padding:10px var(--s-5);border-bottom:1px solid var(--x-hairline);display:flex;flex-direction:column;gap:10px}
 .supervisor__stream{flex:1 1 auto;min-height:0;overflow-y:auto}
 .supervisor__col{display:flex;flex-direction:column;gap:var(--s-4);width:100%;max-width:var(--conversation-width,760px);margin:0 auto;padding:var(--s-5) var(--s-5) var(--s-4);box-sizing:border-box}
+/* Slack owns its cards and never uses the shared conversation composer or Markdown. */
+.xslack,.xslack__list{min-width:0;display:flex;flex-direction:column;gap:var(--s-3);color:var(--x-prose);font:var(--t-body)}
+.xslack{gap:var(--s-4)}
+.xslack h2,.xslack h3,.xslack h4,.xslack p{margin:0;overflow-wrap:anywhere}
+.xslack h2,.xslack h3,.xslack h4,.xslack strong{color:var(--x-title)}
+.xslack h2{font:600 21px/1.3 var(--sans)}
+.xslack h3,.xslack h4{font:600 14px/1.4 var(--sans)}
+.xslack__head,.xslack__row,.xslack__message-meta{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--s-3)}
+.xslack__head>div:first-child,.xslack__row>div:first-child{min-width:0;display:grid;gap:4px}
+.xslack__card{min-width:0;border:1px solid var(--x-hairline);border-radius:8px;padding:var(--s-3);background:var(--x-surface,var(--x-screen));overflow-wrap:anywhere}
+.xslack__card:not(.xslack__row){display:grid;justify-items:start;gap:8px}
+.xslack__confirm{border-color:var(--x-needs-border,var(--x-hairline));background:var(--x-needs-bg,var(--x-screen))}
+.xslack__actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;max-width:100%;min-width:0}
+.xslack :is(input,select){max-width:100%;min-height:28px;box-sizing:border-box;border:1px solid var(--x-hairline);background:var(--x-screen);color:var(--x-title);border-radius:6px;padding:3px 8px;font:inherit}
+.xslack__ids,.xslack__message-meta{color:var(--x-meta);font:var(--t-caption);overflow-wrap:anywhere}
+.xslack__ids code{color:var(--x-secondary);font-family:var(--mono)}
+.xslack__text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
 /* Empty state: a mark, one sentence, three one-tap questions. */
 .xempty{display:flex;flex-direction:column;align-items:center;gap:8px;margin:14vh auto 0;max-width:460px;text-align:center;color:var(--x-meta);font:var(--t-body)}
 .xempty--wait{margin-top:14vh}

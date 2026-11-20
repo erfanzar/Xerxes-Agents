@@ -107,6 +107,7 @@ export interface HubSupervisorOptions {
   /** Bounded reverse reads of retained task records; separate from summary/digest event fakes. */
   readonly journal?: SupervisorToolDeps['journal']
   readonly model: SupervisorModelPort
+  readonly slack?: import('./slackTools.js').SupervisorSlackPort
   /** Whether XERXES has a model to run on; `unconfigured` makes `supervisor.message.submit` refuse. */
   readonly configStatus?: () => { readonly status: string; readonly message?: string }
   readonly persona?: string
@@ -487,6 +488,7 @@ export function createHubSupervisor(options: HubSupervisorOptions): HubSuperviso
   const runner = new SupervisorRunner({
     threads,
     registry,
+    ...(options.slack === undefined ? {} : { slack: options.slack }),
     model: controlledModel,
     beforeTurn: async input => { control.assertActive(); if (input.trigger !== undefined) await control.reserve('wake', `wake-${randomUUID()}`); control.assertActive() },
     persona: options.persona ?? loadSupervisorPersona(),
