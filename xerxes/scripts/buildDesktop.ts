@@ -24,6 +24,9 @@ const rendererOutput = join(outputDirectory, 'renderer')
 async function buildDesktop(): Promise<void> {
   await mkdir(rendererOutput, { recursive: true })
   await rm(join(outputDirectory, 'machineHelper.js'), { force: true })
+  // Retired style sheets: the output folder is reused between builds, so a sheet
+  // dropped from the asset list below would otherwise ship forever.
+  for (const retired of ['shading.css']) await rm(join(rendererOutput, retired), { force: true })
   const packageRecord = JSON.parse(await readFile(join(packageDirectory, 'package.json'), 'utf8')) as {
     readonly version?: unknown
   }
@@ -106,7 +109,7 @@ async function buildDesktop(): Promise<void> {
     'utf8',
   )
   await writeFile(join(rendererOutput, 'theme.css'), themeStylesheet(), 'utf8')
-  for (const asset of ['index.html', 'app.css', 'atelier.css', 'layout.css', 'shading.css', 'neo.css']) {
+  for (const asset of ['index.html', 'app.css', 'atelier.css', 'layout.css', 'vibes.css', 'neo.css']) {
     await cp(join(packageDirectory, 'src', 'desktop', 'renderer', asset), join(rendererOutput, asset))
   }
   // Bundled background artwork (Settings → General → Background); CSP img-src 'self' covers it.

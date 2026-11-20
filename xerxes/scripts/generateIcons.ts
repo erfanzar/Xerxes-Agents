@@ -51,6 +51,7 @@ const MAP: ReadonlyArray<readonly [local: string, phosphor: string]> = [
   ['tree', 'tree-structure'], ['archive', 'archive'], ['pin', 'push-pin'], ['eye', 'eye'],
   ['brain', 'brain'], ['note', 'note-pencil'], ['hourglass', 'hourglass'],
   ['arrowDown', 'arrow-down'], ['retry', 'arrow-clockwise'], ['half', 'square-half'], ['spinner', 'circle-notch'], ['agents', 'users-three'], ['laptop', 'laptop'],
+  ['code', 'code'], ['listBullets', 'list-bullets'], ['enter', 'arrow-elbow-down-left'],
 ]
 
 /**

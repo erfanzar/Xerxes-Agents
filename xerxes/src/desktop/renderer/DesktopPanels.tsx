@@ -89,7 +89,7 @@ export const PAGE_TITLES: Readonly<Record<DesktopPageName, string>> = {
 const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> = {
   agents: 'Specialists you can bring into a conversation.',
   extensions: 'Instructions and tools available in this workspace.',
-  artifacts: 'Files this task wrote or changed, and its exportable transcript.',
+  artifacts: 'Reports, plans and documents this task saved.',
   schedules: 'Jobs that run on their own in this workspace.',
 }
 export type { RailPanel } from './railTabs.js'
@@ -97,23 +97,31 @@ export type { RailPanel } from './railTabs.js'
 export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'browser', 'background', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
 const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', browser: 'cloud', background: 'hourglass', activity: 'activity', usage: 'clock' }
+/** Vibes draws Activity as a list, like Claude's side panel; other styles keep the pulse. */
+const railIconOf = (panel: RailPanel, vibes: boolean): IconName => vibes && panel === 'activity' ? 'listBullets' : RAIL_ICONS[panel]
 export const railTabName = (panel: RailPanel): string =>
   panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'browser' ? 'Browser' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
-/** Whether the page is in the Shading style, following a switch made anywhere. Shading-only layout hangs off this. */
-export function useShadingStyle(): boolean {
-  const read = (): boolean => typeof document !== 'undefined' && document.documentElement.getAttribute('data-style') === 'shading'
-  const [shading, setShading] = useState(read)
+/** Whether the page carries one of these `data-style`s, following a switch made anywhere. */
+function useDataStyle(names: readonly string[]): boolean {
+  const read = (): boolean => typeof document !== 'undefined' && names.includes(document.documentElement.getAttribute('data-style') ?? '')
+  const [active, setActive] = useState(read)
   useEffect(() => {
     if (typeof MutationObserver === 'undefined') return
-    const observer = new MutationObserver(() => setShading(read()))
+    const observer = new MutationObserver(() => setActive(read()))
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-style'] })
     return () => observer.disconnect()
   }, [])
-  return shading
+  return active
 }
+
+/**
+ * Whether the page uses Claude Code's layout: Vibes, and Neo, which shares it.
+ * False only for VS Code high contrast, which stamps no style.
+ */
+export function useVibesStyle(): boolean { return useDataStyle(['vibes', 'neo']) }
 
 function useRequest(snap: Snapshot) {
   const [busy, setBusy] = useState(false),
@@ -192,6 +200,7 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
 function RailAddMenu({ onPick }: { onPick: (panel: RailPanel) => void }): ReactElement {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
+  const vibes = useVibesStyle()
   useEffect(() => {
     if (!open) return
     const away = (event: MouseEvent): void => { if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false) }
@@ -203,7 +212,7 @@ function RailAddMenu({ onPick }: { onPick: (panel: RailPanel) => void }): ReactE
   }, [open])
   return <div className="rail-add" ref={root}>
     <button className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}><Icon name="plus" size={14} /></button>
-    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{RAIL_PANELS.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}><Icon name={RAIL_ICONS[value]} size={14} /><span>{railTabName(value)}</span></button>)}</div>}
+    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{RAIL_PANELS.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}><Icon name={railIconOf(value, vibes)} size={14} /><span>{railTabName(value)}</span></button>)}</div>}
   </div>
 }
 
@@ -224,7 +233,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
   reviewPath?: string
 }): ReactElement {
   const open = useDesktopNavigation()
-  const shading = useShadingStyle()
+  const vibes = useVibesStyle()
   // Without the toggle the window is too narrow for a side rail: it is already full width.
   const wide = filesExpanded || !toggleFilesExpanded
   // The open tabs: the default single section when the caller keeps none.
@@ -250,14 +259,19 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views">{shownTabs.map(tab => {
       const key = tabKey(tab), name = tab.title || railTabName(tab.panel), selected = key === currentKey
       return <div key={key} className="desktop-rail__tab" data-selected={selected || undefined}>
-        <button role="tab" aria-selected={selected} className="desktop-rail__tabmain" title={name} onClick={() => onSelectTab ? onSelectTab(key) : open(tab.panel)}><Icon name={RAIL_ICONS[tab.panel]} size={14} /><span>{name}</span></button>
+        <button role="tab" aria-selected={selected} className="desktop-rail__tabmain" title={vibes && selected ? `Close ${name}` : name} onClick={() => {
+          // Claude Code's panel icons toggle: clicking the open one closes it, so
+          // Vibes and Neo need no separate × glued to each icon.
+          if (vibes && selected) { if (onCloseTab) onCloseTab(key); else close(); return }
+          if (onSelectTab) onSelectTab(key); else open(tab.panel)
+        }}><Icon name={railIconOf(tab.panel, vibes)} size={14} /><span>{name}</span></button>
         <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}><Icon name="close" size={10} /></button>
       </div>
     })}</nav><RailAddMenu onPick={value => open(value)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${currentKey}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
       {/* An artifact tab shows that one artifact and takes its title; the Artifacts tab lists them. */}
-      {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} {...(item ? { target: { id: item, count: artifactTarget?.count ?? 0 }, onTitle: (title: string) => onRetitle?.(currentKey, title) } : {})} />}
+      {panel === 'docs' && <ArtifactsSection key={snap.currentId} sessionKey={snap.sessionKey} sessionId={snap.currentId} online={snap.connection === 'online'} {...(item ? { target: { id: item, count: artifactTarget?.count ?? 0 }, onTitle: (title: string) => onRetitle?.(currentKey, title), onBack: () => open('docs') } : {})} />}
       {/* A file tab shows its own file; picking another file opens it in a new tab. */}
       {panel === 'files' && <FilesPanel snap={snap} close={close} changes={snap.changes} onOpen={path => open('files', path)} {...(item ? { target: { path: item, count: 0 } } : filesTarget ? { target: filesTarget } : {})} />}
       {panel === 'review' && <GitPanel snap={snap} initialPath={reviewPath} expanded={wide} {...(setExpanded ? { onExpand: () => setExpanded(true) } : {})} onSnapshots={() => open('snapshots')} onReviewSent={() => { setExpanded?.(false); open('activity') }} />}
@@ -362,15 +376,17 @@ export function DesktopSheet({
   )
 }
 
+/**
+ * The Artifacts page lists the documents the agent saved with ArtifactTool
+ * (reports, plans, specs) and opens each as a document. Changed files belong
+ * to the Changes panel, not here.
+ */
 function ArtifactsPanel({ snap }: { snap: Snapshot }): ReactElement {
-  const open = useDesktopNavigation()
   const request = useRequest(snap)
-  return <div className="studio-form">
+  return <div className="studio-form artifacts-page">
+    <ArtifactsSection key={snap.currentId} sessionKey={snap.sessionKey} sessionId={snap.currentId} online={snap.connection === 'online'} />
     <Feedback {...request} />
-    <button className="btn btn--ghost" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
-    <OutputsList snap={snap} />
-    {snap.changes.map(file => <div className="studio-item" key={file.path}><div><strong>{file.path}</strong><p>+{file.adds} −{file.dels}</p></div><button onClick={() => open('review', file.path)}>Review changes <Icon name="arrow" size={12} /></button></div>)}
-    {!snap.changes.length && <p className="studio-muted">No files changed in this session yet.</p>}
+    <button className="btn btn--ghost artifacts-page__export" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
   </div>
 }
 
@@ -1367,7 +1383,6 @@ function lastUnsavedPath(cwd: string): string {
 export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap: Pick<Snapshot, 'cwd' | 'sessionKey'> & Partial<Pick<Snapshot, 'storageScope'>>; close: () => void; target?: { readonly path: string; readonly count: number }; changes?: Snapshot['changes']
   /** Open a picked file in its own tab instead of replacing the one shown here. */
   onOpen?: (path: string) => void }): ReactElement {
-  const shading = useShadingStyle()
   const [menuOpen, setMenuOpen] = useState(false)
   const [changedOpen, setChangedOpen] = useState(true)
   // Shading: narrow card shows only the open file until this flips the tree in; a wide card hides the tree with it.

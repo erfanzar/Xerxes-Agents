@@ -1,0 +1,738 @@
+/* Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+   Licensed under the Apache License, Version 2.0.
+
+   Vibes — an opt-in warm, quiet coding workspace, not a branded replica.
+   Reference inventory: .xerxes/review/claude-app/INDEX.md (private images).
+   Dark canvas, sidebar and composer use sampled Code reference values;
+   the light palette and semantic colours are accessible Vibes variants.
+   Every selector is gated on data-style; :not(#vibes) adds the ID specificity
+   needed to beat layout.css's :not(#layout) without changing shared geometry.
+   Keep the shared responsive layout, editor metrics, native browser bounds,
+   disclosure mechanics and terminal canvas intact. All sizes follow --ui-*.
+*/
+
+/* Warm charcoal and terracotta; state colours remain distinct from the accent. */
+:root[data-style='vibes']:not(#vibes){
+  color-scheme:dark;
+  /* Neutral greys measured from the live Claude Code window (.xerxes/review/vibes/claude-spec.md). */
+  --x-backdrop:#191919;--x-screen:#191919;--x-chrome:#262626;--x-card:#252525;
+  --x-selected:#464646;--x-chip:#303030;--x-sunken:#1f1f1f;
+  --x-popover:#2b2b2b;--x-dialog:#262626;
+  --x-title:#f0f0f0;--x-prose:#efefef;--x-strong:#ffffff;
+  --x-secondary:#b8b8b8;--x-meta:#9b9b9b;--x-caption:#9b9b9b;--x-numeric:#b8b8b8;
+  --x-hairline:#353535;--x-divider:#2a2a2a;--x-separator:#4a4a4a;--x-seam:#353535;
+  /* Claude Code's accent is blue, not terracotta: #257de0 measured on its live
+     toggles, context bar and links (claude-now-dark.png, claude-settings-now.png). */
+  --x-accent:#257de0;--x-accent-soft:#257de01f;--x-focus:#4c95e8;
+  --x-working:#5aa0ec;--x-activity:#bba9dc;--x-structure:#9fbbda;--x-fleet-blue:#9fbbda;
+  --x-local:#9fbbda;--x-cloud:#bba9dc;
+  --x-on-accent:#ffffff;--x-inverse:#262626;
+  --x-done:#a4c997;--x-bridge:#a4c997;
+  --x-failed:#f29c98;--x-danger:#f29c98;--x-failed-text:#f5aaa5;
+  --x-failed-bg:#f29c9812;--x-failed-border:#f29c984d;
+  --x-needs:#e7c27e;--x-needs-text:#ecd099;--x-needs-bg:#e7c27e12;--x-needs-border:#e7c27e4d;
+  --x-diff-add:#a4c99718;--x-diff-del:#f29c9818;--x-user-bubble:#252525;
+  --x-menubar:var(--x-chrome);--x-menubar-edge:var(--x-hairline);
+  --x-menubar-fg:var(--x-secondary);--x-menubar-strong:var(--x-title);--x-menubar-meta:var(--x-meta);
+  --x-lit:transparent;--x-elev:none;--mac-control:#ffffff09;--mac-toolbar:var(--x-chrome);
+  --glass-navigation:var(--x-chrome);--glass-overlay:var(--x-popover);--glass-edge:var(--x-hairline);
+  --glass-highlight:transparent;--glass-blur:none;--glass-control:none;--glass-shadow:none;
+  --mac-shadow:0 12px 36px #00000040,0 2px 6px #00000026;
+  --sh-composer:#303030;--sh-composer-shadow:none;--sh-pill:var(--x-selected);
+  --sh-card-edge:var(--x-hairline);--sh-switch-off:#68675f;
+  --sh-input:var(--x-separator);--sh-input-bg:var(--x-sunken);--sh-ring:var(--x-focus);
+  --sh-shadow-xs:none;--sh-shadow-sm:none;--sh-shadow-lg:var(--mac-shadow);
+  --grad:none;--accent-soft:var(--mac-control);
+  --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif;
+  --prose:var(--sans);--mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+  --r-sm:6px;--r-md:10px;--r-lg:14px;
+}
+
+/* Paper, not stark white. The darker terracotta keeps light-mode text legible. */
+:root[data-style='vibes'][data-theme='light']:not(#vibes){
+  color-scheme:light;
+  --x-backdrop:#eeece5;--x-screen:#faf9f5;--x-chrome:#f0eee7;--x-card:#fffefb;
+  --x-selected:#e5e2d9;--x-chip:#eeebe3;--x-sunken:#f1efe8;
+  --x-popover:#fffefb;--x-dialog:#faf9f5;
+  --x-title:#292923;--x-prose:#3c3c34;--x-strong:#191914;
+  --x-secondary:#55554c;--x-meta:#65645a;--x-caption:#65645a;--x-numeric:#55554c;
+  --x-hairline:#302e231c;--x-divider:#302e2310;--x-separator:#302e2342;--x-seam:#302e231c;
+  /* Blue like dark mode; darker so text stays legible on paper. Light is unmeasured. */
+  --x-accent:#1f6fd1;--x-accent-soft:#1f6fd114;--x-focus:#1f6fd1;
+  --x-working:#1f6fd1;--x-activity:#735692;--x-structure:#365d82;--x-fleet-blue:#365d82;
+  --x-local:#365d82;--x-cloud:#735692;--x-on-accent:#fffefb;--x-inverse:#fffefb;
+  --x-done:#3e6736;--x-bridge:#3e6736;
+  --x-failed:#a83e39;--x-danger:#a83e39;--x-failed-text:#9a3531;
+  --x-failed-bg:#a83e390b;--x-failed-border:#a83e3938;
+  --x-needs:#805c20;--x-needs-text:#75521a;--x-needs-bg:#805c200c;--x-needs-border:#805c2038;
+  --x-diff-add:#3e673612;--x-diff-del:#a83e3910;--x-user-bubble:#eeebe3;
+  --mac-control:#302e2307;--mac-shadow:0 12px 36px #302e231c,0 2px 6px #302e2310;
+  --sh-composer:#fffefb;--sh-composer-shadow:0 2px 12px #302e230a;--sh-switch-off:#8a887f;
+}
+
+/* Proportional chrome and conversation; monospace remains reserved for code.
+   Set these on .atelier too: it defines its own typography below :root. */
+:root[data-style='vibes']:not(#vibes) body{font-family:var(--sans);background:var(--x-backdrop);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) :is(button,input,textarea,select){font-family:var(--sans)}
+:root[data-style='vibes']:not(#vibes) .atelier{
+  --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif;
+  --prose:var(--sans);--mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+  --t-caption:400 var(--ui-small)/1.45 var(--sans);
+  --t-body:400 calc(var(--ui-font) + 1px)/1.55 var(--sans);
+  --t-title:500 calc(var(--ui-font) + 1px)/1.35 var(--sans);
+  --t-hero:600 calc(var(--ui-large) + 8px)/1.2 var(--sans);
+  --t-num:400 var(--ui-font)/1.4 var(--mono);
+  /* Claude Code prose: 15px on a 21pt line at the default 11px UI font (measured). */
+  --t-prose:400 calc(var(--ui-font) + 4px)/1.4 var(--sans);
+  --card-radius:12px;
+  /* One centered reading column, shared by the transcript and the composer. */
+  --conversation-width:768px;--reading-width:768px;
+}
+:root[data-style='vibes']:not(#vibes) ::selection{background:color-mix(in srgb,var(--x-accent) 30%,transparent)}
+:root[data-style='vibes']:not(#vibes) ::-webkit-scrollbar-thumb{border-radius:999px;background-color:color-mix(in srgb,var(--x-title) 22%,transparent)}
+:root[data-style='vibes']:not(#vibes) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:2px solid var(--x-focus);outline-offset:2px}
+/* Neo shares Claude's layout, so it shares the centered 768pt reading column too. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier{--conversation-width:768px;--reading-width:768px}
+/* Do not disturb the transparent editor overlay's metrics or caret affordance. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .code-editor .code-editor__input:is(:focus,:focus-visible){outline:none}
+:root[data-style='vibes']:not(#vibes) .atelier .code-editor .code-editor__input:is(:focus,:focus-visible){box-shadow:none}
+
+/* Solid, flatter planes: the warm sidebar groups rows without nested cards. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.side,.top){background:var(--x-chrome)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.side,.top){-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.app__body,.chat){background:var(--x-screen)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.app__body,.chat){box-shadow:none;border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head{background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__title{background:transparent;color:var(--x-title);font-size:calc(var(--ui-font) + 3px);font-weight:400;padding:5px 1px}
+:root[data-style='vibes']:not(#vibes) .atelier .chat__title{border-radius:6px}
+/* Top bar: title left, quiet 28px icon tools right (Sections ⋯ and Search share one size). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head{gap:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head :is(.sections-menu__trigger,.top__actions>button){width:28px;height:28px;min-width:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .chat__head :is(.sections-menu__trigger,.top__actions>button){border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head :is(.sections-menu__trigger,.top__actions>button):is(:hover,[aria-expanded='true']){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.top__actions button,.chat__head .cchip){background:transparent;border-color:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.top__actions button,.chat__head .cchip){box-shadow:none;border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.top__actions button,.chat__head .cchip):hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button){min-height:32px;height:auto;border:0;background:transparent;color:var(--x-prose);font-size:var(--ui-large)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button){border-radius:7px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.newchat,.studio-nav,.studio-side-bottom>button):hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-nav.is-selected{background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup{background:transparent;border:0}
+:root[data-style='vibes']:not(#vibes) .atelier .wgroup{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__cap{background:transparent;color:var(--x-meta);font-size:var(--ui-font);letter-spacing:0;text-transform:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess{min-height:32px}
+:root[data-style='vibes']:not(#vibes) .atelier .sess{border-radius:6px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess:hover:not(.is-current){background:var(--mac-control)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess.is-current{background:var(--x-selected);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .sess.is-current{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess__t{color:var(--x-prose);font-size:var(--ui-large)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.sess__age,.side__find,.addws){color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__search{height:32px;margin:6px 0 0;padding:0 10px;border:1px solid transparent;background:transparent;color:var(--x-title);font:400 var(--ui-large)/1 var(--sans)}
+:root[data-style='vibes']:not(#vibes) .atelier .side__search{border-radius:7px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__search:hover:not(:focus){background:var(--mac-control)}
+/* Sidebar as one flat list of rows: New task, the Tasks/Agents/XERXES destinations, then
+   Skills and Scheduled. Same buttons, same order in the DOM and the tab sequence is unchanged
+   except for visual order; nothing is hidden. Destination text lines up with icon rows. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__pad{display:flex;flex-direction:column;gap:1px;padding:8px 8px 6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__pad>.newchat{order:-3}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__pad>.studio-segment{order:-2}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__pad>.studio-nav{order:-1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment{flex-direction:column;align-items:stretch;gap:1px;margin:0;padding:0;border:0;background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .studio-segment{border-radius:0;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button{flex:none;display:flex;align-items:center;height:32px;padding:0 10px 0 36px;border:0;background:transparent;color:var(--x-secondary);font:400 var(--ui-large)/1 var(--sans);text-align:left}
+:root[data-style='vibes']:not(#vibes) .atelier .studio-segment>button{border-radius:7px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button:hover:not(.is-selected){background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>.is-selected{background:transparent;color:var(--x-title);font-weight:600}
+:root[data-style='vibes']:not(#vibes) .atelier .studio-segment>.is-selected{box-shadow:none}
+/* Row icons for the three destinations, drawn as masks from Xerxes' own Phosphor set
+   (MIT, the same paths as Icon.tsx: chat-circle, users-three, sparkle). No DOM change. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button{position:relative}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button::before{content:'';position:absolute;left:10px;top:50%;width:16px;height:16px;margin-top:-8px;background:var(--x-secondary);-webkit-mask:var(--vibes-icon) center/contain no-repeat;mask:var(--vibes-icon) center/contain no-repeat;pointer-events:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button:nth-child(1){--vibes-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath d='M128,24A104,104,0,0,0,36.18,176.88L24.83,210.93a16,16,0,0,0,20.24,20.24l34.05-11.35A104,104,0,1,0,128,24Zm0,192a87.87,87.87,0,0,1-44.06-11.81,8,8,0,0,0-6.54-.67L40,216,52.47,178.6a8,8,0,0,0-.66-6.54A88,88,0,1,1,128,216Z'/%3E%3C/svg%3E")}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button:nth-child(2){--vibes-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath d='M244.8,150.4a8,8,0,0,1-11.2-1.6A51.6,51.6,0,0,0,192,128a8,8,0,0,1-7.37-4.89,8,8,0,0,1,0-6.22A8,8,0,0,1,192,112a24,24,0,1,0-23.24-30,8,8,0,1,1-15.5-4A40,40,0,1,1,219,117.51a67.94,67.94,0,0,1,27.43,21.68A8,8,0,0,1,244.8,150.4ZM190.92,212a8,8,0,1,1-13.84,8,57,57,0,0,0-98.16,0,8,8,0,1,1-13.84-8,72.06,72.06,0,0,1,33.74-29.92,48,48,0,1,1,58.36,0A72.06,72.06,0,0,1,190.92,212ZM128,176a32,32,0,1,0-32-32A32,32,0,0,0,128,176ZM72,120a8,8,0,0,0-8-8A24,24,0,1,1,87.24,82a8,8,0,1,0,15.5-4A40,40,0,1,0,37,117.51,67.94,67.94,0,0,0,9.6,139.19a8,8,0,1,0,12.8,9.61A51.6,51.6,0,0,1,64,128,8,8,0,0,0,72,120Z'/%3E%3C/svg%3E")}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>button:nth-child(3){--vibes-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath d='M197.58,129.06,146,110l-19-51.62a15.92,15.92,0,0,0-29.88,0L78,110l-51.62,19a15.92,15.92,0,0,0,0,29.88L78,178l19,51.62a15.92,15.92,0,0,0,29.88,0L146,178l51.62-19a15.92,15.92,0,0,0,0-29.88ZM137,164.22a8,8,0,0,0-4.74,4.74L112,223.85,91.78,169A8,8,0,0,0,87,164.22L32.15,144,87,123.78A8,8,0,0,0,91.78,119L112,64.15,132.22,119a8,8,0,0,0,4.74,4.74L191.85,144ZM144,40a8,8,0,0,1,8-8h16V16a8,8,0,0,1,16,0V32h16a8,8,0,0,1,0,16H184V64a8,8,0,0,1-16,0V48H152A8,8,0,0,1,144,40ZM248,88a8,8,0,0,1-8,8h-8v8a8,8,0,0,1-16,0V96h-8a8,8,0,0,1,0-16h8V72a8,8,0,0,1,16,0v8h8A8,8,0,0,1,248,88Z'/%3E%3C/svg%3E")}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-segment>.is-selected::before{background:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__cap{padding:14px 10px 4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__cap::after{content:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__search:focus{border-color:var(--x-focus)}
+
+/* Reading surface: a quiet user bubble, restrained headings and code frames. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.msg,.agent-msg,.md){font:var(--t-prose);color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg--user{background:var(--x-user-bubble);border:0;padding:12px 16px;color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .msg--user{border-radius:12px;box-shadow:none}
+/* Claude Code: the user bubble hugs its text, right-aligned, inset 16pt from the composer's right edge. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg--user{align-self:flex-end;width:fit-content;max-width:min(80%,600px);margin:0 16px 0 auto;padding:8px 14px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.md h1,.md h2,.md h3){font-weight:600;letter-spacing:-.015em;color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .md a{color:var(--x-working);text-decoration:underline;text-underline-offset:3px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.md__codewrap,pre){background:var(--x-sunken);border-color:var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.md__codewrap,pre){border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .md__codebar{background:var(--mac-control);color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :not(pre):not(.code-editor__row)>code:not(pre code){background:var(--x-chip);color:var(--x-prose)}
+:root[data-style='vibes']:not(#vibes) .atelier :not(pre):not(.code-editor__row)>code:not(pre code){border-radius:4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.trail,.plan,.acard,.railcard,.qcard,.approval,.provcard,.pcard){background:var(--x-card);border-color:var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.trail,.plan,.acard,.railcard,.qcard,.approval,.provcard,.pcard){border-radius:10px;box-shadow:none}
+/* Never restyle approval/error colours as decorative neutrals. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .terr{background:var(--x-failed-bg);border-color:var(--x-failed-border);color:var(--x-failed-text)}
+:root[data-style='vibes']:not(#vibes) .atelier .terr{border-radius:10px}
+
+/* Compact activity disclosures. Keep native details/summary and every action;
+   shared output caps and Show all/Expand behaviour are intentionally untouched. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group{background:transparent;border:0;margin:4px 0}
+:root[data-style='vibes']:not(#vibes) .atelier .activity-group{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group>summary{padding:4px 0;color:var(--x-secondary);font:400 var(--ui-large)/1.5 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body{background:transparent;border:0;margin:2px 0 10px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution-row>summary{padding:5px 2px;min-height:28px}
+:root[data-style='vibes']:not(#vibes) .atelier .activity-group__body .execution-row>summary{border-radius:5px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution-row>summary:hover{background:var(--mac-control)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution-row__label{font:400 var(--ui-large)/1.5 var(--sans);color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution-row__target{font-size:var(--ui-font);color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution-row[open]>.execution{border-left-color:var(--x-separator)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution__command{background:transparent;color:var(--x-prose)}
+:root[data-style='vibes']:not(#vibes) .atelier .activity-group__body .execution__command{border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .execution__raw{display:block;margin-top:6px;color:var(--x-meta);font-size:var(--ui-font)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .filetool__actions{opacity:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .activity-group__body .filetool__path{color:var(--x-secondary);text-underline-offset:3px}
+
+/* Composer: one rounded field (attached images, then the message with send inside its
+   right end). The controls row and the folder line sit under it as plain text. Same DOM,
+   same grid rows from layout.css; only the send cell moves up to the message row.
+   The agent dock keeps its own one-row card (rules below). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap{background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap::before{content:'';background:var(--x-screen)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap::before{border-radius:14px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) :is(.composer__images,.composer__input){background:var(--sh-composer);border:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) :is(.composer__images,.composer__input){box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__images{border-bottom:0}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__images{border-radius:12px 12px 0 0}
+/* The field itself is the full reading-column width; the wrap's side padding sits outside it. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock){max-width:calc(var(--conversation-width) + 48px)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{min-height:42px;padding:10px 76px 10px 40px;color:var(--x-title);font:400 calc(var(--ui-font) + 2px)/20px var(--sans)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-radius:12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock):has(.composer__images) .composer__input{border-top:0}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock):has(.composer__images) .composer__input{border-radius:0 0 12px 12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap .composer__input::placeholder{color:var(--x-meta);opacity:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send{grid-row:5;align-self:end;margin:0 7px 7px 0;width:28px;height:28px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar{background:transparent;padding:4px 2px 0;margin-bottom:2px}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar{border-radius:0}
+/* + and the microphone sit inside the message field (+ at the left, the mic beside send). They
+   stay in the controls row in the DOM, so tab order and handlers are unchanged; the row clips
+   only sideways so they can rise into the field. The other controls line up on the right. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar{position:relative;overflow-x:clip;overflow-y:visible;justify-content:flex-end}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__flex{display:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__icon:first-child{position:absolute;left:8px;bottom:calc(100% + 8px);z-index:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.dictation{position:absolute;right:40px;bottom:calc(100% + 8px);z-index:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.dictation .dictation-error{left:auto;right:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.repobar{background:transparent;border:0;clip-path:none;min-height:24px;padding:0 8px;color:var(--x-meta)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.repobar{border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer__toolbar :is(.cchip,.composer__icon){background:transparent;border-color:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer__toolbar :is(.cchip,.composer__icon){box-shadow:none;border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer__toolbar :is(.cchip,.composer__icon):hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer__send{border:0;background:var(--x-accent);color:var(--x-on-accent)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer__send{border-radius:8px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer__send:disabled{background:var(--x-chip);color:var(--x-meta);opacity:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap.agent-dock::before{content:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap.agent-dock>.composer-dock{background:var(--sh-composer)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap.agent-dock>.composer-dock{border-radius:12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap.agent-dock .composer__input{background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap.agent-dock .composer__input{border-radius:6px}
+
+/* Menus and Settings: opaque surfaces, soft shadows, plain selected rows. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop,.studio-sheet,.sections-menu__list,.sections-menu__preview,.file-browser__menu),
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .runtime-popover{background:var(--x-popover);border:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.modal,.menu,.modelpicker,.modelpop,.palette,.hints,.ctxpop,.fleetpop,.studio-sheet,.sections-menu__list,.sections-menu__preview,.file-browser__menu),
+:root[data-style='vibes']:not(#vibes) .runtime-popover{border-radius:10px;box-shadow:var(--mac-shadow);-webkit-backdrop-filter:none;backdrop-filter:none}
+/* Full-page destinations (Customize, Artifacts, Scheduled, Specialists) are pages, not
+   sheets: flat on the window colour, no popover fill, edge, corner or shadow, with the
+   content in one centred column as Claude lays out its pages. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-page.studio-sheet{background:var(--x-screen);border:0;border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-page>header.desktop-page__bar{border-bottom:0;background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-page>.studio-sheet-content{background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-page .studio-form{box-sizing:border-box;width:100%;max-width:860px;margin:0 auto;padding:8px 32px 48px;background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-page .studio-split>nav{background:transparent;border:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artifacts-page>.rsec{padding:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artifacts-page__export{align-self:flex-start;margin-top:16px}
+
+/* ── XERXES page (SupervisorPage): a main view in Claude's layout ──
+   44pt header on the header line; Chat | Activity as the quiet segmented switch;
+   Autopilot / Watch / Model as borderless text buttons (no capsules); the thread
+   and composer in the same 768pt column as a task. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor{background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar{height:44px;padding:0 12px 0 16px;gap:6px;border-bottom:1px solid var(--x-hairline);background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xseg{display:inline-flex;gap:2px;padding:0;border:0;background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xseg>button{height:28px;padding:0 10px;border:0;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary);box-shadow:none}
+:root[data-style='vibes']:not(#vibes) .atelier .supervisor__bar .xseg>button{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xseg>button:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xseg>button[aria-pressed='true']{background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpills{gap:2px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpill{height:28px;gap:6px;padding:0 8px;border:0;background:transparent;font:400 13px/1 var(--sans);color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .xpill{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpill:is(:hover,[aria-expanded='true']){background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpill__name{font-weight:400;color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpill__value{color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xpill[data-tone='on'] .xpill__dot{background:var(--x-accent)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xbar__sep{width:1px;height:16px;margin:0 4px;background:var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xicon{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .supervisor__bar .xicon{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__bar .xicon:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__panel{border-bottom:1px solid var(--x-hairline);background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__col{max-width:768px;padding:24px 20px 16px}
+/* Empty state: Claude's welcome, a centred mark, a large title, quiet suggestion rows. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xempty{display:flex;flex-direction:column;align-items:center;gap:10px;margin:12vh auto 0;max-width:520px;text-align:center}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xempty>strong{font-size:24px;line-height:1.25;font-weight:400;color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .xempty>strong{font-family:ui-serif,"New York",Georgia,serif}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xempty>p{margin:0;font:400 14px/1.5 var(--sans);color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xempty__try{display:flex;flex-direction:column;align-self:stretch;margin-top:16px;border-top:1px solid var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xsuggest{display:block;width:100%;padding:12px 4px;border:0;border-bottom:1px solid var(--x-hairline);background:transparent;text-align:left;font:400 14px/1.4 var(--sans);color:var(--x-prose);cursor:pointer}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xsuggest:hover:not(:disabled){color:var(--x-title);background:var(--mac-control)}
+/* Composer: the task composer's column and quiet meta row under it. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock{padding:8px 20px 12px;background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock>:is(.composer-dock,.composer__toolbar){box-sizing:border-box;width:100%;max-width:768px;margin-left:auto;margin-right:auto}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .supervisor__dock .supervisor__hint{max-width:none;margin:0;text-align:left;color:var(--x-meta)}
+/* The controls dialog (Model, Autopilot, Watch) uses the Settings frame. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal.xcontrols{background:var(--x-popover);border:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .modal.xcontrols{border-radius:12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xcontrols__tab{border:0;background:transparent;font:400 13px/1.3 var(--sans);color:var(--x-prose)}
+:root[data-style='vibes']:not(#vibes) .atelier .xcontrols__tab{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xcontrols__tab:is(:hover,[aria-selected='true'],[aria-current='true']){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal{background:var(--x-dialog)}
+:root[data-style='vibes']:not(#vibes) .atelier .modal{border-radius:14px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__side{background:var(--x-chrome)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__title{color:var(--x-title);font-weight:600;letter-spacing:-.015em}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__side .mtab{color:var(--x-secondary);font-size:var(--ui-large)}
+:root[data-style='vibes']:not(#vibes) .atelier .modal__side .mtab{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__side :is(.mtab.is-on,button[aria-pressed='true'],button.is-selected){background:var(--x-selected);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .modal__side :is(.mtab.is-on,button[aria-pressed='true'],button.is-selected){box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__main :is(.rowlist,.optlist,.pcardlist,.tiercard,.modecard){background:var(--x-card);border:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .modal__main :is(.rowlist,.optlist,.pcardlist,.tiercard,.modecard){box-shadow:none;border-radius:10px}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.menu,.modelpop,.ctxpop,.fleetpop) :is(button,[role='menuitem'],[role='option']){border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.menu,.modelpop,.ctxpop,.fleetpop) :is(button,[role='menuitem'],[role='option']):hover{background:var(--x-selected)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){background:var(--x-sunken);color:var(--x-title);border:1px solid var(--x-separator)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){border-radius:7px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .btn{background:var(--x-chip);color:var(--x-title);border:1px solid var(--x-hairline);font-weight:500}
+:root[data-style='vibes']:not(#vibes) .atelier .btn{border-radius:7px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .btn:hover:not(:disabled){background:var(--x-selected);border-color:var(--x-separator)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.btn--solid,.studio-primary){background:var(--x-accent);color:var(--x-on-accent);border-color:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:var(--x-accent);color:var(--x-on-accent)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){filter:brightness(1.08)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .switch{background:var(--sh-switch-off)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .switch.is-on{background:var(--x-accent)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.seg,.studio-segment){background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.seg,.studio-segment){border-radius:8px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.seg button.is-on,.studio-segment>button.is-selected){background:var(--x-selected);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.seg button.is-on,.studio-segment>button.is-selected){border-radius:6px;box-shadow:none}
+
+/* One visual grammar for the right rail and all of its coding surfaces. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail{background:var(--x-screen);border-left:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail{border-radius:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+/* The panel is flush with the window, divided by one hairline: not an inset card. Its
+   header lines up with the conversation header. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body>.desktop-rail{margin:0;border:0;border-left:1px solid var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .app__body>.desktop-rail{border-radius:0;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body>.desktop-rail>header{height:44px;min-height:44px;padding:0 8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header{background:var(--x-screen);border-color:var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header button{background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header button{border-radius:6px;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header button:is(:hover,[aria-selected='true'],[aria-pressed='true'],.is-on,.is-selected){background:var(--x-selected);color:var(--x-title)}
+/* Open views read as plain text tabs, not chips; the current one is the panel's title.
+   Every tab keeps its close button, now always visible (it was opacity 0 until hover). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tab,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tab[data-selected]{background:transparent;color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tab:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain{background:transparent;font:400 var(--ui-large)/1 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{color:var(--x-title);font-weight:600}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tabclose{opacity:.5}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard{background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail .railcard{border-radius:0;box-shadow:none}
+/* Panel sections read as one flat list divided by hairlines, not stacked boxed cards.
+   Status colour stays on the status text and dot; only the decorative edge goes. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail :is(.railcard,.railcard--status){border:0;border-bottom:1px solid var(--x-hairline);margin:0;padding:12px 2px}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail :is(.railcard,.railcard--status){border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard+.railcard{margin-top:0}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail .railcard>*{border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard__title{font:600 var(--ui-large)/1.3 var(--sans);color:var(--x-title)}
+/* Claude Code section labels ("Environment", "Context"): 13px medium, with any value
+   (e.g. "51%") in 13px sans grey at the right. No monospace, no accent colour while
+   things are normal; a blocked goal keeps its warning colour. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard__head{align-items:center}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard__head .railcard__title{font:500 13px/18px var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard__meta,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .railcard__meta[data-phase='active']{font:400 13px/18px var(--sans);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .railcard__meta[data-phase='blocked']{color:var(--x-needs)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .goalcard{font:400 13px/18px var(--sans);color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .goalcard__rounds{font:400 13px/18px var(--sans);color:var(--x-meta)}
+/* Claude's "Show more" under Outputs is grey 13px text, not an accent link. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .goal-expand{font:400 13px/18px var(--sans);color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--goal .goal-expand:hover{color:var(--x-title);text-decoration:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railstatus__facts dt{color:var(--x-secondary)}
+/* Claude Code side panel (measured at 1800x1130 dark): 13px medium section label,
+   13px sans rows on a 32pt pitch, no monospace numbers. The status card and its
+   statistics take the same type and pitch; Xerxes keeps its own rows. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status .railstatus__head strong{font:500 13px/18px var(--sans);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status :is(.railstatus__facts,.session-diagnostics__values){gap:0 16px;margin-top:4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status :is(.railstatus__facts,.session-diagnostics__values)>div{min-height:32px;align-items:center}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status :is(.railstatus__facts,.session-diagnostics__values) :is(dt,dd){font:400 13px/18px var(--sans);font-variant-numeric:tabular-nums}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status :is(.railstatus__facts,.session-diagnostics__values) dt{color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .railcard--status .session-diagnostics{margin:0}
+/* Claude Code: with the side panel closed, its openers are a row of 28pt icons
+   at the top right of the 44pt header (32pt pitch), not a floating column. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .floatrail{top:8px;right:10px;flex-direction:row;gap:4px;padding:0;border:0;background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .floatrail{border-radius:0;box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .floatrail button{width:28px;height:28px;background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .floatrail button{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .floatrail button:is(:hover,:focus-visible){background:var(--x-selected);color:var(--x-title)}
+/* Keep the header's own controls clear of the icon row; the column needs no side gutter now. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body:has(>.floatrail) .chat__head{padding-right:236px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body:has(>.floatrail) :is(.conversation-surface,.agents-workspace,.specialists){padding-right:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .panel-divider{background:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .panel-divider:is(:hover,:focus-visible){background:var(--x-separator)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.rsec__bar,.file-browser__pathbar,.scm__head,.scm__diff>header,.term__bar){background:transparent;border-color:var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.rsec__row,.file-browser__entry,.file-browser__changed-row,.scm-file){border-radius:5px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.file-browser__entry,.file-browser__changed-row,.scm-file):hover{background:var(--x-chip)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.file-browser__entry,.scm-file).is-selected{background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .file-tree__name[data-change='modified'],
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .file-tree__badge[data-change='modified']{color:var(--x-structure)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .file-tree__name[data-change='added'],
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .file-tree__badge[data-change='added']{color:var(--x-done)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .file-tree__dot{background:var(--x-structure)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.scm__side,.scm__diff,.file-browser,.file-browser__preview,.term){background:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab{background:transparent;border:0;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .term-tab{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab.is-active{background:var(--x-selected);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .term-tab.is-active{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.term-tab__close,.term__new,.term__tool){background:transparent;color:var(--x-meta)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.term-tab__close,.term__new,.term__tool){border-radius:5px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.term-tab__close,.term__new,.term__tool):hover:not(:disabled){background:var(--x-chip);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .browser-panel__address{background:var(--x-sunken);border-color:var(--x-hairline);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .browser-panel__address{border-radius:7px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .browser-panel__page{background:var(--x-sunken);border-color:var(--x-hairline)}
+:root[data-style='vibes']:not(#vibes) .atelier .browser-panel__page{border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .browser-panel__ports{border-color:var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .code-completion{background:var(--x-popover);border-color:var(--x-separator)}
+:root[data-style='vibes']:not(#vibes) .atelier .code-completion{border-radius:8px;box-shadow:var(--mac-shadow)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .rsec__row:focus-within .rsec__pin{opacity:1}
+
+/* Shared breakpoints still own sidebar collapse, rail availability and panes.
+   Only soften padding here; never reveal hidden terminals or hide real controls. */
+@media(max-width:760px){
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg--user{padding:10px 12px}
+:root[data-style='vibes']:not(#vibes) .atelier .msg--user{border-radius:10px}
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__title{font-size:var(--ui-large)}
+}
+/* Claude's Chat | Code switch, here XERXES | Code: right end of the 44pt sidebar header,
+   27pt tall, the open mode #4a4a4a on a #353535 track (ref 13, measured). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__head{gap:4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode{margin-left:auto;display:inline-flex;gap:0;padding:1px;-webkit-app-region:no-drag}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode{border-radius:8px;background:#353535}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button{display:inline-grid;place-items:center;width:29px;height:25px;padding:0;border:0;background:transparent;color:var(--x-secondary);cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode>button{border-radius:7px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button:hover{color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-mode>button.is-selected{color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-mode>button.is-selected{background:#4a4a4a}
+:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .vibes-mode{background:var(--x-chip)}
+:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .vibes-mode>button.is-selected{background:var(--x-card)}
+:root[data-style='vibes'][data-theme='light']:not(#vibes) .atelier .vibes-mode>button.is-selected{box-shadow:0 0 0 1px var(--x-hairline)}
+/* ── Claude Code sidebar (Vibes renders VibesSideNav and a one-row footer) ── */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-side{display:flex;flex-direction:column;gap:0;padding:4px 8px 12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav{display:flex;flex-direction:column;gap:2px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__anchor{position:relative;display:flex;flex-direction:column}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border:0;background:transparent;color:var(--x-prose);font:400 14px/1 var(--sans);text-align:left;cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-nav__row{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row>svg{flex:none;width:16px;height:16px;color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row>span:not(:first-of-type){margin-left:auto}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row:hover:not(:disabled),:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row[aria-expanded='true']{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row.is-selected{background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__row:disabled{opacity:.5;cursor:default}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu{position:absolute;top:calc(100% + 4px);left:0;z-index:40;width:236px;padding:4px;box-sizing:border-box;display:flex;flex-direction:column;gap:1px;border:1px solid var(--x-hairline);background:var(--x-popover)}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-nav__menu{border-radius:10px;box-shadow:var(--mac-shadow)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border:0;background:transparent;color:var(--x-title);font:400 13px/1 var(--sans);text-align:left;cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-nav__menu>button{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button>svg{flex:none;width:15px;height:15px;color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button:is(:hover,:focus-visible):not(:disabled){background:var(--x-selected)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button[aria-current='true']{font-weight:600}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>hr{width:100%;height:1px;margin:3px 0;border:0;background:var(--x-hairline)}
+/* More menu (ref 12): #303030 popover, 1pt #383838 edge, 5pt inset, 30pt rows, 3pt below the More row.
+   Claude opens it beside the sidebar; here it stays inside, because the sidebar clips overflow. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu{top:calc(100% + 3px);padding:5px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav__menu>button{height:30px}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu{background:#303030;border-color:#383838}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu>hr{background:#454545}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .vibes-nav__menu>button:is(:hover,:focus-visible):not(:disabled){background:#3a3a3a}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-nav>.side__search{margin-top:6px}
+/* Groups: grey project name and chevron; no ages; the + only on hover. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .side__list{padding:8px 8px 12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup{margin-top:14px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__cap{font:500 12px/1 var(--sans);color:var(--x-meta);padding:6px 10px}
+/* Measured: the user bubble is prose-sized (15px), composer meta and panel labels 13px. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg--user .msg__text{font:var(--t-prose);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar .cchip.composer__text{font:400 13px/1 var(--sans)}
+/* The header's 1pt line continues across the side panel, as in Claude Code: 44pt of bar,
+   then the line at y=44 (measured), so both headers are 45pt including the line. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body>.desktop-rail>header{border-bottom:1px solid var(--x-hairline);box-sizing:border-box;height:45px;min-height:45px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head{box-sizing:border-box;height:45px;min-height:45px}
+/* Measured: the bubble pads 12/16; replies sit 20pt inside the 768pt composer column. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg--user{padding:12px 16px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream__col>:not(.msg-turn--user){padding-inline:20px;box-sizing:border-box}
+/* The user turn sits inside that inset wrapper: undo it so the bubble ends 16pt inside the column (measured). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream__col>:not(.msg-turn--user) .msg-turn--user{width:auto;max-width:none;margin-right:-20px}
+/* A pasted image belongs to your message: right-aligned above the bubble, on the bubble's
+   16pt right inset. layout.css stretches the user turn, which left it at the column start. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images{align-self:flex-end;justify-content:flex-end;width:fit-content;max-width:min(80%,600px);margin:0 16px 8px auto}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images img{max-width:min(100%,320px);max-height:240px}
+/* Claude Code has no repository row under the composer: branch and changes live in the side
+   panel. In Vibes the folder is under More and Changes opens from the header icon row. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.repobar{display:none}
+/* Measured: field 40pt tall at y=1048 in a 1130pt window; meta text centred at y≈1111. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock){padding-bottom:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar{margin-bottom:0;padding-top:8px}
+/* Measured edge to edge: 44pt tall (y 1046–1089) with a 1pt #404040 edge. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{min-height:44px;padding-top:11px;padding-bottom:11px}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:#404040}
+:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input{border-color:var(--x-separator)}
+/* Side panel header: Claude Code shows right-aligned 28pt icon tabs, the open one filled.
+   The tab name stays the button's title and accessible name; close appears on hover or focus. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header>nav.desktop-rail__tabs{justify-content:flex-end;gap:4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain{width:28px;min-width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab>button.desktop-rail__tabmain>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:#2a2a2a}
+:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .desktop-rail>header .desktop-rail__tab[data-selected]>button.desktop-rail__tabmain{background:var(--x-selected)}
+/* Every header control is a 28pt icon button on a 32pt pitch (measured: x 1604–1784). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header>button,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header .rail-add>button{width:28px;min-width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header>button,
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail>header .rail-add>button{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail>header{gap:4px}
+/* Measured: the last icon ends 16pt from the window edge (x 1784 of 1800). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body>.desktop-rail>header{padding:0 16px 0 8px}
+/* Settings: a page's description starts on the heading's left edge. atelier.css caps
+   .modal__sub at 560px and layout.css centres it, which indented it whenever it sat
+   inside a <section> (macOS permissions). "New agents use" lines up with the tier cards. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__main .modal__sub{max-width:none;margin-left:0;margin-right:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__main>.tierdefault{width:100%;max-width:690px;margin-left:auto!important;margin-right:auto!important}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modal__main>.tierdefault>select{width:min(320px,100%)}
+/* Permission card (ToolApprovalCard, .vq--approval): the question card's frame; the
+   tool name on the band with a quiet hide ×, the exact command in a sunken block. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq--approval:focus{outline:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__q--approval{display:flex;align-items:center;gap:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__qtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__hide{display:inline-grid;place-items:center;width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--x-meta);cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__hide{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__hide:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__reason{margin:0;padding:12px 16px 0;font:400 14px/20px var(--sans);color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__body{padding:12px 16px 0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__body .approval__desc{margin:0;max-height:240px;overflow:auto;padding:10px 12px;border:1px solid var(--x-hairline);background:var(--x-sunken);font:400 12.5px/1.5 var(--mono);color:var(--x-title);white-space:pre-wrap;word-break:break-word}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__body .approval__desc{border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__body .approval__fields{display:grid;gap:6px;margin:8px 0 0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__body .approval__fields dt{font:500 12px/1.3 var(--sans);color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__body .approval__fields dd{margin:2px 0 0;font:400 12.5px/1.5 var(--mono);color:var(--x-title);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__cwd{margin:0;padding:8px 16px 0;font:400 12px/1.4 var(--sans);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq--approval .vq__actions{padding-top:16px;flex-wrap:wrap}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__skip kbd{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 2px;border:1px solid var(--x-hairline);background:transparent;color:var(--x-meta);font:400 11px/1 var(--sans)}
+
+/* Agents card in Claude's quiet form: neutral counts and progress, sans stats and
+   kind, the working line in secondary grey; only a failure keeps a colour. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acard__counts [data-tone='working']{color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acard__progress{height:3px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acard__progress>[data-tone='working']{background:var(--x-chip)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acard__progress>[data-tone='done']{background:var(--x-accent)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.acard__kind,.acard__stats,.acard__clock){font-family:var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.acard__kind,.acard__stats,.acard__clock){color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.acard__act,.acard__elbow){color:var(--x-secondary)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acard__row[data-tone='working'] .acard__glyph{color:var(--x-secondary)}
+/* Claude's panel icons have no separate ×: clicking the open icon closes it (DesktopRail). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail__tab>.desktop-rail__tabclose{display:none}
+
+/* ── Artifact document (ArtifactsSection, .artdoc): Claude's reading view ──
+   A centred 720pt column, a large title, date/version chips, roomy prose.
+   Vibes sets the title in the system serif; Neo keeps its mono font. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .rsec--detail>.rsec__body:has(>.artdoc){padding:28px 32px 64px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc{max-width:720px;margin:0 auto}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__head{margin:0 0 28px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__title{margin:0 0 12px;font-size:30px;line-height:1.2;font-weight:400;letter-spacing:-.01em;color:var(--x-title);overflow-wrap:anywhere}
+:root[data-style='vibes']:not(#vibes) .atelier .artdoc__title{font-family:ui-serif,"New York",Georgia,serif}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 7px;background:var(--x-chip);font:400 12.5px/1 var(--sans);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .artdoc__chip{border-radius:5px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__body{padding:0;max-height:none;background:none;border:0;font-size:15px;line-height:1.65;color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__body :is(h1,h2){margin:32px 0 10px;font-size:22px;line-height:1.3;font-weight:400;letter-spacing:-.005em;color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .artdoc__body :is(h1,h2){font-family:ui-serif,"New York",Georgia,serif}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__body h3{margin:24px 0 8px;font-size:16px;font-weight:600;color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__body p{margin:0 0 14px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__body strong{color:var(--x-title);font-weight:600}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline{display:flex;flex-direction:column;gap:1px;max-height:40%;overflow:auto;padding:8px;border-bottom:1px solid var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button{display:block;width:100%;padding:5px 8px;border:0;background:transparent;text-align:left;font:400 13px/1.3 var(--sans);color:var(--x-prose);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .artdoc__outline>button{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button[data-level='2']{padding-left:20px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .artdoc__outline>button[data-level='3']{padding-left:32px;color:var(--x-meta)}
+/* Measured: the side panel divider is #303030 below the header line (the line itself stays #353535). */
+:root[data-style='vibes']:not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:#303030}
+:root:is([data-style='vibes'],[data-style='neo'])[data-theme='light']:not(#vibes) .atelier .app__body>.desktop-rail{border-left-color:var(--x-hairline)}
+/* Claude Code shows the conversation's scrollbar only while you point at it, like a macOS overlay scrollbar. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream::-webkit-scrollbar-thumb{background-color:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .stream:hover::-webkit-scrollbar-thumb{background-color:color-mix(in srgb,var(--x-title) 22%,transparent)}
+/* Measured (live capture, "Create PR"): primary buttons are a neutral #3b3b3b fill with light text,
+   not an accent colour. Dark only; the light theme has not been measured. */
+:root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary){color:var(--x-title);border-color:transparent}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary){background:#3b3b3b}
+:root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){color:var(--x-title)}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier :is(.btn--solid,.studio-primary):hover:not(:disabled){background:#454545;filter:none}
+/* Settings (ref 25): a centred 1022×800 dialog over the window dimmed to half brightness, not a
+   full-window page. Nav column 211pt #191919 with a #303030 divider; content #1f1f1f; 1pt #2a2a2a edge. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .backdrop:has(>.modal:not(.modal--single)){align-items:center;justify-content:center}
+:root[data-style='vibes']:not(#vibes) .backdrop:has(>.modal:not(.modal--single)){background:rgba(0,0,0,.5);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single){width:min(1022px,calc(100vw - 48px));height:min(800px,calc(100dvh - 48px));border:1px solid var(--x-hairline);overflow:hidden}
+:root[data-style='vibes']:not(#vibes) .atelier .backdrop>.modal:not(.modal--single){border-radius:12px;box-shadow:var(--mac-shadow)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{flex:0 0 211px;padding-top:16px;-webkit-app-region:no-drag;border-right:1px solid var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__main{padding:24px 32px 32px}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single){background:#1f1f1f;border-color:#2a2a2a}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{background:#191919;border-right-color:#303030}
+/* Settings nav (ref 25): 28pt rows inset to x 405–583 (16pt from the dialog edge, 17pt from the divider);
+   the open section is a quiet #252424 fill, not the brighter sidebar selection. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side{padding-left:15px;padding-right:17px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side .mtab{min-height:28px;height:28px;padding-top:0;padding-bottom:0;box-sizing:border-box}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .backdrop>.modal:not(.modal--single)>.modal__side :is(.mtab.is-on,button[aria-pressed='true'],button.is-selected){background:#252424}
+/* Menus (ref 07): #303030 popover with a 1pt #383838 edge, 28pt rows of 13px text, #454545 separators. */
+:root:is([data-style='vibes'],[data-style='neo']):not([data-theme='light']):not(#vibes) .atelier .menu{padding:4px}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu{background:#303030;border-color:#383838}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu .menu__sep{background:#454545}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .menu .menu__item{min-height:28px;padding:0 10px;font:400 13px/1.2 var(--sans)}
+:root[data-style='vibes']:not([data-theme='light']):not(#vibes) .atelier .menu .menu__item:hover{background:#3a3a3a}
+/* Files (ref 05): the filter sits on the plain panel, no filled box; its hairline edge stays. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .desktop-rail .file-browser__search{background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .desktop-rail .file-browser__search{border-radius:6px}
+/* Terminal (ref 02): no filled tab chips and no strip line; shell output sits on the plain panel.
+   Tabs stay (and keep working); the open one reads as brighter text. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term__bar{border-bottom:0;padding:4px 10px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab.is-active{background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .term-tab,
+:root[data-style='vibes']:not(#vibes) .atelier .term-tab.is-active{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab:not(.is-active){color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab.is-active{color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .term-tab:hover{background:var(--mac-control)}
+/* Return glyph, then the microphone at the far right of the field. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send{margin:0 40px 7px 0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.dictation{right:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__cur,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__mark,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess__age,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess__dot:not([data-status='working']):not([data-status='failed']){display:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__add{opacity:0;transition:opacity 120ms ease}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .wgroup__head:is(:hover,:focus-within) .wgroup__add{opacity:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess{height:32px;min-height:32px;padding:0 10px;font:400 14px/1 var(--sans);color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess .sess__t{font:400 14px/1.2 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .sess.is-current{background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.wgroup__more,.addws){height:28px;padding:0 10px;font:400 13px/1 var(--sans);color:var(--x-meta)}
+/* Footer: one row, connection + workspace on the left, a settings cog on the right. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-foot{display:flex;flex-direction:row;align-items:center;gap:4px;padding:8px 10px;border-top:1px solid var(--x-divider)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-foot>.runtime-status{flex:1 1 auto;min-width:0;height:32px;padding:0 8px;border:0;background:transparent;color:var(--x-title);font:400 14px/1 var(--sans);justify-content:flex-start}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-foot>.runtime-status{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-foot>.runtime-status:hover{background:var(--mac-control)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-foot>.vibes-foot__settings{flex:none;display:grid;place-items:center;width:32px;min-width:32px;height:32px;padding:0;border:0;background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .vibes-foot>.vibes-foot__settings{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vibes-foot>.vibes-foot__settings:hover{background:var(--mac-control);color:var(--x-title)}
+/* Header: the 1pt #353535 line Claude draws under the top bar; the Sections and Search
+   buttons beside the title step aside while the right-hand icon row offers the same panels. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .chat__head{border-bottom:1px solid var(--x-hairline)}
+@media (min-width:761px){
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .app__body:has(>.floatrail) .chat__head>:is(.sections-menu,.top__actions){display:none}
+}
+/* Composer: Claude's send is a quiet return glyph inside the field, never a filled accent button. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send{background:transparent;color:var(--x-secondary)}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send{border-radius:6px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send:hover:not(:disabled){background:var(--x-selected);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__send:disabled{background:transparent;color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-dock:focus-within{border-color:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .composer-dock:focus-within{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock) .composer__input:focus{border-color:var(--x-separator);outline:none}
+
+@media(prefers-reduced-motion:reduce){
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) *,
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) *::before,
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
+/* ── Prompt box meta row, in Claude's order: "Opus 5.5  High   Auto  ◌" ──
+   Model in title colour, effort grey beside it, then the mode words, the ring last.
+   The + and mic stay positioned inside the field (rules above). */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>*{order:6}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__model{order:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__effort{order:2;margin-left:-4px;color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__perm{order:3;margin-left:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__plan{order:4}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.chipanchor:has(>.delegation-chip){order:5}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__model>.cchip,
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.composer__toolbar>.composer__perm{color:var(--x-title)}
+
+/* ── Question and permission cards: one quiet card in the reading column ──
+   No warning-yellow title or terracotta wash: a neutral card, a blue dot,
+   15/21 question text, outlined option rows that turn blue when picked. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval){padding:14px 16px;gap:10px;border:1px solid var(--x-hairline);background:var(--x-card)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.qcard,.approval){border-radius:12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard__title,.approval__title){font:500 13px/18px var(--sans);color:var(--x-title);text-transform:none;letter-spacing:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval) .approval__dot{width:7px;height:7px;background:var(--x-accent);animation:none}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.qcard,.approval) .approval__dot{box-shadow:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard__q{font:400 15px/21px var(--sans);color:var(--x-prose)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard .opt{min-height:36px;padding:0 12px;border:1px solid var(--x-hairline);background:transparent;font:400 14px/1.3 var(--sans);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .qcard .opt{border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard .opt:hover{background:var(--mac-control)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard .opt.is-approve{border-color:var(--x-accent);background:var(--x-accent-soft)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard .opt__kbd{color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .qcard .opt.is-approve .opt__kbd{color:var(--x-accent)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .otherbox input{min-height:36px;padding:0 12px;border:1px solid var(--x-hairline);background:var(--x-sunken);font:400 14px/1.3 var(--sans);color:var(--x-title)}
+:root[data-style='vibes']:not(#vibes) .atelier .otherbox input{border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .otherbox input:focus{border-color:var(--x-accent);outline:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval) .approval__row .btn{min-height:30px;padding:0 12px;font:500 13px/1 var(--sans)}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.qcard,.approval) .approval__row .btn{border-radius:8px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval) .approval__row .btn--solid{background:var(--x-accent);color:var(--x-on-accent);border-color:transparent}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval) .approval__row .btn--solid:disabled{background:var(--x-chip);color:var(--x-meta);opacity:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.qcard,.approval) .btn kbd{background:transparent;border:0;color:inherit;opacity:.7}
+
+/* ── Claude Code's question card (VibesQuestion in App.tsx, class .vq) ──
+   Amber "Needs your input" pill, then a 480pt card: the question on a lighter
+   band, hairline-split radio rows (15px label, grey description), an Other row,
+   Skip (grey) and Submit (light, ⌘↵) at the bottom right. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq{display:flex;flex-direction:column;align-items:flex-start;gap:12px;max-width:var(--reading-width);width:100%;margin:8px auto 0;box-sizing:border-box}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__pill{display:inline-flex;align-items:center;gap:10px;height:22px;padding:0 10px 0 0;font:400 13px/1 var(--sans);color:var(--x-needs-text)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__ring{width:12px;height:12px;box-sizing:border-box;border:2px solid var(--x-needs);background:radial-gradient(circle,var(--x-needs) 0 3px,transparent 3.5px)}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__ring{border-radius:50%}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__pill{padding-left:0;background:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__card{width:min(100%,480px);border:1px solid var(--x-hairline);background:var(--x-screen);overflow:hidden}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__card{border-radius:12px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__q{padding:14px 16px;background:var(--x-card);font:400 15px/21px var(--sans);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__q .md{padding:0;max-height:none;background:none;border:0;font:inherit;color:inherit}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__q .md p{margin:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__item+.vq__item{border-top:1px solid var(--x-hairline)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opts{display:flex;flex-direction:column}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt{display:flex;align-items:flex-start;gap:16px;width:100%;box-sizing:border-box;margin:0;padding:16px;border:0;border-top:1px solid var(--x-hairline);background:transparent;text-align:left;color:var(--x-title);cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__opt{border-radius:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opts>.vq__opt:first-child{border-top:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt:hover{background:var(--mac-control)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__radio{flex:none;width:20px;height:20px;margin-top:0;box-sizing:border-box;border:1.5px solid var(--x-separator);background:transparent}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__radio{border-radius:50%}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt[aria-checked='true']>.vq__radio{border:0}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__opt[aria-checked='true']>.vq__radio{background:radial-gradient(circle,#ffffff 0 4px,var(--x-accent) 4.5px)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__text{display:flex;flex-direction:column;gap:6px;min-width:0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__label{font:400 15px/20px var(--sans);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__detail{font:400 15px/20px var(--sans);color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt--other{align-items:center;cursor:text}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt--other>input{flex:1;min-width:0;height:20px;padding:0;border:0;outline:none;background:transparent;font:400 15px/20px var(--sans);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt--other>input::placeholder{color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__opt--other>input:focus::placeholder{color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__actions{display:flex;justify-content:flex-end;gap:12px;padding:8px 16px 16px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.vq__skip,.vq__submit){display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:0;font:400 15px/1 var(--sans);cursor:pointer}
+:root[data-style='vibes']:not(#vibes) .atelier :is(.vq__skip,.vq__submit){border-radius:7px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__skip{background:var(--x-chip);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__skip:hover{background:var(--x-selected)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__submit{background:var(--x-title);color:var(--x-screen)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__submit:disabled{opacity:.45;cursor:default}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__submit kbd{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 2px;border:1px solid color-mix(in srgb,var(--x-screen) 35%,transparent);background:transparent;color:inherit;font:400 11px/1 var(--sans)}
+:root[data-style='vibes']:not(#vibes) .atelier .vq__submit kbd{border-radius:4px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .vq__submit kbd+kbd{margin-left:-3px}
+
+@media(forced-colors:active){
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:2px solid Highlight}
+  :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier :is(.composer__send,.btn--solid){border:1px solid ButtonText}
+}

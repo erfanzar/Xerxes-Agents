@@ -51,7 +51,7 @@ export interface PanelPorts {
   pickFiles(): Promise<string[]>
   showSourceControl(): Promise<boolean>
   /** Save the Xerxes: Style setting (VS Code user settings); every Xerxes view follows it. */
-  setStyle(style: 'classic' | 'neo' | 'shading'): Promise<boolean>
+  setStyle(style: 'vibes' | 'neo'): Promise<boolean>
   /** Whether the panel is visible now (notifications only fire while it is not). */
   visible(): boolean
   /** Open an already validated http, https or mailto link (`vscode.env.openExternal`). */
@@ -194,7 +194,9 @@ export class PanelHost {
       }
       case 'host:set-style': {
         const style = args[0]
-        if (style !== 'neo' && style !== 'classic' && style !== 'shading') throw new Error('Unknown style: choose neo, classic or shading.')
+        // Classic and Shading were retired; an older view asking for one gets Vibes.
+        if (style === 'classic' || style === 'shading') return this.ports.setStyle('vibes')
+        if (style !== 'vibes' && style !== 'neo') throw new Error('Unknown style: choose vibes or neo.')
         return this.ports.setStyle(style)
       }
       default: throw new Error(`Unknown channel ${channel}`)

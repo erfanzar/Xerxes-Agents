@@ -19,6 +19,7 @@ import { desktopCall, desktopError, record, text } from './desktopRpc.js'
 import { createListPoll, type ListPoll } from './listPoll.js'
 import { agentKindLabel, agentState } from './AgentRoster.js'
 import { AgentInspector } from './AgentInspector.js'
+import { parseArtifactResult } from './ArtifactCard.js'
 import type { SessionRow } from './types.js'
 
 export interface ArtifactRow {
@@ -65,6 +66,31 @@ export function compactAge(iso: string, now = Date.now()): string {
   return `${Math.floor(s / 86400)}d`
 }
 
+/** "Nov 10, 2026" for an ISO timestamp; empty when it does not parse. */
+const dateLabel = (iso: string): string => {
+  const at = new Date(iso)
+  return Number.isFinite(at.getTime()) ? at.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+}
+
+/** A Markdown artifact's leading "# Title" is its page title; the rest is the body. */
+export function documentTitle(content: string, fallback: string): { title: string; body: string } {
+  const match = /^\s*#[ \t]+([^\n]+?)[ \t]*#*[ \t]*(?:\n|$)/.exec(content)
+  return match ? { title: match[1]!.trim(), body: content.slice(match[0].length) } : { title: fallback, body: content }
+}
+
+/** The h1–h3 headings of a Markdown body, in order, skipping fenced code. */
+export function documentOutline(markdown: string): Array<{ level: number; text: string }> {
+  const out: Array<{ level: number; text: string }> = []
+  let fenced = false
+  for (const line of markdown.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) { fenced = !fenced; continue }
+    if (fenced) continue
+    const match = /^(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line)
+    if (match) out.push({ level: match[1]!.length, text: match[2]!.replace(/[*_`]/g, '') })
+  }
+  return out
+}
+
 const sizeLabel = (bytes: number): string => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`
 const kindLabel = (row: ArtifactRow): string => row.kind === 'markdown' ? 'md' : row.kind === 'code' ? (row.language || 'code') : row.kind
 
@@ -72,13 +98,22 @@ function SectionSearch({ placeholder, value, onChange }: { placeholder: string; 
   return <label className="rsec__search"><Icon name="search" size={13} /><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
 }
 
-export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sessionKey: string; online: boolean; onTitle?: (title: string) => void; target?: { readonly id: string; readonly count: number } }): ReactElement {
+export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBack, target }: { sessionKey: string; sessionId?: string; online: boolean; onTitle?: (title: string) => void; onBack?: () => void; target?: { readonly id: string; readonly count: number } }): ReactElement {
   const [rows, setRows] = useState<readonly ArtifactRow[]>([])
   const [error, setError] = useState('')
+  const [listError, setListError] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [needle, setNeedle] = useState('')
-  const [open, setOpen] = useState<{ row: ArtifactRow; content: string } | null>(null)
+  const [pickedId, setPickedId] = useState('')
+  const [document, setDocument] = useState<{ row: ArtifactRow; content: string } | null>(null)
+  const artifactId = target?.id ?? pickedId
+  const open = document?.row.id === artifactId ? document : null
+  const [announced, setAnnounced] = useState<{ id: string; version: number } | null>(null)
+  const listedVersion = rows.find(row => row.id === artifactId)?.version
+  const announcedVersion = announced?.id === artifactId ? announced.version : undefined
   const [source, setSource] = useState(false)
+  const [outlineOpen, setOutlineOpen] = useState(false)
+  const docBody = useRef<HTMLDivElement>(null)
   const [reload, setReload] = useState(0)
   // Edit mode: a draft of the content, saved through artifacts.update.
   const [draft, setDraft] = useState<string | null>(null)
@@ -99,7 +134,8 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
     void desktopCall(window.xerxes, sessionKey, 'artifacts.update', { id: open.row.id, content: draft })
       .then(result => {
         const art = record(result.artifact)
-        setOpen({ row: artifactRowsOf([art])[0] ?? open.row, content: text(art.content) })
+        const row = artifactRowsOf([art])[0]
+        if (row?.id === open.row.id) setDocument(current => !current || current.row.version <= row.version ? { row, content: text(art.content) } : current)
         setDraft(null); setError(''); setReload(value => value + 1)
       })
       .catch(reason => setError(desktopError(reason)))
@@ -110,13 +146,13 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
   const listPoll = useRef<ListPoll | null>(null)
   listPoll.current ??= createListPoll(
     key => desktopCall(window.xerxes, key, 'artifacts.list'),
-    result => { setRows(artifactRowsOf(result.artifacts)); setError(''); setLoaded(true) },
+    result => { setRows(artifactRowsOf(result.artifacts)); setListError(''); setLoaded(true) },
     reason => {
       const message = desktopError(reason)
       // An older runtime has no artifact methods: say what to do, not the raw RPC error.
       const outdated = /unknown method/i.test(message)
       if (outdated) unsupported.current = true
-      setError(outdated ? 'outdated' : message)
+      setListError(outdated ? 'outdated' : message)
       setLoaded(true)
     },
   )
@@ -131,37 +167,55 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
     return () => clearInterval(timer)
   }, [])
   useEffect(() => { onTitle?.(open?.row.title ?? '') }, [open?.row.title])
-  const show = (row: ArtifactRow): void => {
-    setError('')
-    void desktopCall(window.xerxes, sessionKey, 'artifacts.read', { id: row.id })
-      .then(result => { const art = record(result.artifact); setOpen({ row: artifactRowsOf([art])[0] ?? row, content: text(art.content) }); setSource(false); setDraft(null) })
-      .catch(reason => setError(desktopError(reason)))
-  }
-  // A transcript card, toast or notification names one artifact: open it straight away.
   useEffect(() => {
-    if (!online || !target?.id) return
+    if (!online || !artifactId) return
+    return window.xerxes.onEvent(({ type, payload }) => {
+      if (type !== 'tool_result' || payload.name !== 'ArtifactTool' || payload.permitted === false) return
+      if (sessionId && typeof payload.session_id === 'string' && payload.session_id !== sessionId) return
+      const saved = parseArtifactResult(text(payload.result))
+      if (saved?.id === artifactId) setAnnounced(previous => previous?.id === artifactId && previous.version >= saved.version ? previous : saved)
+    })
+  }, [artifactId, online, sessionId])
+  // Both notification and list revisions refresh the same detail without
+  // replacing the editor draft or changing its preview/source mode.
+  useEffect(() => {
+    if (!online || !artifactId) return
     let live = true
     setError('')
-    void desktopCall(window.xerxes, sessionKey, 'artifacts.read', { id: target.id })
+    void desktopCall(window.xerxes, sessionKey, 'artifacts.read', { id: artifactId })
       .then(result => {
         if (!live) return
         const art = record(result.artifact)
         const row = artifactRowsOf([art])[0]
-        if (row) { setOpen({ row, content: text(art.content) }); setSource(false); setDraft(null) }
+        if (row?.id !== artifactId) throw new Error('The requested artifact was not returned')
+        setDocument(current => current?.row.id === row.id && current.row.version > row.version ? current : { row, content: text(art.content) })
       })
       .catch(reason => { if (live) setError(desktopError(reason)) })
     return () => { live = false }
-  }, [target?.id, target?.count, sessionKey, online])
+  }, [artifactId, target?.count, sessionKey, online, listedVersion, announcedVersion])
+  const back = (): void => {
+    setPickedId(''); setDocument(null); setDraft(null); setSource(false); setError('')
+    onBack?.()
+  }
   const pin = (row: ArtifactRow): void => {
     void desktopCall(window.xerxes, sessionKey, 'artifacts.pin', { id: row.id, pinned: !row.pinned })
-      .then(() => { setReload(value => value + 1); if (open?.row.id === row.id) setOpen({ ...open, row: { ...open.row, pinned: !row.pinned } }) })
+      .then(() => { setReload(value => value + 1); setDocument(current => current?.row.id === row.id ? { ...current, row: { ...current.row, pinned: !row.pinned } } : current) })
       .catch(reason => setError(desktopError(reason)))
   }
   if (open) {
     const { row } = open
+    // A Markdown artifact reads as a document: its own "# Title" becomes the page
+    // title (shown once), and its headings make the outline.
+    const doc = row.kind === 'markdown' ? documentTitle(open.content, row.title) : null
+    const outline = doc && !source && draft === null ? documentOutline(doc.body) : []
+    const jump = (index: number): void => {
+      docBody.current?.querySelectorAll('.artdoc__body :is(h1,h2,h3)')[index]?.scrollIntoView({ block: 'start' })
+      setOutlineOpen(false)
+    }
     return <div className="rsec rsec--detail">
       <div className="rsec__bar">
-        <button className="rsec__icon" aria-label="Back to artifacts" title="Back to artifacts" onClick={() => { setOpen(null); setDraft(null) }}><Icon name="sidebar" size={14} /></button>
+        <button className="rsec__icon" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}><Icon name="sidebar" size={14} /></button>
+        {outline.length > 0 && <button className="rsec__icon artdoc__outline-toggle" aria-expanded={outlineOpen} aria-label="Outline" title="Outline" onClick={() => setOutlineOpen(value => !value)}><Icon name="listBullets" size={14} /></button>}
         <Icon name="file" size={13} /><strong className="rsec__title" title={row.title}>{row.title}</strong>
         <span className="rsec__spacer" />
         {draft !== null ? <>
@@ -176,7 +230,10 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
       </div>
       <p className="rsec__meta">{row.kind === 'markdown' ? 'Document' : row.kind === 'code' ? 'Code' : row.kind === 'html' ? 'HTML' : 'Text'} · {sizeLabel(row.size)} · edited {compactAge(row.updatedAt) || 'just now'} ago{row.version > 1 ? ` · v${row.version}` : ''}</p>
       {error && <p className="studio-error" role="alert">{error}</p>}
-      <div className="rsec__body">
+      {outlineOpen && outline.length > 0 && <nav className="artdoc__outline" aria-label="Outline">
+        {outline.map((heading, index) => <button key={index} data-level={heading.level} title={heading.text} onClick={() => jump(index)}>{heading.text}</button>)}
+      </nav>}
+      <div className="rsec__body" ref={docBody}>
         {draft !== null
           ? <textarea className="rsec__editor" aria-label={`Edit ${row.title}`} value={draft} spellCheck={false} autoFocus
               onChange={event => setDraft(event.target.value)}
@@ -186,20 +243,34 @@ export function ArtifactsSection({ sessionKey, online, onTitle, target }: { sess
               }} />
           : source || row.kind !== 'markdown'
             ? <pre className="rsec__source"><code>{row.kind === 'markdown' ? highlightCode(open.content, 'markdown') : row.language ? highlightCode(open.content, row.language) : open.content}</code></pre>
-            : <Markdown text={open.content} className="rsec__doc" />}
+            : <article className="artdoc">
+                <header className="artdoc__head">
+                  <h1 className="artdoc__title">{doc?.title ?? row.title}</h1>
+                  <p className="artdoc__chips">
+                    {dateLabel(row.updatedAt) && <span className="artdoc__chip"><Icon name="clock" size={12} />{dateLabel(row.updatedAt)}</span>}
+                    {row.version > 1 && <span className="artdoc__chip">v{row.version}</span>}
+                    <span className="artdoc__chip">{sizeLabel(row.size)}</span>
+                  </p>
+                </header>
+                <Markdown text={doc?.body ?? open.content} className="rsec__doc artdoc__body" />
+              </article>}
       </div>
     </div>
   }
+  if (artifactId) return <div className="rsec rsec--detail">
+    <div className="rsec__bar"><button className="rsec__icon" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}><Icon name="sidebar" size={14} /></button></div>
+    {error ? <p className="studio-error" role="alert">{error}</p> : <p className="rsec__empty" role="status">{online ? 'Opening document…' : 'Waiting for workspace connection…'}</p>}
+  </div>
   const shown = rows.filter(row => !needle || row.title.toLowerCase().includes(needle.toLowerCase()))
   return <div className="rsec">
     <SectionSearch placeholder="Search artifacts" value={needle} onChange={setNeedle} />
-    {error === 'outdated'
+    {listError === 'outdated'
       ? <p className="rsec__empty" role="status">This workspace runtime is older than the app and can't list artifacts yet. They appear here after the runtime restarts on the new build.</p>
-      : error && <p className="studio-error" role="alert">{error}</p>}
-    {loaded && !error && rows.length === 0 && <p className="rsec__empty">No artifacts yet. Reports, plans and documents the agent saves with the artifact tool appear here.</p>}
+      : (listError || error) && <p className="studio-error" role="alert">{listError || error}</p>}
+    {loaded && !listError && rows.length === 0 && <p className="rsec__empty">No artifacts yet. Reports, plans and documents the agent saves with the artifact tool appear here.</p>}
     {shown.length > 0 && <div className="rsec__group"><span>Artifacts</span><span className="rsec__count">{shown.length}</span></div>}
     {shown.map(row => <div className="rsec__row" key={row.id}>
-      <button className="rsec__open" onClick={() => show(row)} title={row.title}>
+      <button className="rsec__open" onClick={() => { setError(''); setPickedId(row.id) }} title={row.title}>
         <Icon name="file" size={13} /><span className="rsec__name">{row.title}</span><span className="rsec__kind">• {kindLabel(row)}</span>
         <span className="rsec__age">{compactAge(row.updatedAt)}</span>
       </button>

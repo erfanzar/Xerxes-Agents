@@ -7,22 +7,27 @@ export type FontSize = typeof FONT_SIZES[number]
 export type ThemeChoice = 'system' | 'dark' | 'light'
 /**
  * The visual language, independent of light/dark and colour theme.
- * `neo` is the terminal-console look (one mono face, square corners,
- * hairlines, one purple accent) that neo.css draws under
- * `:root[data-style='neo']`; `classic` is the earlier Xerxes design, kept for
- * anyone who picks it. `shading` is the black, white and grey look (flat panes
- * split by hairlines, a sans face) that shading.css draws under
- * `:root[data-style='shading']`, and what a fresh install shows.
+ * `vibes` is Claude Code's layout and type (vibes.css, `:root[data-style='vibes']`)
+ * and what a fresh install shows. `neo` shares that whole layout and swaps in
+ * its own terminal-console look: one mono face, square corners, a purple
+ * accent (neo.css). Desktop and VS Code offer the same two.
  */
-export const STYLES = ['classic', 'neo', 'shading'] as const
+export const STYLES = ['vibes', 'neo'] as const
 export type StyleChoice = typeof STYLES[number]
-export const STYLE_LABELS: Record<StyleChoice, string> = { classic: 'Classic', neo: 'Neo', shading: 'Shading' }
-/** Whether a value is one of the known styles. */
+export const STYLE_LABELS: Record<StyleChoice, string> = { vibes: 'Vibes', neo: 'Neo' }
+/** Whether a value is one of the current styles. */
 export function isStyleChoice(value: unknown): value is StyleChoice {
   return STYLES.some(style => style === value)
 }
 /** A fresh install's style, and the style of any stored record that never chose one. */
-export const DEFAULT_STYLE: StyleChoice = 'shading'
+export const DEFAULT_STYLE: StyleChoice = 'vibes'
+/** Styles that were removed. A saved one (Desktop storage, VS Code's Xerxes: Style) opens as Vibes. */
+export const RETIRED_STYLES = ['classic', 'shading'] as const
+/** A saved or published style value as a current style; retired ones become Vibes, unknown ones undefined. */
+export function styleFromSaved(value: unknown): StyleChoice | undefined {
+  if (isStyleChoice(value)) return value
+  return RETIRED_STYLES.some(style => style === value) ? 'vibes' : undefined
+}
 /** A fresh install's light/dark choice, and that of any stored record that never chose one. */
 export const DEFAULT_THEME: ThemeChoice = 'dark'
 export interface Appearance { readonly theme: ThemeChoice; readonly font: FontSize; readonly style: StyleChoice }
@@ -37,7 +42,7 @@ export function parseAppearance(value: unknown): Appearance {
   return {
     theme: record.theme === 'system' || record.theme === 'light' ? record.theme : DEFAULT_THEME,
     font: font ?? DEFAULT_FONT_SIZE,
-    style: STYLES.find(style => style === record.style) ?? DEFAULT_STYLE,
+    style: styleFromSaved(record.style) ?? DEFAULT_STYLE,
   }
 }
 
@@ -56,11 +61,11 @@ export function saveAppearance(change: Partial<Appearance>): void {
 }
 
 /**
- * Classic carries no attribute at all, so every existing stylesheet rule sees
- * exactly the page it always did; only Neo and Shading stamp `data-style`.
+ * Stamp the style. `null` stamps none: the base sheets alone, in the host's own
+ * colours. Only VS Code's high-contrast themes use that, so their colours win.
  */
-export function applyStyle(style: StyleChoice, root: Pick<HTMLElement, 'setAttribute' | 'removeAttribute'> = document.documentElement): void {
-  if (style === 'classic') root.removeAttribute('data-style')
+export function applyStyle(style: StyleChoice | null, root: Pick<HTMLElement, 'setAttribute' | 'removeAttribute'> = document.documentElement): void {
+  if (style === null) root.removeAttribute('data-style')
   else root.setAttribute('data-style', style)
 }
 

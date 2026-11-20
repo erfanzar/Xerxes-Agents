@@ -34,7 +34,7 @@ function block(css: string, selector: string): Record<string, string> {
   return tokens
 }
 
-test('every Neo rule is scoped to data-style="neo", so Classic is untouched', async () => {
+test('every Neo rule is scoped to data-style="neo", so Vibes is untouched', async () => {
   const css = await Bun.file(NEO).text()
   const selectors = selectorsOf(css)
   expect(selectors.length).toBeGreaterThan(40)
@@ -132,7 +132,7 @@ globalThis.localStorage = { getItem: (k: string) => store.get(k) ?? null, setIte
 /** Inline tokens that would show a picture, glass or blur. Neo must never paint any of them. */
 const PICTURE_TOKENS = ['--x-backdrop-image', '--x-backdrop-gradient', '--x-backdrop-paint', '--glass-blur', '--x-chat-blur', '--x-chat-r', '--x-panel-r', '--glass-edge']
 
-test('in Neo a background lends only its colours: solid surfaces, its accent, never the picture', () => {
+test('Neo and Vibes both show a chosen background, and None keeps their own solid surfaces', () => {
   withPage((root, store) => {
     const image = { kind: 'image', src: 'backgrounds/background-1.jpg', from: '#0b1f4d', to: '#3b1a5a', accent: '#ff8800', chat: 20, panels: 10, blur: 90 }
     store.set('xerxes.desktop.backdrop.v1', JSON.stringify(image))
@@ -141,31 +141,28 @@ test('in Neo a background lends only its colours: solid surfaces, its accent, ne
 
     applyBackdrop(image as never, page, undefined)
     expect(root.attributes.get('data-backdrop')).toBe('image')
-    const classicAccent = root.styles.get('--x-accent')
 
     chooseStyle('neo', page)
     expect(loadAppearance()).toEqual({ theme: 'system', font: '13', style: 'neo' })
     expect(root.attributes.get('data-style')).toBe('neo')
-    // No picture: the attribute every background rule keys off is gone.
-    expect(root.attributes.has('data-backdrop')).toBe(false)
-    expect(root.attributes.get('data-backdrop-colors')).toBe('image')
-    for (const name of PICTURE_TOKENS) expect(root.styles.has(name)).toBe(false)
-    // The colours stay: the same accent, and surfaces fully solid despite the 20%/10% sliders.
-    expect(root.styles.get('--x-accent')).toBe(classicAccent!)
-    for (const name of ['--x-screen', '--x-card', '--x-chrome', '--glass-navigation']) expect(root.styles.get(name)).toMatch(/^#[0-9a-f]{6}ff$/i)
-    expect(root.styles.get('--glass-overlay')).toBe(root.styles.get('--x-popover')!)
-    // The stored choice is untouched, so Classic shows the picture again.
-    expect(JSON.parse(store.get('xerxes.desktop.backdrop.v1')!)).toEqual(image)
-
-    chooseStyle('classic', page)
-    expect(root.attributes.has('data-style')).toBe(false)
-    expect(root.attributes.has('data-backdrop-colors')).toBe(false)
+    // Neo shows the picture: the attribute every background rule keys off, and its layers.
     expect(root.attributes.get('data-backdrop')).toBe('image')
     expect(root.styles.get('--x-backdrop-image')).toContain('background-1.jpg')
+
+    chooseStyle('vibes', page)
+    expect(root.attributes.get('data-style')).toBe('vibes')
+    expect(root.attributes.get('data-backdrop')).toBe('image')
+    // Switching style never changes the stored background.
+    expect(JSON.parse(store.get('xerxes.desktop.backdrop.v1')!)).toEqual(image)
+
+    // None, the default, paints nothing: the style's own solid surfaces.
+    applyBackdrop({ kind: 'none' }, page, undefined)
+    expect(root.attributes.has('data-backdrop')).toBe(false)
+    for (const name of PICTURE_TOKENS) expect(root.styles.has(name)).toBe(false)
   })
 })
 
-test('a colour theme applies in Neo, over a background\'s colours, and the transparent window adds nothing', () => {
+test('a colour theme applies in Neo, with or without a background', () => {
   withPage((root, store) => {
     const page = root as unknown as HTMLElement
     const catppuccin = PALETTES.find(p => p.name === 'catppuccin')!
@@ -178,25 +175,9 @@ test('a colour theme applies in Neo, over a background\'s colours, and the trans
     expect(root.styles.get('--x-accent')).toBe('dark' in catppuccin ? catppuccin.dark.primary : '')
 
     applyBackdrop({ kind: 'gradient', from: '#0b1f4d', to: '#3b1a5a', angle: 135 }, page, catppuccin)
+    expect(root.attributes.get('data-backdrop')).toBe('gradient')
     expect(root.styles.get('--x-accent')).toBe('dark' in catppuccin ? catppuccin.dark.primary : '')
-    for (const name of PICTURE_TOKENS) expect(root.styles.has(name)).toBe(false)
-
-    // An explicit `undefined` palette falls back to the stored one, so clear it.
-    store.delete('xerxes.desktop.palette.v1')
-    applyBackdrop({ kind: 'transparent' }, page, undefined)
-    expect(root.attributes.has('data-backdrop')).toBe(false)
-    expect(root.attributes.has('data-backdrop-colors')).toBe(false)
-    expect(root.styles.size).toBe(0)
   })
-})
-
-test('Settings tells a Neo user that a background shows only its colours', async () => {
-  const { neoBackdropNote } = await import('../src/desktop/renderer/backdrop.js')
-  expect(neoBackdropNote('image')).toContain('picture is not shown')
-  expect(neoBackdropNote('image')).toContain('Only its colours are used')
-  expect(neoBackdropNote('gradient')).toContain('Only its colours are used')
-  expect(neoBackdropNote('transparent')).toContain('no effect')
-  expect(neoBackdropNote('none')).toContain('never shows a background')
 })
 
 test('Neo still follows the Theme setting for light and dark', () => {

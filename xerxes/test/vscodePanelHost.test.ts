@@ -153,14 +153,15 @@ test('files, diffs, the file picker and Git go to VS Code through the host chann
   expect(env.editor).toEqual(['open:src/a.ts:12', 'open:src/b.ts:', 'diff:src/a.ts', 'pick', 'scm'])
 })
 
-test('the Style switch saves through VS Code settings and rejects anything but neo, classic or shading', async () => {
+test('the Style switch saves Vibes or Neo through VS Code settings and rejects anything else', async () => {
   const env = ports()
   const { bridge } = wire(post => new PanelHost(env.value, post, () => fakeDaemon().daemon))
-  expect(await bridge.setStyle('classic')).toBe(true)
+  expect(await bridge.setStyle('vibes')).toBe(true)
   expect(await bridge.setStyle('neo')).toBe(true)
-  expect(await bridge.setStyle('shading')).toBe(true)
+  // Classic and Shading were retired: the bridge refuses them, nothing is saved.
+  await expect(bridge.setStyle('classic')).rejects.toThrow('invalid style')
   await expect(bridge.setStyle('retro')).rejects.toThrow('invalid style')
-  expect(env.editor).toEqual(['style:classic', 'style:neo', 'style:shading'])
+  expect(env.editor).toEqual(['style:vibes', 'style:neo'])
 })
 
 test('every Xerxes view action is an icon on the title bar, none hidden in the overflow menu', async () => {
@@ -175,7 +176,7 @@ test('every Xerxes view action is an icon on the title bar, none hidden in the o
   }
   // The style switch lives in the command palette and Settings only.
   expect(menu).not.toContain("command: 'xerxes.toggleStyle'")
-  expect(source).toContain("command: 'xerxes.toggleStyle', title: 'Switch Style (Neo / Shading / Classic)'")
+  expect(source).toContain("command: 'xerxes.toggleStyle', title: 'Switch Style (Vibes / Neo)'")
   expect(source).toContain("activity: '$(pulse)'")
   expect(source).toContain("usage: '$(graph)'")
 })

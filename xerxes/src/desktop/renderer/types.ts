@@ -63,8 +63,8 @@ export interface XerxesBridge {
   openDiff?(path: string): Promise<boolean>
   pickFiles?(): Promise<string[]>
   showSourceControl?(): Promise<boolean>
-  setStyle?(style: 'neo' | 'classic' | 'shading'): Promise<boolean>
-  onStyle?(handler: (style: 'neo' | 'classic' | 'shading') => void): () => void
+  setStyle?(style: 'vibes' | 'neo'): Promise<boolean>
+  onStyle?(handler: (style: 'vibes' | 'neo') => void): () => void
   call<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>
   onEvent(handler: (event: DaemonEvent) => void): () => void
   /** Present the folder picker; open independently of the current workspace. */

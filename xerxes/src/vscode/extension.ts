@@ -42,7 +42,7 @@ export function activate(extension: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('xerxes.palette', () => menu('palette')),
     vscode.commands.registerCommand('xerxes.exportTranscript', () => menu('export')),
     vscode.commands.registerCommand('xerxes.sendSelection', sendSelection),
-    // Cycles Neo → Shading → Classic → Neo.
+    // Switches between Vibes and Neo.
     vscode.commands.registerCommand('xerxes.toggleStyle', () => setStyle(nextStyle(currentStyle()))),
     // Settings UI, settings.json, the palette or another window: every open view follows.
     vscode.workspace.onDidChangeConfiguration(event => {
@@ -53,16 +53,16 @@ export function activate(extension: vscode.ExtensionContext): void {
   )
 }
 
-type VscodeStyle = 'neo' | 'classic' | 'shading'
+type VscodeStyle = 'vibes' | 'neo'
 
-/** Xerxes: Style. Shading unless the person chose Classic or Neo. */
+/** Xerxes: Style. Vibes unless the person chose Neo; a saved Classic or Shading (retired) opens as Vibes. */
 function currentStyle(): VscodeStyle {
   const value = vscode.workspace.getConfiguration('xerxes').get<string>('style')
-  return value === 'classic' || value === 'neo' ? value : 'shading'
+  return value === 'neo' ? 'neo' : 'vibes'
 }
 
 function nextStyle(style: VscodeStyle): VscodeStyle {
-  return style === 'neo' ? 'shading' : style === 'shading' ? 'classic' : 'neo'
+  return style === 'neo' ? 'vibes' : 'neo'
 }
 
 /** Save the style in the user's settings; the configuration listener repaints every view. */
@@ -185,10 +185,10 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
   }
   const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'renderer/')).toString()
   const source = webview.cspSource
-  // Stamped before first paint so a Neo view never flashes Classic.
+  // Stamped before first paint so the view never flashes an unstyled page.
   const style = currentStyle()
   return `<!doctype html>
-<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}" data-style-choice="${style}"${style === 'classic' ? '' : ` data-style="${style}"`}>
+<html lang="en" data-layout="claude" data-host="vscode" data-surface="${surface}" data-style-choice="${style}" data-style="${style}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -202,9 +202,9 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     <link rel="stylesheet" href="${asset('vscode.css')}" />
     <!-- The one layout every style shares. -->
     <link rel="stylesheet" href="${asset('renderer/layout.css')}" />
-    <!-- The Shading style; inert unless data-style="shading". -->
-    <link rel="stylesheet" href="${asset('renderer/shading.css')}" />
-    <!-- Last: the Neo style; inert unless data-style="neo". -->
+    <!-- Claude Code's layout, shared by Vibes and Neo; Vibes colours and type. -->
+    <link rel="stylesheet" href="${asset('renderer/vibes.css')}" />
+    <!-- Last: the Neo look over the same layout; inert unless data-style="neo". -->
     <link rel="stylesheet" href="${asset('renderer/neo.css')}" />
     <!-- VS Code pads every webview body (0 20px); the view is edge to edge. -->
     <style>html, body { margin: 0; padding: 0; overflow: hidden; }</style>

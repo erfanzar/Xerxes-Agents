@@ -383,14 +383,17 @@ export function createBridge(transport: BridgeTransport) {
   pickFiles(): Promise<string[]> { return transport.invoke('host:pick-files') as Promise<string[]> },
   /** VS Code: show the Source Control view. */
   showSourceControl(): Promise<boolean> { return transport.invoke('host:source-control') as Promise<boolean> },
-  /** VS Code: save the Style setting (Neo, Classic or Shading); every Xerxes view follows it. */
+  /** VS Code: save the Style setting (Vibes or Neo); every Xerxes view follows it. */
   setStyle(style: unknown): Promise<boolean> {
-    if (style !== 'neo' && style !== 'classic' && style !== 'shading') return Promise.reject(new TypeError('invalid style'))
+    if (style !== 'vibes' && style !== 'neo') return Promise.reject(new TypeError('invalid style'))
     return transport.invoke('host:set-style', style) as Promise<boolean>
   },
-  /** VS Code: the Style setting changed (Settings, the palette, or another view). */
-  onStyle(handler: (style: 'neo' | 'classic' | 'shading') => void): () => void {
-    return transport.on('desktop:style', value => { if (value === 'neo' || value === 'classic' || value === 'shading') handler(value) })
+  /** VS Code: the Style setting changed (Settings, the palette, or another view). A retired value arrives as Vibes. */
+  onStyle(handler: (style: 'vibes' | 'neo') => void): () => void {
+    return transport.on('desktop:style', value => {
+      if (value === 'neo') handler('neo')
+      else if (value === 'vibes' || value === 'classic' || value === 'shading') handler('vibes')
+    })
   },
 
   /** Open an http, https or mailto link outside the app. The host checks the scheme again. */

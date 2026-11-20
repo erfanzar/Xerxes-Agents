@@ -514,6 +514,12 @@
 :root:not(#layout) .atelier .rsec__body{padding:14px 18px 24px;overflow:auto;min-height:0}
 /* The artifact viewer fills the panel and scrolls once: the generic .md preview cap (380px, own scrollbar) cut documents in half. */
 :root:not(#layout) .atelier .rsec--detail{flex:1 1 auto;height:100%}
+/* Only the body gives way to a long document. The header rows keep their content height:
+   a wrapped bar (narrow panel) has min-height:32px, which replaces the flex minimum, so it
+   used to shrink to 32px and draw its second row over the meta line. */
+:root:not(#layout) .atelier .rsec>:is(.rsec__bar,.rsec__meta){flex:none}
+/* A wide table scrolls inside the document instead of running past the panel edge. */
+:root:not(#layout) .atelier .rsec__body .md table{display:block;max-width:100%;overflow-x:auto}
 :root:not(#layout) .atelier .rsec--detail>.rsec__body{flex:1 1 auto}
 :root:not(#layout) .atelier .rsec__body>.md{max-height:none;overflow:visible;padding:0}
 /* Editing: the textarea takes the whole body and scrolls itself, instead of a 60vh box with dead space under it. */

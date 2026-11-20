@@ -93,6 +93,39 @@ test('in VS Code, settings is one page of providers, agent intelligence and appr
   expect(html).not.toContain('Language servers')
 })
 
+test('Desktop permissions show Plan first separately from the saved Accept all selection', () => {
+  const render = (planMode: boolean) => renderToStaticMarkup(createElement(SettingsModal, { snap: snapshot({
+    settingsOpen: true, settingsTab: 'permissions', permissionMode: 'accept-all', planMode,
+  }) }))
+  expect(render(true)).toContain('Effective policy: Plan first')
+  expect(render(true)).toContain('Accept all does not override Plan first')
+  expect(render(false)).not.toContain('Effective policy: Plan first')
+})
+
+test('Desktop and VS Code offer the same two styles, and a saved Shading opens as Vibes', () => {
+  const snap = snapshot({ settingsOpen: true })
+  const radios = (html: string) => [...html.matchAll(/<button[^>]*role="radio"[^>]*>(Vibes|Neo|Classic|Shading)<\/button>/g)].map(match => match[1])
+  ;(globalThis as { document?: unknown }).document = undefined
+  const desktop = renderToStaticMarkup(createElement(SettingsModal, { snap }))
+  expect(radios(desktop)).toEqual(['Vibes', 'Neo'])
+
+  ;(globalThis as { document?: unknown }).document = { documentElement: { dataset: { host: 'vscode', styleChoice: 'shading' } } }
+  const vscode = renderToStaticMarkup(createElement(SettingsModal, { snap }))
+  expect(radios(vscode)).toEqual(['Vibes', 'Neo'])
+  expect(vscode).toMatch(/<button[^>]*aria-checked="true"[^>]*>Vibes<\/button>/)
+})
+
+test('Vibes Settings offers real backgrounds, off by default', () => {
+  ;(globalThis as { document?: unknown }).document = {
+    documentElement: { dataset: {}, getAttribute: (name: string) => name === 'data-style' ? 'vibes' : null },
+  }
+  const html = renderToStaticMarkup(createElement(SettingsModal, { snap: snapshot({ settingsOpen: true }) }))
+  expect(html).not.toContain('never shows a background')
+  expect(html).not.toContain('colours only')
+  expect(html).toContain('own solid surfaces')
+  expect(html).toContain('Artwork')
+})
+
 test('a folder without VS Code open asks to open one instead of showing a conversation', () => {
   const html = renderToStaticMarkup(createElement(VscodeChat, { snap: snapshot({ noWorkspace: true }) }))
   expect(html).toContain('Open Folder')

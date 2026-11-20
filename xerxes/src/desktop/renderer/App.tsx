@@ -21,7 +21,7 @@ import { Markdown } from './markdown.js'
 import { CodeRunContext } from './codeRun.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
-import { PanelDivider, usePanelLayout } from './layout.js'
+import { PANEL_SIZES, PanelDivider, panelWidthOf, usePanelLayout, vibesPanelLayout } from './layout.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { activitySummary, approvalTitle, liveActivityPhrase, thinkingHeadingOf } from './activityPhrase.js'
@@ -54,7 +54,7 @@ import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { ModelSplitChip } from './TaskModels.js'
 import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
-import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, RAIL_PANELS, useDesktopNavigation, useShadingStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
+import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, RAIL_PANELS, useDesktopNavigation, useVibesStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
@@ -175,7 +175,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     return () => { current = false; unsubscribe?.() }
   }, [])
   const [panel, setPanel] = useState<DesktopPanel>(null)
-  const { layout, setLayout } = usePanelLayout()
+  const { layout: storedLayout, setLayout } = usePanelLayout()
+  const vibesStyle = useVibesStyle()
+  const layout = vibesStyle ? vibesPanelLayout(storedLayout) : storedLayout
   const [narrowNavigation, setNarrowNavigation] = useState(false)
   const [windowWidth, setWindowWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
@@ -192,7 +194,15 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   /** An artifact to open in Artifacts (a transcript card's id); the count re-opens the same one. */
   const [artifactTarget, setArtifactTarget] = useState({ id: '', count: 0 })
   const [selectedAgent, setSelectedAgent] = useState('')
-  const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + layout.inspectorWidth + 320
+  // Each side panel has its own default and minimum width (layout.tsx PANEL_SIZES);
+  // the chat always keeps 320px, so a wide default narrows to fit instead of
+  // taking the window. Only when even the panel's minimum does not fit does
+  // the panel go full width.
+  const shownPanel: RailPanel = railChoice ? panelOfKey(railChoice) : 'activity'
+  const panelMin = PANEL_SIZES[shownPanel].min
+  const inspectorMax = Math.max(panelMin, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
+  const panelWidth = Math.max(panelMin, Math.min(inspectorMax, panelWidthOf(layout, shownPanel)))
+  const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + panelWidth + 320
   // Show activity on entry without covering the conversation in a narrow window.
   // An explicit open/close choice survives session changes and resizing.
   const railKey = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
@@ -213,6 +223,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
   const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
   const [page, setPage] = useState<DesktopPageName | null>(null)
+  // Vibes: XERXES is its own mode (Claude's Chat | Code), so the task's side
+  // panel and its openers step aside while it is shown. Other styles unchanged.
+  const xerxesMode = vibesStyle && page === 'xerxes'
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
   // Git sits in the rail like the others; only its expanded diff view takes the window.
@@ -220,15 +233,15 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // An open sub-agent takes the conversation's place, composer and cards included.
   const agentOpen = page === null && Boolean(selectedAgent)
   const chatHidden = { contextFull, any: contextFull || agentOpen }
-  // The divider must never be draggable past the width that hides the
-  // divider itself — the old max let a persisted value strand the rail
-  // over the whole window with no control able to shrink it again.
-  // Wide windows can give the rail real room; the chat always keeps 320px.
-  const inspectorMax = Math.max(260, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
+  // The divider never drags past the width that hides the divider itself
+  // (inspectorMax above): the chat always keeps 320px.
   const navigate = (next: DesktopPanel, filePath?: string): void => {
     if (next === 'review') setReviewPath(filePath ?? '')
     if (next === 'files' && filePath) setFilesTarget(target => ({ path: filePath, count: target.count + 1 }))
-    if (next === 'docs' && filePath) setArtifactTarget(target => ({ id: filePath, count: target.count + 1 }))
+    if (next === 'docs' && filePath) {
+      setArtifactTarget(target => ({ id: filePath, count: target.count + 1 }))
+      setFilesExpanded(false)
+    }
     // A link to one file's changes opens straight into the diff view.
     if (next === 'review' && filePath && !contextRequiresFullWidth) setFilesExpanded(true)
     // An agent opens in the conversation's place (DeepSeek Harness's layout);
@@ -238,7 +251,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // Every file gets its own tab, so two files stay open side by side.
     if (next === 'files' && filePath) { const path = workspaceFilePath(filePath, snap.cwd); setRail('files', path, path.split('/').filter(Boolean).at(-1) ?? path) }
     // Every right-panel view opens as a tab; the list is the one source, so a new view cannot fall through to a dialog.
-    else if (next !== null && (RAIL_PANELS as readonly string[]).includes(next)) setRail(next as RailPanel, next, next === 'docs' ? filePath : undefined)
+    else if (next !== null && (RAIL_PANELS as readonly string[]).includes(next)) setRail(next as RailPanel, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
     else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
     else setPanel(next)
@@ -266,7 +279,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
   return (
     <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
-    <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${layout.inspectorWidth}px` } as React.CSSProperties}>
+    <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${panelWidth}px` } as React.CSSProperties}>
       {/* No title bar: its controls live in the sidebar's top row and the
           conversation header — one row, as in Claude's app. */}
       <FirstRunSetup snap={snap} />
@@ -275,9 +288,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {narrow && narrowNavigation && <div className="side-scrim" aria-hidden="true" onClick={() => setNarrowNavigation(false)} />}
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
-        {!rail && !snap.noWorkspace && <FloatingRail open={navigate} />}
-        {rail && <PanelDivider label="Resize inspector" value={layout.inspectorWidth} min={260} max={inspectorMax} reverse onChange={inspectorWidth => setLayout({ inspectorWidth })} />}
-        {rail && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} tabs={shownTabs} activeKey={railKey ?? rail}
+        {!rail && !snap.noWorkspace && !xerxesMode && <FloatingRail open={navigate} />}
+        {rail && !xerxesMode && <PanelDivider label="Resize inspector" value={panelWidth} min={panelMin} max={inspectorMax} reverse onChange={width => setLayout({ panelWidths: { ...layout.panelWidths, [rail]: width } })} />}
+        {rail && !xerxesMode && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} tabs={shownTabs} activeKey={railKey ?? rail}
           onSelectTab={key => setRailChoice(key)}
           onCloseTab={key => { const next = closeTab(shownTabs, key, railKey ?? rail); setRailTabs(next.tabs); setRailChoice(next.active) }}
           onRetitle={(key, title) => setRailTabs(tabs => retitleTab(tabs, key, title))} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
@@ -342,9 +355,10 @@ function SidebarToggle(): ReactElement {
 
 /**
  * While the inspector is closed, a slim column of icons opens one of its
- * sections. Hidden by default; the Shading style shows it (shading.css).
+ * sections. Vibes and Neo show it as a row of icons in the header (vibes.css).
  */
 function FloatingRail({ open }: { open: (panel: DesktopPanel) => void }): ReactElement {
+  const vibes = useVibesStyle()
   // The rail: Subagents, Artifacts, Changes, Files, Terminal (then Activity).
   const items = [
     { panel: 'subagents', icon: 'agents', label: 'Subagents' },
@@ -352,7 +366,7 @@ function FloatingRail({ open }: { open: (panel: DesktopPanel) => void }): ReactE
     { panel: 'review', icon: 'changes', label: 'Changes' },
     { panel: 'files', icon: 'folder', label: 'Files' },
     { panel: 'terminal', icon: 'terminal', label: 'Terminal' },
-    { panel: 'activity', icon: 'activity', label: 'Activity' },
+    { panel: 'activity', icon: vibes ? 'listBullets' : 'activity', label: 'Activity' },
   ] as const
   return <nav className="floatrail" aria-label="Open a side panel">
     <button type="button" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" size={16} /></button>
@@ -832,11 +846,12 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
   // One list for every host and folder, in an order no click changes.
   const sections = sidebarSections(groups, snap.contexts ?? [], snap.contextHost ?? hostOfScope(snap.storageScope))
   const online = snap.connection === 'online'
+  const vibes = useVibesStyle()
 
   return (
     <aside id="session-sidebar" className="side" aria-label="Sessions">
-      <div className="side__head"><SidebarToggle /></div>
-      <div className="side__pad">
+      <div className="side__head"><SidebarToggle />{vibes && <VibesModeSwitch page={page} />}</div>
+      {vibes ? <div className="side__pad vibes-side"><VibesSideNav snap={snap} page={page} filter={filter} setFilter={setFilter} /></div> : <div className="side__pad">
         <div className="sidebar-wordmark" aria-label="Xerxes">XERXES</div>
         {/* `page !== 'agents'` lit Sessions while Skills & tools or
             Artifacts was open, so two destinations claimed to be current. */}
@@ -864,7 +879,7 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
           title="Full-text search across the messages of every saved task"
           onClick={() => store.openSessionSearch()}
         >Search message history <Icon name="arrow" size={12} /></button>
-      </div>
+      </div>}
       <nav className="side__list">
         {sections.map(section => {
           // A filter searches every task, folded or not.
@@ -941,8 +956,94 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
           <Icon name="plus" size={12} /> Add folder…
         </button>
       </nav>
-      <div className="studio-side-bottom"><RuntimeStatus snap={snap} /><button onClick={() => store.openSettings()}><Icon name="settings" /><span>Settings</span></button><button onClick={() => open('workspace')}><Icon name="folder" /><span>{homeLabel(snap) && snap.cwd ? homeLabel(snap) : 'Choose a folder…'}</span></button></div>
+      {vibes
+        ? <div className="studio-side-bottom vibes-foot"><RuntimeStatus snap={snap} /><button className="vibes-foot__settings" title="Settings" aria-label="Settings" onClick={() => store.openSettings()}><Icon name="settings" /></button></div>
+        : <div className="studio-side-bottom"><RuntimeStatus snap={snap} /><button onClick={() => store.openSettings()}><Icon name="settings" /><span>Settings</span></button><button onClick={() => open('workspace')}><Icon name="folder" /><span>{homeLabel(snap) && snap.cwd ? homeLabel(snap) : 'Choose a folder…'}</span></button></div>}
     </aside>
+  )
+}
+
+/**
+ * Vibes only: Claude's Chat | Code switch at the top right of the sidebar,
+ * as XERXES | Code. XERXES is its own full view (the supervisor), Code is the
+ * task workspace. Both keep the existing navigation handlers.
+ */
+export function VibesModeSwitch({ page }: { page: DesktopPageName | null }): ReactElement {
+  const open = useDesktopNavigation()
+  const xerxes = page === 'xerxes'
+  return <div className="vibes-mode" role="group" aria-label="Mode">
+    <button type="button" aria-pressed={xerxes} className={xerxes ? 'is-selected' : ''} title="XERXES, the supervisor across every workspace" aria-label="XERXES" onClick={() => open('xerxes')}><Icon name="spark" size={16} /></button>
+    <button type="button" aria-pressed={!xerxes} className={xerxes ? '' : 'is-selected'} title="Code: tasks in this workspace" aria-label="Code" onClick={() => open(null)}><Icon name="code" size={16} /></button>
+  </div>
+}
+
+/**
+ * Vibes only: Claude Code's five sidebar rows (New, Search, Artifacts,
+ * Customize, More). Xerxes-only destinations keep their handlers and move
+ * under More; the task filter opens from there.
+ */
+export function VibesSideNav({ snap, page, filter, setFilter, defaultMoreOpen = false }: {
+  snap: Snapshot
+  page: DesktopPageName | null
+  filter: string
+  setFilter: (value: string) => void
+  /** Tests render the menu open; the app always starts closed. */
+  defaultMoreOpen?: boolean
+}): ReactElement {
+  const open = useDesktopNavigation()
+  const online = snap.connection === 'online'
+  const [moreOpen, setMoreOpen] = useState(defaultMoreOpen)
+  const [filtering, setFiltering] = useState(false)
+  const menu = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!moreOpen) return
+    const dismiss = (event: MouseEvent) => {
+      if (event.target instanceof Node && !menu.current?.contains(event.target) && !trigger.current?.contains(event.target)) setMoreOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setMoreOpen(false); trigger.current?.focus() }
+    }
+    document.addEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
+  }, [moreOpen])
+  const pick = (run: () => void) => () => { setMoreOpen(false); run() }
+  const row = (selected: boolean): string => `vibes-nav__row${selected ? ' is-selected' : ''}`
+  return (
+    <nav className="vibes-nav" aria-label="Navigation">
+      <button
+        className="vibes-nav__row"
+        disabled={!online}
+        onClick={() => { if (!snap.turnActive) open(null); store.newChat() }}
+        title={homeLabel(snap) ? `Start a new task in ${homeLabel(snap)} (⌘N)` : 'Start a new task (⌘N)'}
+      ><Icon name="plus" /><span>New</span></button>
+      <button className="vibes-nav__row" disabled={!online} title="Search the messages of every saved task" onClick={() => store.openSessionSearch()}><Icon name="search" /><span>Search</span></button>
+      <button className={row(page === 'artifacts')} aria-pressed={page === 'artifacts'} disabled={!online} onClick={() => open('artifacts')}><Icon name="stack" /><span>Artifacts</span></button>
+      <button className={row(page === 'extensions')} aria-pressed={page === 'extensions'} disabled={!online} title="Skills & tools" onClick={() => open('extensions')}><Icon name="tools" /><span>Customize</span><LearnedBadge snap={snap} /></button>
+      <div className="vibes-nav__anchor">
+        <button ref={trigger} className={row(page === 'agents' || page === 'schedules')} aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(value => !value)}><Icon name="dots" /><span>More</span></button>
+        {moreOpen && <div ref={menu} className="vibes-nav__menu" role="menu" aria-label="More">
+          <button role="menuitem" aria-current={page === null || undefined} onClick={pick(() => open(null))}><Icon name="chat" /><span>Tasks</span></button>
+          <button role="menuitem" aria-current={page === 'agents' || undefined} onClick={pick(() => open('agents'))}><Icon name="agents" /><span>Agents</span></button>
+          <button role="menuitem" aria-current={page === 'schedules' || undefined} disabled={!online} onClick={pick(() => open('schedules'))}><Icon name="clock" /><span>Scheduled jobs</span></button>
+          <hr />
+          <button role="menuitem" disabled={!online} onClick={pick(() => setFiltering(true))}><Icon name="search" /><span>Filter tasks…</span></button>
+          <button role="menuitem" onClick={pick(() => open('workspace'))}><Icon name="folder" /><span>{homeLabel(snap) && snap.cwd ? `Workspace · ${homeLabel(snap)}` : 'Choose a folder…'}</span></button>
+        </div>}
+      </div>
+      {(filtering || filter) && <input
+        className="side__search"
+        value={filter}
+        autoFocus
+        onChange={e => setFilter(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setFilter(''); setFiltering(false) } }}
+        placeholder="Filter tasks…"
+        disabled={!online}
+        aria-label="Filter tasks in this list"
+        spellCheck={false}
+      />}
+    </nav>
   )
 }
 
@@ -1586,6 +1687,7 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
 
 function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
   const card = useRef<HTMLDivElement>(null)
+  const vibes = useVibesStyle()
   // role="alertdialog" that never takes focus announces nothing, and the
   // 1/2/3 keys it advertises are dropped while the composer (auto-focused
   // on entry) holds focus. Moving focus here fixes both at once — and it
@@ -1597,6 +1699,32 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
     card.current?.focus()
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
   }, [approval.id])
+  if (vibes) {
+    // Same card as the Vibes question: the "Needs your input" label, then what is asked
+    // on the header band, the exact command or fields, and the three answers at the right.
+    // Keys 1/2/3 still answer while the card has focus (the window handler accepts .vq--approval).
+    const title = approvalTitle(approval.toolName || approval.action || '')
+    return (
+      <div ref={card} tabIndex={-1} className="vq vq--approval" role="alertdialog" aria-modal="false" aria-label={`Approve ${approval.toolName || approval.action || 'tool call'}`}
+        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); store.approve(approval.id, 'allow_once') } }}>
+        <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
+        <div className="vq__card">
+          <div className="vq__q vq__q--approval">
+            <span className="vq__qtitle" title={approval.toolName || approval.action || undefined}>{title}</span>
+            <button type="button" className="vq__hide" title="Hide until you decide; the request stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
+          </div>
+          {approval.reason && <p className="vq__reason">{approval.reason}</p>}
+          <div className="vq__body"><ApprovalBody approval={approval} /></div>
+          {approval.cwd && <p className="vq__cwd" title={approval.cwd}>in {approval.cwd}</p>}
+          <div className="vq__actions">
+            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>3</kbd></button>
+            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'allow_session')}>Allow for this session <kbd>2</kbd></button>
+            <button type="button" className="vq__submit" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>⌘</kbd><kbd>↵</kbd></button>
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div ref={card} tabIndex={-1} className={`approval${inline ? ' approval--inline' : ''}`} role="alertdialog" aria-modal="false" aria-label={`Approve ${approval.toolName || approval.action || 'tool call'}`}>
       <div className="approval__head">
@@ -1664,6 +1792,12 @@ export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']>
 }
 
 /** dsh user-questions card: batched questions, options, Other free-text. */
+/** "Label — description" shows as a label over a grey line. Display only: the answer is the whole option. */
+function optionParts(option: string): { label: string; detail: string } {
+  const at = option.indexOf(' — ')
+  return at > 0 ? { label: option.slice(0, at), detail: option.slice(at + 3) } : { label: option, detail: '' }
+}
+
 function QuestionCard({
   question,
   plan,
@@ -1674,6 +1808,7 @@ function QuestionCard({
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [others, setOthers] = useState<Record<string, string>>({})
   const review = isPlanReview(question)
+  const vibes = useVibesStyle()
   const canSubmit = question.items.length > 0 && question.items.every(item =>
     (item.allowFreeform && !!others[item.id]?.trim()) || (selections[item.id]?.length ?? 0) > 0)
   const submit = (): void => {
@@ -1721,6 +1856,54 @@ function QuestionCard({
   }, [question, selections, others, review])
 
   if (review) return <PlanReviewCard question={question} plan={plan} />
+  if (vibes) {
+    // Claude Code's question card: a "Needs your input" pill, the question on a
+    // header band, radio rows (label over a grey description), an Other row,
+    // then Skip and Submit (⌘↵) at the right. Same state and answers as below.
+    const skippable = question.items.every(item => item.allowFreeform)
+    const skip = (): void => store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
+    return (
+      <div className="vq" role="form" aria-label="Agent questions">
+        <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
+        <div className="vq__card">
+          {question.items.map((item, qi) => {
+            const picked = selections[item.id] ?? []
+            const other = others[item.id] ?? ''
+            return (
+              <div key={item.id} className="vq__item">
+                <div className="vq__q"><Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" /></div>
+                <div className="vq__opts" role="radiogroup" aria-label={item.question}>
+                  {item.options.map(option => {
+                    const on = picked.includes(option)
+                    const { label, detail } = optionParts(option)
+                    return (
+                      <button key={option} type="button" role="radio" aria-checked={on} className="vq__opt"
+                        onClick={() => { setOthers(prev => ({ ...prev, [item.id]: '' })); setSelections(prev => ({ ...prev, [item.id]: on ? [] : [option] })) }}>
+                        <span className="vq__radio" aria-hidden="true" />
+                        <span className="vq__text"><span className="vq__label">{label}</span>{detail && <span className="vq__detail">{detail}</span>}</span>
+                      </button>
+                    )
+                  })}
+                  {item.allowFreeform && (
+                    <label className="vq__opt vq__opt--other" aria-checked={other.trim() !== ''} role="radio">
+                      <span className="vq__radio" aria-hidden="true" />
+                      <input aria-label="Other answer" placeholder={item.placeholder || 'Other'} spellCheck={false} value={other}
+                        onChange={e => { const value = e.target.value; setOthers(prev => ({ ...prev, [item.id]: value })); setSelections(prev => ({ ...prev, [item.id]: [] })) }}
+                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); submit() } }} />
+                    </label>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          <div className="vq__actions">
+            {skippable && <button type="button" className="vq__skip" title="Answer “Skipped” and let the agent continue" onClick={skip}>Skip</button>}
+            <button type="button" className="vq__submit" disabled={!canSubmit} onClick={submit}>Submit <kbd>⌘</kbd><kbd>↵</kbd></button>
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="qcard" role="form" aria-label="Agent questions">
       <div className="qcard__head">
@@ -2084,6 +2267,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           : 'Describe what you need'
   // VS Code has Source Control for the repo line, and no dictation in a webview.
   const vscode = isVscodeHost()
+  // Vibes draws Claude's prompt box: a return-arrow send and plain-text meta.
+  const vibes = useVibesStyle()
 
   return (
     <div
@@ -2188,19 +2373,19 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
               onClick={send}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
-            ><Icon name="arrowUp" size={16} /></button>}
+            ><Icon name={vibes ? 'enter' : 'arrowUp'} size={16} /></button>}
       </div>
       </div>
       <div className="composer__toolbar">
         <button className="cchip composer__icon" title="Add files or folders as context" aria-label="Add context" onClick={() => open('files')}><Icon name="plus" size={16} /></button>
         {!vscode && <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />}
         <button
-          className="cchip composer__text"
+          className="cchip composer__text composer__perm"
           title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
           onClick={() => store.openSettings('permissions')}
         >{permissionLabel(snap.permissionMode)}</button>
         <button
-          className={`cchip composer__text${snap.planMode ? ' is-on' : ''}`}
+          className={`cchip composer__text composer__plan${snap.planMode ? ' is-on' : ''}`}
           aria-pressed={snap.planMode}
           title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
           onClick={() => store.togglePlanMode()}
@@ -2212,14 +2397,14 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             aria-expanded={snap.delegationMenuOpen}
             title="How eagerly this task uses agents and workflows — click to change"
             onClick={() => store.toggleDelegationMenu()}
-          ><Icon name="agents" size={14} />Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
+          >{!vibes && <Icon name="agents" size={14} />}Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
           <PickerLayer>
           {snap.delegationMenuOpen && <DelegationMenu snap={snap} onClose={() => store.closeDelegationMenu()} />}
           </PickerLayer>
         </div>
         <span className="composer__flex" />
         {snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
-        <div className="chipanchor">
+        <div className="chipanchor composer__model">
           <button
             className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}
             title="Model — click to change"
@@ -2232,7 +2417,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           </PickerLayer>
         </div>
         {snap.reasoningLevels.length > 0 && <button
-          className="cchip composer__text"
+          className="cchip composer__text composer__effort"
           title="Reasoning effort — click to change"
           onClick={() => store.toggleReasoningPicker()}
         >{capitalizeWord(snap.reasoningEffort || 'default')}</button>}
@@ -2377,11 +2562,16 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
   const todos = snap.todos ?? snap.plan?.items.map((item, index) => ({ id: String(index), content: item.text, status: item.done ? 'completed' : 'pending' })) ?? []
   const current = todos.find(item => item.status === 'in_progress')
   const next = current ?? todos.find(item => item.status === 'pending')
-  if (!visibleGoal && !todos.length && !snap.queue.length) return null
+  const viewingPlan = snap.tab === 'plan'
+  if (!viewingPlan && !visibleGoal && !todos.length && !snap.queue.length) return null
   const done = todos.filter(item => item.status === 'completed').length
   return <section className="composer-task-summary" aria-label="Current task">
     {visibleGoal && <button onClick={() => open('activity')} title={visibleGoal.objective}><span className="composer-task-summary__label">Goal</span><span className="composer-task-summary__text">{activityVisible ? 'View goal details' : visibleGoal.objective}</span><span className="composer-task-summary__status">{visibleGoal.phase}</span></button>}
-    {todos.length > 0 && <button onClick={() => store.setTab('plan')} title={next?.content ?? 'View completed tasks'}><span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span></button>}
+    {(viewingPlan || todos.length > 0) && <button onClick={() => store.setTab(viewingPlan ? 'activity' : 'plan')} title={viewingPlan ? 'Return to the latest messages' : next?.content ?? 'View completed tasks'}>
+      {viewingPlan ? <><Icon name="chat" size={13} /><span className="composer-task-summary__text">Back to conversation</span></> : <>
+        <span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span>
+      </>}
+    </button>}
     {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><button aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div>)}</div></div>}
   </section>
 }
@@ -2600,7 +2790,7 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
       // the thing you are looking at, and never by accident.
       if (!snap.approval || event.metaKey || event.ctrlKey || event.altKey) return
       const active = document.activeElement
-      if (!(active instanceof HTMLElement) || !active.closest('.approval')) return
+      if (!(active instanceof HTMLElement) || !active.closest('.approval, .vq--approval')) return
       if (event.key === '1') { event.preventDefault(); store.approve(snap.approval.id, 'allow_once') }
       else if (event.key === '2') { event.preventDefault(); store.approve(snap.approval.id, 'allow_session') }
       else if (event.key === '3') { event.preventDefault(); store.approve(snap.approval.id, 'deny') }

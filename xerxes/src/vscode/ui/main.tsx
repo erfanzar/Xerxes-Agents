@@ -11,14 +11,15 @@
 
 import { createRoot } from 'react-dom/client'
 
-import { applyStyle, isStyleChoice, type StyleChoice } from '../../desktop/renderer/appearance.js'
+import { applyStyle, DEFAULT_STYLE, styleFromSaved, type StyleChoice } from '../../desktop/renderer/appearance.js'
 import { ErrorBoundary } from '../../desktop/renderer/ErrorBoundary.js'
 import { VscodeApp } from './VscodeApp.js'
 
 const root = document.documentElement
 /** The saved setting, stamped into the page by the extension and updated live. */
 const stamped = root.getAttribute('data-style-choice')
-let chosenStyle: StyleChoice = isStyleChoice(stamped) ? stamped : 'shading'
+// A saved Classic or Shading (both retired) opens as Vibes.
+let chosenStyle: StyleChoice = styleFromSaved(stamped) ?? DEFAULT_STYLE
 
 /** VS Code marks the body vscode-light / vscode-dark / vscode-high-contrast(-light); follow it live. */
 const followTheme = (): void => {
@@ -27,11 +28,13 @@ const followTheme = (): void => {
   const highContrast = classes.contains('vscode-high-contrast') || classes.contains('vscode-high-contrast-light')
   root.setAttribute('data-theme', light ? 'light' : 'dark')
   root.toggleAttribute('data-high-contrast', highContrast)
-  applyStyle(highContrast ? 'classic' : chosenStyle, root)
+  // High contrast stamps no style: the base sheets in VS Code's own colours win.
+  applyStyle(highContrast ? null : chosenStyle, root)
 }
 followTheme()
 new MutationObserver(followTheme).observe(document.body, { attributes: true, attributeFilter: ['class'] })
-window.xerxes.onStyle?.(style => {
+window.xerxes.onStyle?.(value => {
+  const style = styleFromSaved(value) ?? DEFAULT_STYLE
   chosenStyle = style
   root.setAttribute('data-style-choice', style)
   followTheme()

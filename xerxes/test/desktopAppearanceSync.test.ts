@@ -3,7 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
-import { APPEARANCE_KEY, applyAppearance, loadAppearance, saveAppearance } from '../src/desktop/renderer/appearance.js'
+import { APPEARANCE_KEY, applyAppearance, applyStyle, loadAppearance, saveAppearance } from '../src/desktop/renderer/appearance.js'
 import { followAppearanceChanges, SHARED_APPEARANCE_KEYS } from '../src/desktop/renderer/appearanceSync.js'
 import { BACKDROP_KEY } from '../src/desktop/renderer/backdrop.js'
 import { PALETTE_KEY } from '../src/desktop/renderer/palettes.js'
@@ -20,26 +20,42 @@ test('changing the text size in one view never puts back the theme another view 
     saveAppearance({ theme: 'light' })
     // A second view, still showing dark, changes only the font.
     saveAppearance({ font: '15' })
-    // Never chose a style: Shading, the default.
-    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'shading' })
+    // Never chose a style: Vibes, the default.
+    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'vibes' })
     saveAppearance({ theme: 'system' })
-    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'shading' })
+    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'vibes' })
     // The style is its own field: switching it keeps theme and font.
-    saveAppearance({ style: 'classic' })
-    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'classic' })
+    saveAppearance({ style: 'neo' })
+    expect(loadAppearance()).toEqual({ theme: 'system', font: '15', style: 'neo' })
+  })
+})
+
+test('Vibes is the default, and a saved Classic or Shading opens as Vibes without changing theme or font', () => {
+  withStorage(storage => {
+    expect(loadAppearance().style).toBe('vibes')
+    for (const retired of ['classic', 'shading']) {
+      storage.set(APPEARANCE_KEY, JSON.stringify({ theme: 'light', font: '15', style: retired }))
+      expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'vibes' })
+    }
+    storage.set(APPEARANCE_KEY, JSON.stringify({ theme: 'light', font: '15', style: 'neo' }))
+    expect(loadAppearance()).toEqual({ theme: 'light', font: '15', style: 'neo' })
+    saveAppearance({ font: '17' })
+    expect(loadAppearance()).toEqual({ theme: 'light', font: '17', style: 'neo' })
   })
 })
 
 test('applying a stored choice sets the page attributes, and system hands the theme back', () => {
   const attributes = new Map<string, string>()
   const root = { setAttribute: (k: string, v: string) => { attributes.set(k, v) }, removeAttribute: (k: string) => { attributes.delete(k) } }
-  applyAppearance({ theme: 'dark', font: '13', style: 'classic' }, root)
-  // Classic stamps no data-style, so every Classic rule sees the page it always did.
-  expect(Object.fromEntries(attributes)).toEqual({ 'data-font': '13', 'data-user-theme': 'dark', 'data-theme': 'dark' })
+  applyAppearance({ theme: 'dark', font: '13', style: 'vibes' }, root)
+  // Every style stamps data-style; only VS Code high contrast stamps none (applyStyle(null)).
+  expect(Object.fromEntries(attributes)).toEqual({ 'data-style': 'vibes', 'data-font': '13', 'data-user-theme': 'dark', 'data-theme': 'dark' })
   applyAppearance({ theme: 'dark', font: '13', style: 'neo' }, root)
   expect(attributes.get('data-style')).toBe('neo')
-  applyAppearance({ theme: 'system', font: '11', style: 'classic' }, root)
+  applyStyle(null, root)
   expect(attributes.has('data-style')).toBe(false)
+  applyAppearance({ theme: 'system', font: '11', style: 'vibes' }, root)
+  expect(attributes.get('data-style')).toBe('vibes')
   expect(attributes.has('data-user-theme')).toBe(false)
   expect(attributes.get('data-font')).toBe('11')
 })

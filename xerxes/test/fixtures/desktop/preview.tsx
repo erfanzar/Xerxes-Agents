@@ -15,6 +15,8 @@ import type { DaemonEvent, TerminalDetail, XerxesBridge } from '../../../src/des
 // Activity rail): replies, reasoning, commands, an edit and a failed test.
 // Opening it subscribes to live events; a few more steps then stream in.
 const fixtureListeners=new Set<(event:DaemonEvent)=>void>()
+let artifactRevision=1
+const fixtureArtifact=()=>({id:'planfix001',title:'Plan: grouped usage',kind:'markdown',size:64,created_at:'',updated_at:'',pinned:false,version:artifactRevision,content:`# Artifact revision ${artifactRevision}`})
 const fixtureAgentId='agent-0'
 let fixtureAgentStep=0
 const agentSay=(content:string,thinking?:string)=>({id:`${fixtureAgentStep++}:message`,messages:[{role:'assistant',content}],executions:[],thinking:thinking?[thinking]:[]})
@@ -220,6 +222,9 @@ const bridge: XerxesBridge={onEvent:handler=>{fixtureListeners.add(handler);retu
   // Visual-review stubs: the Source control, Terminal, Agent intelligence and Models pages render real content.
   else if(method==='git.status')result={ok:true,repository:{root:cwd,branch:'main',detached:false,hasHead:true,upstream:'origin/main',ahead:1,behind:0,staged:[{path:'src/desktop/layout.ts',status:'A'}],unstaged:[{path:'src/runtime/transport/connections/recovery/session-reconnect-controller.ts',status:'M'}],untracked:[],conflicts:[],truncated:false,counts:{staged:1,unstaged:1,untracked:0,conflicts:0},lines:{added:25,removed:8}}}
   else if(method==='terminal.open')result={ok:true,terminal_id:'fixture-shell'}
+  else if(method==='artifacts.read' && params.id==='planfix001')result={ok:true,artifact:fixtureArtifact()}
+  else if(method==='artifacts.read' && params.id==='docs')result={ok:false,error:'Artifact not found'}
+  else if(method==='artifacts.list' && artifactRevision>1)result={ok:true,artifacts:[fixtureArtifact()]}
   else if(method==='artifacts.list')result={ok:true,artifacts:[{id:'a1b2c3d4e5',title:'Xerxes-Agents: architecture, findings & what to add',kind:'markdown',size:37900,created_at:new Date(Date.now()-17*3600e3).toISOString(),updated_at:new Date(Date.now()-17*3600e3).toISOString(),pinned:false,version:1}]}
   else if(method==='artifacts.read')result={ok:true,artifact:{id:'a1b2c3d4e5',title:'Xerxes-Agents: architecture, findings & what to add',kind:'markdown',size:37900,created_at:new Date(Date.now()-17*3600e3).toISOString(),updated_at:new Date(Date.now()-17*3600e3).toISOString(),pinned:false,version:1,content:'# Xerxes-Agents: architecture, findings, and what to add\n\n*Repository:* `~/Documents/Projects/Xerxes-Agents`\n\n| Area | Report |\n| --- | --- |\n| Entry points | `1-entry-daemon.md` |\n| Turn loop | `2-turn-llms.md` |\n\n## 1. Executive summary\n\nXerxes is a **Bun-native** agent runtime.'}}
   else if(method==='artifacts.pin')result={ok:true,artifact:{id:params.id,title:'x',kind:'markdown',size:1,created_at:'',updated_at:'',pinned:params.pinned===true,version:1}}
@@ -250,7 +255,7 @@ const bridge: XerxesBridge={onEvent:handler=>{fixtureListeners.add(handler);retu
 Object.defineProperty(window,'xerxes',{value:bridge})
 ;(store as unknown as {bridge:XerxesBridge}).bridge=bridge
 localStorage.setItem('xerxes.desktop.setup.v1','done')
-// `previewDesktop.ts --style=shading` opens the fixture in that style.
+// `previewDesktop.ts --style=neo` opens the fixture in that style.
 const requestedStyle=new URLSearchParams(location.search).get('style')
 if(isStyleChoice(requestedStyle))saveAppearance({style:requestedStyle})
 restoreAppearance()
@@ -261,6 +266,20 @@ createRoot(document.getElementById('root')!).render(<Preview/> )
 const host=window as unknown as {fixture?:{onScenario(handler:(name:string)=>void):void}}
 let activityBuilder = new BlockBuilder()
 const scenario = (name:string) => {
+  if(name==='Refresh artifact' || name==='Refresh artifact via poll') {
+    artifactRevision++
+    if(name==='Refresh artifact') for(const listener of fixtureListeners) listener({type:'tool_result',payload:{name:'ArtifactTool',permitted:true,result:`Updated artifact "Plan: grouped usage" (id planfix001, version ${artifactRevision}).`}})
+    return
+  }
+  if(name==='Todo navigation') {
+    patch({tab:'activity',todos:[{id:'verify',content:'Verify the return to chat',status:'in_progress'}],blocks:[...Array.from({length:35},(_,i)=>({kind:'user' as const,id:i+1,text:`Earlier message ${i+1}`})),{kind:'agent',id:36,text:'Latest fixture reply',streaming:false}]})
+    return
+  }
+  if(name==='Artifact card') {
+    artifactRevision=1
+    patch({blocks:[...blocks,{kind:'tools',id:20,running:false,items:[{id:'plan-artifact',verb:'Artifact',name:'ArtifactTool',arg:'Plan: grouped usage',dur:'1s',state:'done',input:'{"action":"create","kind":"markdown"}',output:'Created artifact "Plan: grouped usage" (id planfix001, version 1)'}]}]})
+    return
+  }
   if(name==='Agent failure'){fixtureAgentError=true;return}
   if(name==='Agent recover'){fixtureAgentError=false;return}
   if(name==='Command failure'){fixtureCommandError=true;return}

@@ -6,9 +6,8 @@ import { applyBackdrop, BACKDROP_KEY, loadBackdrop } from './backdrop.js'
 import { PALETTE_KEY } from './palettes.js'
 
 /**
- * Switch Classic ⇄ Neo in place: remember it for every view, stamp the page,
- * then repaint the background (Neo takes only its colours, solid; Classic shows
- * the picture again). No reload, no other setting touched.
+ * Switch styles in place: remember the choice, stamp the page and repaint
+ * the background. No reload and no other appearance preference is changed.
  */
 export function chooseStyle(style: StyleChoice, root: HTMLElement = document.documentElement): void {
   // In VS Code the choice is the Xerxes: Style setting; the extension pushes
