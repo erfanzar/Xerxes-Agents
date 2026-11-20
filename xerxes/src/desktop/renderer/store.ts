@@ -4472,9 +4472,9 @@ export class Store {
             ...(inputs ? { inputs } : {}),
             ...(str(payload.cwd) ? { cwd: str(payload.cwd) } : {}),
             ...(str(payload.reason) ? { reason: str(payload.reason) } : {}),
+            ...(str(payload.permission_mode) ? { permissionMode: str(payload.permission_mode) } : {}),
           },
           interactionHidden: false,
-            ...(str(payload.permission_mode) ? { permissionMode: str(payload.permission_mode) } : {}),
         })
         break
       }
