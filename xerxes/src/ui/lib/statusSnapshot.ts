@@ -68,7 +68,8 @@ export const statusContextPercent = (snapshot: StatusSnapshot): number => {
 
 /** Fraction of prompt tokens obtained through the provider cache. */
 export const statusCacheHitRate = (snapshot: StatusSnapshot): number => {
-  const total = snapshot.inputTokens + snapshot.cacheReadTokens
+  // Cache writes are part of the prompt too; leaving them out reported 100 read + 100 written as 100%.
+  const total = snapshot.inputTokens + snapshot.cacheReadTokens + snapshot.cacheWriteTokens
 
   if (total <= 0) {
     return 0

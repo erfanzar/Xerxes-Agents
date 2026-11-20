@@ -480,7 +480,7 @@ function aggregate(events: readonly CostEvent[]): CostAggregate {
     tokens: inputTokens + outputTokens,
     cacheReadTokens,
     cacheCreationTokens,
-    cacheHitRate: cacheHitRateValues(inputTokens, cacheReadTokens),
+    cacheHitRate: cacheHitRateValues(inputTokens, cacheReadTokens, cacheCreationTokens),
     costUsd,
   })
 }
@@ -503,24 +503,28 @@ function groupBy(
 
 function cacheHitRate(events: readonly CostEvent[]): number {
   const totals = aggregateTokenCounts(events)
-  return cacheHitRateValues(totals.inputTokens, totals.cacheReadTokens)
+  return cacheHitRateValues(totals.inputTokens, totals.cacheReadTokens, totals.cacheCreationTokens)
 }
 
 function aggregateTokenCounts(events: readonly CostEvent[]): {
   readonly cacheReadTokens: number
+  readonly cacheCreationTokens: number
   readonly inputTokens: number
 } {
   let inputTokens = 0
   let cacheReadTokens = 0
+  let cacheCreationTokens = 0
   for (const event of events) {
     inputTokens += event.inputTokens
     cacheReadTokens += event.cacheReadTokens
+    cacheCreationTokens += event.cacheCreationTokens
   }
-  return { inputTokens, cacheReadTokens }
+  return { inputTokens, cacheReadTokens, cacheCreationTokens }
 }
 
-function cacheHitRateValues(inputTokens: number, cacheReadTokens: number): number {
-  const served = inputTokens + cacheReadTokens
+/** Cache reads over the whole prompt (fresh + read + written), the same denominator the daemon and Desktop use. */
+function cacheHitRateValues(inputTokens: number, cacheReadTokens: number, cacheCreationTokens = 0): number {
+  const served = inputTokens + cacheReadTokens + cacheCreationTokens
   return served > 0 ? cacheReadTokens / served : 0
 }
 

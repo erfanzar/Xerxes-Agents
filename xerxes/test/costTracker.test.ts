@@ -54,7 +54,8 @@ test('cost tracker uses published provider pricing, cache included', () => {
   expect(tracker.totalTokens).toBe(1_500)
   expect(tracker.totalCacheReadTokens).toBe(100)
   expect(tracker.totalCacheCreationTokens).toBe(20)
-  expect(tracker.cacheHitRate()).toBeCloseTo(100 / 1_100, 12)
+  // Cache writes are part of the prompt: 100 read over 1,000 fresh + 100 read + 20 written.
+  expect(tracker.cacheHitRate()).toBeCloseTo(100 / 1_120, 12)
   expect(tracker.summary()).toContain('Total cost: $0.0076')
   expect(tracker.summary()).toContain('**openai/gpt-4o**: $0.0076 (1 turns, 1,500 tokens)')
 

@@ -316,6 +316,16 @@ test('chat-completions mirrors Pi cache placement and cache-write accounting', a
   })
 })
 
+test('streamed usage whose cache split arrives in a later frame is not double counted', async () => {
+  const sse = [
+    { choices: [{ delta: { content: 'hi' } }], usage: { prompt_tokens: 1_000, completion_tokens: 1 } },
+    { choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1_000, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 700 } } },
+  ].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n'
+  const client = openAiClient(async () => new Response(sse, { headers: { 'Content-Type': 'text/event-stream' } }))
+  const usages = (await collect(client.stream(request()))).flatMap(delta => (delta as { usage?: unknown }).usage ? [(delta as { usage: unknown }).usage] : [])
+  expect(usages.at(-1)).toMatchObject({ inputTokens: 300, cacheReadTokens: 700, outputTokens: 5 })
+})
+
 test('chat-completions propagates Retry-After delta-seconds as structured classifier metadata', async () => {
   for (const operation of ['complete', 'stream'] as const) {
     const client = openAiClient(async () => new Response('slow down', {

@@ -2765,8 +2765,12 @@ function mergeTokenUsage(current: TokenUsage | undefined, next: TokenUsage): Tok
   const cacheCreationTokens = maxDefined(current.cacheCreationTokens, next.cacheCreationTokens)
   const cacheReadTokens = maxDefined(current.cacheReadTokens, next.cacheReadTokens)
   const reasoningTokens = maxDefined(current.reasoningTokens, next.reasoningTokens)
+  // Merge the whole prompt, then split it. A frame that reports 1,000 input before a later
+  // frame says 700 of it was cached must end as 300 fresh + 700 cached, not 1,000 + 700.
+  const prompt = (usage: TokenUsage) => usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0)
+  const promptTokens = Math.max(prompt(current), prompt(next))
   return {
-    inputTokens: Math.max(current.inputTokens, next.inputTokens),
+    inputTokens: Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheCreationTokens ?? 0)),
     outputTokens: Math.max(current.outputTokens, next.outputTokens),
     ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
