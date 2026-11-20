@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.49 — 2026-11-20
+
+- **Codex prompt cache covers the system prompt.** The ChatGPT subscription backend never cached the `instructions` field, so every round re-sent the whole system prompt uncached (a 164K-character prompt cost about 39K uncached tokens a round). The system prompt now leads the request as a developer message, where it becomes part of the cached prefix; `instructions` keeps one fixed line.
+- **Creator mode opens while a task runs.** "Open Creator mode" was disabled for the whole turn. It now opens a Creator session in another view of the workspace, the way New task does, and leaves the running task alone.
+- **XERXES controls list fits its rows.** Each row's second line (Autopilot state, model, …) was cut in half and centred; rows now grow to fit and sit left-aligned.
+- **One composer status at a time.** "Sending…" no longer draws over "Compacting…"; the message is sent once compaction finishes.
+- **Plain XERXES mark.** The glowing blue bird beside XERXES replies is now the mark on a small quiet tile.
+
 ## 0.8.48 — 2026-11-20
 
 - **Claude Code prompt cache stays warm with pasted screenshots.** Claude Code resizes any image over 4,784 tokens (one per 28×28 tile), even when both sides are under 2000px. A resized image stopped the cache at the system prompt, so every later round rewrote the whole conversation. Xerxes now sends images at exactly the size Claude Code would pick, so it passes them through untouched.
