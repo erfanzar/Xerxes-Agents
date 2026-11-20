@@ -501,7 +501,11 @@
 /* A pasted image belongs to your message: right-aligned above the bubble, on the bubble's
    16pt right inset. layout.css stretches the user turn, which left it at the column start. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images{align-self:flex-end;justify-content:flex-end;width:fit-content;max-width:min(80%,600px);margin:0 16px 8px auto}
-:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images img{max-width:min(100%,320px);max-height:240px}
+/* The link box takes the thumbnail's width, not the screenshot's. A percentage max-width on the img is
+   cyclic inside this fit-content row, so the link grew to the full 600px and the thumbnail sat at its
+   left edge, far from the bubble. A fixed cap on the link keeps image and bubble on one right edge. */
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images a{flex:0 1 auto;min-width:0;max-width:320px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images img{max-width:100%;max-height:240px;margin-left:auto}
 /* Claude Code has no repository row under the composer: branch and changes live in the side
    panel. In Vibes the folder is under More and Changes opens from the header icon row. */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .composer-wrap:not(.agent-dock)>.repobar{display:none}

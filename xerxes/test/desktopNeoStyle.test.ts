@@ -192,3 +192,22 @@ test('Neo still follows the Theme setting for light and dark', () => {
     expect(root.attributes.get('data-theme')).toBe('dark')
   })
 })
+
+test('the Neo prompt bar keeps the shared layout: no card frame or fill around input and controls', async () => {
+  const css = (await Bun.file(NEO).text()).replace(/\/\*[\s\S]*?\*\//g, '')
+  // The old card drew one ::after frame over input + toolbar and filled the toolbar, which boxed
+  // the controls inside the prompt once Neo moved onto the Vibes layout.
+  expect(css).not.toContain('.composer-wrap:not(.agent-dock)::after')
+  expect(css).not.toMatch(/\.composer-wrap:not\(\.agent-dock\)[^{]*\.composer__toolbar[^{]*\{[^}]*background/)
+  expect(css).not.toContain('--neo-edge')
+  // Neo keeps its prompt glyph.
+  expect(css).toContain("content:'❯'")
+})
+
+test('a pasted image shares the user bubble right edge in Vibes and Neo', async () => {
+  const css = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
+  const shared = ":root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .msg-turn--user>.msg__images"
+  // The link is capped at the thumbnail width; a percentage cap on the img alone let it grow to 600px.
+  expect(css).toContain(`${shared} a{flex:0 1 auto;min-width:0;max-width:320px}`)
+  expect(css).toContain(`${shared} img{max-width:100%;max-height:240px;margin-left:auto}`)
+})
