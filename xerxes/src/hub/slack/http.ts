@@ -5,6 +5,8 @@ import { SlackTransportError } from './types.js'
 import { record } from './wire.js'
 
 export type SlackFetch = (url: string, init: RequestInit) => Promise<Response>
+/** The invented authorization code used only to check a client ID and secret. */
+export const SLACK_CLIENT_CHECK_CODE = 'xerxes-credential-check'
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const methods = {
   'oauth.v2.access': 'POST', 'auth.test': 'POST', 'users.info': 'GET', 'users.lookupByEmail': 'GET',
@@ -50,12 +52,38 @@ export class SlackHttp {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new SlackTransportError('invalid_request')
   }
 
-  async request(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return (await this.requestWithScopes(method, authorization, input, signal)).data
+  /**
+   * Check a Slack app's client ID and secret without a real authorization code. Slack answers an
+   * invented code with `invalid_code` when the credentials are right and names a wrong ID or secret.
+   */
+  async checkClient(clientId: string, clientSecret: string, redirectUri: string, signal?: AbortSignal): Promise<'ok' | 'bad_client'> {
+    checkAbort(signal)
+    const deadline = AbortSignal.timeout(this.timeoutMs)
+    const combined = AbortSignal.any([deadline, ...(signal === undefined ? [] : [signal])])
+    let response: Response
+    try {
+      response = await this.fetchPort('https://slack.com/api/oauth.v2.access', {
+        method: 'POST', redirect: 'error', signal: combined,
+        headers: new Headers({ authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+          accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' }),
+        body: new URLSearchParams({ code: SLACK_CLIENT_CHECK_CODE, redirect_uri: redirectUri }).toString(),
+      })
+    } catch {
+      checkAbort(signal)
+      throw new SlackTransportError(deadline.aborted ? 'timeout' : 'network_error')
+    }
+    if (response.redirected || !response.ok) {
+      void response.body?.cancel().catch(() => {})
+      throw new SlackTransportError(response.status === 429 ? 'rate_limited' : 'slack_rejected')
+    }
+    const data = await parseSlackJson(response, combined)
+    if (data.ok === true) return 'ok'
+    if (data.error === 'invalid_client_id' || data.error === 'bad_client_secret' || data.error === 'invalid_client') return 'bad_client'
+    if (data.error === 'ratelimited') throw new SlackTransportError('rate_limited')
+    return 'ok'
   }
 
-  /** Same request, plus the scopes Slack reports for this token in the `x-oauth-scopes` header. */
-  async requestWithScopes(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<{ data: Record<string, unknown>; scopes: string }> {
+  async request(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     checkAbort(signal)
     const url = new URL(`https://slack.com/api/${method}`)
     const headers = new Headers({ authorization, accept: 'application/json' })
@@ -86,7 +114,7 @@ export class SlackHttp {
     }
   }
 
-  async #exchange(method: SlackMethod, url: string, init: RequestInit): Promise<{ data: Record<string, unknown>; scopes: string }> {
+  async #exchange(method: SlackMethod, url: string, init: RequestInit): Promise<Record<string, unknown>> {
     let response: Response
     try { response = await this.fetchPort(url, init) } catch { throw new SlackTransportError('network_error') }
     if (init.signal?.aborted || response.redirected || !response.ok) {
@@ -101,7 +129,7 @@ export class SlackHttp {
     }
     const data = await parseSlackJson(response, init.signal)
     if (typeof data.ok !== 'boolean') throw new SlackTransportError('invalid_response')
-    if (data.ok === true) return { data, scopes: (response.headers.get('x-oauth-scopes') ?? '').slice(0, 4096) }
+    if (data.ok === true) return data
     if (data.error === 'ratelimited') throw new SlackTransportError('rate_limited')
     if ((method === 'users.info' && data.error === 'user_not_found') || (method === 'users.lookupByEmail' && data.error === 'users_not_found')) {
       throw new SlackTransportError('not_found')

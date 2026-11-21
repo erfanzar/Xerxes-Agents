@@ -11,8 +11,9 @@ import { SUPERVISOR_DISPLAY_NAME, SUPERVISOR_PRINCIPAL_ID } from '../supervisor/
 import type { SupervisorSlackPort } from '../supervisor/slackTools.js'
 import type { UserPrincipal } from '../supervisor/threads.js'
 import { SLACK_BROKER_ORIGIN_ENV, readSlackBrokerOrigin, SlackBroker, type SlackBrokerAttempt } from './broker.js'
-import { USER_SCOPES, type SlackUserGrant } from './oauth.js'
-import { userToken } from './wire.js'
+import type { SlackUserGrant } from './oauth.js'
+import { loadSlackApp, removeSlackApp, saveSlackApp, slackClientValue, type SavedSlackApp } from './appStore.js'
+import { SlackHttp } from './http.js'
 import { SlackPolicy, type SlackInbox } from './policy.js'
 import { HubSlackTransport, SlackTransportError, type SlackFetch, type SlackIdentity, type SlackOAuthConfig, type SlackPeer } from './transport.js'
 
@@ -100,25 +101,40 @@ function rpcError(error: unknown): HubProtocolError {
 }
 
 export function createHubSlackIntegration(options: HubSlackOptions): HubSlackIntegration {
-  let redirect: URL | undefined
-  if (options.oauth !== undefined) {
-    try { redirect = new URL(options.oauth.redirectUri) } catch { /* checked below */ }
-    if (!redirect || redirect.protocol !== 'https:' || redirect.pathname !== SLACK_CALLBACK_PATH || redirect.username || redirect.password
-      || redirect.search || redirect.hash || !options.publicOrigins.includes(redirect.origin)) {
+  const checkRedirect = (uri: string): URL => {
+    let url: URL | undefined
+    try { url = new URL(uri) } catch { /* checked below */ }
+    if (!url || url.protocol !== 'https:' || url.pathname !== SLACK_CALLBACK_PATH || url.username || url.password
+      || url.search || url.hash || !options.publicOrigins.includes(url.origin)) {
       throw new Error(`Slack redirect must use an explicitly configured Hub HTTPS origin and ${SLACK_CALLBACK_PATH}.`)
     }
+    return url
   }
+  // Where Slack returns the browser after sign-in: this Hub's own HTTPS origin. It also pre-fills the owner's app manifest.
+  const hubOrigin = options.publicOrigins.find(origin => origin.startsWith('https://'))
+  const hubRedirectUri = hubOrigin === undefined ? undefined : `${hubOrigin}${SLACK_CALLBACK_PATH}`
   const transportOptions = (ownerId: string) => ({ stateDir: join(options.stateDir, `slack-owner-${digest(ownerId)}`),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }), ...(options.now === undefined ? {} : { now: options.now }) })
-  const oauthOptions = options.oauth === undefined ? {} : { oauth: options.oauth }
-  // Validate the operator's settings at startup; per-owner instances keep credentials and OAuth state disjoint.
-  const oauthForOwner = (ownerId: string) => new HubSlackTransport({ ...transportOptions(ownerId), ...oauthOptions })
-  if (options.oauth !== undefined) oauthForOwner('validation-only')
   const managed = options.brokerOrigin !== undefined
+  // Operator settings (environment) win; otherwise the owner's own Slack app, saved from Desktop.
+  const operatorApp = options.oauth !== undefined || managed
+  let saved: SavedSlackApp | undefined
+  if (!operatorApp && hubRedirectUri !== undefined) {
+    // A damaged settings file only turns browser sign-in off; the owner saves the app again from Desktop.
+    try { saved = loadSlackApp(options.stateDir) } catch { saved = undefined }
+  }
+  const configFor = (app: SavedSlackApp | undefined): SlackOAuthConfig | undefined => options.oauth
+    ?? (app === undefined || hubRedirectUri === undefined ? undefined : { ...app, redirectUri: hubRedirectUri })
+  let oauthConfig = configFor(saved)
+  let redirect = oauthConfig === undefined ? undefined : checkRedirect(oauthConfig.redirectUri)
+  // Per-owner instances keep credentials and OAuth state disjoint; constructing one validates the settings.
+  const oauthForOwner = (ownerId: string, config = oauthConfig) => new HubSlackTransport({ ...transportOptions(ownerId), ...(config === undefined ? {} : { oauth: config }) })
+  if (oauthConfig !== undefined) oauthForOwner('validation-only')
+  const http = new SlackHttp(options.fetch ?? ((url, init) => fetch(url, init)), 10_000)
   const broker = options.brokerOrigin === undefined || !options.brokerEnrollmentToken ? undefined
     : new SlackBroker(options.brokerOrigin, options.brokerEnrollmentToken, options.fetch)
-  // Browser sign-in needs operator settings; pasting your own app's user token (connect_token) never does.
-  const browserSignIn = managed ? broker !== undefined : redirect !== undefined
+  const browserSignIn = (): boolean => managed ? broker !== undefined : redirect !== undefined
+  const appSource = (): 'operator' | 'saved' | 'none' => operatorApp ? 'operator' : saved !== undefined ? 'saved' : 'none'
   const db = new Database(options.databasePath, { create: true, strict: true })
   const active = new Set<Promise<unknown>>()
   const shutdown = new AbortController()
@@ -131,6 +147,7 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     oauth: HubSlackTransport; timer: ReturnType<typeof setTimeout>; phase: Phase
   }
   let pending: Flow | undefined
+  let savingApp = false
   const disconnecting = new Set<string>()
   const epochs = new Map<string, AbortController>()
   const now = options.now ?? Date.now
@@ -192,7 +209,7 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     const account = accountOf(principal.id)
     const contacts = account === undefined ? [] : policy.listContacts(principal).filter(contact => sameAccount(account, contact))
     const phase = bound(context, principal)?.phase
-    return { configured: true, browser_sign_in: browserSignIn, connection: account === undefined ? null : wireIdentity(account),
+    return { configured: true, browser_sign_in: browserSignIn(), app: appSource(), redirect_url: hubRedirectUri ?? null, connection: account === undefined ? null : wireIdentity(account),
       pending_identity: phase?.kind === 'review' ? wireIdentity(phase.grant.account) : null,
       contacts: contacts.map(row => ({ team_id: row.teamId, user_id: row.peerId, display_name: row.displayName, mode: row.mode })) }
   }
@@ -242,7 +259,7 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
     if (method === 'supervisor.slack.connect') {
       requireKeys(params)
       if (managed && broker === undefined) throw new HubProtocolError('unavailable', 'Managed Slack sign-in is unavailable on this Hub.')
-      if (!browserSignIn) throw new HubProtocolError('unconfigured', 'Browser sign-in is not set up on this Hub. Connect with your own Slack app instead.')
+      if (!browserSignIn()) throw new HubProtocolError('unconfigured', 'Set up your Slack app first in XERXES → Slack.')
       if (pending && !usable(pending)) cancelFlow(pending)
       if (accountOf(id) || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect the current Slack account before connecting another.')
       if (pending) throw new HubProtocolError('conflict', 'Slack authorization is already pending. Finish it or wait for it to expire.')
@@ -269,39 +286,45 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
         return { authorize_url: authorizeUrl }
       } finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
     }
-    if (method === 'supervisor.slack.connect_token') {
-      requireKeys(params, 'token')
-      const token = typeof params.token === 'string' ? params.token.trim() : ''
-      if (!userToken(token)) {
-        throw new HubProtocolError('invalid_request', 'Paste the User OAuth Token from your Slack app. It starts with xoxp-.')
+    if (method === 'supervisor.slack.app.save' || method === 'supervisor.slack.app.remove') {
+      if (method === 'supervisor.slack.app.save') requireKeys(params, 'client_id', 'client_secret')
+      else requireKeys(params)
+      if (operatorApp) throw new HubProtocolError('conflict', 'This Hub’s Slack sign-in is set by its operator settings.')
+      if (hubRedirectUri === undefined) {
+        throw new HubProtocolError('unconfigured', 'Slack needs this Hub’s HTTPS address to send you back after signing in, and the Hub has none. Give the Hub a public HTTPS address, then try again.')
       }
       if (pending && !usable(pending)) cancelFlow(pending)
-      if (accountOf(id) || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect the current Slack account before connecting another.')
-      if (pending) throw new HubProtocolError('conflict', 'A Slack connection is already waiting. Confirm it or wait for it to expire.')
-      const flow: Flow = { owner: id, deviceId: principal.deviceId, sessionId: context.browserSessionId, expiresAt: now() + FLOW_TTL_MS,
-        abort: new AbortController(), oauth: oauthForOwner(id), phase: { kind: 'busy' }, timer: setTimeout(() => cancelFlow(flow), FLOW_TTL_MS) }
-      flow.timer.unref()
-      pending = flow
-      const signal = AbortSignal.any([flow.abort.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+      if (pending || savingApp) throw new HubProtocolError('conflict', 'A Slack sign-in is in progress. Finish it or wait for it to expire.')
+      if (method === 'supervisor.slack.app.remove') {
+        if (accountOf(id) || disconnecting.has(id)) throw new HubProtocolError('conflict', 'Disconnect your Slack account before removing its app.')
+        await audit(context, method); owner(principal)
+        try { await removeSlackApp(options.stateDir) } catch { throw new HubProtocolError('unavailable', 'The Hub could not remove the Slack app settings.') }
+        saved = undefined; oauthConfig = undefined; redirect = undefined
+        return status(context, principal)
+      }
+      const clientId = typeof params.client_id === 'string' ? params.client_id.trim() : ''
+      const clientSecret = typeof params.client_secret === 'string' ? params.client_secret.trim() : ''
+      if (!slackClientValue(clientId) || !slackClientValue(clientSecret)) {
+        throw new HubProtocolError('invalid_request', 'Paste the Client ID and Client Secret from your Slack app’s Basic Information page.')
+      }
+      savingApp = true
       try {
-        // The audit names the method only; the token never reaches an audit record, log or reply.
+        // The audit names the method only; the secret never reaches an audit record, log or reply.
         await audit(context, method)
-        owner(principal); signal.throwIfAborted()
-        let grant: SlackUserGrant
-        try { grant = await flow.oauth.verifyUserToken(token, signal) } catch (error) {
-          if (!(error instanceof SlackTransportError)) throw error
-          if (error.code === 'oauth_unsupported') {
-            throw new HubProtocolError('invalid_request', `This token must be a user token (not a bot token) with exactly these User Token Scopes: ${USER_SCOPES.join(', ')}.`)
-          }
-          if (error.code === 'slack_rejected' || error.code === 'invalid_request') {
-            throw new HubProtocolError('invalid_request', 'Slack did not accept this token. Copy the User OAuth Token again from your Slack app’s OAuth & Permissions page.')
-          }
-          throw error
+        owner(principal); socketSignal?.throwIfAborted()
+        const app = { clientId, clientSecret }
+        const config = configFor(app)
+        if (config === undefined) throw new SlackTransportError('invalid_state')
+        oauthForOwner('validation-only', config)
+        const signal = AbortSignal.any([shutdown.signal, ...(socketSignal === undefined ? [] : [socketSignal])])
+        if (await http.checkClient(clientId, clientSecret, config.redirectUri, signal) === 'bad_client') {
+          throw new HubProtocolError('invalid_request', 'Slack didn’t accept this Client ID and Client Secret. Copy both again from your app’s Basic Information page.')
         }
         owner(principal); signal.throwIfAborted()
-        review(flow, grant)
-        return status(context, principal)
-      } finally { if (flow.phase.kind === 'busy') clearFlow(flow) }
+        try { await saveSlackApp(options.stateDir, app) } catch { throw new HubProtocolError('unavailable', 'The Hub could not save the Slack app settings.') }
+        saved = app; oauthConfig = config; redirect = checkRedirect(config.redirectUri)
+      } finally { savingApp = false }
+      return status(context, principal)
     }
     if (method === 'supervisor.slack.confirm_connection') {
       requireKeys(params, 'team_id', 'user_id')
@@ -430,7 +453,7 @@ export function createHubSlackIntegration(options: HubSlackOptions): HubSlackInt
   return {
     handlers: {
       'supervisor.slack.status': run('supervisor.slack.status'), 'supervisor.slack.connect': run('supervisor.slack.connect'),
-      'supervisor.slack.connect_token': run('supervisor.slack.connect_token'),
+      'supervisor.slack.app.save': run('supervisor.slack.app.save'), 'supervisor.slack.app.remove': run('supervisor.slack.app.remove'),
       'supervisor.slack.confirm_connection': run('supervisor.slack.confirm_connection'),
       'supervisor.slack.disconnect': run('supervisor.slack.disconnect'), 'supervisor.slack.contact.lookup': run('supervisor.slack.contact.lookup'),
       'supervisor.slack.contact.confirm': run('supervisor.slack.contact.confirm'), 'supervisor.slack.contact.remove': run('supervisor.slack.contact.remove'),

@@ -63,7 +63,7 @@ async function setup(configured = true) {
 
 test('only a live human Hub owner may use every Slack RPC; unconfigured and old Hub replies differ', async () => {
   const { f, client, live, calls } = await setup(false)
-  expect(await client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: false, connection: null, pending_identity: null, contacts: [] })
+  expect(await client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: false, app: 'none', redirect_url: redirectUri, connection: null, pending_identity: null, contacts: [] })
   expect(await client.fails('supervisor.slack.connect')).toBe('unconfigured')
   for (const who of ['alice', 'robot']) {
     const denied = await f.client(who)
@@ -93,9 +93,9 @@ test('OAuth callback is fixed-host, expiring, one-use, owner/device-bound, and n
   expect(await completed.text()).not.toContain('fake-code')
   expect((await s.callback(state)).status).toBe(400)
   expect(s.calls).toEqual(['oauth.v2.access', 'auth.test'])
-  expect(await s.client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: true, connection: null, pending_identity: account, contacts: [] })
-  expect(await s.client.ok('supervisor.slack.confirm_connection', account)).toEqual({ configured: true, browser_sign_in: true, connection: account, pending_identity: null, contacts: [] })
-  expect(await s.client.ok('supervisor.slack.disconnect', account)).toEqual({ configured: true, browser_sign_in: true, connection: null, pending_identity: null, contacts: [] })
+  expect(await s.client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: true, app: 'operator', redirect_url: redirectUri, connection: null, pending_identity: account, contacts: [] })
+  expect(await s.client.ok('supervisor.slack.confirm_connection', account)).toEqual({ configured: true, browser_sign_in: true, app: 'operator', redirect_url: redirectUri, connection: account, pending_identity: null, contacts: [] })
+  expect(await s.client.ok('supervisor.slack.disconnect', account)).toEqual({ configured: true, browser_sign_in: true, app: 'operator', redirect_url: redirectUri, connection: null, pending_identity: null, contacts: [] })
   const denied = await s.initiate()
   expect((await s.callback(denied, 'error=access_denied')).status).toBe(400)
   expect((await s.callback(denied)).status).toBe(400)
@@ -215,7 +215,7 @@ test('managed OAuth binds redemption/review to the initiating device and confirm
     expect(await status({ context, grants: [] }, {})).toMatchObject({ pending_identity: null })
   }
   expect(s.calls).toHaveLength(2)
-  expect(await s.client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: true, connection: null, pending_identity: account, contacts: [] })
+  expect(await s.client.ok('supervisor.slack.status')).toEqual({ configured: true, browser_sign_in: true, app: 'operator', redirect_url: redirectUri, connection: null, pending_identity: account, contacts: [] })
   expect(s.calls.slice(2)).toEqual([`${brokerOrigin}/v1/slack/redeem`, 'https://slack.com/api/auth.test'])
   expect(await readdir(s.dir)).not.toContainEqual(expect.stringMatching(/^slack-owner-/))
   expect(s.integration.tools?.isOwner('owner')).toBe(false)
@@ -225,7 +225,7 @@ test('managed OAuth binds redemption/review to the initiating device and confirm
       .rejects.toMatchObject({ code: 'not_found' })
   }
   expect(await (await s.f.client('alice')).fails('supervisor.slack.confirm_connection', account)).toBe('forbidden')
-  expect(await s.client.ok('supervisor.slack.confirm_connection', account)).toEqual({ configured: true, browser_sign_in: true, connection: account, pending_identity: null, contacts: [] })
+  expect(await s.client.ok('supervisor.slack.confirm_connection', account)).toEqual({ configured: true, browser_sign_in: true, app: 'operator', redirect_url: redirectUri, connection: account, pending_identity: null, contacts: [] })
   expect((await readdir(s.dir)).some(name => name.startsWith('slack-owner-'))).toBe(true)
   expect(await s.client.fails('supervisor.slack.confirm_connection', account)).toBe('not_found')
   expect(await s.client.fails('supervisor.slack.dm.open', peer)).toBe('forbidden')

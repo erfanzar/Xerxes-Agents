@@ -2,15 +2,18 @@
 
 The Hub Slack transport acts as the connected Slack **user**, not as a bot. Slack may grant user scopes across the workspace; Xerxes narrows their use to one-to-one DMs with explicitly approved peers. An OAuth grant by itself does not approve any peer or authorize automatic sending. Use this only with a workspace and account whose administrators and users have agreed to the integration.
 
-## Connect from the app (no Hub settings)
+## Sign in with Slack from the app (no Hub settings)
 
-Every Hub that has this build accepts your own Slack app's user token. No server environment variables, redirect URL or broker are needed:
+The Hub needs an HTTPS public origin (`XERXES_HUB_PUBLIC_ORIGINS` or the saved `public_origin`), because Slack sends your browser back to `https://<hub>/api/hub/v1/slack/oauth/callback` after you sign in. The callback only has to be reachable from your own browser, so a tailnet-only address works. Nothing else is set on the server.
 
-1. In Desktop, open **XERXES → Slack** and click **Create XERXES app in Slack**. Slack opens with a manifest already filled in. It requests only the six user scopes (`users:read`, `users:read.email`, `im:write`, `im:read`, `im:history`, `chat:write`), with no bot and token rotation off. Pick your workspace, click **Next**, then click **Create**. If Slack opens without the details, choose **From a manifest** and paste the manifest from **Copy manifest**.
-2. In the new app, open **OAuth & Permissions**, click **Install to Workspace**, then click **Allow**.
-3. Paste the **User OAuth Token** (`xoxp-…`) into the panel and click **Connect**.
+**One-time setup (about a minute), as the Hub owner in Desktop → XERXES → Slack:**
 
-The Hub checks the token with Slack's `auth.test` before it stores anything. The token must belong to a real user, not a bot, and carry exactly the six scopes above. The panel then shows the workspace and member IDs it found. Nothing is saved until you click **Confirm Slack account**. The token goes only to the Hub, as the Hub owner, and never appears in a reply, audit record or the renderer's state. **Disconnect** removes it from the Hub. To revoke the token, also uninstall the app in Slack.
+1. Click **Create XERXES app in Slack**. Slack opens with a manifest already filled in. It requests only the six user scopes (`users:read`, `users:read.email`, `im:write`, `im:read`, `im:history`, `chat:write`), has no bot, no Socket Mode and no token rotation, and lists this Hub's callback as its only redirect URL. Pick your workspace, click **Next**, then **Create**. If Slack opens without the details, choose **From a manifest** and paste the manifest from **Copy manifest**.
+2. On the new app's **Basic Information** page, copy the **Client ID** and **Client Secret** into the panel and click **Save**.
+
+Before saving, the Hub asks Slack whether the Client ID and Secret are right, and refuses them with a plain message if not. They are stored in the Hub's state directory (`slack-app.json`, mode 0600) and are never returned to any client or written to the audit log.
+
+**Connecting, from then on:** click **Sign in with Slack**, approve in the browser, then click **Confirm Slack account** in the panel. XERXES uses a user token, so it acts as you, not as a bot. Disconnecting and reconnecting is the same one click. **Use a different app** removes the saved app while no account is connected. Operator settings (below) take precedence over a saved app.
 
 ## Choose managed or self-hosted sign-in
 

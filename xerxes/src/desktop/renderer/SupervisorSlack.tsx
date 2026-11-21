@@ -5,42 +5,47 @@ import { useCallback, useEffect, useRef, useState, type ReactElement, type React
 
 import { HubRequestError } from '../../client/hubConnection.js'
 import {
-  isSlackUserId, isSlackUserToken, sameSlackContact, slackAppManifest, slackCreateAppUrl, slackUnavailable,
+  isSlackClientValue, isSlackUserId, sameSlackContact, slackAppManifest, slackCreateAppUrl, slackUnavailable,
   type SlackContact, type SlackDm, type SlackDraft, type SlackIdentity, type SlackStatus, type SupervisorSlackClient,
 } from '../../client/supervisorSlack.js'
 import { copyToClipboard } from './CopyButton.js'
 
 const SLACK_UNAVAILABLE = 'Managed Slack sign-in is currently unavailable.'
 const HUB_TOO_OLD = 'Your Hub runs an older Xerxes that can’t connect Slack from this app. Update the Hub, then press Refresh.'
+const NO_HTTPS = 'Slack needs this Hub’s HTTPS address to send you back after signing in, and the Hub has none. Give the Hub a public HTTPS address, then press Refresh.'
 
-/** A message the owner can act on; Hub messages for these codes are written for people and never carry the token. */
-function tokenError(reason: unknown): string {
+/** A message the owner can act on; Hub messages for these codes are written for people and never carry the secret. */
+function setupError(reason: unknown): string {
   if (reason instanceof HubRequestError) {
     if (reason.code === 'unknown_method' || (reason.code === 'invalid_request' && reason.message.startsWith('unknown hub method'))) return HUB_TOO_OLD
-    if (reason.code === 'invalid_request' || reason.code === 'conflict') return reason.message
-    if (reason.code === 'unavailable' || reason.code === 'rate_limited') return `${reason.message} Try again in a moment.`
+    if (reason.code === 'invalid_request' || reason.code === 'conflict' || reason.code === 'unconfigured') return reason.message
+    if (reason.code === 'unavailable' || reason.code === 'rate_limited' || reason.code === 'timeout') return `${reason.message} Try again in a moment.`
   }
-  if (reason instanceof Error && reason.message.startsWith('Paste the User OAuth Token')) return reason.message
-  return 'Could not connect this token. Press Refresh to check the Hub, then try again.'
+  if (reason instanceof Error && reason.message.startsWith('Paste the Client ID')) return reason.message
+  return 'Could not save the Slack app. Press Refresh to check the Hub, then try again.'
 }
 
-/** Three steps, all in the app: create the owner's own Slack app, install it, paste its user token. */
-export function SlackTokenSetup({ disabled, openApp, onSubmit }: {
+/** One-time setup, all in the app: create the owner's own Slack app (pre-filled), then hand its credentials to the Hub. */
+export function SlackAppSetup({ redirectUrl, disabled, openApp, onSave }: {
+  readonly redirectUrl: string
   readonly disabled: boolean
   readonly openApp: () => void
-  readonly onSubmit: (token: string) => void
+  readonly onSave: (app: { readonly clientId: string; readonly clientSecret: string }) => void
 }): ReactElement {
-  const [token, setToken] = useState('')
+  const [clientId, setClientId] = useState('')
+  const [secret, setSecret] = useState('')
   const [copied, setCopied] = useState<string>()
-  const value = token.trim()
-  const valid = isSlackUserToken(value)
-  return <form className="xslack__card xslack__setup" aria-label="Connect your Slack account" onSubmit={event => {
+  const id = clientId.trim()
+  const value = secret.trim()
+  const valid = isSlackClientValue(id) && isSlackClientValue(value)
+  return <form className="xslack__card xslack__setup" aria-label="Set up your XERXES Slack app" onSubmit={event => {
     event.preventDefault()
     if (disabled || !valid) return
-    // The token never stays in renderer state after it is handed to the Hub.
-    setToken('')
-    onSubmit(value)
+    // The secret never stays in renderer state after it is handed to the Hub.
+    setSecret('')
+    onSave({ clientId: id, clientSecret: value })
   }}>
+    <p>One-time setup, about a minute. After this, connecting is one click.</p>
     <ol className="xslack__steps">
       <li>
         <strong>Create your XERXES app in Slack.</strong>
@@ -48,27 +53,24 @@ export function SlackTokenSetup({ disabled, openApp, onSubmit }: {
         <div className="xslack__actions">
           <button type="button" className="btn btn--solid" disabled={disabled} onClick={openApp}>Create XERXES app in Slack</button>
           <button type="button" className="btn" disabled={disabled}
-            onClick={() => void copyToClipboard(slackAppManifest()).then(ok => setCopied(ok ? 'Manifest copied.' : 'Could not copy the manifest.'))}>Copy manifest</button>
+            onClick={() => void copyToClipboard(slackAppManifest(redirectUrl)).then(ok => setCopied(ok ? 'Manifest copied.' : 'Could not copy the manifest.'))}>Copy manifest</button>
         </div>
         <span className="studio-muted">If Slack opens without the details, choose <em>From a manifest</em> and paste the copied manifest.</span>
         {copied ? <span className="studio-muted" role="status">{copied}</span> : null}
       </li>
       <li>
-        <strong>Install it to your workspace.</strong>
-        <span>In the new app, open <em>OAuth &amp; Permissions</em>, click <em>Install to Workspace</em>, then <em>Allow</em>.</span>
-      </li>
-      <li>
-        <strong>Paste the User OAuth Token.</strong>
-        <span>It’s on the same page and starts with <code>xoxp-</code>.</span>
-        <div className="xslack__actions">
-          <input type="password" aria-label="Slack User OAuth Token" value={token} placeholder="xoxp-…" autoComplete="off" spellCheck={false}
-            disabled={disabled} onChange={event => setToken(event.target.value)} />
-          <button type="submit" className="btn btn--solid" disabled={disabled || !valid}>Connect</button>
+        <strong>Paste its Client ID and Client Secret.</strong>
+        <span>They’re on the app’s <em>Basic Information</em> page under <em>App Credentials</em>. Click <em>Show</em> to see the secret.</span>
+        <div className="xslack__fields">
+          <input aria-label="Slack Client ID" value={clientId} placeholder="Client ID" autoComplete="off" spellCheck={false}
+            disabled={disabled} onChange={event => setClientId(event.target.value)} />
+          <input type="password" aria-label="Slack Client Secret" value={secret} placeholder="Client Secret" autoComplete="off" spellCheck={false}
+            disabled={disabled} onChange={event => setSecret(event.target.value)} />
+          <button type="submit" className="btn btn--solid" disabled={disabled || !valid}>Save</button>
         </div>
-        {value && !valid ? <span className="studio-muted">That isn’t a user token. Copy the one labelled <em>User OAuth Token</em>, starting with <code>xoxp-</code>.</span> : null}
       </li>
     </ol>
-    <p className="studio-muted">XERXES acts as you in Slack, only in direct messages with people you approve, and replies start as drafts for your review. The token stays on your Hub; Disconnect removes it.</p>
+    <p className="studio-muted">XERXES acts as you in Slack (no bot), only in direct messages with people you approve, and replies start as drafts for your review. The secret stays on your Hub.</p>
   </form>
 }
 const SLACK_EXPIRED = 'Slack sign-in expired. Start again to connect.'
@@ -141,8 +143,9 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
   const [selected, setSelected] = useState<SlackContact>()
   const account = status?.connection ?? null
   const pending = status?.pending_identity
-  // Hubs that report browser_sign_in also accept a pasted user token; older Hubs only offer browser sign-in.
-  const tokenSetup = status?.browser_sign_in !== undefined
+  // Hubs that report `app` let the owner set up their own Slack app here; older Hubs only offer operator sign-in.
+  const appSource = status?.app
+  const redirectUrl = status?.redirect_url ?? undefined
   const browserSignIn = status?.browser_sign_in ?? status?.configured ?? false
   const contact = selected === undefined ? undefined : status?.contacts.find(row => sameSlackContact(row, selected))
   const accept = useCallback((next: SlackStatus): void => {
@@ -182,19 +185,27 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
     return () => clearTimeout(timer)
   }, [busy, oauthUntil, refresh])
 
-  function connectWithToken(token: string): void {
+  function saveApp(app: { readonly clientId: string; readonly clientSecret: string }): void {
     if (account !== null || pending !== undefined) return
     run(async current => {
       setError(undefined)
       setOAuthNote(undefined)
-      const next = await client.connectToken(token)
+      const next = await client.saveApp(app)
       if (current()) accept(next)
-    }, reason => setError(tokenError(reason)))
+    }, reason => setError(setupError(reason)))
+  }
+  function removeApp(): void {
+    run(async current => {
+      setError(undefined)
+      const next = await client.removeApp()
+      if (current()) accept(next)
+    }, reason => setError(setupError(reason)))
   }
   function openCreateApp(): void {
+    if (redirectUrl === undefined) return
     run(async () => {
       setError(undefined)
-      if (!(await openOAuth(slackCreateAppUrl()))) throw new Error('Browser not opened')
+      if (!(await openOAuth(slackCreateAppUrl(redirectUrl)))) throw new Error('Browser not opened')
     }, () => setError('Could not open Slack in your browser. Use Copy manifest and create the app at api.slack.com/apps.'))
   }
   function connect(): void {
@@ -263,13 +274,18 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
           <h3>{account !== null ? account.team_name || 'Connected to Slack' : pending !== undefined ? 'Awaiting confirmation' : 'Not connected'}</h3>
           {account !== null ? <ExactIds contact={account} /> : null}
           {account === null && pending === undefined
-            ? <p>{tokenSetup ? 'Connect XERXES to your Slack account in three steps.' : browserSignIn ? 'Sign in to Slack to connect your account.' : HUB_TOO_OLD}</p> : null}
+            ? <p>{browserSignIn ? 'Sign in with Slack to connect XERXES as you.'
+              : appSource === 'none' ? (redirectUrl === undefined ? NO_HTTPS : 'Set up your XERXES Slack app once. After that, connecting is one click.')
+              : HUB_TOO_OLD}</p> : null}
         </div>
         {account !== null ? <button type="button" className="btn" disabled={locked} onClick={() => setChange({ kind: 'disconnect' })}>Disconnect</button>
-          : pending === undefined && browserSignIn ? <button type="button" className={tokenSetup ? 'btn' : 'btn btn--solid'} disabled={locked || oauthUntil > 0} onClick={connect}>Sign in with Slack</button> : null}
+          : pending === undefined && browserSignIn ? <button type="button" className="btn btn--solid" disabled={locked || oauthUntil > 0} onClick={connect}>Sign in with Slack</button> : null}
       </div>
-      {account === null && pending === undefined && tokenSetup && oauthUntil === 0
-        ? <SlackTokenSetup disabled={locked} openApp={openCreateApp} onSubmit={connectWithToken} /> : null}
+      {account === null && pending === undefined && appSource === 'none' && redirectUrl !== undefined && oauthUntil === 0
+        ? <SlackAppSetup redirectUrl={redirectUrl} disabled={locked} openApp={openCreateApp} onSave={saveApp} /> : null}
+      {account === null && pending === undefined && appSource === 'saved' && oauthUntil === 0
+        ? <p className="studio-muted xslack__appnote">Using your XERXES Slack app.{' '}
+          <button type="button" className="btn btn--link" disabled={locked} onClick={removeApp}>Use a different app</button></p> : null}
       {pending !== undefined ? <section className="xslack__card xslack__confirm" aria-label="Confirm your Slack account">
         <h4>Confirm your Slack account</h4>
         <ExactIds contact={pending} />

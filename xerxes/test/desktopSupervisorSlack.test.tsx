@@ -8,7 +8,7 @@ import { HubRequestError } from '../src/client/hubConnection.js'
 import { initialHubState, type HubState } from '../src/client/hubStore.js'
 import { createSupervisorSlackClient, slackCreateAppUrl, slackUnavailable, SlackBrokerUnavailable, type SlackContact } from '../src/client/supervisorSlack.js'
 import { SupervisorView } from '../src/desktop/renderer/SupervisorPage.js'
-import { SlackDirectMessage, SlackTokenSetup } from '../src/desktop/renderer/SupervisorSlack.js'
+import { SlackAppSetup, SlackDirectMessage } from '../src/desktop/renderer/SupervisorSlack.js'
 import type { HubSlackMethod } from '../src/hub/protocol.js'
 
 const contact = { team_id: 'T01TEST', user_id: 'U01PEER', display_name: 'Jordan', mode: 'draft' } satisfies SlackContact
@@ -162,26 +162,46 @@ test('Slack navigation is owner-only; the isolated DM does not have a shared com
   expect(calls).toEqual([])
 })
 
-test('connecting with a pasted token sends only the trimmed user token and needs a pending identity back', async () => {
-  const pending = { configured: true, browser_sign_in: false, connection: null, contacts: [], pending_identity: account }
-  const replies: Partial<Record<HubSlackMethod, unknown>> = { 'supervisor.slack.connect_token': pending }
+const redirect = 'https://hub.example.test/api/hub/v1/slack/oauth/callback'
+
+test('saving the Slack app sends only the trimmed ID and secret and needs sign-in to be ready afterwards', async () => {
+  const ready = { configured: true, browser_sign_in: true, app: 'saved', redirect_url: redirect, connection: null, contacts: [] }
+  const replies: Partial<Record<HubSlackMethod, unknown>> = { 'supervisor.slack.app.save': ready }
   const { client, calls } = fake(replies)
-  for (const bad of ['xoxb-bot', 'nope', '']) await expect(client.connectToken(bad)).rejects.toThrow('xoxp-')
+  for (const bad of [{ clientId: '', clientSecret: 's' }, { clientId: '1.2', clientSecret: 'has space' }]) {
+    await expect(client.saveApp(bad)).rejects.toThrow('Client ID')
+  }
   expect(calls).toEqual([])
-  expect(await client.connectToken('  xoxp-abc-123 ')).toEqual({ ...pending, pending_identity: account })
-  expect(calls).toEqual([['supervisor.slack.connect_token', { token: 'xoxp-abc-123' }]])
-  replies['supervisor.slack.connect_token'] = status
-  await expect(client.connectToken('xoxp-abc-123')).rejects.toThrow('Invalid Slack response')
+  expect(await client.saveApp({ clientId: ' 123.456 ', clientSecret: ' abcdef0123 ' })).toEqual(ready)
+  expect(calls).toEqual([['supervisor.slack.app.save', { client_id: '123.456', client_secret: 'abcdef0123' }]])
+  replies['supervisor.slack.app.save'] = { ...ready, browser_sign_in: false }
+  await expect(client.saveApp({ clientId: '123.456', clientSecret: 'abcdef0123' })).rejects.toThrow('Invalid Slack response')
 })
 
-test('token setup is three in-app steps with a pre-filled Slack app link and a masked token field', () => {
-  const html = renderToStaticMarkup(<SlackTokenSetup disabled={false} openApp={() => {}} onSubmit={() => {}} />)
+test('status accepts only the Hub Slack callback as the manifest redirect', async () => {
+  const replies: Partial<Record<HubSlackMethod, unknown>> = { 'supervisor.slack.status': { configured: true, app: 'none', redirect_url: redirect, connection: null, contacts: [] } }
+  const { client } = fake(replies)
+  expect((await client.status()).redirect_url).toBe(redirect)
+  for (const bad of ['http://hub.example.test/api/hub/v1/slack/oauth/callback', 'https://hub.example.test/evil', `${redirect}?x=1`]) {
+    replies['supervisor.slack.status'] = { configured: true, app: 'none', redirect_url: bad, connection: null, contacts: [] }
+    await expect(client.status()).rejects.toThrow('Invalid Slack response')
+  }
+})
+
+test('app setup is two in-app steps with a pre-filled user-scope manifest that points back at this Hub', () => {
+  const html = renderToStaticMarkup(<SlackAppSetup redirectUrl={redirect} disabled={false} openApp={() => {}} onSave={() => {}} />)
   expect(html).toContain('Create XERXES app in Slack')
   expect(html).toContain('Copy manifest')
+  expect(html).toContain('Client ID')
   expect(html).toContain('type="password"')
-  expect(html).toContain('User OAuth Token')
-  expect(html.match(/<li>/g)).toHaveLength(3)
-  const url = new URL(slackCreateAppUrl())
+  expect(html).not.toContain('xoxp-')
+  expect(html.match(/<li>/g)).toHaveLength(2)
+  const url = new URL(slackCreateAppUrl(redirect))
   expect(url.origin + url.pathname).toBe('https://api.slack.com/apps')
-  expect(JSON.parse(url.searchParams.get('manifest_json') ?? '{}').oauth_config.scopes.user).toContain('chat:write')
+  const manifest = JSON.parse(url.searchParams.get('manifest_json') ?? '{}')
+  expect(manifest.oauth_config.redirect_urls).toEqual([redirect])
+  expect(manifest.oauth_config.scopes.user).toContain('chat:write')
+  expect(manifest.oauth_config.scopes.bot).toBeUndefined()
+  expect(manifest.features).toBeUndefined()
+  expect(manifest.settings.socket_mode_enabled).toBe(false)
 })

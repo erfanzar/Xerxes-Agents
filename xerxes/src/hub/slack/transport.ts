@@ -3,12 +3,12 @@
 
 import { SlackCredentialStore } from './credentials.js'
 import { checkAbort, SlackHttp, type SlackFetch } from './http.js'
-import { parseScopedUserGrant, parseUserGrant, SlackOAuthState, type SlackOAuthCallback, type SlackOAuthConfig, type SlackOAuthStart, type SlackUserGrant } from './oauth.js'
+import { parseUserGrant, SlackOAuthState, type SlackOAuthCallback, type SlackOAuthConfig, type SlackOAuthStart, type SlackUserGrant } from './oauth.js'
 import {
   SlackTransportError, type SlackDirectMessage, type SlackIdentity, type SlackMessage, type SlackPeer, type SlackPeerApproval,
   type SlackPeerOperation, type SlackProfile, type SlackTransport,
 } from './types.js'
-import { channelId, identity, record, timestamp, userId, userToken } from './wire.js'
+import { channelId, identity, record, timestamp, userId } from './wire.js'
 
 export * from './types.js'
 export type { SlackFetch, SlackOAuthConfig, SlackOAuthStart, SlackOAuthCallback }
@@ -89,18 +89,6 @@ export class HubSlackTransport implements SlackTransport {
     if (expected && !sameAccount(expected, grant.account)) throw new SlackTransportError('identity_mismatch')
     await this.verifyGrant(grant, signal)
     return grant
-  }
-
-  /**
-   * Verify a user token pasted by the Hub owner, without storing it. Slack must report a real
-   * (non-bot) user and exactly the required user scopes; anything else fails closed.
-   */
-  async verifyUserToken(token: string, signal?: AbortSignal): Promise<SlackUserGrant> {
-    checkAbort(signal)
-    if (!userToken(token)) throw new SlackTransportError('invalid_request')
-    const { data, scopes } = await this.#http.requestWithScopes('auth.test', `Bearer ${token}`, new URLSearchParams(), signal)
-    if (data.bot_id !== undefined || data.is_enterprise_install === true) throw new SlackTransportError('oauth_unsupported')
-    return parseScopedUserGrant(data.team_id, data.user_id, token, scopes)
   }
 
   async verifyGrant(grant: SlackUserGrant, signal?: AbortSignal): Promise<void> {

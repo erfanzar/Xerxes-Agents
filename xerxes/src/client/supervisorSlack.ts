@@ -10,8 +10,9 @@ import { HubRequestError } from './hubConnection.js'
  *
  * status {} → { configured, connection, pending_identity?, contacts, … }
  * connect {} → { authorize_url, expires_at?, pairing_code? } (trusted browser endpoint; poll status)
- * connect_token { token } → status shape with pending_identity (Hub verifies the owner's own app user token;
- *   nothing is stored until confirm_connection; the token is never echoed back)
+ * app.save { client_id, client_secret } → status shape (the owner's own Slack app; the Hub checks it with Slack,
+ *   stores it host-only and never returns the secret; browser sign-in then works with no Hub settings)
+ * app.remove {} → status shape (only while no account is connected)
  * confirm_connection { team_id, user_id } → status shape (exact identity after browser authorization)
  * disconnect { team_id, user_id } → status shape
  * contact.lookup { team_id, user_id } → { identity: SlackIdentity } (exact Slack IDs, no name matching)
@@ -35,8 +36,12 @@ export type SlackMode = 'auto' | 'draft'
 export interface SlackContact extends SlackIdentity { readonly mode: SlackMode }
 export interface SlackStatus {
   readonly configured: boolean
-  /** The Hub also offers browser sign-in (operator OAuth app or managed broker). Absent on older Hubs. */
+  /** Sign in with Slack is ready (owner-saved app, operator app or managed broker). Absent on older Hubs. */
   readonly browser_sign_in?: boolean
+  /** Where the Slack app comes from. Absent on older Hubs. */
+  readonly app?: 'saved' | 'operator' | 'none'
+  /** This Hub's Slack callback, used to pre-fill the app manifest; null when the Hub has no HTTPS address. */
+  readonly redirect_url?: string | null
   readonly connection: { readonly team_id: string; readonly team_name?: string; readonly user_id: string } | null
   readonly pending_identity?: SlackIds
   readonly oauth_status?: 'pending' | 'denied' | 'expired'
@@ -69,7 +74,8 @@ type SlackIds = Pick<SlackIdentity, 'team_id' | 'user_id'>
 export interface SupervisorSlackClient {
   status(): Promise<SlackStatus>
   connect(): Promise<SlackAuthorization>
-  connectToken(token: string): Promise<SlackStatus>
+  saveApp(app: { readonly clientId: string; readonly clientSecret: string }): Promise<SlackStatus>
+  removeApp(): Promise<SlackStatus>
   confirmConnection(account: SlackIds): Promise<SlackStatus>
   disconnect(account: SlackIds): Promise<SlackStatus>
   lookup(ids: SlackIds): Promise<SlackIdentity>
@@ -83,22 +89,25 @@ export interface SupervisorSlackClient {
 /** User scopes the Hub requires (mirrors hub/slack/oauth.ts USER_SCOPES). */
 export const SLACK_USER_SCOPES = ['users:read', 'users:read.email', 'im:write', 'im:read', 'im:history', 'chat:write'] as const
 
-/** The Slack app manifest for the owner's own XERXES app: user scopes only, no bot, no token rotation. */
-export function slackAppManifest(): string {
+/**
+ * The Slack app manifest for the owner's own XERXES app: user scopes only (XERXES acts as you),
+ * no bot, no Socket Mode, no token rotation, and this Hub's callback as the only redirect URL.
+ */
+export function slackAppManifest(redirectUrl: string): string {
   return JSON.stringify({
     display_information: { name: 'XERXES', description: 'Lets XERXES read and reply to direct messages you approve, as you.' },
-    oauth_config: { scopes: { user: [...SLACK_USER_SCOPES] } },
+    oauth_config: { redirect_urls: [redirectUrl], scopes: { user: [...SLACK_USER_SCOPES] } },
     settings: { org_deploy_enabled: false, socket_mode_enabled: false, token_rotation_enabled: false },
   })
 }
 
 /** Opens Slack's "create app" page with the manifest pre-filled. */
-export function slackCreateAppUrl(): string {
-  return `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(slackAppManifest())}`
+export function slackCreateAppUrl(redirectUrl: string): string {
+  return `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(slackAppManifest(redirectUrl))}`
 }
 
-/** A Slack user token as Slack issues it (xoxp-…). Checked locally before it is sent to the Hub. */
-export function isSlackUserToken(value: string): boolean { return /^xoxp-[A-Za-z0-9_-]{1,1019}$/u.test(value) }
+/** Slack client IDs and secrets (the Hub applies the same rule). */
+export function isSlackClientValue(value: string): boolean { return /^[A-Za-z0-9._-]{1,256}$/u.test(value) }
 
 export function isSlackUserId(value: string): boolean { return /^[UW][A-Z0-9]{2,31}$/u.exec(value)?.[0] === value }
 export function sameSlackContact(a: SlackIds, b: SlackIds): boolean { return a.team_id === b.team_id && a.user_id === b.user_id }
@@ -126,6 +135,14 @@ function identity(value: unknown): SlackIdentity {
   const raw = record(value)
   return { ...ids(raw), ...(typeof raw.display_name === 'string' ? { display_name: raw.display_name } : {}) }
 }
+/** Only an HTTPS URL on the Hub's Slack callback path may reach the manifest. */
+function redirectUrl(value: string): string {
+  let url: URL
+  try { url = new URL(value) } catch { return invalid() }
+  if (url.protocol !== 'https:' || url.pathname !== '/api/hub/v1/slack/oauth/callback' || url.search || url.hash
+    || url.username || url.password || url.href !== value) invalid()
+  return value
+}
 function parseStatus(value: unknown): SlackStatus {
   const raw = record(value)
   if (typeof raw.configured !== 'boolean') return invalid()
@@ -141,6 +158,8 @@ function parseStatus(value: unknown): SlackStatus {
   const oauth_status = raw.oauth_status
   return { configured: raw.configured, connection, contacts,
     ...(typeof raw.browser_sign_in === 'boolean' ? { browser_sign_in: raw.browser_sign_in } : {}),
+    ...(raw.app === 'saved' || raw.app === 'operator' || raw.app === 'none' ? { app: raw.app } : {}),
+    ...(raw.redirect_url === null ? { redirect_url: null } : typeof raw.redirect_url === 'string' ? { redirect_url: redirectUrl(raw.redirect_url) } : {}),
     ...(pending_identity === undefined ? {} : { pending_identity }),
     ...(oauth_status === 'pending' || oauth_status === 'denied' || oauth_status === 'expired' ? { oauth_status } : {}),
   }
@@ -197,12 +216,15 @@ export function createSupervisorSlackClient(options: {
   return {
     status: async () => parseStatus(await call('supervisor.slack.status')),
     connect: async () => authorization(await call('supervisor.slack.connect'), options.trustedBrokerOrigin),
-    connectToken: async token => {
-      const trimmed = token.trim()
-      if (!isSlackUserToken(trimmed)) throw new Error('Paste the User OAuth Token from your Slack app. It starts with xoxp-.')
-      const result = parseStatus(await call('supervisor.slack.connect_token', { token: trimmed }))
-      return result.pending_identity !== undefined && result.connection === null ? result : invalid()
+    saveApp: async app => {
+      const client_id = app.clientId.trim(); const client_secret = app.clientSecret.trim()
+      if (!isSlackClientValue(client_id) || !isSlackClientValue(client_secret)) {
+        throw new Error('Paste the Client ID and Client Secret from your Slack app’s Basic Information page.')
+      }
+      const result = parseStatus(await call('supervisor.slack.app.save', { client_id, client_secret }))
+      return result.browser_sign_in === true ? result : invalid()
     },
+    removeApp: async () => parseStatus(await call('supervisor.slack.app.remove')),
     confirmConnection: async account => {
       const result = parseStatus(await call('supervisor.slack.confirm_connection', ids(account)))
       return result.connection !== null && sameSlackContact(result.connection, account) ? result : invalid()

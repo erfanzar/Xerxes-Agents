@@ -28,7 +28,8 @@ export const HUB_LIMITS = Object.freeze({
 export const HUB_SLACK_METHODS = [
   'supervisor.slack.status',
   'supervisor.slack.connect',
-  'supervisor.slack.connect_token',
+  'supervisor.slack.app.save',
+  'supervisor.slack.app.remove',
   'supervisor.slack.confirm_connection',
   'supervisor.slack.disconnect',
   'supervisor.slack.contact.lookup',

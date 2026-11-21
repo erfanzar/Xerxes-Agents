@@ -3428,7 +3428,11 @@ html,body,#root,.app.atelier{background:transparent}
 .xslack__steps li{display:grid;justify-items:start;gap:6px;min-width:0}
 .xslack__steps li::marker{color:var(--x-meta);font-weight:600}
 .xslack__steps code{font-family:var(--mono);color:var(--x-secondary)}
-.xslack__setup input[type=password]{width:min(360px,100%)}
+.xslack__fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr)) auto;gap:6px;width:min(640px,100%);align-items:center}
+.xslack__fields input{width:100%}
+.xslack__appnote{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.xslack .btn--link{border:0;background:transparent;padding:0;min-height:0;height:auto;color:var(--x-secondary);text-decoration:underline;cursor:pointer;font:inherit}
+.xslack .btn--link:hover:not(:disabled){color:var(--x-title)}
 /* Empty state: a mark, one sentence, three one-tap questions. */
 .xempty{display:flex;flex-direction:column;align-items:center;gap:8px;margin:14vh auto 0;max-width:460px;text-align:center;color:var(--x-meta);font:var(--t-body)}
 .xempty--wait{margin-top:14vh}
