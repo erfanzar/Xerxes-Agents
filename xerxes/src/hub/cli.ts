@@ -24,6 +24,7 @@ import { WorkspaceRegistry } from './workspaceRegistry.js'
 import { HubDaemonClient } from './daemonClient.js'
 import { daemonPaths } from '../daemon/paths.js'
 import { existsSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
@@ -489,7 +490,14 @@ export async function runHubCli(args: readonly string[], options: HubCliOptions 
       const remoteSocket = parsed.values.get('remote-socket')?.at(-1)
       const localSocket = parsed.values.get('local-socket')?.at(-1)
       if (parsed.positional.length !== 1 || !remoteSocket || !localSocket) throw new Error('usage: xerxes hub link-tunnel <target> --remote-socket <path> --local-socket <path>')
-      return await runLinkTunnel({ ssh: Bun.which('ssh') ?? '/usr/bin/ssh', target: parsed.positional[0]!, remoteSocket, localSocket }, {
+      const tunnelTarget = parsed.positional[0]!
+      await mkdir(paths.stateDir, { recursive: true, mode: 0o700 })
+      return await runLinkTunnel({
+        ssh: Bun.which('ssh') ?? '/usr/bin/ssh', sshKeygen: Bun.which('ssh-keygen') ?? '/usr/bin/ssh-keygen',
+        target: tunnelTarget, remoteSocket, localSocket,
+        knownHostsPath: join(paths.stateDir, 'known_hosts'),
+        statePath: join(paths.stateDir, `link-${slug(tunnelTarget)}.json`),
+      }, {
         run: spawnCommand,
         runAttached: async argv => Bun.spawn([...argv], { stdin: 'ignore', stdout: 'inherit', stderr: 'inherit' }).exited,
       })

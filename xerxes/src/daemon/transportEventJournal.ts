@@ -264,7 +264,7 @@ export class TransportEventJournal {
     if (!this.available) return { sequence: this.committed, reason: 'journal_unavailable' };
     if (cursor === undefined) return { sequence: this.committed };
     const split = cursor.lastIndexOf(':');
-    if (cursor.slice(0, split) !== this.streamId) return { sequence: this.committed, reason: 'stream_replaced' };
+    if (split <= 0 || cursor.slice(0, split) !== this.streamId) return { sequence: this.committed, reason: 'stream_replaced' };
     const raw = cursor.slice(split + 1);
     const sequence = Number(raw);
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(sequence) || sequence > this.committed) return { sequence: this.committed, reason: 'stream_replaced' };
@@ -277,7 +277,7 @@ export class TransportEventJournal {
     if (checked.reason) return { ...base, events: [], next_cursor: afterCursor ?? this.watermark, has_more: false, reason: checked.reason };
     const events: WireTransportEvent[] = [];
     let sequence = checked.sequence;
-    const through = options.through ?? this.committed;
+    const through = Math.min(this.committed, Math.max(checked.sequence, options.through ?? this.committed));
     const maxBytes = Math.min(EVENT_HARD_BYTES, options.maxBytes ?? EVENT_BATCH_BYTES);
     const limit = options.limit ?? 500;
     let bytes = 2;
@@ -293,7 +293,7 @@ export class TransportEventJournal {
           truncated: true, original_bytes: eventBytes(original) };
       }
       const size = eventBytes(event) + (events.length ? 1 : 0);
-      if (events.length >= limit || bytes + size + 320 > maxBytes) { hasMore = true; break; }
+      if (events.length >= limit || (events.length > 0 && bytes + size + 320 > maxBytes)) { hasMore = true; break; }
       events.push(event);
       bytes += size;
       sequence = original.sequence;

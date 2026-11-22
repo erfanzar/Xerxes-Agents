@@ -29,6 +29,7 @@ export const METADATA_SIDECAR_FIELD = 'metadata_sidecar'
 
 /** A sidecar this small is never worth rewriting. */
 const COMPACT_MIN_BYTES = 1024 * 1024
+const MAX_SIDECAR_INDEX_CACHE = 64
 const HASH = /^[0-9a-f]{32}$/
 const LINE_PREFIX = /^\{"h":"([0-9a-f]{32})","v":/
 
@@ -221,7 +222,7 @@ export class MetadataSidecarStore {
       await handle.close()
     }
     const info = await stat(path)
-    this.indexes.set(path, { sizes, size: info.size, mtimeMs: info.mtimeMs, ino: info.ino, endsWithNewline: true })
+    this.rememberIndex(path, { sizes, size: info.size, mtimeMs: info.mtimeMs, ino: info.ino, endsWithNewline: true })
     return fresh.length
   }
 
@@ -278,8 +279,21 @@ export class MetadataSidecarStore {
       throw error
     }
     const cached = this.indexes.get(path)
-    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs && cached.ino === info.ino) return cached
+    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs && cached.ino === info.ino) {
+      this.rememberIndex(path, cached)
+      return cached
+    }
     return (await this.scan(path, false)).index
+  }
+
+  private rememberIndex(path: string, index: SidecarIndex): void {
+    this.indexes.delete(path)
+    this.indexes.set(path, index)
+    while (this.indexes.size > MAX_SIDECAR_INDEX_CACHE) {
+      const oldest = this.indexes.keys().next().value
+      if (oldest === undefined) break
+      this.indexes.delete(oldest)
+    }
   }
 
   /**
@@ -322,7 +336,7 @@ export class MetadataSidecarStore {
       ino: info.ino,
       endsWithNewline: bytes.length === 0 || bytes[bytes.length - 1] === 0x0a,
     }
-    this.indexes.set(path, index)
+    this.rememberIndex(path, index)
     return { index, values, lines }
   }
 }

@@ -262,22 +262,27 @@ async function runExternalConfig(
     stdin: 'ignore',
     stdout: 'pipe',
   })
+  const stdoutPromise = new Response(child.stdout).text().catch(() => '')
+  const stderrPromise = new Response(child.stderr).text().catch(() => '')
   let timedOut = false
+  let graceTimer: ReturnType<typeof setTimeout> | undefined
   const timer = setTimeout(() => {
     timedOut = true
-    child.kill()
+    child.kill('SIGKILL')
   }, config.timeoutMs)
-  let stdout: string
-  let stderr: string
-  let exitCode: number
+  let stdout = ''
+  let stderr = ''
+  let exitCode = 1
   try {
-    ;[stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
+    ;[stdout, stderr, exitCode] = await Promise.race([
+      Promise.all([stdoutPromise, stderrPromise, child.exited]),
+      new Promise<readonly [string, string, number]>(resolve => {
+        graceTimer = setTimeout(() => resolve(['', '', 1]), config.timeoutMs + 250)
+      }),
     ])
   } finally {
     clearTimeout(timer)
+    if (graceTimer !== undefined) clearTimeout(graceTimer)
   }
 
   let metrics: RunMetrics = {}

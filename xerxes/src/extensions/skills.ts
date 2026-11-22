@@ -127,6 +127,12 @@ const PLATFORM_MAP: Readonly<Record<string, NodeJS.Platform>> = {
   linux: "linux",
   windows: "win32",
 };
+/** Transparent backwards-compatible aliases for renamed built-in skills (never listed by `all()`/`names`). */
+const LEGACY_SKILL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  "swarm-coordinator": "immortals-coordinator",
+  "swarm-monitor": "immortals-monitor",
+  "swarm-narrator": "immortals-narrator",
+});
 const SKILL_MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const MAX_PROMPT_RESOURCE_PATHS = 32;
 const MAX_PROMPT_RESOURCE_REFERENCE_LENGTH = 512;
@@ -405,7 +411,54 @@ export class SkillRegistry {
   }
 
   get(name: string): Skill | undefined {
-    return this.skills.get(name);
+    const direct = this.lookupDirect(name);
+    if (direct !== undefined) {
+      return direct;
+    }
+    const normalized = name.trim().toLowerCase().replaceAll("_", "-");
+    const aliased = LEGACY_SKILL_ALIASES[normalized];
+    return aliased !== undefined ? this.lookupDirect(aliased) : undefined;
+  }
+
+  private lookupDirect(name: string): Skill | undefined {
+    const exact = this.skills.get(name);
+    if (exact !== undefined) {
+      return exact;
+    }
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    if (trimmed !== name) {
+      const exactTrimmed = this.skills.get(trimmed);
+      if (exactTrimmed !== undefined) {
+        return exactTrimmed;
+      }
+    }
+    const hyphenated = trimmed.replaceAll("_", "-");
+    if (hyphenated !== trimmed) {
+      const byHyphen = this.skills.get(hyphenated);
+      if (byHyphen !== undefined) {
+        return byHyphen;
+      }
+    }
+    const underscored = trimmed.replaceAll("-", "_");
+    if (underscored !== trimmed) {
+      const byUnderscore = this.skills.get(underscored);
+      if (byUnderscore !== undefined) {
+        return byUnderscore;
+      }
+    }
+    for (const [registeredName, skill] of this.skills) {
+      if (registeredName.replaceAll("_", "-") === hyphenated) {
+        return skill;
+      }
+    }
+    return undefined;
+  }
+
+  has(name: string): boolean {
+    return this.get(name) !== undefined;
   }
 
   all(): Skill[] {
@@ -434,10 +487,13 @@ export class SkillRegistry {
 
   search(query = "", tags: readonly string[] = []): Skill[] {
     const normalizedQuery = query.toLowerCase();
+    const canonicalQuery = normalizedQuery.replaceAll("_", "-");
     return this.all().filter((skill) => {
+      const lowerName = skill.metadata.name.toLowerCase();
       const textMatches =
         !normalizedQuery ||
-        skill.metadata.name.toLowerCase().includes(normalizedQuery) ||
+        lowerName.includes(normalizedQuery) ||
+        lowerName.replaceAll("_", "-").includes(canonicalQuery) ||
         skill.metadata.description.toLowerCase().includes(normalizedQuery);
       const tagMatches =
         !tags.length || tags.some((tag) => skill.metadata.tags.includes(tag));
@@ -449,7 +505,7 @@ export class SkillRegistry {
     const failures: string[] = [];
     for (const skill of this.skills.values()) {
       for (const dependency of skill.metadata.dependencies) {
-        if (!this.skills.has(dependency)) {
+        if (!this.has(dependency)) {
           failures.push(
             `Skill '${skill.metadata.name}' requires missing dependency '${dependency}'`,
           );

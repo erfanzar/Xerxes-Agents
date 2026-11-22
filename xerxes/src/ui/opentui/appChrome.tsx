@@ -5,12 +5,14 @@
 // Model, mode, and permission metadata stay with the composer.
 import { useTerminalDimensions } from '@opentui/react'
 import { useStore } from '@nanostores/react'
-import { $uiReviewCount } from '../app/uiStore.js'
+import { $swarmStore, getSwarmSliceForSession } from '../app/swarmStore.js'
+import { $uiReviewCount, $uiSessionId } from '../app/uiStore.js'
 import type { SessionTab } from '../app/interfaces.js'
 import type { LiveSessionStatus } from '../gatewayTypes.js'
 import { GLYPH } from '../domain/nocturne.js'
 import { getOverlayState, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
 import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
+import { summarizeSwarmCounts } from '../lib/swarmFormat.js'
 import { fmtK } from '../lib/text.js'
 import { branchLabel, type RepoPulse } from '../lib/repoPulse.js'
 import type { Theme } from '../theme.js'
@@ -80,8 +82,12 @@ export function SessionHeader({
 }) {
   const { height } = useTerminalDimensions()
   const reviewCount = useStore($uiReviewCount)
+  const uiSid = useStore($uiSessionId)
+  const swarmStore = useStore($swarmStore)
   const title = sessionTitle?.trim()
   const id = sessionId?.trim()
+  const swarmStatus = getSwarmSliceForSession(swarmStore, id || uiSid).status
+  const swarmCounts = swarmStatus?.active ? summarizeSwarmCounts(swarmStatus) : null
   // A short handle, not the whole id: enough to tell two chats apart at a
   // glance, small enough that it never competes with the title.
   const shortId = id ? id.slice(-4) : ''
@@ -143,6 +149,18 @@ export function SessionHeader({
       }}>
         <Text color={t.color.warn} wrap="truncate-end">{`${reviewCount} to review · /xerxes`}</Text>
       </Box> : null}
+      {swarmStatus?.active && swarmCounts ? (
+        <Box
+          flexShrink={0}
+          onClick={() => {
+            if (!overlayBlocksBackgroundHotkeys(getOverlayState())) patchOverlayState({ swarm: true })
+          }}
+        >
+          <Text color={t.color.accent} wrap="truncate-end">
+            {`✦ Immortals${swarmStatus.title.trim() ? ` · ${truncate(swarmStatus.title.trim(), 24)}` : ''} · ${swarmCounts.working} working · ${swarmCounts.waiting} waiting · #${swarmStatus.head} · /immortals`}
+          </Text>
+        </Box>
+      ) : null}
       <SessionFollowups t={t} sessionId={sessionId} />
       {goal ? (
         <Box flexDirection="row" flexShrink={0} marginTop={1} overflow="hidden" width="100%">

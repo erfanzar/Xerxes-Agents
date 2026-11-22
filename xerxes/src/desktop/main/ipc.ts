@@ -2,16 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ipcMain, type WebContents } from 'electron'
-import { WindowConnections } from "./windowRoutes.js"
+import { WindowConnections, isAllowedRendererDaemonMethod } from "./windowRoutes.js"
 import type { DaemonRpc } from './daemon.js'
+import { DAEMON_EVENT_BATCH_CHANNEL, DaemonEventBatcher } from './ipcEventBatcher.js'
 
-const METHOD_PATTERN = /^[A-Za-z0-9_.]{1,128}$/
 const connections = new WindowConnections<DaemonRpc>()
 const results = new Map<number, (method: string, result: Record<string, unknown>) => void>()
+const batchers = new Map<number, { readonly batcher: DaemonEventBatcher; readonly cleanup: () => void }>()
 let registered = false
 
 /** Remove only this renderer's event subscription. The caller owns its connection. */
 export function detachDaemon(id: number): void {
+  const entry = batchers.get(id)
+  if (entry) {
+    batchers.delete(id)
+    entry.cleanup()
+    entry.batcher.dispose()
+  }
   connections.detach(id)
   results.delete(id)
 }
@@ -21,7 +28,7 @@ export function registerDaemonBridge(target: WebContents, daemon?: DaemonRpc, ob
   if (!registered) {
     registered = true
     ipcMain.handle('daemon:call', (event, method: unknown, params: unknown) => {
-      const name = typeof method === 'string' && METHOD_PATTERN.test(method) ? method : ''
+      const name = isAllowedRendererDaemonMethod(method) ? method : ''
       if (!name) throw new TypeError(`invalid rpc method: ${String(method).slice(0, 32)}`)
       if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) throw new TypeError('params must be an object')
       const current = connections.get(event.sender.id)
@@ -36,10 +43,28 @@ export function registerDaemonBridge(target: WebContents, daemon?: DaemonRpc, ob
   detachDaemon(target.id)
   if (!daemon) return
   if (resultObserver) results.set(target.id, resultObserver)
+  const batcher = new DaemonEventBatcher({
+    sendSingle(type, payload) {
+      if (!target.isDestroyed()) target.send('daemon:event', { type, payload })
+    },
+    sendBatch(frames) {
+      if (!target.isDestroyed()) target.send(DAEMON_EVENT_BATCH_CHANNEL, frames)
+    },
+  })
+  const onDestroyed = () => {
+    if (batchers.get(target.id)?.batcher === batcher) detachDaemon(target.id)
+  }
+  target.once('destroyed', onDestroyed)
+  batchers.set(target.id, {
+    batcher,
+    cleanup: () => {
+      if (!target.isDestroyed()) target.removeListener('destroyed', onDestroyed)
+    },
+  })
   const forward = (type: string, payload: Record<string, unknown>) => {
     if (target.isDestroyed()) return
     observer?.(type, payload)
-    target.send('daemon:event', { type, payload })
+    batcher.push(type, payload)
   }
   connections.attach(target.id, daemon, forward)
 }

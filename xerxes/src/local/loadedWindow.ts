@@ -128,6 +128,36 @@ export function windowFor(result: LoadedWindows, model: string): number | undefi
 
 type Fetched = { readonly kind: 'json'; readonly value: unknown } | { readonly kind: 'status'; readonly status: number }
 
+async function readBoundedText(response: Response, url: string, signal: AbortSignal): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let bytes = 0
+  let text = ''
+  const onAbort = (): void => {
+    void reader.cancel(signal.reason).catch(() => undefined)
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    for (;;) {
+      signal.throwIfAborted()
+      const chunk = await reader.read()
+      signal.throwIfAborted()
+      if (chunk.done) break
+      bytes += chunk.value.byteLength
+      if (bytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(`response from ${new URL(url).pathname} is larger than ${MAX_RESPONSE_BYTES} bytes`)
+      }
+      text += decoder.decode(chunk.value, { stream: true })
+    }
+    return text + decoder.decode()
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    reader.releaseLock()
+  }
+}
+
 async function getJson(
   fetch: WindowFetch,
   url: string,
@@ -144,7 +174,7 @@ async function getJson(
     await response.body?.cancel().catch(() => undefined)
     throw new Error(`response from ${new URL(url).pathname} is larger than ${MAX_RESPONSE_BYTES} bytes`)
   }
-  const text = await response.text()
+  const text = await readBoundedText(response, url, signal)
   if (text.length > MAX_RESPONSE_BYTES) throw new Error(`response from ${new URL(url).pathname} is larger than ${MAX_RESPONSE_BYTES} bytes`)
   try {
     return { kind: 'json', value: JSON.parse(text) as unknown }

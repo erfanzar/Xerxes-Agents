@@ -8,8 +8,11 @@
  * headlessly; extension.ts supplies the ports.
  */
 
+import * as nodePath from 'node:path'
+
 import { notificationFor } from '../desktop/main/notify.js'
 import { readLocalChatImage } from '../desktop/main/chatMedia.js'
+import { isAllowedRendererDaemonMethod } from '../desktop/main/windowRoutes.js'
 import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from '../desktop/chatMediaShared.js'
 import { FILE_ACTION_CHANNEL, fileActionRequestOf } from '../desktop/fileActionShared.js'
 import { performFileAction } from '../desktop/main/fileActions.js'
@@ -70,12 +73,52 @@ export interface PanelOptions {
 const RESUME_KEY = 'xerxes.resumeSession'
 const SESSION_ID = /^[a-zA-Z0-9_-]{1,256}$/
 
+function validSessionId(value: string | undefined): string | null {
+  return typeof value === 'string' && SESSION_ID.test(value) ? value : null
+}
+
+function checkedEditorPath(value: unknown): string {
+  // eslint-disable-next-line no-control-regex
+  if (typeof value !== 'string' || !value.trim() || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error('invalid file path')
+  }
+  return value
+}
+
+function checkedEditorLine(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1) return value
+  throw new Error('invalid line number')
+}
+
+export type PathContainmentOps = Pick<typeof nodePath, 'isAbsolute' | 'relative' | 'resolve' | 'sep'>
+
+/** True only when `targetPath` is an absolute path contained within at least one absolute `roots` entry. */
+export function isAllowedRevealPath(
+  targetPath: string,
+  roots: readonly (string | null | undefined)[],
+  ops: PathContainmentOps = nodePath,
+): boolean {
+  // eslint-disable-next-line no-control-regex
+  if (!targetPath || /[\u0000-\u001f\u007f]/.test(targetPath) || !ops.isAbsolute(targetPath)) return false
+  const target = ops.resolve(targetPath)
+  for (const rawRoot of roots) {
+    if (!rawRoot || !ops.isAbsolute(rawRoot)) continue
+    const root = ops.resolve(rawRoot)
+    const rel = ops.relative(root, target)
+    if (rel === '' || (!ops.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${ops.sep}`))) return true
+  }
+  return false
+}
+
 export class PanelHost {
   private daemon: PanelDaemon | null = null
+  private disposed = false
   private session: string | null
   private fresh: boolean
   private notifications = true
   private readonly forward = (type: string, payload: Record<string, unknown>): void => {
+    if (this.disposed) return
     this.post({ kind: 'push', channel: 'daemon:event', value: { type, payload } })
     // The same moments the desktop pings for, only while the panel is out of sight.
     const note = this.notifications && !this.ports.visible() ? notificationFor({ type, payload }) : null
@@ -88,26 +131,30 @@ export class PanelHost {
     private readonly connect: (projectDir: string) => PanelDaemon,
     options: PanelOptions = {},
   ) {
-    this.session = options.sessionId ?? (options.fresh ? null : ports.memory.get(RESUME_KEY) ?? null)
+    this.session = validSessionId(options.sessionId) ?? (options.fresh ? null : validSessionId(ports.memory.get(RESUME_KEY)))
     this.fresh = options.fresh === true
   }
 
   /** One frame from the webview. Invalid frames are ignored; every request gets an answer. */
   async receive(value: unknown): Promise<void> {
+    if (this.disposed) return
     const frame = invokeFrame(value)
     if (!frame) return
     try {
-      this.post({ kind: 'result', id: frame.id, ok: true, value: await this.answer(frame.channel, frame.args) })
+      const answer = await this.answer(frame.channel, frame.args)
+      if (!this.disposed) this.post({ kind: 'result', id: frame.id, ok: true, value: answer })
     } catch (error) {
-      this.post({ kind: 'result', id: frame.id, ok: false, error: error instanceof Error ? error.message : String(error) })
+      if (!this.disposed) this.post({ kind: 'result', id: frame.id, ok: false, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
   dispose(): void {
+    this.disposed = true
     if (this.daemon) { this.daemon.offEvent(this.forward); this.daemon.dispose(); this.daemon = null }
   }
 
   private runtime(): PanelDaemon {
+    if (this.disposed) throw new Error('This Xerxes panel has been closed.')
     if (this.daemon) return this.daemon
     if (!this.ports.workspace) throw new Error('Open a folder in VS Code to use Xerxes.')
     this.daemon = this.connect(this.ports.workspace)
@@ -168,8 +215,8 @@ export class PanelHost {
       case 'desktop:app-update': return { phase: 'idle' }
       case 'desktop:voice': throw new Error('Dictation is not available in VS Code yet.')
       case 'desktop:remote': return this.remote(args[0])
-      case 'host:open-file': return this.ports.openFile(String(args[0]), typeof args[1] === 'number' ? args[1] : undefined)
-      case 'host:open-diff': return this.ports.openDiff(String(args[0]))
+      case 'host:open-file': return this.ports.openFile(checkedEditorPath(args[0]), checkedEditorLine(args[1]))
+      case 'host:open-diff': return this.ports.openDiff(checkedEditorPath(args[0]))
       case 'host:pick-files': return this.ports.pickFiles()
       case 'host:source-control': return this.ports.showSourceControl()
       case OPEN_EXTERNAL_CHANNEL: {
@@ -204,9 +251,14 @@ export class PanelHost {
   }
 
   private async call(method: unknown, params: unknown): Promise<unknown> {
-    if (typeof method !== 'string') throw new Error('invalid rpc method')
+    if (!isAllowedRendererDaemonMethod(method)) {
+      throw new Error('invalid rpc method')
+    }
+    if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) {
+      throw new Error('params must be an object')
+    }
     const runtime = this.runtime()
-    const clean = params && typeof params === 'object' && !Array.isArray(params) ? params as Record<string, unknown> : {}
+    const clean = (params ?? {}) as Record<string, unknown>
     if (method === 'desktop.restartRuntime') {
       if (!runtime.restartRuntime) throw new Error('This runtime connection cannot restart.')
       return runtime.restartRuntime(clean.allow_legacy === true, clean.force === true)

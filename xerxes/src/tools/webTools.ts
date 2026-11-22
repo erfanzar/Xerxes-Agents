@@ -64,7 +64,7 @@ export interface PublicFetchResponse {
  * call open past every limit. Keyed weakly by response object so `text()` can
  * pick up the remaining time automatically without widening the public shape.
  */
-const responseReadDeadlines = new WeakMap<object, number>()
+const responseReadDeadlines = new WeakMap<object, { readonly deadline: number; readonly timeoutMs: number }>()
 
 /** HTTP-only client that blocks private URLs — literal IPs and DNS answers — and rechecks every redirect target. */
 export class PublicWebClient {
@@ -95,7 +95,11 @@ export class PublicWebClient {
     // One deadline includes URL/DNS validation, every redirect and the body.
     // A cancelled or stalled resolver must never resume into a late fetch.
     const deadline = Date.now() + timeoutMs
-    let currentUrl = await runWithTimeout(() => assertPublicHttpUrl(url, this.urlSafety), Math.max(1, deadline - Date.now()), signal)
+    let currentUrl = await runWithTimeout(
+      () => assertPublicHttpUrl(url, this.urlSafety),
+      remainingDeadlineMs(deadline, 'web request', timeoutMs),
+      signal,
+    )
     const method = (requestBase.method ?? 'GET').toUpperCase()
     let redirectCount = 0
     let currentOrigin = new URL(currentUrl).origin
@@ -110,17 +114,17 @@ export class PublicWebClient {
         : { ...requestBase, redirect: 'manual' }
       const response = await runWithTimeout(
         requestSignal => this.fetcher(currentUrl, withSignal(requestInit, requestSignal)),
-        Math.max(1, deadline - Date.now()),
+        remainingDeadlineMs(deadline, 'web request', timeoutMs),
         signal,
       )
       if (!REDIRECT_STATUSES.has(response.status) || (method !== 'GET' && method !== 'HEAD')) {
-        responseReadDeadlines.set(response, deadline)
+        responseReadDeadlines.set(response, { deadline, timeoutMs })
         return { response, url: currentUrl }
       }
 
       const location = response.headers.get('location')
       if (!location) {
-        responseReadDeadlines.set(response, deadline)
+        responseReadDeadlines.set(response, { deadline, timeoutMs })
         return { response, url: currentUrl }
       }
       if (redirectCount >= this.maxRedirects) {
@@ -134,7 +138,11 @@ export class PublicWebClient {
       void response.body?.cancel().catch(() => {})
       const nextUrl = new URL(location, currentUrl).toString()
       enforceDomainAllowlist(nextUrl, options.allowedDomains)
-      currentUrl = await runWithTimeout(() => assertPublicHttpUrl(nextUrl, this.urlSafety), Math.max(1, deadline - Date.now()), signal)
+      currentUrl = await runWithTimeout(
+        () => assertPublicHttpUrl(nextUrl, this.urlSafety),
+        remainingDeadlineMs(deadline, 'web request', timeoutMs),
+        signal,
+      )
       if (previousProtocol === 'https:' && new URL(currentUrl).protocol === 'http:') {
         throw new ClientError('web', 'refusing to follow an HTTPS to HTTP redirect downgrade')
       }
@@ -160,10 +168,20 @@ export class PublicWebClient {
     if (options.timeoutMs !== undefined) {
       budgetMs = boundedInteger(options.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
     } else {
-      const deadline = responseReadDeadlines.get(response)
-      budgetMs = deadline === undefined ? this.timeoutMs : Math.max(1, deadline - Date.now())
+      const tracked = responseReadDeadlines.get(response)
+      if (tracked === undefined) {
+        budgetMs = this.timeoutMs
+      } else {
+        const remaining = tracked.deadline - Date.now()
+        if (remaining <= 0) {
+          void response.body?.cancel().catch(() => {})
+          throw new XerxesTimeoutError('web response', Math.max(1, Math.ceil(tracked.timeoutMs / 1000)))
+        }
+        budgetMs = remaining
+      }
     }
-    return boundedResponseText(response, this.maxResponseBytes, { signal: options.signal, timeoutMs: budgetMs })  }
+    return boundedResponseText(response, this.maxResponseBytes, { signal: options.signal, timeoutMs: budgetMs })
+  }
 
   urlSafetyDecision(url: string): UrlSafetyDecision {
     return checkUrl(url, this.urlSafety)
@@ -403,14 +421,18 @@ export async function analyzeUrl(
     const options = fetchOptions(signal, request.timeoutMs, request.allowedDomains)
     let fetched = await client.fetch(request.url, { method: 'HEAD' }, options)
     if (fetched.response.status === 405 || fetched.response.status === 501) {
+      void fetched.response.body?.cancel().catch(() => {})
       fetched = await client.fetch(request.url, { method: 'GET' }, options)
     }
-    const available = fetched.response.status < 400
+    const statusCode = fetched.response.status
+    const finalUrl = fetched.url
+    void fetched.response.body?.cancel().catch(() => {})
+    const available = statusCode < 400
     if (available) {
       getSourceLog().record({
         sessionId: request.sessionId ?? DEFAULT_SOURCE_SESSION,
         tool: 'URLAnalyzer',
-        url: fetched.url,
+        url: finalUrl,
       })
     }
     const result: {
@@ -436,9 +458,9 @@ export async function analyzeUrl(
       url: string
     } = {
       ...local,
-      finalUrl: fetched.url,
+      finalUrl,
       isAvailable: available,
-      statusCode: fetched.response.status,
+      statusCode,
     }
     if ((request.extractMetadata ?? true) && available) {
       const page = await scrapeWebPage({
@@ -1021,6 +1043,14 @@ function withSignal(init: RequestInit, signal: AbortSignal | undefined): Request
   return { ...init, signal }
 }
 
+function remainingDeadlineMs(deadline: number, label: 'web request' | 'web response', totalTimeoutMs: number): number {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) {
+    throw new XerxesTimeoutError(label, Math.max(1, Math.ceil(totalTimeoutMs / 1000)))
+  }
+  return remaining
+}
+
 async function runWithTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
@@ -1031,11 +1061,16 @@ async function runWithTimeout<T>(
   const abort = () => controller.abort(signal?.reason)
   signal?.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let onControllerAbort: (() => void) | undefined
   try {
+    const inFlight = operation(controller.signal)
+    // Suppress unhandled rejections if operation rejects after abort wins Promise.race.
+    void inFlight.catch(() => {})
     return await Promise.race([
-      operation(controller.signal),
+      inFlight,
       new Promise<T>((_resolve, reject) => {
-        controller.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true })
+        onControllerAbort = () => reject(new Error('request aborted'))
+        controller.signal.addEventListener('abort', onControllerAbort, { once: true })
       }),
     ])
   } catch (error) {
@@ -1046,6 +1081,9 @@ async function runWithTimeout<T>(
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)
+    if (onControllerAbort !== undefined) {
+      controller.signal.removeEventListener('abort', onControllerAbort)
+    }
   }
 }
 
@@ -1065,11 +1103,15 @@ async function boundedResponseText(
   limits: { readonly signal?: AbortSignal | undefined; readonly timeoutMs?: number | undefined } = {},
 ): Promise<string> {
   const signal = limits.signal
-  if (signal?.aborted) throw new ClientError('web', 'request cancelled before execution')
+  if (signal?.aborted) {
+    void response.body?.cancel().catch(() => {})
+    throw new ClientError('web', 'request cancelled before execution')
+  }
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null) {
     const length = Number.parseInt(declaredLength, 10)
     if (Number.isFinite(length) && length > maxBytes) {
+      void response.body?.cancel().catch(() => {})
       throw new ClientError('web', `response exceeds ${maxBytes} byte limit`)
     }
   }

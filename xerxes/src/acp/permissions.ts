@@ -88,6 +88,29 @@ export class AcpPermissionBoard {
     decision?.resolve(false)
   }
 
+  /** Reject and remove every pending permission belonging to `sessionId`. */
+  dropSession(sessionId: string): number {
+    let dropped = 0
+    for (const [requestId, request] of [...this.requests.entries()]) {
+      if (request.sessionId !== sessionId) continue
+      const wasPending = !request.decided
+      this.drop(requestId)
+      if (wasPending) dropped += 1
+    }
+    return dropped
+  }
+
+  /** Reject and remove every pending permission across all sessions. */
+  clear(): number {
+    let dropped = 0
+    for (const [requestId, request] of [...this.requests.entries()]) {
+      const wasPending = !request.decided
+      this.drop(requestId)
+      if (wasPending) dropped += 1
+    }
+    return dropped
+  }
+
   async awaitDecision(request: AcpPermissionRequest, signal?: AbortSignal): Promise<boolean> {
     const decision = this.submit(request)
     if (!signal) {

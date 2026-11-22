@@ -21,6 +21,7 @@ agent:
     - pty_list
     - pty_close
     - ReadFile
+    - FileOutlineTool
     - WriteFile
     - FileEditTool
     - GlobTool

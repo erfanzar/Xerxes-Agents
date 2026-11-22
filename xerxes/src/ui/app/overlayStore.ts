@@ -29,7 +29,9 @@ const buildOverlayState = (): OverlayState => ({
   activity: false,
   monitors: false,
   runs: false,
+  sideQuestion: false,
   snapshots: false,
+  swarm: false,
   workspaces: false,
   modelPicker: false,
   pager: null,
@@ -76,7 +78,9 @@ const OVERLAY_FLAG_KEYS = [
   'activity',
   'monitors',
   'runs',
+  'sideQuestion',
   'snapshots',
+  'swarm',
   'workspaces',
   'modelPicker',
   'pager',
@@ -130,7 +134,9 @@ export const OVERLAY_BLOCKS_BACKGROUND_HOTKEYS: Record<OverlayFlagKey, boolean> 
   activity: true,
   monitors: true,
   runs: true,
+  sideQuestion: true,
   snapshots: true,
+  swarm: true,
   workspaces: true,
   modelPicker: true,
   pager: true,
@@ -191,45 +197,26 @@ export const clearClarifyOverlay = (requestId: string): boolean => {
 /** Full reset — used by session/turn teardown and tests. */
 export const resetOverlayState = () => $overlayState.set(buildOverlayState())
 
+type FlowOverlayKey = 'approval' | 'clarify' | 'confirm' | 'pager' | 'secret' | 'sudo'
+
+const FLOW_OVERLAY_RESET: Pick<OverlayState, FlowOverlayKey> = {
+  approval: null,
+  clarify: null,
+  confirm: null,
+  pager: null,
+  secret: null,
+  sudo: null
+}
+
 /**
  * Soft reset: drop FLOW-scoped overlays (approval / clarify / confirm / sudo
- * / secret / pager) but PRESERVE user-toggled ones — agents dashboard, model
- * picker, reasoning picker, skills hub, sessions overlay. Those are opened
- * deliberately and shouldn't vanish when a turn ends. Called from
- * turnController.idle() on every turn completion / interrupt; the old "reset
- * everything" behaviour silently closed /agents the moment delegation
- * finished.
+ * / secret / pager) but PRESERVE user-toggled ones — agents dashboard, usage,
+ * model picker, reasoning picker, skills hub, sessions overlay, etc. Those are
+ * opened deliberately and shouldn't vanish when a turn ends. Called from
+ * turnController.idle() on every turn completion / interrupt / error.
  */
 export const resetFlowOverlays = () =>
   $overlayState.set({
-    ...buildOverlayState(),
-    agents: $overlayState.get().agents,
-    agentsInitialHistoryIndex: $overlayState.get().agentsInitialHistoryIndex,
-    agentsInspectId: $overlayState.get().agentsInspectId,
-    copyPicker: $overlayState.get().copyPicker,
-    diff: $overlayState.get().diff,
-    goal: $overlayState.get().goal,
-    learning: $overlayState.get().learning,
-    loops: $overlayState.get().loops,
-    schedules: $overlayState.get().schedules,
-    agentSettings: $overlayState.get().agentSettings,
-    lspSettings: $overlayState.get().lspSettings,
-    mcpSettings: $overlayState.get().mcpSettings,
-    contextInspector: $overlayState.get().contextInspector,
-    machinePicker: $overlayState.get().machinePicker,
-    customAgentEditor: $overlayState.get().customAgentEditor,
-    presetEditor: $overlayState.get().presetEditor,
-    forge: $overlayState.get().forge,
-    activity: $overlayState.get().activity,
-    monitors: $overlayState.get().monitors,
-    runs: $overlayState.get().runs,
-    snapshots: $overlayState.get().snapshots,
-    workspaces: $overlayState.get().workspaces,
-    modelPicker: $overlayState.get().modelPicker,
-    pluginsHub: $overlayState.get().pluginsHub,
-    reasoningPicker: $overlayState.get().reasoningPicker,
-    sessions: $overlayState.get().sessions,
-    capabilities: $overlayState.get().capabilities,
-    skillsHub: $overlayState.get().skillsHub,
-    terminals: $overlayState.get().terminals
+    ...$overlayState.get(),
+    ...FLOW_OVERLAY_RESET
   })

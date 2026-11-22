@@ -35,6 +35,12 @@ export const LEAN_CORE_TOOL_NAMES: readonly string[] = Object.freeze([
   'AskAdvisor',
 ])
 
+/** Optional SWE localization and atomic patch tools admitted when `includeSweTools` is set. */
+export const LEAN_SWE_TOOL_NAMES: readonly string[] = Object.freeze([
+  'ApplyPatchTool',
+  'FileOutlineTool',
+])
+
 const MAX_TOOL_DESCRIPTION_CHARS = 200
 const MAX_SCHEMA_DESCRIPTION_CHARS = 80
 const MAX_PROJECT_INSTRUCTION_CHARS = 1500
@@ -103,6 +109,8 @@ export function parsePromptProfileConfig(
 export interface LeanToolOptions {
   /** A protected run never gets shell, MCP, plugin or computer tools, even when listed in `extra`. */
   readonly protected?: boolean
+  /** Include SWE structural outline and atomic patch tools (`ApplyPatchTool`, `FileOutlineTool`). */
+  readonly includeSweTools?: boolean
   /** Additional tool names to keep on top of the core set. */
   readonly extra?: readonly string[]
 }
@@ -116,7 +124,11 @@ export function selectLeanTools<T extends ToolDefinition>(
   definitions: readonly T[],
   options: LeanToolOptions = {},
 ): ToolDefinition[] {
-  const wanted = new Set<string>([...LEAN_CORE_TOOL_NAMES, ...(options.extra ?? [])])
+  const wanted = new Set<string>([
+    ...LEAN_CORE_TOOL_NAMES,
+    ...(options.includeSweTools === true ? LEAN_SWE_TOOL_NAMES : []),
+    ...(options.extra ?? []),
+  ])
   const seen = new Set<string>()
   const selected: ToolDefinition[] = []
   for (const definition of definitions) {
@@ -189,6 +201,12 @@ export function buildLeanSystemPrompt(input: LeanSystemPromptInput): string {
       : '- Write .xlsx files with XlsxWriter. WriteFile would store plain text, not a workbook.')
   } else if (has('XlsxConvert')) {
     lines.push('- Python may lack openpyxl: for a script, convert .xlsx to CSV and back with XlsxConvert.')
+  }
+  if (has('FileOutlineTool')) {
+    lines.push('- Inspect large files structurally with FileOutlineTool before reading line ranges with ReadFile.')
+  }
+  if (has('ApplyPatchTool')) {
+    lines.push('- Prefer ApplyPatchTool for coordinated multi-hunk or multi-file edits, and FileEditTool for single replacements.')
   }
   if (has('AskUserQuestionTool')) {
     lines.push('- If the request is unclear in a way that changes the result, ask with AskUserQuestionTool.')

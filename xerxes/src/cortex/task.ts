@@ -95,18 +95,20 @@ export function validateContextTaskReferences(tasks: readonly CortexTask[]): voi
   const layers = taskDependencyLayers(tasks)
   const layerOf = new Map<string, number>()
   layers.forEach((layer, index) => {
-    for (const task of layer) layerOf.set(task.id, index)
+    for (const task of layer) layerOf.set(task.id.trim(), index)
   })
   for (const task of tasks) {
-    const taskLayer = layerOf.get(task.id) ?? 0
-    for (const contextId of task.contextTaskIds ?? []) {
+    const taskId = task.id.trim()
+    const taskLayer = layerOf.get(taskId) ?? 0
+    for (const rawContextId of task.contextTaskIds ?? []) {
+      const contextId = rawContextId.trim()
       const contextLayer = layerOf.get(contextId)
-      if (contextLayer === undefined) {
-        throw new TaskGraphError(`task ${task.id} references unknown context task ${contextId}`)
+      if (!contextId || contextLayer === undefined) {
+        throw new TaskGraphError(`task ${taskId} references unknown context task ${rawContextId}`)
       }
       if (contextLayer >= taskLayer) {
         throw new TaskGraphError(
-          `task ${task.id} references context task ${contextId} from a concurrent or later dependency layer; declare a dependency instead`,
+          `task ${taskId} references context task ${contextId} from a concurrent or later dependency layer; declare a dependency instead`,
         )
       }
     }
@@ -120,7 +122,7 @@ export function topologicallyOrderTasks(tasks: readonly CortexTask[]): CortexTas
 
 /** Build a readable context block from dependency and explicitly requested task outputs. */
 export function taskContext(task: CortexTask, outputs: ReadonlyMap<string, CortexTaskOutput>): string {
-  const ids = [...new Set([...(task.dependencies ?? []), ...(task.contextTaskIds ?? [])])]
+  const ids = [...new Set([...(task.dependencies ?? []), ...(task.contextTaskIds ?? [])].map(id => id.trim()).filter(Boolean))]
   return ids.flatMap(id => {
     const output = outputs.get(id)
     return output?.status === 'succeeded' && output.output
@@ -146,8 +148,13 @@ export function dependencyLayers<T>(
 
   const dependencies = new Map<string, Set<string>>()
   for (const item of items) {
-    const id = idFor(item)
-    const required = new Set(dependenciesFor(item))
+    const id = idFor(item).trim()
+    const required = new Set<string>()
+    for (const rawDependency of dependenciesFor(item)) {
+      const dependency = rawDependency.trim()
+      if (!dependency) throw new TaskGraphError(`${label} ${id} has an empty dependency id`)
+      required.add(dependency)
+    }
     if (required.has(id)) throw new TaskGraphError(`${label} ${id} cannot depend on itself`)
     for (const dependency of required) {
       if (!byId.has(dependency)) throw new TaskGraphError(`${label} ${id} depends on unknown ${label} ${dependency}`)
@@ -160,7 +167,7 @@ export function dependencyLayers<T>(
   const result: T[][] = []
   while (unresolved.size > 0) {
     const ready = items.filter(item => {
-      const id = idFor(item)
+      const id = idFor(item).trim()
       const required = dependencies.get(id)
       return unresolved.has(id) && required !== undefined && [...required].every(dependency => completed.has(dependency))
     })
@@ -169,7 +176,7 @@ export function dependencyLayers<T>(
     }
     result.push(ready)
     for (const item of ready) {
-      const id = idFor(item)
+      const id = idFor(item).trim()
       unresolved.delete(id)
       completed.add(id)
     }

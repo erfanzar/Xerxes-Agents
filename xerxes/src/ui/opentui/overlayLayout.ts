@@ -99,6 +99,8 @@ export const OVERLAY_PANEL_SPECS = {
   diff: { maxWidth: 240, minWidth: 60 },
   info: { maxWidth: 90, minWidth: 42 },
   pager: { maxWidth: 110, minWidth: 48 },
+  sideQuestion: { maxWidth: 108, minWidth: 42 },
+  swarm: { maxWidth: 148, minWidth: 42 },
   terminals: { maxWidth: 140, minWidth: 60 }
 } as const satisfies Record<string, OverlayPanelSpec>
 

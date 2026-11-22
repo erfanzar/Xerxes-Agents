@@ -236,6 +236,11 @@ export class PtySessionManager {
     }
     this.sessions.set(id, session)
     void childProcess.exited.then(code => {
+      const trailing = decoder.decode()
+      if (trailing) {
+        output.append(trailing)
+        mirror?.append(trailing)
+      }
       resolveWaiters(waiters)
       mirror?.close(typeof code === 'number' ? code : null)
     })
@@ -300,9 +305,13 @@ export class PtySessionManager {
     const session = this.sessions.get(sessionId)
     if (!session || session.process.exitCode !== null) return true
     if (!session.ownsTerminal || isWindows()) return false
-    const probe = Bun.spawnSync(['ps', '-o', 'tpgid=,pgid=', '-p', String(session.process.pid)], { stdout: 'pipe', stderr: 'ignore' })
-    const [foreground, own] = probe.stdout.toString().trim().split(/\s+/).map(Number)
-    return foreground !== undefined && Number.isInteger(foreground) && foreground > 0 && foreground === own
+    try {
+      const probe = Bun.spawnSync(['ps', '-o', 'tpgid=,pgid=', '-p', String(session.process.pid)], { stdout: 'pipe', stderr: 'ignore' })
+      const [foreground, own] = probe.stdout.toString().trim().split(/\s+/).map(Number)
+      return foreground !== undefined && Number.isInteger(foreground) && foreground > 0 && foreground === own
+    } catch {
+      return false
+    }
   }
 
   /** Follow the viewer's size; a full-screen program redraws on SIGWINCH. */
@@ -472,8 +481,14 @@ class OutputBuffer {
         this.chunks.shift()
         this.length -= first.length
       } else {
-        this.chunks[0] = first.slice(excess)
-        this.length -= excess
+        const cut = splitsSurrogatePair(first, excess) ? excess + 1 : excess
+        if (cut >= first.length) {
+          this.chunks.shift()
+          this.length -= first.length
+        } else {
+          this.chunks[0] = first.slice(cut)
+          this.length -= cut
+        }
       }
       this.dropped = true
     }
@@ -501,14 +516,23 @@ class OutputBuffer {
         values.push(current)
         remaining -= current.length
       } else {
-        values.push(current.slice(0, remaining))
-        this.chunks[0] = current.slice(remaining)
-        this.length -= remaining
+        const takeCount = splitsSurrogatePair(current, remaining) ? remaining - 1 : remaining
+        if (takeCount === 0) break
+        values.push(current.slice(0, takeCount))
+        this.chunks[0] = current.slice(takeCount)
+        this.length -= takeCount
         remaining = 0
       }
     }
     return { text: values.join(''), truncated: this.length > 0 }
   }
+}
+
+function splitsSurrogatePair(text: string, index: number): boolean {
+  if (index <= 0 || index >= text.length) return false
+  const high = text.charCodeAt(index - 1)
+  const low = text.charCodeAt(index)
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff
 }
 
 function resolveWaiters(waiters: Set<() => void>): void {

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
-import { pageIsBackground } from './pageVisibility.js'
+import { pageIsInactive } from './pageVisibility.js'
 import { agentState } from './AgentRoster.js'
 import { desktopCall, desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
@@ -126,7 +126,7 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       try {
-        if (pageIsBackground()) { if (current && active) timer = setTimeout(() => void load(), 3000); return }
+        if (pageIsInactive()) { if (current && active) timer = setTimeout(() => void load(), 5000); return }
         const sent = received.current
         const result = await desktopCall(window.xerxes, sessionKey, 'subagent.inspect', { task: row.id, history_limit: AGENT_HISTORY_PAGE })
         const agent = record(result.agent)

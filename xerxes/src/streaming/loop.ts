@@ -4,6 +4,7 @@
 import { chargeModelCall, ModelCallBudgetError, ModelTokenBudgetError, ModelUsageCheckpointError } from '../llms/callBudget.js'
 import {
   isScreenshotToolResult,
+  screenshotParts,
   supersedeScreenshotToolResults,
 } from '../context/screenshotSuperseder.js'
 import {
@@ -66,6 +67,7 @@ import {
 } from './permissions.js'
 import type { SystemPromptSegment } from './promptCaching.js'
 import { ThinkingParser, type ThinkingStreamParser } from './thinkingParser.js'
+import { canonicalizeToolCallArguments } from './toolCallIds.js'
 import { neutralizeSystemReminders } from './toolMarkers.js'
 
 /** Distinct productive tool rounds are unbounded unless the caller opts into a budget. */
@@ -112,6 +114,24 @@ const utf8 = new TextEncoder()
  * loops one provider call per round forever (maxToolTurns is unbounded).
  */
 export const MAX_UNCONFIGURED_ONLY_ROUNDS = 3
+/**
+ * Consecutive rounds in which the model repeats the exact same configured tool
+ * call(s) and every execution fails before a harness nudge or stop intervenes.
+ */
+export const IDENTICAL_FAILED_TOOL_NUDGE_THRESHOLD = 2
+export const DEFAULT_MAX_IDENTICAL_FAILED_TOOL_ROUNDS = 4
+export const IDENTICAL_FAILED_TOOL_LOOP_PATTERN = 'identical_failed_tool_loop'
+
+export function identicalFailedToolNudge(toolName: string, streak: number): string {
+  return `[harness] You repeated the exact same failing call to ${toolName} ${streak} times in a row with identical `
+    + 'arguments and received an execution failure each time. Do not issue those exact arguments again: inspect the '
+    + 'current state with another tool, adjust the parameters, or report the concrete blocker.'
+}
+
+export function identicalFailedToolStopText(toolName: string, streak: number): string {
+  return `\n[Stopped: the model repeated the identical failing ${toolName} call ${streak} consecutive rounds without `
+    + 'changing arguments or recovering; ending the turn instead of looping on the same error.]'
+}
 /** Times one turn re-asks after a reply with no text and no readable call. */
 export const MAX_EMPTY_REPLY_NUDGES = 2
 /** What the model is told after such a reply; it names both ways to continue. */
@@ -208,26 +228,10 @@ export const CONTEXT_OVERFLOW_STOP_TEXT = renderContextOverflowStopGuard()
 /** Upper bound on tools executed at once, so a wide round cannot exhaust file handles or sockets. */
 export const MAX_CONCURRENT_TOOL_CALLS = 8
 
-/**
- * The reasoning that preceded one specific tool call, not the whole round's.
- *
- * A round with multiple tool calls splits its thinking at each call boundary:
- * the model thinks, calls a tool, thinks again, calls another. Without this
- * split every row in the expanded view shows the same full-round text.
- */
-function reasoningBeforeCall(
-  callId: string,
-  roundToolCalls: readonly ToolCall[],
-  thinkingParts: readonly string[],
-): string | undefined {
-  if (!thinkingParts.length) return undefined
-  const index = roundToolCalls.findIndex(call => call.id === callId)
-  if (index < 0) return thinkingParts.join('')
-  // The thinking that preceded this call is everything before the call's
-  // position in the round. The parts array is one entry per thinking block,
-  // so the split is at the same index as the call.
-  const before = thinkingParts.slice(0, index + 1)
-  return before.length ? before.join('') : undefined
+function roundSignatureOf(calls: readonly ToolCall[]): string {
+  return calls
+    .map(call => `${call.function.name}:${canonicalizeToolCallArguments(call.function.arguments)}`)
+    .join('\u0000')
 }
 
 /** A per-call verdict from the sequential permission phase, executed later in order. */
@@ -295,15 +299,36 @@ export type ContextReducer = (
   signal?: AbortSignal,
 ) => Promise<ContextReduction>
 
+const ROUGH_CHARS_PER_IMAGE = 6_400
+
 /**
  * Rough size of a request in tokens (characters ÷ 4), for telling the user how
  * much the model must read before its first token. Not for budgeting.
  */
-export function roughPromptTokens(messages: readonly ChatMessage[], tools: readonly unknown[] | undefined): number {
-  let chars = 0
-  for (const message of messages) chars += JSON.stringify(message).length
+export function roughPromptTokens(
+  messages: readonly ChatMessage[],
+  tools: readonly unknown[] | undefined,
+  requestOnlySystemPrompt?: string,
+): number {
+  let chars = requestOnlySystemPrompt ? requestOnlySystemPrompt.length : 0
+  for (const message of messages) chars += roughMessageChars(message)
   if (tools?.length) chars += JSON.stringify(tools).length
   return Math.ceil(chars / 4)
+}
+
+function roughMessageChars(message: ChatMessage): number {
+  if (message.role === 'tool' && isScreenshotToolResult(message.content)) {
+    const shot = screenshotParts(message.content)
+    if (shot) return shot.text.length + shot.images.length * ROUGH_CHARS_PER_IMAGE
+  }
+  if (Array.isArray(message.content)) {
+    let partChars = 32
+    for (const part of message.content) {
+      partChars += part.type === 'text' ? part.text.length : ROUGH_CHARS_PER_IMAGE
+    }
+    return partChars
+  }
+  return JSON.stringify(message).length
 }
 
 /**
@@ -346,6 +371,11 @@ export interface TurnRequest {
    * takes the DenialBudget default; a non-positive value opts out entirely.
    */
   readonly maxConsecutiveDenials?: number
+  /**
+   * Consecutive identical failing tool rounds tolerated before the turn stops.
+   * Omitted uses {@link DEFAULT_MAX_IDENTICAL_FAILED_TOOL_ROUNDS}; null or <= 0 opts out.
+   */
+  readonly maxIdenticalFailedToolRounds?: number | null
   readonly maxToolTurns?: number
   /** Hard cap on model rounds, including continuations after truncated output. */
   readonly maxModelTurns?: number
@@ -595,6 +625,7 @@ export async function* runTurn(
   // One instance per turn, so a subagent running under a stricter policy burns
   // its own budget instead of the parent's.
   const denialBudget = new DenialBudget(request.maxConsecutiveDenials)
+  const maxIdenticalFailedToolRounds = normalizeIdenticalFailedToolCeiling(request.maxIdenticalFailedToolRounds)
   const toolContext: ToolExecutionContext = {
     ...(request.agentId ? { agentId: request.agentId } : {}),
     ...(request.sessionId ? { sessionId: request.sessionId } : {}),
@@ -640,6 +671,8 @@ export async function* runTurn(
       ? {}
       : { objective_guard_max_retries: request.objectiveGuardMaxRetries },
   )
+  let pendingRoundToolCalls: readonly ToolCall[] = []
+  const answeredRoundToolCallIds = new Set<string>()
   /** Record one tool result, letting tool_result_persist hooks rewrite it first. */
   const recordToolResult = async (result: ToolResult, call: ToolCall): Promise<ToolResult> => {
     const mutated = hookRunner === undefined
@@ -679,10 +712,13 @@ export async function* runTurn(
       objectiveToolExecutions,
       providerContent === recorded.result ? undefined : providerContent,
     )
+    answeredRoundToolCallIds.add(call.id)
     return recorded
   }
 
   let consecutiveUnconfiguredOnlyRounds = 0
+  let lastFailedRoundSignature: string | undefined
+  let consecutiveIdenticalFailedRounds = 0
   /** Set when a round ends without post-processing: a terminal provider failure or a caller abort. */
   let terminalProviderFailure = false
   let stopReason: TurnStopReason = signal?.aborted ? 'aborted' : 'tool_budget_exhausted'
@@ -715,7 +751,7 @@ export async function* runTurn(
   let loopSettled = false
   try {
     for (let toolTurn = 0; !signal?.aborted && toolTurn < turnLimit && toolTurn < maxModelTurns; toolTurn += 1) {
-      appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
+      const injectedAgentEvents = appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
       if (dependencies.refreshTools) {
         try { turnTools = dependencies.refreshTools(turnTools) } catch { /* keep the previous list */ }
       }
@@ -724,9 +760,17 @@ export async function* runTurn(
       const visibleTools = forceToolFreeSummary ? [] : request.blockPlanDelegation
         ? turnTools?.filter(tool => !request.blockPlanDelegation?.(tool.function.name))
         : turnTools
+      let steeredThisRound = false
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const message = steerMessage('[steer from user]', steer)
-        if (message) state.messages.push(message)
+        if (message) {
+          state.messages.push(message)
+          steeredThisRound = true
+        }
+      }
+      if (injectedAgentEvents || steeredThisRound) {
+        lastFailedRoundSignature = undefined
+        consecutiveIdenticalFailedRounds = 0
       }
       const observedForRound = observedPromptTokens
       observedPromptTokens = undefined
@@ -750,6 +794,7 @@ export async function* runTurn(
       let thinkingParts: string[] = []
       let thinkingSignature: string | undefined
       let roundToolCalls: readonly ToolCall[] = []
+      let roundCallReasoning = new Map<string, string>()
       let lastUsage: TokenUsage | undefined
       /** A mid-round reduction: this round's usage no longer measures what the host estimated. */
       let roundHistoryReplaced = false
@@ -758,7 +803,7 @@ export async function* runTurn(
       let roundStartedAt = 0
       let roundFirstOutputAt: number | undefined
       let roundFirstStreamTokenAt: number | undefined
-      let roundStreamedBytes = 0
+      let roundFirstContentAt: number | undefined
       let roundCompletedAt = 0
       let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
@@ -782,6 +827,8 @@ export async function* runTurn(
         thinkingParts = []
         thinkingSignature = undefined
         roundToolCalls = []
+        roundCallReasoning = new Map()
+        const unclaimedThinking: string[] = []
         lastUsage = undefined
         finishReason = undefined
         textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
@@ -805,9 +852,13 @@ export async function* runTurn(
           roundStartedAt = now()
           roundFirstOutputAt = undefined
           roundFirstStreamTokenAt = undefined
-          roundStreamedBytes = 0
+          roundFirstContentAt = undefined
           roundCompletedAt = 0
-          const promptTokens = roughPromptTokens(state.messages, visibleTools)
+          const promptTokens = roughPromptTokens(
+            state.messages,
+            visibleTools,
+            request.systemPromptRequestOnly ? request.systemPrompt : undefined,
+          )
           yield { type: 'provider_wait', active: true, promptTokens }
           let awaitingOutput = true
           try {
@@ -828,19 +879,22 @@ export async function* runTurn(
             )) {
               attemptStreamed = true
               const hasStreamToken = Boolean(delta.content || delta.thinking)
-              roundStreamedBytes += streamedBytesOf(delta)
+              const hasContentToken = Boolean(delta.content)
               if (awaitingOutput && hasModelOutput(delta)) {
                 awaitingOutput = false
                 yield { type: 'provider_wait', active: false }
               }
               if ((roundFirstOutputAt === undefined && hasModelOutput(delta))
-                || (roundFirstStreamTokenAt === undefined && hasStreamToken)) {
+                || (roundFirstStreamTokenAt === undefined && hasStreamToken)
+                || (roundFirstContentAt === undefined && hasContentToken)) {
                 const observedAt = now()
                 if (roundFirstOutputAt === undefined && hasModelOutput(delta)) roundFirstOutputAt = observedAt
                 if (roundFirstStreamTokenAt === undefined && hasStreamToken) roundFirstStreamTokenAt = observedAt
+                if (roundFirstContentAt === undefined && hasContentToken) roundFirstContentAt = observedAt
               }
               const parts = processDelta(delta, parser, textParts, thinkingParts)
               for (const part of parts) {
+                if (part.type === 'thinking') unclaimedThinking.push(part.text)
                 // Live incremental emission: each deduped part is yielded the
                 // moment it arrives, so consumers render text while the provider
                 // is still streaming. 95c53d6 buffered whole rounds here, which
@@ -869,6 +923,9 @@ export async function* runTurn(
                 for (const toolCall of delta.toolCalls) {
                   const existing = merged.findIndex(candidate => candidate.id === toolCall.id)
                   if (existing === -1) {
+                    if (unclaimedThinking.length > 0) {
+                      roundCallReasoning.set(toolCall.id, unclaimedThinking.splice(0).join(''))
+                    }
                     merged.push(toolCall)
                   } else {
                     merged[existing] = toolCall
@@ -897,7 +954,15 @@ export async function* runTurn(
               for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield rememberVisible(visible)
             } else {
               thinkingParts.push(flushed.text)
+              unclaimedThinking.push(flushed.text)
               for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield rememberVisible(visible)
+            }
+          }
+          if (unclaimedThinking.length > 0 && roundToolCalls.length > 0) {
+            const targetCall = roundToolCalls.find(call => !roundCallReasoning.has(call.id)) ?? roundToolCalls.at(-1)
+            if (targetCall) {
+              const previous = roundCallReasoning.get(targetCall.id) ?? ''
+              roundCallReasoning.set(targetCall.id, previous + unclaimedThinking.splice(0).join(''))
             }
           }
           roundCompletedAt = now()
@@ -1149,12 +1214,28 @@ export async function* runTurn(
         // produced multi-million tok/s readings for Codex tool rounds. Throughput
         // needs an actual streamed text/reasoning interval, and sub-100ms bursts
         // are too coarse to be a meaningful sample.
-        const decodeMilliseconds = roundFirstStreamTokenAt === undefined
+        const streamedThinkingBytes = utf8.encode(thinkingParts.join('')).byteLength
+        const streamedContentBytes = utf8.encode(textParts.join('')).byteLength
+        const streamedToolBytes = toolCallsUtf8Bytes(roundToolCalls)
+        const totalStreamedBytes = streamedContentBytes + streamedThinkingBytes + streamedToolBytes
+        const reportedReasoning = lastUsage.reasoningTokens ?? 0
+        const reasoningWasStreamed = reportedReasoning > 0
+          && streamedThinkingBytes > 0
+          && reportedReasoning <= streamedThinkingBytes / MIN_STREAMED_BYTES_PER_TOKEN + THROUGHPUT_TOKEN_SLACK
+        const decodeStartAt = reasoningWasStreamed || reportedReasoning === 0
+          ? roundFirstStreamTokenAt
+          : roundFirstContentAt
+        const decodeMilliseconds = decodeStartAt === undefined
           ? 0
-          : Math.max(0, roundCompletedAt - roundFirstStreamTokenAt)
-        const decodedTokens = Math.max(0, lastUsage.outputTokens - (lastUsage.reasoningTokens ?? 0))
+          : Math.max(0, roundCompletedAt - decodeStartAt)
+        const decodedTokens = reasoningWasStreamed
+          ? Math.max(0, lastUsage.outputTokens)
+          : Math.max(0, lastUsage.outputTokens - reportedReasoning)
+        const relevantStreamedBytes = reasoningWasStreamed || reportedReasoning === 0
+          ? totalStreamedBytes
+          : streamedContentBytes + streamedToolBytes
         const measuredTokensPerSecond = decodeMilliseconds >= MIN_THROUGHPUT_SAMPLE_MS && decodedTokens > 0
-          && decodedTokens <= roundStreamedBytes / MIN_STREAMED_BYTES_PER_TOKEN + THROUGHPUT_TOKEN_SLACK
+          && decodedTokens <= relevantStreamedBytes / MIN_STREAMED_BYTES_PER_TOKEN + THROUGHPUT_TOKEN_SLACK
           ? decodedTokens * 1_000 / decodeMilliseconds
           : undefined
         const tokensPerSecond = measuredTokensPerSecond !== undefined
@@ -1216,6 +1297,10 @@ export async function* runTurn(
           state.thinkingContent.push(thinkingParts.join(''))
         } else {
           state.thinkingContent.push('')
+        }
+        if (providerToolCalls.length) {
+          pendingRoundToolCalls = providerToolCalls
+          answeredRoundToolCallIds.clear()
         }
       }
       persistUnfinishedRound = undefined
@@ -1294,15 +1379,18 @@ export async function* runTurn(
           const result = await recordToolResult(unconfiguredToolResult(call), call)
           yield { type: 'tool_end', result }
         }
-        if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
-          stopReason = 'unconfigured_tools'
-          break
-        }
-        if (forceToolFreeSummary) {
+        if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop' || forceToolFreeSummary) {
+          for (const call of pendingRoundToolCalls) {
+            if (answeredRoundToolCallIds.has(call.id)) continue
+            const result = await recordToolResult(cancelledToolResult(call), call)
+            yield { type: 'tool_end', result }
+          }
+          pendingRoundToolCalls = []
           stopReason = 'unconfigured_tools'
           break
         }
         if (!roundToolCalls.length) {
+          pendingRoundToolCalls = []
           consecutiveUnconfiguredOnlyRounds += 1
           if (consecutiveUnconfiguredOnlyRounds >= MAX_UNCONFIGURED_ONLY_ROUNDS) {
             // The model keeps requesting tools outside the configured surface
@@ -1356,15 +1444,6 @@ export async function* runTurn(
           if (toolTurn + 1 >= turnLimit) turnLimit += 1
           continue
         }
-        for (const steer of dependencies.drainSteer?.('final') ?? []) {
-          const message = steerMessage('[steer from user saved for next turn]', steer)
-          if (!message) continue
-          state.messages.push(message)
-          yield {
-            type: 'text',
-            text: renderIntervention({ kind: 'steer-note', content: steerText(steer).trim() || 'image' }),
-          }
-        }
         // A reply with no visible text and no call we could read, after the turn
         // has already worked, is not an answer (raw text: a reply that only
         // repeats the last round is deduplicated to nothing, but it did answer): ending there reported workflow
@@ -1391,6 +1470,15 @@ export async function* runTurn(
               mode: currentInteractionMode(state, request.interactionMode),
             })
         if (!objectiveDecision.shouldContinue) {
+          for (const steer of dependencies.drainSteer?.('final') ?? []) {
+            const message = steerMessage('[steer from user saved for next turn]', steer)
+            if (!message) continue
+            state.messages.push(message)
+            yield {
+              type: 'text',
+              text: renderIntervention({ kind: 'steer-note', content: steerText(steer).trim() || 'image' }),
+            }
+          }
           // The guard states its own grounds when it has any; today an accepted
           // answer carries an empty reason, so plain completion is the fallback.
           stopReason = objectiveDecision.reason.trim() ? 'objective_verified' : 'completed'
@@ -1398,6 +1486,15 @@ export async function* runTurn(
         }
         objectiveGuardRetries += 1
         if (objectiveGuardRetries > objectiveGuardLimit) {
+          for (const steer of dependencies.drainSteer?.('final') ?? []) {
+            const message = steerMessage('[steer from user saved for next turn]', steer)
+            if (!message) continue
+            state.messages.push(message)
+            yield {
+              type: 'text',
+              text: renderIntervention({ kind: 'steer-note', content: steerText(steer).trim() || 'image' }),
+            }
+          }
           yield {
             type: 'text',
             text: renderIntervention({
@@ -1442,7 +1539,8 @@ export async function* runTurn(
         }
         // Repaired before hooks and checks see it, so every gate judges the
         // command that will run; a hook's own mutation is repaired the same way.
-        const repairedCall = repairToolCall(call)
+        const toolSchema = visibleTools?.find(tool => tool.function.name === call.function.name)?.function.parameters
+        const repairedCall = repairToolCall(call, toolSchema)
         const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
           arguments: repairedCall.function.arguments,
@@ -1450,14 +1548,17 @@ export async function* runTurn(
           ...(request.sessionId ? { sessionId: request.sessionId } : {}),
           toolCallId: repairedCall.id,
         })
-        const effectiveCall = repairToolCall(applyToolArgumentsMutation(
-          repairedCall,
-          hookMutation(beforeResult, repairedCall.function.arguments),
-        ))
+        const effectiveCall = repairToolCall(
+          applyToolArgumentsMutation(
+            repairedCall,
+            hookMutation(beforeResult, repairedCall.function.arguments),
+          ),
+          toolSchema,
+        )
         const liveMode = request.permissionModeProvider?.() ?? permissionMode
         const blockPlanDelegation = liveMode === 'plan' && request.blockPlanDelegation?.(effectiveCall.function.name) === true
         const planAcceptAll = liveMode === 'plan' && request.planAcceptAll?.() === true
-        const gate = permissionGateOptions(dependencies, permissionMode)
+        const gate = permissionGateOptions(dependencies, liveMode)
         const permission = permissionDisposition(
           effectiveCall,
           liveMode,
@@ -1523,6 +1624,9 @@ export async function* runTurn(
 
       // PHASE B — execute in maximal runs of consecutive concurrency-safe calls,
       // then emit strictly in model-emitted order regardless of completion order.
+      const executedEffectiveCalls: ToolCall[] = []
+      let roundAllowedCalls = 0
+      let roundExecutionFailures = 0
       for (const group of groupToolDecisions(
         decisions.map(decision => decision.kind === 'allowed'
           ? { ...decision, call: decision.effectiveCall }
@@ -1547,7 +1651,7 @@ export async function* runTurn(
             // The reasoning that preceded THIS call, not the whole round's.
             // A round with multiple tool calls splits its thinking at each
             // call boundary so each row shows the model's actual intent.
-            const reasoning = reasoningBeforeCall(decision.effectiveCall.id, roundToolCalls, thinkingParts)
+            const reasoning = roundCallReasoning.get(decision.effectiveCall.id)
             yield { type: 'tool_start', call: decision.effectiveCall, ...(reasoning ? { reasoning } : {}) }
           }
         }
@@ -1555,8 +1659,11 @@ export async function* runTurn(
         // The metadata object stays the same reference, so a lone call still
         // writes straight into the turn's shared record.
         const steerWakeSignal = dependencies.steerWake?.()
-        // Fully local mode sandboxes commands whatever the permission mode.
-        const commandSandbox = permissionMode === 'auto' || localOnlyActive() ? dependencies.runSafety?.commandSandbox() : undefined
+        // Fully local mode sandboxes commands whatever the permission mode;
+        // consult the live session mode so leaving plan mode or switching modes
+        // mid-turn updates sandbox routing immediately.
+        const liveGroupMode = request.permissionModeProvider?.() ?? permissionMode
+        const commandSandbox = liveGroupMode === 'auto' || localOnlyActive() ? dependencies.runSafety?.commandSandbox() : undefined
         const roundContext: ToolExecutionContext = steerWakeSignal || commandSandbox
           ? {
               ...toolContext,
@@ -1641,13 +1748,17 @@ export async function* runTurn(
             continue
           }
           const effectiveCall = decision.effectiveCall
+          executedEffectiveCalls.push(effectiveCall)
+          roundAllowedCalls += 1
           const outcome = outcomes[member]
           if (!outcome || outcome.kind === 'failure') {
+            roundExecutionFailures += 1
             const result = await recordToolResult(
               failedToolResult(effectiveCall, outcome?.error, performance.now() - (outcome?.startedAt ?? 0)),
               effectiveCall,
             )
-            yield { type: 'tool_end', result }
+            const reasoning = roundCallReasoning.get(effectiveCall.id)
+            yield { type: 'tool_end', result, ...(reasoning ? { reasoning } : {}) }
             continue
           }
           // A tool that actually ran means the model found a permitted route,
@@ -1678,10 +1789,11 @@ export async function* runTurn(
             result = { ...result, result: mutatedOutput }
           }
           const recorded = await recordToolResult(result, effectiveCall)
-          const reasoning = reasoningBeforeCall(effectiveCall.id, roundToolCalls, thinkingParts)
+          const reasoning = roundCallReasoning.get(effectiveCall.id)
           yield { type: 'tool_end', result: recorded, ...(reasoning ? { reasoning } : {}) }
         }
       }
+      pendingRoundToolCalls = []
       if (signal?.aborted) {
         stopReason = 'aborted'
         break
@@ -1696,6 +1808,51 @@ export async function* runTurn(
         reportDenialLoop(dependencies, request, denialBudget)
         stopReason = 'tool_budget_exhausted'
         break
+      }
+      if (
+        roundAllowedCalls > 0
+        && roundExecutionFailures === roundAllowedCalls
+        && unconfigured.length === 0
+        && decisions.length === roundAllowedCalls
+      ) {
+        const signature = roundSignatureOf(executedEffectiveCalls)
+        if (signature === lastFailedRoundSignature) {
+          consecutiveIdenticalFailedRounds += 1
+        } else {
+          lastFailedRoundSignature = signature
+          consecutiveIdenticalFailedRounds = 1
+        }
+        const repeatedToolName = executedEffectiveCalls[0]?.function.name ?? 'tool'
+        if (
+          maxIdenticalFailedToolRounds !== undefined
+          && consecutiveIdenticalFailedRounds >= maxIdenticalFailedToolRounds
+        ) {
+          yield {
+            type: 'text',
+            text: identicalFailedToolStopText(repeatedToolName, consecutiveIdenticalFailedRounds),
+          }
+          reportIdenticalFailedToolLoop(
+            dependencies,
+            request,
+            repeatedToolName,
+            consecutiveIdenticalFailedRounds,
+          )
+          stopReason = 'tool_budget_exhausted'
+          break
+        }
+        if (
+          maxIdenticalFailedToolRounds !== undefined
+          && consecutiveIdenticalFailedRounds === IDENTICAL_FAILED_TOOL_NUDGE_THRESHOLD
+        ) {
+          state.messages.push({
+            role: 'user',
+            content: identicalFailedToolNudge(repeatedToolName, consecutiveIdenticalFailedRounds),
+            origin: 'harness',
+          })
+        }
+      } else {
+        lastFailedRoundSignature = undefined
+        consecutiveIdenticalFailedRounds = 0
       }
       let needsFinalization = false
       if (toolTurn + 1 >= turnLimit) {
@@ -1715,6 +1872,14 @@ export async function* runTurn(
     }
     loopSettled = true
   } catch (error) {
+    // Pair any assistant tool_calls committed earlier in this round before
+    // surfacing the error so the durable transcript remains replay-valid.
+    for (const call of pendingRoundToolCalls) {
+      if (answeredRoundToolCallIds.has(call.id)) continue
+      const result = await recordToolResult(cancelledToolResult(call), call)
+      yield { type: 'tool_end', result }
+    }
+    pendingRoundToolCalls = []
     // Rejections outside the provider-attempt handler — an abort during
     // retry backoff, a permission broker failure, a subagent join failure —
     // must not skip the turn epilogue. Surface the failure as an explicit
@@ -1751,6 +1916,12 @@ export async function* runTurn(
     loopSettled = true
   } finally {
     persistUnfinishedRound?.()
+    for (const call of pendingRoundToolCalls) {
+      if (answeredRoundToolCallIds.has(call.id)) continue
+      answeredRoundToolCallIds.add(call.id)
+      appendToolResult(state, cancelledToolResult(call), call, objectiveToolExecutions)
+    }
+    pendingRoundToolCalls = []
     if (!loopSettled || signal?.aborted) stopReason = 'aborted'
     const lastMessage = state.messages.at(-1)
     if (lastMessage) setTurnOutcome(lastMessage, stopReason, request.turnId)
@@ -1973,6 +2144,35 @@ function reportDenialLoop(
   }
 }
 
+function reportIdenticalFailedToolLoop(
+  dependencies: TurnDependencies,
+  request: TurnRequest,
+  toolName: string,
+  count: number,
+): void {
+  if (dependencies.auditToolLoopBlock === undefined) return
+  try {
+    dependencies.auditToolLoopBlock({
+      ...(request.agentId ? { agentId: request.agentId } : {}),
+      count,
+      pattern: IDENTICAL_FAILED_TOOL_LOOP_PATTERN,
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+      toolName,
+    })
+  } catch {
+    // An audit sink is observability, never a turn-ending dependency.
+  }
+}
+
+function normalizeIdenticalFailedToolCeiling(value: number | null | undefined): number | undefined {
+  if (value === undefined) return DEFAULT_MAX_IDENTICAL_FAILED_TOOL_ROUNDS
+  if (value === null || value <= 0) return undefined
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError('maxIdenticalFailedToolRounds must be a safe integer')
+  }
+  return value
+}
+
 function configuredMaxTokens(request: TurnRequest): number | undefined {
   return request.maxTokensProvider ? request.maxTokensProvider() : request.maxTokens
 }
@@ -2114,12 +2314,10 @@ function hasModelOutput(delta: LlmDelta): boolean {
   return Boolean(delta.content || delta.thinking || delta.toolCalls?.length)
 }
 
-/** UTF-8 bytes of the model output a delta carries: text, thinking and tool calls. */
-function streamedBytesOf(delta: LlmDelta): number {
+/** UTF-8 bytes of deduplicated tool-call payloads in one provider round. */
+function toolCallsUtf8Bytes(calls: readonly ToolCall[]): number {
   let bytes = 0
-  if (delta.content) bytes += utf8.encode(delta.content).byteLength
-  if (delta.thinking) bytes += utf8.encode(delta.thinking).byteLength
-  for (const call of delta.toolCalls ?? []) bytes += utf8.encode(call.function.name + JSON.stringify(call.function.arguments)).byteLength
+  for (const call of calls) bytes += utf8.encode(call.function.name + JSON.stringify(call.function.arguments)).byteLength
   return bytes
 }
 
@@ -2346,15 +2544,15 @@ function defaultDelay(
       reject(signal.reason)
       return
     }
-    const timer = setTimeout(resolve, milliseconds)
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer)
-        reject(signal.reason)
-      },
-      { once: true },
-    )
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, milliseconds)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -2419,13 +2617,25 @@ async function* watchProviderStream(
   firstTimeoutMs: number = timeoutMs,
 ): AsyncGenerator<LlmDelta> {
   const iterator = stream[Symbol.asyncIterator]()
-  let first = true
+  const startedAt = performance.now()
+  let firstChunk = true
+  let awaitingFirstOutput = true
   try {
     while (true) {
-      const result = await nextDeltaWithTimeout(iterator, first ? firstTimeoutMs : timeoutMs, attempt)
-      first = false
+      const budgetMs = firstChunk
+        ? firstTimeoutMs
+        : awaitingFirstOutput && Number.isFinite(firstTimeoutMs) && firstTimeoutMs > 0
+          ? Math.max(timeoutMs, Math.ceil(firstTimeoutMs - Math.max(0, performance.now() - startedAt)))
+          : awaitingFirstOutput
+            ? firstTimeoutMs
+            : timeoutMs
+      const result = await nextDeltaWithTimeout(iterator, budgetMs, attempt)
+      firstChunk = false
       if (result.done) {
         return
+      }
+      if (awaitingFirstOutput && (hasModelOutput(result.value) || Boolean(result.value.finishReason))) {
+        awaitingFirstOutput = false
       }
       yield result.value
     }

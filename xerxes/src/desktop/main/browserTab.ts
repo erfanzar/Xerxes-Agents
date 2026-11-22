@@ -14,6 +14,7 @@
 
 import { session as electronSession, shell, WebContentsView, type BrowserWindow, type Session } from 'electron'
 
+import { resolveSuspendedBrowserUrl } from './perfHygiene.js'
 import { browserLoadError, browserUrl, type RemoteNetwork } from './remoteNetwork.js'
 
 export interface BrowserState {
@@ -28,6 +29,14 @@ export interface BrowserState {
 }
 export interface BrowserBounds { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
 
+/** How long a hidden Browser tab stays resident before its WebContentsView is destroyed to reclaim RAM. */
+export const DEFAULT_BROWSER_HIDDEN_SUSPEND_MS = 90_000
+
+export interface BrowserTabOptions {
+  /** Override idle-hide suspension delay in ms (0 disables auto-suspend). */
+  readonly hiddenSuspendMs?: number
+}
+
 let partitions = 0
 
 export class BrowserTab {
@@ -40,12 +49,19 @@ export class BrowserTab {
   private routeSetup: Promise<WebContentsView> | undefined
   private proxyPort: number | undefined
   private retryUrl = ''
+  private suspendedUrl = ''
+  private suspendedTitle = ''
+  private suspendTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly hiddenSuspendMs: number
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly network: () => RemoteNetwork | null,
     private readonly publish: (state: BrowserState) => void,
-  ) {}
+    options: BrowserTabOptions = {},
+  ) {
+    this.hiddenSuspendMs = Math.max(0, options.hiddenSuspendMs ?? DEFAULT_BROWSER_HIDDEN_SUSPEND_MS)
+  }
 
   private async ensure(): Promise<WebContentsView> {
     if (this.closed || this.window.isDestroyed()) throw new Error('The window is closed')
@@ -84,7 +100,8 @@ export class BrowserTab {
     ses.setPermissionCheckHandler(() => false)
     ses.on('will-download', event => event.preventDefault())
     const view = new WebContentsView({ webPreferences: {
-      session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
+      session: ses, sandbox: true, contextIsolation: true, backgroundThrottling: true, enableWebSQL: false,
+      nodeIntegration: false, nodeIntegrationInSubFrames: false,
       webviewTag: false, safeDialogs: true, spellcheck: false,
     } })
     const contents = view.webContents
@@ -124,7 +141,9 @@ export class BrowserTab {
   state(): BrowserState {
     const contents = this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
     return {
-      url: this.retryUrl || contents?.getURL() || '', title: contents?.getTitle() ?? '', loading: contents?.isLoading() ?? false,
+      url: this.retryUrl || contents?.getURL() || this.suspendedUrl,
+      title: contents?.getTitle() ?? this.suspendedTitle,
+      loading: contents?.isLoading() ?? false,
       canGoBack: contents?.navigationHistory.canGoBack() ?? false, canGoForward: contents?.navigationHistory.canGoForward() ?? false,
       via: this.network()?.label ?? null, ...(this.error ? { error: this.error } : {}),
     }
@@ -132,9 +151,28 @@ export class BrowserTab {
 
   private emit(): void { if (!this.closed) this.publish(this.state()) }
 
+  private clearSuspendTimer(): void {
+    if (this.suspendTimer !== undefined) {
+      clearTimeout(this.suspendTimer)
+      this.suspendTimer = undefined
+    }
+  }
+
+  private scheduleSuspend(): void {
+    if (this.closed || !this.view || this.hiddenSuspendMs <= 0 || this.suspendTimer !== undefined) return
+    this.suspendTimer = setTimeout(() => {
+      this.suspendTimer = undefined
+      if (!this.shown || !this.bounds || this.error) this.suspend()
+    }, this.hiddenSuspendMs)
+    this.suspendTimer.unref?.()
+  }
+
   async open(input: unknown): Promise<BrowserState> {
     const url = browserUrl(String(input ?? ''))
     const generation = this.generation
+    this.clearSuspendTimer()
+    this.suspendedUrl = ''
+    this.suspendedTitle = ''
     this.retryUrl = url
     this.error = undefined
     try {
@@ -149,7 +187,7 @@ export class BrowserTab {
 
   async navigate(action: 'back' | 'forward' | 'reload' | 'stop'): Promise<BrowserState> {
     const contents = this.view?.webContents
-    if (action === 'reload' && this.retryUrl) return this.open(this.retryUrl)
+    if (action === 'reload' && (this.retryUrl || (!contents && this.suspendedUrl))) return this.open(this.retryUrl || this.suspendedUrl)
     if (!contents || contents.isDestroyed()) return this.state()
     if (action === 'stop') { contents.stop(); return this.state() }
     if (action === 'back' && !contents.navigationHistory.canGoBack()) return this.state()
@@ -169,6 +207,11 @@ export class BrowserTab {
     const ok = rect && ['x', 'y', 'width', 'height'].every(key => typeof rect[key] === 'number' && Number.isFinite(rect[key] as number))
     this.bounds = ok ? { x: Math.round(rect.x as number), y: Math.round(rect.y as number), width: Math.max(0, Math.round(rect.width as number)), height: Math.max(0, Math.round(rect.height as number)) } : null
     this.shown = Boolean(this.bounds && this.bounds.width > 0 && this.bounds.height > 0)
+    if (this.shown && !this.view && !this.routeSetup && this.suspendedUrl && !this.closed) {
+      const restoreUrl = this.suspendedUrl
+      void this.open(restoreUrl).catch(() => {})
+      return
+    }
     this.place()
   }
 
@@ -176,16 +219,27 @@ export class BrowserTab {
     const view = this.view
     if (!view || this.window.isDestroyed()) return
     if (this.shown && this.bounds && !this.error) {
+      this.clearSuspendTimer()
       // Re-adding keeps it above the workspace view that the window may have restacked.
       this.window.contentView.addChildView(view)
       view.setBounds(this.bounds)
       view.setVisible(true)
-    } else view.setVisible(false)
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.setAudioMuted(false)
+      }
+    } else {
+      view.setVisible(false)
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.setBackgroundThrottling(true)
+        view.webContents.setAudioMuted(true)
+      }
+      this.scheduleSuspend()
+    }
   }
 
   /** Public pages can open in the system browser; a tunnelled localhost would not resolve there. */
   async openExternal(): Promise<void> {
-    const url = this.view?.webContents.getURL() ?? ''
+    const url = this.view?.webContents.getURL() || this.retryUrl || this.suspendedUrl
     if (!/^https?:/i.test(url)) return
     const host = new URL(url).hostname
     if (this.network() && /^(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
@@ -194,18 +248,54 @@ export class BrowserTab {
     await shell.openExternal(url)
   }
 
-  /** Drop the page and its session (used when the workspace changes or closes). */
-  reset(): void {
+  /**
+   * Destroy an inactive WebContentsView to release Chromium renderer RAM while preserving
+   * the page URL/title so reopening the Browser tab restores it seamlessly.
+   */
+  suspend(): void {
+    this.clearSuspendTimer()
     const view = this.view
+    if (!view) return
+    const contents = !view.webContents.isDestroyed() ? view.webContents : null
+    const currentUrl = contents?.getURL() ?? ''
+    const preservedUrl = resolveSuspendedBrowserUrl(currentUrl, this.retryUrl)
+    if (preservedUrl) {
+      this.suspendedUrl = preservedUrl
+      this.suspendedTitle = preservedUrl === currentUrl ? (contents?.getTitle() ?? '') : ''
+    }
     this.generation++
     this.routeSetup = undefined
     this.proxyPort = undefined
     this.retryUrl = ''
     this.view = null
+    if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view)
+    if (contents) {
+      void contents.session.clearCache().catch(() => {})
+      void contents.session.closeAllConnections().catch(() => {})
+      contents.close()
+    }
+    this.emit()
+  }
+
+  /** Drop the page and its session (used when the workspace changes or closes). */
+  reset(): void {
+    this.clearSuspendTimer()
+    const view = this.view
+    this.generation++
+    this.routeSetup = undefined
+    this.proxyPort = undefined
+    this.retryUrl = ''
+    this.suspendedUrl = ''
+    this.suspendedTitle = ''
+    this.view = null
     this.error = undefined
     if (view) {
       if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view)
-      if (!view.webContents.isDestroyed()) view.webContents.close()
+      if (!view.webContents.isDestroyed()) {
+        void view.webContents.session.clearCache().catch(() => {})
+        void view.webContents.session.closeAllConnections().catch(() => {})
+        view.webContents.close()
+      }
     }
     this.emit()
   }

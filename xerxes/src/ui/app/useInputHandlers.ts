@@ -213,6 +213,14 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     if (overlay.agents) {
       return patchOverlayState({ agents: false })
     }
+
+    if (overlay.sideQuestion) {
+      return patchOverlayState({ sideQuestion: false })
+    }
+
+    if (overlay.swarm) {
+      return patchOverlayState({ swarm: false })
+    }
   }
 
   const cycleQueue = (dir: 1 | -1) => {

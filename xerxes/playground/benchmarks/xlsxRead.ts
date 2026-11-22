@@ -56,7 +56,8 @@ export function readWorkbookCells(bytes: Uint8Array): WorkbookCells {
 }
 
 function resolvePart(target: string): string {
-  return target.startsWith('/') ? target.slice(1) : posix.normalize(`xl/${target}`)
+  const normalizedTarget = target.replaceAll('\\', '/')
+  return normalizedTarget.startsWith('/') ? posix.normalize(normalizedTarget.slice(1)) : posix.normalize(`xl/${normalizedTarget}`)
 }
 
 function attribute(attributes: string, name: string): string | undefined {
@@ -118,7 +119,7 @@ function decodeEntities(value: string): string {
     if (lower === 'quot') return '"'
     if (lower === 'apos') return "'"
     const codePoint = lower.startsWith('#x') ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10)
-    if (!Number.isSafeInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return whole
+    if (!Number.isSafeInteger(codePoint) || codePoint <= 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return whole
     return String.fromCodePoint(codePoint)
   })
 }

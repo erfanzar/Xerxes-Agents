@@ -21,7 +21,8 @@ import {
   type HubHealthState,
 } from './hubHealthShared.js'
 import {
-  IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, asChatImageResult, chatImageRequestOf, chatImageWire, externalUrlOf,
+  IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, PROJECT_ICON_CHANNEL,
+  asChatImageResult, asProjectIconDataUrl, chatImageRequestOf, chatImageWire, externalUrlOf, isAbsolutePath,
   type ChatImageResult,
 } from './chatMediaShared.js'
 import { FILE_ACTION_CHANNEL, asFileActionResult, fileActionRequestOf, type FileActionResult } from './fileActionShared.js'
@@ -304,6 +305,22 @@ export function createBridge(transport: BridgeTransport) {
     return transport.invoke('desktop:workspaces') as Promise<string[]>
   },
 
+  /** Remove a local workspace folder from the remembered sidebar list (never deletes files on disk). */
+  removeWorkspace(dir: unknown): Promise<string[]> {
+    if (typeof dir !== 'string' || !isAbsolutePath(dir) || /[\x00-\x1f]/.test(dir)) {
+      return Promise.reject(new TypeError('invalid workspace dir'))
+    }
+    return transport.invoke('desktop:remove-workspace', dir) as Promise<string[]>
+  },
+
+  /** Re-add a previously removed local workspace folder to the remembered sidebar list (Undo). */
+  restoreWorkspace(dir: unknown): Promise<string[]> {
+    if (typeof dir !== 'string' || !isAbsolutePath(dir) || /[\x00-\x1f]/.test(dir)) {
+      return Promise.reject(new TypeError('invalid workspace dir'))
+    }
+    return transport.invoke('desktop:restore-workspace', dir) as Promise<string[]>
+  },
+
   openWorkspaceWindow(dir?: unknown, resumeSessionId?: unknown, options?: unknown): Promise<unknown> {
     if (dir !== undefined && (typeof dir !== 'string' || !dir || /[\x00-\x1f]/.test(dir))) return Promise.reject(new TypeError('invalid workspace dir'))
     if (resumeSessionId !== undefined && (typeof resumeSessionId !== 'string' || !resumeSessionId || resumeSessionId.length > 256 || /[\x00-\x1f]/.test(resumeSessionId))) return Promise.reject(new TypeError('invalid session identity'))
@@ -417,6 +434,18 @@ export function createBridge(transport: BridgeTransport) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return { ok: false, error: message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '').slice(0, 300) || 'the image could not be read' }
+    }
+  },
+
+  /** Real workspace favicon / project logo as a bounded `data:` URL, or null if absent. Never rejects. */
+  async projectIcon(cwd: unknown): Promise<string | null> {
+    if (typeof cwd !== 'string' || !cwd || cwd.length > 4096 || /[\x00-\x1f\x7f]/.test(cwd) || !isAbsolutePath(cwd)) {
+      return null
+    }
+    try {
+      return asProjectIconDataUrl(await transport.invoke(PROJECT_ICON_CHANNEL, cwd))
+    } catch {
+      return null
     }
   },
 

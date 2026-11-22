@@ -78,6 +78,15 @@ import { compactionCompletionPort } from "./daemon/server.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { nativeSubagentWorktrees } from "./runtime/subagentWorktrees.js";
 import { createNativeSubagentHost, subagentRetryWirePayload, type NativeSubagentHostOptions } from "./daemon/subagentHost.js";
+import { requestDaemonControl } from "./daemon/controlClient.js";
+import {
+  parseSwarmCommand,
+  renderSwarmChannelsText,
+  renderSwarmStatusText,
+} from "./daemon/swarmCommand.js";
+import { DaemonSwarmHost } from "./daemon/swarmHost.js";
+import type { SwarmBoardMessage, SwarmStatusSnapshot } from "./swarm/types.js";
+import { registerSwarmTools } from "./tools/swarmTools.js";
 import { AgentTurnRunner, formatSubagentResults, SessionPromptSnapshots } from "./daemon/turnRunner.js";
 import {
   defaultSkillDiscoveryRoots,
@@ -253,6 +262,7 @@ const HELP_GROUPS: readonly {
     commands: [
       ["xerxes", "open the interactive terminal interface"],
       ["xerxes [prompt]", "run one turn and exit"],
+      ["xerxes immortals [<task>|status|channels|kill <name|all>|stop]", "coordinate a parallel multi-agent Immortals force (alias: swarm)"],
       ["xerxes --agent <name|path> [prompt]", "run one turn as a named or file-defined agent"],
       ["xerxes --resume <session_id> [prompt]", "continue an earlier session"],
     ],
@@ -300,6 +310,24 @@ const HELP_GROUPS: readonly {
     ],
   },
 ];
+
+const IMMORTALS_CLI_HELP = [
+  "Xerxes Immortals — parallel multi-agent coordination on a shared message board",
+  "",
+  "Usage:",
+  "  xerxes immortals <task>                                       run a one-shot Immortals coordinator session",
+  "  xerxes immortals status [--project-dir <d>] [--socket <p>] [--session <id>]",
+  "                                                                show Immortals status from the running daemon",
+  "  xerxes immortals channels [--project-dir <d>] [--socket <p>] [--session <id>]",
+  "                                                                list Immortals board channels from the daemon",
+  "  xerxes immortals kill <name|all> [--project-dir <d>] [--socket <p>] [--session <id>]",
+  "                                                                stop a worker, group, or all living workers",
+  "  xerxes immortals stop [--project-dir <d>] [--socket <p>] [--session <id>]",
+  "                                                                stop all living Immortals workers",
+  "  xerxes immortals board                                        open the TUI (or show status if non-interactive)",
+  "",
+  "Legacy alias: `xerxes swarm ...` is accepted identically.",
+].join("\n");
 
 /** Render `--help` with aligned descriptions and coloured invocations. */
 function renderHelp(writer: CliWriter): void {
@@ -1088,6 +1116,8 @@ if (argument === "--help" || argument === "-h") {
   process.exit(0);
 } else if (argument === "acp") {
   await runAcp(argumentsAfterCommand);
+} else if (argument === "immortals" || argument === "swarm") {
+  await runImmortalsCli(argumentsAfterCommand);
 } else if (argument === "-r" || argument === "--resume") {
   const sessionId = argumentsAfterCommand[0]?.trim();
   if (!sessionId || sessionId.startsWith("-")) {
@@ -1191,27 +1221,25 @@ async function runDaemonOwned(
   const monitorWebhookHub = daemonMonitorWebhookHub(config, process.env);
   const terminals = new TerminalRegistry({ runHistory });
   let announceMonitorEvent: ConstructorParameters<typeof TerminalMonitors>[2];
+  const resolveMonitorWorkspace = (owner: string, label: string): string => {
+    const activeScope = getActiveSession<{ id?: string; cwd?: string }>();
+    if (activeScope?.cwd && activeScope.id === owner) {
+      return activeScope.cwd;
+    }
+    const baseOwner = owner.includes(':swarm:') ? owner.split(':swarm:', 1)[0]! : owner;
+    const session = runtime.listSessions().find(candidate => candidate.id === owner || candidate.id === baseOwner);
+    if (!session) throw new Error(`${label} monitor owner session is unavailable`);
+    return session.cwd;
+  };
   const monitors = new TerminalMonitors(terminals, runHistory, (monitor, event) => announceMonitorEvent?.(monitor, event), undefined, reactionMailbox, {
     source: nativeFileMonitorSource,
-    resolveWorkspace: (owner) => {
-      const session = runtime.listSessions().find(candidate => candidate.id === owner);
-      if (!session) throw new Error('File monitor owner session is unavailable');
-      return session.cwd;
-    },
+    resolveWorkspace: owner => resolveMonitorWorkspace(owner, 'File'),
   }, {
     source: nativeWebSocketMonitorSource,
-    resolveWorkspace: owner => {
-      const session = runtime.listSessions().find(candidate => candidate.id === owner);
-      if (!session) throw new Error('WebSocket monitor owner session is unavailable');
-      return session.cwd;
-    },
+    resolveWorkspace: owner => resolveMonitorWorkspace(owner, 'WebSocket'),
   }, monitorWebhookHub ? {
     source: monitorWebhookHub,
-    resolveWorkspace: owner => {
-      const session = runtime.listSessions().find(candidate => candidate.id === owner);
-      if (!session) throw new Error('Webhook monitor owner session is unavailable');
-      return session.cwd;
-    },
+    resolveWorkspace: owner => resolveMonitorWorkspace(owner, 'Webhook'),
   } : undefined);
   const buildId = await daemonBuildIdForEntry(
     import.meta.dir,
@@ -1221,9 +1249,11 @@ async function runDaemonOwned(
   // its events, and the server needs the runtime. Same shape as `finishDaemon`
   // below.
   let announceModeChange: ((sessionId: string) => void) | undefined;
-  // The runtime builds the one PTY manager; the server needs it for the
-  // desktop's interactive terminal tab (terminal.open / resize).
+  // The runtime builds the one PTY, background-command, and LSP managers; share
+  // them with both the daemon RPC surface and native swarm workers.
   let ptySessions: PtySessionManager | undefined;
+  let sharedBackgroundCommands: BackgroundCommandManager | undefined;
+  let sharedLspManager: ReturnType<typeof loadConfiguredLsp> | undefined;
   const learning = createLearningServices(projectDirectory ?? config.projectDirectory, skillRegistry);
   const runtime = daemonRuntime(
     config,
@@ -1238,6 +1268,10 @@ async function runDaemonOwned(
       reflection: input => daemon.reflectAfterTurn(input),
       onSessionModeChange: (sessionId) => announceModeChange?.(sessionId),
       exposePtySessions: (manager) => { ptySessions = manager; },
+      exposeSwarmToolHosts: (hosts) => {
+        sharedBackgroundCommands = hosts.backgroundCommands;
+        sharedLspManager = hosts.lspManager;
+      },
       workspaces,
       skillRegistry,
       managedPlugins,
@@ -1276,8 +1310,68 @@ async function runDaemonOwned(
   // The limit one agent command's process tree may reach before it is stopped.
   const memoryGuardFile = join(xerxesHome(), "daemon", "memory-guard.json");
   let memoryGuardSettings = await readMemoryGuardSettings(memoryGuardFile);
+  let daemonRef: InstanceType<typeof DaemonServer> | undefined;
+  const swarmHost = new DaemonSwarmHost({
+    profileStore,
+    modelInventoryHost: (sessionId, params, signal) => {
+      if (!daemonRef) throw new Error("Daemon is still initializing");
+      return daemonRef.modelInventoryToolRequest(sessionId, params, signal);
+    },
+    scheduleHost: (sessionId, action, params, signal) => {
+      if (!daemonRef) throw new Error("Daemon is still initializing");
+      return daemonRef.scheduleToolRequest(sessionId, action, params, signal, true);
+    },
+    ...(sharedBackgroundCommands ? { backgroundCommands: sharedBackgroundCommands } : {}),
+    ptySessions: () => ptySessions,
+    terminalRegistry: terminals,
+    terminalMonitors: monitors,
+    ...(sharedLspManager ? { lspManager: sharedLspManager } : {}),
+    mcpManager: (cwd) => workspaces.peek(cwd)?.mcpManager ?? mcpManager,
+    permissionMode: (session) => {
+      if (session?.interactionMode === "plan") return "plan";
+      return runtimePermissionMode(session?.permissionMode ?? runtime.status().permission_mode) ?? DEFAULT_PERMISSION_MODE;
+    },
+    skillRegistryForWorkspace: (cwd) => workspaces.peek(cwd)?.skillRegistry ?? skillRegistry,
+    sessionLookup: (sessionId) => runtime.listSessions().find((item) => item.id === sessionId),
+    defaultModel: () => String(runtime.status().model ?? profileStore.active()?.model ?? ""),
+    resolveWorkerLlm: (session, member) => {
+      if (session) {
+        const remote = remoteProviderBindings.client(session, member.model);
+        if (remote) return remote;
+      }
+      const profile = (session ? sessionProvider(profileStore, session, member.model) : undefined)
+        ?? profileStore.list().find((candidate) => candidate.model === member.model)
+        ?? profileStore.active();
+      if (profile && (profile.api_key || profile.provider === "ollama" || profile.provider === "openai-codex" || profile.provider === "claude-code" || profile.provider === "github-copilot")) {
+        return createLlmClient(
+          member.model,
+          { provider: profile.provider, api_key: profile.api_key, base_url: profile.base_url },
+          profileSessionOptions(profile),
+        );
+      }
+      const conn = runtimeConnection(config, profileStore.active(), { claudeCodeChosen: profileStore.activeIsExplicit() });
+      if (conn) {
+        return createLlmClient(member.model, {
+          ...(conn.provider ? { provider: conn.provider } : {}),
+          ...(conn.apiKey ? { api_key: conn.apiKey } : {}),
+          ...(conn.baseUrl ? { base_url: conn.baseUrl } : {}),
+          ...(conn.responsesApi ? { responses_api: true } : {}),
+        });
+      }
+      return runtime.defaultLlmClient?.();
+    },
+    onCoordinatorModelSwitch: async (sessionId, modelInfo) => {
+      const target = runtime.listSessions().find((item) => item.id === sessionId);
+      if (target) {
+        target.model = modelInfo.id;
+        target.modelPinned = true;
+        await runtime.flushSessions();
+      }
+    },
+  });
   const daemon = new DaemonServer({
     learning,
+    swarmHost,
     memoryGuard: { settingsFile: memoryGuardFile, applied: settings => { memoryGuardSettings = settings; } },
     compactionSettingsFile: compactionSettingsPath(xerxesHome()),
     goalRearmFile: join(xerxesHome(), "daemon", "goal-rearm.json"),
@@ -1333,6 +1427,7 @@ async function runDaemonOwned(
       : {}),
     ...(pidPath ? { pidPath } : {}),
   });
+  daemonRef = daemon;
   announceModeChange = (sessionId) => daemon.notifySessionModeChanged(sessionId);
   announceMonitorEvent = (monitor, event) => daemon.notifyMonitorEvent(monitor, event);
   try {
@@ -2030,6 +2125,11 @@ function daemonRuntime(
     readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
     /** Receives the runtime's PTY manager once it exists. */
     readonly exposePtySessions?: (manager: PtySessionManager) => void;
+    /** Shares the runtime's background-command and LSP managers with swarm workers. */
+    readonly exposeSwarmToolHosts?: (hosts: {
+      readonly backgroundCommands: BackgroundCommandManager;
+      readonly lspManager: ReturnType<typeof loadConfiguredLsp>;
+    }) => void;
     readonly skillRegistry?: SkillRegistry;
     readonly managedPlugins?: ManagedPlugins;
     readonly mcpManager?: MCPManager;
@@ -2150,6 +2250,7 @@ function daemonRuntime(
     activeWorkspaceRoot: () => getActiveSession<{ cwd: string }>()?.cwd,
   });
   host.exposePtySessions?.(ptySessions);
+  host.exposeSwarmToolHosts?.({ backgroundCommands, lspManager });
   // Both process-owning managers share the daemon teardown contract; the
   // runtime accepts one lifecycle object, so compose them here.
   const processLifecycle = {
@@ -3286,6 +3387,116 @@ async function runAcp(args: readonly string[]): Promise<void> {
   }
 }
 
+async function runImmortalsCli(args: readonly string[]): Promise<void> {
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(IMMORTALS_CLI_HELP);
+    process.exit(0);
+  }
+  let projectDirectory: string | undefined;
+  let socketPath: string | undefined;
+  let sessionId: string | undefined;
+  const positional: string[] = [];
+  let parsingOptions = true;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === undefined) continue;
+    if (parsingOptions && token === "--") {
+      parsingOptions = false;
+      continue;
+    }
+    if (parsingOptions && (token === "--project-dir" || token === "--socket" || token === "--session")) {
+      const value = args[index + 1];
+      if (value === undefined) {
+        reportCommandUsageError(
+          new Error(`immortals option ${token} requires a value`),
+          "xerxes immortals --help",
+        );
+      }
+      if (token === "--project-dir") projectDirectory = value;
+      else if (token === "--socket") socketPath = value;
+      else sessionId = value;
+      index += 1;
+      continue;
+    }
+    if (parsingOptions && isFlagLikeToken(token)) {
+      reportCommandUsageError(
+        new Error(`Unknown immortals option '${token}'. Put dash-led task text after '--'.`),
+        "xerxes immortals --help",
+      );
+    }
+    positional.push(token);
+  }
+
+  if (positional.length === 0) {
+    if (process.stdin.isTTY && process.stdout.isTTY && !socketPath && !projectDirectory && !sessionId) {
+      await runTui();
+      return;
+    }
+    console.log(IMMORTALS_CLI_HELP);
+    process.exit(0);
+  }
+
+  const parsed = parseSwarmCommand(positional.join(" "));
+  if (parsed.kind === "invalid-kill") {
+    reportCommandUsageError(
+      new Error('Specify a worker name or "all".'),
+      "xerxes immortals --help",
+    );
+  }
+
+  if (parsed.kind === "status" && parsed.openBoard && process.stdin.isTTY && process.stdout.isTTY && !socketPath && !projectDirectory && !sessionId) {
+    await runTui();
+    return;
+  }
+
+  if (parsed.kind === "activate") {
+    await runOneShotOrUsageError(parsed.task, cliAgentReference, { activateImmortals: true });
+    return;
+  }
+
+  const resolvedSocket = socketPath ?? daemonPaths(projectDirectory).socketPath;
+  const sessionParams = sessionId ? { session_id: sessionId } : {};
+  try {
+    if (parsed.kind === "status") {
+      const [rawStatus, rawBoard] = await Promise.all([
+        requestDaemonControl(resolvedSocket, "swarm.status", sessionParams),
+        requestDaemonControl(resolvedSocket, "swarm.board", { ...sessionParams, limit: 15 }),
+      ]);
+      const status = rawStatus as unknown as SwarmStatusSnapshot;
+      const messages = Array.isArray(rawBoard.messages)
+        ? (rawBoard.messages as unknown as SwarmBoardMessage[])
+        : [];
+      console.log(renderSwarmStatusText(status, messages));
+      process.exit(0);
+    }
+    if (parsed.kind === "channels") {
+      const rawStatus = await requestDaemonControl(resolvedSocket, "swarm.status", sessionParams);
+      const status = rawStatus as unknown as SwarmStatusSnapshot;
+      console.log(renderSwarmChannelsText(status.channels ?? [], status.title));
+      process.exit(0);
+    }
+    const killedRes = await requestDaemonControl(resolvedSocket, "swarm.kill", {
+      ...sessionParams,
+      name: parsed.target,
+    });
+    const killed = Array.isArray(killedRes.killed)
+      ? killedRes.killed.filter((item): item is string => typeof item === "string")
+      : [];
+    const text = killed.length > 0
+      ? `Killed Immortals worker(s): ${killed.join(", ")}`
+      : parsed.target.toLowerCase() === "all"
+        ? "No living Immortals workers to stop."
+        : `No living Immortals worker matched "${parsed.target}".`;
+    console.log(text);
+    process.exit(0);
+  } catch (error) {
+    reportCommandUsageError(
+      error instanceof Error ? error : new Error(String(error)),
+      "xerxes immortals --help",
+    );
+  }
+}
+
 /**
  * Run a one-shot turn, rendering a missing provider configuration as a clean
  * usage error.
@@ -3297,9 +3508,14 @@ async function runAcp(args: readonly string[]): Promise<void> {
 async function runOneShotOrUsageError(
   prompt: string,
   agentReference?: string,
+  options: { readonly activateImmortals?: boolean } = {},
 ): Promise<void> {
   try {
-    await runOneShot(prompt, agentReference, { outputFormat: cliOutputFormat, noSave: cliNoSave });
+    await runOneShot(prompt, agentReference, {
+      outputFormat: cliOutputFormat,
+      noSave: cliNoSave,
+      ...(options.activateImmortals === true ? { activateImmortals: true } : {}),
+    });
   } catch (error) {
     if (error instanceof RuntimeConnectionRequiredError) {
       reportCommandUsageError(error, "xerxes --help");
@@ -3311,7 +3527,7 @@ async function runOneShotOrUsageError(
 async function runOneShot(
   prompt: string,
   agentReference?: string,
-  options: { readonly outputFormat?: OutputFormat; readonly noSave?: boolean } = {},
+  options: { readonly outputFormat?: OutputFormat; readonly noSave?: boolean; readonly activateImmortals?: boolean } = {},
 ): Promise<void> {
   const config = loadSystemDaemonConfig();
   applyLocalOnly(config);
@@ -3329,6 +3545,7 @@ async function runOneShot(
   const mcpManager = new MCPManager();
   const lspManager = loadConfiguredLsp(xerxesHome());
   const computerUseHost = new MacOSComputerUseHost();
+  let oneShotSwarmHost: DaemonSwarmHost | undefined;
   try {
   await startConfiguredMcpServers(mcpManager, mcpHostOptions(workspaceRoot));
   const tools = new ToolRegistry();
@@ -3438,12 +3655,45 @@ async function runOneShot(
     manager: subagentHost.managerPort,
     workflowPreflight: workflowPreflightPorts(profileStore, workspaceRoot),
   });
+  const sessionId = saveRun ? newOneShotSessionId() : `oneshot-${crypto.randomUUID()}`;
+  oneShotSwarmHost = new DaemonSwarmHost({
+    profileStore,
+    fallbackLlm: llm,
+    defaultModel: () => model,
+    permissionMode: () => connection.permissionMode,
+    lspManager,
+    mcpManager,
+    modelInventoryHost: profileInventoryHost(profileStore, new AgentSettingsStore(join(xerxesHome(), 'daemon', 'agent-settings.sqlite'))),
+    skillRegistryForWorkspace: () => skillRegistry,
+  });
+  const oneShotSwarmManager = await oneShotSwarmHost.ensureSession({
+    id: sessionId,
+    cwd: workspaceRoot,
+    model,
+  });
+  const immortalsActivation = options.activateImmortals === true
+    ? await oneShotSwarmHost.activateCoordinator({
+        id: sessionId,
+        cwd: workspaceRoot,
+        model,
+        enabled: true,
+      })
+    : undefined;
+  const oneShotSwarmRegistration = registerSwarmTools(tools, {
+    swarm: oneShotSwarmManager,
+  });
   const agentTools = agentToolDefinitions(tools.definitions(), agent);
   // The daemon's prompt-profile rule: lean for Bonsai models and small
   // windows unless prompt_profile says otherwise.
   const activeProfile = config.runtime.provider || config.runtime.base_url || config.runtime.api_key ? undefined : profileStore.active();
   const lean = parsePromptProfileConfig(config.runtime, process.env, activeProfile?.prompt_profile, childPromptRoute(profileStore, model)) === "lean";
-  const selectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  const baseSelectedTools = lean ? selectLeanTools(agentTools) : agentTools;
+  const selectedTools = [
+    ...baseSelectedTools,
+    ...oneShotSwarmRegistration.visibleDefinitions().filter(
+      def => !baseSelectedTools.some(existing => existing.function.name === def.function.name),
+    ),
+  ];
   // The safety floor in auto mode: inputs locked, new files in the working
   // folder, commands in the OS sandbox. Without it every write and command is refused.
   const runSafety = await oneShotRunSafety(connection.permissionMode, "oneshot", workspaceRoot);
@@ -3460,6 +3710,7 @@ async function runOneShot(
         }),
         // An explicit --agent keeps its role; the default agent's long prompt is what lean replaces.
         agentReference === undefined ? undefined : agent?.systemPrompt,
+        immortalsActivation?.prompt_overlay,
       )
     : joinSystemPrompts(
         (await bootstrap({
@@ -3472,11 +3723,11 @@ async function runOneShot(
         agent?.systemPrompt,
         await agentMemory.toPromptSection(),
         await selfMemory.systemPromptAddendum(),
+        immortalsActivation?.prompt_overlay,
       );
   const feedback = process.env.XERXES_EDIT_DIAGNOSTICS?.trim() === "0" ? undefined : new EditFeedback(workspaceRoot, undefined, lspManager.configured ? lspManager.forWorkspace(workspaceRoot) : undefined);
   // A saved run is a normal daemon session (same store and format), so
   // `xerxes --resume <id> "prompt"` continues it after an interruption.
-  const sessionId = saveRun ? newOneShotSessionId() : `oneshot-${crypto.randomUUID()}`;
   const state = createAgentState();
   const recorder = saveRun
     ? new OneShotSessionRecorder({
@@ -3616,6 +3867,8 @@ async function runOneShot(
         catch (error) { console.error(`Could not save session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`); }
       }
     } finally {
+      oneShotSwarmRegistration.dispose();
+      await oneShotSwarmHost.close();
       await subagentHost.manager.shutdown();
     }
   }
@@ -3656,8 +3909,11 @@ async function runOneShot(
   // must learn about it through the exit code rather than stdout alone.
   if (terminalProviderError !== undefined) process.exitCode = 1;
   } finally {
-    try { await computerUseHost.dispose(); }
-    finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
+    try { await oneShotSwarmHost?.close(); }
+    finally {
+      try { await computerUseHost.dispose(); }
+      finally { try { await lspManager.close(); } finally { await mcpManager.disconnectAll(); } }
+    }
   }
 }
 

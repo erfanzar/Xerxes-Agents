@@ -68,6 +68,7 @@ import { useLongRunToolCharms } from './useLongRunToolCharms.js'
 import { useLearningSync } from './useLearningSync.js'
 import { useSessionLifecycle } from './useSessionLifecycle.js'
 import { useSubmission } from './useSubmission.js'
+import { useSwarmSync } from './useSwarmSync.js'
 
 const GOOD_VIBES_RE = /\b(good bot|thanks|thank you|thx|ty|ily|love you)\b/i
 const BRACKET_PASTE_ON = '\x1b[?2004h'
@@ -151,6 +152,7 @@ export async function startPromptLiveSession({
 
 export function useMainApp(gw: GatewayClient) {
   useLearningSync(gw)
+  useSwarmSync(gw)
   const { exit } = useApp()
   const { stdout } = useStdout()
   const [terminalCols, setTerminalCols] = useState(stdout?.columns ?? 80)

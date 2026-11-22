@@ -4,6 +4,12 @@ import { join } from 'node:path'
 import { LspManager } from './manager.js'
 import { LspSettingsStore } from './settingsStore.js'
 
+export {
+  discoverWorkspaceLspServers,
+  mergeDiscoveredLspServers,
+  type WorkspaceLspDiscoveryOptions,
+} from './discovery.js'
+
 /** Only the user configuration directory supplies executable LSP settings. No project discovery. */
 export function loadConfiguredLsp(home: string): LspManager {
   const snapshot = new LspSettingsStore(join(home, 'lsp.json')).read()

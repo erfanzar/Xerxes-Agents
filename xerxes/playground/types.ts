@@ -117,8 +117,17 @@ export interface EvaluationAgent {
 /** Per-turn limits. Retry behavior belongs to the agent implementation. */
 export interface EvaluationTurnOptions {
   readonly retries?: number
+  readonly signal?: AbortSignal
   readonly timeoutMs?: number
 }
+
+/** Deterministic failure taxonomy distinguishing harness/provider faults from model misses. */
+export type EvaluationFailureCategory =
+  | 'assertion_failed'
+  | 'cancelled'
+  | 'grader_exception'
+  | 'timeout'
+  | 'transport_error'
 
 /** A pass/fail outcome returned by a task-specific behavioral grader. */
 export interface EvaluationCheck {

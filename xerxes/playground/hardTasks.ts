@@ -932,16 +932,15 @@ async function runProbe(
     stdin: "ignore",
     stdout: "pipe",
   });
+  const stdoutPromise = new Response(child.stdout).text().catch(() => "");
+  const stderrPromise = new Response(child.stderr).text().catch(() => "");
   const exitCode = await childExitBeforeDeadline(child, PROBE_TIMEOUT_MS);
   if (exitCode === undefined) {
     child.kill("SIGKILL");
-    await child.exited;
+    await childExitBeforeDeadline(child, 250);
     return fail(`behavioral probe timed out after ${PROBE_TIMEOUT_MS}ms`);
   }
-  const [stdout, stderr] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
   if (exitCode !== 0)
     return fail(
       `behavioral probe failed: ${lastLine(stderr) || lastLine(stdout) || `exit ${exitCode}`}`,

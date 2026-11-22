@@ -8,6 +8,8 @@ agent:
     - ReadFile
     - WriteFile
     - FileEditTool
+    - ApplyPatchTool
+    - FileOutlineTool
     - GlobTool
     - GrepTool
     - ListDir

@@ -70,6 +70,10 @@ export interface XerxesBridge {
   /** Present the folder picker; open independently of the current workspace. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
+  /** Remove a local folder from the remembered sidebar workspace list (never deletes files on disk). */
+  removeWorkspace?(dir: string): Promise<string[]>
+  /** Re-add a previously removed local folder to the remembered sidebar workspace list. */
+  restoreWorkspace?(dir: string): Promise<string[]>
   /** existingOnly: bring forward a view already showing the session, else open nothing (resolves null). */
   openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean; agentPreset?: string }): Promise<unknown>
   /** True once, for a window opened to start a fresh task. */
@@ -101,6 +105,8 @@ export interface XerxesBridge {
   openExternal?(url: string): Promise<boolean>
   /** An image file the chat shows, read by the host and returned as a data URL, or the reason it cannot be. */
   imageData?(request: ChatImageRequestWire): Promise<ChatImageResult>
+  /** Real workspace logo / favicon discovered on disk as a bounded data URL, or null when absent. */
+  projectIcon?(cwd: string): Promise<string | null>
   /** Open a workspace file in its default app (`open`) or show it in Finder (`reveal`); see fileActionShared.ts. */
   fileAction?(action: FileAction, path: string, cwd: string): Promise<FileActionResult>
 }
@@ -306,6 +312,7 @@ export interface QuestionItem {
   readonly question: string
   readonly options: readonly string[]
   readonly allowFreeform: boolean
+  readonly multiSelect?: boolean
   readonly placeholder?: string
 }
 

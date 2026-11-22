@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createSlashHandler } from '../app/createSlashHandler.js'
 import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
+import { resetSideQuestionStore } from '../app/sideQuestionStore.js'
 import { patchUiState, resetUiState } from '../app/uiStore.js'
 import type { Msg, SlashCatalog } from '../types.js'
 
@@ -240,6 +241,7 @@ describe('createSlashHandler', () => {
   });
   afterEach(() => {
     resetOverlayState()
+    resetSideQuestionStore()
     resetUiState()
   })
 
@@ -357,9 +359,16 @@ describe('createSlashHandler', () => {
     expect(request).not.toHaveBeenCalled()
   })
 
-  it('keeps /btw daemon-owned instead of aliasing it to /background', async () => {
+  it('opens the side question overlay on /btw instead of aliasing it to /background', async () => {
     patchUiState({ sid: 's1' })
-    const request = vi.fn().mockResolvedValue({})
+    const request = vi.fn().mockResolvedValue({
+      answer: 'Nothing outside src/ui.',
+      model: 'gpt-test',
+      ok: true,
+      question: 'what changed?',
+      request_id: 'btw-1',
+      session_id: 's1'
+    })
     const fixture = makeContext(request)
 
     createSlashHandler(fixture.context)('/btw what changed?')
@@ -367,7 +376,16 @@ describe('createSlashHandler', () => {
 
     expect(fixture.dispatch).toEqual([])
     expect(getOverlayState().sessions).toBe(false)
-    expect(request).toHaveBeenCalledWith('slash.exec', { command: 'btw what changed?', session_id: 's1' })
+    expect(getOverlayState().sideQuestion).toBe(true)
+    expect(request).toHaveBeenCalledWith(
+      'session.side_question',
+      {
+        question: 'what changed?',
+        request_id: expect.any(String),
+        session_id: 's1'
+      },
+      { reportError: false }
+    )
   })
 
   it.each(['/agents pause', '/agents resume', '/replay list', '/replay load /tmp/tree.json', '/tools disable shell'])(

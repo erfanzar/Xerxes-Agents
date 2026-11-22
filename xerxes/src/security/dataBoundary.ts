@@ -31,6 +31,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import type { PermissionDisposition } from '../streaming/permissions.js'
+import { inspectPatchTargets } from '../tools/applyPatchTool.js'
 import type { JsonObject, ToolCall } from '../types/toolCalls.js'
 import {
   DataBoundaryError,
@@ -183,8 +184,13 @@ export function deriveDataTrust(profile: { readonly base_url?: string; readonly 
   }
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1)
   if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return 'local'
-  const v4 = host.startsWith('::ffff:') ? host.slice('::ffff:'.length) : host
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4) ? 'local' : 'cloud'
+  if (host.startsWith('::ffff:')) {
+    const mapped = host.slice('::ffff:'.length)
+    // WHATWG URL canonicalizes `http://[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`.
+    if (/^7f[\da-f]{2}:[\da-f]{1,4}$/.test(mapped)) return 'local'
+    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(mapped) ? 'local' : 'cloud'
+  }
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ? 'local' : 'cloud'
 }
 
 /** Records which agents have seen private data. Keys must match the agent ids passed to the boundary. */
@@ -284,12 +290,26 @@ interface ShellSegment {
 }
 
 const SHELL_TOOLS = new Set(['exec_command', 'ExecuteShell', 'Bash', 'shell', 'pty_open', 'pty_write'])
-const WRITE_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'MultiEdit', 'AppendFile', 'NotebookEdit', 'XlsxWriter', 'XlsxConvert'])
-/** The argument naming the file a write tool writes, where it is not `file_path` or `notebook_path`. */
-const WRITE_TARGET_KEYS: Readonly<Record<string, string>> = { XlsxWriter: 'path', XlsxConvert: 'output_path' }
+const WRITE_TOOLS = new Set([
+  'Write', 'WriteFile', 'write_file', 'Edit', 'FileEditTool', 'ApplyPatchTool', 'find_and_replace',
+  'MultiEdit', 'AppendFile', 'NotebookEdit', 'NotebookEditTool',
+  'copy_file', 'move_file', 'delete_file', 'XlsxWriter', 'XlsxConvert',
+])
+/** Arguments naming paths mutated by a write tool, where not `file_path` or `notebook_path`. */
+const WRITE_TARGET_KEYS: Readonly<Record<string, readonly string[]>> = {
+  XlsxWriter: ['path'],
+  XlsxConvert: ['output_path'],
+  copy_file: ['destination'],
+  move_file: ['source', 'destination'],
+  delete_file: ['path'],
+}
+const DIRECTORY_LIST_TOOLS = new Set(['ListDir', 'list_directory'])
 const CONTENT_SEARCH_TOOLS = new Set(['GrepTool', 'Grep'])
 const NAME_GLOB_TOOLS = new Set(['GlobTool', 'Glob'])
-const PATH_KEYS = ['file_path', 'path', 'directory_path', 'notebook_path'] as const
+const PATH_KEYS = [
+  'file_path', 'path', 'directory_path', 'directory', 'notebook_path',
+  'source', 'destination', 'output_path', 'repo_path',
+] as const
 const SEARCH_EXECUTABLES = new Set(['rg', 'ag', 'ack', 'fd', 'find', 'tar', 'zip', 'rsync'])
 const FOLD_CASE = process.platform === 'darwin' || process.platform === 'win32'
 
@@ -503,6 +523,34 @@ export class DataBoundary {
       const value = inputs[key]
       if (typeof value === 'string' && value.trim() && this.isPrivatePath(value)) return value
     }
+    if (name === 'ApplyPatchTool' && typeof inputs.patch === 'string' && inputs.patch.trim()) {
+      for (const candidate of inspectPatchTargets(inputs.patch).allPaths) {
+        if (this.isPrivatePath(candidate)) return candidate
+      }
+    }
+    if (name === 'FileOutlineTool' && typeof inputs.file_path === 'string' && inputs.file_path.trim()) {
+      const rawTarget = inputs.file_path.trim()
+      if (/[*?[{]/.test(rawTarget)) {
+        const prefix = literalPrefix(rawTarget)
+        if (prefix && this.isPrivatePath(prefix)) return prefix
+        if (this.overlapsPrivate(prefix || '.')) return `${rawTarget} overlaps private paths`
+      } else if (isDirectory(resolve(this.root, expandHome(rawTarget))) && this.overlapsPrivate(rawTarget)) {
+        return `${rawTarget} contains private paths`
+      }
+    }
+    if (Array.isArray(inputs.files)) {
+      const repoBase = typeof inputs.repo_path === 'string' && inputs.repo_path.trim() ? inputs.repo_path : '.'
+      for (const entry of inputs.files) {
+        if (typeof entry !== 'string' || !entry.trim()) continue
+        if (this.isPrivatePath(entry) || this.isPrivatePath(join(repoBase, entry))) return entry
+      }
+    }
+    if (DIRECTORY_LIST_TOOLS.has(name) && inputs.recursive === true) {
+      const rawScope = typeof inputs.directory_path === 'string' && inputs.directory_path.trim()
+        ? inputs.directory_path
+        : typeof inputs.directory === 'string' && inputs.directory.trim() ? inputs.directory : '.'
+      if (this.overlapsPrivate(rawScope)) return `${rawScope} contains private paths`
+    }
     if (CONTENT_SEARCH_TOOLS.has(name)) {
       const scope = typeof inputs.path === 'string' && inputs.path.trim() ? inputs.path : '.'
       if (this.overlapsPrivate(scope)) return `${scope} contains private paths`
@@ -592,20 +640,22 @@ export class DataBoundary {
   }
 
   private writeVerdict(name: string, inputs: JsonObject): BoundaryToolVerdict | undefined {
-    const key = WRITE_TARGET_KEYS[name]
-    const named = key === undefined ? undefined : inputs[key]
-    const raw = key !== undefined ? (typeof named === 'string' ? named : undefined)
-      : typeof inputs.file_path === 'string' ? inputs.file_path : typeof inputs.notebook_path === 'string' ? inputs.notebook_path : undefined
-    if (!raw?.trim()) return undefined
-    const absolute = resolve(this.root, expandHome(raw))
-    // The output folder holds the run's results: it stays writable even when
-    // every path is private, or a local agent could only write through a script.
-    if (isAncestorOrEqual(this.outputKey, pathKey(canonicalPath(absolute)))) return undefined
-    if (this.isPrivatePath(absolute)) {
-      return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: ${name} may not write into private path ${raw}; write into ${this.config.outputDir}/.`)
+    const candidates: readonly unknown[] = name === 'ApplyPatchTool' && typeof inputs.patch === 'string'
+      ? inspectPatchTargets(inputs.patch).writePaths
+      : (WRITE_TARGET_KEYS[name] ?? ['file_path', 'notebook_path']).map(key => inputs[key])
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || !candidate.trim()) continue
+      const absolute = resolve(this.root, expandHome(candidate))
+      // The output folder holds the run's results: it stays writable even when
+      // every path is private, or a local agent could only write through a script.
+      if (isAncestorOrEqual(this.outputKey, pathKey(canonicalPath(absolute)))) continue
+      if (this.isPrivatePath(absolute)) {
+        return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: ${name} may not write into private path ${candidate}; write into ${this.config.outputDir}/.`)
+      }
+      if (!existsSync(absolute)) continue
+      return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: inputs are read-only; ${name} may not modify existing file ${candidate}. Write new files, or write into ${this.config.outputDir}/.`)
     }
-    if (!existsSync(absolute)) return undefined
-    return deny('DATA_BOUNDARY_READ_ONLY', `Data boundary: inputs are read-only; ${name} may not modify existing file ${raw}. Write new files, or write into ${this.config.outputDir}/.`)
+    return undefined
   }
 }
 

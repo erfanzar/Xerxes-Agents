@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve, sep } from 'node:path'
 
 import { OfficePackageError, OfficePackagePartNotFoundError } from './errors.js'
@@ -39,12 +39,14 @@ export class BunOfficePackageDirectory implements OfficePackagePort {
   }
 
   async deletePart(partName: string): Promise<void> {
-    await rm(this.partPath(partName), { force: true })
+    const partPath = await this.containedPartPath(partName)
+    await rm(partPath, { force: true })
   }
 
   async hasPart(partName: string): Promise<boolean> {
+    const partPath = await this.containedPartPath(partName)
     try {
-      return (await stat(this.partPath(partName))).isFile()
+      return (await stat(partPath)).isFile()
     } catch (error) {
       if (isMissingPathError(error)) return false
       throw error
@@ -61,7 +63,7 @@ export class BunOfficePackageDirectory implements OfficePackagePort {
   }
 
   async readBytes(partName: string): Promise<Uint8Array> {
-    const partPath = this.partPath(partName)
+    const partPath = await this.containedPartPath(partName)
     try {
       return new Uint8Array(await readFile(partPath))
     } catch (error) {
@@ -76,7 +78,7 @@ export class BunOfficePackageDirectory implements OfficePackagePort {
   }
 
   async writeBytes(partName: string, contents: Uint8Array): Promise<void> {
-    const partPath = this.partPath(partName)
+    const partPath = await this.containedPartPath(partName)
     await mkdir(dirname(partPath), { recursive: true })
     await writeFile(partPath, contents)
   }
@@ -93,6 +95,37 @@ export class BunOfficePackageDirectory implements OfficePackagePort {
       throw new OfficePackageError(`Office part escapes package root: ${partName}`)
     }
     return path
+  }
+
+  private async containedPartPath(partName: string): Promise<string> {
+    const normalized = normalizeOfficePartName(partName)
+    const lexicalPath = this.partPath(normalized)
+    let realRoot: string | undefined
+    try {
+      realRoot = await realpath(this.resolvedRoot)
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error
+    }
+    let current = this.resolvedRoot
+    for (const segment of normalized.split('/')) {
+      current = resolve(current, segment)
+      try {
+        const entry = await lstat(current)
+        if (entry.isSymbolicLink()) {
+          throw new OfficePackageError(`Office package symlinks are not supported: ${partName}`)
+        }
+        if (realRoot !== undefined) {
+          const resolvedCurrent = await realpath(current)
+          if (!isPathInside(resolvedCurrent, realRoot)) {
+            throw new OfficePackageError(`Office part escapes package root: ${partName}`)
+          }
+        }
+      } catch (error) {
+        if (isMissingPathError(error)) break
+        throw error
+      }
+    }
+    return lexicalPath
   }
 }
 
@@ -121,6 +154,7 @@ export function normalizeOfficePartName(partName: string): string {
       continue
     }
     if (segment.includes('\0')) throw new OfficePackageError('Office part name contains a NUL byte')
+    if (/^[A-Za-z]:/.test(segment)) throw new OfficePackageError(`Office part escapes package root: ${partName}`)
     parts.push(segment)
   }
   if (!parts.length) throw new TypeError('Office part name must identify a file')
@@ -179,5 +213,5 @@ function isPathInside(path: string, root: string): boolean {
 }
 
 function isMissingPathError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+  return typeof error === 'object' && error !== null && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')
 }

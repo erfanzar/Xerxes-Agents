@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 
 import {
   costLabel,
@@ -157,11 +158,15 @@ export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => {
     if (!online) return
     void load(false)
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void load(false) }, REFRESH_MS)
+    const timer = setInterval(() => { if (!pageIsInactive()) void load(false) }, REFRESH_MS)
     return () => clearInterval(timer)
   }, [load, online])
-  // Countdowns and "updated 20s ago" stay true between fetches.
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(timer) }, [])
+  // Countdowns and "updated 20s ago" stay true between fetches while active.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!pageIsInactive()) setNow(Date.now()) }, 15_000)
+    const unsub = subscribePerfPaused(() => { if (!pageIsInactive()) setNow(Date.now()) })
+    return () => { clearInterval(timer); unsub() }
+  }, [])
 
   const profiles = report?.profiles ?? []
 

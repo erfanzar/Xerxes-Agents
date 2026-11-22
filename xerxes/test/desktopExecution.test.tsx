@@ -233,3 +233,67 @@ test('output viewer decodes valid strings and envelopes, preserves literal paths
  expect(html).toContain('Expand output')
  expect(html).not.toContain('<dialog')
 })
+
+test('compact output viewer trims trailing blank lines without inflating line counts or mutating full mode', async () => {
+ const { OutputViewer } = await import('../src/desktop/renderer/OutputViewer.js')
+ const compactHtml = renderToStaticMarkup(createElement(OutputViewer, {
+  text: 'eyvan/sdk/commands/head_discovery.py:75: def url(self) -> str | None:\neyvan/sdk/commands/head_discovery.py:83: return None\n\n  \n',
+  compact: true,
+ }))
+ expect(compactHtml).toContain('return None</pre>')
+ expect(compactHtml).not.toContain('return None\n</pre>')
+
+ // 14 lines ending in trailing newlines must not spuriously trigger "Show all 15 lines".
+ const fourteenLines = `${Array.from({ length: 14 }, (_, i) => `line ${i + 1}`).join('\n')}\n\n`
+ const fourteenHtml = renderToStaticMarkup(createElement(OutputViewer, { text: fourteenLines, compact: true }))
+ expect(fourteenHtml).toContain('line 14</pre>')
+ expect(fourteenHtml).not.toContain('Show all')
+
+ // Full (non-compact) mode keeps verbatim trailing newlines.
+ const fullHtml = renderToStaticMarkup(createElement(OutputViewer, { text: 'kept\n\n', compact: false }))
+ expect(fullHtml).toContain('kept\n\n</pre>')
+})
+
+test('expanded execution unifies raw details and copy actions inside one compact footer row', () => {
+ const html = renderToStaticMarkup(createElement(ExecutionDetails, { item }))
+ const footerIndex = html.indexOf('<div class="execution__footer">')
+ expect(footerIndex).toBeGreaterThan(-1)
+ const footer = html.slice(footerIndex)
+ expect(footer).toContain('<details class="execution__raw"><summary>Raw details</summary>')
+ expect(footer).toContain('<div class="execution__actions">')
+ expect(footer).toContain('Copy command')
+ expect(footer).toContain('Copy output')
+ expect(footer).toContain('Copy arguments')
+ expect(footer.indexOf('class="execution__raw"')).toBeLessThan(footer.indexOf('class="execution__actions"'))
+ // Compact output inside ExecutionDetails strips trailing newline from stdout.
+ expect(html).toContain('return 1\n}</pre>')
+
+ const emptyItem: ToolItem = { id: 'call-empty', name: 'noop', verb: 'noop', arg: '', dur: '0.0s', state: 'done', input: '', output: '' }
+ const emptyHtml = renderToStaticMarkup(createElement(ExecutionDetails, { item: emptyItem }))
+ expect(emptyHtml).toContain('<div class="execution__footer">')
+ expect(emptyHtml).toContain('<details class="execution__raw">')
+ expect(emptyHtml).not.toContain('class="execution__actions"')
+})
+
+test('layout.css and vibes.css eliminate nested tool pre fills, stacked footer margins, and user bubble bottom dead space', async () => {
+ const layoutCss = await Bun.file(new URL('../src/desktop/renderer/layout.css', import.meta.url)).text()
+ const vibesCss = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
+
+ // Expanded .execution card uses tight padding/gap and transparent compact output pre (no sunken box-in-a-box).
+ expect(layoutCss).toContain('.execution-row[open]>.execution{display:grid;gap:6px;margin:4px 0 6px;padding:8px 12px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,10px),10px);background:var(--x-card)}')
+ expect(layoutCss).toContain('.execution :is(.output-viewer--compact .output-viewer__text,.execution__error pre){margin:0;padding:0;border:0;border-radius:0;background:transparent;')
+ expect(layoutCss).toContain('.execution__footer{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:4px 12px;margin-top:2px;padding-top:6px;border-top:1px solid var(--x-hairline);')
+ expect(layoutCss).toContain('.execution__footer .execution__raw[open]{flex:1 0 100%;max-width:100%;opacity:1}')
+
+ expect(vibesCss).toContain('.activity-group__body .execution-row[open]>.execution{padding:8px 12px;gap:6px;border:1px solid var(--x-hairline);background:var(--x-card)}')
+ expect(vibesCss).toContain('.activity-group__body .output-viewer{margin:0}')
+ expect(vibesCss).toContain('.activity-group__body .output-viewer--compact .output-viewer__text{background:transparent;border:0;border-radius:0;margin:0;padding:0}')
+ expect(vibesCss).not.toContain('.activity-group__body .execution__raw{display:block;margin-top:6px;')
+
+ // User bubble actions never reserve vertical dead air below .msg-turn--user while staying hover/focus accessible.
+ expect(layoutCss).toContain('.msg-turn--user>.msg__actions{position:absolute;top:6px;right:6px;z-index:2;margin-top:0;pointer-events:none}')
+ expect(layoutCss).toContain('.msg-turn--user:is(:hover,:focus-within)>.msg__actions{pointer-events:auto}')
+ expect(vibesCss).toContain('.msg-turn--user{position:relative;display:flex;flex-direction:row;flex-wrap:wrap;justify-content:flex-end;align-items:flex-end;column-gap:4px;max-width:100%}')
+ expect(vibesCss).toContain('.msg-turn--user>.msg__actions{position:static;order:1;flex:none;align-self:flex-end;margin:0 0 8px;pointer-events:none}')
+ expect(vibesCss).toContain('.msg-turn--user:is(:hover,:focus-within)>.msg__actions{pointer-events:auto}')
+})

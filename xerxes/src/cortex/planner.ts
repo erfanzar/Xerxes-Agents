@@ -148,9 +148,15 @@ export function getNextPlanSteps(
   failed: ReadonlySet<string> = new Set(),
 ): PlanStep[] {
   validateExecutionPlan(plan)
-  return plan.steps.filter(step => !completed.has(step.id) && !failed.has(step.id)
-    && !step.dependencies.some(dependency => failed.has(dependency))
-    && step.dependencies.every(dependency => completed.has(dependency)))
+  const completedIds = new Set([...completed].map(id => id.trim()))
+  const failedIds = new Set([...failed].map(id => id.trim()))
+  return plan.steps.filter(step => {
+    const stepId = step.id.trim()
+    return !completedIds.has(stepId)
+      && !failedIds.has(stepId)
+      && !step.dependencies.some(dependency => failedIds.has(dependency.trim()))
+      && step.dependencies.every(dependency => completedIds.has(dependency.trim()))
+  })
 }
 
 /** Resolve result_from_step_N placeholders before a step is dispatched. */
@@ -162,10 +168,14 @@ export function resolvePlanArguments(
   for (const [key, value] of Object.entries(argumentsValue)) {
     const exact = /^result_from_step_(.+)$/.exec(value)
     if (exact?.[1]) {
-      resolved[key] = outputs.get(exact[1])?.output ?? value
+      const targetId = exact[1].trim()
+      resolved[key] = outputs.get(exact[1])?.output ?? outputs.get(targetId)?.output ?? value
       continue
     }
-    resolved[key] = value.replace(/\{\{result_from_step_([^}]+)\}\}/g, (_whole, id: string) => outputs.get(id)?.output ?? _whole)
+    resolved[key] = value.replace(
+      /\{\{result_from_step_([^}]+)\}\}/g,
+      (_whole, id: string) => outputs.get(id)?.output ?? outputs.get(id.trim())?.output ?? _whole,
+    )
   }
   return resolved
 }
@@ -180,21 +190,22 @@ export async function executeExecutionPlan(
   const now = options.now ?? (() => new Date())
   const maxParallel = validateMaxParallel(options.maxParallel)
   throwIfPlanAborted(options.signal)
-  const states = new Map<string, PlanStepStatus>(plan.steps.map(step => [step.id, 'pending']))
+  const states = new Map<string, PlanStepStatus>(plan.steps.map(step => [step.id.trim(), 'pending']))
   const outputs = new Map<string, PlanStepOutput>()
 
   while ([...states.values()].some(status => status === 'pending')) {
     throwIfPlanAborted(options.signal)
     let stateChanged = false
     for (const step of plan.steps) {
-      if (states.get(step.id) !== 'pending') continue
+      const stepId = step.id.trim()
+      if (states.get(stepId) !== 'pending') continue
       if (!step.dependencies.some(dependency => {
-        const status = states.get(dependency)
+        const status = states.get(dependency.trim())
         return status === 'failed' || status === 'skipped'
       })) continue
       const timestamp = now()
-      outputs.set(step.id, {
-        stepId: step.id,
+      outputs.set(stepId, {
+        stepId,
         status: 'skipped',
         output: '',
         error: 'A dependency did not complete successfully',
@@ -203,14 +214,14 @@ export async function executeExecutionPlan(
         durationMs: 0,
         metadata: {},
       })
-      states.set(step.id, 'skipped')
+      states.set(stepId, 'skipped')
       stateChanged = true
     }
     if (stateChanged) continue
 
     const completed = new Set([...states].flatMap(([id, status]) => status === 'succeeded' ? [id] : []))
     const failed = new Set([...states].flatMap(([id, status]) => status === 'failed' ? [id] : []))
-    const ready = getNextPlanSteps(plan, completed, failed).filter(step => states.get(step.id) === 'pending')
+    const ready = getNextPlanSteps(plan, completed, failed).filter(step => states.get(step.id.trim()) === 'pending')
     if (ready.length === 0) throw new Error('No executable plan steps remain')
     if (options.parallel) {
       await mapConcurrent(ready, maxParallel, step => executeStep(plan, step, executor, outputs, states, now, options.signal), options.signal)
@@ -224,7 +235,7 @@ export async function executeExecutionPlan(
 
   throwIfPlanAborted(options.signal)
   const ordered = plan.steps.flatMap(step => {
-    const output = outputs.get(step.id)
+    const output = outputs.get(step.id.trim())
     return output ? [output] : []
   })
   return {
@@ -305,6 +316,7 @@ async function executeStep(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   throwIfPlanAborted(signal)
+  const stepId = step.id.trim()
   const startedAt = now()
   try {
     const result = await executor({
@@ -316,8 +328,8 @@ async function executeStep(
     throwIfPlanAborted(signal)
     const normalized = typeof result === 'string' ? { output: result } : result
     const completedAt = now()
-    outputs.set(step.id, {
-      stepId: step.id,
+    outputs.set(stepId, {
+      stepId,
       status: 'succeeded',
       output: normalized.output,
       startedAt,
@@ -325,12 +337,12 @@ async function executeStep(
       durationMs: Math.max(0, completedAt.getTime() - startedAt.getTime()),
       metadata: normalized.metadata ?? {},
     })
-    states.set(step.id, 'succeeded')
+    states.set(stepId, 'succeeded')
   } catch (error) {
     if (signal?.aborted || error instanceof PlanExecutionAbortedError) throw new PlanExecutionAbortedError(signal?.reason ?? error)
     const completedAt = now()
-    outputs.set(step.id, {
-      stepId: step.id,
+    outputs.set(stepId, {
+      stepId,
       status: 'failed',
       output: '',
       error: errorMessage(error),
@@ -339,7 +351,7 @@ async function executeStep(
       durationMs: Math.max(0, completedAt.getTime() - startedAt.getTime()),
       metadata: {},
     })
-    states.set(step.id, 'failed')
+    states.set(stepId, 'failed')
   }
 }
 

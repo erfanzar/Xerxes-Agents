@@ -261,10 +261,16 @@ export class HubVoiceModelStore {
     let handle: Awaited<ReturnType<typeof open>> | undefined
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
+      let base: URL
       let url: URL
-      try { url = new URL(`${this.baseUrl.replace(/\/+$/u, '')}/${resolved.model.repo}/resolve/${resolved.model.revision}/${resolved.file.path}`) }
-      catch { throw new VoiceModelsUnavailable('Model mirror configuration is invalid.') }
-      if (url.protocol !== 'https:' || url.username || url.password) throw new VoiceModelsUnavailable('Model mirror must use HTTPS without credentials.')
+      try {
+        base = new URL(this.baseUrl)
+        if (base.search || base.hash) throw new Error('baseUrl must not include query or hash')
+        url = new URL(`${this.baseUrl.replace(/\/+$/u, '')}/${resolved.model.repo}/resolve/${resolved.model.revision}/${resolved.file.path}`)
+      } catch { throw new VoiceModelsUnavailable('Model mirror configuration is invalid.') }
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+        throw new VoiceModelsUnavailable('Model mirror must use HTTPS without credentials.')
+      }
       const response = await this.fetchPinned(url, signal)
       if (!response.ok || !response.body) {
         void response.body?.cancel().catch(() => undefined)
@@ -291,6 +297,7 @@ export class HubVoiceModelStore {
       if (size !== resolved.file.size) throw new VoiceModelsUnavailable('Model verification did not match the pinned manifest.', 'size mismatch')
       if (hash.digest('hex') !== resolved.file.sha256) throw new VoiceModelsUnavailable('Model verification did not match the pinned manifest.', 'hash mismatch')
       signal.throwIfAborted()
+      await handle.sync()
       await handle.close(); handle = undefined
       await rename(temporary, path)
       // The just-downloaded bytes have already been verified, so do not hash them twice.

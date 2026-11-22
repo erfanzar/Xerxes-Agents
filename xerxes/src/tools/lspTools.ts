@@ -15,13 +15,32 @@ export function registerConfiguredLspTool(registry: ToolRegistry, manager: LspMa
     }, required: ['action', 'file_path'] },
   } }, (inputs, context, signal) => new ClaudeSearchTools({ lspAdapter: { execute: (request, abort) => manager.forWorkspace(workspace()).execute({ ...request, diagnosticsWaitMs: 1000 }, abort) } }).execute(inputs, context, signal))
 }
+
 /** The tool {@link addLspToolToBuiltinAgents} adds while a language server is configured. */
 export const LSP_RUNTIME_TOOL_NAME = LSP_TOOL_DEFINITION.function.name
 
+/** Built-in agent profiles that receive {@link LSP_RUNTIME_TOOL_NAME} when an LSP server is configured. */
+export const LSP_BUILTIN_AGENT_NAMES = [
+  'default',
+  'creator',
+  'coder',
+  'researcher',
+  'reviewer',
+  'tester',
+] as const
+
 export function addLspToolToBuiltinAgents(definitions: Map<string, AgentDefinition>, manager: LspManager): void {
   if (!manager.configured) return
-  for (const name of ['default', 'creator']) {
+  for (const name of LSP_BUILTIN_AGENT_NAMES) {
     const definition = definitions.get(name)
-    if (definition?.source === 'built-in') definitions.set(name, { ...definition, tools: [...new Set([...definition.tools, LSP_RUNTIME_TOOL_NAME])] })
+    if (definition?.source !== 'built-in') continue
+    if (definition.excludeTools.includes(LSP_RUNTIME_TOOL_NAME)) continue
+    definitions.set(name, {
+      ...definition,
+      tools: [...new Set([...definition.tools, LSP_RUNTIME_TOOL_NAME])],
+      allowedTools: definition.allowedTools === null
+        ? null
+        : [...new Set([...definition.allowedTools, LSP_RUNTIME_TOOL_NAME])],
+    })
   }
 }

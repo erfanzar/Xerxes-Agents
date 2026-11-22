@@ -317,6 +317,15 @@ export class TerminalRegistry {
     return [...archived.map(archivedTerminal), ...live]
   }
 
+  /** Fast zero-I/O check for whether a session (or any session) has a live running terminal. */
+  hasRunning(ownerSessionId?: string): boolean {
+    for (const entry of this.entries.values()) {
+      if (!entry.running) continue
+      if (ownerSessionId === undefined || entry.ownerSessionId === ownerSessionId) return true
+    }
+    return false
+  }
+
   /** Pids of running terminals with this label, across every session (the memory guard spares a person's own shells). */
   pidsLabelled(label: string): Set<number> {
     const pids = new Set<number>()
@@ -491,6 +500,7 @@ function archivedTerminal(run: RunRecord): TerminalSummary {
  */
 class TailBuffer {
   private chunks: string[] = []
+  private headIndex = 0
   private droppedChars = 0
   private length = 0
   private total = 0
@@ -508,29 +518,54 @@ class TailBuffer {
 
   append(text: string): void {
     if (!text) return
+    this.total += text.length
+    if (text.length >= this.capacity) {
+      const kept = text.slice(text.length - this.capacity)
+      this.droppedChars += this.length + (text.length - kept.length)
+      this.chunks = kept ? [kept] : []
+      this.headIndex = 0
+      this.length = kept.length
+      return
+    }
     this.chunks.push(text)
     this.length += text.length
-    this.total += text.length
-    while (this.length > this.capacity && this.chunks.length > 0) {
-      const first = this.chunks[0]
+    while (this.length > this.capacity && this.headIndex < this.chunks.length) {
+      const first = this.chunks[this.headIndex]
       if (first === undefined) break
       const excess = this.length - this.capacity
       if (first.length <= excess) {
-        this.chunks.shift()
+        this.chunks[this.headIndex] = ''
+        this.headIndex += 1
         this.length -= first.length
         this.droppedChars += first.length
       } else {
-        this.chunks[0] = first.slice(excess)
+        this.chunks[this.headIndex] = first.slice(excess)
         this.length -= excess
         this.droppedChars += excess
       }
+    }
+    const activeChunks = this.chunks.length - this.headIndex
+    if (this.headIndex >= 64 && this.headIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.headIndex)
+      this.headIndex = 0
+    } else if (activeChunks > 512) {
+      const joined = this.headIndex > 0 ? this.chunks.slice(this.headIndex).join('') : this.chunks.join('')
+      this.chunks = joined ? [joined] : []
+      this.headIndex = 0
     }
   }
 
   /** The last `maxChars` characters, without consuming anything. */
   tail(maxChars: number): { readonly text: string; readonly truncated: boolean } {
-    const joined = this.chunks.join('')
-    if (this.chunks.length > 1) this.chunks = joined ? [joined] : []
+    const joined = this.headIndex > 0
+      ? this.chunks.slice(this.headIndex).join('')
+      : this.chunks.length === 1
+        ? this.chunks[0]!
+        : this.chunks.join('')
+    if (this.headIndex > 0 || this.chunks.length > 1) {
+      this.chunks = joined ? [joined] : []
+      this.headIndex = 0
+    }
     return joined.length <= maxChars
       ? { text: joined, truncated: false }
       : { text: joined.slice(joined.length - maxChars), truncated: true }

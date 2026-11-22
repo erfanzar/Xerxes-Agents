@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { realpath, stat } from 'node:fs/promises'
-import { extname, isAbsolute, relative, resolve } from 'node:path'
+import { lstat, realpath, stat } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 
 import { sniffImageMediaType } from '../core/multimodal.js'
 import { OfficeZipEntryTooLargeError, UnsupportedOfficeZipError } from '../skills/powerpoint/errors.js'
@@ -61,25 +61,248 @@ export function previewOptionsOf(params: Readonly<Record<string, unknown>>): Pre
 /** The version a save must match: a hash of the file's bytes. */
 const versionOf = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 
-/** Canonical file inside the workspace; symlinks out of it and non-files are refused. */
-async function workspaceFile(cwd: string, path: unknown, action: 'preview' | 'editing'): Promise<{ file: string; local: string }> {
+/** Result of resolving a preview path against the workspace and optional read-only roots. */
+export interface ResolvedPreviewPath {
+  /** Canonical real path on disk. */
+  readonly file: string
+  /** Workspace-relative path for workspace files, or canonical absolute path for external read-only roots. */
+  readonly local: string
+  /** True when the file resolved inside an external `allowedReadRoots` entry rather than `cwd`. */
+  readonly readOnly: boolean
+}
+
+const SENSITIVE_EXTERNAL_DIR_SEGMENTS: ReadonlySet<string> = new Set([
+  '.ssh',
+  '.gnupg',
+  '.aws',
+  '.kube',
+  '.docker',
+  'credentials',
+  'credential',
+  'secrets',
+  'secret',
+  'keychain',
+])
+
+const SENSITIVE_SYSTEM_GENERATED_SEGMENTS: ReadonlySet<string> = new Set([
+  'credentials',
+  'credential',
+  'secrets',
+  'secret',
+  'tokens',
+  'token',
+  'auth',
+  'oauth',
+  'keys',
+  'key',
+  'keychain',
+  'cookies',
+  'cookie',
+  'session_tokens',
+])
+
+const SENSITIVE_EXTERNAL_BASENAMES: ReadonlySet<string> = new Set([
+  '.env',
+  '.netrc',
+  '.npmrc',
+  '.pypirc',
+  'credentials.json',
+  'secrets.json',
+  'token.json',
+  'tokens.json',
+  'oauth_creds.json',
+  'application_default_credentials.json',
+  'id_rsa',
+  'id_ed25519',
+  'id_ecdsa',
+  'id_dsa',
+])
+
+const SENSITIVE_EXTERNAL_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.pem',
+  '.key',
+  '.p12',
+  '.pfx',
+  '.jks',
+  '.keystore',
+])
+
+/** Relative path from `root` to `target` only when `target` is strictly contained inside `root`. */
+function relativeIfContained(root: string, target: string): string | undefined {
+  const rel = relative(root, target)
+  if (!rel || rel === '.' || isAbsolute(rel)) return undefined
+  const segments = rel.split(/[\\/]+/)
+  if (segments.length === 0 || segments[0] === '..' || segments.includes('..')) return undefined
+  return rel
+}
+
+/** True when a relative path inside an external read-only root enters a sensitive credential/secret location. */
+function isSensitiveExternalRelativePath(relPath: string): boolean {
+  const segments = relPath.split(/[\\/]+/).filter(Boolean).map(segment => segment.toLowerCase())
+  if (segments.length === 0) return true
+  let insideSystemGenerated = false
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i]!
+    const isLast = i === segments.length - 1
+    if (seg === '.system_generated') {
+      insideSystemGenerated = true
+      continue
+    }
+    if (insideSystemGenerated && SENSITIVE_SYSTEM_GENERATED_SEGMENTS.has(seg)) {
+      return true
+    }
+    if (!isLast && SENSITIVE_EXTERNAL_DIR_SEGMENTS.has(seg)) {
+      return true
+    }
+    if (isLast) {
+      if (SENSITIVE_EXTERNAL_BASENAMES.has(seg) || seg.startsWith('.env.')) return true
+      if (SENSITIVE_EXTERNAL_EXTENSIONS.has(extname(seg))) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Resolve a file path for read-only preview.
+ *
+ * Workspace containment remains strictly primary: relative paths (and symlinks
+ * inside `cwd`) resolve only inside `cwd`. Absolute paths outside `cwd` are
+ * allowed read-only ONLY when their canonical `realpath` is strictly contained
+ * within one of `allowedReadRoots` and does not touch sensitive internal dirs.
+ */
+export async function resolvePreviewPath(
+  cwd: string,
+  path: unknown,
+  allowedReadRoots?: readonly string[],
+): Promise<ResolvedPreviewPath> {
   if (typeof path !== 'string' || !path || path.length > 4096 || path.includes('\0')) {
     throw new TypeError('Choose a valid workspace file path')
   }
-  const root = await realpath(cwd)
-  const file = await realpath(resolve(root, path))
-  const local = relative(root, file)
-  if (!local || local === '..' || local.startsWith('../') || isAbsolute(local)) {
-    throw new Error(`File ${action} is limited to the selected workspace`)
+  const rawWorkspaceRoot = resolve(cwd)
+  const root = await realpath(rawWorkspaceRoot)
+  const rawIsAbsolute = isAbsolute(path)
+  const candidate = resolve(root, path)
+
+  const canonicalAllowedRoots: string[] = []
+  const rawAllowedRoots: string[] = []
+  if (rawIsAbsolute && allowedReadRoots && allowedReadRoots.length > 0) {
+    for (const rawRoot of allowedReadRoots) {
+      if (typeof rawRoot !== 'string' || !rawRoot.trim() || rawRoot.includes('\0')) continue
+      const normalizedRaw = resolve(rawRoot)
+      rawAllowedRoots.push(normalizedRaw)
+      try {
+        const realAllowed = await realpath(normalizedRaw)
+        if ((await stat(realAllowed)).isDirectory() && !canonicalAllowedRoots.includes(realAllowed)) {
+          canonicalAllowedRoots.push(realAllowed)
+        }
+      } catch {
+        // Missing or unreadable read root cannot authorize access.
+      }
+    }
   }
-  if (!(await stat(file)).isFile()) throw new Error(`Choose a regular file to ${action === 'preview' ? 'preview' : 'edit'}`)
+
+  let file: string
+  try {
+    file = await realpath(candidate)
+  } catch (error) {
+    // Refuse out-of-bounds traversal paths and dangling symlink escapes cleanly
+    // without revealing whether an external target exists.
+    const lexicallyInWorkspace =
+      relativeIfContained(root, candidate) !== undefined ||
+      relativeIfContained(rawWorkspaceRoot, candidate) !== undefined
+    const lexicallyInAllowed =
+      rawIsAbsolute &&
+      (canonicalAllowedRoots.some(allowed => relativeIfContained(allowed, candidate) !== undefined) ||
+        rawAllowedRoots.some(allowed => relativeIfContained(allowed, candidate) !== undefined))
+    if (!lexicallyInWorkspace && !lexicallyInAllowed) {
+      throw new Error('File preview is limited to the selected workspace')
+    }
+    try {
+      const linkInfo = await lstat(candidate)
+      if (linkInfo.isSymbolicLink()) {
+        throw new Error('File preview is limited to the selected workspace')
+      }
+    } catch (lstatError) {
+      if (lstatError instanceof Error && lstatError.message === 'File preview is limited to the selected workspace') {
+        throw lstatError
+      }
+      // If an intermediate directory is a symlink escaping all allowed roots, refuse as out-of-bounds.
+      try {
+        const realParent = await realpath(dirname(candidate))
+        const parentInWorkspace = realParent === root || relativeIfContained(root, realParent) !== undefined
+        const parentInAllowed =
+          rawIsAbsolute &&
+          canonicalAllowedRoots.some(allowed => realParent === allowed || relativeIfContained(allowed, realParent) !== undefined)
+        if (!parentInWorkspace && !parentInAllowed) {
+          throw new Error('File preview is limited to the selected workspace')
+        }
+      } catch (parentError) {
+        if (parentError instanceof Error && parentError.message === 'File preview is limited to the selected workspace') {
+          throw parentError
+        }
+      }
+    }
+    throw error
+  }
+
+  // 1. Workspace root is always primary.
+  const local = relativeIfContained(root, file)
+  if (local !== undefined) {
+    if (!(await stat(file)).isFile()) throw new Error('Choose a regular file to preview')
+    return { file, local, readOnly: false }
+  }
+
+  // 2. Relative paths (including workspace symlinks) never escape into external read roots.
+  if (!rawIsAbsolute) {
+    throw new Error('File preview is limited to the selected workspace')
+  }
+
+  // 3. External absolute paths are read-only and must stay strictly inside a verified allowed root.
+  for (const allowedRoot of canonicalAllowedRoots) {
+    const relInAllowed = relativeIfContained(allowedRoot, file)
+    if (relInAllowed === undefined) continue
+    if (isSensitiveExternalRelativePath(relInAllowed)) {
+      throw new Error('File preview is limited to the selected workspace')
+    }
+    if (!(await stat(file)).isFile()) throw new Error('Choose a regular file to preview')
+    return { file, local: file, readOnly: true }
+  }
+
+  throw new Error('File preview is limited to the selected workspace')
+}
+
+/** Canonical file strictly inside the workspace for writes; symlinks out of it and non-files are refused. */
+async function workspaceFileForEdit(cwd: string, path: unknown): Promise<{ file: string; local: string }> {
+  if (typeof path !== 'string' || !path || path.length > 4096 || path.includes('\0')) {
+    throw new TypeError('Choose a valid workspace file path')
+  }
+  const rawWorkspaceRoot = resolve(cwd)
+  const root = await realpath(rawWorkspaceRoot)
+  const candidate = resolve(root, path)
+  let file: string
+  try {
+    file = await realpath(candidate)
+  } catch (error) {
+    const lexicallyInWorkspace =
+      relativeIfContained(root, candidate) !== undefined ||
+      relativeIfContained(rawWorkspaceRoot, candidate) !== undefined
+    if (!lexicallyInWorkspace) {
+      throw new Error('File editing is limited to the selected workspace')
+    }
+    throw error
+  }
+  const local = relativeIfContained(root, file)
+  if (local === undefined) {
+    throw new Error('File editing is limited to the selected workspace')
+  }
+  if (!(await stat(file)).isFile()) throw new Error('Choose a regular file to edit')
   return { file, local }
 }
 
 /** A text preview could not be made; the legacy reply throws this message as an RPC error. */
 class NotTextError extends Error {}
 
-async function textPreview(file: string, local: string) {
+async function textPreview(file: string, local: string, readOnly = false) {
   const blob = Bun.file(file)
   const truncated = blob.size > MAX_BYTES
   const bytes = new Uint8Array(await blob.slice(0, MAX_BYTES).arrayBuffer())
@@ -87,31 +310,48 @@ async function textPreview(file: string, local: string) {
   try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: truncated }) }
   catch { throw new NotTextError('This file is not UTF-8 text and cannot be previewed') }
   if (content.includes('\0')) throw new NotTextError('This binary file cannot be previewed as text')
-  // Only a whole file can be edited, so only a whole file has a version.
-  return { ok: true as const, path: local, content, truncated, ...(truncated ? {} : { version: versionOf(bytes) }) }
+  // Only a whole editable workspace file has a version.
+  return {
+    ok: true as const,
+    path: local,
+    content,
+    truncated,
+    ...(readOnly ? { read_only: true as const } : {}),
+    ...(truncated || readOnly ? {} : { version: versionOf(bytes) }),
+  }
 }
 
 /**
- * Explicit workspace reads never follow a symlink outside the selected workspace.
+ * Explicit workspace reads never follow a symlink outside the selected workspace
+ * (or outside verified `allowedReadRoots` for absolute read-only previews).
  *
  * This is the text preview older clients understand. previewWorkspaceFileRich
  * serves a client that names the `kinds` it renders: a file whose kind the client renders comes back parsed
  * (`kind` says which), and anything that cannot be shown is a typed
  * `{ok:false,reason}` reply rather than an RPC error.
  */
-export async function previewWorkspaceFile(cwd: string, path: unknown) {
-  const { file, local } = await workspaceFile(cwd, path, 'preview')
-  try { return await textPreview(file, local) }
+export async function previewWorkspaceFile(
+  cwd: string,
+  path: unknown,
+  allowedReadRoots?: readonly string[],
+) {
+  const { file, local, readOnly } = await resolvePreviewPath(cwd, path, allowedReadRoots)
+  try { return await textPreview(file, local, readOnly) }
   catch (error) { throw error instanceof NotTextError ? new Error(error.message) : error }
 }
 
 /** A preview for a client that renders `options.kinds`: see previewWorkspaceFile. */
-export async function previewWorkspaceFileRich(cwd: string, path: unknown, options: PreviewOptions) {
-  const { file, local } = await workspaceFile(cwd, path, 'preview')
+export async function previewWorkspaceFileRich(
+  cwd: string,
+  path: unknown,
+  options: PreviewOptions,
+  allowedReadRoots?: readonly string[],
+) {
+  const { file, local, readOnly } = await resolvePreviewPath(cwd, path, allowedReadRoots)
   const size = (await stat(file)).size
   const kind = EXTENSION_KINDS[extname(local).toLowerCase()]
   if (kind === undefined || !options.kinds.has(kind)) {
-    try { return { ...(await textPreview(file, local)), kind: 'text' as const, size } }
+    try { return { ...(await textPreview(file, local, readOnly)), kind: 'text' as const, size } }
     catch (error) {
       if (!(error instanceof NotTextError)) throw error
       return unavailable(local, size, 'unsupported', 'This kind of file has no preview here. Open it in its default app to see it.')
@@ -126,14 +366,19 @@ export async function previewWorkspaceFileRich(cwd: string, path: unknown, optio
   if (bytes.byteLength > limit) {
     return { ...unavailable(local, bytes.byteLength, 'too_large', `This file is ${formatBytes(bytes.byteLength)}. Previews of ${KIND_LABELS[kind]} are limited to ${formatBytes(limit)}.`), limit }
   }
-  const base = { ok: true as const, path: local, size: bytes.byteLength }
+  const base = {
+    ok: true as const,
+    path: local,
+    size: bytes.byteLength,
+    ...(readOnly ? { read_only: true as const } : {}),
+  }
   switch (kind) {
     case 'html': {
       let content: string
       try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
       catch { return unavailable(local, size, 'unreadable', 'This web page is not UTF-8 text, so it cannot be shown here.') }
-      // Saving goes through the 128 KiB text editor, so only a page that fits it has a version.
-      return { ...base, kind, content, truncated: false, ...(bytes.byteLength <= MAX_BYTES ? { version: versionOf(bytes) } : {}) }
+      // Saving goes through the 128 KiB text editor, so only an editable workspace page that fits has a version.
+      return { ...base, kind, content, truncated: false, ...(!readOnly && bytes.byteLength <= MAX_BYTES ? { version: versionOf(bytes) } : {}) }
     }
     case 'image': {
       if (extname(local).toLowerCase() === '.svg') {
@@ -160,8 +405,10 @@ export async function previewWorkspaceFileRich(cwd: string, path: unknown, optio
       }
     }
     case 'sheet':
-    case 'document':
-      return officePreview(local, bytes, kind, options.sheet)
+    case 'document': {
+      const office = await officePreview(local, bytes, kind, options.sheet)
+      return office.ok && readOnly ? { ...office, read_only: true as const } : office
+    }
   }
 }
 
@@ -224,7 +471,7 @@ export async function writeWorkspaceFile(cwd: string, path: unknown, content: un
   const encoded = new TextEncoder().encode(content)
   if (encoded.byteLength > MAX_BYTES) throw new Error('Files over 128 KiB cannot be edited here')
   if (content.includes('\0')) throw new Error('Text files cannot contain NUL characters')
-  const { file, local } = await workspaceFile(cwd, path, 'editing')
+  const { file, local } = await workspaceFileForEdit(cwd, path)
   const current = new Uint8Array(await Bun.file(file).arrayBuffer())
   if (versionOf(current) !== baseVersion) {
     return { ok: false as const, conflict: true, path: local, error: 'This file changed on disk since you opened it. Reload it to see the new version, then edit again.' }

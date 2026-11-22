@@ -214,7 +214,7 @@ export class AuditEmitter {
       ...eventContext(input),
       toolName: input.toolName,
       errorType: input.errorType ?? '',
-      errorMessage: input.errorMessage ?? '',
+      errorMessage: sanitizeDiagnostic(input.errorMessage),
     }))
   }
 
@@ -264,8 +264,8 @@ export class AuditEmitter {
     this.emit(new ErrorEvent({
       ...eventContext(input),
       errorType: input.errorType ?? '',
-      errorMessage: input.errorMessage ?? '',
-      errorContext: input.context ?? '',
+      errorMessage: sanitizeDiagnostic(input.errorMessage),
+      errorContext: sanitizeDiagnostic(input.context),
     }))
   }
 
@@ -322,12 +322,14 @@ export class AuditEmitter {
       this.emitLoopWarningEvent(input)
       return
     }
+    const sessionId = input.sessionId ?? this.sessionId
     this.hookRunner.run('on_loop_warning', {
       toolName: input.toolName,
       pattern: input.pattern ?? '',
       severity: input.severity ?? 'warning',
       count: input.count ?? 0,
       ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+      ...(sessionId === undefined ? {} : { sessionId }),
       ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
     })
   }
@@ -392,4 +394,9 @@ function preview(value: unknown): string {
   } catch {
     return redactString(String(value)).slice(0, 200)
   }
+}
+
+function sanitizeDiagnostic(value: string | undefined): string {
+  if (!value) return ''
+  return redactString(value).slice(0, 1_000)
 }

@@ -12,6 +12,7 @@ import {
   type ReconnectWithBackoffOptions,
 } from './reconnect.js'
 import type {
+  MCPCapabilityKind,
   MCPPrompt,
   MCPPromptResult,
   MCPResource,
@@ -38,6 +39,7 @@ export interface MCPClientPort {
   callTool(name: string, arguments_?: JsonObject, options?: MCPToolCallOptions): Promise<MCPToolCallResult>
   readResource(uri: string): Promise<MCPResourceContentsResult>
   getPrompt(name: string, arguments_?: JsonObject): Promise<MCPPromptResult>
+  onCapabilitiesChanged?(handler: (kind: MCPCapabilityKind) => void): () => void
 }
 
 /** Factory boundary for hosts that own MCP transports or authentication. */
@@ -69,11 +71,18 @@ export interface MCPServerCapabilitiesSummary {
   readonly tools: number
 }
 
+export interface MCPCapabilitiesChangedEvent {
+  readonly kind: MCPCapabilityKind
+  readonly name: string
+}
+
 export interface MCPManagerOptions {
   /** Creates one connected-client candidate for each start or reconnect attempt. */
   readonly clientFactory?: MCPClientFactory
   /** Maximum active plus queued operations retained for one server. */
   readonly maxPendingOperationsPerServer?: number
+  /** Invoked when a live server refreshes tools, resources, or prompts via `list_changed`. */
+  readonly onCapabilitiesChanged?: (event: MCPCapabilitiesChangedEvent) => void
   /** Receives already-redacted lifecycle failures. Observer errors are contained. */
   readonly onFailure?: (failure: MCPServerFailure) => void
   /** Retry policy and deterministic hooks used by reconnect. */
@@ -120,6 +129,7 @@ export class MCPManager {
   private readonly serverOperations = new Map<string, Promise<void>>()
   private readonly pendingServerOperations = new Map<string, number>()
   private readonly maxPendingOperationsPerServer: number
+  private readonly capabilityListeners = new Set<(event: MCPCapabilitiesChangedEvent) => void>()
   private readonly onFailure: ((failure: MCPServerFailure) => void) | undefined
   private readonly reconnectOptions: ReconnectWithBackoffOptions | undefined
   private readonly configurations = new Map<string, MCPServerConfig>()
@@ -134,8 +144,17 @@ export class MCPManager {
       options.maxPendingOperationsPerServer ?? MCPManager.DEFAULT_MAX_PENDING_OPERATIONS_PER_SERVER,
       'maxPendingOperationsPerServer',
     )
+    if (options.onCapabilitiesChanged) {
+      this.capabilityListeners.add(options.onCapabilitiesChanged)
+    }
     this.onFailure = options.onFailure
     this.reconnectOptions = options.reconnect
+  }
+
+  /** Subscribe to live capability updates across all active servers. */
+  onCapabilitiesChanged(listener: (event: MCPCapabilitiesChangedEvent) => void): () => void {
+    this.capabilityListeners.add(listener)
+    return () => { this.capabilityListeners.delete(listener) }
   }
 
   /** Build, connect, and register a server. Disabled or duplicate configurations are skipped. */
@@ -514,6 +533,16 @@ export class MCPManager {
     const client = await this.clientFactory(config)
     try {
       await client.connect()
+      client.onCapabilitiesChanged?.(kind => {
+        if (this.servers.get(config.name) !== client) return
+        for (const listener of [...this.capabilityListeners]) {
+          try {
+            listener({ name: config.name, kind })
+          } catch {
+            // Diagnostic capability observers must not alter transport state.
+          }
+        }
+      })
       return client
     } catch (error) {
       try {

@@ -12,13 +12,15 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron'
 
 import { createBridge } from './bridgeApi.js'
+import { createChannelDispatcher } from './main/preloadDispatcher.js'
+
+const dispatcher = createChannelDispatcher({
+  on(channel, listener) { ipcRenderer.on(channel, listener) },
+  removeListener(channel, listener) { ipcRenderer.removeListener(channel, listener) },
+})
 
 contextBridge.exposeInMainWorld('xerxes', createBridge({
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
-  on(channel, listener) {
-    const forward = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value)
-    ipcRenderer.on(channel, forward)
-    return () => { ipcRenderer.removeListener(channel, forward) }
-  },
+  on: (channel, listener) => dispatcher.on(channel, listener),
   setZoomFactor: factor => webFrame.setZoomFactor(factor),
 }))

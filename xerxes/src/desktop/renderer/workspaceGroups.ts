@@ -115,7 +115,8 @@ export function sidebarSections<T extends GroupableRow>(
     sections.push({ kind: 'here', key, host, folder: group.name, label: `${host} · ${group.name}`, cwd: group.cwd, rows: group.rows })
   }
   for (const context of contexts) {
-    const rows = context.sessions.filter(row => !shown.has(row.id))
+    const contextSessions = Array.isArray(context.sessions) ? context.sessions : []
+    const rows = contextSessions.filter(row => !shown.has(row.id))
     if (context.remote) {
       const contextHost = context.alias || context.label
       const cwd = context.workspacePath ?? context.workspace

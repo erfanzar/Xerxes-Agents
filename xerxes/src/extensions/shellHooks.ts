@@ -306,7 +306,9 @@ function shellHookCallback(point: HookPoint, spec: ShellHookSpec, execute: Shell
   return async payload => {
     if (matcher !== undefined) {
       const toolName = typeof payload.toolName === 'string' ? payload.toolName : ''
-      if (!matcher.test(toolName)) return undefined
+      if (!matcher.test(toolName)) {
+        return point === 'tool_permission_check' ? { allow: true, source: 'shell_hook' } : undefined
+      }
     }
     const input = JSON.stringify({ hook_point: point, ...payload })
     const { code, stdout, stderr } = await execute(spec.command, input, spec.timeout_ms ?? DEFAULT_TIMEOUT_MS)

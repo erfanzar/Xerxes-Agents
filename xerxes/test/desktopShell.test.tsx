@@ -1065,9 +1065,10 @@ test('settings notices preserve the welcome screen while errors and real convers
   expect(html).toContain('welcome-notices')
   const error = render(snapshot({ blocks: [{ ...notice, error: true, text: 'Provider failed' }] }))
   expect(error).not.toContain('welcome__wordmark')
-  expect(error).toContain('1 failed')
-  expect(error).toContain('Runtime error')
-  expect(error).not.toContain('Provider failed')
+  expect(error).toContain('Provider failed')
+  expect(error).toContain('tool-timeline__inline-error')
+  expect(error).not.toContain('Runtime error')
+  expect(error).not.toContain('tool-timeline__pill--failed')
 })
 
 

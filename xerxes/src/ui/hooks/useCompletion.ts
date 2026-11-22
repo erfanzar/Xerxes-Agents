@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { CompletionItem } from '../app/interfaces.js'
 import { SLASH_COMMANDS } from '../app/slash/registry.js'
+import { getActiveSwarmSlice } from '../app/swarmStore.js'
 import { looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { CompletionResponse } from '../gatewayTypes.js'
 import { rankCompletionItems } from '../lib/completion.js'
 import { asRpcResult } from '../lib/rpc.js'
+import { swarmSubcommandCompletions } from '../lib/swarmFormat.js'
 import type { SlashCatalog } from '../types.js'
 
 /** Wire shape of the daemon's skill_suggestions RPC (daemon/server.ts). */
@@ -100,6 +102,9 @@ const panelCatalog: SlashCatalog = {
 
 /** Panel navigation belongs to the client, even with an older or unavailable daemon catalog. */
 export function tuiSlashCompletions(input: string, catalog: null | SlashCatalog): CompletionItem[] {
+  if (/^\/(?:immortals|swarm)\s+/i.test(input)) {
+    return swarmSubcommandCompletions(input, getActiveSwarmSlice().status)
+  }
   return mergeCompletionItems(slashCompletionsFromCatalog(input, panelCatalog), slashCompletionsFromCatalog(input, catalog))
 }
 
@@ -127,8 +132,8 @@ export function completionRequestForInput(
 
   // These argument candidates are owned by the daemon, including package
   // versions and preset IDs. Keep the complete command in the replacement.
-  if (/^\/(?:forge|presets?|config|plugins|skills|xerxes)\s+\S*$/.test(input)
-    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect|xerxes\s+(?:show|approve|reject))\s+\S*(?:\s+\S*)?$/.test(input)) {
+  if (/^\/(?:forge|presets?|config|plugins|skills|immortals|swarm|xerxes)\s+\S*$/.test(input)
+    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect|(?:immortals|swarm)\s+kill|xerxes\s+(?:show|approve|reject))\s+\S*(?:\s+\S*)?$/.test(input)) {
     return { method: 'complete.slash', params: { text: input }, replaceFrom: 1 }
   }
   const fileArg = input.match(/^\/file\s+(.*)$/)

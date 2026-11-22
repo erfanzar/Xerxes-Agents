@@ -5,7 +5,7 @@ import { WorkspaceFileTree } from './WorkspaceFileTree.js'
 import { ArtifactsSection, SubagentsSection } from './RailSections.js'
 import { railFitOf, tabKey, type RailFit, type RailPanel, type RailTab } from './railTabs.js'
 import { activityFleetRows } from './AgentRoster.js'
-import { pageIsBackground } from './pageVisibility.js'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 import { RemoteProviders } from './RemoteProviders.js'
 import { SimurghMark } from './SimurghMark.js'
 import { DiffPreview } from './DiffPreview.js'
@@ -36,7 +36,28 @@ import {
   type RpcRecord,
   type Specialist,
 } from './desktopRpc.js'
-import { store, type Snapshot } from './store.js'
+import {
+  resolveExternalAcpCatalog,
+  showsImmortalsForSession,
+  store,
+  type AcpAvailableCommand,
+  type AcpCatalogResult,
+  type AcpConfigOption,
+  type AcpDiscoveredSkill,
+  type AcpRuntimeCapabilities,
+  type AcpSessionBinding,
+  type Snapshot,
+} from './store.js'
+import {
+  activeAcpConfigOptionLabel,
+  activeAcpModeLabel,
+  activeAcpModelKnown,
+  activeAcpThoughtLevelLabel,
+  extraAcpConfigOptions,
+  isExternalAcpBinding,
+  transportBadgeLabel,
+} from './AcpRuntimePicker.js'
+import { AgentBrandGlyph } from './XerxesSprites.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
 import { BrowserPanel } from './BrowserPanel.js'
@@ -52,6 +73,7 @@ function pythonCompleter(sessionKey: string, path: string): Completer {
 import { FileActions, renderedViewOf, requestPreview, RichFilePreview, type RichPreview } from './FilePreview.js'
 import { TerminalsCard } from './TerminalsPanel.js'
 import { Icon, type IconName } from './Icon.js'
+import { T3Icon, railT3IconOf } from './T3Icons.js'
 import { GitPanel } from './GitPanel.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { UsagePanel } from './UsagePanel.js'
@@ -61,9 +83,13 @@ import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
 import { trustAllSkills } from './catalogBulk.js'
 import { ActionDialog } from './ActionDialog.js'
+import { SideQuestionPanel } from './SideQuestion.js'
+import { SwarmBoard } from './SwarmBoard.js'
 
 export type DesktopPanel =
   | 'subagents'
+  | 'swarm'
+  | 'btw'
   | 'docs'
   | 'artifacts'
   | 'agents'
@@ -93,14 +119,14 @@ const PAGE_NOTES: Readonly<Record<Exclude<DesktopPageName, 'xerxes'>, string>> =
   schedules: 'Jobs that run on their own in this workspace.',
 }
 export type { RailPanel } from './railTabs.js'
-/** Section order first (Subagents, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
-export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'docs', 'review', 'files', 'terminal', 'browser', 'background', 'outputs', 'activity', 'usage']
+/** Section order first (Subagents, Immortals, Artifacts, Changes, Files, Terminal), then Xerxes' extras. */
+export const RAIL_PANELS: readonly RailPanel[] = ['subagents', 'swarm', 'btw', 'docs', 'review', 'files', 'terminal', 'browser', 'background', 'outputs', 'activity', 'usage']
 /** Rail tabs are icons, as in Claude Code; the name is the tooltip and accessible label. */
-const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', browser: 'cloud', background: 'hourglass', activity: 'activity', usage: 'clock' }
+const RAIL_ICONS: Record<RailPanel, IconName> = { subagents: 'agents', swarm: 'tree', btw: 'chat', docs: 'stack', files: 'folder', outputs: 'file', review: 'changes', terminal: 'terminal', browser: 'cloud', background: 'hourglass', activity: 'activity', usage: 'clock' }
 /** Vibes draws Activity as a list, like Claude's side panel; other styles keep the pulse. */
 const railIconOf = (panel: RailPanel, vibes: boolean): IconName => vibes && panel === 'activity' ? 'listBullets' : RAIL_ICONS[panel]
 export const railTabName = (panel: RailPanel): string =>
-  panel === 'subagents' ? 'Subagents' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'browser' ? 'Browser' : panel === 'usage' ? 'Usage' : 'Activity'
+  panel === 'subagents' ? 'Subagents' : panel === 'swarm' ? 'Immortals' : panel === 'btw' ? 'Side question' : panel === 'docs' ? 'Artifacts' : panel === 'review' ? 'Changes' : panel === 'files' ? 'Files' : panel === 'outputs' ? 'Outputs' : panel === 'terminal' ? 'Terminal' : panel === 'background' ? 'Background' : panel === 'browser' ? 'Browser' : panel === 'usage' ? 'Usage' : 'Activity'
 export const DesktopNavigation = createContext<(panel: DesktopPanel, filePath?: string) => void>(() => {})
 export const useDesktopNavigation = () => useContext(DesktopNavigation)
 
@@ -186,19 +212,24 @@ function Empty({ children }: { children: ReactNode }) {
 export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, 'xerxes'>; snap: Snapshot }): ReactElement {
   // 'xerxes' is rendered by SupervisorPage in App.tsx, not here.
   const close = useDesktopNavigation()
-  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "")} aria-label={PAGE_TITLES[panel]}>
+  const externalBinding = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
+  const pageTitle = panel === 'extensions' && externalBinding ? 'Customize' : PAGE_TITLES[panel]
+  const pageNote = panel === 'extensions' && externalBinding
+    ? `Discovered skills, commands and capabilities from ${externalBinding.name}.`
+    : PAGE_NOTES[panel]
+  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "") + (panel === "extensions" && externalBinding ? " acp-customize-page" : "")} aria-label={pageTitle}>
     {/* A full-page destination had no way out of itself: no close button,
         and the tab bar is hidden while it is open, so Escape was the only
         thing left to try — and Escape cancelled the running turn. */}
-    <header className="desktop-page__bar"><h2 className="visually-hidden">{PAGE_TITLES[panel]}</h2><p className="studio-muted">{PAGE_NOTES[panel]}</p><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
-    <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : panel === 'schedules' ? <SchedulesPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
+    <header className="desktop-page__bar"><h2 className="visually-hidden">{pageTitle}</h2><p className="studio-muted">{pageNote}</p><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
+    <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}:${externalBinding?.agent_id ?? 'native'}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : panel === 'schedules' ? <SchedulesPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
   </section>
 }
 
 /** Nonmodal task context: the conversation and draft remain interactive. */
 /** The rail's + button: a menu of every view, each opening (or focusing) its tab. */
-function RailAddMenu({ onPick }: { onPick: (panel: RailPanel) => void }): ReactElement {
-  const [open, setOpen] = useState(false)
+export function RailAddMenu({ onPick, hideSwarm = false, defaultOpen = false }: { onPick: (panel: RailPanel) => void; hideSwarm?: boolean; defaultOpen?: boolean }): ReactElement {
+  const [open, setOpen] = useState(defaultOpen)
   const root = useRef<HTMLDivElement>(null)
   const vibes = useVibesStyle()
   useEffect(() => {
@@ -210,9 +241,12 @@ function RailAddMenu({ onPick }: { onPick: (panel: RailPanel) => void }): ReactE
     window.addEventListener('keydown', escape, true)
     return () => { document.removeEventListener('mousedown', away); window.removeEventListener('keydown', escape, true) }
   }, [open])
+  const panels = hideSwarm ? RAIL_PANELS.filter(value => value !== 'swarm') : RAIL_PANELS
   return <div className="rail-add" ref={root}>
-    <button className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}><Icon name="plus" size={14} /></button>
-    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{RAIL_PANELS.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}><Icon name={railIconOf(value, vibes)} size={14} /><span>{railTabName(value)}</span></button>)}</div>}
+    <button className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      {vibes ? <T3Icon name="plus" size={15} /> : <Icon name="plus" size={14} />}
+    </button>
+    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{panels.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}>{vibes ? <T3Icon name={railT3IconOf(value)} size={14} /> : <Icon name={railIconOf(value, vibes)} size={14} />}<span>{railTabName(value)}</span></button>)}</div>}
   </div>
 }
 
@@ -259,17 +293,18 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views">{shownTabs.map(tab => {
       const key = tabKey(tab), name = tab.title || railTabName(tab.panel), selected = key === currentKey
       return <div key={key} className="desktop-rail__tab" data-selected={selected || undefined}>
-        <button role="tab" aria-selected={selected} className="desktop-rail__tabmain" title={vibes && selected ? `Close ${name}` : name} onClick={() => {
-          // Claude Code's panel icons toggle: clicking the open one closes it, so
-          // Vibes and Neo need no separate × glued to each icon.
-          if (vibes && selected) { if (onCloseTab) onCloseTab(key); else close(); return }
+        <button role="tab" aria-selected={selected} className="desktop-rail__tabmain" title={name} onClick={() => {
           if (onSelectTab) onSelectTab(key); else open(tab.panel)
-        }}><Icon name={railIconOf(tab.panel, vibes)} size={14} /><span>{name}</span></button>
-        <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}><Icon name="close" size={10} /></button>
+        }} onAuxClick={event => {
+          if (event.button === 1) { event.preventDefault(); if (onCloseTab) onCloseTab(key); else close() }
+        }}>{vibes ? <T3Icon name={railT3IconOf(tab.panel)} size={15} /> : <Icon name={railIconOf(tab.panel, vibes)} size={14} />}<span>{name}</span></button>
+        <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}>{vibes ? <T3Icon name="close" size={9} /> : <Icon name="close" size={10} />}</button>
       </div>
-    })}</nav><RailAddMenu onPick={value => open(value)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}><Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} /></button>}<button aria-label="Close task context" onClick={close}><Icon name="close" size={13} /></button></header>
+    })}</nav><RailAddMenu onPick={value => open(value)} hideSwarm={!showsImmortalsForSession(snap)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}>{vibes ? <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} /> : <Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} />}</button>}<button aria-label="Close task context" onClick={close}>{vibes ? <T3Icon name="close" size={14} /> : <Icon name="close" size={13} />}</button></header>
     <div className="studio-sheet-content" key={`${currentKey}:${snap.cwd}:${snap.sessionKey}`}>
-      {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} onInspect={id => open('activity', id)} />}
+      {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} swarm={snap.swarm ?? null} onOpenSwarm={() => { store.openSwarmBoard(); open('swarm') }} onInspect={id => open('activity', id)} />}
+      {panel === 'swarm' && <SwarmBoard snap={snap} />}
+      {panel === 'btw' && <SideQuestionPanel snap={snap} />}
       {/* An artifact tab shows that one artifact and takes its title; the Artifacts tab lists them. */}
       {panel === 'docs' && <ArtifactsSection key={snap.currentId} sessionKey={snap.sessionKey} sessionId={snap.currentId} online={snap.connection === 'online'} {...(item ? { target: { id: item, count: artifactTarget?.count ?? 0 }, onTitle: (title: string) => onRetitle?.(currentKey, title), onBack: () => open('docs') } : {})} />}
       {/* A file tab shows its own file; picking another file opens it in a new tab. */}
@@ -309,6 +344,8 @@ export function DesktopSheet({
   }, [])
   const names = {
     subagents: 'Subagents',
+    swarm: 'Immortals Board',
+    btw: 'Side question',
     docs: 'Artifacts',
     artifacts: 'Artifacts',
     agents: 'Specialists',
@@ -353,7 +390,9 @@ export function DesktopSheet({
         <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}`}>
           {panel === 'artifacts' && <ArtifactsPanel snap={snap} />}
           {panel === 'docs' && <ArtifactsSection sessionKey={snap.sessionKey} online={snap.connection === 'online'} />}
-          {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} onInspect={() => {}} />}
+          {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} swarm={snap.swarm ?? null} onOpenSwarm={() => { close(); store.openSwarmBoard() }} onInspect={() => {}} />}
+          {panel === 'swarm' && <SwarmBoard snap={snap} />}
+          {panel === 'btw' && <SideQuestionPanel snap={snap} />}
           {panel === 'agents' && <SpecialistsPanel snap={snap} />}
           {panel === 'extensions' && <ExtensionsPanel snap={snap} />}
           {panel === 'schedules' && <SchedulesPanel snap={snap} />}
@@ -593,7 +632,402 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
   )
 }
 
+export type AcpCustomizeTab = 'skills' | 'commands' | 'capabilities'
+
+export interface AcpCustomizePanelProps {
+  readonly snap: Snapshot
+  readonly binding: AcpSessionBinding
+  readonly initialTab?: AcpCustomizeTab
+  readonly onDisconnect?: () => Promise<boolean> | boolean
+  readonly onInsertCommand?: (command: string) => void
+}
+
+/**
+ * Claude Code-style Customize surface for an active external ACP runtime.
+ * Automatically surfaces the connected runtime's discovered skills, commands,
+ * models, modes, config options, and capabilities (`acp.catalog` + `snap.acpBinding`)
+ * while completely isolating away Xerxes native skills (`immortals-*`, Learned, etc.).
+ */
+export function AcpCustomizePanel({
+  snap,
+  binding,
+  initialTab = 'skills',
+  onDisconnect,
+  onInsertCommand,
+}: AcpCustomizePanelProps): ReactElement {
+  const open = useDesktopNavigation()
+  const [tab, setTab] = useState<AcpCustomizeTab>(initialTab)
+  const [needle, setNeedle] = useState('')
+  const [catalog, setCatalog] = useState<AcpCatalogResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  useEffect(() => {
+    if (snap.connection !== 'online') return
+    let active = true
+    setLoading(true)
+    void store.loadAcpCatalog({ silent: true })
+      .then(result => {
+        if (active && result) setCatalog(result)
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => { active = false }
+  }, [snap.connection, snap.cwd, snap.sessionKey, binding.agent_id, binding.external_session_id])
+
+  const effectiveBinding: AcpSessionBinding = catalog?.binding && catalog.binding.agent_id === binding.agent_id
+    ? { ...binding, ...catalog.binding }
+    : binding
+  const resolved = resolveExternalAcpCatalog(effectiveBinding)
+  const skills: readonly AcpDiscoveredSkill[] = catalog?.skills.length ? catalog.skills : resolved.skills
+  const commands: readonly AcpAvailableCommand[] = catalog?.commands.length ? catalog.commands : resolved.commands
+  const capabilities: AcpRuntimeCapabilities | undefined = catalog?.capabilities ?? effectiveBinding.capabilities
+  const configOptions: readonly AcpConfigOption[] = catalog?.config_options.length
+    ? catalog.config_options
+    : (effectiveBinding.config_options ?? [])
+
+  const query = needle.trim().toLowerCase()
+  const filteredSkills = query
+    ? skills.filter(skill =>
+        skill.name.toLowerCase().includes(query)
+        || (skill.description?.toLowerCase().includes(query) ?? false)
+        || (skill.source?.toLowerCase().includes(query) ?? false)
+        || (skill.path?.toLowerCase().includes(query) ?? false),
+      )
+    : skills
+  const filteredCommands = query
+    ? commands.filter(cmd =>
+        cmd.name.toLowerCase().includes(query)
+        || (cmd.description?.toLowerCase().includes(query) ?? false)
+        || (cmd.source?.toLowerCase().includes(query) ?? false)
+        || (cmd.input_hint?.toLowerCase().includes(query) ?? false),
+      )
+    : commands
+
+  const insertInChat = (slashCommand: string): void => {
+    const clean = slashCommand.startsWith('/') ? slashCommand : `/${slashCommand}`
+    if (onInsertCommand) {
+      onInsertCommand(clean)
+      return
+    }
+    window.dispatchEvent(new CustomEvent('xerxes:insert-command', { detail: clean }))
+    open(null)
+  }
+
+  const switchToXerxes = async (): Promise<void> => {
+    if (disconnecting || snap.acpConnecting) return
+    setDisconnecting(true)
+    try {
+      await (onDisconnect ? onDisconnect() : store.disconnectAcpAgent())
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
+  const versionText = effectiveBinding.agent_version
+    ? effectiveBinding.agent_version.startsWith('v')
+      ? effectiveBinding.agent_version
+      : `v${effectiveBinding.agent_version}`
+    : ''
+  const activeModel = activeAcpModelKnown(effectiveBinding)
+  const activeThinking = activeAcpThoughtLevelLabel(effectiveBinding)
+  const activeMode = effectiveBinding.modes?.length ? activeAcpModeLabel(effectiveBinding) : null
+  const extraConfigs = extraAcpConfigOptions(effectiveBinding)
+  const otherConfigs = configOptions.filter(opt => opt.type !== 'select')
+
+  const capabilityFlag = (label: string, supported: boolean): ReactElement => (
+    <div className="acp-cap-row" key={label} data-supported={supported ? 'true' : 'false'}>
+      <span className="acp-cap-row__label">{label}</span>
+      <span className="acp-cap-row__value">
+        <span className="acp-cap-row__dot" aria-hidden="true" />
+        <span>{supported ? 'Supported' : 'Not advertised'}</span>
+      </span>
+    </div>
+  )
+
+  return (
+    <div className="studio-form acp-customize" data-provider={effectiveBinding.provider}>
+      <header className="acp-customize__head">
+        <div className="acp-customize__heading">
+          <h1>Customize</h1>
+          <span className="acp-customize__runtime-pill" data-provider={effectiveBinding.provider}>
+            <AgentBrandGlyph provider={effectiveBinding.provider} size={14} />
+            <span>
+              {effectiveBinding.name} {transportBadgeLabel(effectiveBinding.transport)}
+              {versionText ? ` · ${versionText}` : ''}
+            </span>
+          </span>
+        </div>
+        <button
+          type="button"
+          className="btn acp-customize__switch"
+          disabled={disconnecting || Boolean(snap.acpConnecting)}
+          onClick={() => void switchToXerxes()}
+        >
+          {disconnecting ? 'Switching…' : 'Switch to Xerxes'}
+        </button>
+      </header>
+
+      <div className="acp-customize__bar">
+        <div className="acp-customize__tabs" role="tablist" aria-label={`${effectiveBinding.name} runtime views`}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'skills'}
+            className={`acp-customize__tab${tab === 'skills' ? ' is-selected' : ''}`}
+            onClick={() => { setTab('skills'); setNeedle('') }}
+          >
+            <span>Skills</span>
+            <span className="acp-customize__count">{skills.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'commands'}
+            className={`acp-customize__tab${tab === 'commands' ? ' is-selected' : ''}`}
+            onClick={() => { setTab('commands'); setNeedle('') }}
+          >
+            <span>Commands</span>
+            <span className="acp-customize__count">{commands.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'capabilities'}
+            className={`acp-customize__tab${tab === 'capabilities' ? ' is-selected' : ''}`}
+            onClick={() => { setTab('capabilities'); setNeedle('') }}
+          >
+            <span>Capabilities</span>
+          </button>
+        </div>
+
+        {tab !== 'capabilities' && (
+          <label className="acp-catalog__search">
+            <Icon name="search" size={13} />
+            <input
+              type="search"
+              aria-label={`Search ${effectiveBinding.name} ${tab}`}
+              placeholder="Search"
+              spellCheck={false}
+              value={needle}
+              onChange={event => setNeedle(event.target.value)}
+            />
+          </label>
+        )}
+      </div>
+
+      {loading && skills.length === 0 && commands.length === 0 && (
+        <div className="studio-progress" role="status">
+          <span className="studio-spinner" />
+          Discovering {effectiveBinding.name} features…
+        </div>
+      )}
+
+      {tab === 'skills' && (
+        <div className="acp-customize__pane" role="tabpanel" aria-label={`${effectiveBinding.name} skills`}>
+          {filteredSkills.length === 0 ? (
+            <Empty>
+              {query
+                ? `No skills match “${needle.trim()}”.`
+                : `No skills discovered from ${effectiveBinding.name} in this workspace yet.`}
+            </Empty>
+          ) : (
+            <div className="acp-customize__list" role="list">
+              {filteredSkills.map(skill => {
+                const slash = skill.slash_command?.startsWith('/') ? skill.slash_command : `/${skill.name}`
+                return (
+                  <div className="acp-customize__row" role="listitem" key={skill.name}>
+                    <span className="acp-customize__icon" aria-hidden="true">
+                      <Icon name="spark" size={14} />
+                    </span>
+                    <div className="acp-customize__body">
+                      <div className="acp-customize__row-top">
+                        <strong className="acp-customize__name">{skill.name}</strong>
+                        {skill.source && <span className="acp-customize__source">{skill.source}</span>}
+                      </div>
+                      <p className="acp-customize__desc" title={skill.path || skill.description || slash}>
+                        {skill.description || skill.path || `Use ${slash} in chat`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="acp-customize__use"
+                      onClick={() => insertInChat(slash)}
+                    >
+                      Use in chat
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'commands' && (
+        <div className="acp-customize__pane" role="tabpanel" aria-label={`${effectiveBinding.name} commands`}>
+          {filteredCommands.length === 0 ? (
+            <Empty>
+              {query
+                ? `No commands match “${needle.trim()}”.`
+                : `No slash commands advertised by ${effectiveBinding.name} yet.`}
+            </Empty>
+          ) : (
+            <div className="acp-customize__list" role="list">
+              {filteredCommands.map(cmd => {
+                const slash = `/${cmd.name}`
+                return (
+                  <div className="acp-customize__row" role="listitem" key={cmd.name}>
+                    <span className="acp-customize__icon" aria-hidden="true">
+                      <Icon name="terminal" size={14} />
+                    </span>
+                    <div className="acp-customize__body">
+                      <div className="acp-customize__row-top">
+                        <strong className="acp-customize__name">{slash}</strong>
+                        <span className="acp-customize__source">{cmd.source || effectiveBinding.name}</span>
+                        {cmd.input_hint && <span className="acp-customize__hint">{cmd.input_hint}</span>}
+                      </div>
+                      <p className="acp-customize__desc" title={cmd.description || slash}>
+                        {cmd.description || `${effectiveBinding.name} slash command`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="acp-customize__use"
+                      onClick={() => insertInChat(slash)}
+                    >
+                      Use in chat
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'capabilities' && (
+        <div className="acp-customize__pane acp-customize__caps" role="tabpanel" aria-label={`${effectiveBinding.name} capabilities`}>
+          <section className="acp-cap-section">
+            <h3>Runtime</h3>
+            <div className="acp-cap-group">
+              <div className="acp-cap-row">
+                <span className="acp-cap-row__label">Agent</span>
+                <span className="acp-cap-row__value">
+                  {effectiveBinding.agent_title || effectiveBinding.name}
+                  {versionText ? ` · ${versionText}` : ''}
+                </span>
+              </div>
+              <div className="acp-cap-row">
+                <span className="acp-cap-row__label">Transport</span>
+                <span className="acp-cap-row__value">{transportBadgeLabel(effectiveBinding.transport)}</span>
+              </div>
+              {effectiveBinding.external_session_id && (
+                <div className="acp-cap-row">
+                  <span className="acp-cap-row__label">Session</span>
+                  <span className="acp-cap-row__value acp-cap-row__mono" title={effectiveBinding.external_session_id}>
+                    {effectiveBinding.external_session_id.slice(0, 12)}
+                  </span>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="acp-cap-section">
+            <h3>Models & controls</h3>
+            <div className="acp-cap-group">
+              <div className="acp-cap-row">
+                <span className="acp-cap-row__label">Models</span>
+                <span className="acp-cap-row__value">
+                  {effectiveBinding.models?.length
+                    ? `${activeModel ?? effectiveBinding.models[0]!.name} · ${effectiveBinding.models.length} available`
+                    : `${effectiveBinding.name} managed`}
+                </span>
+              </div>
+              {effectiveBinding.thought_levels && effectiveBinding.thought_levels.length > 0 && (
+                <div className="acp-cap-row">
+                  <span className="acp-cap-row__label">Thinking level</span>
+                  <span className="acp-cap-row__value">
+                    {activeThinking} ({effectiveBinding.thought_levels.map(level => level.name).join(', ')})
+                  </span>
+                </div>
+              )}
+              {effectiveBinding.modes && effectiveBinding.modes.length > 0 && (
+                <div className="acp-cap-row">
+                  <span className="acp-cap-row__label">Modes</span>
+                  <span className="acp-cap-row__value">
+                    {activeMode} ({effectiveBinding.modes.map(mode => mode.name).join(', ')})
+                  </span>
+                </div>
+              )}
+              {extraConfigs.map(option => (
+                <div className="acp-cap-row" key={option.id}>
+                  <span className="acp-cap-row__label">{option.name}</span>
+                  <span className="acp-cap-row__value">
+                    {activeAcpConfigOptionLabel(option)} ({option.options.map(opt => opt.name).join(', ')})
+                  </span>
+                </div>
+              ))}
+              {otherConfigs.map(option => (
+                <div className="acp-cap-row" key={option.id}>
+                  <span className="acp-cap-row__label">{option.name}</span>
+                  <span className="acp-cap-row__value">{option.current_value || option.type}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="acp-cap-section">
+            <h3>Prompt capabilities</h3>
+            <div className="acp-cap-group">
+              {capabilityFlag('Images', capabilities?.prompt.image === true)}
+              {capabilityFlag('Embedded context', capabilities?.prompt.embedded_context === true)}
+              {capabilityFlag('Audio', capabilities?.prompt.audio === true)}
+            </div>
+          </section>
+
+          <section className="acp-cap-section">
+            <h3>Session capabilities</h3>
+            <div className="acp-cap-group">
+              {capabilityFlag('Resume', capabilities?.session.resume === true)}
+              {capabilityFlag('Load', capabilities?.session.load === true)}
+              {capabilityFlag('List', capabilities?.session.list === true)}
+              {capabilityFlag('Close', capabilities?.session.close === true)}
+              {capabilityFlag('Additional directories', capabilities?.session.additional_directories === true)}
+            </div>
+          </section>
+
+          <section className="acp-cap-section">
+            <h3>MCP & authentication</h3>
+            <div className="acp-cap-group">
+              {capabilityFlag('MCP over HTTP', capabilities?.mcp.http === true)}
+              {capabilityFlag('MCP over SSE', capabilities?.mcp.sse === true)}
+              {capabilities?.auth_methods && capabilities.auth_methods.length > 0 && (
+                <div className="acp-cap-row">
+                  <span className="acp-cap-row__label">Auth methods</span>
+                  <span className="acp-cap-row__value">
+                    {capabilities.auth_methods.map(method => method.name).join(', ')}
+                  </span>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
+  const externalBinding = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
+  if (externalBinding) {
+    return <AcpCustomizePanel snap={snap} binding={externalBinding} />
+  }
+  return <NativeExtensionsPanel snap={snap} />
+}
+
+function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
   const request = useRequest(snap),
     [catalog, setCatalog] = useState<RpcRecord | null>(null),
@@ -1159,40 +1593,49 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
     [terminals, setTerminals] = useState(false)
   useEffect(() => {
     let active = true,
-      timer: ReturnType<typeof setTimeout> | undefined
-    // The 3s refresh must not reuse request.run: that flips the shared busy
-    // flag, so an unreserved "Working…" row entered layout every three
-    // seconds and re-disabled the row buttons under the pointer.
+      timer: ReturnType<typeof setTimeout> | undefined,
+      lastRowsJson = '[]'
+    // The periodic refresh must not reuse request.run: that flips the shared busy
+    // flag, so an unreserved "Working…" row entered layout every few seconds
+    // and re-disabled the row buttons under the pointer.
     const load = async (silent = false) => {
       if (timer) clearTimeout(timer)
+      let hasRunning = false
       const fetchRows = async () => {
         const result = await request.call('background.activity')
         const next = records(result.rows)
-        if (active) {
+        hasRunning = next.some(row => row.state === 'running' || row.state === 'watching')
+        const nextJson = JSON.stringify(next)
+        if (active && (nextJson !== lastRowsJson || !silent)) {
+          lastRowsJson = nextJson
           setRows(next)
           setLoaded(true)
         }
       }
-      // Out of sight, a background refresh skips the runtime call and only
-      // keeps the timer going.
-      if (silent && pageIsBackground()) { /* skipped while hidden */ }
+      // Out of sight or unfocused, a background refresh skips the runtime call.
+      if (silent && pageIsInactive()) { /* skipped while hidden/unfocused */ }
       else if (silent) await fetchRows().catch(() => {})
       else await request.run(fetchRows)
       if (active) {
         if (timer) clearTimeout(timer)
-        timer = setTimeout(() => void load(true), 3000)
+        const nextDelay = hasRunning || snap.turnActive ? 3000 : 15_000
+        timer = setTimeout(() => void load(true), nextDelay)
       }
     }
     const unsubscribe = window.xerxes.onEvent(({ type, payload }) => {
       if (type === 'background_changed' && (!payload.session_id || payload.session_id === snap.currentId)) void load()
     })
+    const unsubPause = subscribePerfPaused(() => {
+      if (!pageIsInactive()) void load(true)
+    })
     void load()
     return () => {
       unsubscribe()
+      unsubPause()
       active = false
       if (timer) clearTimeout(timer)
     }
-  }, [snap.sessionKey, snap.currentId])
+  }, [snap.sessionKey, snap.currentId, snap.turnActive])
   // Same row grammar as the agents above: dot, name, state. These used to
   // be two-line blocks whose second line was a whole sentence from the
   // daemon, so a finished watcher carried more visual weight than a
@@ -1920,9 +2363,13 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
         const result = await desktopCall(window.xerxes, snap.sessionKey, 'background.status')
         if (typeof result.shells !== 'number' || typeof result.watchers !== 'number')
           throw new Error('Invalid activity counts')
-        if (active) setCounts({ shells: result.shells, watchers: result.watchers })
+        if (active) {
+          const shells = result.shells
+          const watchers = result.watchers
+          setCounts(prev => (prev && prev.shells === shells && prev.watchers === watchers ? prev : { shells, watchers }))
+        }
       } catch {
-        if (active) setCounts(null)
+        if (active) setCounts(prev => (prev === null ? prev : null))
       } finally {
         pending = false
       }
@@ -1936,10 +2383,12 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
         setCompacting('')
     })
     void load()
-    const timer = setInterval(() => { if (!pageIsBackground()) void load() }, 5000)
+    const timer = setInterval(() => { if (!pageIsInactive()) void load() }, 15_000)
+    const unsubPause = subscribePerfPaused(() => { if (!pageIsInactive()) void load() })
     return () => {
       active = false
       clearInterval(timer)
+      unsubPause()
       unsubscribe()
     }
   }, [snap.sessionKey, snap.currentId])

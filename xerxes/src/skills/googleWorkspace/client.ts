@@ -526,9 +526,16 @@ export function googleWorkspaceRequestUrl(
   path: string,
   query: Readonly<Record<string, GoogleQueryValue>> | undefined = undefined,
 ): URL {
-  const base = normalizedEndpoint(endpoint)
+  const base = new URL(normalizedEndpoint(endpoint))
   const relativePath = requireRelativePath(path)
   const url = new URL(relativePath, base)
+  if (
+    url.origin !== base.origin
+    || !url.pathname.startsWith(base.pathname)
+    || hasDecodedDotTraversal(url.pathname)
+  ) {
+    throw new TypeError('Google API path must be a relative path without query strings or traversal')
+  }
   if (query !== undefined) {
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined) continue
@@ -576,10 +583,29 @@ function normalizedEndpoint(value: string): string {
 
 function requireRelativePath(value: string): string {
   const path = requireSkillText(value, 'Google API path')
-  if (path.startsWith('/') || path.includes('://') || path.includes('?') || path.split('/').some(part => part === '..')) {
+  if (
+    path.startsWith('/')
+    || path.includes('\\')
+    || path.includes('://')
+    || path.includes('?')
+    || path.includes('#')
+    || path.split('/').some(part => part === '..' || part === '.')
+  ) {
     throw new TypeError('Google API path must be a relative path without query strings or traversal')
   }
   return path
+}
+
+function hasDecodedDotTraversal(pathname: string): boolean {
+  for (const segment of pathname.split('/')) {
+    try {
+      const decoded = decodeURIComponent(segment)
+      if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) return true
+    } catch {
+      return true
+    }
+  }
+  return false
 }
 
 function pathSegment(value: string, name: string): string {

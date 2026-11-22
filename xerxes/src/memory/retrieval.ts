@@ -10,20 +10,25 @@ export interface RetrievalWeightsOptions {
   readonly semantic?: number
 }
 
+function sanitizeWeight(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
+}
+
 export class RetrievalWeights {
   readonly bm25: number
   readonly recency: number
   readonly semantic: number
 
   constructor(options: RetrievalWeightsOptions = {}) {
-    this.semantic = options.semantic ?? 0.55
-    this.bm25 = options.bm25 ?? 0.3
-    this.recency = options.recency ?? 0.15
+    this.semantic = sanitizeWeight(options.semantic, 0.55)
+    this.bm25 = sanitizeWeight(options.bm25, 0.3)
+    this.recency = sanitizeWeight(options.recency, 0.15)
   }
 
   normalized(): RetrievalWeights {
     const total = this.semantic + this.bm25 + this.recency
-    return total === 0
+    return !Number.isFinite(total) || total <= 0
       ? new RetrievalWeights()
       : new RetrievalWeights({ semantic: this.semantic / total, bm25: this.bm25 / total, recency: this.recency / total })
   }
@@ -60,13 +65,15 @@ export class HybridRetriever {
   }
 
   rank(query: string, items: readonly MemoryItem[], limit = 10, now = new Date()): RetrievalResult[] {
-    if (items.length === 0) return []
+    if (items.length === 0 || !Number.isFinite(limit) || limit <= 0) return []
+    const maxItems = Math.floor(limit)
     const queryEmbedding = this.embedder.embed(query)
     const rawBm25 = this.bm25(query, items)
     const maxBm25 = Math.max(0, ...rawBm25)
     const results = items.map((item, index) => {
       const itemEmbedding = item.embedding ?? this.embeddingFor(item)
-      const semanticScore = Math.max(0, cosineSimilarity(queryEmbedding, itemEmbedding))
+      const rawSemantic = cosineSimilarity(queryEmbedding, itemEmbedding)
+      const semanticScore = Number.isFinite(rawSemantic) ? Math.max(0, rawSemantic) : 0
       const bm25Score = maxBm25 === 0 ? 0 : (rawBm25[index] ?? 0) / maxBm25
       const recencyScore = this.recency(item.timestamp, now)
       const score = this.weights.semantic * semanticScore
@@ -74,7 +81,7 @@ export class HybridRetriever {
         + this.weights.recency * recencyScore
       return { item, score, semanticScore, bm25Score, recencyScore }
     })
-    return results.sort((left, right) => right.score - left.score).slice(0, limit)
+    return results.sort((left, right) => right.score - left.score).slice(0, maxItems)
   }
 
   /** Embed one item's content once per distinct content value. */
@@ -113,7 +120,10 @@ export class HybridRetriever {
   }
 
   private recency(timestamp: Date, now: Date): number {
-    const ageDays = Math.max(0, (now.valueOf() - timestamp.valueOf()) / 86_400_000)
+    const itemMs = timestamp.valueOf()
+    const nowMs = now.valueOf()
+    if (!Number.isFinite(itemMs) || !Number.isFinite(nowMs)) return 0
+    const ageDays = Math.max(0, (nowMs - itemMs) / 86_400_000)
     return 2 ** (-ageDays / Math.max(this.recencyHalfLifeDays, 0.001))
   }
 }

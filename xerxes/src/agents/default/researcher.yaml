@@ -14,6 +14,7 @@ agent:
     Use this agent when the parent agent needs to understand the codebase, find relevant files, or answer questions about how things work.
   allowed_tools:
     - ReadFile
+    - FileOutlineTool
     - GlobTool
     - GrepTool
     - ListDir
@@ -37,6 +38,7 @@ agent:
     - AskUserQuestionTool
     - WriteFile
     - FileEditTool
+    - ApplyPatchTool
     - TodoWriteTool
     - SkillTool
   subagents:

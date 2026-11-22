@@ -38,6 +38,7 @@ export type WindowFit =
 
 export function fitWindow(input: WindowFitInput): WindowFit {
   const spare = (input.freeBytes - input.weightsBytes - FIT_RESERVE_BYTES) * FIT_CACHE_SHARE
+  if (spare < 0) return { fits: false, ctxSize: Math.min(MIN_FIT_WINDOW, input.maxWindow) }
   const tokens = input.kvBytesPerToken > 0 ? spare / input.kvBytesPerToken : Number.POSITIVE_INFINITY
   const window = Math.min(input.maxWindow, Math.floor(tokens / WINDOW_STEP) * WINDOW_STEP)
   if (window < MIN_FIT_WINDOW) return { fits: false, ctxSize: Math.min(MIN_FIT_WINDOW, input.maxWindow) }

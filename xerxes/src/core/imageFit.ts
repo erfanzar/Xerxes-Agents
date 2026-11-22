@@ -100,18 +100,34 @@ export function fitImage(image: ImageData64): ImageData64 {
 export function imageSize(bytes: Uint8Array): { width: number; height: number; format: 'png' | 'jpeg' } | undefined {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-    return { width: view.getUint32(16), height: view.getUint32(20), format: 'png' }
+    const width = view.getUint32(16)
+    const height = view.getUint32(20)
+    return width > 0 && height > 0 ? { width, height, format: 'png' } : undefined
   }
   if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
     let offset = 2
-    while (offset + 9 < bytes.length) {
+    while (offset < bytes.length) {
       if (bytes[offset] !== 0xff) { offset += 1; continue }
-      const marker = bytes[offset + 1]!
-      // Start-of-frame markers carry the dimensions (not DHT/JPG/DAC).
+      // ITU T.81 §B.1.1.2: any marker may be preceded by arbitrary 0xFF fill bytes.
+      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1
+      if (offset >= bytes.length) break
+      const marker = bytes[offset]!
+      offset += 1
+      // Stuffed 0x00 or standalone markers (TEM 0x01, RST0..RST7/SOI 0xD0..0xD8) carry no length.
+      if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue
+      // EOI (0xD9) or SOS (0xDA, followed by entropy-coded scan data) ends header scanning.
+      if (marker === 0xd9 || marker === 0xda) break
+      // Start-of-frame markers carry the dimensions (not DHT 0xC4, JPG 0xC8, DAC 0xCC).
       if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-        return { width: view.getUint16(offset + 7), height: view.getUint16(offset + 5), format: 'jpeg' }
+        if (offset + 7 > bytes.length) break
+        const height = view.getUint16(offset + 3)
+        const width = view.getUint16(offset + 5)
+        return width > 0 && height > 0 ? { width, height, format: 'jpeg' } : undefined
       }
-      offset += 2 + view.getUint16(offset + 2)
+      if (offset + 2 > bytes.length) break
+      const segmentLength = view.getUint16(offset)
+      if (segmentLength < 2) break
+      offset += segmentLength
     }
   }
   return undefined

@@ -14,6 +14,15 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { ActivityDetails, Announcer, Composer, ConnectionBanner, GlobalKeys, Stream, TaskModal } from '../../desktop/renderer/App.js'
+import {
+  activeAcpConfigOptionLabel,
+  activeAcpModeLabel,
+  activeAcpSummaryParts,
+  activeAcpThoughtLevelLabel,
+  extraAcpConfigOptions,
+  isExternalAcpBinding,
+  transportBadgeLabel,
+} from '../../desktop/renderer/AcpRuntimePicker.js'
 import { ActivityPanel, DesktopNavigation, DesktopSheet, type DesktopPanel } from '../../desktop/renderer/DesktopPanels.js'
 import { ErrorBoundary } from '../../desktop/renderer/ErrorBoundary.js'
 import { FindBar } from '../../desktop/renderer/FindBar.js'
@@ -23,9 +32,17 @@ import { SessionSearch } from '../../desktop/renderer/SearchPanel.js'
 import { FirstRunSetup } from '../../desktop/renderer/Setup.js'
 import { Shortcuts } from '../../desktop/renderer/Shortcuts.js'
 import { store, type Snapshot } from '../../desktop/renderer/store.js'
+import { swarmMemberCounts } from '../../desktop/renderer/swarmState.js'
 import type { SessionRow } from '../../desktop/renderer/types.js'
 import { sidebarOrder } from '../../desktop/renderer/workspaceGroups.js'
 import { ChangesTab, PlanTab } from '../../desktop/renderer/Workspaces.js'
+import { AgentBrandGlyph } from '../../desktop/renderer/XerxesSprites.js'
+import {
+  foldVscodeBtwEvent,
+  parseVscodeBtwEvent,
+  SideQuestionCard,
+  type VscodeBtwEntry,
+} from './SideQuestionCard.js'
 
 type Sheet = Exclude<DesktopPanel, null>
 
@@ -44,7 +61,19 @@ function useWideView(min: number): boolean {
 }
 
 /** Overflow-menu commands the extension pushes (`panel:<name>`) → the sheet they open. */
-const SHEETS: ReadonlySet<string> = new Set<Sheet>(['activity', 'usage'])
+const SHEETS: ReadonlySet<string> = new Set(['activity', 'usage', 'swarm'])
+
+function readSnapBtwOpen(snap: Snapshot): { readonly open: boolean; readonly revision: number } {
+  const raw = snap as unknown as Record<string, unknown>
+  const open = raw.btwOpen === true || raw.sideQuestionOpen === true
+  const rev =
+    typeof raw.btwOpenRevision === 'number'
+      ? raw.btwOpenRevision
+      : typeof raw.sideQuestionOpenRevision === 'number'
+        ? raw.sideQuestionOpenRevision
+        : 0
+  return { open, revision: rev }
+}
 
 export function VscodeApp(): ReactElement {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot)
@@ -76,22 +105,82 @@ function RuntimeUpdate({ snap }: { snap: Snapshot }): ReactElement {
 export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [history, setHistory] = useState(false)
+  const [btwOpen, setBtwOpen] = useState(false)
+  const [btwBySession, setBtwBySession] = useState<Record<string, readonly VscodeBtwEntry[]>>({})
+  const sessionBucket = snap.currentId || snap.sessionKey || '__default__'
+  const btwEntries = btwBySession[sessionBucket] ?? []
+  const btwStreaming = btwEntries.some(entry => entry.status === 'streaming')
+  const snapBtw = readSnapBtwOpen(snap)
+
+  const updateBtwEntries = (updater: (prev: readonly VscodeBtwEntry[]) => readonly VscodeBtwEntry[]): void => {
+    setBtwBySession(current => ({
+      ...current,
+      [sessionBucket]: updater(current[sessionBucket] ?? []),
+    }))
+  }
+
   // A full window or a wide editor tab has room to keep activity in view.
   const activityColumn = useWideView(ACTIVITY_COLUMN_MIN_WIDTH) && !snap.noWorkspace
   const navigate = (panel: DesktopPanel, path?: string): void => {
+    if ((panel as string | null) === 'btw') {
+      setHistory(false)
+      setBtwOpen(true)
+      return
+    }
     if (panel === 'activity' && activityColumn) { document.querySelector('.xv-activity')?.scrollTo({ top: 0 }); return }
     void navigateInVscode(window.xerxes, setSheet, panel, path)
   }
-  useEffect(() => { setSheet(null); setHistory(false) }, [snap.cwd, snap.sessionKey])
+  useEffect(() => { setSheet(null); setHistory(false); setBtwOpen(false) }, [snap.cwd, snap.sessionKey])
+  useEffect(() => { if (snap.swarmOpen) { setHistory(false); setSheet('swarm') } }, [snap.swarmOpenRevision])
+  useEffect(() => { if (snapBtw.open) { setHistory(false); setBtwOpen(true) } }, [snapBtw.open, snapBtw.revision])
   useEffect(() => window.xerxes.onMenuCommand?.(command => {
     if (command === 'history') setHistory(open => !open)
+    else if (command === 'btw' || command === 'panel:btw') setBtwOpen(open => !open)
     else if (command.startsWith('panel:') && SHEETS.has(command.slice(6))) setSheet(command.slice(6) as Sheet)
   }), [])
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.xerxes?.onEvent) return
+    return window.xerxes.onEvent((raw: unknown) => {
+      if (!raw || typeof raw !== 'object') return
+      const frame = raw as { type?: unknown; payload?: unknown }
+      if (frame.type !== 'btw_event') return
+      const parsed = parseVscodeBtwEvent(frame.payload)
+      if (!parsed) return
+      if (snap.currentId && parsed.sessionId && parsed.sessionId !== snap.currentId) return
+      const targetBucket = parsed.sessionId || sessionBucket
+      setBtwBySession(current => ({
+        ...current,
+        [targetBucket]: foldVscodeBtwEvent(current[targetBucket] ?? [], parsed),
+      }))
+      if (parsed.kind === 'begin') {
+        setBtwOpen(true)
+      }
+    })
+  }, [snap.currentId, sessionBucket])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === ';' && (event.metaKey || event.ctrlKey) && !event.altKey) {
+        event.preventDefault()
+        setBtwOpen(open => !open)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   return (
     <DesktopNavigation.Provider value={navigate}>
       <div className="app atelier xv">
         <FirstRunSetup snap={snap} />
-        <Header snap={snap} history={history} setHistory={setHistory} />
+        <Header
+          snap={snap}
+          history={history}
+          setHistory={setHistory}
+          openSwarm={() => setSheet('swarm')}
+          btwOpen={btwOpen}
+          btwStreaming={btwStreaming}
+          toggleBtw={() => setBtwOpen(open => !open)}
+        />
         <div className="xv-body">
           {snap.noWorkspace ? <NoFolder /> : <ErrorBoundary label="This conversation"><main className="chat xv-chat">
             {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
@@ -99,6 +188,15 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
             {snap.tab === 'changes' ? <div className="workspace"><ChangesTab snap={snap} /></div>
               : snap.tab === 'plan' ? <div className="workspace"><PlanTab snap={snap} /></div>
               : <Stream snap={snap} />}
+            {btwOpen && (
+              <SideQuestionCard
+                snap={snap}
+                entries={btwEntries}
+                onEntriesChange={updateBtwEntries}
+                onClear={() => setBtwBySession(current => ({ ...current, [sessionBucket]: [] }))}
+                onClose={() => setBtwOpen(false)}
+              />
+            )}
             <Composer snap={snap} />
           </main></ErrorBoundary>}
           {activityColumn && <ErrorBoundary label="Activity"><aside className="xv-activity desktop-rail" aria-label="Activity">
@@ -113,12 +211,12 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
         {snap.taskModalOpen && <TaskModal snap={snap} />}
         {snap.paletteOpen && <CommandPalette snap={snap} />}
         {snap.searchOpen && <SessionSearch snap={snap} />}
-        {sheet && <DesktopSheet panel={sheet} snap={snap} close={() => setSheet(null)} activityDetails={<ActivityDetails snap={snap} />} />}
+        {sheet && <DesktopSheet panel={sheet} snap={snap} close={() => { setSheet(null); store.closeSwarmBoard() }} activityDetails={<ActivityDetails snap={snap} />} />}
         {(snap.workspaceBusy || snap.workspaceError) && <div className="workspace-notice" role={snap.workspaceError ? 'alert' : 'status'}>
           <span>{snap.workspaceError || 'Opening workspace…'}</span>
           {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
         </div>}
-        <GlobalKeys snap={snap} closeSurface={sheet || history ? () => { setSheet(null); setHistory(false) } : null} />
+        <GlobalKeys snap={snap} closeSurface={btwOpen ? () => setBtwOpen(false) : sheet || history ? () => { setSheet(null); setHistory(false); store.closeSwarmBoard() } : null} />
       </div>
     </DesktopNavigation.Provider>
   )
@@ -151,16 +249,79 @@ export async function navigateInVscode(
  * an earlier task in this folder. Session edits and a pending decision are
  * the only other things worth the room.
  */
-function Header({ snap, history, setHistory }: { snap: Snapshot; history: boolean; setHistory: (open: boolean) => void }): ReactElement {
+function Header({
+  snap,
+  history,
+  setHistory,
+  openSwarm,
+  btwOpen,
+  btwStreaming,
+  toggleBtw,
+}: {
+  snap: Snapshot
+  history: boolean
+  setHistory: (open: boolean) => void
+  openSwarm: () => void
+  btwOpen: boolean
+  btwStreaming: boolean
+  toggleBtw: () => void
+}): ReactElement {
   const totals = useMemo(() => snap.changes.reduce((sum, file) => ({ adds: sum.adds + file.adds, dels: sum.dels + file.dels }), { adds: 0, dels: 0 }), [snap.changes])
   const title = snap.currentTitle || (snap.connection === 'online' ? 'New task' : snap.connection === 'connecting' ? 'Connecting…' : 'Not connected')
   const needsInput = snap.approval !== null || snap.question !== null
+  const swarmCounts = snap.swarm?.active ? swarmMemberCounts(snap.swarm.members) : null
   return <header className="xv-head">
     <button className="xv-title" aria-haspopup="dialog" aria-expanded={history} title="Switch task" onClick={() => setHistory(!history)}>
       <span className="xv-title__text">{title}</span>
       <Icon name="caretDown" size={12} />
     </button>
     <span className="xv-head__flex" />
+    {!snap.noWorkspace && isExternalAcpBinding(snap.acpBinding) && (() => {
+      const summary = activeAcpSummaryParts(snap.acpBinding).join(' · ')
+      const externalThinking = activeAcpThoughtLevelLabel(snap.acpBinding)
+      const externalMode = snap.acpBinding.modes?.length ? activeAcpModeLabel(snap.acpBinding) : null
+      const extraMeta = extraAcpConfigOptions(snap.acpBinding).map(activeAcpConfigOptionLabel).filter(Boolean)
+      const pillMeta = [externalThinking, externalMode, ...extraMeta].filter(Boolean).join(' · ')
+      return (
+        <button
+          type="button"
+          className="xv-pill xv-pill--acp"
+          data-provider={snap.acpBinding.provider}
+          title={`${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''} — click to switch back to Xerxes`}
+          aria-label={`External runtime: ${snap.acpBinding.name}${summary ? ` · ${summary}` : ''}`}
+          onClick={() => void store.disconnectAcpAgent()}
+        >
+          <AgentBrandGlyph provider={snap.acpBinding.provider} size={11} />
+          <span>{snap.acpBinding.name}{pillMeta ? ` · ${pillMeta}` : ''}</span>
+        </button>
+      )
+    })()}
+    {!snap.noWorkspace && (
+      <button
+        type="button"
+        className={`xv-pill xv-pill--btw${btwOpen ? ' is-on' : ''}`}
+        data-streaming={btwStreaming ? 'true' : undefined}
+        aria-pressed={btwOpen}
+        title="Ask an ephemeral side question (/btw · ⌘;)"
+        aria-label="Ask aside"
+        onClick={toggleBtw}
+      >
+        <span>Ask aside</span>
+      </button>
+    )}
+    {swarmCounts && (
+      <button
+        type="button"
+        className="xv-pill xv-pill--swarm"
+        data-working={swarmCounts.working > 0 ? 'true' : undefined}
+        title="Open Immortals Board"
+        aria-label="Open Immortals Board"
+        onClick={openSwarm}
+      >
+        <Icon name="tree" size={11} />
+        <span>Immortals{swarmCounts.working > 0 ? ` · ${swarmCounts.working}` : ''}</span>
+      </button>
+    )}
     {needsInput && snap.interactionHidden && <button className="xv-pill xv-pill--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}>needs input</button>}
     {snap.changes.length > 0 && <button className="xv-pill" title="Files this task changed — open Source Control" onClick={() => void window.xerxes.showSourceControl?.()}>
       <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>

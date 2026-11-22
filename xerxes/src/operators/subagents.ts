@@ -228,10 +228,11 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
 
   /** Whether a handle with this exact id is still retained (not yet LRU-evicted). */
   hasHandle(handleId: string): boolean {
-    return this.handles.has(handleId)
+    return this.handles.has(handleId.trim())
   }
 
   async spawn(options: SpawnAgentOptions = {}): Promise<SpawnedAgentSnapshot> {
+    options.signal?.throwIfAborted()
     if (options.isolation || options.worktreeRef !== undefined || options.worktreeSource !== undefined) throw new ValidationError('isolation', 'requires a native host with a configured worktree adapter', options.isolation)
     const id = options.nickname?.trim() || this.idFactory()
     if (this.handles.has(id)) throw new ValidationError('nickname', 'already identifies a spawned agent', id)
@@ -458,13 +459,14 @@ export class SpawnedAgentManager implements SpawnedAgentManagerPort {
   }
 
   private requireHandle(handleId: string): SpawnedAgentHandle {
-    const handle = this.handles.get(handleId)
+    const handle = this.handles.get(handleId.trim())
     if (handle === undefined) throw new ValidationError('handle_id', 'spawned agent not found', handleId)
     return handle
   }
 
   private resolveHandleId(handleId: string | undefined): string {
-    if (handleId?.trim()) return handleId
+    const trimmed = handleId?.trim()
+    if (trimmed) return trimmed
     const active = [...this.handles.values()]
       .filter(handle => !handle.closed)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.createdAt.localeCompare(left.createdAt))[0]

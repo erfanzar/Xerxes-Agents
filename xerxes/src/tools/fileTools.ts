@@ -8,12 +8,13 @@ import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import type { FileToolContext } from './fileState.js'
-import { guardedCreate, guardedWrite, recordedAppend, recordFileRead, withStaleNotice } from './fileState.js'
+import { fileStateTracker, guardedCreate, guardedWrite, recordedAppend, recordFileRead, withStaleNotice } from './fileState.js'
 import { OfficePackageError } from '../skills/powerpoint/errors.js'
 import { GitignoreMatcher } from './gitignore.js'
 import { BINARY_SNIFF_BYTES, binaryFileHint, extractOfficeText, looksBinary, officeTextKind, type OfficeTextKind } from './officeText.js'
 import { optionalBoolean, optionalInteger, optionalString, requireRange, requiredString } from './inputs.js'
 import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
+import { discoverRelatedTests } from './testDiscovery.js'
 
 export const DEFAULT_READ_LINE_LIMIT = 400
 export const DEFAULT_MAX_RESULTS = 500
@@ -785,9 +786,12 @@ export async function editFile(
       toolName: 'FileEditTool',
       transform: () => newString,
     })
-    return `Replaced entire file ${relativePath}.`
+    const related = discoverRelatedTests(paths.root, [relativePath])
+    const suffix = related.hint ? `\n${related.hint}` : ''
+    return `Replaced entire file ${relativePath}.${suffix}`
   }
 
+  const priorRead = context?.sessionId ? fileStateTracker.peek(context.sessionId, checked) : undefined
   let applied: ForgivingReplacement | undefined
   const written = guardedWrite({
     absolutePath: checked,
@@ -798,7 +802,8 @@ export async function editFile(
     transform: content => {
       const occurrences = countOccurrences(content, oldString)
       if (occurrences === 0) {
-        applied = replaceForgivingly(content, oldString, newString, replaceAll)
+        const hasFreshWholeRead = priorRead !== undefined && !priorRead.partialView && priorRead.snapshot === content
+        applied = replaceForgivingly(content, oldString, newString, replaceAll, hasFreshWholeRead)
         return applied.text
       }
       if (occurrences > 1 && !replaceAll) {
@@ -818,7 +823,9 @@ export async function editFile(
     ? `Applied ${replaceAll ? countOccurrences(written.previous, oldString) : 1} replacement(s) to ${relativePath}.`
     : `Applied ${applied.replacements} replacement(s) to ${relativePath} `
       + `after matching on ${applied.matchedOn}; the file keeps its original characters.`
-  return withStaleNotice(written.staleNotice, summary)
+  const related = discoverRelatedTests(paths.root, [relativePath])
+  const summaryWithRelated = related.hint ? `${summary}\n${related.hint}` : summary
+  return withStaleNotice(written.staleNotice, summaryWithRelated)
 }
 
 /**
@@ -874,6 +881,7 @@ function replaceForgivingly(
   oldString: string,
   newString: string,
   replaceAll: boolean,
+  hasFreshWholeRead = false,
 ): ForgivingReplacement {
   const crlfContent = usesCrlfLineEndings(content)
   const crlfNeedle = crlfContent && oldString.includes('\n') && !oldString.includes('\r\n')
@@ -906,7 +914,65 @@ function replaceForgivingly(
       text: spliceMatches(content, chosen, attempt.needle.length, newString, crlfContent),
     }
   }
-  throw new ValidationError('old_string', 'was not found exactly; re-read the file before retrying', oldString)
+  throw new ValidationError('old_string', diagnoseMissingSpan(content, oldString, hasFreshWholeRead), oldString)
+}
+
+const MAX_EDIT_DIAGNOSTIC_BYTES = 512_000
+const MAX_DIAGNOSTIC_PREVIEW_LINES = 6
+const MAX_DIAGNOSTIC_PREVIEW_LINE_CHARS = 160
+
+/**
+ * Explain why `oldString` failed to match without mutating the file: catch
+ * copied line-number prefixes (`"  12 | ..."`) and indentation-only drift so
+ * the caller can fix the call directly instead of looping on blind re-reads.
+ */
+function diagnoseMissingSpan(content: string, oldString: string, hasFreshWholeRead: boolean): string {
+  const normalizedNeedle = oldString.replaceAll('\r\n', '\n')
+  const rawNeedleLines = normalizedNeedle.split('\n')
+  if (normalizedNeedle.endsWith('\n') && rawNeedleLines.length > 1) {
+    rawNeedleLines.pop()
+  }
+  if (rawNeedleLines.some(line => /^\s*\d+\s*\|\s/.test(line))) {
+    const stripped = rawNeedleLines.map(line => line.replace(/^\s*\d+\s*\|\s?/, '')).join('\n')
+    if (stripped.trim() && content.replaceAll('\r\n', '\n').includes(stripped)) {
+      return 'was not found exactly; old_string includes "N | " line-number prefixes — strip the prefixes and pass only verbatim file text'
+    }
+  }
+
+  if (content.length <= MAX_EDIT_DIAGNOSTIC_BYTES) {
+    const trimmedNeedleLines = rawNeedleLines.map(line => line.trim())
+    if (trimmedNeedleLines.some(Boolean)) {
+      const contentLines = content.replaceAll('\r\n', '\n').split('\n')
+      const windowLength = trimmedNeedleLines.length
+      const matchedStarts: number[] = []
+      for (let start = 0; start <= contentLines.length - windowLength; start += 1) {
+        let matches = true
+        for (let offset = 0; offset < windowLength; offset += 1) {
+          if ((contentLines[start + offset] ?? '').trim() !== trimmedNeedleLines[offset]) {
+            matches = false
+            break
+          }
+        }
+        if (matches) matchedStarts.push(start)
+      }
+      const firstStart = matchedStarts[0]
+      if (firstStart !== undefined) {
+        const endLine = firstStart + windowLength
+        const rangeLabel = windowLength === 1 ? `line ${firstStart + 1}` : `lines ${firstStart + 1}-${endLine}`
+        const preview = contentLines
+          .slice(firstStart, Math.min(endLine, firstStart + MAX_DIAGNOSTIC_PREVIEW_LINES))
+          .map(line => line.length <= MAX_DIAGNOSTIC_PREVIEW_LINE_CHARS ? line : `${line.slice(0, MAX_DIAGNOSTIC_PREVIEW_LINE_CHARS)}…`)
+          .join('\n')
+        const extraMatches = matchedStarts.length > 1 ? ` (${matchedStarts.length} occurrences)` : ''
+        return `was not found exactly, but matches ${rangeLabel}${extraMatches} when leading/trailing whitespace is ignored; copy the exact indentation on disk:\n${preview}`
+      }
+    }
+  }
+
+  if (hasFreshWholeRead) {
+    return 'was not found exactly in the current file (your last ReadFile is still current — check exact spelling and surrounding lines instead of re-reading)'
+  }
+  return 'was not found exactly; re-read the file before retrying'
 }
 
 /** Offsets where the folded needle occurs in the folded haystack; the fold preserves offsets. */

@@ -36,6 +36,10 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
     title: 'Finding things',
     items: [
       { keys: '⌘K', label: 'Command palette' },
+      { keys: '⌘J', label: 'Toggle bottom terminal drawer (also Ctrl+`)' },
+      { keys: '⌘\\', label: 'Toggle right panel' },
+      { keys: '⌥S', label: 'Toggle Immortals Board' },
+      { keys: '⌘Z', label: 'Undo recent sidebar settle, snooze or pin' },
       { keys: '⌘F', label: 'Find in this conversation' },
       { keys: '⇧⌘F', label: 'Search the messages of every task' },
       { keys: '⌘,', label: 'Settings' },

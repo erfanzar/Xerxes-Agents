@@ -1,12 +1,18 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { isCompactionSummaryMessage } from '../context/compressor.js'
+
 /** The message prefix that can be used as the history of a historical branch. */
 export interface BranchTurnSelection {
   /** Number of transcript messages through the selected completed turn. */
   readonly messageCount: number
   /** Number of retained user turns in that prefix. */
   readonly turnCount: number
+}
+
+function isStandaloneUserTurn(message: Readonly<Record<string, unknown>> | undefined): boolean {
+  return message?.role === 'user' && !isCompactionSummaryMessage(message) && message.origin !== 'harness'
 }
 
 /**
@@ -28,7 +34,7 @@ export function selectBranchTurn(
 
   const userTurnStarts: number[] = []
   for (let index = 0; index < messages.length; index += 1) {
-    if (messages[index]?.role === 'user') userTurnStarts.push(index)
+    if (isStandaloneUserTurn(messages[index])) userTurnStarts.push(index)
   }
   if (turn > userTurnStarts.length) {
     throw new RangeError(`retained user turn ${turn} is out of range`)
@@ -38,7 +44,14 @@ export function selectBranchTurn(
   if (selectedStart === undefined) {
     throw new RangeError(`retained user turn ${turn} is out of range`)
   }
-  const messageCount = userTurnStarts[turn] ?? messages.length
+  let messageCount = messages.length
+  for (let index = selectedStart + 1; index < messages.length; index += 1) {
+    const candidate = messages[index]
+    if (isStandaloneUserTurn(candidate) || isCompactionSummaryMessage(candidate)) {
+      messageCount = index
+      break
+    }
+  }
   validatePrefix(messages, selectedStart, messageCount, turn)
   return { messageCount, turnCount: turn }
 }
@@ -50,15 +63,26 @@ function validatePrefix(
   selectedTurn: number,
 ): void {
   let currentTurn = 0
+  let turnOpen = false
+  let postSummaryTail = false
   let sawAssistant = false
   let sawFinalAssistant = false
   let pendingToolCalls = new Set<string>()
 
-  const finishTurn = (): void => {
-    if (currentTurn === 0) return
-    if (pendingToolCalls.size > 0 || !sawAssistant || !sawFinalAssistant) {
-      throw incompleteTurn(selectedTurn, currentTurn)
+  const finishSegment = (): void => {
+    if (turnOpen) {
+      if (pendingToolCalls.size > 0 || !sawAssistant || !sawFinalAssistant) {
+        throw incompleteTurn(selectedTurn, currentTurn)
+      }
+    } else if (postSummaryTail) {
+      if (pendingToolCalls.size > 0 || (sawAssistant && !sawFinalAssistant)) {
+        throw incompleteTurn(selectedTurn, currentTurn || 1)
+      }
+    } else {
+      return
     }
+    turnOpen = false
+    postSummaryTail = false
     sawAssistant = false
     sawFinalAssistant = false
     pendingToolCalls = new Set<string>()
@@ -71,24 +95,49 @@ function validatePrefix(
     }
     const role = message.role
 
-    if (role === 'user') {
-      finishTurn()
-      currentTurn += 1
+    // System messages are transcript preamble and do not open or close a turn,
+    // though they cannot appear mid-tool-round.
+    if (role === 'system') {
+      if (pendingToolCalls.size > 0) {
+        throw incompleteTurn(selectedTurn, currentTurn || 1)
+      }
       continue
     }
 
-    // System messages are transcript preamble. They are retained as part of
-    // the prefix and do not make a user turn complete or incomplete.
-    if (role === 'system') continue
+    // Compaction summaries close any preceding protected head turn (verifying
+    // it was complete) and open a post-summary tail segment so tail cuts that
+    // CompactionProvisioner starts at `assistant` / `tool` / `origin: 'harness'`
+    // remain valid ahead of the next standalone user turn.
+    if (isCompactionSummaryMessage(message)) {
+      finishSegment()
+      postSummaryTail = true
+      continue
+    }
+
+    if (role === 'user') {
+      if (message.origin === 'harness') {
+        if (!turnOpen && !postSummaryTail) {
+          throw new Error(`harness message ${index} precedes the first user turn`)
+        }
+        if (pendingToolCalls.size > 0) {
+          throw incompleteTurn(selectedTurn, currentTurn || 1)
+        }
+        continue
+      }
+      finishSegment()
+      currentTurn += 1
+      turnOpen = true
+      continue
+    }
 
     if (role === 'assistant') {
-      if (currentTurn === 0) {
+      if (!turnOpen && !postSummaryTail) {
         throw new Error(`assistant message ${index} precedes the first user turn`)
       }
       if (pendingToolCalls.size > 0) {
-        throw incompleteTurn(selectedTurn, currentTurn)
+        throw incompleteTurn(selectedTurn, currentTurn || 1)
       }
-      const toolCallIds = assistantToolCallIds(message, index, selectedTurn, currentTurn)
+      const toolCallIds = assistantToolCallIds(message, index, selectedTurn, currentTurn || 1)
       sawAssistant = true
       if (toolCallIds.length === 0) {
         sawFinalAssistant = true
@@ -100,12 +149,12 @@ function validatePrefix(
     }
 
     if (role === 'tool') {
-      if (currentTurn === 0) {
+      if (!turnOpen && !postSummaryTail) {
         throw new Error(`tool message ${index} precedes the first user turn`)
       }
       const toolCallId = message.tool_call_id
       if (typeof toolCallId !== 'string' || toolCallId.trim() === '' || !pendingToolCalls.delete(toolCallId)) {
-        throw incompleteTurn(selectedTurn, currentTurn)
+        throw incompleteTurn(selectedTurn, currentTurn || 1)
       }
       continue
     }
@@ -116,10 +165,10 @@ function validatePrefix(
   // The selected prefix always contains the selected user turn. A malformed
   // preamble or an earlier incomplete turn is rejected before the branch can
   // copy it, and the selected turn is checked by the same rule.
-  if (currentTurn === 0 || selectedStart >= messageCount) {
+  if (currentTurn === 0 || !turnOpen || selectedStart >= messageCount) {
     throw new RangeError(`retained user turn ${selectedTurn} is out of range`)
   }
-  finishTurn()
+  finishSegment()
 }
 
 function assistantToolCallIds(

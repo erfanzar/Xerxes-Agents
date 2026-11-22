@@ -163,8 +163,17 @@ export class OTelCollector implements AuditCollector {
       this.recordFallback('turn', attributes)
       return
     }
-    // Refresh recency so long-lived turns are not evicted ahead of stale ones.
-    this.openTurnSpans.delete(event.turnId)
+    // Refresh recency so long-lived turns are not evicted ahead of stale ones;
+    // end any prior span carrying the same turnId so it is never leaked open.
+    const existing = this.openTurnSpans.get(event.turnId)
+    if (existing !== undefined) {
+      this.openTurnSpans.delete(event.turnId)
+      try {
+        existing.end()
+      } catch {
+        // Best-effort span cleanup.
+      }
+    }
     while (this.openTurnSpans.size >= this.maxOpenTurns) {
       const oldest = this.openTurnSpans.keys().next().value
       if (oldest === undefined) break

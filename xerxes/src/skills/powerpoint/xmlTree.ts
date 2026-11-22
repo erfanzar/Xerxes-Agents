@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { OfficePackageError } from './errors.js'
-import { xmlLocalName } from './xml.js'
+import { tokenizeOoxmlXml, xmlLocalName } from './xml.js'
 
 /** A mutable XML attribute retained without resolving XML entities. */
 export interface OoxmlTreeAttribute {
@@ -40,18 +40,18 @@ export interface OoxmlTreeDocument {
 
 /** Parse regular OOXML XML into a deliberately limited, entity-safe mutable tree. */
 export function parseOoxmlTree(xml: string): OoxmlTreeDocument {
-  const tokens = xml.match(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE[\s\S]*?>|<[^>]+>|[^<]+/g)
-  if (tokens === null) throw new OfficePackageError('XML payload could not be tokenized')
+  const tokens = tokenizeOoxmlXml(xml)
+  if (tokens.length === 0) throw new OfficePackageError('XML payload could not be tokenized')
   const document: OoxmlTreeDocument = { children: [] }
   const stack: OoxmlTreeElement[] = []
   for (const token of tokens) {
     const children = stack.at(-1)?.children ?? document.children
-    if (token.startsWith('<!--') || token.startsWith('<![CDATA[') || token.startsWith('<?') || token.startsWith('<!DOCTYPE')) {
+    if (token.startsWith('<!--') || token.startsWith('<![CDATA[') || token.startsWith('<?')) {
       children.push({ kind: 'raw', value: token })
       continue
     }
     if (token.startsWith('</')) {
-      const name = /^<\/\s*([^\s>]+)/.exec(token)?.[1]
+      const name = /^<\/\s*([A-Za-z_][\w:.-]*)\s*>$/.exec(token)?.[1]
       const open = stack.pop()
       if (name === undefined || open === undefined || open.name !== name) {
         throw new OfficePackageError(`Malformed XML close tag: ${token.slice(0, 80)}`)
@@ -89,7 +89,9 @@ export function serializeOoxmlTree(document: OoxmlTreeDocument): string {
 /** Serialize a node on its own for semantic XML comparisons. */
 export function serializeOoxmlNode(node: OoxmlTreeNode): string {
   if (node.kind === 'text' || node.kind === 'raw') return node.value
-  const attributes = node.attributes.map(attribute => ` ${attribute.name}="${attribute.value.replaceAll('"', '&quot;')}"`).join('')
+  const attributes = node.attributes
+    .map(attribute => ` ${attribute.name}="${attribute.value.replaceAll('"', '&quot;').replaceAll('<', '&lt;')}"`)
+    .join('')
   if (node.selfClosing && !node.children.length) return `<${node.name}${attributes}/>`
   return `<${node.name}${attributes}>${node.children.map(serializeOoxmlNode).join('')}</${node.name}>`
 }

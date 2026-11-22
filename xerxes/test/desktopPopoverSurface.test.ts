@@ -25,3 +25,10 @@ test('no floating (absolute or fixed) surface is painted with the translucent ca
     .map(entry => entry.selector)
   expect(offenders).toEqual([])
 })
+
+test('dictation error popover never clamps width to 100% of its 28px mic wrapper', () => {
+  const dictationRules = rules.filter(entry => entry.selector === '.dictation-error').map(entry => entry.body).join(';')
+  expect(dictationRules).not.toContain('var(--composer-width,100%)')
+  expect(dictationRules).toContain('width:min(320px,calc(100vw - 32px))')
+  expect(dictationRules).toContain('right:0')
+})

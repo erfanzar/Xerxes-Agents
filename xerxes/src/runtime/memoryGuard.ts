@@ -15,7 +15,7 @@
  */
 
 import { dlopen, FFIType, ptr } from 'bun:ffi'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { totalmem } from 'node:os'
 
@@ -28,6 +28,12 @@ export interface ProcessRow {
 /** The host capabilities the guard needs; tests inject their own. */
 export interface MemoryGuardPorts {
   listProcesses(): Promise<readonly ProcessRow[]>
+  /**
+   * Fast synchronous check for whether `rootPid` currently has any direct child
+   * processes. When provided and returning `false`, the guard skips spawning
+   * `ps` altogether while idle.
+   */
+  hasChildren?(rootPid: number): boolean
   /** Physical footprint in bytes, or undefined when it cannot be read. */
   footprintBytes(pid: number): number | undefined
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void
@@ -103,6 +109,9 @@ export class MemoryGuard {
   async tick(): Promise<readonly MemoryGuardStop[]> {
     const limitBytes = this.options.limitBytes()
     if (!(limitBytes > 0)) return []
+    if (this.options.ports.hasChildren && !this.options.ports.hasChildren(this.options.rootPid)) {
+      return []
+    }
     const rows = await this.options.ports.listProcesses()
     const children = new Map<number, number[]>()
     const commands = new Map<number, string>()
@@ -219,6 +228,7 @@ export function memoryGuardSupported(platform: NodeJS.Platform = process.platfor
 
 /** The real host: `ps` for the tree, and the kernel's own footprint count. */
 export function hostMemoryGuardPorts(platform: NodeJS.Platform = process.platform): MemoryGuardPorts {
+  const darwin = platform === 'darwin' ? loadDarwinProcPorts() : undefined
   return {
     async listProcesses() {
       const child = Bun.spawn(['ps', '-A', '-o', 'pid=,ppid=,command='], { stdout: 'pipe', stderr: 'ignore', stdin: 'ignore' })
@@ -231,33 +241,82 @@ export function hostMemoryGuardPorts(platform: NodeJS.Platform = process.platfor
       }
       return rows
     },
-    footprintBytes: platform === 'darwin' ? darwinFootprint() : platform === 'linux' ? pid => linuxFootprint(pid) : () => undefined,
+    ...(darwin
+      ? { hasChildren: darwin.hasChildren }
+      : platform === 'linux'
+        ? { hasChildren: linuxHasChildren }
+        : {}),
+    footprintBytes: darwin ? darwin.footprintBytes : platform === 'linux' ? pid => linuxFootprint(pid) : () => undefined,
     kill(pid, signal) {
       try { process.kill(pid, signal) } catch { /* Already gone. */ }
     },
   }
 }
 
+let lastSoftGcMs = 0
+
+/**
+ * Ask Bun's JSC allocator to run an incremental (non-blocking) collection pass
+ * after bulk memory reclamation (for example idle-session eviction or swarm
+ * teardown). Rate-limited so rapid events cannot trigger GC thrash.
+ */
+export function triggerSoftGc(minIntervalMs = 15_000, nowMs: number = Date.now()): boolean {
+  if (nowMs - lastSoftGcMs < minIntervalMs) return false
+  if (typeof Bun === 'undefined' || typeof Bun.gc !== 'function') return false
+  lastSoftGcMs = nowMs
+  Bun.gc(false)
+  return true
+}
+
 /**
  * macOS: `proc_pid_rusage` (RUSAGE_INFO_V4) `ri_phys_footprint` — the figure
- * Activity Monitor and Force Quit show, GPU memory included.
+ * Activity Monitor and Force Quit show, GPU memory included — plus
+ * `proc_listchildpids` so idle ticks avoid spawning `ps`.
  */
-function darwinFootprint(): (pid: number) => number | undefined {
+function loadDarwinProcPorts(): {
+  readonly footprintBytes: (pid: number) => number | undefined
+  readonly hasChildren: (rootPid: number) => boolean
+} {
   try {
-    // The symbol lives in libSystem.
+    // Both symbols live in libSystem.
     const library = dlopen('/usr/lib/libSystem.B.dylib', {
       proc_pid_rusage: { args: [FFIType.i32, FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
+      proc_listchildpids: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     })
     const RUSAGE_INFO_V4 = 4
     // ri_uuid[16] is two uint64 slots; ri_phys_footprint is the eighth uint64 after it.
     const PHYS_FOOTPRINT_SLOT = 2 + 7
-    const buffer = new BigUint64Array(64)
-    return pid => {
-      if (library.symbols.proc_pid_rusage(pid, RUSAGE_INFO_V4, ptr(buffer)) !== 0) return undefined
-      return Number(buffer[PHYS_FOOTPRINT_SLOT])
+    const rusageBuffer = new BigUint64Array(64)
+    const childPidBuffer = new Int32Array(4)
+    return {
+      footprintBytes: pid => {
+        if (library.symbols.proc_pid_rusage(pid, RUSAGE_INFO_V4, ptr(rusageBuffer)) !== 0) return undefined
+        return Number(rusageBuffer[PHYS_FOOTPRINT_SLOT])
+      },
+      hasChildren: rootPid => {
+        const count = library.symbols.proc_listchildpids(rootPid, ptr(childPidBuffer), childPidBuffer.byteLength)
+        // Return true conservatively on syscall error (< 0) so `ps` remains the fallback.
+        return count !== 0
+      },
     }
   } catch {
-    return () => undefined
+    return {
+      footprintBytes: () => undefined,
+      hasChildren: () => true,
+    }
+  }
+}
+
+function linuxHasChildren(rootPid: number): boolean {
+  try {
+    const tasks = readdirSync(`/proc/${rootPid}/task`)
+    for (const tid of tasks) {
+      const content = readFileSync(`/proc/${rootPid}/task/${tid}/children`, 'utf8')
+      if (content.trim().length > 0) return true
+    }
+    return false
+  } catch {
+    return true
   }
 }
 

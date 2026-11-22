@@ -7,6 +7,7 @@ export const FEATURES_GUIDE = [
   'Close this guide, then type a command to get started.',
   '',
   'DELEGATE WORK',
+  '/immortals    Coordinate a multi-agent Immortals force over a shared message board or open the Immortals Board (alias /swarm).',
   '/agents       Inspect working agents and their results. F6 also opens agents.',
   '/config       Choose provider, model and reasoning for light, balanced and smart agents.',
   '/init         Ask the model to inspect this repo and create missing specialists and workflows.',

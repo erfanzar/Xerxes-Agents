@@ -201,8 +201,14 @@ export class EscalationController {
   private spentUsd = 0
   private unknownCostAttempts = 0
   private lastAction: EscalationAction | undefined
-  private previousScore: Score | undefined
+  private bestScore: Score | undefined
   private noImprovementStreak = 0
+  private readonly history: Array<{
+    readonly attempt: number
+    readonly codes: readonly string[]
+    readonly errors: number
+    readonly warns: number
+  }> = []
   private stopped: Extract<EscalationStep, { action: 'stop' }> | undefined
 
   constructor(options: EscalationOptions) {
@@ -224,15 +230,24 @@ export class EscalationController {
     }
 
     const score = scoreOf(attempt.findings)
-    if (this.previousScore !== undefined) {
-      this.noImprovementStreak = improved(score, this.previousScore) ? 0 : this.noImprovementStreak + 1
+    const codes = [...new Set(errorFindings.map(finding => finding.code))]
+    this.history.push({ attempt: this.attempts, codes, errors: score.errors, warns: score.warns })
+    const regressed = this.bestScore !== undefined && improved(this.bestScore, score)
+    const previousBestErrors = this.bestScore?.errors
+    if (this.bestScore === undefined || improved(score, this.bestScore)) {
+      this.bestScore = score
+      this.noImprovementStreak = 0
+    } else {
+      this.noImprovementStreak += 1
     }
-    this.previousScore = score
     if (this.noImprovementStreak >= 2) {
       return this.stop(`no improvement after ${this.attempts} attempts`, attempt.findings)
     }
 
     const report = renderFindings(attempt.findings)
+    const regressionNote = regressed && previousBestErrors !== undefined && score.errors > previousBestErrors
+      ? ` Errors increased compared to an earlier attempt (${previousBestErrors} -> ${score.errors}); narrow or revert the regressed edit instead of compounding changes.`
+      : ''
 
     if (this.localRetries < config.maxLocalRetries) {
       this.localRetries += 1
@@ -240,7 +255,7 @@ export class EscalationController {
         action: 'retry_local',
         feedback:
           `${report}\n\nYour result failed these checks. Fix exactly these problems and leave everything else unchanged ` +
-          `(local retry ${this.localRetries} of ${config.maxLocalRetries}).`,
+          `(local retry ${this.localRetries} of ${config.maxLocalRetries}).${regressionNote}`,
       })
     }
 
@@ -259,7 +274,11 @@ export class EscalationController {
     if (advisorBlock === undefined && this.advisorCalls < config.maxAdvisorCalls) {
       this.advisorCalls += 1
       this.noImprovementStreak = 0
-      const request = buildCheckFailureAdvisorRequest(report, this.options.taskSummary ?? DEFAULT_TASK_SUMMARY)
+      const baseSummary = this.options.taskSummary ?? DEFAULT_TASK_SUMMARY
+      const summaryWithHistory = this.history.length > 1
+        ? `${baseSummary}\nAttempt progression: ${this.formatAttemptProgression()}.`
+        : baseSummary
+      const request = buildCheckFailureAdvisorRequest(report, summaryWithHistory)
       return this.finish({ action: 'ask_advisor', question: request.question, context: request.context })
     }
 
@@ -312,6 +331,16 @@ export class EscalationController {
   private finish<T extends EscalationStep>(step: T): T {
     this.lastAction = step.action
     return step
+  }
+
+  private formatAttemptProgression(): string {
+    return this.history
+      .map(entry => {
+        const codes = entry.codes.length ? `[${entry.codes.join(',')}]` : ''
+        const warns = entry.warns > 0 ? `, ${entry.warns} warning(s)` : ''
+        return `attempt ${entry.attempt}: ${entry.errors} error(s)${codes}${warns}`
+      })
+      .join(' -> ')
   }
 
   private stop(reason: string, findings: readonly CheckFinding[]): EscalationStep {

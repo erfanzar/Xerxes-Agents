@@ -5,8 +5,9 @@ import { createHash, randomBytes } from 'node:crypto'
 import { SlackTransportError, type SlackIdentity } from './types.js'
 import { identity, record, teamId, userId, userToken } from './wire.js'
 
-/** The exact user scopes XERXES needs; also used to pre-fill the in-app Slack app manifest. */
-export const USER_SCOPES = ['users:read', 'users:read.email', 'im:write', 'im:read', 'im:history', 'chat:write'] as const
+import { USER_SCOPES } from './manifest.js'
+
+export { USER_SCOPES }
 const STATE_TTL_MS = 10 * 60_000
 const MAX_PENDING = 256
 

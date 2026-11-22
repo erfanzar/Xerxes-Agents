@@ -2401,16 +2401,38 @@ test("daemon supplies real direct session controls used by the native TUI", asyn
   }
 });
 
-test("daemon saves named sessions and routes the advertised btw alias", async () => {
+test("daemon saves named sessions, steers with /steer, and routes /btw as an ephemeral side question", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-save-command-"));
   const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const sideLlm: LlmClient = {
+    async *stream(req: CompletionRequest): AsyncIterable<LlmDelta> {
+      const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
+      const prompt = typeof lastUser?.content === "string" ? lastUser.content : "";
+      if (prompt.includes("trigger-provider-failure")) {
+        yield* [];
+        throw new Error("insufficient_quota: side question provider failed");
+      }
+      yield { content: "Saved under release-notes.", finishReason: "stop" };
+    },
+  };
+  const turnRunner: TurnRunner = {
+    defaultLlmClient: () => sideLlm,
+    async *run(_session, text) {
+      yield { type: "turn_begin", payload: { prompt: text } };
+      yield { type: "text_part", payload: { text: `Handled: ${text}` } };
+      yield { type: "turn_end", payload: { finish_reason: "stop" } };
+    },
+  };
+  const runtime = new InMemoryDaemonRuntime(turnRunner, {
+    currentProjectDirectory: directory,
+    model: "save-command-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
   const server = new DaemonServer({
     socketPath,
-    runtime: new InMemoryDaemonRuntime(undefined, {
-      currentProjectDirectory: directory,
-      model: "save-command-model",
-      sessionDirectory: join(directory, "sessions"),
-    }),
+    profileStore,
+    runtime,
   });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
@@ -2473,7 +2495,7 @@ test("daemon saves named sessions and routes the advertised btw alias", async ()
       jsonrpc: "2.0",
       id: 5,
       method: "slash",
-      params: { command: "/btw keep the title" },
+      params: { command: "/steer keep the title" },
     });
     expect((await client.next((frame) => frame.id === 5)).result).toEqual({
       ok: true,
@@ -2484,6 +2506,72 @@ test("daemon saves named sessions and routes the advertised btw alias", async ()
     expect(
       (await client.next(eventFrame("notification"))).params?.payload,
     ).toMatchObject({ category: "slash", body: "Steer accepted." });
+
+    const savedSession = runtime.listSessions()[0]!;
+    const msgCountBeforeBtw = savedSession.messages.length;
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "slash",
+      params: { command: "/btw what is the saved session title?" },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject({
+      ok: true,
+      question: "what is the saved session title?",
+      answer: "Saved under release-notes.",
+    });
+    expect(
+      (await client.next(
+        (frame) =>
+          frame.method === "event" &&
+          frame.params?.type === "btw_event" &&
+          (frame.params.payload as { kind?: string } | undefined)?.kind === "end",
+      )).params?.payload,
+    ).toMatchObject({
+      kind: "end",
+      answer: "Saved under release-notes.",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: "[btw] Saved under release-notes.",
+    });
+    expect(savedSession.messages).toHaveLength(msgCountBeforeBtw);
+
+    // Terminal provider failure inside `runTurn` must emit `btw_event { kind: "error" }`
+    // and return `{ ok: false, error }` rather than `{ ok: true, answer: "[Error: ...]" }`.
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: "/btw trigger-provider-failure" },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject({
+      ok: false,
+      question: "trigger-provider-failure",
+      error: expect.stringContaining("insufficient_quota"),
+    });
+    expect(
+      (await client.next(
+        (frame) =>
+          frame.method === "event" &&
+          frame.params?.type === "btw_event" &&
+          (frame.params.payload as { kind?: string } | undefined)?.kind === "error",
+      )).params?.payload,
+    ).toMatchObject({
+      kind: "error",
+      error: expect.stringContaining("insufficient_quota"),
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "warning",
+      body: expect.stringContaining("insufficient_quota"),
+    });
+    expect(savedSession.messages).toHaveLength(msgCountBeforeBtw);
   } finally {
     client.close();
     await server.stop();
@@ -3608,7 +3696,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.8.51",
+      daemon_version: "0.8.52",
       provider_account_isolation_v1_supported: true,
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });

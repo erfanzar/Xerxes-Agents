@@ -29,7 +29,8 @@ export function decodeXmlEntities(value: string): string {
       case 'apos': return "'"
       default: {
         const code = entity[1] === 'x' ? Number.parseInt(entity.slice(2), 16) : Number.parseInt(entity.slice(1), 10)
-        return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole
+        const validScalar = Number.isSafeInteger(code) && code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)
+        return validScalar ? String.fromCodePoint(code) : whole
       }
     }
   })
@@ -134,36 +135,103 @@ export function expandEmptyXmlElement(xml: string, qualifiedName: string, child:
 }
 
 /**
+ * Tokenize regular OOXML XML while keeping quoted `>` / `/>` inside attribute
+ * values intact and rejecting DTD declarations (`<!DOCTYPE`, `<!ENTITY`, etc.)
+ * forbidden by ECMA-376 OOXML.
+ */
+export function tokenizeOoxmlXml(xml: string): readonly string[] {
+  const tokens: string[] = []
+  let cursor = 0
+  while (cursor < xml.length) {
+    if (xml[cursor] !== '<') {
+      const next = xml.indexOf('<', cursor)
+      const end = next < 0 ? xml.length : next
+      tokens.push(xml.slice(cursor, end))
+      cursor = end
+      continue
+    }
+    if (xml.startsWith('<!--', cursor)) {
+      const end = xml.indexOf('-->', cursor + 4)
+      if (end < 0) throw new OfficePackageError('Malformed XML: unclosed comment')
+      tokens.push(xml.slice(cursor, end + 3))
+      cursor = end + 3
+      continue
+    }
+    if (xml.startsWith('<![CDATA[', cursor)) {
+      const end = xml.indexOf(']]>', cursor + 9)
+      if (end < 0) throw new OfficePackageError('Malformed XML: unclosed CDATA section')
+      tokens.push(xml.slice(cursor, end + 3))
+      cursor = end + 3
+      continue
+    }
+    if (xml.startsWith('<?', cursor)) {
+      const end = xml.indexOf('?>', cursor + 2)
+      if (end < 0) throw new OfficePackageError('Malformed XML: unclosed processing instruction')
+      tokens.push(xml.slice(cursor, end + 2))
+      cursor = end + 2
+      continue
+    }
+    if (xml.startsWith('<!', cursor)) {
+      throw new OfficePackageError('OOXML DTD declarations are not allowed')
+    }
+    let quote: '"' | "'" | undefined
+    let end = -1
+    for (let index = cursor + 1; index < xml.length; index += 1) {
+      const ch = xml[index]
+      if (quote !== undefined) {
+        if (ch === quote) quote = undefined
+        continue
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch
+        continue
+      }
+      if (ch === '<') {
+        throw new OfficePackageError(`Malformed XML tag: ${xml.slice(cursor, cursor + 80)}`)
+      }
+      if (ch === '>') {
+        end = index
+        break
+      }
+    }
+    if (end < 0) throw new OfficePackageError(`Malformed XML: unclosed tag ${xml.slice(cursor, cursor + 80)}`)
+    tokens.push(xml.slice(cursor, end + 1))
+    cursor = end + 1
+  }
+  return tokens
+}
+
+/**
  * Remove presentation-indent whitespace and comments without touching text
  * contained in `*:t` elements. This matches the intent of the Python pack
  * helper while avoiding an XML parser with external entity expansion.
  */
 export function condenseOoxmlXml(xml: string): string {
-  const tokens = xml.match(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE[\s\S]*?>|<[^>]+>|[^<]+/g)
-  if (tokens === null) throw new OfficePackageError('XML payload could not be tokenized')
+  const tokens = tokenizeOoxmlXml(xml)
+  if (tokens.length === 0) throw new OfficePackageError('XML payload could not be tokenized')
   const stack: string[] = []
   const output: string[] = []
   for (const token of tokens) {
     if (token.startsWith('<!--')) continue
-    if (token.startsWith('<![CDATA[') || token.startsWith('<?') || token.startsWith('<!DOCTYPE')) {
+    if (token.startsWith('<![CDATA[') || token.startsWith('<?')) {
       output.push(token)
       continue
     }
     if (token.startsWith('</')) {
-      const name = /^<\/\s*([^\s>]+)/.exec(token)?.[1]
-      if (name !== undefined) {
-        const expected = stack.pop()
-        if (expected !== undefined && expected !== name) {
-          throw new OfficePackageError(`Malformed XML nesting: expected </${expected}> but received </${name}>`)
-        }
+      const name = /^<\/\s*([A-Za-z_][\w:.-]*)\s*>$/.exec(token)?.[1]
+      if (name === undefined) throw new OfficePackageError(`Malformed XML close tag: ${token.slice(0, 80)}`)
+      const expected = stack.pop()
+      if (expected === undefined || expected !== name) {
+        throw new OfficePackageError(`Malformed XML nesting: expected </${expected ?? ''}> but received </${name}>`)
       }
       output.push(token)
       continue
     }
     if (token.startsWith('<')) {
-      const name = /^<\s*([^\s/>]+)/.exec(token)?.[1]
+      const match = /^<\s*([A-Za-z_][\w:.-]*)([\s\S]*?)>$/.exec(token)
+      const name = match?.[1]
       if (name === undefined) throw new OfficePackageError(`Malformed XML tag: ${token.slice(0, 80)}`)
-      if (!/\/\s*>$/.test(token)) stack.push(name)
+      if (!/\/\s*$/.test(match?.[2] ?? '')) stack.push(name)
       output.push(token)
       continue
     }

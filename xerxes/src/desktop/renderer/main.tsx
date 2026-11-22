@@ -8,6 +8,7 @@ import { followAppearanceChanges } from './appearanceSync.js'
 import { applyBackdrop, loadBackdrop } from './backdrop.js'
 import { restoreDisplayPrefs } from './displayPrefs.js'
 import { ErrorBoundary } from './ErrorBoundary.js'
+import { installPerfPauseListeners, syncPerfPaused } from './pageVisibility.js'
 import { App } from './App.js'
 
 // Theme: follow the system only while the user has not pinned an explicit
@@ -25,21 +26,22 @@ applyBackdrop(loadBackdrop())
 restoreDisplayPrefs()
 // A look chosen in any other workspace or SSH view applies here too.
 followAppearanceChanges()
-// Pause every animation while the window is not focused (see atelier.css):
+// Pause every animation while the window is hidden, occluded, or unfocused:
 // a turn can run for an hour behind another app, redrawing spinners nobody sees.
 const setFocused = (focused: boolean): void => {
   if (focused) root.removeAttribute('data-window-unfocused')
   else root.setAttribute('data-window-unfocused', '')
+  syncPerfPaused(document)
 }
-window.addEventListener('focus', () => setFocused(true))
-window.addEventListener('blur', () => setFocused(false))
 setFocused(document.hasFocus())
 // Covered by another workspace view in the same window: draw nothing, so a
 // transparent view on top does not show this page through it.
 const setOccluded = (occluded: boolean): void => {
   if (occluded) root.setAttribute('data-occluded', '')
   else root.removeAttribute('data-occluded')
+  syncPerfPaused(document)
 }
+installPerfPauseListeners(window, document)
 // A push can arrive before this page listens (startup), so it also asks. A
 // push that lands first is newer than the answer and wins.
 let pushed = false

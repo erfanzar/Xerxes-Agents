@@ -19,10 +19,11 @@ import { agentKindLabel } from './AgentRoster.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
-import { pageIsBackground } from './pageVisibility.js'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 import { desktopError } from './desktopRpc.js'
 import { store } from './store.js'
 import type { AgentMember } from './types.js'
+import { SimurghSprite, XerxesStatusMark, resolveSimurghRole } from './XerxesSprites.js'
 
 type Tone = 'working' | 'done' | 'failed' | 'stopped'
 
@@ -71,8 +72,9 @@ function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!active) return
-    const timer = setInterval(() => { if (!pageIsBackground()) setNow(Date.now()) }, 1_000)
-    return () => clearInterval(timer)
+    const timer = setInterval(() => { if (!pageIsInactive()) setNow(Date.now()) }, 1_000)
+    const unsub = subscribePerfPaused(() => { if (!pageIsInactive()) setNow(Date.now()) })
+    return () => { clearInterval(timer); unsub() }
   }, [active])
   return now
 }
@@ -95,8 +97,17 @@ function uses(count: number | undefined): string {
   return count ? `${count} tool use${count === 1 ? '' : 's'}` : ''
 }
 
-function Glyph({ tone }: { tone: Tone }): ReactElement {
-  if (tone === 'working') return <Icon name="spinner" size={13} />
+function Glyph({ tone, member }: { tone: Tone; member: AgentMember }): ReactElement {
+  if (tone === 'working') {
+    return (
+      <SimurghSprite
+        role={resolveSimurghRole(member.title, member.baseAgent)}
+        state="working"
+        size={16}
+        animate
+      />
+    )
+  }
   if (tone === 'done') return <Icon name="check" size={12} />
   if (tone === 'failed') return <Icon name="close" size={11} />
   return <span className="acard__dash" />
@@ -113,7 +124,7 @@ function AgentBranch({ row, now, open }: { row: Row; now: number; open: (id: str
   const hidden = Math.max(0, (member.toolUses ?? recent.length) - (opened ? recent.length : 1))
   return <li className="acard__node" data-tone={tone}>
     <button className="acard__row" data-tone={tone} onClick={() => open(member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
-      <span className="acard__glyph" aria-hidden="true"><Glyph tone={tone} /></span>
+      <span className="acard__glyph" aria-hidden="true"><Glyph tone={tone} member={member} /></span>
       <span className="acard__t">{member.title}</span>
       {kind && <span className="acard__kind">{kind}</span>}
       <span className="acard__stats">{stats}</span>
@@ -161,7 +172,7 @@ function PhaseSection({ phase, index, total, now, open, expanded, onExpand }: {
   const hidden = phase.rows.length - listed.length
   return <div className="acard__phase" data-state={state}>
     {(phase.name || total > 1) && <div className="acard__phasehead">
-      <span className="acard__phaseicon" aria-hidden="true">{state === 'working' ? <Icon name="spinner" size={12} /> : state === 'failed' ? <Icon name="close" size={10} /> : <Icon name="check" size={11} />}</span>
+      <span className="acard__phaseicon" aria-hidden="true">{state === 'working' ? <XerxesStatusMark state="working" size={14} live /> : state === 'failed' ? <Icon name="close" size={10} /> : <Icon name="check" size={11} />}</span>
       <span className="acard__phasename">{phase.name || `Batch ${index + 1}`}</span>
       <span className="acard__phasemeta">
         {phase.rows.length} agent{phase.rows.length === 1 ? '' : 's'}
@@ -212,7 +223,13 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
   return (
     <section className="acard" data-state={tally.working ? 'working' : tally.failed ? 'failed' : 'done'} aria-label={label ? `Workflow: ${label}` : 'Subagents'}>
       <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
-        <span className="acard__icon">{tally.working ? <AgentOrb size={20} state="connecting" /> : <Icon name="agents" size={15} />}</span>
+        <span className="acard__icon">
+          {tally.working > 0
+            ? <AgentOrb size={20} state="working" live />
+            : tally.failed > 0
+              ? <AgentOrb size={20} state="failed" live={false} />
+              : <AgentOrb size={20} state="done" live={false} />}
+        </span>
         <span className="acard__heading">
           <span className="acard__title">{title}</span>
           {sub && <span className="acard__sub">{sub}</span>}

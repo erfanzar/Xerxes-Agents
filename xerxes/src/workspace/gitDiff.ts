@@ -96,6 +96,62 @@ const defaultRunner: GitDiffRunner = async (args, cwd) => {
 
 const utf8Length = (text: string): number => new TextEncoder().encode(text).length
 
+function sliceSafeUtf16(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value
+  let end = maxChars
+  if (end > 0) {
+    const code = value.charCodeAt(end - 1)
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  }
+  return value.slice(0, end)
+}
+
+function unquoteGitPath(quoted: string): string {
+  const bytes: number[] = []
+  for (let i = 0; i < quoted.length; i += 1) {
+    const ch = quoted.charCodeAt(i)
+    if (ch !== 0x5c || i + 1 >= quoted.length) {
+      bytes.push(...Buffer.from(quoted[i]!, 'utf8'))
+      continue
+    }
+    const next = quoted[i + 1]!
+    if (next >= '0' && next <= '7') {
+      let octal = next
+      let step = 1
+      while (step < 3 && i + 1 + step < quoted.length && quoted[i + 1 + step]! >= '0' && quoted[i + 1 + step]! <= '7') {
+        octal += quoted[i + 1 + step]!
+        step += 1
+      }
+      bytes.push(Number.parseInt(octal, 8) & 0xff)
+      i += step
+      continue
+    }
+    i += 1
+    const escapes: Record<string, number> = { a: 0x07, b: 0x08, t: 0x09, n: 0x0a, v: 0x0b, f: 0x0c, r: 0x0d, '"': 0x22, '\\': 0x5c }
+    bytes.push(escapes[next] ?? next.charCodeAt(0))
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
+function parseDiffGitHeader(raw: string): string {
+  const rest = raw.slice('diff --git '.length)
+  if (rest.startsWith('"')) {
+    const quotedMatch = rest.match(/^"(?:[^"\\]|\\.)+"\s+"((?:[^"\\]|\\.)+)"$/)
+    if (quotedMatch?.[1]) {
+      const unquoted = unquoteGitPath(quotedMatch[1])
+      return unquoted.startsWith('b/') ? unquoted.slice(2) : unquoted
+    }
+  }
+  if (rest.startsWith('a/') && rest.length >= 7 && (rest.length - 5) % 2 === 0) {
+    const half = (rest.length - 5) / 2
+    const candidate = rest.slice(2, 2 + half)
+    if (rest.slice(2 + half, 5 + half) === ' b/' && rest.slice(5 + half) === candidate) {
+      return candidate
+    }
+  }
+  return rest.match(/^a\/.+? b\/(.+)$/)?.[1] ?? raw
+}
+
 /** Parse unified-diff text into classified rows, honoring line/byte caps. */
 export function parseUnifiedDiff(
   text: string,
@@ -117,7 +173,7 @@ export function parseUnifiedDiff(
     }
     let rendered = row
     if (rendered.length > MAX_RENDERED_ROW_CHARS) {
-      rendered = rendered.slice(0, MAX_RENDERED_ROW_CHARS - TRUNCATED_ROW_SUFFIX.length) + TRUNCATED_ROW_SUFFIX
+      rendered = sliceSafeUtf16(rendered, MAX_RENDERED_ROW_CHARS - TRUNCATED_ROW_SUFFIX.length) + TRUNCATED_ROW_SUFFIX
       truncated = true
     }
     const remainingBytes = maxBytes - bytes
@@ -133,7 +189,7 @@ export function parseUnifiedDiff(
   for (const raw of text.split('\n')) {
     if (raw.startsWith('diff --git ')) {
       files += 1
-      const path = raw.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? raw
+      const path = parseDiffGitHeader(raw)
       oldLine = undefined
       newLine = undefined
       if (!push('file', path)) break
@@ -146,8 +202,9 @@ export function parseUnifiedDiff(
       if (!push('hunk', raw)) break
       continue
     }
-    if (raw.startsWith('+++') || raw.startsWith('---')) {
-      // File-marker lines; the diff --git row already named the file.
+    if (oldLine === undefined && newLine === undefined && (raw.startsWith('+++') || raw.startsWith('---'))) {
+      // File-marker lines before the first hunk; inside an active hunk `+++x`
+      // and `---x` are added `++x` / deleted `--x` source lines.
       continue
     }
     if (raw.startsWith('+')) {
@@ -193,7 +250,13 @@ export function parseUnifiedDiff(
 /** Collect the bounded worktree diff for one repository. */
 export async function collectGitDiff(options: CollectGitDiffOptions): Promise<GitDiffResult> {
   const path = options.path
-  if (path !== undefined && (!path || path.length > 4096 || path.startsWith('/') || path.split('/').some(part => part === '..' || part === '.') || /[\0\r\n]/.test(path))) return { kind: 'error', message: 'Choose a workspace-relative file path without parent traversal' }
+  if (
+    path !== undefined
+    && (!path || path.length > 4096 || path.startsWith('/') || path.startsWith('\\') || /^[A-Za-z]:/.test(path)
+      || path.split(/[\\/]/).some(part => part === '..' || part === '.' || part === '') || /[\0\r\n]/.test(path))
+  ) {
+    return { kind: 'error', message: 'Choose a workspace-relative file path without parent traversal' }
+  }
   const cwd = options.cwd.trim() || process.cwd()
   const run = options.run ?? defaultRunner
   const maxUntracked = options.maxUntracked ?? DEFAULT_MAX_UNTRACKED

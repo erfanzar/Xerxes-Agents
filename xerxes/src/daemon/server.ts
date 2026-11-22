@@ -22,6 +22,58 @@ import { deriveDataTrust } from '../security/dataBoundary.js';
 import { sharedLessonsRpc } from './lessonSync.js';
 import { proposeReflection } from '../runtime/reflection.js';
 import type { TurnReflectionInput } from './turnRunner.js';
+import {
+  formatSwarmNarratorFeedback,
+  parseSwarmCommand,
+  renderSwarmChannelsText,
+  renderSwarmStatusText,
+  SWARM_USAGE,
+} from './swarmCommand.js';
+import {
+  AgyBrainBridge,
+  artifactIdForAgyPath,
+  isValidAgyArtifactFilename,
+  type AgyBrainLocation,
+} from './agyBrainBridge.js';
+import { pathToFileURL } from 'node:url';
+import { DaemonSwarmHost, transcriptMessagesToChatMessages } from './swarmHost.js';
+import { DaemonAcpBridgeHost, type AcpPromptResourceInput } from './acpBridgeHost.js';
+import type {
+  AcpClientPermissionRequest,
+  AcpClientPermissionResponse,
+  AcpElicitationRequest,
+  AcpElicitationResponse,
+  AcpPermissionOption,
+} from '../acp/client.js';
+import {
+  buildElicitationResponseFromAnswers,
+  elicitationToQuestionItems,
+  formatElicitationAnswersSummary,
+  isAcpTurboMode,
+  type AcpBridgeStreamEvent,
+  type AcpDiscoveredSkill,
+  type AcpElicitationQuestionSpec,
+  type AcpExternalAgentInfo,
+  type AcpExternalCommandOption,
+  type AcpSessionBinding,
+} from '../acp/externalAgents.js';
+import type { JsonObject } from '../types/toolCalls.js';
+import {
+  formatWorkerErrorWakeNotice,
+  sanitizeForkedMessages,
+  SWARM_OPEN_BOARD_MARKDOWN,
+  USER_BOARD_AUTHOR,
+  type SwarmCoordinatorWakeEvent,
+  type SwarmLifecycleEvent,
+  type SwarmMemberActivitySnapshot,
+} from '../swarm/index.js';
+import { ToolRegistry, type ToolExecutor } from '../executors/toolRegistry.js';
+import { createAgentState, type TurnStopReason } from '../streaming/events.js';
+import { runTurn, type TurnDependencies, type TurnRequest } from '../streaming/loop.js';
+import { registerFileTools } from '../tools/fileTools.js';
+import { registerFileOutlineTool } from '../tools/outlineTool.js';
+import { WorkspacePathResolver } from '../tools/pathSafety.js';
+import type { ChatMessage } from '../types/messages.js';
 
 import { recordCompaction } from '../context/compactionHistory.js'
 import { previewOptionsOf, previewWorkspaceFile, previewWorkspaceFileRich, writeWorkspaceFile } from './filePreview.js'
@@ -137,8 +189,8 @@ import { blockGoal, getGoal, pauseGoal, disarmGoal, recordGoalEvidence, resumeGo
 import { classifyError } from "../runtime/errorClassifier.js";
 import { parseAdvisorConfig } from "../runtime/advisorBudget.js";
 import { taskOutputFiles, taskOutputsOf, taskOutputsPayload } from "./taskOutputs.js";
-import { ArtifactStore } from "../session/artifacts.js";
-import { artifactsRpc } from "./artifactsRpc.js";
+import { ArtifactStore, summaryOf, type Artifact, type ArtifactSummary } from "../session/artifacts.js";
+import { artifactsRpc, type ArtifactsRpcMethod } from "./artifactsRpc.js";
 import { modelUsageLedger } from "../runtime/modelUsageLedger.js";
 import { GoalTimeGuard } from "../runtime/goalTimeGuard.js";
 import { GoalTokenBudget } from '../runtime/goalTokenBudget.js';
@@ -285,6 +337,7 @@ import {
 import {
   MAX_TRANSCRIPT_INLINE_IMAGE_BYTES,
   MAX_TRANSCRIPT_TOTAL_INLINE_IMAGE_BYTES,
+  imageUrlContentParts,
   validateTurnImages,
   type TurnImage,
 } from "./images.js";
@@ -497,6 +550,21 @@ export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
   "runtime.status",
   "learning.list",
   "schedule.list",
+  "swarm.status",
+  "swarm.board",
+  "swarm.inspect",
+  "swarm.post",
+  "swarm.kill",
+  "swarm.model",
+  "session.side_question",
+  "acp.agents",
+  "acp.catalog",
+  "acp.connect",
+  "acp.disconnect",
+  "acp.cancel",
+  "acp.set_model",
+  "acp.set_mode",
+  "acp.set_config_option",
 ]);
 
 export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
@@ -598,6 +666,7 @@ interface DaemonSlashCommand {
 
 /** Canonical commands exposed by concrete native daemon handlers. */
 const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
+  "acp",
   "agents",
   "background",
   "local-model",
@@ -676,7 +745,9 @@ const HANDLED_CANONICAL_COMMANDS: ReadonlySet<string> = new Set([
   "statusbar",
   "steer",
   "stop",
+  "immortals",
   "soul",
+  "swarm",
   "title",
   "mcp",
   "lsp",
@@ -1041,6 +1112,18 @@ export interface DaemonServerOptions {
   readonly managedPlugins?: ManagedPlugins;
   /** Persistent native provider profile store. */
   readonly profileStore?: ProfileStore;
+  /** Host-owned Native Swarm manager registry shared with turn runners. */
+  readonly swarmHost?: DaemonSwarmHost;
+  /** Host-owned External ACP agent bridge (Claude Code, Antigravity, custom stdio ACP). */
+  readonly acpBridgeHost?: DaemonAcpBridgeHost;
+  /** Optional Antigravity brain bridge for read-only live swarm, artifacts, and subagent projection. */
+  readonly agyBrainBridge?: AgyBrainBridge;
+  /** Optional home directory override for Antigravity brain resolution (deterministic offline tests). */
+  readonly agyBrainHomeDir?: string;
+  /** Idle settle debounce (ms) for autonomous out-of-turn ACP coordinator wakeups (default 1200ms). */
+  readonly acpWakeupIdleMs?: number;
+  /** Optional test seam for Side Question model client construction. */
+  readonly sideQuestionClientFactory?: (model: string, profile: ProviderProfile | undefined) => LlmClient;
   readonly agentSettingsStore?: AgentSettingsStore;
   readonly agentSettingsDefaults?: unknown;
   /** Refresh provider-reported model capabilities after initialize. Host opt-in avoids ambient network calls. */
@@ -1121,6 +1204,33 @@ interface ChannelStatusData {
   readonly configured: boolean;
 }
 
+interface AcpOutOfTurnWakeupState {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly startedAt: number;
+  assistantText: string;
+  thinkingText: string;
+  readonly toolStartTimes: Map<string, number>;
+  readonly toolInputsById: Map<string, JsonObject>;
+  readonly recordedToolCalls: Array<{
+    readonly id: string;
+    readonly type: "function";
+    readonly function: { readonly name: string; readonly arguments: string };
+  }>;
+  readonly recordedToolResults: Array<{
+    readonly role: "tool";
+    readonly tool_call_id: string;
+    readonly name: string;
+    readonly content: string;
+    readonly duration_ms: number;
+    readonly is_error?: boolean;
+  }>;
+  readonly recordedToolExecutions: Array<Record<string, unknown>>;
+  readonly pendingToolCallIds: Set<string>;
+  lastPlanTodoText: string | undefined;
+  settleTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
 /**
  * Event types that prove a turn actually did something.
  *
@@ -1131,6 +1241,13 @@ interface ChannelStatusData {
  * These are wire event names (`streaming/wireEvents.ts`), not internal stream
  * names: reasoning reaches this set as `think_part`.
  */
+/** Default disk + RAM retention cap for TransportEventJournal (8 MiB instead of 64 MiB). */
+const DEFAULT_EVENT_JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_EVENT_JOURNAL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const WIRE_MEMBER_ACTIVITY_MAX_RECENT_TOOLS = 6;
+const WIRE_MEMBER_ACTIVITY_MAX_LIVE_CHARS = 240;
+const WIRE_MEMBER_ACTIVITY_MAX_PREVIEW_CHARS = 120;
+
 const PRODUCTIVE_TURN_EVENTS: ReadonlySet<string> = new Set([
   "text_part",
   "think_part",
@@ -1299,6 +1416,8 @@ export class DaemonServer {
     DaemonTransportConnection,
     SkillCreateFlow
   >();
+  /** Coalesces concurrent in-flight `refreshSkills()` calls per registry and root set. */
+  private readonly skillRefreshesInFlight = new WeakMap<SkillRegistry, Map<string, Promise<void>>>();
   private readonly skillDirectory: string;
   private readonly machineSettingsPath: string;
   private readonly artifactStore: ArtifactStore;
@@ -1327,6 +1446,26 @@ export class DaemonServer {
   private readonly goalTokenLedger: GoalTokenLedger | undefined;
   private readonly goalTokenOwner: string;
   private readonly monitors: TerminalMonitors | undefined;
+  private readonly swarmHost: DaemonSwarmHost;
+  private readonly acpBridgeHost: DaemonAcpBridgeHost;
+  private readonly agyBrainBridge: AgyBrainBridge;
+  private readonly acpWakeupIdleMs: number;
+  private readonly acpOutOfTurnWakeups = new Map<string, AcpOutOfTurnWakeupState>();
+  private readonly acpApprovalOptionChoices = new Map<string, string>();
+  private readonly acpNonPermanentApprovals = new Set<string>();
+  private readonly pendingAcpApprovalIds = new Map<string, Set<string>>();
+  private readonly pendingAcpQuestions = new Map<string, {
+    readonly abort: () => void;
+    readonly resolve: (answers: Readonly<Record<string, string | readonly string[]>> | null) => void;
+    readonly sessionId: string;
+    readonly signal: AbortSignal | undefined;
+    readonly specs: readonly AcpElicitationQuestionSpec[];
+    readonly title: string;
+    readonly toolCallId: string;
+  }>();
+  private readonly sideQuestionClientFactory: DaemonServerOptions["sideQuestionClientFactory"];
+  private readonly pendingSwarmCoordinatorWakes = new Map<string, SwarmCoordinatorWakeEvent>();
+  private readonly swarmCoordinatorWakeInFlight = new Set<string>();
   private readonly unsubscribeRunHistory: (() => void) | undefined;
   private readonly transcriptSearch = new TranscriptSearchIndex();
   /**
@@ -1404,6 +1543,8 @@ export class DaemonServer {
         : join(xerxesHome(), 'daemon', 'state', createHash('sha256').update(resolve(options.socketPath), 'utf8').digest('hex').slice(0, 16));
     this.eventJournal = new TransportEventJournal(options.eventJournal ?? {
       directory: join(daemonStateDirectory, 'transport-events'),
+      maxBytes: DEFAULT_EVENT_JOURNAL_MAX_BYTES,
+      maxAgeMs: DEFAULT_EVENT_JOURNAL_MAX_AGE_MS,
     });
     this.hubVerifier = new HubIdentityVerifier({ path: options.hubEnrollmentPath ?? join(daemonStateDirectory, 'hub-enrollments.json') });
     this.eventSubscriptions = new EventSubscriptions(this.eventJournal, undefined, owner => this.outputBacklogged(owner));
@@ -1574,6 +1715,91 @@ export class DaemonServer {
     this.default_skillRegistry =
       options.skillRegistry ??
       new SkillRegistry({ workspaceTrust: trustedHashWorkspaceSkills({ skillsDirectory: this.skillDirectory }) });
+    this.swarmHost = options.swarmHost ?? new DaemonSwarmHost({
+      profileStore: this.profileStore,
+      fallbackLlm: () => this.runtime.defaultLlmClient?.(),
+      defaultModel: () => {
+        const status = this.runtime.status();
+        return typeof status.model === "string" && status.model.trim()
+          ? status.model.trim()
+          : (this.profileStore.active()?.model ?? "");
+      },
+      skillRegistryForWorkspace: () => this.skillRegistry,
+      ...(options.terminalRegistry === undefined ? {} : { terminalRegistry: options.terminalRegistry }),
+      ...(options.ptySessions === undefined ? {} : { ptySessions: options.ptySessions }),
+      ...(options.monitors === undefined ? {} : { terminalMonitors: options.monitors }),
+      mcpManager: () => this.mcpManager,
+      permissionMode: (session) => {
+        if (session?.interactionMode === "plan") return "plan";
+        return runtimePermissionMode(session?.permissionMode ?? this.runtime.status().permission_mode);
+      },
+      sessionLookup: (sessionId) =>
+        this.runtime.listSessions().find((item) => item.id === sessionId),
+      onCoordinatorModelSwitch: async (sessionId, modelInfo) => {
+        const target = this.runtime.listSessions().find((item) => item.id === sessionId);
+        if (target) {
+          target.model = modelInfo.id;
+          target.modelPinned = true;
+          await this.runtime.flushSessions();
+        }
+      },
+    });
+    this.runtime.attachSwarmHooks?.({
+      ensureSession: async (session) => {
+        await this.refreshSkills(session);
+        await this.swarmHost.ensureSession(session);
+      },
+      sessionAdapter: (session) => this.swarmHost.sessionTurnAdapter(session),
+    });
+    this.swarmHost.onEvent((event, workspaceDir) => {
+      this.emitSwarmEvent(event, workspaceDir);
+    });
+    this.swarmHost.onCoordinatorWake((event, workspaceDir) => {
+      this.scheduleSwarmCoordinatorWake(event, workspaceDir);
+    });
+    this.acpBridgeHost = options.acpBridgeHost ?? new DaemonAcpBridgeHost();
+    this.agyBrainBridge =
+      options.agyBrainBridge ??
+      new AgyBrainBridge({
+        ...(options.agyBrainHomeDir ? { homeDir: options.agyBrainHomeDir } : {}),
+      });
+    this.acpWakeupIdleMs =
+      typeof options.acpWakeupIdleMs === "number" && Number.isFinite(options.acpWakeupIdleMs) && options.acpWakeupIdleMs >= 10
+        ? Math.trunc(options.acpWakeupIdleMs)
+        : 1200;
+    this.acpBridgeHost.onBindingChange((sessionId, binding) => {
+      const live = this.runtime.listSessions().find((item) => item.id === sessionId);
+      if (live) {
+        live.metadata.acp_binding = binding.connected ? binding : { ...binding, connected: false };
+        void this.runtime.flushSessions().catch(() => undefined);
+      }
+      if (!binding.connected) {
+        void this.settleAcpOutOfTurnWakeup(sessionId, "end_turn");
+      } else if (live && isAntigravityBinding(binding)) {
+        this.ensureAgySwarmWatch(live);
+      }
+      this.emitAcpStatus(sessionId, binding, live?.cwd ?? binding.cwd);
+    });
+    this.acpBridgeHost.onSessionEvent((sessionId, event) => {
+      const live = this.runtime.listSessions().find((item) => item.id === sessionId);
+      if (!live) return;
+      if (event.type === "usage") {
+        applyAcpUsageToSession(live, event);
+        this.notifySessionStateChanged(sessionId);
+      } else if (event.type === "session_info" && event.title) {
+        this.applyExternalSessionTitle(live, event.title);
+      } else if (
+        event.type === "text_delta" ||
+        event.type === "thought_delta" ||
+        event.type === "tool_call" ||
+        event.type === "tool_result" ||
+        event.type === "plan" ||
+        event.type === "continuation"
+      ) {
+        this.handleAcpOutOfTurnEvent(live, event);
+      }
+    });
+    this.sideQuestionClientFactory = options.sideQuestionClientFactory;
     this.slashPluginRegistry =
       options.slashPluginRegistry ?? getDefaultSlashPluginRegistry();
     // Managed plugins' slash commands join the registry the dispatcher reads.
@@ -1607,6 +1833,9 @@ export class DaemonServer {
     this.monitors = options.monitors;
     for (const source of [this.terminalRegistry, this.monitors, this.cronStore, this.cronScheduler]) {
       if (source) this.activityUnsubscribe.push(source.activityChanges.subscribe(() => this.notifyActivity()));
+    }
+    if (this.runtime instanceof InMemoryDaemonRuntime) {
+      this.runtime.setIdleSessionPinCheck((session) => this.isSessionPinnedForEviction(session));
     }
     this.reactionMailbox = options.reactionMailbox;
     this.reactionDispatcher = options.reactionMailbox && this.runHistory ? new ReactionDispatcher(options.reactionMailbox, {
@@ -1767,10 +1996,18 @@ export class DaemonServer {
    */
   private startCronSchedulerIfOwned(): void {
     if (this.cronSchedulerStarted) {
+      if (this.cronLeaseProbe !== undefined) {
+        clearInterval(this.cronLeaseProbe);
+        this.cronLeaseProbe = undefined;
+      }
       return;
     }
     if (this.acquireCronLease()) {
       this.cronSchedulerStarted = true;
+      if (this.cronLeaseProbe !== undefined) {
+        clearInterval(this.cronLeaseProbe);
+        this.cronLeaseProbe = undefined;
+      }
       this.cronScheduler.start();
       return;
     }
@@ -1778,7 +2015,13 @@ export class DaemonServer {
       return;
     }
     this.cronLeaseProbe = setInterval(() => {
-      if (this.cronSchedulerStarted) return;
+      if (this.cronSchedulerStarted) {
+        if (this.cronLeaseProbe !== undefined) {
+          clearInterval(this.cronLeaseProbe);
+          this.cronLeaseProbe = undefined;
+        }
+        return;
+      }
       this.startCronSchedulerIfOwned();
     }, this.cronLeaseRetryInterval);
     this.cronLeaseProbe.unref?.();
@@ -2019,6 +2262,16 @@ export class DaemonServer {
     // Pooled Codex WebSocket sessions outlive individual turns; drop them so
     // the daemon exits without waiting on an idle-timeout close.
     try {
+      for (const wakeup of this.acpOutOfTurnWakeups.values()) {
+        if (wakeup.settleTimer !== undefined) {
+          clearTimeout(wakeup.settleTimer);
+          wakeup.settleTimer = undefined;
+        }
+      }
+      this.acpOutOfTurnWakeups.clear();
+      this.agyBrainBridge.dispose();
+      await this.acpBridgeHost.disposeAll();
+      await this.swarmHost.close();
       await closeCodexWebSocketSessions();
       await this.runtime.shutdown?.();
     } finally {
@@ -2218,10 +2471,20 @@ export class DaemonServer {
   /** Journal exactly once before either transport fans an event out. */
   private broadcastEvent(type: string, payload: JsonRpcPayload, accepts: (connection: DaemonTransportConnection) => boolean = () => true,
     observers?: readonly DaemonTransportConnection[], projectDirectory?: string): void {
-    const audience = [...new Set([...this.connections, ...(observers ?? [])])].filter(accepts).map(connection => {
-      this.recordEventInteraction(connection, type, payload);
-      return { connection, payload: this.normalizedEventPayload(connection, type, payload) };
-    });
+    // Deduplicate by canonical lease owner: `this.connections` holds raw socket
+    // transports while `this.sessionObservers` holds `connectionLeases.owner(...)`
+    // wrappers for the same underlying socket, so a raw Set would deliver every
+    // frame twice to leased clients (e.g., Desktop).
+    const seen = new Set<DaemonTransportConnection>();
+    const audience: Array<{ readonly connection: DaemonTransportConnection; readonly payload: JsonRpcPayload }> = [];
+    for (const raw of [...this.connections, ...(observers ?? [])]) {
+      const canonical = this.connectionLeases.owner(raw);
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      if (!accepts(canonical)) continue;
+      this.recordEventInteraction(canonical, type, payload);
+      audience.push({ connection: canonical, payload: this.normalizedEventPayload(canonical, type, payload) });
+    }
     this.publishEvent(type, payload, undefined, () => {
       for (const target of audience) this.deliverEvent(target.connection, type, target.payload);
       if (!observers) this.websocketGateway?.broadcast(type, payload, accepts);
@@ -2637,6 +2900,7 @@ export class DaemonServer {
         });
       }
       const history = requestedHistory === 0 ? session : await this.historySession(session);
+      this.ensureAgySwarmWatch(session);
       return {
         ok: true,
         session: this.sessionWirePayload(session, this.contextLimit(session.model, session), this.mcpStatusRecord(session), requestedHistory, history),
@@ -2715,10 +2979,13 @@ export class DaemonServer {
       return { ok: true, observation: await this.observations.read(connection, root, params) };
     }
     if (method === "workspace.filePreview") {
-      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const session = this.resolveRequestedSession(connection, params);
       if (!session) return { ok: false, error: "Select a session before previewing workspace files" };
       const options = previewOptionsOf(params);
-      return options ? await previewWorkspaceFileRich(session.cwd, params.path, options) : await previewWorkspaceFile(session.cwd, params.path);
+      const allowedReadRoots = await this.resolveAllowedPreviewReadRootsForSession(session);
+      return options
+        ? await previewWorkspaceFileRich(session.cwd, params.path, options, allowedReadRoots)
+        : await previewWorkspaceFile(session.cwd, params.path, allowedReadRoots);
     }
     if (method === "workspace.fileWrite") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
@@ -2780,10 +3047,10 @@ export class DaemonServer {
       return taskOutputsPayload(session.cwd, await taskOutputFiles(session.cwd, taskOutputsOf(session.metadata))) as JsonRpcPayload;
     }
     if (method === "artifacts.list" || method === "artifacts.read" || method === "artifacts.pin" || method === "artifacts.update") {
-      // Titled documents the agent saved with ArtifactTool, kept per session id.
-      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      // Titled documents saved with ArtifactTool or bridged from an Antigravity brain session.
+      const session = this.resolveRequestedSession(connection, params);
       if (!session) return { ok: false, error: "no active session" };
-      return artifactsRpc(this.artifactStore, method, session.id, params);
+      return this.handleArtifactsRpc(session, method, params);
     }
     if (method === "session.usage") {
       const session = this.runtime.sessionStatus(
@@ -2826,6 +3093,32 @@ export class DaemonServer {
         this.runtime.sessionStatus(key),
         optionalString(params.name) ?? "",
       );
+    }
+    if (
+      method === "swarm.status" ||
+      method === "swarm.board" ||
+      method === "swarm.inspect" ||
+      method === "swarm.post" ||
+      method === "swarm.kill" ||
+      method === "swarm.model" ||
+      method === "swarm.activate"
+    ) {
+      return this.handleSwarmRpc(connection, method, params);
+    }
+    if (
+      method === "acp.agents" ||
+      method === "acp.catalog" ||
+      method === "acp.connect" ||
+      method === "acp.disconnect" ||
+      method === "acp.cancel" ||
+      method === "acp.set_model" ||
+      method === "acp.set_mode" ||
+      method === "acp.set_config_option"
+    ) {
+      return this.handleAcpRpc(connection, method, params);
+    }
+    if (method === "session.side_question") {
+      return this.handleSideQuestionRpc(connection, params);
     }
     if (method === "session.goal") {
       const key = sessionKey(connection, params);
@@ -3008,6 +3301,12 @@ export class DaemonServer {
         const deleted = await remove.call(this.runtime, sessionId);
         if (deleted) {
           this.forgetAcceptedSubmissions([sessionId, active?.sessionKey ?? ""]);
+          this.pendingSwarmCoordinatorWakes.delete(sessionId);
+          this.monitors?.disposeOwner(sessionId);
+          void this.swarmHost.disposeSession(sessionId);
+          void this.settleAcpOutOfTurnWakeup(sessionId, "end_turn");
+          this.agyBrainBridge.unwatchSession(sessionId);
+          void this.acpBridgeHost.disconnect(sessionId);
           this.endSessionLifetime(
             [sessionId, active?.sessionKey].filter(
               (value): value is string => Boolean(value),
@@ -3451,7 +3750,10 @@ export class DaemonServer {
           && resolveProjectDirectory(job.projectRoot) === resolveProjectDirectory(workspace!)
           && job.nextRunAt && Number.isFinite(Date.parse(job.nextRunAt)))
           .sort((a, b) => Date.parse(a.nextRunAt!) - Date.parse(b.nextRunAt!) || a.id.localeCompare(b.id)) : [];
-        const attention = this.interactions.pendingAttention(owner);
+        const acpAttention = [...this.pendingAcpQuestions]
+          .filter(([, pending]) => pending.sessionId === owner)
+          .map(([id, pending]) => ({ id, kind: "question" as const, title: pending.title.slice(0, 240) }));
+        const attention = [...this.interactions.pendingAttention(owner), ...acpAttention];
         return { ok: true, attention_total: attention.length, attention: attention.slice(0, 3), has_more: rows.length > 100, runs: rows.slice(0, 100).map(({ output: _output, ...row }) => row),
           upcoming_total: upcoming.length, upcoming: upcoming.slice(0, 3).map(job => ({ id: job.id,
             title: job.prompt.slice(0, 160), next_run_at: job.nextRunAt!, timezone: job.timezone,
@@ -3645,9 +3947,11 @@ export class DaemonServer {
         return { ok: false, error: errorMessage(error) };
       }
       const session = this.runtime.sessionStatus(key);
-      requireConfiguredModel(
-        session?.model || stringValue(this.runtime.status().model),
-      );
+      if (!(session && this.acpBridgeHost.hasActiveBridge(session.id))) {
+        requireConfiguredModel(
+          session?.model || stringValue(this.runtime.status().model),
+        );
+      }
       const displayText =
         (typeof params.display_text === "string"
           ? params.display_text.trim()
@@ -3792,14 +4096,35 @@ export class DaemonServer {
       return { ok: this.cancelTrackedTurn(cancelKey), ...(droppedSteers ? { cancelled_steers: droppedSteers } : {}) };
     }
     if (method === "cancel_all") {
-      return { ok: true, cancelled: this.runtime.cancelAllTurns() };
+      return { ok: true, cancelled: this.cancelAllActiveTurns() };
     }
     if (method === "subagent.inspect") {
       const task = optionalString(params.task);
       if (!task) return { ok: false, error: "subagent.inspect requires a task id" };
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       const saved = session && persistedSubagentSnapshotValues(session.metadata).find(row => row.id === task);
-      if (!saved) return { ok: false, error: "Agent is not available in this session. Refresh its activity or reconnect to its parent task." };
+      if (!saved) {
+        const agyLoc = session ? this.resolveAgyBrainLocationForSession(session) : undefined;
+        if (agyLoc) {
+          const requestedHistory = historyLimit(params.history_limit);
+          if (requestedHistory === 0) {
+            throw new ValidationError('history_limit', 'history pages need at least one action', requestedHistory);
+          }
+          const agyInspected = await this.agyBrainBridge.inspectSubagent(agyLoc, task, {
+            ...(requestedHistory !== undefined ? { limit: requestedHistory } : {}),
+            before: params.before,
+          });
+          if (agyInspected) {
+            return {
+              ok: true,
+              agent: agyInspected.agent,
+              ...(agyInspected.history_session_id ? { history_session_id: agyInspected.history_session_id } : {}),
+              ...(agyInspected.history ? { history: agyInspected.history } : {}),
+            };
+          }
+        }
+        return { ok: false, error: "Agent is not available in this session. Refresh its activity or reconnect to its parent task." };
+      }
       const panel = subagentSnapshotPanelPayloads(session.metadata).find(row => row.id === task)!;
       // Inspect only this parent's retained child evidence, never arbitrary metadata or provider config.
       const agent = { ...panel,
@@ -3919,6 +4244,35 @@ export class DaemonServer {
         }
         return outcome;
       }
+      if (
+        session &&
+        this.acpBridgeHost.hasActiveBridge(session.id) &&
+        (this.acpBridgeHost.hasActiveTurn(session.id) || this.sessionBusy(key, session))
+      ) {
+        if (!processed.enhancedMessage.trim() && !images.length) {
+          return { ok: false, error: "No session or steering text to apply" };
+        }
+        const submissionId = optionalString(params.submission_id)?.trim();
+        const outcome = await this.queueDurableSteer({
+          session,
+          text: processed.enhancedMessage,
+          images,
+          hub: undefined,
+          submissionId,
+          digest: submissionDigest(processed.enhancedMessage, "", "steer", images),
+        });
+        if (outcome.ok === true) {
+          this.emit(connection, "steer_input", {
+            content,
+            ...(images.length ? { image_count: images.length } : {}),
+            ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
+            ...(processed.mentionedFiles.length
+              ? { mentioned_files: processed.mentionedFiles }
+              : {}),
+          });
+        }
+        return outcome;
+      }
       const ok = this.runtime.steerTurn(key, processed.enhancedMessage, images);
       if (ok) {
         this.emit(connection, "steer_input", {
@@ -3935,7 +4289,11 @@ export class DaemonServer {
         : { ok: false, error: "No session or steering text to apply" };
     }
     if (method === "slash") {
-      return this.handleSlash(connection, optionalString(params.command) ?? "");
+      return this.handleSlash(
+        connection,
+        optionalString(params.command) ?? "",
+        optionalString(params.session_key),
+      );
     }
     if (method === "commands.catalog") {
       return this.commandCatalog();
@@ -4397,6 +4755,183 @@ export class DaemonServer {
     }
     const text = stringValue(params.text);
     const stripped = text.trim();
+    const acpAction = /^\/acp\s+(\S*)$/.exec(text);
+    if (acpAction) {
+      const prefix = (acpAction[1] ?? "").toLowerCase();
+      return {
+        ok: true,
+        kind: "slash",
+        completions: [
+          { action: "connect", meta: "Connect an external ACP runtime" },
+          { action: "use", meta: "Connect an external ACP runtime (alias for connect)" },
+          { action: "disconnect", meta: "Disconnect external ACP runtime and return to Xerxes" },
+          { action: "status", meta: "Show active ACP runtime, capabilities, and available agents" },
+          { action: "catalog", meta: "Show discovered ACP commands, skills, capabilities, and config" },
+          { action: "list", meta: "List discovered ACP runtimes" },
+          { action: "model", meta: "Show or switch the active ACP model" },
+          { action: "mode", meta: "Show or switch the active ACP mode" },
+          { action: "thinking", meta: "Show or switch the active ACP thinking level" },
+          { action: "config", meta: "Show or set an ACP config option" },
+        ]
+          .filter((entry) => entry.action.startsWith(prefix))
+          .map((entry) => ({
+            value: `/acp ${entry.action} `,
+            label: entry.action,
+            meta: entry.meta,
+          })),
+      };
+    }
+    const acpUseAgent = /^\/acp\s+(use|connect)\s+(\S*)$/.exec(text);
+    if (acpUseAgent) {
+      const sub = acpUseAgent[1] ?? "use";
+      const prefix = (acpUseAgent[2] ?? "").toLowerCase();
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const { agents } = this.acpBridgeHost.listAgents(session?.id);
+      return {
+        ok: true,
+        kind: "slash",
+        completions: agents
+          .filter(
+            (agent) =>
+              agent.id.toLowerCase().startsWith(prefix) ||
+              agent.name.toLowerCase().startsWith(prefix),
+          )
+          .map((agent) => ({
+            value: `/acp ${sub} ${agent.id} `,
+            label: agent.id,
+            meta: `${agent.name}${agent.available ? "" : " (not installed)"}`,
+          })),
+      };
+    }
+    const acpModelArg = /^\/acp\s+model\s+(\S*)$/.exec(text);
+    if (acpModelArg) {
+      const prefix = (acpModelArg[1] ?? "").toLowerCase();
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      return {
+        ok: true,
+        kind: "slash",
+        completions: (binding?.models ?? [])
+          .filter(
+            (item) =>
+              item.id.toLowerCase().startsWith(prefix) ||
+              item.name.toLowerCase().startsWith(prefix),
+          )
+          .map((item) => ({
+            value: `/acp model ${item.id} `,
+            label: item.id,
+            meta: item.name !== item.id ? item.name : (item.description ?? "ACP model"),
+          })),
+      };
+    }
+    const acpModeArg = /^\/acp\s+mode\s+(\S*)$/.exec(text);
+    if (acpModeArg) {
+      const prefix = (acpModeArg[1] ?? "").toLowerCase();
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      return {
+        ok: true,
+        kind: "slash",
+        completions: (binding?.modes ?? [])
+          .filter(
+            (item) =>
+              item.id.toLowerCase().startsWith(prefix) ||
+              item.name.toLowerCase().startsWith(prefix),
+          )
+          .map((item) => ({
+            value: `/acp mode ${item.id} `,
+            label: item.id,
+            meta: item.name !== item.id ? item.name : (item.description ?? "ACP mode"),
+          })),
+      };
+    }
+    const acpThinkingArg = /^\/acp\s+(thinking|thought)\s+(\S*)$/.exec(text);
+    if (acpThinkingArg) {
+      const sub = acpThinkingArg[1] ?? "thinking";
+      const prefix = (acpThinkingArg[2] ?? "").toLowerCase();
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      return {
+        ok: true,
+        kind: "slash",
+        completions: (binding?.thought_levels ?? [])
+          .filter(
+            (item) =>
+              item.id.toLowerCase().startsWith(prefix) ||
+              item.name.toLowerCase().startsWith(prefix),
+          )
+          .map((item) => ({
+            value: `/acp ${sub} ${item.id} `,
+            label: item.id,
+            meta: item.name !== item.id ? item.name : (item.description ?? "ACP thinking level"),
+          })),
+      };
+    }
+    const acpConfigArg = /^\/acp\s+config\s+(\S*)(?:\s+(\S*))?$/.exec(text);
+    if (acpConfigArg) {
+      const idToken = acpConfigArg[1] ?? "";
+      const valToken = acpConfigArg[2];
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      const options = binding?.config_options ?? [];
+      if (valToken === undefined) {
+        const prefix = idToken.toLowerCase();
+        return {
+          ok: true,
+          kind: "slash",
+          completions: options
+            .filter((opt) => opt.id.toLowerCase().startsWith(prefix))
+            .map((opt) => ({
+              value: `/acp config ${opt.id} `,
+              label: opt.id,
+              meta: `${opt.name}${opt.current_value ? ` (${opt.current_value})` : ""}`,
+            })),
+        };
+      }
+      const matchedOpt = options.find((opt) => opt.id === idToken);
+      const valPrefix = valToken.toLowerCase();
+      return {
+        ok: true,
+        kind: "slash",
+        completions: (matchedOpt?.options ?? [])
+          .filter(
+            (choice) =>
+              choice.value.toLowerCase().startsWith(valPrefix) ||
+              choice.name.toLowerCase().startsWith(valPrefix),
+          )
+          .map((choice) => ({
+            value: `/acp config ${idToken} ${choice.value} `,
+            label: choice.value,
+            meta: choice.name !== choice.value ? choice.name : (choice.description ?? matchedOpt?.name ?? "ACP option"),
+          })),
+      };
+    }
+
+    // Strict runtime isolation: when an external ACP runtime is active on this
+    // session, never leak Xerxes's native daemon commands or bundled skills.
+    const activeAcpSession = this.runtime.sessionStatus(sessionKey(connection, params));
+    const activeAcpBinding = activeAcpSession
+      ? this.acpBridgeHost.getBinding(activeAcpSession.id)
+      : null;
+    if (activeAcpBinding && activeAcpBinding.connected && activeAcpBinding.transport !== "native") {
+      if (stripped.startsWith("/") && !/\s/.test(stripped)) {
+        return {
+          ok: true,
+          kind: "slash",
+          completions: this.completeAcpSlashAndSkills(stripped, activeAcpBinding),
+        };
+      }
+      if (stripped.startsWith("/")) {
+        return { ok: true, kind: "slash", completions: [] };
+      }
+      const cwd = activeAcpSession?.cwd ?? process.cwd();
+      return {
+        ok: true,
+        kind: "path",
+        completions: await completePath(text, cwd),
+      };
+    }
+
     const forgeAction = /^\/forge\s+(\S*)$/.exec(text);
     if (forgeAction) return { ok: true, kind: 'slash', completions: ['list', 'inspect']
       .filter(action => action.startsWith(forgeAction[1] ?? ''))
@@ -4504,6 +5039,153 @@ export class DaemonServer {
       kind: "path",
       completions: await completePath(text, cwd),
     };
+  }
+
+  /**
+   * Runtime-isolated single-token slash completions when an external ACP
+   * runtime is bound to the active session. Returns ONLY the connected ACP
+   * runtime's discovered commands & skills plus a minimal non-colliding host
+   * bridge command set (`/acp`, and `/new`, `/clear`, `/export` when not
+   * shadowed by an ACP command). Never leaks Xerxes native commands or skills.
+   */
+  private completeAcpSlashAndSkills(
+    stripped: string,
+    binding: AcpSessionBinding,
+  ): JsonRpcPayload[] {
+    const wanted = slashCompletionPrefix(stripped);
+    const acpNames = new Set<string>();
+    const seen = new Set<string>();
+
+    interface RankedEntry {
+      readonly payload: JsonRpcPayload;
+      readonly labelLower: string;
+      readonly metaLower: string;
+      readonly tierOrder: number;
+    }
+
+    const entries: RankedEntry[] = [];
+
+    // 1. Connected ACP runtime commands (non-skill slash commands).
+    for (const cmd of binding.available_commands ?? []) {
+      if (cmd.kind === "skill") continue;
+      const name = cmd.name.trim().replace(/^\/+/, "");
+      const lower = name.toLowerCase();
+      if (!name || seen.has(lower)) continue;
+      seen.add(lower);
+      acpNames.add(lower);
+      const description = cmd.description || `${binding.name} command`;
+      entries.push({
+        labelLower: lower,
+        metaLower: description.toLowerCase(),
+        tierOrder: 0,
+        payload: {
+          value: `/${name}`,
+          label: name,
+          meta: description,
+          category: "acp",
+          kind: "command",
+          source: cmd.source ?? binding.name,
+          ...(cmd.input_hint ? { input_hint: cmd.input_hint } : {}),
+        },
+      });
+    }
+
+    // 2. Connected ACP runtime discovered skills (and any available_commands marked kind: 'skill').
+    for (const skill of binding.discovered_skills ?? []) {
+      const name = skill.name.trim().replace(/^\/+/, "");
+      const lower = name.toLowerCase();
+      if (!name || seen.has(lower)) continue;
+      seen.add(lower);
+      acpNames.add(lower);
+      const description = skill.description || `${skill.source ?? binding.name} skill`;
+      entries.push({
+        labelLower: lower,
+        metaLower: description.toLowerCase(),
+        tierOrder: 1,
+        payload: {
+          value: skill.slash_command || `/${name}`,
+          label: name,
+          meta: description,
+          kind: "skill",
+          source: skill.source ?? binding.name,
+          ...(skill.path ? { path: skill.path } : {}),
+        },
+      });
+    }
+    for (const cmd of binding.available_commands ?? []) {
+      if (cmd.kind !== "skill") continue;
+      const name = cmd.name.trim().replace(/^\/+/, "");
+      const lower = name.toLowerCase();
+      if (!name || seen.has(lower)) continue;
+      seen.add(lower);
+      acpNames.add(lower);
+      const description = cmd.description || `${cmd.source ?? binding.name} skill`;
+      entries.push({
+        labelLower: lower,
+        metaLower: description.toLowerCase(),
+        tierOrder: 1,
+        payload: {
+          value: `/${name}`,
+          label: name,
+          meta: description,
+          kind: "skill",
+          source: cmd.source ?? binding.name,
+          ...(cmd.input_hint ? { input_hint: cmd.input_hint } : {}),
+        },
+      });
+    }
+
+    // 3. Minimal host-bridge command set (`/acp` always; `/new`, `/clear`, `/export`
+    //    only when they do not collide with an ACP runtime command or skill).
+    const hostCommands: ReadonlyArray<{ readonly name: string; readonly meta: string; readonly always?: boolean }> = [
+      {
+        name: "acp",
+        meta: "Manage external ACP runtime (status, catalog, model, mode, thinking, config, disconnect)",
+        always: true,
+      },
+      { name: "new", meta: "Start a fresh conversation (Xerxes host)" },
+      { name: "clear", meta: "Clear the visible scrollback (Xerxes host)" },
+      { name: "export", meta: "Export conversation transcript (Xerxes host)" },
+    ];
+    for (const hostCmd of hostCommands) {
+      if (!hostCmd.always && acpNames.has(hostCmd.name)) continue;
+      if (seen.has(hostCmd.name)) continue;
+      seen.add(hostCmd.name);
+      entries.push({
+        labelLower: hostCmd.name,
+        metaLower: hostCmd.meta.toLowerCase(),
+        tierOrder: 2,
+        payload: {
+          value: `/${hostCmd.name}`,
+          label: hostCmd.name,
+          meta: hostCmd.meta,
+          category: "host",
+          kind: "command",
+          source: "Xerxes host",
+        },
+      });
+    }
+
+    const starts: RankedEntry[] = [];
+    const nameHits: RankedEntry[] = [];
+    const descHits: RankedEntry[] = [];
+    for (const entry of entries) {
+      if (!wanted || entry.labelLower.startsWith(wanted)) {
+        starts.push(entry);
+      } else if (entry.labelLower.includes(wanted)) {
+        nameHits.push(entry);
+      } else if (entry.metaLower.includes(wanted)) {
+        descHits.push(entry);
+      }
+    }
+    const sortEntries = (left: RankedEntry, right: RankedEntry): number =>
+      left.tierOrder - right.tierOrder || left.labelLower.localeCompare(right.labelLower);
+
+    return [
+      ...starts.sort(sortEntries),
+      ...nameHits.sort(sortEntries),
+      ...descHits.sort(sortEntries),
+    ].map((entry) => entry.payload);
   }
 
   /**
@@ -4964,10 +5646,36 @@ export class DaemonServer {
     requestedHistory?: number,
     historySession?: DaemonSession,
   ): JsonRpcPayload {
-    const cost = session.model ? this.sessionCost(session, session.model) : undefined;
-    const basis = this.sessionCostBasis(session);
+    const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+    const savedRaw = isRecord(session.metadata.acp_binding)
+      ? (session.metadata.acp_binding as unknown as AcpSessionBinding)
+      : undefined;
+    const savedAcpBinding =
+      !liveAcpBinding &&
+      savedRaw &&
+      typeof savedRaw.agent_id === "string" &&
+      savedRaw.agent_id.trim() &&
+      savedRaw.agent_id !== "xerxes"
+        ? { ...savedRaw, connected: false }
+        : undefined;
+    const cost = liveAcpBinding ? undefined : (session.model ? this.sessionCost(session, session.model) : undefined);
+    const basis = liveAcpBinding ? undefined : this.sessionCostBasis(session);
     const payload = sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
-    return basis ? { ...payload, cost_basis: basis } : payload;
+    const agyLoc = this.resolveAgyBrainLocationForSession(session);
+    const agySubagents = agyLoc ? this.agyBrainBridge.listSubagentSnapshotsSync(agyLoc) : [];
+    const existingSubagents = Array.isArray(payload.subagent_snapshots)
+      ? (payload.subagent_snapshots as JsonRpcPayload[])
+      : [];
+    const mergedSubagents = agySubagents.length > 0
+      ? mergeSubagentSnapshotRows(existingSubagents, agySubagents)
+      : existingSubagents;
+    return {
+      ...payload,
+      ...(mergedSubagents.length > 0 ? { subagent_snapshots: mergedSubagents } : {}),
+      ...(basis ? { cost_basis: basis } : {}),
+      ...(liveAcpBinding ? { acp_binding: liveAcpBinding as unknown as JsonRpcPayload } : {}),
+      ...(savedAcpBinding ? { saved_acp_binding: savedAcpBinding as unknown as JsonRpcPayload } : {}),
+    };
   }
 
   private priceTokens(profile: ProviderProfile | undefined, model: string, input: number, output: number, cacheRead = 0, cacheWrite = 0): number | undefined {
@@ -5293,20 +6001,26 @@ export class DaemonServer {
     session: DaemonSession,
     options: { readonly scoped?: boolean } = {},
   ): void {
-    const model = session.model || stringValue(this.runtime.status().model);
+    const acpBinding = this.acpBridgeHost.getBinding(session.id);
+    const nativeModel = session.model || stringValue(this.runtime.status().model);
+    const model = acpBinding?.connected
+      ? (acpBinding.current_model ?? nativeModel)
+      : nativeModel;
     const payload = statusUpdatePayload(
       session,
       model,
-      this.contextLimit(model, session),
+      this.contextLimit(nativeModel, session),
       this.channelStatusData(),
-      this.sessionReasoningEffort(session),
+      acpBinding?.connected && acpBinding.thought_level
+        ? acpBinding.thought_level
+        : this.sessionReasoningEffort(session),
       runtimePermissionMode(
         session.permissionMode ?? this.runtime.status().permission_mode,
       ),
       this.mcpStatusRecord(session),
-      model ? this.sessionCost(session, model) : undefined,
+      acpBinding?.connected ? undefined : (nativeModel ? this.sessionCost(session, nativeModel) : undefined),
     );
-    const basis = this.sessionCostBasis(session);
+    const basis = acpBinding?.connected ? undefined : this.sessionCostBasis(session);
     const priced = basis ? { ...payload, cost_basis: basis } : payload;
     this.emit(
       connection,
@@ -5357,6 +6071,9 @@ export class DaemonServer {
     const key = sessionKey(connection, params);
     const session = this.runtime.sessionStatus(key);
     const cwd = session?.cwd || this.projectDirectory || process.cwd();
+    if (method === "git.branch") {
+      return { ok: true, branch: (await gitBranch(cwd)) ?? "" };
+    }
     try {
       const scm = await GitScm.open(cwd);
       if (!scm) return { ok: true, repository: null, reason: "This folder is not a git repository." };
@@ -6170,6 +6887,9 @@ export class DaemonServer {
   }
 
   private contextLimit(model: string, session?: DaemonSession): number {
+    if (session && this.acpBridgeHost.hasActiveBridge(session.id)) {
+      return acpContextSize(session) ?? 0;
+    }
     // Local provider capacity has not been negotiated. Never substitute a remote profile window.
     if (session && Object.hasOwn(session.metadata, LOCAL_PROVIDER_BINDING)) return 0;
     // The turn runs on the session's pinned profile, so that is the window to
@@ -6257,6 +6977,7 @@ export class DaemonServer {
   private async handleSlash(
     connection: DaemonTransportConnection,
     raw: string,
+    explicitSessionKey?: string,
   ): Promise<JsonRpcPayload> {
     const command = raw.trim();
     // `!<cmd>` shell mode (Claude Code parity): run the rest in the project
@@ -6288,8 +7009,50 @@ export class DaemonServer {
     const canonical = resolveCommand(command);
     const name = entry?.name ?? canonical?.name ?? token;
     const args = argumentParts.join(" ").trim();
-    const key = connection.activeSessionKey;
+    const key = explicitSessionKey?.trim() || connection.activeSessionKey;
     const session = this.runtime.sessionStatus(key);
+
+    // Strict runtime isolation: when an external ACP runtime is active on this
+    // session, route any command or skill advertised by the ACP runtime straight
+    // to `runExternalAcpTurn` before Xerxes's native slash handlers or plugins
+    // can hijack it. Keep `/acp ...` on the Xerxes host so the user can always
+    // manage models/modes/thinking/config or disconnect back to Xerxes.
+    const acpBinding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+    const isExternalAcp = Boolean(
+      acpBinding && acpBinding.connected && acpBinding.transport !== "native",
+    );
+    if (isExternalAcp && acpBinding) {
+      if (token === "acp") {
+        return this.handleAcpSlashCommand(connection, args, session);
+      }
+      if (token === "swarm" || token === "immortals") {
+        const parsedSwarm = parseSwarmCommand(args);
+        if (parsedSwarm.kind !== "activate") {
+          return this.handleSwarmSlashCommand(connection, args, session);
+        }
+      }
+      if (isAcpAdvertisedSlashToken(acpBinding, token)) {
+        return this.forwardSlashToExternalAcp(connection, key, command, acpBinding);
+      }
+      if (token === "skill") {
+        const [skillTarget = "", ...skillRest] = args.split(/\s+/).filter(Boolean);
+        const matchedSkill = findAcpDiscoveredSkill(acpBinding, skillTarget);
+        if (matchedSkill) {
+          const slashPrefix = matchedSkill.slash_command || `/${matchedSkill.name}`;
+          const forwarded = skillRest.length > 0 ? `${slashPrefix} ${skillRest.join(" ")}` : slashPrefix;
+          return this.forwardSlashToExternalAcp(connection, key, forwarded, acpBinding);
+        }
+        const err = `Xerxes native /skill is isolated while connected to ${acpBinding.name}. Run /acp catalog to see ${acpBinding.name} skills, or /acp disconnect to return to Xerxes.`;
+        this.emitSlash(connection, err, "warning");
+        return { ok: false, error: err };
+      }
+      if (token === "help" || token === "commands") {
+        const text = formatAcpCatalogText(acpBinding);
+        this.emitSlash(connection, text);
+        return { ok: true, text };
+      }
+    }
+
     const plugin = this.slashPluginRegistry.resolve(command);
     if (plugin) {
       try {
@@ -6447,6 +7210,13 @@ export class DaemonServer {
         if (typeof result.text === "string") this.emitSlash(connection, result.text);
         return result;
       }
+      case "immortals":
+      case "swarm": {
+        return this.handleSwarmSlashCommand(connection, args, session);
+      }
+      case "acp": {
+        return this.handleAcpSlashCommand(connection, args, session);
+      }
       case "context": {
         if (!session) return { ok: false, error: "No active session" };
         const inspected = inspectSessionContext(session);
@@ -6467,13 +7237,20 @@ export class DaemonServer {
         }
         this.emitSlash(connection, formatSessionHistory(session));
         return { ok: true, history: sessionHistoryPayload(session) };
-      case "loop": {
+      case "loop":
+      case "loops": {
         if (!session) return { ok: false, error: 'No active session' };
         const [action = 'list', id, ...extra] = args.split(/\s+/).filter(Boolean);
         if (!['list', 'pause', 'resume', 'cancel', 'run'].includes(action) || extra.length || (action === 'list' ? id !== undefined : !id)) return { ok: false, error: 'Usage: /loop [list|pause|resume|cancel|run <id>]. Open bare /loop in the TUI to create a follow-up.' };
-        const result = await this.manageProjectSchedule(resolveProjectDirectory(session.cwd), 'schedule.' + action, { scope: 'session', ...(id ? { schedule_id: id } : {}) }, job => this.runCronJob(connection, [job.id]), session);
-        this.emitSlash(connection, result.ok ? action === 'list' ? JSON.stringify(result.jobs, null, 2) : 'Follow-up ' + action + ' applied.' : String(result.error ?? 'Follow-up failed'), result.ok ? 'info' : 'warning');
-        return result;
+        try {
+          const result = await this.manageProjectSchedule(resolveProjectDirectory(session.cwd), 'schedule.' + action, { scope: 'session', ...(id ? { schedule_id: id } : {}) }, job => this.runCronJob(connection, [job.id]), session);
+          this.emitSlash(connection, result.ok ? action === 'list' ? JSON.stringify(result.jobs, null, 2) : 'Follow-up ' + action + ' applied.' : String(result.error ?? 'Follow-up failed'), result.ok ? 'info' : 'warning');
+          return result;
+        } catch (error) {
+          const message = errorMessage(error);
+          this.emitSlash(connection, message, 'warning');
+          return { ok: false, error: message };
+        }
       }
       case "cron":
       case "schedules":
@@ -6504,6 +7281,7 @@ export class DaemonServer {
         const leaving = this.runtime.sessionStatus(key);
         const working = leaving && (leaving.activeTurnId || this.turnOwners.has(key)
           || subagentSnapshotPanelPayloads(leaving.metadata).some(agent => agent.status === 'running' || agent.status === 'queued')
+          || (this.swarmHost.peekManager(leaving.id)?.status().members.some(member => member.role !== 'coordinator' && member.state === 'working') ?? false)
           || (() => { const goal = getGoal(leaving.metadata, leaving.id); return goal?.phase === 'active' && goal.activation === 'armed'; })());
         if (working) {
           const error = "This session is still working (a turn, agents, or an armed goal). Stop or pause it before starting a new one.";
@@ -6524,6 +7302,14 @@ export class DaemonServer {
         const previousKey = key;
         if (!shared) {
           this.forgetAcceptedSubmissions([previousKey]);
+          if (leaving) {
+            this.pendingSwarmCoordinatorWakes.delete(leaving.id);
+            this.monitors?.disposeOwner(leaving.id);
+            await this.swarmHost.disposeSession(leaving.id);
+            await this.settleAcpOutOfTurnWakeup(leaving.id, "end_turn");
+            this.agyBrainBridge.unwatchSession(leaving.id);
+            await this.acpBridgeHost.disconnect(leaving.id);
+          }
           this.endSessionLifetime([previousKey]);
           this.runtime.evictSession(previousKey);
           this.clearAutoCompactFailures(previousKey);
@@ -6548,14 +7334,45 @@ export class DaemonServer {
         return { ok: cancelled };
       }
       case "cancel-all": {
-        const cancelled = this.runtime.cancelAllTurns();
+        const cancelled = this.cancelAllActiveTurns();
         this.emitSlash(
           connection,
           `Cancelled ${cancelled} running turn${cancelled === 1 ? "" : "s"}.`,
         );
         return { ok: true, cancelled };
       }
-      case "btw":
+      case "btw": {
+        if (!args) {
+          const usage = "Usage: `/btw [--model <model>] <question>` — ask an ephemeral side question without interrupting or polluting the conversation.";
+          this.emitSlash(connection, usage, "info");
+          return { ok: true, open_side_question: true, text: usage };
+        }
+        const parsedBtw = parseSideQuestionArgs(args);
+        if (!parsedBtw.question) {
+          const usage = "Usage: `/btw [--model <model>] <question>` — provide a question after `--model <model>`.";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: "question is required", text: usage };
+        }
+        const sideResult = await this.handleSideQuestionRpc(connection, {
+          question: parsedBtw.question,
+          ...(parsedBtw.model ? { model: parsedBtw.model } : {}),
+          ...(session ? { session_id: session.id } : {}),
+          session_key: key,
+        });
+        if (sideResult.ok === true) {
+          const answerText = typeof sideResult.answer === "string" && sideResult.answer.trim()
+            ? sideResult.answer.trim()
+            : "(no answer)";
+          this.emitSlash(connection, `[btw] ${answerText}`, "info");
+        } else {
+          this.emitSlash(
+            connection,
+            String(sideResult.error ?? "Side question failed."),
+            "warning",
+          );
+        }
+        return sideResult;
+      }
       case "steer": {
         if (!args) {
           this.emitSlash(connection, "Usage: `/steer <hint>`.", "warning");
@@ -6564,6 +7381,34 @@ export class DaemonServer {
         const processed = session
           ? await processAtMentions(args, session.cwd)
           : { enhancedMessage: args, mentionedFiles: [] };
+        if (
+          session &&
+          this.acpBridgeHost.hasActiveBridge(session.id) &&
+          (this.acpBridgeHost.hasActiveTurn(session.id) || this.sessionBusy(key, session))
+        ) {
+          const outcome = await this.queueDurableSteer({
+            session,
+            text: processed.enhancedMessage,
+            images: [],
+            hub: undefined,
+            submissionId: undefined,
+            digest: submissionDigest(processed.enhancedMessage, "", "steer", []),
+          });
+          if (outcome.ok === true) {
+            this.emit(connection, "steer_input", {
+              content: args,
+              ...(processed.mentionedFiles.length
+                ? { mentioned_files: processed.mentionedFiles }
+                : {}),
+            });
+          }
+          this.emitSlash(
+            connection,
+            outcome.ok === true ? "Steer queued for follow-up." : String(outcome.error ?? "Could not queue steer."),
+            outcome.ok === true ? "info" : "warning",
+          );
+          return outcome;
+        }
         const steered = this.runtime.steerTurn(
           key,
           processed.enhancedMessage,
@@ -6871,9 +7716,15 @@ export class DaemonServer {
           return { ok: true, monitors: monitors.map(watch => ({ ...watch, events: watch.events.map(event => ({ ...event })) })) };
         }
         if (tokens[0] === "stop" && tokens.length === 2) {
-          const monitor = this.monitors.stop(owner, tokens[1]!);
-          this.emitSlash(connection, `Monitor ${monitor.id}: ${monitor.state}; remaining reactions revoked. Source process unchanged.`);
-          return { ok: true };
+          try {
+            const monitor = this.monitors.stop(owner, tokens[1]!);
+            this.emitSlash(connection, `Monitor ${monitor.id}: ${monitor.state}; remaining reactions revoked. Source process unchanged.`);
+            return { ok: true };
+          } catch (error) {
+            const message = errorMessage(error);
+            this.emitSlash(connection, `Could not stop monitor: ${message}`, "warning");
+            return { ok: false, error: message };
+          }
         }
         return { ok: false, error: "Usage: /monitors [list|stop <id>]" };
       }
@@ -6931,7 +7782,8 @@ export class DaemonServer {
       }
       case 'file': {
         if (!session) return { ok: false, error: 'Select a session first' };
-        const result = await previewWorkspaceFile(session.cwd, args.trim());
+        const allowedReadRoots = await this.resolveAllowedPreviewReadRootsForSession(session);
+        const result = await previewWorkspaceFile(session.cwd, args.trim(), allowedReadRoots);
         return { ...result, output: `${result.path}${result.truncated ? '\nPreview limited to 128 KiB.' : ''}\n\n${result.content.split('\n').map((line, index) => `${index + 1}  ${line}`).join('\n')}` };
       }
       case 'undo-edits': {
@@ -7356,13 +8208,31 @@ export class DaemonServer {
   private async refreshSkills(
     session: DaemonSession | undefined,
   ): Promise<void> {
+    const registry = this.skillRegistry;
     const roots =
       this.skillDirectories ??
       defaultSkillDiscoveryRoots({
         cwd: session?.cwd ?? process.cwd(),
         userSkillsDirectory: this.skillDirectory,
       });
-    await this.skillRegistry.refresh(...roots);
+    let byRoots = this.skillRefreshesInFlight.get(registry);
+    if (!byRoots) {
+      byRoots = new Map<string, Promise<void>>();
+      this.skillRefreshesInFlight.set(registry, byRoots);
+    }
+    const cacheKey = roots.join("\u0000");
+    const existing = byRoots.get(cacheKey);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const pending: Promise<void> = registry.refresh(...roots).then(() => undefined).finally(() => {
+      if (byRoots.get(cacheKey) === pending) {
+        byRoots.delete(cacheKey);
+      }
+    });
+    byRoots.set(cacheKey, pending);
+    await pending;
   }
 
   private async listSkills(
@@ -8310,6 +9180,12 @@ export class DaemonServer {
     args: string,
     session: DaemonSession | undefined,
   ): Promise<JsonRpcPayload> {
+    const acpBinding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+    if (acpBinding && acpBinding.connected && acpBinding.transport !== "native") {
+      const err = `/${token} is not available in ${acpBinding.name}. Run /acp catalog to see discovered commands and skills, or /acp disconnect to return to Xerxes.`;
+      this.emitSlash(connection, err, "warning");
+      return { ok: false, error: err };
+    }
     await this.refreshSkills(session);
     const [name] = token.split(":", 1);
     const skill = name ? this.skillRegistry.get(name) : undefined;
@@ -8873,7 +9749,7 @@ export class DaemonServer {
     signal?: AbortSignal,
   ): Promise<void> {
     const session = this.runtime.sessionStatus(sessionKey);
-    if (!session || session.activeTurnId || session.messages.length < 2) {
+    if (!session || session.activeTurnId || session.messages.length < 2 || this.acpBridgeHost.hasActiveBridge(session.id)) {
       return Promise.resolve();
     }
     const model = session.model || stringValue(this.runtime.status().model);
@@ -9006,12 +9882,29 @@ export class DaemonServer {
    * a session the user already titled, a disabled setting, a missing provider,
    * or a failed generation all leave the existing title state untouched.
    */
+  private applyExternalSessionTitle(session: DaemonSession, rawTitle: string): void {
+    const title = displayTitle(rawTitle);
+    if (!title) return;
+    const existing = stringValue(session.metadata.title);
+    if (existing && session.metadata.title_derived !== true && existing !== title) {
+      return;
+    }
+    if (existing === title && session.metadata.title_derived !== true) {
+      return;
+    }
+    session.metadata.title = title;
+    delete session.metadata.title_derived;
+    void this.runtime.flushSessions().catch(() => undefined);
+    this.broadcast("session_title", { session_id: session.id, title });
+  }
+
   private maybeGenerateTitle(sessionKey: string): void {
     // Naming is optional; a fully spent work budget must not become a failure
     // merely because its completed exchange could receive an automatic title.
     if (!optionalModelCallAvailable()) return;
     const session = this.runtime.sessionStatus(sessionKey);
     if (!session) return;
+    if (this.acpBridgeHost.hasActiveBridge(session.id)) return;
     if (!this.resolvedAutoTitle()) return;
     // Explicit titles — set through /title or session.title — always win.
     // `title_derived` is retained only as a migration seam for transcripts
@@ -10765,15 +11658,28 @@ export class DaemonServer {
     if (supplied !== undefined && supplied !== PENDING_INTERACTION_REVISION) {
       return { ok: false, code: "interaction-revision-mismatch", error: "interaction-revision-mismatch" };
     }
-    const response = optionalString(params.response) ?? "reject";
+    const rawResponse = optionalString(params.response) ?? optionalString(params.decision) ?? "reject";
+    const optionId = optionalString(params.option_id)?.trim();
+    const response =
+      this.acpNonPermanentApprovals.has(requestId) &&
+      (rawResponse === "approve_for_session" || rawResponse === "always")
+        ? "approve"
+        : rawResponse;
+    if (optionId) {
+      this.acpApprovalOptionChoices.set(requestId, optionId);
+    }
     // respondPermission removes the wait before resolving it: the first answer wins atomically.
     const ok = this.interactions.respondPermission(requestId, response);
-    if (ok) {
+    if (!ok) {
+      this.acpApprovalOptionChoices.delete(requestId);
+    } else {
+      this.acpNonPermanentApprovals.delete(requestId);
       this.approvalOwners.delete(requestId);
       const resolution = this.recordResolution(requestId, "permission", permissionDecisionName(response), hub, info.sessionId, info.toolCallId, info.toolName);
       this.emit(this.interactionAudience(owner, connection), "approval_response", {
         request_id: requestId,
         response,
+        ...(optionId ? { option_id: optionId } : {}),
         ...(hub ? resolutionEventFields(resolution) : {}),
       });
     }
@@ -11006,6 +11912,14 @@ export class DaemonServer {
       // ONE continuation carries every waiting steer, in queue order.
       settleSteers(state, new Set(entries.map(entry => entry.steer_id)), "applied");
       this.publishSteerStatus(live, entries);
+      emit({
+        type: "steer_applied",
+        payload: {
+          session_id: live.id,
+          contents: entries.map(entry => entry.text),
+          count: entries.length,
+        },
+      });
       const images = entries.flatMap(entry => this.queuedSteerImages.get(entry.steer_id) ?? []);
       for (const entry of entries) this.queuedSteerImages.delete(entry.steer_id);
       // Any agent-authored steer keeps the whole continuation non-human.
@@ -11078,9 +11992,12 @@ export class DaemonServer {
     if (owner && !this.canAnswerInteraction(owner, connection)) {
       return { ok: false, error: "question owned by another connection" };
     }
-    const answers = stringRecord(params.answers);
+    const rawAnswers = questionAnswersRecord(params.answers);
+    const answers = flattenQuestionAnswers(rawAnswers);
     const hub = this.hubContexts.getStore();
-    const questionInfo = this.interactions.pendingQuestionInfo(requestId);
+    const acpQuestion = this.pendingAcpQuestions.get(requestId);
+    const questionInfo = this.interactions.pendingQuestionInfo(requestId)
+      ?? (acpQuestion ? { sessionId: acpQuestion.sessionId, toolCallId: acpQuestion.toolCallId } : undefined);
     if (hub && questionInfo) {
       const mismatch = this.interactionSessionMismatch(hub, questionInfo.sessionId);
       if (mismatch) return mismatch;
@@ -11113,6 +12030,29 @@ export class DaemonServer {
         providerFlow,
         transition,
       );
+    }
+    if (acpQuestion) {
+      if (Object.keys(rawAnswers).length === 0) {
+        return { ok: false };
+      }
+      this.pendingAcpQuestions.delete(requestId);
+      acpQuestion.signal?.removeEventListener("abort", acpQuestion.abort);
+      this.questionOwners.delete(requestId);
+      const resolution = this.recordResolution(
+        requestId,
+        "question",
+        "answered",
+        hub,
+        acpQuestion.sessionId,
+        acpQuestion.toolCallId,
+      );
+      this.emit(this.interactionAudience(owner, connection), "question_response", {
+        id: requestId,
+        answers,
+        ...(hub ? resolutionEventFields(resolution) : {}),
+      });
+      acpQuestion.resolve(rawAnswers);
+      return { ok: true };
     }
     const ok = this.interactions.respondQuestion(requestId, answers);
     if (ok) {
@@ -11646,9 +12586,31 @@ export class DaemonServer {
     await this.rearmGoalAfterRestart(key, connection);
     await this.resumeTurnAfterRestart(key, connection);
     await this.refreshSkills(session);
-    const skills = this.skillRegistry
-      .all()
-      .filter((skill) => skillMatchesPlatform(skill));
+    const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+    const externalAcpActive = Boolean(
+      liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== "native",
+    );
+    const skills = externalAcpActive
+      ? []
+      : this.skillRegistry
+          .all()
+          .filter((skill) => skillMatchesPlatform(skill));
+    const initSkillNames = externalAcpActive
+      ? (liveAcpBinding!.discovered_skills ?? []).map((skill) => skill.name)
+      : skills.map((skill) => skill.metadata.name);
+    const initSkillDescriptions = externalAcpActive
+      ? Object.fromEntries(
+          (liveAcpBinding!.discovered_skills ?? []).map((skill) => [
+            skill.name,
+            skill.description ?? "",
+          ]),
+        )
+      : Object.fromEntries(
+          skills.map((skill) => [
+            skill.metadata.name,
+            skill.metadata.description,
+          ]),
+        );
     const model = session.model || stringValue(this.runtime.status().model);
     const contextLimit = this.contextLimit(model, session);
     // One cheap git call per initialize: the shell shows the branch the work
@@ -11673,13 +12635,9 @@ export class DaemonServer {
       permission_mode: runtimePermissionMode(
         session.permissionMode ?? this.runtime.status().permission_mode,
       ),
-      skills: skills.map((skill) => skill.metadata.name),
-      skill_descriptions: Object.fromEntries(
-        skills.map((skill) => [
-          skill.metadata.name,
-          skill.metadata.description,
-        ]),
-      ),
+      ...(externalAcpActive ? { acp_binding: liveAcpBinding as unknown as JsonRpcPayload } : {}),
+      skills: initSkillNames,
+      skill_descriptions: initSkillDescriptions,
       head_hash: "",
       // `version` is retained for existing clients; daemon_version makes the
       // handshake role explicit for desktop/app compatibility checks.
@@ -11720,8 +12678,12 @@ export class DaemonServer {
         ...(initBasis ? { cost_basis: initBasis } : {}),
       },
     );
+    let precomputedHistory: DaemonSession | undefined;
     if (session.messages.length) {
-      if (requestedHistory === undefined) this.replaySessionHistory(connection, await this.historySession(session));
+      if (requestedHistory === undefined) {
+        precomputedHistory = await this.historySession(session);
+        this.replaySessionHistory(connection, precomputedHistory);
+      }
       this.indexSessionForSearch(key);
     }
     if (resumeId && session.messages.length) {
@@ -11733,7 +12695,9 @@ export class DaemonServer {
     this.recoverMonitorReactions(session);
     // Await the history first so the snapshot and everything after it are
     // built in one synchronous step; the lease replay is taken at send time.
-    const history = requestedHistory === 0 ? session : await this.historySession(session);
+    const history = requestedHistory === 0
+      ? session
+      : (precomputedHistory ?? await this.historySession(session));
     return {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
@@ -11963,12 +12927,24 @@ export class DaemonServer {
       this.eventJournal.deliverPrivate(deliver);
       return;
     }
+    // Ephemeral high-frequency worker activity ticks never belong in durable replay.
+    if (type === 'swarm_event' && payload.kind === 'member_activity') {
+      this.eventJournal.deliverPrivate(deliver);
+      return;
+    }
     const nested = isRecord(payload.payload) ? payload.payload : undefined;
     const id = optionalString(payload.session_id) ?? optionalString(nested?.session_id);
-    const session = id ? this.runtime.listSessions().find(session => session.id === id)
+    const session = id
+      ? (this.runtime.sessionById?.(id) ?? this.runtime.listSessions().find(item => item.id === id))
       : connection ? this.runtime.sessionStatus(connection.activeSessionKey) : undefined;
-    const journalPayload = type === 'question_response' && Object.hasOwn(payload, 'answers')
+    let journalPayload = type === 'question_response' && Object.hasOwn(payload, 'answers')
       ? { ...payload, answers: '[redacted]' } : payload;
+    // Strip the ~48 KiB static skill_descriptions catalog from the journaled copy of
+    // `init_done` while live connections continue receiving the complete payload.
+    if (type === 'init_done' && Object.hasOwn(journalPayload, 'skill_descriptions')) {
+      const { skill_descriptions: _omitted, ...compactInit } = journalPayload;
+      journalPayload = compactInit;
+    }
     this.eventJournal.append({ type, payload: journalPayload,
       project_dir: projectDirectory ?? session?.cwd ?? this.projectDirectory ?? process.cwd(),
       ...(id || session?.id ? { session_id: id ?? session!.id } : {}),
@@ -12028,9 +13004,13 @@ export class DaemonServer {
     }
     const reactionOwner = this.runtime.sessionStatus(sessionKey)?.id;
     if (reactionOwner) this.reactionDispatcher?.cancel(reactionOwner);
+    const acpCancelled = reactionOwner && this.acpBridgeHost.hasActiveTurn(reactionOwner);
+    if (acpCancelled && reactionOwner) {
+      void this.acpBridgeHost.cancel(reactionOwner);
+    }
     const owner = this.turnOwners.get(sessionKey);
     if (!owner) {
-      return this.runtime.cancelTurn(sessionKey) || cancelledQueued;
+      return this.runtime.cancelTurn(sessionKey) || Boolean(acpCancelled) || cancelledQueued;
     }
     // Retain the stop intent while server-side setup (notably compaction) is
     // still awaiting and no runtime controller exists yet. The admission
@@ -12047,6 +13027,19 @@ export class DaemonServer {
       if (session) disarmGoal(session.id);
     }
     return true;
+  }
+
+  private cancelAllActiveTurns(): number {
+    const nativeCancelled = this.runtime.cancelAllTurns();
+    const acpCancelled = this.acpBridgeHost.cancelAll();
+    for (const session of this.runtime.listSessions()) {
+      if (this.acpBridgeHost.hasActiveTurn(session.id) || this.turnOwners.has(session.sessionKey)) {
+        session.cancelRequested = true;
+        this.turnOwners.delete(session.sessionKey);
+      }
+      this.cancelQueuedSteers(session.sessionKey, "turn-cancelled");
+    }
+    return nativeCancelled + acpCancelled;
   }
 
   /**
@@ -12544,10 +13537,16 @@ export class DaemonServer {
           }
         }
       };
-      await this.runtime.submitTurn(sessionKey, text, forward, {
-        ...options,
-        pullQueuedSteers: () => this.pullQueuedSteers(sessionKey),
-      });
+      const activeSession = this.runtime.sessionStatus(sessionKey);
+      const acpBinding = activeSession ? this.acpBridgeHost.getBinding(activeSession.id) : null;
+      if (activeSession && acpBinding?.connected) {
+        await this.runExternalAcpTurn(activeSession, text, forward, options);
+      } else {
+        await this.runtime.submitTurn(sessionKey, text, forward, {
+          ...options,
+          pullQueuedSteers: () => this.pullQueuedSteers(sessionKey),
+        });
+      }
       if (options.goalRound !== undefined && round_.error === undefined && round_.productive) {
         this.goalTransientFailures.delete(sessionKey);
       }
@@ -12625,6 +13624,7 @@ export class DaemonServer {
       // Steers that arrived too late for any provider/tool boundary run in ONE serialized continuation.
       this.scheduleSteerContinuation(sessionKey, emit, owner);
       if (!options.origin || options.origin === 'human') this.kickGoalWake(sessionKey, emit, owner);
+      this.drainPendingSwarmCoordinatorWake(sessionKey);
       // The runtime persists the session as the turn ends, so this is the
       // incremental feed: the index tracks the transcript that was just saved.
       this.indexSessionForSearch(sessionKey);
@@ -12820,10 +13820,57 @@ export class DaemonServer {
     for (const session of this.runtime.listSessions()) {
       if (sessionHasHistory(session) || session.activeTurnId) continue;
       if (attached.has(session.sessionKey)) continue;
+      this.pendingSwarmCoordinatorWakes.delete(session.id);
+      this.monitors?.disposeOwner(session.id);
+      void this.swarmHost.disposeSession(session.id);
+      void this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
+      this.agyBrainBridge.unwatchSession(session.id);
+      void this.acpBridgeHost.disconnect(session.id);
       this.runtime.evictSession(session.sessionKey);
       if (session.cwd) {
         void this.releaseWorkspaceIfIdle(session.cwd);
       }
+    }
+    void this.evictIdleSessionsAndSwarms();
+  }
+
+  /**
+   * True when a loaded session owns live clients, turns, interactions, goals,
+   * living swarms, ACP bridges, terminals, monitors, or explicit event
+   * subscriptions and therefore must never be dehydrated from RAM.
+   */
+  private isSessionPinnedForEviction(session: DaemonSession): boolean {
+    if (session.activeTurnId || session.status !== "idle") return true;
+    for (const raw of [...this.connections, ...this.sessionObservers]) {
+      const owner = this.connectionLeases.owner(raw);
+      if (owner.activeSessionKey === session.sessionKey) return true;
+    }
+    if (this.turnOwners.has(session.sessionKey)) return true;
+    for (const frame of this.pendingInteractionFrames.values()) {
+      if (frame.owner.activeSessionKey === session.sessionKey) return true;
+    }
+    if (this.goalWakeDispatches.has(session.sessionKey) || this.heldGoalKicks.has(session.sessionKey)) {
+      return true;
+    }
+    try {
+      if (getGoal(session.metadata, session.id)?.phase === "active") return true;
+    } catch {
+      // Malformed goal metadata does not pin an otherwise idle session.
+    }
+    if (this.swarmHost.hasActiveSwarm(session.id)) return true;
+    if (this.acpBridgeHost.hasActiveBridge(session.id)) return true;
+    if (this.terminalRegistry?.hasRunning(session.id)) return true;
+    if (this.monitors?.hasActiveWatches(session.id)) return true;
+    if (this.eventSubscriptions.hasSessionSubscription(session.id)) return true;
+    return false;
+  }
+
+  private async evictIdleSessionsAndSwarms(): Promise<void> {
+    const evictedIds = await this.runtime.evictIdleSessions?.().catch(() => [] as readonly string[]);
+    if (!evictedIds?.length) return;
+    for (const sessionId of evictedIds) {
+      this.agyBrainBridge.unwatchSession(sessionId);
+      await this.swarmHost.evictIdleManager(sessionId).catch(() => undefined);
     }
   }
 
@@ -12877,6 +13924,2835 @@ export class DaemonServer {
       // so its next request gets new resources instead of a missing entry.
       void this.workspaceResources?.(root).catch(() => undefined);
     }
+  }
+
+  private async resolveSwarmTarget(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+    openIfMissing: boolean,
+  ): Promise<{
+    readonly session: DaemonSession | undefined;
+    readonly id: string;
+    readonly cwd: string;
+    readonly model: string;
+  } | undefined> {
+    const requestedId = optionalString(params.session_id)?.trim();
+    const requestedKey = (optionalString(params.session_key) ?? optionalString(params.key))?.trim();
+    const sessions = this.runtime.listSessions();
+
+    let session: DaemonSession | undefined;
+    if (requestedId) {
+      session = sessions.find(item => item.id === requestedId || item.sessionKey === requestedId)
+        ?? this.runtime.sessionStatus(requestedId);
+    }
+    if (!session && requestedKey) {
+      session = this.runtime.sessionStatus(requestedKey)
+        ?? sessions.find(item => item.sessionKey === requestedKey || item.id === requestedKey);
+    }
+    if (!session && !requestedId) {
+      session = this.runtime.sessionStatus(connection.activeSessionKey);
+    }
+    if (!session && openIfMissing) {
+      const targetKey = requestedKey || requestedId || connection.activeSessionKey;
+      session = await this.runtime.openSession(
+        targetKey,
+        undefined,
+        this.projectDirectory ? { cwd: this.projectDirectory } : {},
+      );
+    }
+
+    if (session) {
+      return {
+        session,
+        id: session.id,
+        cwd: session.cwd || this.projectDirectory || process.cwd(),
+        model: session.model || String(this.runtime.status().model ?? ''),
+      };
+    }
+
+    if (requestedId) {
+      return {
+        session: undefined,
+        id: requestedId,
+        cwd: this.projectDirectory ?? process.cwd(),
+        model: String(this.runtime.status().model ?? ''),
+      };
+    }
+
+    return undefined;
+  }
+
+  private async handleSwarmRpc(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const isReadOnly =
+      method === "swarm.status" ||
+      method === "swarm.board" ||
+      method === "swarm.inspect";
+    const target = await this.resolveSwarmTarget(connection, params, !isReadOnly);
+    const agySwarm = target?.session ? this.resolveAgySwarmContext(target.session) : undefined;
+
+    if (method === "swarm.inspect") {
+      const name = optionalString(params.name)?.trim() ?? "";
+      if (!name) {
+        return { ok: false, error: "name is required" };
+      }
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const limit =
+        typeof params.limit === "number" && Number.isInteger(params.limit) && params.limit > 0
+          ? params.limit
+          : undefined;
+      if (agySwarm && target.session) {
+        this.ensureAgySwarmWatch(target.session);
+        const inspected = await this.agyBrainBridge.inspectSwarmMember(
+          target.id,
+          agySwarm.location,
+          name,
+          {
+            ...(limit === undefined ? {} : { limit }),
+            modelDisplayMap: agySwarm.modelDisplayMap,
+          },
+        );
+        if (!inspected) {
+          return { ok: false, error: `unknown swarm member "${name}"` };
+        }
+        return inspected as unknown as JsonRpcPayload;
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      return manager.inspectMember(
+        name,
+        limit === undefined ? {} : { limit },
+      ) as unknown as JsonRpcPayload;
+    }
+
+    if (method === "swarm.status") {
+      if (!target) {
+        return {
+          active: false,
+          session_id: "",
+          title: "",
+          board: "local",
+          open_board: SWARM_OPEN_BOARD_MARKDOWN,
+          head: 0,
+          overview: null,
+          channels: [{ name: "main", topic: "", created_by: "coordinator", archived: false, subscriber_count: 0 }],
+          members: [],
+        };
+      }
+      if (agySwarm && target.session) {
+        this.ensureAgySwarmWatch(target.session);
+        const status = await this.agyBrainBridge.readSwarmStatus(
+          target.id,
+          agySwarm.location,
+          agySwarm.modelDisplayMap,
+        );
+        return status as unknown as JsonRpcPayload;
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      return manager.status() as unknown as JsonRpcPayload;
+    }
+
+    if (method === "swarm.board") {
+      if (!target) {
+        return { head: 0, messages: [] };
+      }
+      const since = typeof params.since === "number" && Number.isInteger(params.since) && params.since >= 0
+        ? params.since
+        : undefined;
+      const limit = typeof params.limit === "number" && Number.isInteger(params.limit)
+        ? params.limit
+        : undefined;
+      const seqs = Array.isArray(params.seqs)
+        ? params.seqs.filter((item): item is number => typeof item === "number" && Number.isInteger(item) && item > 0)
+        : undefined;
+      const channel = optionalString(params.channel)?.trim() || undefined;
+      if (agySwarm && target.session) {
+        this.ensureAgySwarmWatch(target.session);
+        const page = await this.agyBrainBridge.readSwarmBoard(agySwarm.location, {
+          ...(since === undefined ? {} : { since }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(seqs === undefined ? {} : { seqs }),
+          ...(channel === undefined ? {} : { channel }),
+        });
+        return {
+          head: page.head,
+          messages: page.messages as unknown as JsonRpcPayload[],
+        };
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      const page = await manager.readBoard({
+        caller: USER_BOARD_AUTHOR,
+        ...(since === undefined ? {} : { since }),
+        ...(limit === undefined ? {} : { limit }),
+        ...(seqs === undefined ? {} : { seqs }),
+        ...(channel === undefined ? {} : { channel }),
+      });
+      return {
+        head: page.head,
+        messages: ("messages" in page ? page.messages : []) as unknown as JsonRpcPayload[],
+      };
+    }
+
+    if (!target) {
+      return { ok: false, error: "no active session" };
+    }
+
+    if (method === "swarm.post") {
+      const text = optionalString(params.text) ?? "";
+      const channel = optionalString(params.channel)?.trim() || undefined;
+      const asFeedback = params.as_feedback === true;
+      if (agySwarm && target.session) {
+        if (!agySwarm.liveConnected) {
+          return {
+            ok: false,
+            error: "Reconnect Antigravity to send swarm actions; board remains readable offline.",
+          };
+        }
+        const trimmed = text.trim();
+        if (!trimmed) {
+          return { ok: false, error: "text is required" };
+        }
+        const status = await this.agyBrainBridge.readSwarmStatus(
+          target.id,
+          agySwarm.location,
+          agySwarm.modelDisplayMap,
+        );
+        const postBody = asFeedback
+          ? formatSwarmNarratorFeedback(trimmed, status)
+          : trimmed;
+        const channelNote = channel && channel !== "main" ? ` (target channel: #${channel})` : "";
+        const instruction = [
+          `[Xerxes Immortals Board Action] The user posted a message from the Immortals Board UI${channelNote}.`,
+          "Call `post_message` verbatim with the exact text below (do not paraphrase or strip @mentions), then wait or continue as appropriate:",
+          "",
+          postBody,
+        ].join("\n");
+        await this.dispatchAgyCoordinatorAction(
+          target.session,
+          instruction,
+          asFeedback ? "Immortals feedback (@narrator)" : "Immortals board post",
+        );
+        return {
+          ok: true,
+          status: "posted",
+          dispatched: true,
+          seq: status.head,
+          channel: channel ?? "main",
+        };
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      const posted = await manager.postFromUser({
+        text,
+        ...(channel === undefined ? {} : { channel }),
+        ...(asFeedback ? { as_feedback: true } : {}),
+      });
+      return {
+        status: "posted",
+        seq: posted.seq,
+        channel: posted.channel,
+      };
+    }
+
+    if (method === "swarm.kill") {
+      const name = (optionalString(params.name) ?? "").trim();
+      if (agySwarm && target.session) {
+        return this.dispatchAgySwarmKill(target.session, agySwarm, name);
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      const killed = await manager.killFromHost(name);
+      return {
+        status: "killed",
+        killed: killed.killed,
+      };
+    }
+
+    if (method === "swarm.model") {
+      const name = optionalString(params.name)?.trim() || undefined;
+      const model = optionalString(params.model)?.trim() || undefined;
+      const reason = optionalString(params.reason)?.trim() || undefined;
+      if (agySwarm && target.session) {
+        if (!agySwarm.liveConnected) {
+          return {
+            ok: false,
+            error: "Reconnect Antigravity to send swarm actions; board remains readable offline.",
+          };
+        }
+        if (!model) {
+          return { ok: false, error: "model is required" };
+        }
+        const targetName = name || "coordinator";
+        if (targetName === "coordinator") {
+          const switched = await this.acpBridgeHost.setModel(target.id, model);
+          if (!switched.ok) {
+            return { ok: false, error: switched.error };
+          }
+          target.session.metadata.acp_binding = switched.binding;
+          await this.runtime.flushSessions();
+          this.emitAcpStatus(target.id, switched.binding, target.cwd);
+          return {
+            ok: true,
+            status: "switched",
+            name: "coordinator",
+            model: switched.binding.current_model ?? model,
+            ...(reason === undefined ? {} : { reason }),
+          };
+        }
+        const reasonClause = reason ? ` Reason: ${reason}.` : "";
+        const instruction = [
+          `[Xerxes Immortals Board Action] The user requested switching worker "${targetName}" to model "${model}".${reasonClause}`,
+          `Call \`swarm\` with \`action: "model"\`, \`name: "${targetName}"\`, and \`model: "${model}"\` immediately.`,
+        ].join("\n");
+        await this.dispatchAgyCoordinatorAction(
+          target.session,
+          instruction,
+          `Immortals model switch (@${targetName} → ${model})`,
+        );
+        return {
+          ok: true,
+          status: "switched",
+          dispatched: true,
+          name: targetName,
+          model,
+          ...(reason === undefined ? {} : { reason }),
+        };
+      }
+      const manager = await this.swarmHost.ensureSession(target);
+      const switched = await manager.switchModel({
+        caller: "coordinator",
+        ...(name === undefined ? {} : { name }),
+        ...(model === undefined ? {} : { model }),
+        ...(reason === undefined ? {} : { reason }),
+      });
+      return {
+        status: "switched",
+        name: switched.name,
+        model: switched.model,
+        ...(switched.reason === undefined ? {} : { reason: switched.reason }),
+      };
+    }
+
+    // method === "swarm.activate"
+    if (agySwarm && target.session) {
+      this.ensureAgySwarmWatch(target.session);
+      const status = await this.agyBrainBridge.readSwarmStatus(
+        target.id,
+        agySwarm.location,
+        agySwarm.modelDisplayMap,
+      );
+      return {
+        ok: true,
+        active: status.active,
+        prompt_overlay: "",
+      };
+    }
+    await this.refreshSkills(target.session);
+    const enabled = params.enabled !== false;
+    const activated = await this.swarmHost.activateCoordinator({
+      id: target.id,
+      cwd: target.cwd,
+      model: target.model,
+      enabled,
+    });
+    return {
+      ok: true,
+      active: activated.active,
+      prompt_overlay: activated.prompt_overlay,
+    };
+  }
+
+  private async handleSwarmSlashCommand(
+    connection: DaemonTransportConnection,
+    args: string,
+    session: DaemonSession | undefined,
+  ): Promise<JsonRpcPayload> {
+    const parsed = parseSwarmCommand(args);
+    if (parsed.kind === "invalid-kill") {
+      const message = `Specify a worker name or "all".\n${SWARM_USAGE}`;
+      this.emitSlash(connection, message, "warning");
+      return { ok: false, error: message };
+    }
+
+    const activeSession = session ?? await this.runtime.openSession(
+      connection.activeSessionKey,
+      undefined,
+      this.projectDirectory ? { cwd: this.projectDirectory } : {},
+    );
+    const agySwarm = this.resolveAgySwarmContext(activeSession);
+    if (agySwarm) {
+      this.ensureAgySwarmWatch(activeSession);
+      if (parsed.kind === "status") {
+        const status = await this.agyBrainBridge.readSwarmStatus(
+          activeSession.id,
+          agySwarm.location,
+          agySwarm.modelDisplayMap,
+        );
+        const board = await this.agyBrainBridge.readSwarmBoard(agySwarm.location, { limit: 15 });
+        const text = renderSwarmStatusText(status, board.messages);
+        this.emitSlash(connection, text);
+        return {
+          ok: true,
+          text,
+          open_board: parsed.openBoard,
+          status: status as unknown as JsonRpcPayload,
+        };
+      }
+      if (parsed.kind === "channels") {
+        const status = await this.agyBrainBridge.readSwarmStatus(
+          activeSession.id,
+          agySwarm.location,
+          agySwarm.modelDisplayMap,
+        );
+        const text = renderSwarmChannelsText(status.channels, status.title);
+        this.emitSlash(connection, text);
+        return {
+          ok: true,
+          text,
+          channels: status.channels as unknown as JsonRpcPayload[],
+        };
+      }
+      if (parsed.kind === "kill") {
+        const res = await this.dispatchAgySwarmKill(activeSession, agySwarm, parsed.target);
+        if (res.ok === false) {
+          const msg = String(res.error ?? "Could not stop Antigravity swarm worker.");
+          this.emitSlash(connection, msg, "warning");
+          return res;
+        }
+        const killedList = Array.isArray(res.killed)
+          ? res.killed.filter((item): item is string => typeof item === "string")
+          : [];
+        const text = killedList.length > 0
+          ? `Requested Antigravity coordinator to stop worker(s): ${killedList.join(", ")}`
+          : parsed.target.toLowerCase() === "all"
+            ? "No living Immortals workers to stop."
+            : `No living Immortals worker matched "${parsed.target}".`;
+        this.emitSlash(connection, text);
+        return { ...res, text };
+      }
+      // parsed.kind === "activate": forward `/swarm <task>` to live Antigravity ACP.
+      if (!agySwarm.liveConnected) {
+        const error = "Reconnect Antigravity to start a swarm; existing board remains readable offline.";
+        this.emitSlash(connection, error, "warning");
+        return { ok: false, error };
+      }
+      return this.forwardSlashToExternalAcp(
+        connection,
+        activeSession.sessionKey,
+        `/swarm ${parsed.task}`,
+        agySwarm.binding,
+      );
+    }
+
+    const target = {
+      id: activeSession.id,
+      cwd: activeSession.cwd || this.projectDirectory || process.cwd(),
+      model: activeSession.model || String(this.runtime.status().model ?? ""),
+    };
+    const manager = await this.swarmHost.ensureSession(target);
+
+    if (parsed.kind === "status") {
+      const status = manager.status();
+      const board = await manager.readBoard({ caller: USER_BOARD_AUTHOR, limit: 15 });
+      const messages = "messages" in board ? board.messages : [];
+      const text = renderSwarmStatusText(status, messages);
+      this.emitSlash(connection, text);
+      return {
+        ok: true,
+        text,
+        open_board: parsed.openBoard,
+        status: status as unknown as JsonRpcPayload,
+      };
+    }
+
+    if (parsed.kind === "channels") {
+      const status = manager.status();
+      const text = renderSwarmChannelsText(status.channels, status.title);
+      this.emitSlash(connection, text);
+      return {
+        ok: true,
+        text,
+        channels: status.channels as unknown as JsonRpcPayload[],
+      };
+    }
+
+    if (parsed.kind === "kill") {
+      const killed = await manager.killFromHost(parsed.target);
+      const text = killed.killed.length > 0
+        ? `Killed Immortals worker(s): ${killed.killed.join(", ")}`
+        : parsed.target.toLowerCase() === "all"
+          ? "No living Immortals workers to stop."
+          : `No living Immortals worker matched "${parsed.target}".`;
+      this.emitSlash(connection, text);
+      return {
+        ok: true,
+        status: "killed",
+        killed: killed.killed,
+        text,
+      };
+    }
+
+    // parsed.kind === "activate": activate coordinator mode and submit the task turn.
+    await this.refreshSkills(activeSession);
+    const activated = await this.swarmHost.activateCoordinator({
+      id: target.id,
+      cwd: target.cwd,
+      model: target.model,
+      enabled: true,
+    });
+    void this.submitTrackedTurn(
+      activeSession.sessionKey,
+      parsed.task,
+      (event) => this.emit(connection, event.type, event.payload),
+      connection,
+      { displayText: `/immortals ${parsed.task}` },
+    ).catch((error) =>
+      this.emit(connection, "notification", {
+        level: "error",
+        message: errorMessage(error),
+        session_id: activeSession.id,
+      }),
+    );
+    return {
+      ok: true,
+      active: true,
+      queued: true,
+      prompt_overlay: activated.prompt_overlay,
+    };
+  }
+
+  private emitSwarmEvent(event: SwarmLifecycleEvent, workspaceDir: string): void {
+    if (this.runtimeShutdown) return;
+    const accepts = (connection: DaemonTransportConnection): boolean => {
+      const current = this.runtime.sessionStatus(connection.activeSessionKey);
+      return !current || current.id === event.session_id;
+    };
+    if (event.kind === "member_activity") {
+      // Lightweight ephemeral delta: omit the full 57-member `status` snapshot
+      // (~28 KiB) and compact `activity` to avoid socket + EventJournal bloat.
+      const compactPayload: JsonRpcPayload = {
+        session_id: event.session_id,
+        kind: event.kind,
+        head: event.head,
+        ...(event.member === undefined ? {} : {
+          member_name: event.member.name,
+          member: event.member as unknown as JsonRpcPayload,
+        }),
+        ...(event.activity === undefined ? {} : {
+          activity: compactWireMemberActivity(event.activity) as unknown as JsonRpcPayload,
+        }),
+      };
+      this.broadcastEvent("swarm_event", compactPayload, accepts, [...this.sessionObservers], workspaceDir);
+      return;
+    }
+    const payload: JsonRpcPayload = {
+      session_id: event.session_id,
+      kind: event.kind,
+      head: event.head,
+      status: event.status as unknown as JsonRpcPayload,
+      ...(event.message === undefined ? {} : { message: event.message as unknown as JsonRpcPayload }),
+      ...(event.member === undefined ? {} : { member: event.member as unknown as JsonRpcPayload }),
+      ...(event.activity === undefined ? {} : { activity: event.activity as unknown as JsonRpcPayload }),
+    };
+    this.broadcastEvent("swarm_event", payload, accepts, [...this.sessionObservers], workspaceDir);
+  }
+
+  private emitAcpStatus(
+    sessionId: string,
+    binding: AcpSessionBinding | null,
+    workspaceDir: string,
+  ): void {
+    if (this.runtimeShutdown) return;
+    const { agents } = this.acpBridgeHost.listAgents(sessionId);
+    const payload: JsonRpcPayload = {
+      session_id: sessionId,
+      binding: binding as unknown as JsonRpcPayload | null,
+      agents: agents as unknown as JsonRpcPayload[],
+    };
+    const accepts = (connection: DaemonTransportConnection): boolean => {
+      const current = this.runtime.sessionStatus(connection.activeSessionKey);
+      return !current || current.id === sessionId;
+    };
+    this.broadcastEvent("acp_status", payload, accepts, [...this.sessionObservers], workspaceDir);
+  }
+
+  private async handleAcpRpc(
+    connection: DaemonTransportConnection,
+    method: string,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const isReadOnly = method === "acp.agents" || method === "acp.catalog";
+    const target = await this.resolveSwarmTarget(connection, params, !isReadOnly && method === "acp.connect");
+
+    if (method === "acp.agents") {
+      const { agents, active } = this.acpBridgeHost.listAgents(target?.id);
+      return {
+        ok: true,
+        agents: agents as unknown as JsonRpcPayload[],
+        active: active as unknown as JsonRpcPayload | null,
+      };
+    }
+
+    if (method === "acp.catalog") {
+      const binding = target ? this.acpBridgeHost.getBinding(target.id) : null;
+      const connected = Boolean(
+        binding && binding.connected && binding.transport !== "native",
+      );
+      if (!connected || !binding) {
+        return {
+          ok: true,
+          connected: false,
+          commands: [],
+          skills: [],
+          config_options: [],
+        };
+      }
+      const commands = (binding.available_commands ?? []).filter(
+        (item) => item.kind !== "skill",
+      );
+      const skills = binding.discovered_skills ?? [];
+      const configOptions = binding.config_options ?? [];
+      return {
+        ok: true,
+        connected: true,
+        binding: binding as unknown as JsonRpcPayload,
+        commands: commands as unknown as JsonRpcPayload[],
+        skills: skills as unknown as JsonRpcPayload[],
+        ...(binding.capabilities
+          ? { capabilities: binding.capabilities as unknown as JsonRpcPayload }
+          : {}),
+        config_options: configOptions as unknown as JsonRpcPayload[],
+      };
+    }
+
+    if (method === "acp.disconnect") {
+      if (!target) {
+        return { ok: true, disconnected: false, binding: null };
+      }
+      await this.settleAcpOutOfTurnWakeup(target.id, "end_turn");
+      this.agyBrainBridge.unwatchSession(target.id);
+      const disconnected = await this.acpBridgeHost.disconnect(target.id);
+      if (target.session) {
+        if (Object.hasOwn(target.session.metadata, "acp_binding")) {
+          delete target.session.metadata.acp_binding;
+        }
+        if (Object.hasOwn(target.session.extra, "acp_context")) {
+          delete target.session.extra.acp_context;
+        }
+        await this.runtime.flushSessions();
+      }
+      this.emitAcpStatus(target.id, null, target.cwd);
+      if (target.session) {
+        this.emitStatus(connection, target.session, { scoped: true });
+      }
+      return { ok: true, disconnected, binding: null };
+    }
+
+    if (method === "acp.cancel") {
+      if (!target) {
+        return { ok: true, cancelled: false };
+      }
+      if (target.session) {
+        this.cancelQueuedSteers(target.session.sessionKey, "turn-cancelled");
+      }
+      const cancelled = await this.acpBridgeHost.cancel(target.id);
+      if (target.session) {
+        this.cancelTrackedTurn(target.session.sessionKey);
+      }
+      return { ok: true, cancelled };
+    }
+
+    if (method === "acp.set_model") {
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const modelId = (optionalString(params.model_id) ?? optionalString(params.model))?.trim() ?? "";
+      if (!modelId) {
+        return { ok: false, error: "model_id is required" };
+      }
+      const result = await this.acpBridgeHost.setModel(target.id, modelId);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      if (target.session) {
+        target.session.metadata.acp_binding = result.binding;
+        await this.runtime.flushSessions();
+      }
+      this.emitAcpStatus(target.id, result.binding, target.cwd);
+      return {
+        ok: true,
+        binding: result.binding as unknown as JsonRpcPayload,
+      };
+    }
+
+    if (method === "acp.set_mode") {
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const modeId = (optionalString(params.mode_id) ?? optionalString(params.mode))?.trim() ?? "";
+      if (!modeId) {
+        return { ok: false, error: "mode_id is required" };
+      }
+      const result = await this.acpBridgeHost.setMode(target.id, modeId);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      if (target.session) {
+        target.session.metadata.acp_binding = result.binding;
+        await this.runtime.flushSessions();
+      }
+      this.emitAcpStatus(target.id, result.binding, target.cwd);
+      if (isAcpTurboMode(result.binding)) {
+        this.autoApprovePendingAcpRequests(target.id, connection);
+      }
+      return {
+        ok: true,
+        binding: result.binding as unknown as JsonRpcPayload,
+      };
+    }
+
+    if (method === "acp.set_config_option") {
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const configId = (optionalString(params.config_id) ?? optionalString(params.id))?.trim() ?? "";
+      const value =
+        typeof params.value === "boolean"
+          ? String(params.value)
+          : typeof params.value === "number" && Number.isFinite(params.value)
+            ? String(params.value)
+            : (optionalString(params.value)?.trim() ?? "");
+      if (!configId) {
+        return { ok: false, error: "config_id is required" };
+      }
+      if (!value) {
+        return { ok: false, error: "value is required" };
+      }
+      const result = await this.acpBridgeHost.setConfigOption(target.id, configId, value);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      if (target.session) {
+        target.session.metadata.acp_binding = result.binding;
+        await this.runtime.flushSessions();
+      }
+      this.emitAcpStatus(target.id, result.binding, target.cwd);
+      if (isAcpTurboMode(result.binding)) {
+        this.autoApprovePendingAcpRequests(target.id, connection);
+      }
+      return {
+        ok: true,
+        binding: result.binding as unknown as JsonRpcPayload,
+      };
+    }
+
+    // method === "acp.connect"
+    if (!target) {
+      return { ok: false, error: "no active session" };
+    }
+    const command = optionalString(params.command)?.trim() || undefined;
+    const rawAgentId = optionalString(params.agent_id)?.trim() ?? "";
+    const agentId = rawAgentId || (command ? "custom" : "");
+    if (!agentId) {
+      return { ok: false, error: "agent_id is required" };
+    }
+    const cwd = resolveProjectDirectory(optionalString(params.cwd)?.trim() || target.cwd);
+    const args = Array.isArray(params.args)
+      ? params.args.filter((item): item is string => typeof item === "string")
+      : undefined;
+    const permissionMode = target.session?.permissionMode
+      ?? (typeof this.runtime.status().permission_mode === "string"
+        ? String(this.runtime.status().permission_mode)
+        : undefined);
+    const explicitResumeId =
+      optionalString(params.resume_session_id)?.trim() ||
+      optionalString(params.external_session_id)?.trim() ||
+      undefined;
+    const explicitModeId =
+      optionalString(params.mode_id)?.trim() ||
+      optionalString(params.mode)?.trim() ||
+      undefined;
+    const savedBinding =
+      params.fresh !== true && isRecord(target.session?.metadata.acp_binding)
+        ? (target.session.metadata.acp_binding as unknown as AcpSessionBinding)
+        : undefined;
+    const savedMatchesTarget =
+      savedBinding !== undefined &&
+      savedBinding.agent_id === agentId &&
+      resolveProjectDirectory(savedBinding.cwd || cwd) === cwd;
+    const resumeSessionId =
+      explicitResumeId ??
+      (savedMatchesTarget &&
+      typeof savedBinding.external_session_id === "string" &&
+      savedBinding.external_session_id.trim().length > 0
+        ? savedBinding.external_session_id.trim()
+        : undefined);
+    const initialModeId =
+      explicitModeId ??
+      (savedMatchesTarget &&
+      typeof savedBinding.current_mode === "string" &&
+      savedBinding.current_mode.trim().length > 0
+        ? savedBinding.current_mode.trim()
+        : undefined);
+
+    const result = await this.acpBridgeHost.connect({
+      sessionId: target.id,
+      agentId,
+      cwd,
+      ...(command ? { command } : {}),
+      ...(args ? { args } : {}),
+      ...(initialModeId ? { initialModeId } : {}),
+      ...(permissionMode ? { permissionMode } : {}),
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    });
+
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error,
+        ...(result.install_hint ? { install_hint: result.install_hint } : {}),
+      };
+    }
+
+    const activeExternal = agentId === "xerxes" ? null : result.binding;
+    if (target.session) {
+      if (activeExternal) {
+        target.session.metadata.acp_binding = activeExternal;
+      } else {
+        delete target.session.metadata.acp_binding;
+        delete target.session.extra.acp_context;
+      }
+      await this.runtime.flushSessions();
+    }
+    this.emitAcpStatus(target.id, activeExternal, cwd);
+    if (activeExternal && target.session && isAntigravityBinding(activeExternal)) {
+      this.ensureAgySwarmWatch(target.session);
+    } else if (!activeExternal && target.session) {
+      this.agyBrainBridge.unwatchSession(target.id);
+      this.emitStatus(connection, target.session, { scoped: true });
+    }
+    return {
+      ok: true,
+      binding: result.binding as unknown as JsonRpcPayload,
+    };
+  }
+
+  private forwardSlashToExternalAcp(
+    connection: DaemonTransportConnection,
+    sessionKey: string,
+    command: string,
+    binding: AcpSessionBinding,
+  ): JsonRpcPayload {
+    void this.submitTrackedTurn(
+      sessionKey,
+      command,
+      (event) => this.emit(connection, event.type, event.payload),
+      connection,
+      { displayText: command, announceSuppressedTurn: true },
+    ).catch((error) =>
+      this.emit(connection, "notification", {
+        level: "error",
+        message: errorMessage(error),
+      }),
+    );
+    return {
+      ok: true,
+      forwarded_to_acp: true,
+      agent_id: binding.agent_id,
+      command,
+    };
+  }
+
+  private async handleAcpSlashCommand(
+    connection: DaemonTransportConnection,
+    args: string,
+    session: DaemonSession | undefined,
+  ): Promise<JsonRpcPayload> {
+    const trimmed = args.trim();
+    const tokens = trimmed ? trimmed.split(/\s+/) : [];
+    const sub = (tokens[0] ?? "status").toLowerCase();
+
+    if (sub === "list" || sub === "status") {
+      const { agents, active } = this.acpBridgeHost.listAgents(session?.id);
+      const text = formatAcpAgentsStatusText(agents, active);
+      this.emitSlash(connection, text);
+      return {
+        ok: true,
+        agents: agents as unknown as JsonRpcPayload[],
+        active: active as unknown as JsonRpcPayload | null,
+        text,
+      };
+    }
+
+    if (sub === "catalog" || sub === "skills" || sub === "capabilities") {
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      if (!binding || !binding.connected || binding.transport === "native") {
+        const msg = "No external ACP runtime is connected. Connect one with `/acp use <claude-code|antigravity>`.";
+        this.emitSlash(connection, msg, "warning");
+        return { ok: true, connected: false, commands: [], skills: [], config_options: [], text: msg };
+      }
+      const text = formatAcpCatalogText(binding);
+      this.emitSlash(connection, text);
+      const commands = (binding.available_commands ?? []).filter((item) => item.kind !== "skill");
+      const skills = binding.discovered_skills ?? [];
+      return {
+        ok: true,
+        connected: true,
+        binding: binding as unknown as JsonRpcPayload,
+        commands: commands as unknown as JsonRpcPayload[],
+        skills: skills as unknown as JsonRpcPayload[],
+        ...(binding.capabilities ? { capabilities: binding.capabilities as unknown as JsonRpcPayload } : {}),
+        config_options: (binding.config_options ?? []) as unknown as JsonRpcPayload[],
+        text,
+      };
+    }
+
+    if (sub === "disconnect" || sub === "off" || sub === "native") {
+      const res = await this.handleAcpRpc(connection, "acp.disconnect", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+      });
+      const text = "Disconnected external ACP agent. Switched back to native Xerxes runtime.";
+      this.emitSlash(connection, text);
+      return { ...res, text };
+    }
+
+    if (sub === "use" || sub === "connect") {
+      const agentId = tokens[1]?.trim() ?? "";
+      if (!agentId) {
+        const usage = "Usage: `/acp use <claude-code|antigravity|xerxes|custom> [command ...]`";
+        this.emitSlash(connection, usage, "warning");
+        return { ok: false, error: usage };
+      }
+      const customCmd = tokens[2]?.trim();
+      const customArgs = tokens.slice(3);
+      const res = await this.handleAcpRpc(connection, "acp.connect", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        agent_id: agentId,
+        ...(customCmd ? { command: customCmd } : {}),
+        ...(customArgs.length > 0 ? { args: customArgs } : {}),
+      });
+      if (res.ok === true) {
+        const binding = res.binding as unknown as AcpSessionBinding | undefined;
+        const msg = binding?.provider === "xerxes"
+          ? "Switched back to native Xerxes runtime."
+          : `Connected to ${binding?.name ?? agentId} (${binding?.transport ?? "acp"}).`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const hint = typeof res.install_hint === "string" && res.install_hint ? `\n${res.install_hint}` : "";
+      const errText = `${String(res.error ?? "ACP connection failed.")}${hint}`;
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "model") {
+      const modelId = tokens.slice(1).join(" ").trim();
+      if (!modelId) {
+        const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+        if (!binding) {
+          const usage = "Usage: `/acp model <model_id>` (connect an external ACP agent first with `/acp use <agent>`).";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: usage };
+        }
+        const lines = [
+          `Active ${binding.name} model: ${binding.current_model_name ?? binding.current_model ?? `${binding.name} default`}`,
+        ];
+        if (binding.models && binding.models.length > 0) {
+          lines.push("", "Available models:");
+          for (const item of binding.models) {
+            const marker = item.id === binding.current_model ? "*" : " ";
+            const label = item.name && item.name !== item.id ? `${item.id} (${item.name})` : item.id;
+            lines.push(`${marker} ${label}${item.description ? ` — ${item.description}` : ""}`);
+          }
+        }
+        lines.push("", "Switch with `/acp model <id>`.");
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ok: true, binding: binding as unknown as JsonRpcPayload, text };
+      }
+      const res = await this.handleAcpRpc(connection, "acp.set_model", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        model_id: modelId,
+      });
+      if (res.ok === true) {
+        const binding = res.binding as unknown as AcpSessionBinding | undefined;
+        const label = binding?.current_model_name ?? binding?.current_model ?? modelId;
+        const msg = `Switched ${binding?.name ?? "ACP"} model to ${label}.`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? "Failed to switch ACP model.");
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "mode") {
+      const modeId = tokens.slice(1).join(" ").trim();
+      if (!modeId) {
+        const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+        if (!binding) {
+          const usage = "Usage: `/acp mode <mode_id>` (connect an external ACP agent first with `/acp use <agent>`).";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: usage };
+        }
+        const lines = [
+          `Active ${binding.name} mode: ${binding.current_mode_name ?? binding.current_mode ?? "default"}`,
+        ];
+        if (binding.modes && binding.modes.length > 0) {
+          lines.push("", "Available modes:");
+          for (const item of binding.modes) {
+            const marker = item.id === binding.current_mode ? "*" : " ";
+            const label = item.name && item.name !== item.id ? `${item.id} (${item.name})` : item.id;
+            lines.push(`${marker} ${label}${item.description ? ` — ${item.description}` : ""}`);
+          }
+        }
+        lines.push("", "Switch with `/acp mode <id>`.");
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ok: true, binding: binding as unknown as JsonRpcPayload, text };
+      }
+      const res = await this.handleAcpRpc(connection, "acp.set_mode", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        mode_id: modeId,
+      });
+      if (res.ok === true) {
+        const binding = res.binding as unknown as AcpSessionBinding | undefined;
+        const label = binding?.current_mode_name ?? binding?.current_mode ?? modeId;
+        const msg = `Switched ${binding?.name ?? "ACP"} mode to ${label}.`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? "Failed to switch ACP mode.");
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "thinking" || sub === "thought") {
+      const level = tokens.slice(1).join(" ").trim();
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      if (!level) {
+        if (!binding) {
+          const usage = "Usage: `/acp thinking <level>` (connect an external ACP agent first with `/acp use <agent>`).";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: usage };
+        }
+        const currentName =
+          binding.thought_levels?.find((item) => item.id === binding.thought_level)?.name ??
+          binding.thought_level ??
+          "default";
+        const lines = [`Active ${binding.name} thinking level: ${currentName}`];
+        if (binding.thought_levels && binding.thought_levels.length > 0) {
+          lines.push("", "Available thinking levels:");
+          for (const item of binding.thought_levels) {
+            const marker = item.id === binding.thought_level ? "*" : " ";
+            const label = item.name && item.name !== item.id ? `${item.id} (${item.name})` : item.id;
+            lines.push(`${marker} ${label}${item.description ? ` — ${item.description}` : ""}`);
+          }
+        }
+        lines.push("", "Switch with `/acp thinking <level>`.");
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ok: true, binding: binding as unknown as JsonRpcPayload, text };
+      }
+      const configId = binding?.thought_level_config_id ?? "thought_level";
+      const res = await this.handleAcpRpc(connection, "acp.set_config_option", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        config_id: configId,
+        value: level,
+      });
+      if (res.ok === true) {
+        const updated = res.binding as unknown as AcpSessionBinding | undefined;
+        const label =
+          updated?.thought_levels?.find((item) => item.id === updated.thought_level)?.name ??
+          updated?.thought_level ??
+          level;
+        const msg = `Switched ${updated?.name ?? "ACP"} thinking level to ${label}.`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? "Failed to switch ACP thinking level.");
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "config") {
+      const configId = tokens[1]?.trim() ?? "";
+      const value = tokens.slice(2).join(" ").trim();
+      const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      if (!configId || !value) {
+        if (!binding) {
+          const usage = "Usage: `/acp config <id> <value>` (connect an external ACP agent first with `/acp use <agent>`).";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: usage };
+        }
+        const lines = [`Active ${binding.name} config options:`];
+        if (binding.config_options && binding.config_options.length > 0) {
+          for (const opt of binding.config_options) {
+            const choices = opt.options.map((c) => c.value).join(", ");
+            lines.push(`- ${opt.id} (${opt.name}): ${opt.current_value || "unset"}${choices ? ` [${choices}]` : ""}`);
+          }
+        } else {
+          lines.push("(none reported by external agent)");
+        }
+        lines.push("", "Update with `/acp config <id> <value>`.");
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ok: true, binding: binding as unknown as JsonRpcPayload, text };
+      }
+      const res = await this.handleAcpRpc(connection, "acp.set_config_option", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        config_id: configId,
+        value,
+      });
+      if (res.ok === true) {
+        const updated = res.binding as unknown as AcpSessionBinding | undefined;
+        const msg = `Set ${updated?.name ?? "ACP"} config "${configId}" to ${value}.`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? `Failed to set ACP config "${configId}".`);
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    const usage = "Usage: `/acp [list|status|catalog|use <claude-code|antigravity|xerxes>|model <id>|mode <id>|thinking <level>|config <id> <value>|disconnect]`";
+    this.emitSlash(connection, usage, "warning");
+    return { ok: false, error: usage };
+  }
+
+  /** Auto-resolve any currently waiting ACP approval prompts when a session switches into Turbo mode mid-turn. */
+  private autoApprovePendingAcpRequests(
+    sessionId: string,
+    connection: DaemonTransportConnection,
+  ): void {
+    const pendingIds = this.pendingAcpApprovalIds.get(sessionId);
+    if (!pendingIds || pendingIds.size === 0) return;
+    for (const requestId of [...pendingIds]) {
+      const owner = this.approvalOwners.get(requestId);
+      const info = this.interactions.pendingPermissionInfo(requestId);
+      if (!info) continue;
+      const ok = this.interactions.respondPermission(requestId, "approve");
+      if (ok) {
+        this.acpNonPermanentApprovals.delete(requestId);
+        this.approvalOwners.delete(requestId);
+        this.pendingInteractionFrames.delete(requestId);
+        this.emit(this.interactionAudience(owner, connection), "approval_response", {
+          request_id: requestId,
+          response: "approve",
+        });
+      }
+    }
+  }
+
+  private async runExternalAcpTurn(
+    session: DaemonSession,
+    text: string,
+    emit: (event: DaemonEvent) => void,
+    options: SubmitTurnOptions,
+  ): Promise<void> {
+    // Flush any autonomous post-settle coordinator wakeup before starting an explicit turn.
+    await this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
+    const turnId = crypto.randomUUID();
+    const displayText = options.displayText ?? text;
+    session.activeTurnId = turnId;
+    session.status = "working";
+    session.cancelRequested = false;
+    session.lastActive = Date.now();
+    session.inflightUser = displayText;
+    session.inflightAssistant = "";
+    session.inflightThinking = "";
+    session.inflightStartedAt = Date.now();
+    session.inflightTools = [];
+
+    const unbindInteractions = this.interactions.bind(session.id, emit);
+    const toolStartTimes = new Map<string, number>();
+    const toolInputsById = new Map<string, JsonObject>();
+    const deniedToolCallIds = new Set<string>();
+    const acpQuestionSummaries = new Map<string, string>();
+    const activeAcpQuestionIds = new Set<string>();
+    const recordedToolCalls: Array<{
+      readonly id: string;
+      readonly type: "function";
+      readonly function: { readonly name: string; readonly arguments: string };
+    }> = [];
+    const recordedToolResults: Array<{
+      readonly role: "tool";
+      readonly tool_call_id: string;
+      readonly name: string;
+      readonly content: string;
+      readonly duration_ms: number;
+      readonly is_error?: boolean;
+    }> = [];
+    const recordedToolExecutions: Array<Record<string, unknown>> = [];
+    let lastPlanTodoText: string | undefined;
+
+    const effectivePermissionMode = session.permissionMode
+      ?? (typeof this.runtime.status().permission_mode === "string"
+        ? String(this.runtime.status().permission_mode)
+        : "auto");
+
+    const processedMentions = await processAtMentions(text, session.cwd);
+    const acpResources = processedMentions.mentionedFiles.length > 0
+      ? extractResourcesFromProcessedMentions(processedMentions.enhancedMessage)
+      : [];
+
+    emit({
+      type: "turn_begin",
+      payload: {
+        session_id: session.id,
+        user_input: displayText,
+        ...(options.origin ? { origin: options.origin } : {}),
+      },
+    });
+
+    let stopReason = "end_turn";
+    let cancelled = false;
+    try {
+      const result = await this.acpBridgeHost.runPrompt({
+        sessionId: session.id,
+        text,
+        ...(acpResources.length > 0
+          ? {
+              resources: acpResources,
+              fallbackInlineText: processedMentions.enhancedMessage,
+            }
+          : {}),
+        ...(options.images?.length ? { images: options.images } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        permissionMode: effectivePermissionMode,
+        createElicitation: async (
+          req: AcpElicitationRequest,
+          elicitSignal?: AbortSignal,
+        ): Promise<AcpElicitationResponse> => {
+          const waitSignal = elicitSignal ?? options.signal;
+          if (waitSignal?.aborted) {
+            return { action: "cancel" };
+          }
+          if (req.mode === "url") {
+            return { action: "cancel" };
+          }
+          const specs = elicitationToQuestionItems(req);
+          if (specs.length === 0) {
+            return { action: "accept", content: {} };
+          }
+          const requestId = crypto.randomUUID().replaceAll("-", "");
+          const toolCallId = req.toolCallId ?? "";
+          const wireQuestions = specs.map((spec) => ({
+            id: spec.id,
+            question: spec.question,
+            options: [...spec.options],
+            allow_free_form: spec.allowFreeform,
+            ...(spec.multiSelect ? { multi_select: true } : {}),
+            ...(spec.placeholder ? { placeholder: spec.placeholder } : {}),
+          }));
+          activeAcpQuestionIds.add(requestId);
+          const rawAnswers = await new Promise<
+            Readonly<Record<string, string | readonly string[]>> | null
+          >((resolveAnswer) => {
+            const abort = () => {
+              const pending = this.pendingAcpQuestions.get(requestId);
+              if (!pending) return;
+              this.pendingAcpQuestions.delete(requestId);
+              activeAcpQuestionIds.delete(requestId);
+              pending.signal?.removeEventListener("abort", pending.abort);
+              this.questionOwners.delete(requestId);
+              this.pendingInteractionFrames.delete(requestId);
+              pending.resolve(null);
+            };
+            this.pendingAcpQuestions.set(requestId, {
+              abort,
+              resolve: resolveAnswer,
+              sessionId: session.id,
+              signal: waitSignal,
+              specs,
+              title: specs[0]?.question || req.message || "Agent question",
+              toolCallId,
+            });
+            waitSignal?.addEventListener("abort", abort, { once: true });
+            if (waitSignal?.aborted) {
+              abort();
+              return;
+            }
+            emit({
+              type: "question_request",
+              payload: {
+                id: requestId,
+                session_id: session.id,
+                tool_call_id: toolCallId,
+                questions: wireQuestions,
+              },
+            });
+          });
+          activeAcpQuestionIds.delete(requestId);
+          if (rawAnswers === null) {
+            return { action: "cancel" };
+          }
+          const response = buildElicitationResponseFromAnswers(specs, rawAnswers);
+          if (toolCallId) {
+            const summary = formatElicitationAnswersSummary(specs, response);
+            if (summary) {
+              acpQuestionSummaries.set(toolCallId, summary);
+            }
+          }
+          return response;
+        },
+        requestPermission: async (req: AcpClientPermissionRequest): Promise<AcpClientPermissionResponse> => {
+          const activeBinding = this.acpBridgeHost.getBinding(session.id);
+          if (isAcpTurboMode(activeBinding) || this.acpBridgeHost.isTurboMode(session.id)) {
+            return selectAcpPermissionOption(req.options, "approve");
+          }
+          const agentOwnsPermissionMode =
+            activeBinding?.provider === "antigravity" ||
+            (activeBinding?.modes?.length ?? 0) > 0;
+          if (!agentOwnsPermissionMode && effectivePermissionMode === "accept-all") {
+            return selectAcpPermissionOption(req.options, "approve");
+          }
+          const requestId = crypto.randomUUID().replaceAll("-", "");
+          const inputs: JsonObject = isRecord(req.rawInput) ? (req.rawInput as JsonObject) : {};
+          const description = req.title || `${req.toolName} permission requested by external ACP agent`;
+          const allowPermanent = req.options.some((opt) => opt.kind === "allow_always");
+          if (!allowPermanent) {
+            this.acpNonPermanentApprovals.add(requestId);
+          }
+          const wireDiff = req.diff
+            ? {
+                path: req.diff.path,
+                ...(req.diff.oldText !== undefined ? { old_text: req.diff.oldText } : {}),
+                ...(req.diff.newText !== undefined ? { new_text: req.diff.newText } : {}),
+              }
+            : undefined;
+          const wireOptions = req.options.length > 0
+            ? req.options.map((opt) => ({
+                option_id: opt.optionId,
+                name: opt.name,
+                kind: opt.kind ?? "",
+              }))
+            : undefined;
+          let sessionPendingIds = this.pendingAcpApprovalIds.get(session.id);
+          if (!sessionPendingIds) {
+            sessionPendingIds = new Set<string>();
+            this.pendingAcpApprovalIds.set(session.id, sessionPendingIds);
+          }
+          sessionPendingIds.add(requestId);
+          emit({
+            type: "approval_request",
+            payload: {
+              id: requestId,
+              request_id: requestId,
+              session_id: session.id,
+              tool_call_id: req.toolCallId,
+              action: req.toolName,
+              name: req.toolName,
+              tool_name: req.toolName,
+              description,
+              inputs,
+              cwd: session.cwd,
+              allow_permanent: allowPermanent,
+              ...(wireDiff ? { diff: wireDiff } : {}),
+              ...(wireOptions ? { options: wireOptions } : {}),
+              ...(req.locations?.length ? { locations: req.locations } : {}),
+            },
+          });
+          let decision: "approve" | "approve_for_session" | "reject";
+          let chosenOptionId: string | undefined;
+          try {
+            decision = await this.interactions.permissionBroker(session.id).request(
+              {
+                requestId,
+                description,
+                inputs,
+                toolCall: {
+                  id: req.toolCallId,
+                  type: "function",
+                  function: {
+                    name: req.toolName,
+                    arguments: inputs,
+                  },
+                },
+              },
+              options.signal,
+            );
+            chosenOptionId = this.acpApprovalOptionChoices.get(requestId);
+          } finally {
+            sessionPendingIds.delete(requestId);
+            if (sessionPendingIds.size === 0) {
+              this.pendingAcpApprovalIds.delete(session.id);
+            }
+            this.acpApprovalOptionChoices.delete(requestId);
+            this.acpNonPermanentApprovals.delete(requestId);
+          }
+          const matchedOption = chosenOptionId
+            ? req.options.find((opt) => opt.optionId === chosenOptionId)
+            : undefined;
+          const resolvedResponse: AcpClientPermissionResponse = matchedOption
+            ? { outcome: "selected", optionId: matchedOption.optionId }
+            : selectAcpPermissionOption(req.options, decision);
+          const selectedMeta = resolvedResponse.optionId
+            ? req.options.find((opt) => opt.optionId === resolvedResponse.optionId)
+            : undefined;
+          if (
+            resolvedResponse.outcome === "cancelled" ||
+            selectedMeta?.kind === "reject_once" ||
+            selectedMeta?.kind === "reject_always" ||
+            (decision === "reject" && !matchedOption)
+          ) {
+            deniedToolCallIds.add(req.toolCallId);
+          }
+          return resolvedResponse;
+        },
+        onEvent: (event: AcpBridgeStreamEvent) => {
+          switch (event.type) {
+            case "session_init":
+            case "model_update":
+            case "mode_update":
+            case "config_update":
+            case "available_commands": {
+              const latestBinding = this.acpBridgeHost.getBinding(session.id);
+              if (latestBinding) {
+                session.metadata.acp_binding = latestBinding;
+                this.emitAcpStatus(session.id, latestBinding, session.cwd);
+              }
+              break;
+            }
+            case "session_info": {
+              if (event.title) {
+                this.applyExternalSessionTitle(session, event.title);
+              }
+              break;
+            }
+            case "thought_delta": {
+              session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-8000);
+              emit({
+                type: "think_part",
+                payload: {
+                  session_id: session.id,
+                  think: event.text,
+                },
+              });
+              break;
+            }
+            case "text_delta": {
+              session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+              emit({
+                type: "text_part",
+                payload: {
+                  session_id: session.id,
+                  text: event.text,
+                },
+              });
+              break;
+            }
+            case "tool_call": {
+              toolStartTimes.set(event.toolCallId, Date.now());
+              const parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText);
+              toolInputsById.set(event.toolCallId, parsedInputs);
+              recordedToolCalls.push({
+                id: event.toolCallId,
+                type: "function",
+                function: {
+                  name: event.name,
+                  arguments: event.argumentsText,
+                },
+              });
+              session.inflightTools = [
+                ...(session.inflightTools ?? []),
+                {
+                  id: event.toolCallId,
+                  name: event.name,
+                  ...(event.argumentsText ? { arguments: event.argumentsText.slice(0, 200) } : {}),
+                },
+              ];
+              emit({
+                type: "tool_call",
+                payload: {
+                  session_id: session.id,
+                  id: event.toolCallId,
+                  tool_call_id: event.toolCallId,
+                  name: event.name,
+                  arguments: event.argumentsText,
+                  ...(event.title ? { title: event.title } : {}),
+                  ...(event.diff ? { diff: event.diff } : {}),
+                  ...(event.locations?.length ? { locations: event.locations } : {}),
+                },
+              });
+              if (isAgySwarmTriggerTool(event.name)) {
+                this.ensureAgySwarmWatch(session);
+                this.agyBrainBridge.refreshSession(session.id);
+              }
+              break;
+            }
+            case "tool_result": {
+              const started = toolStartTimes.get(event.toolCallId);
+              const durationMs = event.durationMs ?? (started !== undefined ? Math.max(0, Date.now() - started) : 0);
+              const isError = event.isError === true;
+              const permitted = !event.permissionDenied && !deniedToolCallIds.has(event.toolCallId);
+              const inputs = toolInputsById.get(event.toolCallId) ?? {};
+              const output = event.output || acpQuestionSummaries.get(event.toolCallId) || "";
+              const artifactId = !isError && permitted
+                ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, event.diff)
+                : undefined;
+              recordedToolResults.push({
+                role: "tool",
+                tool_call_id: event.toolCallId,
+                name: event.name,
+                content: output,
+                duration_ms: durationMs,
+                ...(isError ? { is_error: true } : {}),
+              });
+              recordedToolExecutions.push({
+                toolCallId: event.toolCallId,
+                name: event.name,
+                inputs,
+                result: output,
+                permitted,
+                durationMs,
+                ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+                ...(event.diff ? { diff: event.diff } : {}),
+                ...(event.locations?.length ? { locations: event.locations } : {}),
+                ...(artifactId ? { artifact_id: artifactId } : {}),
+              });
+              if (session.inflightTools) {
+                const match = session.inflightTools.find(item => item.id === event.toolCallId);
+                if (match) {
+                  match.ok = !isError && permitted;
+                  match.duration_ms = durationMs;
+                  if ((isError || !permitted) && output) {
+                    match.error = output.slice(0, 200);
+                  }
+                }
+              }
+              const displayBlocks: JsonRpcPayload[] = [];
+              if (event.diff) {
+                const unified = formatCompactUnifiedDiff(
+                  event.diff.path,
+                  event.diff.old_text,
+                  event.diff.new_text,
+                );
+                if (unified) {
+                  displayBlocks.push({
+                    type: "diff",
+                    diff: unified,
+                    language: "diff",
+                    path: event.diff.path,
+                  });
+                }
+              }
+              emit({
+                type: "tool_result",
+                payload: {
+                  session_id: session.id,
+                  tool_call_id: event.toolCallId,
+                  name: event.name,
+                  return_value: output,
+                  ...(event.rawOutput !== undefined ? { raw_output: event.rawOutput as JsonRpcPayload } : {}),
+                  duration_ms: durationMs,
+                  permitted,
+                  ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+                  ...(event.diff ? { diff: event.diff } : {}),
+                  ...(event.locations?.length ? { locations: event.locations } : {}),
+                  ...(artifactId ? { artifact_id: artifactId } : {}),
+                  display_blocks: displayBlocks,
+                },
+              });
+              if (isAgySwarmTriggerTool(event.name)) {
+                this.ensureAgySwarmWatch(session);
+                this.agyBrainBridge.refreshSession(session.id);
+              }
+              break;
+            }
+            case "usage": {
+              const statusPatch = applyAcpUsageToSession(session, event);
+              const activeBinding = this.acpBridgeHost.getBinding(session.id);
+              const activeModel = activeBinding?.current_model ?? session.model;
+              emit({
+                type: "status_update",
+                payload: {
+                  session_id: session.id,
+                  ...(activeModel ? { model: activeModel } : {}),
+                  ...statusPatch,
+                },
+              });
+              break;
+            }
+            case "plan": {
+              const todoItems = event.entries.map((entry, index) => ({
+                id: `plan-${index + 1}`,
+                content: entry.content,
+                status: normalizeAcpPlanStatus(entry.status),
+                ...(entry.priority ? { priority: entry.priority } : {}),
+              }));
+              const todoText = todoItems
+                .map((item, index) => {
+                  const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " ";
+                  return `${index + 1}. [${mark}] ${item.content}`;
+                })
+                .join("\n");
+              session.inflightTodoResult = todoText;
+              lastPlanTodoText = todoText;
+              emit({
+                type: "tool_result",
+                payload: {
+                  session_id: session.id,
+                  tool_call_id: `acp-plan-${turnId}`,
+                  name: "TodoWriteTool",
+                  return_value: todoText,
+                  duration_ms: 0,
+                  permitted: true,
+                  display_blocks: [{ type: "todo", items: todoItems }],
+                },
+              });
+              const doneCount = todoItems.filter((item) => item.status === "completed").length;
+              emit({
+                type: "status_update",
+                payload: {
+                  session_id: session.id,
+                  kind: "plan",
+                  todos: todoItems,
+                  text: `Plan updated (${doneCount}/${todoItems.length} completed)`,
+                },
+              });
+              break;
+            }
+            case "error": {
+              emit({
+                type: "notification",
+                payload: {
+                  session_id: session.id,
+                  level: "error",
+                  message: event.message,
+                },
+              });
+              break;
+            }
+            case "continuation":
+              break;
+          }
+        },
+      });
+
+      stopReason = result.stopReason;
+      cancelled = result.cancelled;
+
+      // Persist user + assistant + tool messages, toolExecutions, and thinkingContent
+      // onto the session transcript so history, replay, diffs, and `/btw` work seamlessly!
+      const userContent = options.images?.length
+        ? [{ type: "text" as const, text: displayText }, ...imageUrlContentParts(options.images)]
+        : displayText;
+      session.messages.push({
+        role: "user",
+        content: userContent,
+        ...(displayText !== text || options.images?.length ? { displayText } : {}),
+      });
+      if (result.assistantText || result.thinkingText || recordedToolCalls.length > 0) {
+        session.messages.push({
+          role: "assistant",
+          content: result.assistantText,
+          ...(result.thinkingText ? { thinking: result.thinkingText } : {}),
+          ...(recordedToolCalls.length > 0 ? { tool_calls: recordedToolCalls } : {}),
+        });
+      }
+      for (const toolMsg of recordedToolResults) {
+        session.messages.push(toolMsg);
+      }
+      if (recordedToolExecutions.length > 0) {
+        session.toolExecutions.push(...recordedToolExecutions);
+      }
+      if (lastPlanTodoText !== undefined) {
+        session.toolExecutions.push({
+          toolCallId: `acp-plan-${turnId}`,
+          name: "TodoWriteTool",
+          inputs: {},
+          result: lastPlanTodoText,
+          permitted: true,
+          durationMs: 0,
+        });
+      }
+      if (result.thinkingText.trim()) {
+        session.thinkingContent.push(result.thinkingText);
+      }
+      session.turnCount += 1;
+      const latestBinding = this.acpBridgeHost.getBinding(session.id);
+      if (latestBinding) {
+        session.metadata.acp_binding = latestBinding;
+      }
+    } finally {
+      for (const requestId of [...activeAcpQuestionIds]) {
+        this.pendingAcpQuestions.get(requestId)?.abort();
+      }
+      activeAcpQuestionIds.clear();
+      unbindInteractions();
+      session.activeTurnId = "";
+      session.status = "idle";
+      session.lastActive = Date.now();
+      delete session.inflightUser;
+      delete session.inflightAssistant;
+      delete session.inflightThinking;
+      delete session.inflightTools;
+      delete session.inflightStartedAt;
+      delete session.inflightTodoResult;
+      await this.runtime.flushSessions().catch(error => {
+        console.error(`Could not persist external ACP turn: ${errorMessage(error)}`);
+      });
+      emit({
+        type: "turn_end",
+        payload: {
+          session_id: session.id,
+          stop_reason: stopReason,
+          ...(cancelled ? { cancelled: true } : {}),
+        },
+      });
+    }
+  }
+
+  private resolveAgyBindingForSession(
+    session: DaemonSession | undefined,
+  ): { readonly binding: AcpSessionBinding; readonly liveConnected: boolean } | undefined {
+    if (!session) return undefined;
+    const live = this.acpBridgeHost.getBinding(session.id);
+    if (live && live.connected && isAntigravityBinding(live) && live.external_session_id?.trim()) {
+      return { binding: live, liveConnected: true };
+    }
+    if (isRecord(session.metadata.acp_binding)) {
+      const saved = session.metadata.acp_binding as unknown as AcpSessionBinding;
+      if (isAntigravityBinding(saved) && typeof saved.external_session_id === "string" && saved.external_session_id.trim()) {
+        return { binding: { ...saved, connected: false }, liveConnected: false };
+      }
+    }
+    return undefined;
+  }
+
+  private resolveRequestedSession(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): DaemonSession | undefined {
+    const requestedKey = optionalString(params.session_key) || optionalString(params.key);
+    if (!requestedKey && !this.hubContexts.getStore()) {
+      const requestedId = optionalString(params.session_id);
+      if (requestedId) {
+        return (
+          this.runtime.sessionById?.(requestedId) ??
+          this.runtime.listSessions().find((item) => item.id === requestedId)
+        );
+      }
+    }
+    return this.runtime.sessionStatus(sessionKey(connection, params));
+  }
+
+  private resolveAgyBrainLocationForSession(
+    session: DaemonSession | undefined,
+  ): AgyBrainLocation | undefined {
+    const resolved = this.resolveAgyBindingForSession(session);
+    if (!resolved?.binding.external_session_id) return undefined;
+    return this.agyBrainBridge.resolveLocation({
+      externalSessionId: resolved.binding.external_session_id,
+      ...(resolved.binding.command ? { bindingCommand: resolved.binding.command } : {}),
+    });
+  }
+
+  private async resolveAllowedPreviewReadRootsForSession(
+    session: DaemonSession | undefined,
+  ): Promise<readonly string[]> {
+    const location = this.resolveAgyBrainLocationForSession(session);
+    if (!location) return [];
+    return this.agyBrainBridge.listAllowedPreviewRoots(location);
+  }
+
+  private resolveAgySwarmContext(
+    session: DaemonSession | undefined,
+  ):
+    | {
+        readonly binding: AcpSessionBinding;
+        readonly liveConnected: boolean;
+        readonly location: AgyBrainLocation;
+        readonly modelDisplayMap: ReadonlyMap<string, string>;
+      }
+    | undefined {
+    if (!session) return undefined;
+    // Native Xerxes swarm takes precedence if active on the same session.
+    if (this.swarmHost.hasActiveSwarm(session.id)) return undefined;
+    const resolved = this.resolveAgyBindingForSession(session);
+    if (!resolved?.binding.external_session_id) return undefined;
+    const location = this.agyBrainBridge.resolveLocation({
+      externalSessionId: resolved.binding.external_session_id,
+      ...(resolved.binding.command ? { bindingCommand: resolved.binding.command } : {}),
+    });
+    if (!location) return undefined;
+    if (!resolved.liveConnected && !this.agyBrainBridge.hasSwarmData(location)) {
+      return undefined;
+    }
+    return {
+      binding: resolved.binding,
+      liveConnected: resolved.liveConnected,
+      location,
+      modelDisplayMap: modelDisplayMapOfBinding(resolved.binding),
+    };
+  }
+
+  private ensureAgySwarmWatch(session: DaemonSession | undefined): void {
+    if (!session || this.runtimeShutdown) return;
+    const ctx = this.resolveAgySwarmContext(session);
+    if (!ctx) return;
+    if (!ctx.liveConnected && !this.agyBrainBridge.hasSwarmData(ctx.location)) return;
+    this.agyBrainBridge.watchSession({
+      sessionId: session.id,
+      workspaceDir: session.cwd || this.projectDirectory || process.cwd(),
+      externalSessionId: ctx.location.externalSessionId,
+      ...(ctx.binding.command ? { bindingCommand: ctx.binding.command } : {}),
+      modelDisplayMap: ctx.modelDisplayMap,
+      onSwarmEvent: (event, workspaceDir) => {
+        this.emitSwarmEvent(event, workspaceDir);
+      },
+    });
+  }
+
+  private async dispatchAgySwarmKill(
+    session: DaemonSession,
+    agySwarm: {
+      readonly binding: AcpSessionBinding;
+      readonly liveConnected: boolean;
+      readonly location: AgyBrainLocation;
+      readonly modelDisplayMap: ReadonlyMap<string, string>;
+    },
+    rawTarget: string,
+  ): Promise<JsonRpcPayload> {
+    if (!agySwarm.liveConnected) {
+      return {
+        ok: false,
+        error: "Reconnect Antigravity to send swarm actions; board remains readable offline.",
+      };
+    }
+    const clean = rawTarget.trim();
+    if (!clean) {
+      return { ok: false, error: "name is required" };
+    }
+    const status = await this.agyBrainBridge.readSwarmStatus(
+      session.id,
+      agySwarm.location,
+      agySwarm.modelDisplayMap,
+    );
+    const livingWorkers = status.members.filter(
+      (member) => member.role !== "coordinator" && !member.killed,
+    );
+    const targets = clean.toLowerCase() === "all"
+      ? livingWorkers.map((member) => member.name)
+      : livingWorkers
+          .filter((member) => member.name.toLowerCase() === clean.toLowerCase())
+          .map((member) => member.name);
+
+    if (targets.length === 0) {
+      return { ok: true, status: "killed", killed: [] };
+    }
+
+    const calls = targets
+      .map((workerName) => `- \`swarm{action: "kill", name: "${workerName}"}\``)
+      .join("\n");
+    const instruction = [
+      `[Xerxes Immortals Board Action] The user requested stopping Antigravity swarm worker(s): ${targets.join(", ")}.`,
+      "Call the following `swarm` tool action(s) immediately:",
+      calls,
+    ].join("\n");
+    await this.dispatchAgyCoordinatorAction(
+      session,
+      instruction,
+      clean.toLowerCase() === "all" ? "Immortals stop all workers" : `Immortals kill (@${targets[0]})`,
+    );
+    return {
+      ok: true,
+      status: "killed",
+      dispatched: true,
+      killed: targets,
+    };
+  }
+
+  private async dispatchAgyCoordinatorAction(
+    session: DaemonSession,
+    promptText: string,
+    displayText: string,
+  ): Promise<void> {
+    await this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
+    const isBusy = Boolean(
+      session.activeTurnId ||
+      this.turnOwners.has(session.sessionKey) ||
+      this.acpBridgeHost.hasActiveTurn(session.id),
+    );
+    if (isBusy) {
+      const state = collabState(session.metadata);
+      const entry = enqueueSteer(state, {
+        text: promptText,
+        image_count: 0,
+        display_name: "user",
+        principal_id: "local",
+      });
+      this.publishSteerStatus(session, [entry]);
+      await this.runtime.flushSessions().catch(() => undefined);
+      return;
+    }
+
+    const accepts = (conn: DaemonTransportConnection): boolean =>
+      this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+    const emitBroadcast = (turnEvent: DaemonEvent): void => {
+      this.broadcastEvent(
+        turnEvent.type,
+        {
+          ...turnEvent.payload,
+          session_id: session.id,
+          ...(turnEvent.type === "turn_begin" ? { origin: "agent" } : {}),
+        },
+        accepts,
+        [...this.sessionObservers],
+        session.cwd,
+      );
+    };
+    void this.submitTrackedTurn(
+      session.sessionKey,
+      promptText,
+      emitBroadcast,
+      undefined,
+      {
+        origin: "agent",
+        displayText,
+      },
+    ).catch((error) => {
+      this.broadcastEvent(
+        "notification",
+        {
+          level: "error",
+          message: `Antigravity swarm action failed: ${errorMessage(error)}`,
+          session_id: session.id,
+        },
+        accepts,
+        [...this.sessionObservers],
+        session.cwd,
+      );
+    });
+  }
+
+  private detectAgyArtifactId(
+    session: DaemonSession,
+    toolName: string,
+    inputs: JsonObject,
+    locations?: readonly { readonly path: string; readonly line?: number }[],
+    diff?: { readonly path: string },
+  ): string | undefined {
+    const normalizedTool = toolName.trim().toLowerCase();
+    if (
+      normalizedTool !== "write_file" &&
+      normalizedTool !== "edit_file" &&
+      normalizedTool !== "write" &&
+      normalizedTool !== "edit"
+    ) {
+      return undefined;
+    }
+    const location = this.resolveAgyBrainLocationForSession(session);
+    if (!location) return undefined;
+    const candidatePath =
+      optionalString(inputs.Path) ??
+      optionalString(inputs.path) ??
+      optionalString(inputs.TargetFile) ??
+      optionalString(inputs.file_path) ??
+      diff?.path ??
+      locations?.[0]?.path;
+    if (!candidatePath) return undefined;
+    const direct = artifactIdForAgyPath(location, candidatePath);
+    if (direct) return direct;
+    const hasArtifactMeta =
+      isRecord(inputs.ArtifactMetadata) || isRecord(inputs.artifact_metadata);
+    if (hasArtifactMeta) {
+      const file = basename(candidatePath.trim());
+      if (isValidAgyArtifactFilename(file)) {
+        return `agy:${file}`;
+      }
+    }
+    return undefined;
+  }
+
+  private async handleArtifactsRpc(
+    session: DaemonSession,
+    method: ArtifactsRpcMethod,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const agyLoc = this.resolveAgyBrainLocationForSession(session);
+    const persistedPins = Array.isArray(session.metadata.agy_pinned_artifacts)
+      ? session.metadata.agy_pinned_artifacts.filter((item): item is string => typeof item === "string")
+      : undefined;
+
+    if (method === "artifacts.list") {
+      const nativeReply = await artifactsRpc(this.artifactStore, method, session.id, params);
+      if (!agyLoc) return nativeReply;
+      const agySummaries = await this.agyBrainBridge.listArtifacts(session.id, agyLoc, persistedPins);
+      const nativeList = Array.isArray(nativeReply.artifacts)
+        ? (nativeReply.artifacts as JsonRpcPayload[])
+        : [];
+      const seen = new Set<string>();
+      const merged: JsonRpcPayload[] = [];
+      for (const item of [...nativeList, ...agySummaries.map(agyArtifactSummaryWire)]) {
+        const id = optionalString(item.id);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        merged.push(item);
+      }
+      merged.sort((left, right) => {
+        const lp = left.pinned === true;
+        const rp = right.pinned === true;
+        if (lp !== rp) return lp ? -1 : 1;
+        const lu = typeof left.updated_at === "string" ? left.updated_at : "";
+        const ru = typeof right.updated_at === "string" ? right.updated_at : "";
+        if (lu !== ru) return lu < ru ? 1 : -1;
+        return String(left.id ?? "").localeCompare(String(right.id ?? ""));
+      });
+      return { ok: true, artifacts: merged };
+    }
+
+    const id = typeof params.id === "string" ? params.id.trim() : "";
+    if (!id.startsWith("agy:")) {
+      return artifactsRpc(this.artifactStore, method, session.id, params);
+    }
+    if (!agyLoc) {
+      return { ok: false, error: `no artifact ${id} in this session` };
+    }
+
+    try {
+      if (method === "artifacts.read") {
+        const artifact = await this.agyBrainBridge.readArtifact(session.id, agyLoc, id, persistedPins);
+        return artifact
+          ? { ok: true, artifact: agyArtifactWire(artifact) }
+          : { ok: false, error: `no artifact ${id} in this session` };
+      }
+      if (method === "artifacts.update") {
+        if (typeof params.content !== "string") {
+          return { ok: false, error: "content must be a string" };
+        }
+        if (params.title !== undefined && typeof params.title !== "string") {
+          return { ok: false, error: "title must be a string" };
+        }
+        const updated = await this.agyBrainBridge.updateArtifact(
+          session.id,
+          agyLoc,
+          id,
+          {
+            content: params.content,
+            ...(typeof params.title === "string" ? { title: params.title } : {}),
+          },
+          persistedPins,
+        );
+        return { ok: true, artifact: agyArtifactWire(updated) };
+      }
+      if (typeof params.pinned !== "boolean") {
+        return { ok: false, error: "pinned must be a boolean" };
+      }
+      const pinned = await this.agyBrainBridge.pinArtifact(
+        session.id,
+        agyLoc,
+        id,
+        params.pinned,
+        persistedPins,
+      );
+      if (!pinned) {
+        return { ok: false, error: `no artifact ${id} in this session` };
+      }
+      const nextPins = this.agyBrainBridge.getSessionPinnedArtifactIds(session.id);
+      if (nextPins.length > 0) {
+        session.metadata.agy_pinned_artifacts = nextPins;
+      } else {
+        delete session.metadata.agy_pinned_artifacts;
+      }
+      await this.runtime.flushSessions().catch(() => undefined);
+      return { ok: true, artifact: agyArtifactSummaryWire(pinned) };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
+  private handleAcpOutOfTurnEvent(
+    session: DaemonSession,
+    event: Extract<
+      AcpBridgeStreamEvent,
+      | { readonly type: "text_delta" }
+      | { readonly type: "thought_delta" }
+      | { readonly type: "tool_call" }
+      | { readonly type: "tool_result" }
+      | { readonly type: "plan" }
+      | { readonly type: "continuation" }
+    >,
+  ): void {
+    if (this.runtimeShutdown) return;
+    // Never interleave with an explicit user-submitted turn.
+    if (this.acpBridgeHost.hasActiveTurn(session.id)) return;
+    const existing = this.acpOutOfTurnWakeups.get(session.id);
+    if (!existing && session.activeTurnId) return;
+    // Ignore bare empty continuation heartbeats when no wakeup turn is open.
+    if (!existing && event.type === "continuation" && !event.text?.trim()) return;
+
+    const accepts = (conn: DaemonTransportConnection): boolean =>
+      this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+    const broadcastWake = (type: string, payload: JsonRpcPayload): void => {
+      this.broadcastEvent(type, payload, accepts, [...this.sessionObservers], session.cwd);
+    };
+
+    let wakeup = existing;
+    if (!wakeup) {
+      const turnId = `acp-wake-${crypto.randomUUID()}`;
+      wakeup = {
+        sessionId: session.id,
+        turnId,
+        startedAt: Date.now(),
+        assistantText: "",
+        thinkingText: "",
+        toolStartTimes: new Map<string, number>(),
+        toolInputsById: new Map<string, JsonObject>(),
+        recordedToolCalls: [],
+        recordedToolResults: [],
+        recordedToolExecutions: [],
+        pendingToolCallIds: new Set<string>(),
+        lastPlanTodoText: undefined,
+        settleTimer: undefined,
+      };
+      this.acpOutOfTurnWakeups.set(session.id, wakeup);
+      session.activeTurnId = turnId;
+      session.status = "working";
+      session.lastActive = Date.now();
+      session.inflightUser = "";
+      session.inflightAssistant = "";
+      session.inflightThinking = "";
+      session.inflightStartedAt = wakeup.startedAt;
+      session.inflightTools = [];
+      broadcastWake("turn_begin", {
+        session_id: session.id,
+        origin: "agent",
+      });
+    }
+
+    switch (event.type) {
+      case "thought_delta": {
+        wakeup.thinkingText += event.text;
+        session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-8000);
+        broadcastWake("think_part", {
+          session_id: session.id,
+          think: event.text,
+        });
+        break;
+      }
+      case "text_delta": {
+        wakeup.assistantText += event.text;
+        session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+        broadcastWake("text_part", {
+          session_id: session.id,
+          text: event.text,
+        });
+        break;
+      }
+      case "continuation": {
+        if (event.text) {
+          wakeup.assistantText += event.text;
+          session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+          broadcastWake("text_part", {
+            session_id: session.id,
+            text: event.text,
+          });
+        }
+        break;
+      }
+      case "tool_call": {
+        wakeup.toolStartTimes.set(event.toolCallId, Date.now());
+        const parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText);
+        wakeup.toolInputsById.set(event.toolCallId, parsedInputs);
+        wakeup.pendingToolCallIds.add(event.toolCallId);
+        wakeup.recordedToolCalls.push({
+          id: event.toolCallId,
+          type: "function",
+          function: {
+            name: event.name,
+            arguments: event.argumentsText,
+          },
+        });
+        session.inflightTools = [
+          ...(session.inflightTools ?? []),
+          {
+            id: event.toolCallId,
+            name: event.name,
+            ...(event.argumentsText ? { arguments: event.argumentsText.slice(0, 200) } : {}),
+          },
+        ];
+        broadcastWake("tool_call", {
+          session_id: session.id,
+          id: event.toolCallId,
+          tool_call_id: event.toolCallId,
+          name: event.name,
+          arguments: event.argumentsText,
+          ...(event.title ? { title: event.title } : {}),
+          ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+        });
+        if (isAgySwarmTriggerTool(event.name)) {
+          this.ensureAgySwarmWatch(session);
+          this.agyBrainBridge.refreshSession(session.id);
+        }
+        break;
+      }
+      case "tool_result": {
+        const started = wakeup.toolStartTimes.get(event.toolCallId);
+        const durationMs = event.durationMs ?? (started !== undefined ? Math.max(0, Date.now() - started) : 0);
+        const isError = event.isError === true;
+        const permitted = !event.permissionDenied;
+        const inputs = wakeup.toolInputsById.get(event.toolCallId) ?? {};
+        const output = event.output || "";
+        wakeup.pendingToolCallIds.delete(event.toolCallId);
+        const artifactId = !isError && permitted
+          ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, event.diff)
+          : undefined;
+        wakeup.recordedToolResults.push({
+          role: "tool",
+          tool_call_id: event.toolCallId,
+          name: event.name,
+          content: output,
+          duration_ms: durationMs,
+          ...(isError ? { is_error: true } : {}),
+        });
+        wakeup.recordedToolExecutions.push({
+          toolCallId: event.toolCallId,
+          name: event.name,
+          inputs,
+          result: output,
+          permitted,
+          durationMs,
+          ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+          ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+          ...(artifactId ? { artifact_id: artifactId } : {}),
+        });
+        if (session.inflightTools) {
+          const match = session.inflightTools.find((item) => item.id === event.toolCallId);
+          if (match) {
+            match.ok = !isError && permitted;
+            match.duration_ms = durationMs;
+            if ((isError || !permitted) && output) {
+              match.error = output.slice(0, 200);
+            }
+          }
+        }
+        const displayBlocks: JsonRpcPayload[] = [];
+        if (event.diff) {
+          const unified = formatCompactUnifiedDiff(
+            event.diff.path,
+            event.diff.old_text,
+            event.diff.new_text,
+          );
+          if (unified) {
+            displayBlocks.push({
+              type: "diff",
+              diff: unified,
+              language: "diff",
+              path: event.diff.path,
+            });
+          }
+        }
+        broadcastWake("tool_result", {
+          session_id: session.id,
+          tool_call_id: event.toolCallId,
+          name: event.name,
+          return_value: output,
+          ...(event.rawOutput !== undefined ? { raw_output: event.rawOutput as JsonRpcPayload } : {}),
+          duration_ms: durationMs,
+          permitted,
+          ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+          ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+          ...(artifactId ? { artifact_id: artifactId } : {}),
+          display_blocks: displayBlocks,
+        });
+        if (isAgySwarmTriggerTool(event.name)) {
+          this.ensureAgySwarmWatch(session);
+          this.agyBrainBridge.refreshSession(session.id);
+        }
+        break;
+      }
+      case "plan": {
+        const todoItems = event.entries.map((entry, index) => ({
+          id: `plan-${index + 1}`,
+          content: entry.content,
+          status: normalizeAcpPlanStatus(entry.status),
+          ...(entry.priority ? { priority: entry.priority } : {}),
+        }));
+        const todoText = todoItems
+          .map((item, index) => {
+            const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " ";
+            return `${index + 1}. [${mark}] ${item.content}`;
+          })
+          .join("\n");
+        session.inflightTodoResult = todoText;
+        wakeup.lastPlanTodoText = todoText;
+        broadcastWake("tool_result", {
+          session_id: session.id,
+          tool_call_id: `acp-plan-${wakeup.turnId}`,
+          name: "TodoWriteTool",
+          return_value: todoText,
+          duration_ms: 0,
+          permitted: true,
+          display_blocks: [{ type: "todo", items: todoItems }],
+        });
+        break;
+      }
+    }
+
+    this.scheduleAcpOutOfTurnSettle(wakeup);
+  }
+
+  private scheduleAcpOutOfTurnSettle(wakeup: AcpOutOfTurnWakeupState): void {
+    if (wakeup.settleTimer !== undefined) {
+      clearTimeout(wakeup.settleTimer);
+    }
+    const delayMs = wakeup.pendingToolCallIds.size > 0
+      ? Math.max(this.acpWakeupIdleMs * 10, 15_000)
+      : this.acpWakeupIdleMs;
+    wakeup.settleTimer = setTimeout(() => {
+      wakeup.settleTimer = undefined;
+      void this.settleAcpOutOfTurnWakeup(wakeup.sessionId, "end_turn");
+    }, delayMs);
+    wakeup.settleTimer.unref?.();
+  }
+
+  private async settleAcpOutOfTurnWakeup(
+    sessionId: string,
+    stopReason: string,
+  ): Promise<void> {
+    const wakeup = this.acpOutOfTurnWakeups.get(sessionId);
+    if (!wakeup) return;
+    this.acpOutOfTurnWakeups.delete(sessionId);
+    if (wakeup.settleTimer !== undefined) {
+      clearTimeout(wakeup.settleTimer);
+      wakeup.settleTimer = undefined;
+    }
+
+    const session = this.runtime.listSessions().find((item) => item.id === sessionId);
+    if (!session) return;
+
+    if (wakeup.assistantText || wakeup.thinkingText || wakeup.recordedToolCalls.length > 0) {
+      session.messages.push({
+        role: "assistant",
+        content: wakeup.assistantText,
+        ...(wakeup.thinkingText ? { thinking: wakeup.thinkingText } : {}),
+        ...(wakeup.recordedToolCalls.length > 0 ? { tool_calls: wakeup.recordedToolCalls } : {}),
+      });
+    }
+    for (const toolMsg of wakeup.recordedToolResults) {
+      session.messages.push(toolMsg);
+    }
+    if (wakeup.recordedToolExecutions.length > 0) {
+      session.toolExecutions.push(...wakeup.recordedToolExecutions);
+    }
+    if (wakeup.lastPlanTodoText !== undefined) {
+      session.toolExecutions.push({
+        toolCallId: `acp-plan-${wakeup.turnId}`,
+        name: "TodoWriteTool",
+        inputs: {},
+        result: wakeup.lastPlanTodoText,
+        permitted: true,
+        durationMs: 0,
+      });
+    }
+    if (wakeup.thinkingText.trim()) {
+      session.thinkingContent.push(wakeup.thinkingText);
+    }
+    session.turnCount += 1;
+    if (session.activeTurnId === wakeup.turnId) {
+      session.activeTurnId = "";
+      session.status = "idle";
+      delete session.inflightUser;
+      delete session.inflightAssistant;
+      delete session.inflightThinking;
+      delete session.inflightTools;
+      delete session.inflightStartedAt;
+      delete session.inflightTodoResult;
+    }
+    session.lastActive = Date.now();
+
+    await this.runtime.flushSessions().catch((error) => {
+      console.error(`Could not persist autonomous ACP coordinator wakeup: ${errorMessage(error)}`);
+    });
+
+    if (!this.runtimeShutdown) {
+      const accepts = (conn: DaemonTransportConnection): boolean =>
+        this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+      this.broadcastEvent(
+        "turn_end",
+        {
+          session_id: session.id,
+          stop_reason: stopReason,
+          origin: "agent",
+        },
+        accepts,
+        [...this.sessionObservers],
+        session.cwd,
+      );
+      this.notifySessionStateChanged(session.id);
+    }
+  }
+
+  private resolveSideQuestionLlm(
+    session: DaemonSession | undefined,
+    model: string,
+    explicitModel = false,
+    hasConfiguredNativeModel = true,
+  ): { readonly llm: LlmClient; readonly model: string; readonly owned: boolean } | undefined {
+    const runtimeClient = this.runtime.defaultLlmClient?.();
+    const status = this.runtime.status();
+    const profiles = this.profileStore.list();
+
+    if (explicitModel) {
+      const found = findProfileForSideQuestionModel(profiles, model);
+      if (found) {
+        const effectiveModel = found.effectiveModel;
+        const llm = this.sideQuestionClientFactory
+          ? this.sideQuestionClientFactory(effectiveModel, found.profile)
+          : createCompactionClient(effectiveModel, found.profile, status);
+        return { llm, model: effectiveModel, owned: true };
+      }
+      if (runtimeClient) {
+        return { llm: runtimeClient, model, owned: false };
+      }
+    }
+
+    const hasExternalAcp = Boolean(session && this.acpBridgeHost.hasActiveBridge(session.id));
+    if (hasExternalAcp && !explicitModel && !hasConfiguredNativeModel) {
+      return undefined;
+    }
+
+    if (runtimeClient) {
+      return { llm: runtimeClient, model, owned: false };
+    }
+    const pinnedProfileName =
+      typeof session?.metadata.provider_profile === "string"
+        ? session.metadata.provider_profile
+        : "";
+    const matchedProfile =
+      (pinnedProfileName ? profiles.find((item) => item.name === pinnedProfileName) : undefined) ??
+      findProfileForSideQuestionModel(profiles, model)?.profile ??
+      this.profileStore.active();
+    const hasProviderConfig = Boolean(
+      matchedProfile ||
+      (typeof status.provider === "string" && status.provider) ||
+      (typeof status.base_url === "string" && status.base_url),
+    );
+    if (!hasProviderConfig) {
+      return undefined;
+    }
+    const effectiveModel = model || matchedProfile?.model || "default";
+    const llm = this.sideQuestionClientFactory
+      ? this.sideQuestionClientFactory(effectiveModel, matchedProfile)
+      : createCompactionClient(effectiveModel, matchedProfile, status);
+    return {
+      llm,
+      model: effectiveModel,
+      owned: true,
+    };
+  }
+
+  private async handleSideQuestionRpc(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const requestId = optionalString(params.request_id) ?? crypto.randomUUID();
+    const question = (optionalString(params.question) ?? "").trim();
+    const requestedModel = optionalString(params.model)?.trim() || "";
+    const target = await this.resolveSwarmTarget(connection, params, false);
+    const session = target?.session;
+    const sessionId = target?.id ?? (optionalString(params.session_id) ?? "");
+    const workspaceDir = resolveProjectDirectory(
+      target?.cwd ?? this.projectDirectory ?? process.cwd(),
+    );
+    const configuredNativeModel =
+      requestedModel ||
+      (target?.model && target.model.trim()) ||
+      String(this.runtime.status().model ?? "").trim() ||
+      (this.profileStore.active()?.model ?? "").trim();
+    const initialModel = configuredNativeModel || "default";
+
+    if (!question) {
+      return {
+        ok: false,
+        request_id: requestId,
+        session_id: sessionId,
+        question: "",
+        answer: "",
+        model: initialModel,
+        error: "question is required",
+      };
+    }
+
+    const accepts = (candidate: DaemonTransportConnection): boolean => {
+      if (!sessionId) return candidate === connection;
+      const current = this.runtime.sessionStatus(candidate.activeSessionKey);
+      return candidate === connection || !current || current.id === sessionId;
+    };
+    const emitBtw = (payload: JsonRpcPayload): void => {
+      if (this.runtimeShutdown) return;
+      this.broadcastEvent("btw_event", payload, accepts, [...this.sessionObservers], workspaceDir);
+    };
+
+    const resolvedLlm = this.resolveSideQuestionLlm(
+      session,
+      initialModel,
+      Boolean(requestedModel),
+      Boolean(configuredNativeModel),
+    );
+    if (!resolvedLlm) {
+      const acpBinding = session ? this.acpBridgeHost.getBinding(session.id) : null;
+      const error = acpBinding?.connected
+        ? `Side questions (/btw) run on a native Xerxes provider profile so they don't interrupt ${acpBinding.name}. Configure a provider with \`/provider\` (or pass \`/btw --model <model> <question>\`) to enable /btw alongside ${acpBinding.name}.`
+        : "No model provider configured for side questions.";
+      emitBtw({
+        session_id: sessionId,
+        request_id: requestId,
+        kind: "error",
+        question,
+        model: initialModel,
+        error,
+      });
+      return {
+        ok: false,
+        request_id: requestId,
+        session_id: sessionId,
+        question,
+        answer: "",
+        model: initialModel,
+        error,
+      };
+    }
+    const model = resolvedLlm.model;
+
+    const rawTranscript = session
+      ? (this.runtime.liveTurnMessages?.(session) ?? session.messages)
+      : [];
+    const forkedMessages: ChatMessage[] = sanitizeForkedMessages(
+      transcriptMessagesToChatMessages(rawTranscript),
+    );
+    if (Array.isArray(params.history)) {
+      for (const entry of params.history) {
+        if (!isRecord(entry)) continue;
+        const role = entry.role;
+        const content = typeof entry.content === "string" ? entry.content.trim() : "";
+        if ((role === "user" || role === "assistant") && content) {
+          forkedMessages.push({ role, content });
+        }
+      }
+    }
+
+    const safeToolNames = new Set([
+      "ReadFile",
+      "GlobTool",
+      "GrepTool",
+      "FileOutlineTool",
+      "ListDir",
+    ]);
+    const registry = new ToolRegistry({ onDuplicateRegistration: () => undefined });
+    const paths = new WorkspacePathResolver(
+      workspaceDir,
+      () => workspaceDir,
+      [join(xerxesHome(), "tool-results")],
+    );
+    registerFileTools(registry, paths);
+    registerFileOutlineTool(registry, paths);
+    const readOnlyTools = registry
+      .definitions()
+      .filter((tool) => safeToolNames.has(tool.function.name));
+    const readOnlyExecutor: ToolExecutor = {
+      execute: async (call, context, signal) => {
+        if (!safeToolNames.has(call.function.name)) {
+          throw new Error(`Tool "${call.function.name}" is not permitted in a read-only side question.`);
+        }
+        return registry.execute(call, context, signal);
+      },
+    };
+
+    const state = createAgentState(forkedMessages);
+    state.metadata.workspaceDir = workspaceDir;
+    state.metadata.sideQuestion = true;
+    const systemPrompt = [
+      "You are answering an ephemeral side question (`/btw`) alongside an active Xerxes session.",
+      `Workspace: ${workspaceDir}`,
+      "Rules:",
+      "- You have read-only visibility into the session transcript so far and read-only file inspection tools (`ReadFile`, `GlobTool`, `GrepTool`, `FileOutlineTool`, `ListDir`).",
+      "- Answer concisely, accurately, and directly in Markdown. Never claim to edit files or alter the main session.",
+    ].join("\n");
+
+    emitBtw({
+      session_id: sessionId,
+      request_id: requestId,
+      kind: "begin",
+      question,
+      model,
+    });
+
+    let answer = "";
+    let finalProviderError: string | undefined;
+    let terminalGuardText = "";
+    let stopReason: TurnStopReason | undefined;
+    const activeToolMeta = new Map<string, { readonly name: string; readonly target: string }>();
+    try {
+      const request: TurnRequest = {
+        agentId: "side-question",
+        sessionId: `${sessionId || "ephemeral"}:btw:${requestId}`,
+        model,
+        state,
+        systemPrompt,
+        systemPromptRequestOnly: true,
+        tools: readOnlyTools,
+        userMessage: question,
+        permissionMode: "accept-all",
+        maxToolTurns: 6,
+      };
+      const dependencies: TurnDependencies = {
+        llm: resolvedLlm.llm,
+        toolExecutor: readOnlyExecutor,
+        capabilities: (toolName, agentId, args) => registry.capabilities(toolName, agentId, args),
+      };
+      for await (const event of runTurn(request, dependencies)) {
+        if (event.type === "provider_retry" && event.final && event.cause !== "reply_budget") {
+          finalProviderError = event.error;
+        } else if (event.type === "tool_start") {
+          const toolName = event.call.function.name;
+          const toolTarget = sideQuestionToolTarget(event.call.function.arguments, workspaceDir);
+          activeToolMeta.set(event.call.id, { name: toolName, target: toolTarget });
+          emitBtw({
+            session_id: sessionId,
+            request_id: requestId,
+            kind: "tool",
+            model,
+            tool: {
+              name: toolName,
+              target: toolTarget,
+              status: "running",
+            },
+          });
+        } else if (event.type === "tool_end") {
+          const meta = activeToolMeta.get(event.result.toolCallId);
+          const failed =
+            event.result.permitted === false ||
+            /^(?:tool execution failed|error|exception|failed|denied)(?:\b|:)/i.test(event.result.result.trim());
+          emitBtw({
+            session_id: sessionId,
+            request_id: requestId,
+            kind: "tool",
+            model,
+            tool: {
+              name: meta?.name ?? event.result.name,
+              target: meta?.target ?? "",
+              status: failed ? "error" : "done",
+            },
+          });
+        } else if (event.type === "text" && event.text) {
+          if (finalProviderError !== undefined) {
+            terminalGuardText += event.text;
+          } else {
+            answer += event.text;
+            emitBtw({
+              session_id: sessionId,
+              request_id: requestId,
+              kind: "delta",
+              delta: event.text,
+              model,
+            });
+          }
+        } else if (event.type === "turn_done") {
+          stopReason = event.reason;
+        }
+      }
+      const trimmedAnswer = answer.trim();
+      if (
+        stopReason === "provider_failed" ||
+        stopReason === "context_overflow" ||
+        stopReason === "aborted" ||
+        stopReason === "turn_failed" ||
+        stopReason === "unconfigured_tools"
+      ) {
+        const strippedGuard = terminalGuardText.trim().replace(/^\[Error:\s*|\s*\]$/g, "").trim();
+        const errorText =
+          finalProviderError?.trim() ||
+          strippedGuard ||
+          (trimmedAnswer.startsWith("[Error:")
+            ? trimmedAnswer.replace(/^\[Error:\s*|\s*\]$/g, "").trim()
+            : "") ||
+          `Side question stopped (${stopReason}).`;
+        emitBtw({
+          session_id: sessionId,
+          request_id: requestId,
+          kind: "error",
+          question,
+          model,
+          error: errorText,
+        });
+        return {
+          ok: false,
+          request_id: requestId,
+          session_id: sessionId,
+          question,
+          answer: trimmedAnswer,
+          model,
+          error: errorText,
+        };
+      }
+      emitBtw({
+        session_id: sessionId,
+        request_id: requestId,
+        kind: "end",
+        question,
+        answer: trimmedAnswer,
+        model,
+      });
+      return {
+        ok: true,
+        request_id: requestId,
+        session_id: sessionId,
+        question,
+        answer: trimmedAnswer,
+        model,
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      emitBtw({
+        session_id: sessionId,
+        request_id: requestId,
+        kind: "error",
+        question,
+        model,
+        error: message,
+      });
+      return {
+        ok: false,
+        request_id: requestId,
+        session_id: sessionId,
+        question,
+        answer: answer.trim(),
+        model,
+        error: message,
+      };
+    } finally {
+      if (resolvedLlm.owned) {
+        await closeLlmClient(resolvedLlm.llm).catch(() => undefined);
+      }
+    }
+  }
+
+  private scheduleSwarmCoordinatorWake(event: SwarmCoordinatorWakeEvent, _workspaceDir: string): void {
+    if (this.runtimeShutdown || this.stoppingGoalWakes) return;
+    const prev = this.pendingSwarmCoordinatorWakes.get(event.session_id);
+    if (
+      !prev ||
+      event.reason === "worker_error" ||
+      (prev.reason !== "worker_error" && event.wake_seq >= prev.wake_seq)
+    ) {
+      this.pendingSwarmCoordinatorWakes.set(event.session_id, event);
+    }
+    const session = this.runtime.listSessions().find(item => item.id === event.session_id);
+    if (!session) return;
+    this.drainPendingSwarmCoordinatorWake(session.sessionKey);
+  }
+
+  private drainPendingSwarmCoordinatorWake(sessionKey: string): void {
+    if (this.runtimeShutdown || this.stoppingGoalWakes) return;
+    const session = this.runtime.sessionStatus(sessionKey);
+    if (!session) return;
+    const pending = this.pendingSwarmCoordinatorWakes.get(session.id);
+    if (!pending) return;
+    if (
+      session.activeTurnId ||
+      session.status !== "idle" ||
+      this.turnOwners.has(sessionKey) ||
+      this.swarmCoordinatorWakeInFlight.has(session.id)
+    ) {
+      return;
+    }
+
+    queueMicrotask(() => {
+      if (this.runtimeShutdown || this.stoppingGoalWakes) return;
+      const live = this.runtime.sessionStatus(sessionKey);
+      if (!live || live.activeTurnId || live.status !== "idle" || this.turnOwners.has(sessionKey)) {
+        return;
+      }
+      const wake = this.pendingSwarmCoordinatorWakes.get(live.id);
+      if (!wake || this.swarmCoordinatorWakeInFlight.has(live.id)) return;
+      this.pendingSwarmCoordinatorWakes.delete(live.id);
+
+      const manager = this.swarmHost.peekManager(live.id);
+      const isWorkerError = wake.reason === "worker_error";
+      if (!isWorkerError && manager && manager.coordinatorLastReadSeq() >= wake.wake_seq) {
+        return;
+      }
+
+      const latestHead = manager ? manager.head() : wake.head;
+      const lastRead = manager ? manager.coordinatorLastReadSeq() : wake.last_read_seq;
+      let wakePrompt: string;
+      let displayText: string;
+      if (isWorkerError && wake.worker_error) {
+        wakePrompt = [
+          `[board] the latest message is #${latestHead} (you have read up to #${lastRead}).`,
+          wake.notice || formatWorkerErrorWakeNotice(wake.worker_error),
+        ].join(" ");
+        displayText = `Immortals worker error (@${wake.worker_error.member_name})`;
+      } else {
+        const sender = wake.message?.agent ?? "swarm";
+        const channel = wake.message?.channel ?? "main";
+        wakePrompt = [
+          `[board] the latest message is #${latestHead} (you have read up to #${lastRead}).`,
+          `New board message #${wake.wake_seq} from @${sender} in #${channel} addressed @coordinator.`,
+          `Call read_board with since:${lastRead} to inspect what arrived, act on completed deliverables or blockers, and wait for messages if workers remain active.`,
+        ].join(" ");
+        displayText = `Immortals board #${wake.wake_seq} (@${sender})`;
+      }
+
+      this.swarmCoordinatorWakeInFlight.add(live.id);
+      const accepts = (conn: DaemonTransportConnection): boolean =>
+        this.runtime.sessionStatus(conn.activeSessionKey)?.id === live.id;
+      const emitWake = (turnEvent: DaemonEvent): void => {
+        this.broadcastEvent(
+          turnEvent.type,
+          {
+            ...turnEvent.payload,
+            session_id: live.id,
+            ...(turnEvent.type === "turn_begin" ? { origin: "agent" } : {}),
+          },
+          accepts,
+          [...this.sessionObservers],
+          live.cwd,
+        );
+      };
+
+      void this.submitTrackedTurn(
+        sessionKey,
+        wakePrompt,
+        emitWake,
+        undefined,
+        {
+          origin: "agent",
+          displayText,
+        },
+      )
+        .catch((error) => {
+          this.broadcastEvent(
+            "notification",
+            {
+              level: "error",
+              message: `Swarm coordinator wake failed: ${errorMessage(error)}`,
+              session_id: live.id,
+            },
+            accepts,
+            [...this.sessionObservers],
+            live.cwd,
+          );
+        })
+        .finally(() => {
+          this.swarmCoordinatorWakeInFlight.delete(live.id);
+          this.drainPendingSwarmCoordinatorWake(sessionKey);
+        });
+    });
   }
 }
 
@@ -13885,6 +17761,10 @@ export function compactionBudget(budget: number, session: DaemonSession, model: 
 }
 
 function sessionContextTokens(session: DaemonSession, model: string): number {
+  const externalUsed = acpContextUsed(session);
+  if (externalUsed !== undefined && isRecord(session.metadata.acp_binding)) {
+    return externalUsed;
+  }
   const scaffold = sessionContextScaffold(session);
   return Math.ceil(contextCalibrationRatio(session.metadata, model) * estimateContextTokens(session.messages, {
     model,
@@ -14572,6 +18452,32 @@ function stringRecord(value: unknown): Record<string, string> {
   );
 }
 
+function questionAnswersRecord(value: unknown): Record<string, string | readonly string[]> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string | readonly string[]> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") {
+      out[key] = entry;
+    } else if (Array.isArray(entry)) {
+      const items = entry.filter((item): item is string => typeof item === "string");
+      if (items.length > 0) {
+        out[key] = items;
+      }
+    }
+  }
+  return out;
+}
+
+function flattenQuestionAnswers(
+  answers: Readonly<Record<string, string | readonly string[]>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(answers)) {
+    out[key] = Array.isArray(entry) ? entry.join("\n") : String(entry);
+  }
+  return out;
+}
+
 async function closeServer(server: Server | undefined): Promise<void> {
   if (!server) {
     return;
@@ -14595,4 +18501,588 @@ function monitorEvidenceInWorkspace(workspace: string, evidenceDirectory: string
 export function runNoticeBody(run: Pick<RunRecord, "kind" | "state" | "title" | "error" | "id">): string {
   const detail = run.state !== "succeeded" && run.error ? run.error : run.title;
   return `${run.kind} ${run.state}: ${detail.slice(0, 160)}\n/runs inspect ${run.id}`;
+}
+
+/** Parse optional leading `--model <id>` / `-m <id>` flag on `/btw`. */
+export function parseSideQuestionArgs(raw: string): {
+  readonly model?: string;
+  readonly question: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { question: "" };
+  }
+  const eqMatch = /^(?:--model|-m)=("[^"]+"|'[^']+'|\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  if (eqMatch) {
+    const model = eqMatch[1]!.replace(/^["']|["']$/g, "").trim();
+    const question = (eqMatch[2] ?? "").trim();
+    return { ...(model ? { model } : {}), question };
+  }
+  const spMatch = /^(?:--model|-m)\s+("[^"]+"|'[^']+'|\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  if (spMatch) {
+    const model = spMatch[1]!.replace(/^["']|["']$/g, "").trim();
+    const question = (spMatch[2] ?? "").trim();
+    return { ...(model ? { model } : {}), question };
+  }
+  return { question: trimmed };
+}
+
+function findProfileForSideQuestionModel(
+  profiles: readonly ProviderProfile[],
+  requestedModel: string,
+): { readonly effectiveModel: string; readonly profile: ProviderProfile } | undefined {
+  const trimmed = requestedModel.trim();
+  if (!trimmed) return undefined;
+
+  const profileCatalogHas = (profile: ProviderProfile, candidate: string): boolean => {
+    if (profile.model === candidate) return true;
+    if (profile.model_capabilities && Object.hasOwn(profile.model_capabilities, candidate)) return true;
+    if (profile.model_overrides && Object.hasOwn(profile.model_overrides, candidate)) return true;
+    const maybeModels = (profile as { readonly models?: readonly string[] }).models;
+    if (Array.isArray(maybeModels) && maybeModels.includes(candidate)) return true;
+    return false;
+  };
+
+  // 1. Exact match on profile.model
+  const exactModel = profiles.find((profile) => profile.model === trimmed);
+  if (exactModel) {
+    return { profile: exactModel, effectiveModel: trimmed };
+  }
+
+  // 2. Match in cached provider model catalog / overrides
+  const catalogMatch = profiles.find((profile) => profileCatalogHas(profile, trimmed));
+  if (catalogMatch) {
+    return { profile: catalogMatch, effectiveModel: trimmed };
+  }
+
+  // 3. Explicit `profile:model` or `provider:model` prefix
+  const colonIdx = trimmed.indexOf(":");
+  if (colonIdx > 0) {
+    const prefix = trimmed.slice(0, colonIdx).trim().toLowerCase();
+    const suffix = trimmed.slice(colonIdx + 1).trim();
+    if (suffix) {
+      const byPrefix = profiles.find(
+        (profile) =>
+          profile.name.toLowerCase() === prefix || profile.provider.toLowerCase() === prefix,
+      );
+      if (byPrefix) {
+        return { profile: byPrefix, effectiveModel: suffix };
+      }
+    }
+  }
+
+  // 4. `provider/model` prefix match (e.g. `claude-code/sonnet` or `openrouter/anthropic/claude`)
+  const slashIdx = trimmed.indexOf("/");
+  if (slashIdx > 0) {
+    const prefix = trimmed.slice(0, slashIdx).trim().toLowerCase();
+    const suffix = trimmed.slice(slashIdx + 1).trim();
+    const bySlash = profiles.find(
+      (profile) =>
+        profile.name.toLowerCase() === prefix ||
+        profile.provider.toLowerCase() === prefix ||
+        (suffix.length > 0 && profileCatalogHas(profile, suffix)),
+    );
+    if (bySlash) {
+      return { profile: bySlash, effectiveModel: trimmed };
+    }
+  }
+
+  return undefined;
+}
+
+function sideQuestionToolTarget(args: JsonObject, workspaceDir: string): string {
+  const pathRaw =
+    (typeof args.file_path === "string" && args.file_path.trim()) ||
+    (typeof args.path === "string" && args.path.trim()) ||
+    (typeof args.directory_path === "string" && args.directory_path.trim()) ||
+    "";
+  const patternRaw =
+    (typeof args.pattern === "string" && args.pattern.trim()) ||
+    (typeof args.query === "string" && args.query.trim()) ||
+    "";
+  const formatPath = (value: string): string => {
+    if (!value) return "";
+    const resolved = isAbsolute(value) ? resolve(value) : resolve(workspaceDir, value);
+    const rel = relative(workspaceDir, resolved);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+      return rel.length > 48 ? basename(rel) : rel;
+    }
+    return basename(value) || value;
+  };
+  if (patternRaw && pathRaw) {
+    return `${patternRaw.slice(0, 36)} (${formatPath(pathRaw)})`;
+  }
+  if (patternRaw) {
+    return patternRaw.slice(0, 48);
+  }
+  if (pathRaw) {
+    return formatPath(pathRaw);
+  }
+  for (const val of Object.values(args)) {
+    if (typeof val === "string" && val.trim()) {
+      return val.trim().slice(0, 48);
+    }
+  }
+  return "";
+}
+
+function selectAcpPermissionOption(
+  options: readonly AcpPermissionOption[],
+  decision: "approve" | "approve_for_session" | "reject",
+): AcpClientPermissionResponse {
+  if (decision === "approve") {
+    const opt =
+      options.find((item) => item.kind === "allow_once") ??
+      options.find((item) => item.kind === "allow_always") ??
+      options.find((item) => /\ballow|approve\b/i.test(item.name));
+    if (opt) return { outcome: "selected", optionId: opt.optionId };
+  } else if (decision === "approve_for_session") {
+    const opt =
+      options.find((item) => item.kind === "allow_always") ??
+      options.find((item) => item.kind === "allow_once") ??
+      options.find((item) => /\balways|allow|approve\b/i.test(item.name));
+    if (opt) return { outcome: "selected", optionId: opt.optionId };
+  }
+  const rejectOpt =
+    options.find((item) => item.kind === "reject_once") ??
+    options.find((item) => item.kind === "reject_always") ??
+    options.find((item) => /\breject|deny|cancel\b/i.test(item.name));
+  if (rejectOpt) {
+    return { outcome: "selected", optionId: rejectOpt.optionId };
+  }
+  return { outcome: "cancelled" };
+}
+
+function isAcpAdvertisedSlashToken(binding: AcpSessionBinding, token: string): boolean {
+  const wanted = token.trim().replace(/^\/+/, "").toLowerCase();
+  if (!wanted || wanted === "acp") {
+    return false;
+  }
+  const hasCommand = (binding.available_commands ?? []).some(
+    (cmd) => cmd.name.trim().replace(/^\/+/, "").toLowerCase() === wanted,
+  );
+  if (hasCommand) {
+    return true;
+  }
+  return findAcpDiscoveredSkill(binding, wanted) !== undefined;
+}
+
+function findAcpDiscoveredSkill(
+  binding: AcpSessionBinding,
+  token: string,
+): AcpDiscoveredSkill | undefined {
+  const wanted = token.trim().replace(/^\/+/, "").toLowerCase();
+  if (!wanted) return undefined;
+  return (binding.discovered_skills ?? []).find((skill) => {
+    const nameMatch = skill.name.trim().replace(/^\/+/, "").toLowerCase() === wanted;
+    const slashMatch =
+      skill.slash_command !== undefined &&
+      skill.slash_command.trim().replace(/^\/+/, "").toLowerCase() === wanted;
+    return nameMatch || slashMatch;
+  });
+}
+
+function formatAcpCapabilitiesSummary(binding: AcpSessionBinding): string | undefined {
+  const caps = binding.capabilities;
+  if (!caps) return undefined;
+  const promptFlags = [
+    caps.prompt.image ? "images" : "",
+    caps.prompt.embedded_context ? "embedded-context" : "",
+    caps.prompt.audio ? "audio" : "",
+  ].filter(Boolean);
+  const sessionFlags = [
+    caps.session.load ? "load" : "",
+    caps.session.resume ? "resume" : "",
+    caps.session.list ? "list" : "",
+    caps.session.close ? "close" : "",
+    caps.session.additional_directories ? "additional-dirs" : "",
+  ].filter(Boolean);
+  const mcpFlags = [
+    caps.mcp.http ? "http" : "",
+    caps.mcp.sse ? "sse" : "",
+  ].filter(Boolean);
+  const parts = [
+    `prompt[${promptFlags.join(", ") || "text"}]`,
+    `session[${sessionFlags.join(", ") || "new"}]`,
+    ...(mcpFlags.length > 0 ? [`mcp[${mcpFlags.join(", ")}]`] : []),
+    ...(caps.auth_methods.length > 0 ? [`auth[${caps.auth_methods.length}]`] : []),
+  ];
+  return parts.join(" · ");
+}
+
+function formatAcpCatalogText(binding: AcpSessionBinding): string {
+  const commands: readonly AcpExternalCommandOption[] = (binding.available_commands ?? []).filter(
+    (item) => item.kind !== "skill",
+  );
+  const skills: readonly AcpDiscoveredSkill[] = binding.discovered_skills ?? [];
+  const versionPart = binding.agent_version ? ` v${binding.agent_version}` : "";
+  const lines: string[] = [
+    `${binding.name}${versionPart} (${binding.provider} · ${binding.transport})`,
+  ];
+  const capSummary = formatAcpCapabilitiesSummary(binding);
+  if (capSummary) {
+    lines.push(`Capabilities: ${capSummary}`);
+  }
+  if (binding.config_options && binding.config_options.length > 0) {
+    const cfgSummary = binding.config_options
+      .map((opt) => `${opt.id}=${opt.current_value || "unset"}`)
+      .join(" · ");
+    lines.push(`Config options (${binding.config_options.length}): ${cfgSummary}`);
+  }
+  lines.push("", `Commands (${commands.length}):`);
+  if (commands.length === 0) {
+    lines.push("  (none advertised)");
+  } else {
+    for (const cmd of commands) {
+      const hint = cmd.input_hint ? ` ${cmd.input_hint}` : "";
+      const source = cmd.source ? ` [${cmd.source}]` : "";
+      lines.push(`  /${cmd.name}${hint}${source}${cmd.description ? ` — ${cmd.description}` : ""}`);
+    }
+  }
+  lines.push("", `Skills (${skills.length}):`);
+  if (skills.length === 0) {
+    lines.push("  (none discovered)");
+  } else {
+    for (const skill of skills) {
+      const source = skill.source ? ` [${skill.source}]` : "";
+      lines.push(`  /${skill.name}${source}${skill.description ? ` — ${skill.description}` : ""}`);
+    }
+  }
+  lines.push("", "Host controls: `/acp status`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, `/acp disconnect`.");
+  return lines.join("\n");
+}
+
+function formatAcpAgentsStatusText(
+  agents: readonly AcpExternalAgentInfo[],
+  active: AcpSessionBinding | null,
+): string {
+  const versionPart = active?.agent_version ? ` v${active.agent_version}` : "";
+  const modelPart = active?.current_model_name || active?.current_model
+    ? ` · model ${active.current_model_name ?? active.current_model}`
+    : "";
+  const thoughtPart = active?.thought_level
+    ? ` · thinking ${active.thought_levels?.find((item) => item.id === active.thought_level)?.name ?? active.thought_level}`
+    : "";
+  const modePart = active?.current_mode_name || active?.current_mode
+    ? ` · mode ${active.current_mode_name ?? active.current_mode}`
+    : "";
+  const header = active?.connected
+    ? `Active runtime: ${active.name}${versionPart} (${active.provider} · ${active.transport})${modelPart}${thoughtPart}${modePart}${active.external_session_id ? ` [session ${active.external_session_id}]` : ""}`
+    : "Active runtime: Xerxes (native)";
+  const discoveryLines: string[] = [];
+  if (active?.connected && active.transport !== "native") {
+    const commandCount = (active.available_commands ?? []).filter((item) => item.kind !== "skill").length;
+    const skillCount = active.discovered_skills?.length ?? 0;
+    const configCount = active.config_options?.length ?? 0;
+    discoveryLines.push(
+      `Discovered: ${commandCount} commands · ${skillCount} skills · ${configCount} config options`,
+    );
+    const capSummary = formatAcpCapabilitiesSummary(active);
+    if (capSummary) {
+      discoveryLines.push(`Capabilities: ${capSummary}`);
+    }
+    if (active.config_options && active.config_options.length > 0) {
+      discoveryLines.push(
+        `Config: ${active.config_options.map((opt) => `${opt.id}=${opt.current_value || "unset"}`).join(", ")}`,
+      );
+    }
+  }
+  const lines = agents.map((agent) => {
+    const marker = (active?.connected ? active.agent_id === agent.id : agent.id === "xerxes") ? "*" : " ";
+    const state = agent.available ? "ready" : "missing";
+    const detail = agent.binaryPath
+      ? `${agent.transport} · ${agent.binaryPath}`
+      : agent.installHint
+        ? agent.installHint
+        : agent.transport;
+    return `${marker} ${agent.id} (${agent.name}) [${state}] — ${detail}`;
+  });
+  return [
+    header,
+    ...discoveryLines,
+    "",
+    ...lines,
+    "",
+    "Switch with `/acp use <claude-code|antigravity|xerxes>`, `/acp catalog`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, or `/acp disconnect`.",
+  ].join("\n");
+}
+
+function acpContextUsed(session: DaemonSession): number | undefined {
+  const ctx = isRecord(session.extra.acp_context) ? session.extra.acp_context : undefined;
+  return typeof ctx?.used === "number" && Number.isFinite(ctx.used) && ctx.used >= 0
+    ? Math.trunc(ctx.used)
+    : undefined;
+}
+
+function acpContextSize(session: DaemonSession): number | undefined {
+  const ctx = isRecord(session.extra.acp_context) ? session.extra.acp_context : undefined;
+  return typeof ctx?.size === "number" && Number.isFinite(ctx.size) && ctx.size > 0
+    ? Math.trunc(ctx.size)
+    : undefined;
+}
+
+function applyAcpUsageToSession(
+  session: DaemonSession,
+  event: Extract<AcpBridgeStreamEvent, { readonly type: "usage" }>,
+): JsonRpcPayload {
+  if (typeof event.inputTokens === "number" && Number.isFinite(event.inputTokens) && event.inputTokens >= 0) {
+    session.totalInputTokens += event.inputTokens;
+  }
+  if (typeof event.outputTokens === "number" && Number.isFinite(event.outputTokens) && event.outputTokens >= 0) {
+    session.totalOutputTokens += event.outputTokens;
+  }
+
+  const prevCtx = isRecord(session.extra.acp_context) ? session.extra.acp_context : {};
+  const nextUsed =
+    typeof event.contextUsed === "number" && Number.isFinite(event.contextUsed) && event.contextUsed >= 0
+      ? Math.trunc(event.contextUsed)
+      : typeof prevCtx.used === "number" && Number.isFinite(prevCtx.used)
+        ? Math.trunc(prevCtx.used)
+        : undefined;
+  const nextSize =
+    typeof event.contextSize === "number" && Number.isFinite(event.contextSize) && event.contextSize > 0
+      ? Math.trunc(event.contextSize)
+      : typeof prevCtx.size === "number" && Number.isFinite(prevCtx.size)
+        ? Math.trunc(prevCtx.size)
+        : undefined;
+  if (nextUsed !== undefined || nextSize !== undefined) {
+    session.extra.acp_context = {
+      ...(nextUsed !== undefined ? { used: nextUsed } : {}),
+      ...(nextSize !== undefined ? { size: nextSize } : {}),
+    };
+  }
+
+  let cacheReadTokens: number | undefined;
+  let cacheWriteTokens: number | undefined;
+  let cacheHitRate: number | undefined;
+  if (event.cachedReadTokens !== undefined || event.cachedWriteTokens !== undefined) {
+    const stored = isRecord(session.extra.runtime_telemetry) ? session.extra.runtime_telemetry : {};
+    const numOf = (key: string): number => {
+      const value = stored[key];
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    };
+    const nextInput = numOf("inputTokens") + Math.max(0, event.inputTokens ?? 0);
+    const nextCacheRead = numOf("cacheReadTokens") + Math.max(0, event.cachedReadTokens ?? 0);
+    const nextCacheWrite = numOf("cacheWriteTokens") + Math.max(0, event.cachedWriteTokens ?? 0);
+    const denom = nextInput + nextCacheRead + nextCacheWrite;
+    const rate = denom > 0 ? nextCacheRead / denom : numOf("cacheHitRate");
+    session.extra.runtime_telemetry = {
+      ...stored,
+      cacheTelemetryKnown: true,
+      inputTokens: nextInput,
+      cacheReadTokens: nextCacheRead,
+      cacheWriteTokens: nextCacheWrite,
+      cacheHitRate: rate,
+    };
+    cacheReadTokens = nextCacheRead;
+    cacheWriteTokens = nextCacheWrite;
+    cacheHitRate = rate;
+  }
+
+  return {
+    ...(nextUsed !== undefined ? { context_tokens: nextUsed } : {}),
+    ...(nextSize !== undefined ? { max_context: nextSize, context_limit: nextSize } : {}),
+    input_tokens: session.totalInputTokens,
+    output_tokens: session.totalOutputTokens,
+    total_input_tokens: session.totalInputTokens,
+    total_output_tokens: session.totalOutputTokens,
+    ...(cacheReadTokens !== undefined ? { cache_read_tokens: cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cache_creation_tokens: cacheWriteTokens } : {}),
+    ...(cacheHitRate !== undefined ? { cache_hit_rate: cacheHitRate } : {}),
+  };
+}
+
+function unescapeXmlAttribute(value: string): string {
+  return value
+    .replaceAll("&quot;", '"')
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
+function guessTextMimeType(filePath: string): string {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "text/typescript";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) {
+    return "text/javascript";
+  }
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown";
+  if (lower.endsWith(".css")) return "text/css";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
+  if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "text/yaml";
+  if (lower.endsWith(".py")) return "text/x-python";
+  return "text/plain";
+}
+
+function extractResourcesFromProcessedMentions(enhancedMessage: string): readonly AcpPromptResourceInput[] {
+  const resources: AcpPromptResourceInput[] = [];
+  const blockPattern = /<file path="([^"]+)">\n([\s\S]*?)\n<\/file>/g;
+  for (let match = blockPattern.exec(enhancedMessage); match; match = blockPattern.exec(enhancedMessage)) {
+    const rawPath = unescapeXmlAttribute(match[1] ?? "");
+    const content = match[2] ?? "";
+    if (!rawPath) continue;
+    resources.push({
+      path: rawPath,
+      uri: pathToFileURL(rawPath).href,
+      mimeType: guessTextMimeType(rawPath),
+      text: content,
+    });
+  }
+  return resources;
+}
+
+function parseToolInputsObject(rawInput: unknown, argumentsText: string): JsonObject {
+  if (isRecord(rawInput)) {
+    return rawInput as JsonObject;
+  }
+  if (argumentsText.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(argumentsText);
+      if (isRecord(parsed)) {
+        return parsed as JsonObject;
+      }
+    } catch {
+      // Non-JSON argument text falls back to a raw wrapper object.
+    }
+    return { raw: argumentsText };
+  }
+  return {};
+}
+
+function normalizeAcpPlanStatus(status: string | undefined): "completed" | "in_progress" | "pending" {
+  const lower = status?.trim().toLowerCase() ?? "";
+  if (lower === "completed" || lower === "done" || lower === "finished") {
+    return "completed";
+  }
+  if (lower === "in_progress" || lower === "in-progress" || lower === "running" || lower === "active") {
+    return "in_progress";
+  }
+  return "pending";
+}
+
+function formatCompactUnifiedDiff(
+  path: string,
+  oldText: string | undefined,
+  newText: string | undefined,
+): string {
+  if (oldText === undefined && newText === undefined) {
+    return "";
+  }
+  const before = (oldText ?? "").split("\n");
+  const after = (newText ?? "").split("\n");
+  const lines = [
+    `--- a/${path || "file"}`,
+    `+++ b/${path || "file"}`,
+    `@@ -1,${before.length} +1,${after.length} @@`,
+  ];
+  const maxLines = 120;
+  let emitted = 0;
+  for (const line of before) {
+    if (emitted >= maxLines) break;
+    if (oldText !== undefined && (oldText.length > 0 || before.length > 1)) {
+      lines.push(`-${line}`);
+      emitted += 1;
+    }
+  }
+  for (const line of after) {
+    if (emitted >= maxLines) break;
+    if (newText !== undefined && (newText.length > 0 || after.length > 1)) {
+      lines.push(`+${line}`);
+      emitted += 1;
+    }
+  }
+  return lines.join("\n");
+}
+
+function compactWireMemberActivity(activity: SwarmMemberActivitySnapshot): SwarmMemberActivitySnapshot {
+  const recent = activity.recent_tools.slice(-WIRE_MEMBER_ACTIVITY_MAX_RECENT_TOOLS).map((item) => ({
+    id: item.id,
+    name: item.name,
+    ...(item.summary === undefined ? {} : { summary: item.summary }),
+    status: item.status,
+    started_at: item.started_at,
+    ...(item.finished_at === undefined ? {} : { finished_at: item.finished_at }),
+    ...(item.result_preview === undefined
+      ? {}
+      : {
+          result_preview:
+            item.result_preview.length > WIRE_MEMBER_ACTIVITY_MAX_PREVIEW_CHARS
+              ? `${item.result_preview.slice(0, WIRE_MEMBER_ACTIVITY_MAX_PREVIEW_CHARS - 1)}…`
+              : item.result_preview,
+        }),
+  }));
+  const liveText =
+    activity.live_text_preview && activity.live_text_preview.length > WIRE_MEMBER_ACTIVITY_MAX_LIVE_CHARS
+      ? activity.live_text_preview.slice(-WIRE_MEMBER_ACTIVITY_MAX_LIVE_CHARS)
+      : activity.live_text_preview;
+  return {
+    phase: activity.phase,
+    ...(activity.summary === undefined ? {} : { summary: activity.summary }),
+    active_tools: activity.active_tools,
+    recent_tools: recent,
+    ...(liveText ? { live_text_preview: liveText } : {}),
+    ...(activity.updated_at === undefined ? {} : { updated_at: activity.updated_at }),
+  };
+}
+
+function isAntigravityBinding(binding: AcpSessionBinding | null | undefined): boolean {
+  if (!binding) return false;
+  return binding.provider === "antigravity" || binding.agent_id === "antigravity";
+}
+
+function isAgySwarmTriggerTool(toolName: string): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  return (
+    normalized === "swarm" ||
+    normalized === "post_message" ||
+    normalized === "read_board" ||
+    normalized === "swarm_wait"
+  );
+}
+
+function modelDisplayMapOfBinding(binding: AcpSessionBinding): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const model of binding.models ?? []) {
+    if (model.id && model.name) {
+      map.set(model.id, model.name);
+    }
+  }
+  return map;
+}
+
+function agyArtifactSummaryWire(summary: ArtifactSummary): JsonRpcPayload {
+  return {
+    id: summary.id,
+    title: summary.title,
+    kind: summary.kind,
+    ...(summary.language === undefined ? {} : { language: summary.language }),
+    size: summary.size,
+    created_at: summary.created_at,
+    updated_at: summary.updated_at,
+    pinned: summary.pinned,
+    version: summary.version,
+  };
+}
+
+function agyArtifactWire(artifact: Artifact): JsonRpcPayload {
+  return {
+    ...agyArtifactSummaryWire(summaryOf(artifact)),
+    content: artifact.content,
+  };
+}
+
+function mergeSubagentSnapshotRows(
+  nativeRows: readonly JsonRpcPayload[],
+  agyRows: readonly JsonRpcPayload[],
+): JsonRpcPayload[] {
+  const seen = new Set<string>();
+  const merged: JsonRpcPayload[] = [];
+  for (const row of [...nativeRows, ...agyRows]) {
+    const id = optionalString(row.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    merged.push(row);
+  }
+  return merged;
 }

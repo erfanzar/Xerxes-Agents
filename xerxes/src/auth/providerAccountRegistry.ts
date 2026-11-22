@@ -10,6 +10,7 @@ import { xerxesHome } from '../daemon/paths.js'
 import { AnthropicOAuthSession } from './anthropicOAuth.js'
 import { CodexSession, codexAuthHeaders, fetchCodexModelCatalog, importCodexCliTokens } from './codexAuth.js'
 import { loginWithChatGpt, openInBrowser } from './codexLogin.js'
+import { writeOAuthCredentialFile } from './oauthFlows.js'
 import { CredentialStorage } from './storage.js'
 import { fetchClaudeUsage, fetchCodexUsage, type ProviderUsageReport, type UsageRequestOptions } from './usage.js'
 import { ConfigurationError } from '../core/errors.js'
@@ -70,6 +71,18 @@ const LEGACY_CLAUDE_MODEL = 'claude-sonnet-4-5'
 export interface ProviderAccountRegistryOptions {
   /** The model ids a Codex account's plan offers, live. Injected in tests. */
   readonly codexModels?: (accountId: string) => Promise<readonly string[]>
+}
+
+const registryLocks = new Map<string, Promise<unknown>>()
+
+function withRegistryLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = registryLocks.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(work)
+  registryLocks.set(key, current)
+  void current.catch(() => undefined).finally(() => {
+    if (registryLocks.get(key) === current) registryLocks.delete(key)
+  })
+  return current
 }
 
 /** Isolated OAuth account directories plus the existing named API-key profiles. */
@@ -227,7 +240,7 @@ export class ProviderAccountRegistry {
 
   private async newAccount(kind: OAuthAccountKind, label: string): Promise<ProviderAccountMetadata> {
     const clean = label.trim()
-    if (!clean || clean.length > 80 || /[\0\r\n]/.test(clean)) throw new Error('Account label is required')
+    if (!clean || clean.length > 80 || /[\x00-\x1f\x7f/\\]/.test(clean)) throw new Error('Account label is required')
     const id = randomUUID()
     const profileStore = new ProfileStore(this.profilesFile)
     const base = `${kind}-${clean}`
@@ -237,24 +250,26 @@ export class ProviderAccountRegistry {
   }
 
   private async register(account: ProviderAccountMetadata, model?: string): Promise<ProviderAccountMetadata> {
-    const document = await this.document(), profileStore = new ProfileStore(this.profilesFile)
-    let registered = account
-    if (profileStore.get(account.profileName)) {
-      const base = `${account.kind}-${account.label}`
-      let profileName = base, suffix = 2
-      while (profileStore.get(profileName)) profileName = `${base}-${suffix++}`
-      registered = { ...account, profileName }
-    }
-    const defaults = defaultBase(registered.kind)
-    profileStore.save({ name: registered.profileName, apiKey: '', model: model ?? defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: registered.id })
-    try {
-      await this.saveDocument({ accounts: [...document.accounts.filter(row => row.id !== registered.id && row.profileName !== registered.profileName), registered] })
-    } catch (error) {
-      new ProfileStore(this.profilesFile).delete(registered.profileName)
-      throw error
-    }
-    await mkdir(this.directory(registered.id), { recursive: true, mode: 0o700 })
-    return registered
+    return withRegistryLock(this.root, async () => {
+      const document = await this.document(), profileStore = new ProfileStore(this.profilesFile)
+      let registered = account
+      if (profileStore.get(account.profileName)) {
+        const base = `${account.kind}-${account.label}`
+        let profileName = base, suffix = 2
+        while (profileStore.get(profileName)) profileName = `${base}-${suffix++}`
+        registered = { ...account, profileName }
+      }
+      const defaults = defaultBase(registered.kind)
+      profileStore.save({ name: registered.profileName, apiKey: '', model: model ?? defaults.model, provider: defaults.provider, baseUrl: defaults.baseUrl, setActive: false, oauthAccountId: registered.id })
+      try {
+        await this.saveDocument({ accounts: [...document.accounts.filter(row => row.id !== registered.id && row.profileName !== registered.profileName), registered] })
+      } catch (error) {
+        new ProfileStore(this.profilesFile).delete(registered.profileName)
+        throw error
+      }
+      await mkdir(this.directory(registered.id), { recursive: true, mode: 0o700 })
+      return registered
+    })
   }
 
   private async pending(id: string): Promise<ProviderAccountMetadata | undefined> {
@@ -314,8 +329,7 @@ export class ProviderAccountRegistry {
       const storage = new CredentialStorage(join(directory, 'credentials'))
       await new CodexSession({ storage, environment: { CODEX_HOME: join(directory, '.codex') }, homeDirectory: directory }).store(token)
       // The sync receiver uses the CLI-compatible plaintext form, mode 0600.
-      await mkdir(join(directory, '.codex'), { recursive: true, mode: 0o700 })
-      await writeFile(join(directory, '.codex', 'auth.json'), JSON.stringify({ tokens: token.toRecord() }, null, 2) + '\n', { mode: 0o600 })
+      await writeOAuthCredentialFile(join(directory, '.codex', 'auth.json'), { tokens: token.toRecord() })
     } else {
       await new AnthropicOAuthSession({ xerxesHome: directory }).login({ openUrl, onAuthorizationUrl })
     }
@@ -392,9 +406,11 @@ export class ProviderAccountRegistry {
       } catch { throw new Error('Could not remove Gemini account; check local profile storage') }
       return
     }
-    const account = await this.metadata(id)
-    new ProfileStore(this.profilesFile).delete(account.profileName)
-    await rm(this.directory(id), { recursive: true, force: true })
-    await this.saveDocument({ accounts: (await this.document()).accounts.filter(row => row.id !== id) })
+    await withRegistryLock(this.root, async () => {
+      const account = await this.metadata(id)
+      new ProfileStore(this.profilesFile).delete(account.profileName)
+      await rm(this.directory(id), { recursive: true, force: true })
+      await this.saveDocument({ accounts: (await this.document()).accounts.filter(row => row.id !== id) })
+    })
   }
 }

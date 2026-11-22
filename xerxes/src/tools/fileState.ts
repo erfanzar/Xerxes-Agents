@@ -480,7 +480,7 @@ export function withStaleNotice(notice: string | undefined, message: string): st
  * script to the process umask, silently breaking it, and swaps a hardlinked
  * file's identity without its mode.
  */
-function atomicWriteSync(targetPath: string, contents: string, mode: number): void {
+export function atomicWriteSync(targetPath: string, contents: string, mode: number): void {
   const temporary = join(dirname(targetPath), `.${basename(targetPath)}.${crypto.randomUUID()}.tmp`)
   try {
     writeFileSync(temporary, contents)
@@ -494,6 +494,48 @@ function atomicWriteSync(targetPath: string, contents: string, mode: number): vo
     }
     throw error
   }
+}
+
+export interface TrackedFreshnessCheck {
+  readonly absolutePath: string
+  readonly currentContent: string
+  readonly displayPath: string
+  readonly mtimeMs: number
+  readonly sessionId: string | undefined
+  readonly size: number
+  readonly toolName: string
+}
+
+/**
+ * Verify that an existing file tracked in `sessionId` has not drifted on disk
+ * since the session last read or wrote it. Untracked files pass through so
+ * context-anchored patch tools can validate hunks directly against disk.
+ */
+export function assertTrackedFileFresh(
+  check: TrackedFreshnessCheck,
+  tracker: FileStateTracker = fileStateTracker,
+): void {
+  const session = check.sessionId
+  if (session === undefined || session === '' || !isFileFreshnessEnforced()) {
+    return
+  }
+  const record = tracker.peek(session, check.absolutePath)
+  if (record === undefined) {
+    return
+  }
+  const drift = assessDrift(record, { mtimeMs: check.mtimeMs, size: check.size }, check.currentContent)
+  if (drift === undefined) {
+    return
+  }
+  const killSwitch = ' (set XERXES_FILE_FRESHNESS=off to disable this check)'
+  const detail = drift.report === undefined
+    ? `read "${check.displayPath}" again before patching it${killSwitch}`
+    : `read "${check.displayPath}" again before patching it${killSwitch}. What changed since your read:\n${drift.report}`
+  throw new ValidationError(
+    'patch',
+    `${check.toolName} refused "${check.displayPath}" because it changed on disk after you read it; ${detail}`,
+    check.displayPath,
+  )
 }
 
 /**

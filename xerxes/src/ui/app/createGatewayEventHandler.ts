@@ -14,7 +14,8 @@ import type {
   GatewayEvent,
   GatewaySkin,
   SessionMostRecentResponse,
-  SubagentEventPayload
+  SubagentEventPayload,
+  SwarmStatusSnapshot
 } from '../gatewayTypes.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
 import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.js'
@@ -33,8 +34,10 @@ import type {
 import type { GatewayEventHandlerContext, Notice } from './interfaces.js'
 import { compact } from '../lib/compact.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
+import { applyBtwEvent } from './sideQuestionStore.js'
 import { catalogFromSessionSkills, mergeSkillCatalog, skillInfoFromCatalog } from './skillCatalog.js'
 import { reconcileSpawnHistorySubagent } from './spawnHistoryStore.js'
+import { applySwarmEvent, applySwarmStatus } from './swarmStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 import { getTurnPulse, patchTurnState } from './turnStore.js'
@@ -250,6 +253,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   let agentsNudgeEnabled = true
   let agentsNudgeConfigFetched = false
   let agentsNudgedThisTurn = false
+  let swarmNudgedThisTurn = false
 
   const ensureAgentsNudgeConfig = () => {
     if (agentsNudgeConfigFetched) {
@@ -286,6 +290,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
   const resetAgentsNudgeTurnState = () => {
     agentsNudgedThisTurn = false
+    swarmNudgedThisTurn = false
+  }
+
+  const maybeNudgeSwarm = () => {
+    ensureAgentsNudgeConfig()
+    if (!agentsNudgeEnabled || swarmNudgedThisTurn || getOverlayState().swarm) {
+      return
+    }
+    swarmNudgedThisTurn = true
+    turnController.pushActivity('Immortals active · /immortals to open board', 'info')
   }
 
   const setStatus = (status: string) => {
@@ -471,6 +485,38 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         const sessionTitle = state.sid === targetId ? title : state.sessionTitle
         patchUiState({ sessionTabs, sessionTitle })
       }
+
+      return
+    }
+
+    if (ev.type === 'swarm_event') {
+      const targetSid = ev.payload?.session_id || ev.session_id || sid
+      const normalized = applySwarmEvent(ev.payload, targetSid)
+      const isForeground = !sid || !targetSid || targetSid === sid
+      if (isForeground) {
+        if (normalized.status?.active || normalized.message) {
+          maybeNudgeSwarm()
+        }
+        if (
+          !normalized.status &&
+          normalized.kind !== 'message_posted' &&
+          normalized.kind !== 'member_activity' &&
+          targetSid
+        ) {
+          void rpc<SwarmStatusSnapshot>('swarm.status', { session_id: targetSid }, { reportError: false })
+            .then(status => {
+              if (status) applySwarmStatus(status, targetSid)
+            })
+            .catch(() => {})
+        }
+      }
+
+      return
+    }
+
+    if (ev.type === 'btw_event') {
+      const targetSid = ev.payload?.session_id || ev.session_id || sid
+      applyBtwEvent(ev.payload, targetSid)
 
       return
     }

@@ -204,7 +204,8 @@ export async function runImprovement(plan: ImprovementPlan, ports: ImprovementPo
             used.taskRuns += 1
           }
           const remaining = deadline === undefined ? undefined : Math.max(1, deadline - Date.now())
-          const result = await bounded(() => underlying.turn(prompt, { ...options, retries: 0, ...(remaining === undefined ? {} : { timeoutMs: remaining }) }))
+          const signal = options?.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal])
+          const result = await bounded(() => underlying.turn(prompt, { ...options, retries: 0, signal, ...(remaining === undefined ? {} : { timeoutMs: remaining }) }))
           used.tokens += observedTokens(result)
           stepIndex += 1
           return result

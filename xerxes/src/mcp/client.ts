@@ -14,6 +14,7 @@ import {
   MCPRemoteError,
   MCPSessionExpiredError,
   type MCPCapabilities,
+  type MCPCapabilityKind,
   type MCPClientOptions,
   type MCPContent,
   type MCPHttpTransportKind,
@@ -84,6 +85,11 @@ export class MCPClient {
   serverInfo: MCPImplementation | undefined
 
   private closing = false
+  private connecting: Promise<void> | undefined
+  private connectionGeneration = 0
+  private readonly capabilityChangeHandlers = new Set<(kind: MCPCapabilityKind) => void>()
+  private readonly capabilityRefreshInFlight = new Map<MCPCapabilityKind, Promise<void>>()
+  private readonly capabilityRefreshQueued = new Set<MCPCapabilityKind>()
   private readonly notificationHandlers = new Set<MCPNotificationHandler>()
   private readonly pending = new Map<MCPJsonRpcId, PendingRequest>()
   private httpTransport: MCPHttpClientTransport | undefined
@@ -100,6 +106,9 @@ export class MCPClient {
     if (!Number.isSafeInteger(this.maxLineChars) || this.maxLineChars < 1) {
       throw new MCPConnectionError(`MCP server ${config.name} maxLineChars must be a positive integer`)
     }
+    if (options.onCapabilitiesChanged) {
+      this.capabilityChangeHandlers.add(options.onCapabilitiesChanged)
+    }
   }
 
   /** Open the configured transport, initialize it, and discover its capabilities. */
@@ -107,9 +116,23 @@ export class MCPClient {
     if (this.connected) {
       return
     }
+    if (this.connecting) {
+      return this.connecting
+    }
+    const attempt = this.connectOnce().finally(() => {
+      if (this.connecting === attempt) {
+        this.connecting = undefined
+      }
+    })
+    this.connecting = attempt
+    return attempt
+  }
+
+  private async connectOnce(): Promise<void> {
     if (this.config.enabled === false) {
       throw new MCPConnectionError(`MCP server ${this.config.name} is disabled`)
     }
+    const generation = ++this.connectionGeneration
     const transport = this.config.transport ?? 'stdio'
     this.closing = false
     this.stderrOutput = ''
@@ -121,11 +144,18 @@ export class MCPClient {
       } else {
         throw new MCPConnectionError(`MCP transport ${String(transport)} is not supported`)
       }
-
+      if (this.connectionGeneration !== generation) {
+        throw new MCPConnectionError(`Disconnected from MCP server ${this.config.name}`)
+      }
       await this.performHandshake()
+      if (this.connectionGeneration !== generation) {
+        throw new MCPConnectionError(`Disconnected from MCP server ${this.config.name}`)
+      }
       await this.refreshCapabilities()
     } catch (error) {
-      await this.disconnect()
+      if (this.connectionGeneration === generation) {
+        await this.disconnect()
+      }
       throw error
     }
   }
@@ -149,6 +179,9 @@ export class MCPClient {
 
   /** Close the active transport and reject every request still awaiting a response. */
   async disconnect(): Promise<void> {
+    this.connectionGeneration += 1
+    this.connecting = undefined
+    this.capabilityRefreshQueued.clear()
     const process = this.process
     const httpTransport = this.httpTransport
     this.closing = true
@@ -229,6 +262,12 @@ export class MCPClient {
   onNotification(handler: MCPNotificationHandler): () => void {
     this.notificationHandlers.add(handler)
     return () => this.notificationHandlers.delete(handler)
+  }
+
+  /** Subscribe to dynamic capability refreshes triggered by `list_changed` notifications. */
+  onCapabilitiesChanged(handler: (kind: MCPCapabilityKind) => void): () => void {
+    this.capabilityChangeHandlers.add(handler)
+    return () => this.capabilityChangeHandlers.delete(handler)
   }
 
   /** Fetch and cache the server's published tool list. */
@@ -365,25 +404,38 @@ export class MCPClient {
     if ((!this.process && !this.httpTransport) || (!this.connected && !allowBeforeConnected)) {
       throw new MCPConnectionError(`Not connected to MCP server ${this.config.name}`)
     }
+    if (signal?.aborted) {
+      return Promise.reject(new MCPConnectionError(`MCP request ${method} was aborted`))
+    }
 
     const id = ++MCPClient.nextRequestId
     const frame: MCPJsonRpcRequest = { jsonrpc: '2.0', id, method, params }
     const httpTransport = this.httpTransport
+    const notifyServerCancellation = (reason: string): void => {
+      if (allowBeforeConnected || !this.connected || this.closing || httpTransport?.expectsResponseInBody) {
+        return
+      }
+      void this.notify('notifications/cancelled', { requestId: id, reason }).catch(() => undefined)
+    }
     return new Promise<MCPJsonRpcResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} timed out after ${this.timeoutMs}ms`))
+        if (!this.dropPendingRequest(id)) return
+        reject(new MCPConnectionError(`MCP request ${method} timed out after ${this.timeoutMs}ms`))
+        notifyServerCancellation(`Request timed out after ${this.timeoutMs}ms`)
       }, this.timeoutMs)
       const detach = signal === undefined
         ? undefined
         : onAbort(signal, () => {
-          this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} was aborted`))
+          if (!this.dropPendingRequest(id)) return
+          reject(new MCPConnectionError(`MCP request ${method} was aborted`))
+          notifyServerCancellation('Client cancelled request')
         })
       this.pending.set(id, { resolve, reject, timeout, ...(detach === undefined ? {} : { detach }) })
       if (signal?.aborted) {
         this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} was aborted`))
         return
       }
-      void this.sendWithSessionRecovery(frame).then(
+      void this.sendWithSessionRecovery(frame, signal).then(
         () => {
           if (httpTransport?.expectsResponseInBody && this.pending.has(id)) {
             this.rejectPendingRequest(
@@ -411,15 +463,19 @@ export class MCPClient {
    */
   private async sendWithSessionRecovery(
     frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse,
+    signal?: AbortSignal,
   ): Promise<void> {
     try {
-      await this.send(frame)
+      await this.send(frame, signal)
     } catch (error) {
-      if (!(error instanceof MCPSessionExpiredError) || isInitializeFrame(frame)) {
+      if (!(error instanceof MCPSessionExpiredError) || isInitializeFrame(frame) || signal?.aborted) {
         throw error
       }
       await this.recoverHttpSession()
-      await this.send(frame)
+      if (signal?.aborted) {
+        throw new MCPConnectionError('MCP request was aborted during session recovery')
+      }
+      await this.send(frame, signal)
     }
   }
 
@@ -431,7 +487,10 @@ export class MCPClient {
     return this.sessionRecovery
   }
 
-  private async send(frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse): Promise<void> {
+  private async send(
+    frame: MCPJsonRpcNotification | MCPJsonRpcRequest | MCPJsonRpcResponse,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const stdin = this.process?.stdin
     if (stdin) {
       stdin.write(`${JSON.stringify(frame)}\n`)
@@ -440,7 +499,7 @@ export class MCPClient {
     }
     const httpTransport = this.httpTransport
     if (httpTransport) {
-      await httpTransport.send(frame)
+      await httpTransport.send(frame, signal)
       return
     }
     throw new MCPConnectionError(`MCP server ${this.config.name} has no writable transport`)
@@ -595,7 +654,7 @@ export class MCPClient {
       const notification: MCPJsonRpcNotification = params === undefined
         ? { jsonrpc: '2.0', method: String(value.method) }
         : { jsonrpc: '2.0', method: String(value.method), params }
-      for (const handler of this.notificationHandlers) {
+      for (const handler of [...this.notificationHandlers]) {
         try {
           handler(notification)
         } catch (error) {
@@ -603,11 +662,60 @@ export class MCPClient {
           this.debug(`MCP notification handler for ${this.config.name} threw: ${errorMessage(error)}`)
         }
       }
+      const changedKind = listChangedCapabilityKind(notification.method)
+      if (changedKind !== undefined) {
+        this.scheduleCapabilityRefresh(changedKind)
+      }
       return
     }
     void this.send(mcpJsonRpcFailure(value.id, -32601, `Client does not implement ${String(value.method)}`)).catch(() => {
       // The transport has already closed, so the inbound request cannot be answered.
     })
+  }
+
+  private scheduleCapabilityRefresh(kind: MCPCapabilityKind): void {
+    if (!this.connected || this.closing) {
+      return
+    }
+    if (this.capabilityRefreshInFlight.has(kind)) {
+      this.capabilityRefreshQueued.add(kind)
+      return
+    }
+    const generation = this.connectionGeneration
+    const run = (async () => {
+      do {
+        this.capabilityRefreshQueued.delete(kind)
+        if (!this.connected || this.closing || this.connectionGeneration !== generation) {
+          return
+        }
+        if (kind === 'tools') {
+          await this.listTools()
+        } else if (kind === 'resources') {
+          await this.listResources()
+        } else {
+          await this.listPrompts()
+        }
+        if (!this.connected || this.closing || this.connectionGeneration !== generation) {
+          return
+        }
+        for (const handler of [...this.capabilityChangeHandlers]) {
+          try {
+            handler(kind)
+          } catch (error) {
+            this.debug(`MCP capability change handler for ${this.config.name} threw: ${errorMessage(error)}`)
+          }
+        }
+      } while (this.capabilityRefreshQueued.has(kind))
+    })()
+      .catch(error => {
+        this.debug(`MCP ${kind} refresh after list_changed for ${this.config.name} failed: ${errorMessage(error)}`)
+      })
+      .finally(() => {
+        if (this.capabilityRefreshInFlight.get(kind) === run) {
+          this.capabilityRefreshInFlight.delete(kind)
+        }
+      })
+    this.capabilityRefreshInFlight.set(kind, run)
   }
 
   private handleProcessExit(process: Bun.PipedSubprocess, exitCode: number): void {
@@ -689,6 +797,19 @@ function parseInitializeResult(value: MCPJsonRpcResult): MCPInitializeResult {
     capabilities: value.capabilities,
     serverInfo,
     ...(instructions === undefined ? {} : { instructions }),
+  }
+}
+
+function listChangedCapabilityKind(method: string): MCPCapabilityKind | undefined {
+  switch (method) {
+    case 'notifications/tools/list_changed':
+      return 'tools'
+    case 'notifications/resources/list_changed':
+      return 'resources'
+    case 'notifications/prompts/list_changed':
+      return 'prompts'
+    default:
+      return undefined
   }
 }
 

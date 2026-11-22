@@ -8,10 +8,11 @@ import {
 import {
   BunOfficePackageDirectory,
   bunOfficeFileOutput,
+  relationshipTargetPartName,
   type OfficeBinaryOutputPort,
   type OfficePackagePort,
 } from './package.js'
-import { condenseOoxmlXml } from './xml.js'
+import { condenseOoxmlXml, parseOoxmlRelationships } from './xml.js'
 import { createOfficeZip, readOfficeZip, type OfficeZipEntry } from './zip.js'
 
 /** Office archive extensions handled by the native packer. */
@@ -139,6 +140,8 @@ async function validateNativeOfficeStructure(request: OfficeValidationRequest): 
   const missing = (await Promise.all(required.map(async part => await request.packageDirectory.hasPart(part) ? undefined : part)))
     .filter((part): part is string => part !== undefined)
   if (missing.length) return { message: `Missing required Office part(s): ${missing.join(', ')}`, valid: false }
+  const relationshipFailure = await validateInternalRelationships(request.packageDirectory)
+  if (relationshipFailure !== undefined) return { message: relationshipFailure, valid: false }
   if (request.originalPackage === undefined) return { message: 'Native OOXML structural validation passed', valid: true }
   let baselineParts: ReadonlyMap<string, Uint8Array>
   try {
@@ -160,6 +163,30 @@ async function validateNativeOfficeStructure(request: OfficeValidationRequest): 
     message: 'Native OOXML structural validation passed for package and baseline; schema, rendering, and auto-repair validation are not performed.',
     valid: true,
   }
+}
+
+async function validateInternalRelationships(packageDirectory: OfficePackagePort): Promise<string | undefined> {
+  for (const partName of await packageDirectory.listParts()) {
+    if (!partName.endsWith('.rels')) continue
+    let xml: string
+    try {
+      xml = condenseOoxmlXml(await packageDirectory.readText(partName))
+    } catch (error) {
+      return `Invalid relationship XML in ${partName}: ${errorMessage(error)}`
+    }
+    for (const relationship of parseOoxmlRelationships(xml)) {
+      if (relationship.targetMode?.toLowerCase() === 'external') continue
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(relationship.target) || relationship.target.startsWith('//')) {
+        return `External relationship ${relationship.id} in ${partName} is missing TargetMode="External"`
+      }
+      try {
+        relationshipTargetPartName(partName, relationship.target)
+      } catch (error) {
+        return `Unsafe relationship ${relationship.id} in ${partName}: ${errorMessage(error)}`
+      }
+    }
+  }
+  return undefined
 }
 
 function requiredOfficeParts(kind: OfficePackageKind): readonly string[] {

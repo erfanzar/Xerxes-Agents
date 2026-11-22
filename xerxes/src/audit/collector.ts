@@ -344,30 +344,64 @@ export class CompositeCollector implements AuditCollector {
   }
 
   emit(event: AuditEvent): void {
-    for (const collector of this.collectors) collector.emit(event)
+    const errors: unknown[] = []
+    for (const collector of this.collectors) {
+      try {
+        collector.emit(event)
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    rethrowCollectorErrors(errors)
   }
 
   flush(): void {
-    for (const collector of this.collectors) collector.flush()
+    const errors: unknown[] = []
+    for (const collector of this.collectors) {
+      try {
+        collector.flush()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    rethrowCollectorErrors(errors)
   }
 
   /** Await each child's durability barrier in registration order; children without one just flush. */
   async drain(): Promise<void> {
+    const errors: unknown[] = []
     for (const collector of this.collectors) {
-      if (isDrainableCollector(collector)) {
-        await collector.drain()
-        continue
+      try {
+        if (isDrainableCollector(collector)) {
+          await collector.drain()
+          continue
+        }
+        collector.flush()
+      } catch (error) {
+        errors.push(error)
       }
-      collector.flush()
     }
+    rethrowCollectorErrors(errors)
   }
 
   /** Close children that own resources or buffered writes; they drain as part of closing. */
   async close(): Promise<void> {
+    const errors: unknown[] = []
     for (const collector of this.collectors) {
       if (isClosableCollector(collector)) {
-        await collector.close()
+        try {
+          await collector.close()
+        } catch (error) {
+          errors.push(error)
+        }
       }
     }
+    rethrowCollectorErrors(errors)
   }
+}
+
+function rethrowCollectorErrors(errors: readonly unknown[]): void {
+  if (errors.length === 0) return
+  if (errors.length === 1) throw errors[0]
+  throw new AggregateError(errors, 'Multiple audit collectors failed')
 }

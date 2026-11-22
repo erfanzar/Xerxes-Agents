@@ -6,7 +6,14 @@ The Hub Slack transport acts as the connected Slack **user**, not as a bot. Slac
 
 The Hub needs an HTTPS public origin (`XERXES_HUB_PUBLIC_ORIGINS` or the saved `public_origin`), because Slack sends your browser back to `https://<hub>/api/hub/v1/slack/oauth/callback` after you sign in. The callback only has to be reachable from your own browser, so a tailnet-only address works. Nothing else is set on the server.
 
-**One-time setup (about a minute), as the Hub owner in Desktop → XERXES → Slack:**
+**Automatic setup (recommended), as the Hub owner in Desktop → XERXES → Slack:**
+
+1. Click **Open Slack token page**. Under **Your App Configuration Tokens**, click **Generate Token**, pick your workspace, and copy the **Access Token** (`xoxe.xoxp-…`, not the Refresh Token). Slack only issues this token to a signed-in person, so this one copy can't be automated.
+2. Paste it and click **Set up automatically**. The Hub calls Slack's `apps.manifest.create` with the XERXES manifest (described below), stores only the new app's Client ID and Secret, and uses the token once without storing, logging or returning it. Sign in with Slack then opens in your browser: click **Allow**, then **Confirm Slack account** in the panel.
+
+An expired or wrong token is refused with a plain message; configuration tokens last 12 hours.
+
+**Manual setup (fallback, under "Set it up by hand instead"):**
 
 1. Click **Create XERXES app in Slack**. Slack opens with a manifest already filled in. It requests only the six user scopes (`users:read`, `users:read.email`, `im:write`, `im:read`, `im:history`, `chat:write`), has no bot, no Socket Mode and no token rotation, and lists this Hub's callback as its only redirect URL. Pick your workspace, click **Next**, then **Create**. If Slack opens without the details, choose **From a manifest** and paste the manifest from **Copy manifest**.
 2. On the new app's **Basic Information** page, copy the **Client ID** and **Client Secret** into the panel and click **Save**.

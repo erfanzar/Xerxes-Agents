@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 
 import type { ConnectionStatus } from '../../client/bridge.js'
 import { HubConnection } from '../../client/hubConnection.js'
@@ -21,9 +22,9 @@ import { WatchPanel, WatchStrip } from './WatchPanel.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { ModelChooser } from './ModelChooser.js'
-import { SimurghMark } from './SimurghMark.js'
 import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
 import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
+import { XerxesBrandEmblem } from './XerxesSprites.js'
 import { isOpenCard } from '../../client/supervisorRecords.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
 import { liveSteps } from '../../client/supervisorSteps.js'
@@ -58,8 +59,9 @@ function connectionNote(status: ConnectionStatus): string | undefined {
 function useNow(intervalMs = 30_000): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), intervalMs)
-    return () => clearInterval(timer)
+    const timer = setInterval(() => { if (!pageIsInactive()) setNow(Date.now()) }, intervalMs)
+    const unsub = subscribePerfPaused(() => { if (!pageIsInactive()) setNow(Date.now()) })
+    return () => { clearInterval(timer); unsub() }
   }, [intervalMs])
   return now
 }
@@ -115,6 +117,7 @@ export function ConnectHub({ unavailable = false, onOpenSettings }: {
 }): ReactElement {
   return (
     <section className="supervisor supervisor--connect" aria-labelledby="supervisor-connect-title">
+      <span className="xempty__mark" aria-hidden="true"><XerxesBrandEmblem size={44} animate={false} /></span>
       <h3 id="supervisor-connect-title">{CONNECT_HUB_TITLE}</h3>
       {unavailable ? (
         <p className="studio-muted">XERXES is only available in the Xerxes desktop app.</p>
@@ -138,6 +141,7 @@ export function SignInFailed({ message, denied, onRetry, onSignInAgain, onOpenSe
 }): ReactElement {
   return (
     <section className="supervisor supervisor--connect" aria-labelledby="supervisor-signin-title">
+      <span className="xempty__mark" aria-hidden="true"><AgentOrb size={40} state="failed" live={false} /></span>
       <h3 id="supervisor-signin-title">Could not sign in to the Hub</h3>
       <p role="alert" className="action-card__error">{message}</p>
       <div className="hubphone__row">
@@ -258,8 +262,9 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   useEffect(() => { setStartedAt(current => (thinking ? current ?? Date.now() : null)) }, [thinking])
   useEffect(() => {
     if (!thinking) return
-    const timer = setInterval(() => setTick(value => value + 1), 1_000)
-    return () => clearInterval(timer)
+    const timer = setInterval(() => { if (!pageIsInactive()) setTick(value => value + 1) }, 1_000)
+    const unsub = subscribePerfPaused(() => { if (!pageIsInactive()) setTick(value => value + 1) })
+    return () => { clearInterval(timer); unsub() }
   }, [thinking])
   const thinkingSeconds = startedAt === null ? 0 : Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))
   const lastUser = [...supervisor.messages].reverse().find(message => message.role === 'user')
@@ -402,10 +407,15 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             </div>
           ) : (
             <>
-              {!ready ? <p className="xempty xempty--wait" aria-busy="true">{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</p> : null}
+              {!ready ? (
+                <p className="xempty xempty--wait" aria-busy="true">
+                  <AgentOrb size={36} state="connecting" live />
+                  <span>{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</span>
+                </p>
+              ) : null}
               {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
                 <div className="xempty">
-                  <span className="xempty__mark" aria-hidden="true"><SimurghMark size={29} /></span>
+                  <span className="xempty__mark" aria-hidden="true"><XerxesBrandEmblem size={44} animate motion="css" /></span>
                   <strong>Ask XERXES about your work</strong>
                   <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
                   <div className="xempty__try" role="group" aria-label="Try asking">
@@ -603,7 +613,14 @@ export function SupervisorPage(): ReactElement {
   switch (gate.phase) {
     case 'reading':
     case 'signing_in':
-      return <section className="supervisor supervisor--connect"><p aria-busy="true">{gate.phase === 'reading' ? 'Reading the saved Hub…' : 'Signing in to the Hub…'}</p></section>
+      return (
+        <section className="supervisor supervisor--connect">
+          <p className="xempty xempty--wait" aria-busy="true">
+            <AgentOrb size={36} state="connecting" live />
+            <span>{gate.phase === 'reading' ? 'Reading the saved Hub…' : 'Signing in to the Hub…'}</span>
+          </p>
+        </section>
+      )
     case 'no_hub':
       return <ConnectHub onOpenSettings={openSettings} />
     case 'failed':

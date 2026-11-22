@@ -1,6 +1,9 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+
 /**
  * Shared OAuth flow primitives for the subscription-backed provider sessions
  * (anthropic, kimi-code, openrouter, xai, radius), mirroring pi-ai's
@@ -216,4 +219,37 @@ export function sharedCredentialFlight(
       },
     )
   })
+}
+
+/**
+ * Atomically persist an OAuth credential file with owner-only (`0600`)
+ * permissions inside a private (`0700`) directory, repairing loose modes left
+ * behind by older non-atomic writes.
+ */
+export async function writeOAuthCredentialFile(path: string, credential: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(credential, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    await chmod(temporary, 0o600)
+    await rename(temporary, path)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+/**
+ * Remove a stored OAuth credential file. Returns `false` when the file was
+ * already absent (`ENOENT`); real filesystem errors (`EACCES`, `EISDIR`, …)
+ * propagate so permission or path bugs are never masked as "already logged out".
+ */
+export async function removeOAuthCredentialFile(path: string): Promise<boolean> {
+  try {
+    await rm(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
 }

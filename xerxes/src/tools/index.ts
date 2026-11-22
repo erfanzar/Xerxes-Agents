@@ -11,10 +11,12 @@ import { registerBrowserTools, type BrowserToolsOptions } from './browserTools.j
 import { registerClaudeCompatibilityTools, type ClaudeCompatibilityToolsOptions } from './claudeTools/index.js'
 import { registerClarifyTool, type ClarifyToolOptions } from './clarify.js'
 import { registerComputerUseTool, type ComputerUseToolsOptions } from './computerUse/index.js'
+import { registerApplyPatchTool } from './applyPatchTool.js'
 import { registerCodingTools } from './codingTools.js'
 import { registerDataTools } from './dataTools.js'
 import { registerXlsxTools } from './xlsxTools.js'
 import { registerFileTools } from './fileTools.js'
+import { registerFileOutlineTool } from './outlineTool.js'
 import { registerProjectSetupTool } from './projectSetup.js'
 import { registerHomeAssistantTools, type HomeAssistantToolsOptions } from './homeAssistantTools.js'
 import { registerGenerateImageTool, type GenerateImageToolOptions } from './imageGen.js'
@@ -37,6 +39,7 @@ import { registerWorkspaceMemoryTools, type WorkspaceMemoryToolsOptions } from '
 export * from './agentMemoryTools.js'
 export * from './agentMetaTools.js'
 export * from './aiTools.js'
+export * from './applyPatchTool.js'
 export * from './browserTools.js'
 export * from './dataTools.js'
 export * from './claudeTools/index.js'
@@ -61,11 +64,13 @@ export * from './mathTools.js'
 export * from './mediaHttp.js'
 export * from './mediaTools.js'
 export * from './memoryTools.js'
+export * from './outlineTool.js'
 export * from './pathSafety.js'
 export * from './processTools.js'
 export * from './sendMessage.js'
 export * from './skillManage.js'
 export * from './systemTools.js'
+export * from './testDiscovery.js'
 export * from './transcription.js'
 export * from './tts.js'
 export * from './vision.js'
@@ -214,6 +219,8 @@ export function registerCoreTools(registry: ToolRegistry, options: CoreToolsOpti
   if (options.modelInventory) registerModelInventoryTool(registry, options.modelInventory)
   const paths = new WorkspacePathResolver(options.workspaceRoot ?? process.cwd(), options.activeWorkspaceRoot, options.readOnlyRoots)
   registerFileTools(registry, paths)
+  registerApplyPatchTool(registry, paths)
+  registerFileOutlineTool(registry, paths)
   registerProjectSetupTool(registry, paths)
   if (options.includeAiTools ?? false) {
     registerAiTools(registry, options.aiTools ?? {})

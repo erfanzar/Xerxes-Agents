@@ -3,7 +3,7 @@
 
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 const OWNER_FILE = '.evaluation-owner.json'
 const PROFILE_FILE = 'profiles.json'
@@ -86,9 +86,13 @@ export async function sweepStaleEvaluationRuns(rootDirectory: string): Promise<v
   }
 
   await Promise.all(entries
-    .filter(entry => entry.isDirectory() && entry.name.startsWith(RUN_PREFIX))
+    .filter(entry => (entry.isDirectory() || entry.isSymbolicLink()) && entry.name.startsWith(RUN_PREFIX))
     .map(async entry => {
       const runDirectory = childPath(resolvedRoot, entry.name)
+      if (entry.isSymbolicLink()) {
+        await rm(runDirectory, { force: true })
+        return
+      }
       const owner = await readOwner(runDirectory)
       if (owner !== undefined && processIsAlive(owner.pid)) return
       await rm(runDirectory, { force: true, recursive: true })
@@ -163,7 +167,7 @@ function resolveRequiredDirectory(value: string, label: string): string {
 function childPath(parent: string, child: string): string {
   const candidate = resolve(parent, child)
   const fromParent = relative(parent, candidate)
-  if (!fromParent || fromParent === '..' || fromParent.startsWith('../') || isAbsolute(fromParent)) {
+  if (!fromParent || fromParent === '..' || fromParent.startsWith(`..${sep}`) || fromParent.startsWith('../') || isAbsolute(fromParent)) {
     throw new Error(`unsafe child path: ${child}`)
   }
   return candidate

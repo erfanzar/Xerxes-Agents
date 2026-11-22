@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.8.51',
+  daemon_version: '0.8.52',
   daemon_build_id: 'current-build',
 }
 
@@ -750,7 +750,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.51' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.52' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 
@@ -1609,6 +1609,54 @@ describe('Store workspace folds', () => {
     const pick = bridge.calls.find(call => call.method === 'slash' && call.params.command === '/model glm-5.2')
     expect(pick).toBeTruthy()
     expect(bridge.calls.some(call => call.method === 'initialize' && call.params.model === 'glm-5.2')).toBe(false)
+    expect(bridge.calls.some(call => call.method === 'reasoning_levels')).toBe(true)
+  })
+
+  test('loadReasoningLevels populates thinking levels silently for T3ModelPicker', async () => {
+    const original = (bridge as unknown as { respond: Responder }).respond
+    ;(bridge as unknown as { respond: Responder }).respond = (method: string, params: Record<string, unknown>) =>
+      method === 'reasoning_levels'
+        ? {
+            ok: true,
+            current: 'high',
+            default: 'medium',
+            levels: [
+              { effort: 'low' },
+              { effort: 'medium' },
+              { effort: 'high' },
+              { effort: 'xhigh' },
+              { effort: 'max' },
+            ],
+          }
+        : original(method, params)
+    store.loadReasoningLevels({ silent: true })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(store.getSnapshot().reasoningEffort).toBe('high')
+    expect(store.getSnapshot().reasoningDefault).toBe('medium')
+    expect(store.getSnapshot().reasoningLevels.map(row => row.effort)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(store.getSnapshot().reasoningLoading).toBe(false)
+  })
+
+  test('refreshBranch tracks live git checkouts via git.branch and falls back to git.status on older daemons', async () => {
+    const original = (bridge as unknown as { respond: Responder }).respond
+    store.syncBranch('vnext-into-main')
+    expect(store.getSnapshot().branch).toBe('vnext-into-main')
+
+    // Lightweight git.branch path.
+    ;(bridge as unknown as { respond: Responder }).respond = (method: string, params: Record<string, unknown>) =>
+      method === 'git.branch' ? { ok: true, branch: 'main' } : original(method, params)
+    await store.refreshBranch()
+    expect(store.getSnapshot().branch).toBe('main')
+
+    // Older live daemon without git.branch falls back cleanly to git.status.
+    ;(bridge as unknown as { respond: Responder }).respond = (method: string, params: Record<string, unknown>) =>
+      method === 'git.branch'
+        ? { ok: false, code: 'git-unknown-method', error: 'Unknown git method: git.branch' }
+        : method === 'git.status'
+          ? { ok: true, repository: { branch: 'feat/live-sync', detached: false } }
+          : original(method, params)
+    await store.refreshBranch()
+    expect(store.getSnapshot().branch).toBe('feat/live-sync')
   })
 
   test('status_update carries the session permission mode and foreign titles stay out', () => {

@@ -26,11 +26,15 @@ export type MCPJsonRpcResult = Record<string, unknown>
 /** Injectable HTTP primitive for MCP HTTP transports. */
 export type MCPFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+export type MCPCapabilityKind = 'tools' | 'resources' | 'prompts'
+
 /** Optional runtime dependencies for one MCP client. */
 export interface MCPClientOptions {
   readonly fetch?: MCPFetch
   /** Receives diagnostics for skipped malformed server output. Defaults to silent. */
   readonly debug?: (message: string) => void
+  /** Invoked after a server `notifications/<kind>/list_changed` refreshes cached capabilities. */
+  readonly onCapabilitiesChanged?: (kind: MCPCapabilityKind) => void
 }
 
 export interface MCPImplementation {

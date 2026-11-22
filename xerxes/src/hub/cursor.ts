@@ -30,7 +30,11 @@ export interface CursorScope {
 
 export function cursorScopeKey(scope: CursorScope): string {
   const workspaces = [...new Set(scope.workspaceIds)].sort()
-  const sessions = [...new Set(scope.sessionIds ?? [])].sort()
+  const sessions = scope.sessionIds === undefined
+    ? []
+    : scope.sessionIds.length === 0
+      ? 'empty'
+      : [...new Set(scope.sessionIds)].sort()
   return createHash('sha256')
     .update(JSON.stringify([workspaces, sessions]))
     .digest('hex')
@@ -49,9 +53,13 @@ export function decodeCursor(text: string): HubCursor {
   if (typeof text !== 'string' || !text.startsWith(PREFIX) || text.length > 512) {
     throw new HubProtocolError('invalid_request', 'malformed cursor')
   }
+  const encoded = text.slice(PREFIX.length)
+  if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) {
+    throw new HubProtocolError('invalid_request', 'malformed cursor')
+  }
   let value: unknown
   try {
-    value = JSON.parse(Buffer.from(text.slice(PREFIX.length), 'base64url').toString('utf8')) as unknown
+    value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown
   } catch {
     throw new HubProtocolError('invalid_request', 'malformed cursor')
   }
@@ -59,7 +67,9 @@ export function decodeCursor(text: string): HubCursor {
     typeof value !== 'object' ||
     value === null ||
     typeof (value as { s?: unknown }).s !== 'string' ||
+    (value as { s: string }).s.length === 0 ||
     typeof (value as { k?: unknown }).k !== 'string' ||
+    (value as { k: string }).k.length === 0 ||
     !Number.isSafeInteger((value as { n?: unknown }).n) ||
     ((value as { n: number }).n) < 0
   ) {

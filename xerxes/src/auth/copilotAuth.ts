@@ -23,11 +23,12 @@
  * in this module compares in seconds).
  */
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { xerxesHome as defaultXerxesHome } from '../daemon/paths.js'
+import { removeOAuthCredentialFile, writeOAuthCredentialFile } from './oauthFlows.js'
 
 /** Provider key carried in errors surfaced from this module. */
 export const COPILOT_PROVIDER = 'github-copilot'
@@ -309,13 +310,33 @@ export class CopilotSession {
    * so unlike the Codex chain no cross-instance single-flight is required.
    */
   async credential(signal?: AbortSignal): Promise<CopilotCredential> {
-    if (this.pending) return this.pending
-    const flight = this.resolve(signal)
-    const tracked = flight.finally(() => {
-      if (this.pending === tracked) this.pending = undefined
+    if (signal?.aborted) throw signal.reason ?? new Error('Copilot credential request aborted')
+    let flight = this.pending
+    if (!flight) {
+      const created = this.resolve()
+      const tracked = created.finally(() => {
+        if (this.pending === tracked) this.pending = undefined
+      })
+      void tracked.catch(() => undefined)
+      this.pending = tracked
+      flight = tracked
+    }
+    if (!signal) return flight
+    const joined = flight
+    return new Promise<CopilotCredential>((resolveCaller, rejectCaller) => {
+      const onAbort = (): void => rejectCaller(signal.reason ?? new Error('Copilot credential request aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+      joined.then(
+        credential => {
+          signal.removeEventListener('abort', onAbort)
+          resolveCaller(credential)
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort)
+          rejectCaller(error)
+        },
+      )
     })
-    this.pending = tracked
-    return tracked
   }
 
   /**
@@ -429,10 +450,11 @@ export class CopilotSession {
     const deadline = this.now() + device.expiresInSeconds
     let interval = device.intervalSeconds
     for (;;) {
+      signal?.throwIfAborted()
       if (this.now() > deadline) {
         throw new ProviderError(COPILOT_PROVIDER, 'device code expired before authorization completed')
       }
-      await this.sleep(Math.max(0, interval) * 1_000)
+      await catalogRetryDelay(Math.max(0, interval) * 1_000, signal, this.sleep)
       const response = await this.postForm(COPILOT_TOKEN_URL, {
         client_id: COPILOT_CLIENT_ID,
         device_code: device.deviceCode,
@@ -538,12 +560,7 @@ export class CopilotSession {
 
   /** Remove the stored credential. Returns whether one existed. */
   async logout(): Promise<boolean> {
-    try {
-      await rm(this.credentialPath())
-      return true
-    } catch {
-      return false
-    }
+    return removeOAuthCredentialFile(this.credentialPath())
   }
 
   private async loadStored(): Promise<CopilotCredential | undefined> {
@@ -580,9 +597,7 @@ export class CopilotSession {
   }
 
   private async persist(credential: CopilotCredential): Promise<void> {
-    const path = this.credentialPath()
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(credential, null, 2)}\n`, 'utf8')
+    await writeOAuthCredentialFile(this.credentialPath(), credential)
   }
 }
 

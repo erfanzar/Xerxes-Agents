@@ -169,8 +169,8 @@ export function parseNameStatus(stdout: string): ScmFile[] {
 
 /** Workspace-relative, no traversal, no control characters — same rule as `workspace.diff`. */
 export function assertScmPath(path: unknown): string {
-  if (typeof path !== 'string' || !path || path.length > 4096 || path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
-    || path.split(/[\\/]/).some(part => part === '..') || /[\0\r\n]/.test(path)) {
+  if (typeof path !== 'string' || !path || path.length > 4096 || path.startsWith('/') || path.startsWith('\\') || /^[A-Za-z]:/.test(path)
+    || path.split(/[\\/]/).some(part => part === '..' || part === '.' || part === '') || /[\0\r\n]/.test(path)) {
     throw new ScmError('Choose a repository-relative file path without parent traversal')
   }
   return path
@@ -497,8 +497,13 @@ export class GitScm {
       // -D drops the body of deleted files (the name says enough) and -U2 trims
       // context, so the budget goes to what actually changed.
       const full = await this.git(['diff', '--cached', '--no-color', '--no-ext-diff', '-M', '-D', '-U2'], 'git diff failed', { env })
-      const truncated = Buffer.byteLength(full) > maxDiffBytes
-      const diff = truncated ? Buffer.from(full).subarray(0, maxDiffBytes).toString('utf8') : full
+      const fullBytes = Buffer.from(full, 'utf8')
+      const truncated = fullBytes.length > maxDiffBytes
+      let end = maxDiffBytes
+      if (truncated) {
+        while (end > 0 && (fullBytes[end]! & 0xc0) === 0x80) end -= 1
+      }
+      const diff = truncated ? fullBytes.subarray(0, end).toString('utf8') : full
       const recentSubjects = (await this.logUnlocked(12)).map(commit => commit.subject)
       return { stat, files, diff, truncated, recentSubjects }
     } finally {

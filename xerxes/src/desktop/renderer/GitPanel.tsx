@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import type { ScmBranch, ScmCommit, ScmCommitDetail, ScmFile, ScmStatus } from '../../workspace/gitScm.js'
 import { desktopCall, text, type RpcRecord } from './desktopRpc.js'
 import { Icon } from './Icon.js'
+import { pageIsInactive } from './pageVisibility.js'
 import { reflowContextText } from './ContextInspector.js'
 import { store, type Snapshot } from './store.js'
 
@@ -140,6 +141,7 @@ function useScm(snap: Snapshot) {
       if (!alive.current) return
       const repository = result.repository as ScmStatus | null
       setRepo(repository ?? null)
+      store.syncBranch(repository?.branch ?? '')
       setReason(text(result.reason))
     } catch (failure) {
       if (alive.current) setError(failure instanceof Error ? failure.message : String(failure))
@@ -150,7 +152,11 @@ function useScm(snap: Snapshot) {
     setBusy(label); setError('')
     try {
       const result = await call(method, params)
-      if (alive.current && result.status) setRepo(result.status as ScmStatus)
+      if (alive.current && result.status) {
+        const nextStatus = result.status as ScmStatus
+        setRepo(nextStatus)
+        store.syncBranch(nextStatus.branch ?? '')
+      }
       return result
     } catch (failure) {
       if (alive.current) setError(failure instanceof Error ? failure.message : String(failure))
@@ -182,7 +188,7 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
   useEffect(() => {
     const onFocus = () => { void refresh() }
     window.addEventListener('focus', onFocus)
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void refresh() }, 8000)
+    const timer = setInterval(() => { if (!pageIsInactive()) void refresh() }, 12_000)
     return () => { window.removeEventListener('focus', onFocus); clearInterval(timer) }
   }, [refresh])
 

@@ -35,7 +35,7 @@ export async function ruffFormat(root: string, request: FormatRequest, signal?: 
   if (typeof request.text !== 'string' || request.text.length > 1_048_576) throw new Error('Text to format must be at most 1 MiB')
   // The path only names the file for Ruff's config lookup; it must stay inside the workspace.
   const path = await new WorkspacePathResolver(root).resolve(request.filePath)
-  if (!/\.pyi?$/.test(path)) throw new Error('Ruff formats Python files only')
+  if (!/\.pyi?$/i.test(path)) throw new Error('Ruff formats Python files only')
   const ruff = ruffPath ?? await findRuff(root)
   if (!ruff) throw new Error('Ruff is not installed for this project. Install it in the project venv (pip install ruff) or on PATH, then format again.')
   signal?.throwIfAborted()

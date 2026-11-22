@@ -1,0 +1,1451 @@
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+
+import { afterEach, describe, expect, test } from 'bun:test'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+
+import {
+  AcpActiveBanner,
+  AcpModePicker,
+  AcpModelPicker,
+  AcpRuntimePicker,
+  AcpThinkingPicker,
+  attachEscapeCloseListener,
+  parseCustomArgs,
+  resolveRuntimeList,
+} from '../src/desktop/renderer/AcpRuntimePicker.js'
+import { ActivityGroup, ApprovalCard, Shell, approvalKeyAction } from '../src/desktop/renderer/App.js'
+import { BlockBuilder, editStatsOf, isEditTool } from '../src/desktop/renderer/blocks.js'
+import { ExecutionDetails, ToolCallRow, classifyToolItem, executionView, stripAgyCommandEnvelope, toolHasFailed } from '../src/desktop/renderer/Execution.js'
+import { FileToolRow, fileToolOf, fileToolStats } from '../src/desktop/renderer/FileToolRow.js'
+import { SideQuestionPanel } from '../src/desktop/renderer/SideQuestion.js'
+import {
+  applyBtwEventPayload,
+  formatSideQuestionToolLabel,
+  parseSideQuestionSlashCommand,
+} from '../src/desktop/renderer/sideQuestionState.js'
+import {
+  Store,
+  parseAcpSessionBinding,
+  type AcpExternalAgentInfo,
+  type AcpSessionBinding,
+  type Snapshot,
+  type XerxesLike,
+} from '../src/desktop/renderer/store.js'
+import { ToolTimelineGroup, summarizeToolTimeline } from '../src/desktop/renderer/ToolTimeline.js'
+import type { Block, DaemonEvent, ToolItem } from '../src/desktop/renderer/types.js'
+import {
+  SideQuestionCard,
+  foldVscodeBtwEvent,
+  parseVscodeBtwEvent,
+  type VscodeBtwEntry,
+} from '../src/vscode/ui/SideQuestionCard.js'
+import { VscodeChat } from '../src/vscode/ui/VscodeApp.js'
+
+const sampleAgents: readonly AcpExternalAgentInfo[] = [
+  {
+    id: 'xerxes',
+    name: 'Xerxes',
+    provider: 'xerxes',
+    transport: 'native',
+    available: true,
+    description: 'Native multi-agent runtime & Immortals',
+  },
+  {
+    id: 'claude-code',
+    name: 'Claude Code',
+    provider: 'claude-code',
+    transport: 'claude-stream-json',
+    available: true,
+    command: 'claude',
+    binaryPath: '/Users/erfan/.local/bin/claude',
+    version: '2.1.4',
+    description: 'Anthropic Claude Code via stream-json',
+  },
+  {
+    id: 'antigravity',
+    name: 'Antigravity',
+    provider: 'antigravity',
+    transport: 'acp',
+    available: false,
+    installHint: 'Install Antigravity CLI (agy) so `agy acp` is on PATH',
+    description: 'Google Antigravity via ACP stdio',
+  },
+]
+
+const sampleClaudeBinding: AcpSessionBinding = {
+  session_id: 'sess-acp-1',
+  agent_id: 'claude-code',
+  name: 'Claude Code',
+  provider: 'claude-code',
+  transport: 'claude-stream-json',
+  cwd: '/workspace/xerxes',
+  external_session_id: 'ext-claude-8f31ab92',
+  connected: true,
+  command: '/Users/erfan/.local/bin/claude',
+  current_model: 'claude-sonnet-4-6',
+  current_model_name: 'Claude Sonnet 4.6',
+  models: [
+    { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', description: 'Most capable Anthropic model' },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', description: 'Balanced coding speed and quality' },
+    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Fast lightweight responses' },
+  ],
+}
+
+const sampleAntigravityBinding: AcpSessionBinding = {
+  session_id: 'sess-acp-1',
+  agent_id: 'antigravity',
+  name: 'Antigravity',
+  provider: 'antigravity',
+  transport: 'acp',
+  cwd: '/workspace/xerxes',
+  external_session_id: '39c61d78-9f1a-4b2c-98f0-123456789abc',
+  connected: true,
+  command: 'agy',
+  current_model: 'gemini-4-carbon-high',
+  current_model_name: 'Gemini 4 Carbon (High)',
+  model_config_id: 'model',
+  models: [
+    { id: 'gemini-4-carbon-high', name: 'Gemini 4 Carbon (High)', description: 'Deep reasoning for multi-file engineering' },
+    { id: 'gemini-4-carbon-low', name: 'Gemini 4 Carbon (Low)', description: 'Fast iteration with lower latency' },
+    { id: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'General-purpose coding & architecture' },
+    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', description: 'Ultra-fast edits and Q&A' },
+    { id: 'claude-opus-4-6-via-agy', name: 'Claude Opus 4.6 (Thinking)', description: 'Extended thinking via Antigravity' },
+    { id: 'claude-sonnet-4-6-via-agy', name: 'Claude Sonnet 4.6', description: 'Responsive daily coding' },
+    { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', description: 'Open-weights reasoning model' },
+  ],
+  current_mode: 'planning',
+  current_mode_name: 'Planning',
+  mode_config_id: 'mode',
+  modes: [
+    { id: 'planning', name: 'Planning', description: 'Draft a structured plan before editing files' },
+    { id: 'fast', name: 'Fast', description: 'Execute straightforward tasks directly' },
+  ],
+}
+
+interface MockBridge {
+  readonly calls: Array<{ readonly method: string; readonly params: Record<string, unknown> }>
+  readonly emit: (type: string, payload: Record<string, unknown>) => void
+  readonly xerxes: XerxesLike
+}
+
+function createMockBridge(
+  overrides: Partial<Record<string, (params: Record<string, unknown>) => Record<string, unknown>>> = {},
+): MockBridge {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+  const listeners = new Set<(event: DaemonEvent) => void>()
+  let currentActive: AcpSessionBinding | null = null
+
+  const call = async (method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+    calls.push({ method, params })
+    const custom = overrides[method]
+    if (custom) return custom(params)
+    if (method === 'initialize') {
+      return {
+        ok: true,
+        session_id: 'sess-acp-1',
+        session_key: String(params.session_key ?? 'desktop-test'),
+        cwd: '/workspace/xerxes',
+        model: 'claude-opus-4-6',
+        session: {
+          id: 'sess-acp-1',
+          title: 'ACP & Side Question Test',
+          cwd: '/workspace/xerxes',
+          model: 'claude-opus-4-6',
+          messages: [],
+        },
+      }
+    }
+    if (method === 'acp.agents') {
+      return { ok: true, agents: sampleAgents, active: currentActive }
+    }
+    if (method === 'acp.connect') {
+      const agentId = String(params.agent_id ?? '')
+      if (agentId === 'antigravity' && !params.command) {
+        return {
+          ok: false,
+          error: 'Antigravity CLI not found',
+          install_hint: 'Install agy CLI so `agy acp` is on PATH',
+        }
+      }
+      currentActive =
+        agentId === 'antigravity'
+          ? {
+              ...sampleAntigravityBinding,
+              cwd: String(params.cwd ?? '/workspace/xerxes'),
+              ...(typeof params.command === 'string' ? { command: params.command } : {}),
+            }
+          : {
+              session_id: 'sess-acp-1',
+              agent_id: agentId,
+              name: agentId === 'claude-code' ? 'Claude Code' : agentId,
+              provider: agentId === 'claude-code' ? 'claude-code' : 'acp',
+              transport: agentId === 'claude-code' ? 'claude-stream-json' : 'acp',
+              cwd: String(params.cwd ?? '/workspace/xerxes'),
+              external_session_id: `ext-${agentId}-001`,
+              connected: true,
+              ...(typeof params.command === 'string' ? { command: params.command } : {}),
+            }
+      return { ok: true, binding: currentActive }
+    }
+    if (method === 'acp.set_model') {
+      const modelId = String(params.model_id ?? '')
+      if (!currentActive || modelId === 'bad-model') {
+        return { ok: false, error: `Model ${modelId} is not supported` }
+      }
+      const matched = currentActive.models?.find(m => m.id === modelId)
+      currentActive = {
+        ...currentActive,
+        current_model: modelId,
+        current_model_name: matched?.name ?? modelId,
+      }
+      return { ok: true, binding: currentActive }
+    }
+    if (method === 'acp.set_mode') {
+      const modeId = String(params.mode_id ?? '')
+      if (!currentActive || modeId === 'bad-mode') {
+        return { ok: false, error: `Mode ${modeId} is not supported` }
+      }
+      const matched = currentActive.modes?.find(m => m.id === modeId)
+      currentActive = {
+        ...currentActive,
+        current_mode: modeId,
+        current_mode_name: matched?.name ?? modeId,
+      }
+      return { ok: true, binding: currentActive }
+    }
+    if (method === 'acp.set_config_option') {
+      const configId = String(params.config_id ?? '')
+      const value = String(params.value ?? '')
+      if (!currentActive || value === 'invalid') {
+        return { ok: false, error: `Config ${configId}=${value} is not supported` }
+      }
+      const updatedConfigs = currentActive.config_options?.map(opt =>
+        opt.id === configId ? { ...opt, current_value: value } : opt,
+      )
+      currentActive = {
+        ...currentActive,
+        ...(updatedConfigs ? { config_options: updatedConfigs } : {}),
+        ...(configId === (currentActive.thought_level_config_id ?? 'thought_level')
+          ? { thought_level: value }
+          : {}),
+      }
+      return { ok: true, binding: currentActive }
+    }
+    if (method === 'acp.disconnect') {
+      currentActive = null
+      return { ok: true }
+    }
+    if (method === 'acp.cancel') {
+      return { ok: true }
+    }
+    if (method === 'turn.cancel') {
+      return { ok: true }
+    }
+    if (method === 'session.side_question') {
+      return {
+        ok: true,
+        answer: `Answered with ${String(params.model || 'session-default')}: ${String(params.question ?? '')}`,
+        model: String(params.model || 'claude-opus-4-6'),
+      }
+    }
+    if (method === 'session.list' || method === 'session.active_list') {
+      return { ok: true, sessions: [] }
+    }
+    if (method === 'swarm.status') {
+      return { ok: true, active: false }
+    }
+    if (method === 'learning.list') {
+      return { ok: true, proposals: [], lessons: [], counts: { pending_proposals: 0, pending_lessons: 0 } }
+    }
+    if (method === 'fetch_models') {
+      return {
+        ok: true,
+        models: ['claude-opus-4-6', 'claude-haiku-4-5', 'gemini-2.5-flash'],
+      }
+    }
+    return { ok: true }
+  }
+
+  const xerxes: XerxesLike = {
+    call,
+    onEvent: handler => {
+      listeners.add(handler)
+      return () => {
+        listeners.delete(handler)
+      }
+    },
+  }
+
+  return {
+    calls,
+    emit: (type, payload) => {
+      for (const listener of listeners) listener({ type, payload })
+    },
+    xerxes,
+  }
+}
+
+function createMemoryStorage(): Storage {
+  const map = new Map<string, string>()
+  return {
+    get length() {
+      return map.size
+    },
+    clear() {
+      map.clear()
+    },
+    getItem(key: string) {
+      return map.get(key) ?? null
+    },
+    key(index: number) {
+      return [...map.keys()][index] ?? null
+    },
+    removeItem(key: string) {
+      map.delete(key)
+    },
+    setItem(key: string, value: string) {
+      map.set(key, value)
+    },
+  }
+}
+
+const originalWindow = (globalThis as Record<string, unknown>).window
+const originalLocalStorage = (globalThis as Record<string, unknown>).localStorage
+let activeStore: Store | null = null
+
+async function setupConnectedStore(
+  overrides: Partial<Record<string, (params: Record<string, unknown>) => Record<string, unknown>>> = {},
+): Promise<{ store: Store; bridge: MockBridge; storage: Storage }> {
+  const bridge = createMockBridge(overrides)
+  const storage = createMemoryStorage()
+  ;(globalThis as Record<string, unknown>).localStorage = storage
+  ;(globalThis as Record<string, unknown>).window = { xerxes: bridge.xerxes }
+  const store = new Store()
+  activeStore = store
+  store.start(bridge.xerxes)
+  for (let i = 0; i < 40 && store.getSnapshot().connection !== 'online'; i += 1) {
+    await Bun.sleep(5)
+  }
+  await Bun.sleep(10)
+  return { store, bridge, storage }
+}
+
+function sampleSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
+  const base = new Store().getSnapshot()
+  return {
+    ...base,
+    connection: 'online',
+    noWorkspace: false,
+    cwd: '/workspace/xerxes',
+    branch: 'main',
+    currentId: 'sess-acp-1',
+    currentTitle: 'Runtime & Side Question',
+    sessionKey: 'desktop-test',
+    model: 'claude-opus-4-6',
+    models: [
+      { id: 'claude-opus-4-6', provider: 'Anthropic', label: 'Claude Opus 4.6' },
+      { id: 'claude-haiku-4-5', provider: 'Anthropic', label: 'Claude Haiku 4.5' },
+      { id: 'gemini-2.5-flash', provider: 'Google', label: 'Gemini 2.5 Flash' },
+    ],
+    acpAgents: sampleAgents,
+    acpBinding: null,
+    acpConnecting: false,
+    acpError: null,
+    ...overrides,
+  }
+}
+
+afterEach(() => {
+  activeStore = null
+  if (originalWindow === undefined) delete (globalThis as Record<string, unknown>).window
+  else (globalThis as Record<string, unknown>).window = originalWindow
+  if (originalLocalStorage === undefined) delete (globalThis as Record<string, unknown>).localStorage
+  else (globalThis as Record<string, unknown>).localStorage = originalLocalStorage
+})
+
+describe('Side Question state, model selector & read-only tool pills', () => {
+  test('parses /btw and /side slash commands including --model / -m flags', () => {
+    expect(parseSideQuestionSlashCommand('/btw')).toEqual({ kind: 'open' })
+    expect(parseSideQuestionSlashCommand('/side')).toEqual({ kind: 'open' })
+    expect(parseSideQuestionSlashCommand('/btw Where is ACP wired?')).toEqual({
+      kind: 'ask',
+      question: 'Where is ACP wired?',
+    })
+    expect(parseSideQuestionSlashCommand('/btw --model gemini-2.5-flash Explain server.ts')).toEqual({
+      kind: 'ask',
+      question: 'Explain server.ts',
+      model: 'gemini-2.5-flash',
+    })
+    expect(parseSideQuestionSlashCommand('/side -m claude-haiku-4-5 Check diff')).toEqual({
+      kind: 'ask',
+      question: 'Check diff',
+      model: 'claude-haiku-4-5',
+    })
+  })
+
+  test('folds btw_event tool events in place, formats labels cleanly, and settles running tools on end', () => {
+    const t1 = applyBtwEventPayload([], {
+      request_id: 'btw-1',
+      kind: 'begin',
+      question: 'How does handleSideQuestionRpc pick a model?',
+      model: 'gemini-2.5-flash',
+    })
+    expect(t1?.streaming).toBe(true)
+
+    const t2 = applyBtwEventPayload(t1!.turns, {
+      request_id: 'btw-1',
+      kind: 'tool',
+      tool: { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'running' },
+    })
+    expect(t2?.turns[0]?.tools).toEqual([
+      { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'running' },
+    ])
+
+    const t3 = applyBtwEventPayload(t2!.turns, {
+      request_id: 'btw-1',
+      kind: 'tool',
+      tool: { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' },
+    })
+    expect(t3?.turns[0]?.tools).toEqual([
+      { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' },
+    ])
+
+    const t4 = applyBtwEventPayload(t3!.turns, {
+      request_id: 'btw-1',
+      kind: 'tool',
+      tool: { name: 'GrepTool', target: 'handleSideQuestionRpc', status: 'running' },
+    })
+    const t5 = applyBtwEventPayload(t4!.turns, {
+      request_id: 'btw-1',
+      kind: 'end',
+      answer: 'It reads `params.model` and resolves a matching profile.',
+      model: 'gemini-2.5-flash',
+    })
+    expect(t5?.streaming).toBe(false)
+    expect(t5?.turns[0]?.tools).toEqual([
+      { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' },
+      { name: 'GrepTool', target: 'handleSideQuestionRpc', status: 'done' },
+    ])
+
+    expect(formatSideQuestionToolLabel({ name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' })).toEqual({
+      verb: 'Read',
+      target: 'server.ts',
+    })
+    expect(formatSideQuestionToolLabel({ name: 'GrepTool', target: 'handleSideQuestionRpc', status: 'done' })).toEqual({
+      verb: 'Grep',
+      target: 'handleSideQuestionRpc',
+    })
+  })
+
+  test('store persists sideQuestionModel in localStorage and sends model on session.side_question', async () => {
+    const { store, bridge, storage } = await setupConnectedStore()
+    bridge.calls.length = 0
+
+    store.setSideQuestionModel('gemini-2.5-flash')
+    expect(store.getSnapshot().sideQuestionModel).toBe('gemini-2.5-flash')
+    expect(storage.getItem('xerxes.sideQuestion.model')).toBe('gemini-2.5-flash')
+
+    expect(await store.askSideQuestion('Summarize recent edits')).toBe(true)
+    const call = bridge.calls.find(c => c.method === 'session.side_question')
+    expect(call?.params.model).toBe('gemini-2.5-flash')
+    expect(store.getSnapshot().sideQuestionTurns?.[0]?.model).toBe('gemini-2.5-flash')
+
+    // Explicit per-question override via `/btw --model ...`
+    bridge.calls.length = 0
+    expect(await store.submit('/btw --model claude-haiku-4-5 Quick check')).toBe(true)
+    const overrideCall = bridge.calls.find(c => c.method === 'session.side_question')
+    expect(overrideCall?.params.model).toBe('claude-haiku-4-5')
+
+    // Clearing restores session default (removes key)
+    store.setSideQuestionModel('')
+    expect(storage.getItem('xerxes.sideQuestion.model')).toBeNull()
+  })
+
+  test('Desktop SideQuestionPanel and VS Code SideQuestionCard render Model Selector, tool pills, and thinking mark', () => {
+    const snap = sampleSnapshot({
+      turnActive: true,
+      sideQuestionModel: 'gemini-2.5-flash',
+      sideQuestionStreaming: true,
+      sideQuestionTurns: [
+        {
+          requestId: 'sq-1',
+          question: 'Where is handleSideQuestionRpc defined?',
+          answer: 'In `xerxes/src/daemon/server.ts`.',
+          model: 'gemini-2.5-flash',
+          status: 'done',
+          tools: [
+            { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' },
+            { name: 'GrepTool', target: 'handleSideQuestionRpc', status: 'done' },
+          ],
+        },
+        {
+          requestId: 'sq-2',
+          question: 'Inspecting live follow-up?',
+          answer: '',
+          model: 'gemini-2.5-flash',
+          status: 'streaming',
+          tools: [{ name: 'GlobTool', target: 'xerxes/src/acp/*.ts', status: 'running' }],
+        },
+      ],
+    })
+
+    const desktopHtml = renderToStaticMarkup(
+      createElement(SideQuestionPanel, { snap, defaultModelPickerOpen: true }),
+    )
+    expect(desktopHtml).toContain('aria-label="Side question model"')
+    expect(desktopHtml).toContain('btw-model-pop')
+    expect(desktopHtml).not.toContain('<select')
+    expect(desktopHtml).toContain('Session default')
+    expect(desktopHtml).toContain('claude-opus-4-6')
+    expect(desktopHtml).toContain('Gemini 2.5 Flash')
+    expect(desktopHtml).toContain('Claude Haiku 4.5')
+    expect(desktopHtml).toContain('side-question__tool-pill')
+    expect(desktopHtml).toContain('server.ts')
+    expect(desktopHtml).toContain('handleSideQuestionRpc')
+    expect(desktopHtml).toContain('Inspecting files…')
+
+    // VS Code btw tool event parser & card rendering
+    const parsedTool = parseVscodeBtwEvent({
+      session_id: 'sess-acp-1',
+      request_id: 'xv-1',
+      kind: 'tool',
+      tool: { name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'running' },
+    })
+    expect(parsedTool?.kind).toBe('tool')
+    const folded = foldVscodeBtwEvent(
+      [{ requestId: 'xv-1', question: 'Check server?', answer: '', status: 'streaming' }],
+      parsedTool!,
+    )
+    expect(folded[0]?.tools).toHaveLength(1)
+
+    const entries: readonly VscodeBtwEntry[] = [
+      {
+        requestId: 'xv-1',
+        question: 'Check server?',
+        answer: 'Checked `server.ts`.',
+        model: 'gemini-2.5-flash',
+        status: 'done',
+        tools: [{ name: 'ReadFile', target: 'xerxes/src/daemon/server.ts', status: 'done' }],
+      },
+    ]
+    const vscodeCardHtml = renderToStaticMarkup(
+      createElement(SideQuestionCard, {
+        snap,
+        entries,
+        defaultModelPickerOpen: true,
+        onEntriesChange: () => {},
+        onClear: () => {},
+        onClose: () => {},
+      }),
+    )
+    expect(vscodeCardHtml).toContain('aria-label="Side question model"')
+    expect(vscodeCardHtml).toContain('btw-model-pop')
+    expect(vscodeCardHtml).not.toContain('<select')
+    expect(vscodeCardHtml).toContain('Session default')
+    expect(vscodeCardHtml).toContain('claude-opus-4-6')
+    expect(vscodeCardHtml).toContain('side-question__tool-pill')
+    expect(vscodeCardHtml).toContain('server.ts')
+  })
+})
+
+describe('External ACP Agent Runtime Switcher (Store, Desktop & VS Code)', () => {
+  test('store loads acp.agents on connect, connects/disconnects, handles errors, acp_status events, and acp.cancel on Stop', async () => {
+    const { store, bridge } = await setupConnectedStore()
+    expect(bridge.calls.some(c => c.method === 'acp.agents')).toBe(true)
+    expect(store.getSnapshot().acpAgents).toHaveLength(3)
+    expect(store.getSnapshot().acpBinding).toBeNull()
+
+    // Connect Claude Code
+    bridge.calls.length = 0
+    expect(await store.connectAcpAgent('claude-code')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({
+      agent_id: 'claude-code',
+      cwd: '/workspace/xerxes',
+    })
+    expect(store.getSnapshot().acpBinding?.agent_id).toBe('claude-code')
+    expect(store.getSnapshot().acpBinding?.connected).toBe(true)
+
+    // Cancel routes only through turn.cancel (no double acp.cancel + turn.cancel)
+    bridge.calls.length = 0
+    store.cancel()
+    await Bun.sleep(5)
+    expect(bridge.calls.some(c => c.method === 'turn.cancel')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'acp.cancel')).toBe(false)
+
+    // Missing binary returns typed error with install hint
+    expect(await store.connectAcpAgent('antigravity')).toBe(false)
+    expect(store.getSnapshot().acpError).toContain('Antigravity CLI not found')
+    expect(store.getSnapshot().acpError).toContain('agy acp')
+
+    // Custom ACP command connects cleanly with external models & modes
+    bridge.calls.length = 0
+    expect(await store.connectAcpAgent('antigravity', { command: 'agy', args: ['acp'] })).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({
+      agent_id: 'antigravity',
+      command: 'agy',
+      args: ['acp'],
+    })
+    expect(store.getSnapshot().acpBinding?.agent_id).toBe('antigravity')
+    expect(store.getSnapshot().acpBinding?.current_model).toBe('gemini-4-carbon-high')
+    expect(store.getSnapshot().acpBinding?.current_model_name).toBe('Gemini 4 Carbon (High)')
+    expect(store.getSnapshot().acpBinding?.models).toHaveLength(7)
+    expect(store.getSnapshot().acpBinding?.modes).toHaveLength(2)
+
+    // Switch external ACP model via acp.set_model
+    bridge.calls.length = 0
+    expect(await store.setAcpModel('gemini-3-pro')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.set_model')?.params).toMatchObject({
+      model_id: 'gemini-3-pro',
+    })
+    expect(store.getSnapshot().acpBinding?.current_model).toBe('gemini-3-pro')
+    expect(store.getSnapshot().acpBinding?.current_model_name).toBe('Gemini 3 Pro')
+
+    // Invalid external model surfaces error without breaking binding
+    expect(await store.setAcpModel('bad-model')).toBe(false)
+    expect(store.getSnapshot().acpError).toContain('not supported')
+    expect(store.getSnapshot().acpBinding?.current_model).toBe('gemini-3-pro')
+
+    // Switch external ACP mode via acp.set_mode
+    bridge.calls.length = 0
+    expect(await store.setAcpMode('fast')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.set_mode')?.params).toMatchObject({
+      mode_id: 'fast',
+    })
+    expect(store.getSnapshot().acpBinding?.current_mode).toBe('fast')
+    expect(store.getSnapshot().acpBinding?.current_mode_name).toBe('Fast')
+
+    // Live acp_status event updates binding including model metadata
+    bridge.emit('acp_status', {
+      session_id: 'sess-acp-1',
+      binding: sampleClaudeBinding,
+    })
+    expect(store.getSnapshot().acpBinding?.agent_id).toBe('claude-code')
+    expect(store.getSnapshot().acpBinding?.external_session_id).toBe('ext-claude-8f31ab92')
+    expect(store.getSnapshot().acpBinding?.current_model).toBe('claude-sonnet-4-6')
+    expect(store.getSnapshot().acpBinding?.models).toHaveLength(3)
+
+    // Connecting 'xerxes' disconnects external ACP binding
+    bridge.calls.length = 0
+    expect(await store.connectAcpAgent('xerxes')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'acp.disconnect')).toBe(true)
+    expect(store.getSnapshot().acpBinding).toBeNull()
+  })
+
+  test('External ACP swaps composer controls: hides Xerxes native model/Plan/Agents and shows ACP model & mode pickers', () => {
+    ;(globalThis as Record<string, unknown>).window = { xerxes: createMockBridge().xerxes }
+
+    // 1. Connected to Antigravity ACP (with models + modes), while native Xerxes model is gpt-6.2-astra
+    const agySnap = sampleSnapshot({
+      model: 'gpt-6.2-astra',
+      permissionMode: 'accept-all',
+      reasoningEffort: 'high',
+      reasoningLevels: [{ effort: 'high', description: 'High reasoning' }],
+      acpBinding: sampleAntigravityBinding,
+    })
+
+    // Normal connected state stays calm: no noisy "Connected via" banner above the composer
+    const agyBannerHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: agySnap }))
+    expect(agyBannerHtml).toBe('')
+
+    // Model picker popover lists Antigravity's models and shows filter bar (> 6 models)
+    const modelPopoverHtml = renderToStaticMarkup(
+      createElement(AcpModelPicker, { snap: agySnap, defaultOpen: true }),
+    )
+    expect(modelPopoverHtml).toContain('Antigravity models')
+    expect(modelPopoverHtml).toContain('Gemini 4 Carbon (High)')
+    expect(modelPopoverHtml).toContain('Gemini 3 Pro')
+    expect(modelPopoverHtml).toContain('Filter models…')
+    expect(modelPopoverHtml).toContain('aria-selected="true"')
+    expect(modelPopoverHtml).not.toContain('gpt-6.2-astra')
+
+    // Mode picker popover lists Antigravity's modes
+    const modePopoverHtml = renderToStaticMarkup(
+      createElement(AcpModePicker, { snap: agySnap, defaultOpen: true }),
+    )
+    expect(modePopoverHtml).toContain('Antigravity mode')
+    expect(modePopoverHtml).toContain('Planning')
+    expect(modePopoverHtml).toContain('Fast')
+
+    // Desktop Shell composer hides Xerxes native model/Plan/Agents/effort AND hides Xerxes Permissions when AGY modes own approvals
+    const shellAgyHtml = renderToStaticMarkup(createElement(Shell, { snap: agySnap }))
+    expect(shellAgyHtml).toContain('Gemini 4 Carbon (High)')
+    expect(shellAgyHtml).toContain('Planning')
+    expect(shellAgyHtml).not.toContain('Accept all')
+    expect(shellAgyHtml).not.toContain('composer__perm')
+    expect(shellAgyHtml).toContain('Ask aside')
+    expect(shellAgyHtml).toContain('composer__runtime')
+    expect(shellAgyHtml).toContain('composer__acp-model')
+    expect(shellAgyHtml).toContain('composer__acp-mode')
+    expect(shellAgyHtml).not.toContain('gpt-6.2-astra')
+    expect(shellAgyHtml).not.toContain('Agents · Auto')
+    expect(shellAgyHtml).not.toContain('composer__plan')
+    expect(shellAgyHtml).not.toContain('composer__effort')
+
+    // VS Code VscodeChat also swaps composer controls cleanly and hides Xerxes Permissions when AGY modes exist
+    const vscodeAgyHtml = renderToStaticMarkup(createElement(VscodeChat, { snap: agySnap }))
+    expect(vscodeAgyHtml).toContain('Gemini 4 Carbon (High)')
+    expect(vscodeAgyHtml).toContain('Planning')
+    expect(vscodeAgyHtml).not.toContain('Accept all')
+    expect(vscodeAgyHtml).not.toContain('composer__perm')
+    expect(vscodeAgyHtml).not.toContain('gpt-6.2-astra')
+    expect(vscodeAgyHtml).not.toContain('Agents · Auto')
+    expect(vscodeAgyHtml).not.toContain('composer__plan')
+
+    // External ACP without modes ALSO hides Xerxes native Permissions (external ACP owns its own approvals)
+    const claudeNoModesSnap = sampleSnapshot({
+      permissionMode: 'accept-all',
+      acpBinding: sampleClaudeBinding,
+    })
+    const claudeShellHtml = renderToStaticMarkup(createElement(Shell, { snap: claudeNoModesSnap }))
+    expect(claudeShellHtml).not.toContain('composer__perm')
+    expect(claudeShellHtml).not.toContain('Accept all')
+
+    // 2. External ACP agent without advertised models/modes renders calm non-misleading default label (never gpt-6.2-astra)
+    const noModelsSnap = sampleSnapshot({
+      model: 'gpt-6.2-astra',
+      acpBinding: {
+        session_id: 'sess-acp-1',
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/workspace/xerxes',
+        connected: true,
+      },
+    })
+    const staticModelHtml = renderToStaticMarkup(createElement(AcpModelPicker, { snap: noModelsSnap }))
+    expect(staticModelHtml).toContain('Antigravity default')
+    expect(staticModelHtml).toContain('acp-model-chip--static')
+    expect(staticModelHtml).toContain('manages model selection')
+    expect(staticModelHtml).not.toContain('gpt-6.2-astra')
+    expect(renderToStaticMarkup(createElement(AcpModePicker, { snap: noModelsSnap }))).toBe('')
+
+    // 3. Disconnected back to Xerxes Native restores native model picker + Plan + Agents · Auto + effort
+    const nativeSnap = sampleSnapshot({
+      model: 'gpt-6.2-astra',
+      permissionMode: 'accept-all',
+      reasoningEffort: 'high',
+      reasoningLevels: [{ effort: 'high', description: 'High reasoning' }],
+      acpBinding: null,
+    })
+    const shellNativeHtml = renderToStaticMarkup(createElement(Shell, { snap: nativeSnap }))
+    expect(shellNativeHtml).toContain('gpt-6.2-astra')
+    expect(shellNativeHtml).toContain('Agents · Auto')
+    expect(shellNativeHtml).toContain('composer__plan')
+    expect(shellNativeHtml).toContain('composer__effort')
+    expect(shellNativeHtml).not.toContain('composer__acp-model')
+    expect(shellNativeHtml).not.toContain('composer__acp-mode')
+    expect(shellNativeHtml).not.toContain('acp-banner')
+  })
+
+  test('parseCustomArgs and resolveRuntimeList handle quotes and fallback defaults cleanly', () => {
+    expect(parseCustomArgs('acp --cwd "/tmp/my app" --stdio')).toEqual(['acp', '--cwd', '/tmp/my app', '--stdio'])
+    expect(resolveRuntimeList([]).map(a => a.id)).toEqual(['xerxes', 'claude-code', 'antigravity'])
+  })
+
+  test('AcpRuntimePicker, AcpActiveBanner, Welcome brand emblem, ActivityGroup, and VscodeChat render cleanly', () => {
+    const nativeSnap = sampleSnapshot()
+    const pickerHtml = renderToStaticMarkup(
+      createElement(AcpRuntimePicker, { snap: nativeSnap, defaultOpen: true }),
+    )
+    expect(pickerHtml).toContain('aria-label="Agent runtime"')
+    expect(pickerHtml).toContain('Xerxes')
+    expect(pickerHtml).toContain('Built-in runtime')
+    expect(pickerHtml).toContain('Claude Code')
+    expect(pickerHtml).toContain('Claude Code CLI')
+    expect(pickerHtml).toContain('/Users/erfan/.local/bin/claude')
+    expect(pickerHtml).toContain('Antigravity')
+    expect(pickerHtml).toContain('Not installed')
+    expect(pickerHtml).toContain('Custom ACP…')
+    // Clean Claude Code menu: zero chunky header bar, transport pill badges, green status dots, backtick jargon, or footer bloat
+    expect(pickerHtml).not.toContain('acp-pop__head')
+    expect(pickerHtml).not.toContain('acp-row__transport')
+    expect(pickerHtml).not.toContain('acp-row__dot')
+    expect(pickerHtml).not.toContain('acp-pop__foot')
+    expect(pickerHtml).not.toContain('stdio JSON-RPC')
+    expect(pickerHtml).not.toContain('This thread · also')
+    expect(pickerHtml).not.toContain('Use custom command…')
+
+    expect(renderToStaticMarkup(createElement(AcpActiveBanner, { snap: nativeSnap }))).toBe('')
+
+    const boundSnap = sampleSnapshot({ acpBinding: sampleClaudeBinding })
+    const bannerHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: boundSnap }))
+    expect(bannerHtml).toBe('')
+
+    // Desktop Shell Welcome renders XerxesBrandEmblem + quiet borderless AcpRuntimePicker (no noisy connected banner)
+    ;(globalThis as Record<string, unknown>).window = { xerxes: createMockBridge().xerxes }
+    const shellHtml = renderToStaticMarkup(createElement(Shell, { snap: boundSnap }))
+    expect(shellHtml).toContain('xerxes-brand-emblem')
+    expect(shellHtml).toContain('composer__runtime')
+    expect(shellHtml).toContain('Claude Code')
+    expect(shellHtml).not.toContain('Connected via')
+
+    // VS Code VscodeChat renders quiet header ACP pill + composer runtime switcher
+    const vscodeHtml = renderToStaticMarkup(createElement(VscodeChat, { snap: boundSnap }))
+    expect(vscodeHtml).toContain('xv-pill--acp')
+    expect(vscodeHtml).toContain('composer__runtime')
+    expect(vscodeHtml).toContain('Claude Code')
+    expect(vscodeHtml).not.toContain('Connected via')
+
+    // ActivityGroup delegates to ToolTimelineGroup cleanly
+    const blocks: readonly Block[] = [
+      {
+        kind: 'tools',
+        id: 1,
+        running: false,
+        items: [
+          {
+            id: 't1',
+            verb: 'ReadFile',
+            name: 'ReadFile',
+            arg: 'App.tsx',
+            dur: '0.4s',
+            state: 'done',
+            input: '{"path":"App.tsx"}',
+            output: 'export function App() {}',
+          },
+        ],
+      },
+    ]
+    const groupHtml = renderToStaticMarkup(
+      createElement(ActivityGroup, { blocks, active: false, turnActive: false }),
+    )
+    expect(groupHtml.length).toBeGreaterThan(0)
+  })
+})
+
+describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & Chrome', () => {
+  test('PascalCase AGY read_file, edit_file, write_file, run_command, structured diff, envelope stripping & foldChange', async () => {
+    // 1. blocks.ts name normalization & editStatsOf
+    expect(isEditTool('edit_file')).toBe(true)
+    expect(isEditTool('write_file')).toBe(true)
+    expect(isEditTool('read_file')).toBe(false)
+    expect(editStatsOf('edit_file', { Path: 'src/app.ts', Target: 'const a = 1', Replacement: 'const a = 2\nconst b = 3' })).toEqual({
+      path: 'src/app.ts',
+      adds: 2,
+      dels: 1,
+      isNew: false,
+    })
+    expect(editStatsOf('write_file', { Path: 'src/new.ts', Content: 'export const x = 1\nexport const y = 2\n' })).toEqual({
+      path: 'src/new.ts',
+      adds: 2,
+      dels: 0,
+      isNew: true,
+    })
+    // Structured whole-file diff trims unchanged prefix/suffix for accurate stats
+    expect(editStatsOf(
+      'edit_file',
+      {},
+      {
+        path: 'src/large.ts',
+        old_text: 'line1\nline2\nconst oldVal = 1\nline4\nline5\n',
+        new_text: 'line1\nline2\nconst newVal = 2\nconst extra = 3\nline4\nline5\n',
+      },
+    )).toEqual({
+      path: 'src/large.ts',
+      adds: 2,
+      dels: 1,
+      isNew: false,
+    })
+
+    // 2. FileToolRow recognizes AGY PascalCase & structured diff
+    expect(fileToolOf({
+      name: 'read_file',
+      input: JSON.stringify({ Path: '/repo/src/index.ts', StartLine: 15 }),
+    })).toEqual({ kind: 'read', path: '/repo/src/index.ts', offset: 14 })
+
+    const agyEditItem: ToolItem = {
+      id: 'agy-edit-1',
+      verb: 'edit_file',
+      arg: '/repo/src/index.ts',
+      dur: '0.3s',
+      state: 'done',
+      name: 'edit_file',
+      input: JSON.stringify({ Path: '/repo/src/index.ts', Target: 'const v = 1', Replacement: 'const v = 2\nconst w = 3' }),
+      output: 'Edited /repo/src/index.ts',
+    }
+    const agyEditTool = fileToolOf(agyEditItem)
+    expect(agyEditTool).toEqual({
+      kind: 'edit',
+      path: '/repo/src/index.ts',
+      before: 'const v = 1',
+      after: 'const v = 2\nconst w = 3',
+      wholeFile: false,
+    })
+    expect(fileToolStats(agyEditItem)).toEqual({ adds: 2, dels: 1 })
+    const editRowHtml = renderToStaticMarkup(createElement(FileToolRow, { item: agyEditItem, tool: agyEditTool!, failed: false }))
+    expect(editRowHtml).toContain('index.ts')
+    expect(editRowHtml).toContain('>+2<')
+    expect(editRowHtml).toContain('>−1<')
+    expect(editRowHtml).toContain('filetool__line--del')
+    expect(editRowHtml).toContain('filetool__line--add')
+
+    // Structured diff fallback when arguments have no Target/Replacement
+    const builder = new BlockBuilder()
+    builder.push('tool_call', { id: 'agy-diff-only', name: 'edit_file', arguments: {}, locations: [{ path: 'src/onlyDiff.ts' }] })
+    builder.push('tool_result', {
+      tool_call_id: 'agy-diff-only',
+      name: 'edit_file',
+      duration_ms: 250,
+      diff: {
+        path: 'src/onlyDiff.ts',
+        old_text: 'a\nb\nc\nd\nOLD\ne\nf\ng\nh\n',
+        new_text: 'a\nb\nc\nd\nNEW\ne\nf\ng\nh\n',
+      },
+      result: 'Updated src/onlyDiff.ts',
+    })
+    const builtTools = builder.all().flatMap(b => b.kind === 'tools' ? b.items : [])
+    expect(builtTools).toHaveLength(1)
+    const builtDiffItem = builtTools[0]!
+    expect(builtDiffItem.path).toBe('src/onlyDiff.ts')
+    expect(fileToolStats(builtDiffItem)).toEqual({ adds: 1, dels: 1 })
+    const diffOnlyRowHtml = renderToStaticMarkup(createElement(ToolCallRow, { item: builtDiffItem, label: 'Edit file' }))
+    expect(diffOnlyRowHtml).toContain('onlyDiff.ts')
+    expect(diffOnlyRowHtml).toContain('filetool__line--del')
+    expect(diffOnlyRowHtml).toContain('filetool__line--add')
+    expect(diffOnlyRowHtml).toContain('OLD')
+    expect(diffOnlyRowHtml).toContain('NEW')
+
+    // 3. Execution.tsx AGY run_command + exit_code + envelope stripping
+    const rawEnvelope = 'Created At: 2026-11-22T08:00:00+03:00\nCompleted At: 2026-11-22T08:00:01+03:00\nCommand exited with code 0.\n\nCommand output:\nprobe-shell-ok\n'
+    expect(stripAgyCommandEnvelope(rawEnvelope)).toEqual({
+      stripped: true,
+      text: 'probe-shell-ok\n',
+      exitCode: 0,
+    })
+
+    const agyCmdOk: ToolItem = {
+      id: 'agy-cmd-1',
+      verb: 'run_command',
+      arg: 'echo probe-shell-ok',
+      dur: '0.4s',
+      state: 'done',
+      name: 'run_command',
+      input: JSON.stringify({ CommandLine: 'echo probe-shell-ok', toolSummary: 'Verify shell probe', WaitMsBeforeAsync: 5000 }),
+      output: JSON.stringify({ output: rawEnvelope, exit_code: 0 }),
+    }
+    expect(toolHasFailed(agyCmdOk)).toBe(false)
+    expect(executionView(agyCmdOk)).toMatchObject({
+      command: 'echo probe-shell-ok',
+      summary: 'Verify shell probe',
+      stdout: 'probe-shell-ok\n',
+      exitCode: 0,
+    })
+    expect(classifyToolItem(agyCmdOk)).toMatchObject({
+      category: 'shell',
+      badge: 'Verify shell probe',
+      target: 'echo probe-shell-ok',
+      metaPill: 'exit 0',
+      metaTone: 'ok',
+    })
+    const execDetailsHtml = renderToStaticMarkup(createElement(ExecutionDetails, { item: agyCmdOk }))
+    const execVisibleHtml = execDetailsHtml.split('<details class="execution__raw">')[0] ?? execDetailsHtml
+    expect(execVisibleHtml).toContain('echo probe-shell-ok')
+    expect(execVisibleHtml).toContain('probe-shell-ok')
+    expect(execVisibleHtml).not.toContain('Created At:')
+    expect(execVisibleHtml).not.toContain('Command output:')
+
+    const agyCmdFail: ToolItem = {
+      ...agyCmdOk,
+      id: 'agy-cmd-fail',
+      output: JSON.stringify({ output: 'Created At: 2026-11-22T08:00:00Z\nCompleted At: 2026-11-22T08:00:01Z\nCommand exited with code 2\n\nCommand output:\nfatal: bad ref\n', exit_code: 2 }),
+    }
+    expect(toolHasFailed(agyCmdFail)).toBe(true)
+    expect(executionView(agyCmdFail)).toMatchObject({ exitCode: 2, stdout: 'fatal: bad ref\n' })
+
+    // 4. ToolTimelineGroup accurately summarizes AGY edits, writes, reads, and commands
+    const agyWriteItem: ToolItem = {
+      id: 'agy-write-1',
+      verb: 'write_file',
+      arg: '/repo/src/created.ts',
+      dur: '0.2s',
+      state: 'done',
+      name: 'write_file',
+      input: JSON.stringify({ Path: '/repo/src/created.ts', Content: 'export const ok = true\nexport const n = 2\n' }),
+      output: 'Wrote file',
+    }
+    const agyReadItem: ToolItem = {
+      id: 'agy-read-1',
+      verb: 'read_file',
+      arg: '/repo/README.md',
+      dur: '0.1s',
+      state: 'done',
+      name: 'read_file',
+      input: JSON.stringify({ Path: '/repo/README.md', StartLine: 1 }),
+      output: '# Xerxes\n',
+    }
+    const timelineBlocks: readonly Block[] = [
+      { kind: 'tools', id: 1, running: false, items: [agyEditItem, agyWriteItem, agyCmdOk, agyReadItem] },
+    ]
+    const timelineStats = summarizeToolTimeline(timelineBlocks, false)
+    expect(timelineStats.adds).toBe(4)
+    expect(timelineStats.dels).toBe(1)
+    expect(timelineStats.headline).toContain('Edited 2 files')
+    expect(timelineStats.headline).toContain('Ran 1 command')
+    expect(timelineStats.headline).toContain('Read 1 file')
+    const timelineCollapsedHtml = renderToStaticMarkup(createElement(ToolTimelineGroup, { blocks: timelineBlocks, active: false, turnActive: false }))
+    expect(timelineCollapsedHtml).toContain('Edited 2 files · Ran 1 command · Read 1 file')
+    expect(timelineCollapsedHtml).toContain('+4 −1')
+    expect(timelineCollapsedHtml).not.toContain('tool-timeline__status-icon--done')
+    const timelineExpandedHtml = renderToStaticMarkup(createElement(ToolTimelineGroup, { blocks: timelineBlocks, active: false, turnActive: false, defaultOpen: true }))
+    expect(timelineExpandedHtml).toContain('>+4<')
+    expect(timelineExpandedHtml).toContain('>−1<')
+
+    // 5. store.ts foldChange populates snap.changes for AGY PascalCase & structured diff calls
+    const { store, bridge } = await setupConnectedStore()
+    bridge.emit('turn_begin', { user_input: 'Update files' })
+    bridge.emit('tool_call', {
+      id: 'tc-agy-1',
+      name: 'edit_file',
+      arguments: { Path: 'src/a.ts', Target: 'oldA', Replacement: 'newA1\nnewA2' },
+    })
+    bridge.emit('tool_call', {
+      id: 'tc-agy-2',
+      name: 'write_file',
+      arguments: { Path: 'src/b.ts', Content: 'line1\nline2\nline3\n' },
+    })
+    bridge.emit('tool_call', { id: 'tc-agy-3', name: 'edit_file', arguments: {} })
+    bridge.emit('tool_result', {
+      tool_call_id: 'tc-agy-3',
+      name: 'edit_file',
+      diff: { path: 'src/c.ts', old_text: 'top\nbeforeC\nend\n', new_text: 'top\nafterC\nend\n' },
+      result: 'ok',
+    })
+    const changes = store.getSnapshot().changes
+    expect(changes.map(c => c.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts'])
+    expect(changes[0]).toMatchObject({ path: 'src/a.ts', adds: 2, dels: 1, isNew: false })
+    expect(changes[1]).toMatchObject({ path: 'src/b.ts', adds: 3, dels: 0, isNew: true })
+    expect(changes[2]).toMatchObject({ path: 'src/c.ts', adds: 1, dels: 1, isNew: false })
+  })
+
+  test('Approval card displays AGY CommandLine, renders inline diff preview, respects allowPermanent === false, and updates keyboard handling', async () => {
+    const { store, bridge } = await setupConnectedStore()
+
+    // 1. AGY run_command approval with allow_permanent: false + explicit options + AGY plumbing keys hidden cleanly
+    bridge.emit('approval_request', {
+      id: 'appr-cmd-1',
+      tool_name: 'run_command',
+      action: 'run_command',
+      inputs: {
+        CommandLine: 'bun test xerxes/test/agyAcpIntegration.test.ts',
+        WaitMsBeforeAsync: 5000,
+        toolSummary: 'Run ACP integration tests',
+        SafeToAutoRun: false,
+        Blocking: true,
+        IsDaemon: false,
+      },
+      cwd: '/workspace/xerxes',
+      allow_permanent: false,
+      options: [
+        { option_id: 'allow', name: 'Allow', kind: 'allow_once' },
+        { option_id: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    })
+    const cmdApproval = store.getSnapshot().approval
+    expect(cmdApproval?.allowPermanent).toBe(false)
+    expect(cmdApproval?.options).toHaveLength(2)
+
+    const cmdCardHtml = renderToStaticMarkup(
+      createElement(ApprovalCard, { approval: cmdApproval!, policy: 'default' }),
+    )
+    expect(cmdCardHtml).toContain('bun test xerxes/test/agyAcpIntegration.test.ts')
+    expect(cmdCardHtml).toContain('Run ACP integration tests')
+    expect(cmdCardHtml).not.toContain('WaitMsBeforeAsync')
+    expect(cmdCardHtml).not.toContain('waitmsbeforeasync')
+    expect(cmdCardHtml).not.toContain('5000')
+    expect(cmdCardHtml).not.toContain('toolSummary')
+    expect(cmdCardHtml).not.toContain('toolsummary')
+    expect(cmdCardHtml).not.toContain('SafeToAutoRun')
+    expect(cmdCardHtml).not.toContain('IsDaemon')
+    expect(cmdCardHtml).not.toContain('approval__fields')
+    expect(cmdCardHtml).not.toContain('Allow for this session')
+    expect(cmdCardHtml).not.toContain('This session')
+    expect(cmdCardHtml).toContain('Deny <kbd>2</kbd>')
+    expect(cmdCardHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
+
+    // Keyboard action helper respects allowPermanent === false
+    expect(approvalKeyAction('1', false)).toBe('allow_once')
+    expect(approvalKeyAction('2', false)).toBe('deny')
+    expect(approvalKeyAction('3', false)).toBe('deny')
+    expect(approvalKeyAction('2', true)).toBe('allow_session')
+    expect(approvalKeyAction('2', undefined)).toBe('allow_session')
+
+    // Store refuses bogus allow_session when allowPermanent === false, and forwards option_id on allow_once
+    bridge.calls.length = 0
+    store.approve('appr-cmd-1', 'allow_session')
+    expect(bridge.calls.some(c => c.method === 'permission_response')).toBe(false)
+    store.approve('appr-cmd-1', 'allow_once')
+    await Bun.sleep(5)
+    expect(bridge.calls.find(c => c.method === 'permission_response')?.params).toMatchObject({
+      request_id: 'appr-cmd-1',
+      response: 'approve',
+      option_id: 'allow',
+    })
+
+    // 2. AGY edit_file approval with structured diff renders compact theme-dynamic inline diff preview
+    bridge.emit('approval_request', {
+      id: 'appr-diff-1',
+      tool_name: 'edit_file',
+      action: 'edit_file',
+      inputs: { Path: '/workspace/xerxes/src/demo.ts', Target: 'const x = 1', Replacement: 'const x = 42' },
+      diff: {
+        path: '/workspace/xerxes/src/demo.ts',
+        old_text: 'header\nconst x = 1\nfooter\n',
+        new_text: 'header\nconst x = 42\nconst y = 7\nfooter\n',
+      },
+      allow_permanent: false,
+    })
+    const diffApproval = store.getSnapshot().approval
+    expect(diffApproval?.diff).toEqual({
+      path: '/workspace/xerxes/src/demo.ts',
+      oldText: 'header\nconst x = 1\nfooter\n',
+      newText: 'header\nconst x = 42\nconst y = 7\nfooter\n',
+    })
+    const diffCardHtml = renderToStaticMarkup(
+      createElement(ApprovalCard, { approval: diffApproval!, policy: 'default' }),
+    )
+    expect(diffCardHtml).toContain('approval__diff')
+    expect(diffCardHtml).toContain('/workspace/xerxes/src/demo.ts')
+    expect(diffCardHtml).toContain('approval__diff-line--del')
+    expect(diffCardHtml).toContain('approval__diff-line--add')
+    expect(diffCardHtml).toContain('const x = 1')
+    expect(diffCardHtml).toContain('const x = 42')
+    expect(diffCardHtml).toContain('>+2<')
+    expect(diffCardHtml).toContain('>−1<')
+    expect(diffCardHtml).not.toContain('This session')
+    expect(diffCardHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
+  })
+
+  test('AcpThinkingPicker + dynamic configOptions update per model, /plan syncs AGY mode, and ACP slash completions badge Antigravity cleanly', async () => {
+    const carbonBinding: AcpSessionBinding = {
+      ...sampleAntigravityBinding,
+      current_model: 'gemini-4-carbon',
+      current_model_name: 'Gemini 4 Carbon',
+      current_mode: 'default',
+      current_mode_name: 'Default',
+      modes: [
+        { id: 'default', name: 'Default', description: 'Ask before edits and commands' },
+        { id: 'accept-edits', name: 'Accept edits', description: 'Auto-accept file edits' },
+        { id: 'auto', name: 'Auto', description: 'Auto-accept safe actions' },
+        { id: 'plan', name: 'Plan', description: 'Research and plan before changing files' },
+      ],
+      thought_level: 'medium',
+      thought_level_config_id: 'thought_level',
+      thought_levels: [
+        { id: 'low', name: 'Low' },
+        { id: 'medium', name: 'Medium' },
+        { id: 'high', name: 'High' },
+      ],
+      config_options: [
+        {
+          id: 'thought_level',
+          name: 'Thinking Level',
+          category: 'thought_level',
+          type: 'select',
+          current_value: 'medium',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+          ],
+        },
+      ],
+      available_commands: [
+        { name: 'goal', description: 'Run an Antigravity autonomous goal loop' },
+        { name: 'compact', description: 'Compact Antigravity session context' },
+        { name: 'boost', description: 'Boost reasoning depth for this step' },
+        { name: 'grill-me', description: 'Interactive design interview' },
+      ],
+    }
+
+    const neonBinding: AcpSessionBinding = {
+      ...carbonBinding,
+      current_model: 'gemini-4-neon',
+      current_model_name: 'Gemini 4 Neon',
+      thought_level: 'xhigh',
+      thought_levels: [
+        { id: 'low', name: 'Low' },
+        { id: 'medium', name: 'Medium' },
+        { id: 'high', name: 'High' },
+        { id: 'xhigh', name: 'Extra' },
+      ],
+    }
+
+    // parseAcpSessionBinding derives thought_level / thought_levels / available_commands from config_options
+    const parsedFromConfig = parseAcpSessionBinding({
+      session_id: 's1',
+      agent_id: 'antigravity',
+      agent_name: 'Antigravity',
+      provider: 'antigravity',
+      transport: 'acp',
+      cwd: '/workspace/xerxes',
+      connected: true,
+      config_options: [
+        {
+          id: 'thought_level',
+          name: 'Thinking Level',
+          category: 'thought_level',
+          type: 'select',
+          current_value: 'high',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'high', name: 'High' },
+          ],
+        },
+      ],
+      available_commands: [{ name: '/boost', description: 'Boost reasoning' }],
+    })
+    expect(parsedFromConfig?.thought_level).toBe('high')
+    expect(parsedFromConfig?.thought_levels?.map(l => l.id)).toEqual(['low', 'high'])
+    expect(parsedFromConfig?.thought_level_config_id).toBe('thought_level')
+    expect(parsedFromConfig?.available_commands).toEqual([{ name: 'boost', description: 'Boost reasoning' }])
+
+    // Store connects, updates thought_level via acp.set_config_option, and updates dynamically on model switch
+    let activeMockBinding: AcpSessionBinding = carbonBinding
+    const { store, bridge } = await setupConnectedStore({
+      'acp.connect': () => {
+        activeMockBinding = carbonBinding
+        return { ok: true, binding: activeMockBinding }
+      },
+      'acp.set_config_option': params => {
+        activeMockBinding = {
+          ...activeMockBinding,
+          thought_level: String(params.value),
+        }
+        return { ok: true, binding: activeMockBinding }
+      },
+      'acp.set_model': params => {
+        activeMockBinding = params.model_id === 'gemini-4-neon' ? neonBinding : carbonBinding
+        return { ok: true, binding: activeMockBinding }
+      },
+      'acp.set_mode': params => {
+        activeMockBinding = {
+          ...activeMockBinding,
+          current_mode: String(params.mode_id),
+          current_mode_name: String(params.mode_id) === 'plan' ? 'Plan' : 'Default',
+        }
+        return { ok: true, binding: activeMockBinding }
+      },
+      complete: params => {
+        const text = String(params.text ?? '')
+        if (text.startsWith('/skill')) return { ok: true, completions: [] }
+        return {
+          ok: true,
+          completions: [
+            { value: '/goal', label: '/goal', meta: 'Manage Xerxes session goal', category: 'session' },
+            { value: '/acp', label: '/acp', meta: 'External ACP agent control', category: 'session' },
+          ],
+        }
+      },
+      'turn.submit': () => ({ ok: true }),
+    })
+
+    expect(await store.connectAcpAgent('antigravity')).toBe(true)
+    expect(store.getSnapshot().acpBinding?.thought_level).toBe('medium')
+
+    // setAcpThoughtLevel calls acp.set_config_option
+    bridge.calls.length = 0
+    expect(await store.setAcpThoughtLevel('high')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.set_config_option')?.params).toMatchObject({
+      config_id: 'thought_level',
+      value: 'high',
+    })
+    expect(store.getSnapshot().acpBinding?.thought_level).toBe('high')
+
+    // Model switch dynamically updates thought_levels (Carbon -> Neon adds Extra)
+    expect(await store.setAcpModel('gemini-4-neon')).toBe(true)
+    expect(store.getSnapshot().acpBinding?.thought_levels?.map(l => l.name)).toEqual(['Low', 'Medium', 'High', 'Extra'])
+
+    const carbonSnap = sampleSnapshot({ acpBinding: carbonBinding })
+    const carbonThinkingHtml = renderToStaticMarkup(createElement(AcpThinkingPicker, { snap: carbonSnap, defaultOpen: true }))
+    expect(carbonThinkingHtml).toContain('Medium')
+    expect(carbonThinkingHtml).toContain('High')
+    expect(carbonThinkingHtml).not.toContain('Extra')
+
+    const neonSnap = sampleSnapshot({ acpBinding: neonBinding })
+    const neonThinkingHtml = renderToStaticMarkup(createElement(AcpThinkingPicker, { snap: neonSnap, defaultOpen: true }))
+    expect(neonThinkingHtml).toContain('Extra')
+    expect(neonThinkingHtml).toContain('aria-selected="true"')
+
+    // Shell & VscodeChat render AcpThinkingPicker + aligned banner/pill
+    const shellNeonHtml = renderToStaticMarkup(createElement(Shell, { snap: neonSnap }))
+    expect(shellNeonHtml).toContain('composer__acp-thinking')
+    expect(shellNeonHtml).toContain('Extra')
+    expect(shellNeonHtml).toContain('Default')
+    expect(shellNeonHtml).not.toContain('composer__perm')
+
+    const vscodeNeonHtml = renderToStaticMarkup(createElement(VscodeChat, { snap: neonSnap }))
+    expect(vscodeNeonHtml).toContain('xv-pill--acp')
+    expect(vscodeNeonHtml).toContain('Antigravity · Extra · Default')
+    expect(vscodeNeonHtml).toContain('composer__acp-thinking')
+
+    // /plan and /plan off sync AGY mode via acp.set_mode (never native plan_mode)
+    bridge.calls.length = 0
+    expect(await store.submit('/plan')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.set_mode')?.params).toMatchObject({ mode_id: 'plan' })
+    expect(bridge.calls.some(c => c.method === 'plan_mode')).toBe(false)
+
+    bridge.calls.length = 0
+    expect(await store.submit('/plan off')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.set_mode')?.params).toMatchObject({ mode_id: 'default' })
+
+    // ACP available_commands appear in slash completions badged Antigravity; Xerxes native commands are isolated out
+    const hints = await store.completeText('/')
+    const xerxesGoal = hints.find(item => item.value === '/goal' && !item.runtimeProvider)
+    const agyGoal = hints.find(item => item.value === '/goal' && item.runtimeProvider === 'antigravity')
+    const agyBoost = hints.find(item => item.value === '/boost' && item.runtimeProvider === 'antigravity')
+    const hostAcp = hints.find(item => item.value === '/acp')
+    expect(xerxesGoal).toBeUndefined()
+    expect(agyGoal?.badge).toBe('Antigravity')
+    expect(agyBoost?.badge).toBe('Antigravity')
+    expect(hostAcp?.badge).toBe('Host')
+
+    // Submitting colliding /goal OR AGY-only /boost routes straight to turn.submit (never native slash/goal)
+    bridge.calls.length = 0
+    expect(await store.submit('/boost inspect the diff')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'turn.submit')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'slash')).toBe(false)
+
+    bridge.emit('turn_end', { session_id: store.getSnapshot().currentId })
+    bridge.calls.length = 0
+    expect(await store.submit('/goal run overnight checks')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'turn.submit')).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'session.goal')).toBe(false)
+  })
+
+  test('Visible acpError banner with auth hint, Retry/Dismiss, savedAcpBinding Reconnect banner, crash recovery, and Escape closing popovers', async () => {
+    // 1. Disconnected auth error surfaces visible banner with agy acp --login hint + Retry + Dismiss
+    const authErrSnap = sampleSnapshot({
+      acpBinding: null,
+      acpError: 'Authentication required (-32000) for Antigravity',
+    })
+    const authBannerHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: authErrSnap }))
+    expect(authBannerHtml).toContain('acp-banner--error')
+    expect(authBannerHtml).toContain('Authentication required')
+    expect(authBannerHtml).toContain('agy acp --login')
+    expect(authBannerHtml).toContain('Retry')
+    expect(authBannerHtml).toContain('Dismiss runtime error')
+
+    // 2. Connected session with runtime error renders a single quiet error banner with Retry, Switch to Xerxes, and Dismiss
+    const connectedErrSnap = sampleSnapshot({
+      acpBinding: sampleAntigravityBinding,
+      acpError: 'Model switch failed',
+    })
+    const connectedErrHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: connectedErrSnap }))
+    expect(connectedErrHtml).toContain('acp-banner--error')
+    expect(connectedErrHtml).not.toContain('Connected via')
+    expect(connectedErrHtml).toContain('Model switch failed')
+    expect(connectedErrHtml).toContain('Retry')
+    expect(connectedErrHtml).toContain('Switch to Xerxes')
+    expect(connectedErrHtml).toContain('Dismiss runtime error')
+
+    // 3. Reopened session with saved_acp_binding renders one-click Reconnect Antigravity banner & resumes
+    const savedOnly: AcpSessionBinding = {
+      ...sampleAntigravityBinding,
+      connected: false,
+    }
+    const { store, bridge } = await setupConnectedStore({
+      initialize: params => ({
+        ok: true,
+        session_id: 'sess-reopen-1',
+        session_key: String(params.session_key ?? 'desktop-test'),
+        cwd: '/workspace/xerxes',
+        model: 'claude-opus-4-6',
+        saved_acp_binding: savedOnly,
+        session: {
+          id: 'sess-reopen-1',
+          title: 'Reopened AGY Session',
+          cwd: '/workspace/xerxes',
+          model: 'claude-opus-4-6',
+          messages: [],
+        },
+      }),
+      'acp.connect': () => ({ ok: true, binding: sampleAntigravityBinding }),
+    })
+    expect(store.getSnapshot().acpBinding).toBeNull()
+    expect(store.getSnapshot().savedAcpBinding?.agent_id).toBe('antigravity')
+    const reconnectHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: store.getSnapshot() }))
+    expect(reconnectHtml).toContain('acp-banner--reconnect')
+    expect(reconnectHtml).toContain('Reconnect Antigravity')
+    expect(reconnectHtml).toContain('39c61d78')
+
+    bridge.calls.length = 0
+    expect(await store.reconnectSavedAcp()).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({
+      agent_id: 'antigravity',
+      resume_session_id: '39c61d78-9f1a-4b2c-98f0-123456789abc',
+      mode_id: 'planning',
+    })
+    expect(store.getSnapshot().acpBinding?.connected).toBe(true)
+    expect(store.getSnapshot().savedAcpBinding).toBeNull()
+
+    // Turbo mode renders right after Auto in AcpModePicker with description & data-mode="turbo"
+    const turboBinding: AcpSessionBinding = {
+      ...sampleAntigravityBinding,
+      current_mode: 'turbo',
+      current_mode_name: 'Turbo',
+      modes: [
+        { id: 'default', name: 'Default', description: 'Ask before edits and commands.' },
+        { id: 'accept-edits', name: 'Accept edits', description: 'Approve file edits without asking.' },
+        { id: 'auto', name: 'Auto', description: 'Approve edits and safe commands.' },
+        { id: 'turbo', name: 'Turbo', description: 'Run all commands without restrictions.' },
+        { id: 'plan', name: 'Plan', description: 'Plan carefully before executing a task.' },
+      ],
+    }
+    const turboPickerHtml = renderToStaticMarkup(
+      createElement(AcpModePicker, { snap: sampleSnapshot({ acpBinding: turboBinding }), defaultOpen: true }),
+    )
+    expect(turboPickerHtml).toContain('data-mode="turbo"')
+    expect(turboPickerHtml).toContain('Run all commands without restrictions.')
+    const turboListHtml = turboPickerHtml.split('role="listbox"')[1] ?? ''
+    expect(turboListHtml.indexOf('>Auto<')).toBeLessThan(turboListHtml.indexOf('>Turbo<'))
+    expect(turboListHtml.indexOf('>Turbo<')).toBeLessThan(turboListHtml.indexOf('>Plan<'))
+
+    // Unexpected crash via acp_status preserves savedAcpBinding for Retry and surfaces acpError
+    bridge.emit('acp_status', {
+      session_id: 'sess-reopen-1',
+      binding: { ...sampleAntigravityBinding, connected: false, error: 'Antigravity process exited (code 1)' },
+    })
+    expect(store.getSnapshot().acpBinding).toBeNull()
+    expect(store.getSnapshot().acpError).toContain('exited (code 1)')
+    expect(store.getSnapshot().savedAcpBinding?.agent_id).toBe('antigravity')
+    bridge.calls.length = 0
+    expect(await store.retryAcpConnect()).toBe(true)
+    expect(bridge.calls.some(c => c.method === 'acp.connect')).toBe(true)
+
+    // 4. Escape capture listener closes open ACP popovers even when focus moved outside
+    const listeners = new Set<(event: globalThis.KeyboardEvent) => void>()
+    const fakeTarget = {
+      addEventListener: (_type: 'keydown', fn: (event: globalThis.KeyboardEvent) => void) => { listeners.add(fn) },
+      removeEventListener: (_type: 'keydown', fn: (event: globalThis.KeyboardEvent) => void) => { listeners.delete(fn) },
+    }
+    let closedCount = 0
+    const detach = attachEscapeCloseListener(fakeTarget, () => { closedCount += 1 })
+    expect(listeners.size).toBe(1)
+
+    let prevented = false
+    let stopped = false
+    let stoppedImmediate = false
+    const makeKey = (key: string) => ({
+      key,
+      preventDefault: () => { prevented = true },
+      stopPropagation: () => { stopped = true },
+      stopImmediatePropagation: () => { stoppedImmediate = true },
+    }) as unknown as globalThis.KeyboardEvent
+
+    for (const fn of listeners) fn(makeKey('Enter'))
+    expect(closedCount).toBe(0)
+    expect(prevented).toBe(false)
+
+    for (const fn of listeners) fn(makeKey('Escape'))
+    expect(closedCount).toBe(1)
+    expect(prevented).toBe(true)
+    expect(stopped).toBe(true)
+    expect(stoppedImmediate).toBe(true)
+
+    detach()
+    expect(listeners.size).toBe(0)
+  })
+})

@@ -142,9 +142,10 @@ export class WhatsAppChannel extends WebhookChannel {
 /** Validate Meta's `X-Hub-Signature-256`: hex HMAC-SHA256 of the raw body. */
 function whatsAppSignatureMatches(headers: WebhookHeaders, body: Uint8Array, appSecret: string): boolean {
   const provided = webhookHeaderValue(headers, 'x-hub-signature-256')
-  if (!provided || !provided.startsWith(WHATSAPP_SIGNATURE_PREFIX)) return false
+  if (!provided || !provided.toLowerCase().startsWith(WHATSAPP_SIGNATURE_PREFIX)) return false
+  const normalized = WHATSAPP_SIGNATURE_PREFIX + provided.slice(WHATSAPP_SIGNATURE_PREFIX.length).toLowerCase()
   const expected = WHATSAPP_SIGNATURE_PREFIX + createHmac('sha256', appSecret).update(body).digest('hex')
-  return constantTimeEqualStrings(provided, expected)
+  return constantTimeEqualStrings(normalized, expected)
 }
 
 /** Return Meta's verification challenge only when its configured token matches. */
@@ -152,7 +153,11 @@ export function whatsAppWebhookChallenge(
   query: Readonly<Record<string, string | undefined>>,
   verifyToken: string,
 ): string | undefined {
-  if (query['hub.mode'] !== 'subscribe' || query['hub.verify_token'] !== verifyToken) {
+  const provided = query['hub.verify_token']
+  if (!verifyToken || !provided || query['hub.mode'] !== 'subscribe') {
+    return undefined
+  }
+  if (!constantTimeEqualStrings(provided, verifyToken)) {
     return undefined
   }
   return query['hub.challenge']

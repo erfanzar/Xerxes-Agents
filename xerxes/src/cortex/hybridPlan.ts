@@ -48,7 +48,7 @@ const STRONG_KINDS: ReadonlySet<StepKind> = new Set<StepKind>(['reasoning', 'rev
 
 /** The artifact reference a step produces by default. */
 export function stepOutputRef(stepId: string): string {
-  return `out:${stepId}`
+  return `out:${stepId.trim()}`
 }
 
 /**
@@ -123,13 +123,19 @@ export function assignPlacements(plan: ExecutionPlan, ctx: AssignPlacementsConte
 
   for (const layer of planDependencyLayers(plan)) {
     for (const step of layer) {
+      const stepId = step.id.trim()
+      const dependencies = step.dependencies.map(dependency => dependency.trim())
       const merged = new Map<string, Sensitivity>()
-      const add = (ref: string, sensitivity: Sensitivity): void => {
-        if (!ref.trim()) throw new ValidationError(`steps.${step.id}.inputs`, 'input reference cannot be empty', ref)
+      const add = (rawRef: string, sensitivity: Sensitivity): void => {
+        const ref = rawRef.trim()
+        if (!ref) throw new ValidationError(`steps.${stepId}.inputs`, 'input reference cannot be empty', rawRef)
         merged.set(ref, stricter(merged.get(ref) ?? 'shareable', sensitivity))
       }
-      for (const ref of inputsOf(step)) add(ref, ctx.inputSensitivity(ref))
-      for (const dependency of step.dependencies) add(stepOutputRef(dependency), outputSensitivity.get(dependency) ?? 'private')
+      for (const rawRef of inputsOf(step)) {
+        const ref = rawRef.trim()
+        add(rawRef, ctx.inputSensitivity(ref))
+      }
+      for (const dependency of dependencies) add(stepOutputRef(dependency), outputSensitivity.get(dependency) ?? 'private')
 
       const privateRefs = [...merged].filter(([, sensitivity]) => sensitivity === 'private').map(([ref]) => ref)
       const sensitivity: Sensitivity = privateRefs.length > 0 ? 'private' : 'shareable'
@@ -137,30 +143,32 @@ export function assignPlacements(plan: ExecutionPlan, ctx: AssignPlacementsConte
       let placement: Placement
       if (privateRefs.length > 0) {
         placement = 'local'
-        notes.push(`Step ${step.id} is local and its output is private: it consumes private ${privateRefs.join(', ')}.`)
+        notes.push(`Step ${stepId} is local and its output is private: it consumes private ${privateRefs.join(', ')}.`)
       } else if (ctx.boundaryMode === 'private') {
         placement = 'local'
       } else if (kind === 'tool_use') {
         placement = 'local'
-        notes.push(`Step ${step.id} is local: tool steps act on the local machine.`)
+        notes.push(`Step ${stepId} is local: tool steps act on the local machine.`)
       } else {
         placement = 'either'
       }
-      outputSensitivity.set(step.id, sensitivity)
+      outputSensitivity.set(stepId, sensitivity)
       const check = step.arguments.check?.trim()
-      built.set(step.id, {
+      built.set(stepId, {
         ...step,
+        id: stepId,
+        dependencies,
         placement,
         kind,
         inputs: [...merged].map(([ref, itemSensitivity]) => ({ ref, sensitivity: itemSensitivity })),
-        produces: { ref: stepOutputRef(step.id), sensitivity },
+        produces: { ref: stepOutputRef(stepId), sensitivity },
         ...(check ? { check } : {}),
       })
     }
   }
 
   const steps = plan.steps.map(step => {
-    const hybrid = built.get(step.id)
+    const hybrid = built.get(step.id.trim())
     if (!hybrid) throw new Error(`Hybrid plan lost step ${step.id}`)
     return hybrid
   })
@@ -173,10 +181,13 @@ export function assignPlacements(plan: ExecutionPlan, ctx: AssignPlacementsConte
  * data. `cloudSteps` lists steps that may run off the machine.
  */
 export function analyzeSplit(plan: HybridPlan): { splittable: boolean; cloudSteps: string[]; reason: string } {
-  const cloudSteps = plan.steps.filter(step => step.placement !== 'local').map(step => step.id)
+  const byId = new Map(plan.steps.map(step => [step.id.trim(), step] as const))
+  const cloudSteps = plan.steps.filter(step => step.placement !== 'local').map(step => step.id.trim())
   const strong = plan.steps.filter(step => STRONG_KINDS.has(step.kind))
   const dependsOnPrivate = (step: HybridStep): boolean =>
-    step.produces.sensitivity === 'private' || step.inputs.some(input => input.sensitivity === 'private')
+    step.produces.sensitivity === 'private'
+    || step.inputs.some(input => input.sensitivity === 'private')
+    || step.dependencies.some(dependency => byId.get(dependency.trim())?.produces.sensitivity === 'private')
   if (strong.length > 0 && strong.every(dependsOnPrivate)) {
     return { splittable: false, cloudSteps: [], reason: HYBRID_UNSPLITTABLE_REASON }
   }
@@ -204,12 +215,13 @@ function inspectHybridPlan(plan: HybridPlan, mode: DataBoundaryMode): PlanProble
     return { structural, boundary }
   }
 
-  const byId = new Map(plan.steps.map(step => [step.id, step] as const))
+  const byId = new Map(plan.steps.map(step => [step.id.trim(), step] as const))
   const producers = new Map<string, HybridStep>()
   for (const step of plan.steps) {
-    const ref = step.produces.ref
-    if (!ref.trim()) {
-      structural.push(`step ${step.id} has an empty output reference`)
+    const stepId = step.id.trim()
+    const ref = step.produces.ref.trim()
+    if (!ref) {
+      structural.push(`step ${stepId} has an empty output reference`)
     } else if (producers.has(ref)) {
       structural.push(`output reference ${ref} is produced by more than one step`)
     } else {
@@ -218,36 +230,49 @@ function inspectHybridPlan(plan: HybridPlan, mode: DataBoundaryMode): PlanProble
   }
 
   for (const step of plan.steps) {
+    const stepId = step.id.trim()
+    const stepDependencies = new Set(step.dependencies.map(dependency => dependency.trim()))
     const effective = new Map<string, Sensitivity>()
     for (const input of step.inputs) {
-      const producer = producers.get(input.ref)
+      const inputRef = input.ref.trim()
+      if (!inputRef) {
+        structural.push(`step ${stepId} has an empty input reference`)
+        continue
+      }
+      const producer = producers.get(inputRef)
       if (producer !== undefined) {
-        if (!step.dependencies.includes(producer.id)) {
-          structural.push(`step ${step.id} consumes ${input.ref}, produced by step ${producer.id}, which is not one of its dependencies`)
+        const producerId = producer.id.trim()
+        if (!stepDependencies.has(producerId)) {
+          structural.push(`step ${stepId} consumes ${inputRef}, produced by step ${producerId}, which is not one of its dependencies`)
         }
         if (producer.produces.sensitivity === 'private' && input.sensitivity !== 'private') {
-          boundary.push(`step ${step.id} declares ${input.ref} shareable but step ${producer.id} produces it as private`)
+          boundary.push(`step ${stepId} declares ${inputRef} shareable but step ${producerId} produces it as private`)
         }
       }
-      effective.set(input.ref, stricter(effective.get(input.ref) ?? 'shareable', input.sensitivity))
+      effective.set(inputRef, stricter(effective.get(inputRef) ?? 'shareable', input.sensitivity))
     }
-    for (const dependencyId of step.dependencies) {
+    for (const dependencyId of stepDependencies) {
       const dependency = byId.get(dependencyId)
-      if (dependency?.produces.sensitivity === 'private') effective.set(dependency.produces.ref, 'private')
+      if (dependency?.produces.sensitivity === 'private') {
+        effective.set(dependency.produces.ref.trim(), 'private')
+      }
     }
     const privateRefs = [...effective].filter(([, sensitivity]) => sensitivity === 'private').map(([ref]) => ref)
     if (privateRefs.length > 0 && step.produces.sensitivity !== 'private') {
-      boundary.push(`step ${step.id} consumes private ${privateRefs.join(', ')} but declares its output shareable`)
+      boundary.push(`step ${stepId} consumes private ${privateRefs.join(', ')} but declares its output shareable`)
     }
     if (step.placement !== 'local') {
+      if (step.kind === 'tool_use') {
+        structural.push(`step ${stepId} has kind tool_use and must be placed local, got ${step.placement}`)
+      }
       if (privateRefs.length > 0) {
-        boundary.push(`step ${step.id} is placed ${step.placement} but consumes private ${privateRefs.join(', ')}`)
+        boundary.push(`step ${stepId} is placed ${step.placement} but consumes private ${privateRefs.join(', ')}`)
       }
       if (step.produces.sensitivity === 'private') {
-        boundary.push(`step ${step.id} is placed ${step.placement} but produces private output`)
+        boundary.push(`step ${stepId} is placed ${step.placement} but produces private output`)
       }
       if (mode === 'private') {
-        boundary.push(`step ${step.id} is placed ${step.placement} but boundary mode private allows only local steps`)
+        boundary.push(`step ${stepId} is placed ${step.placement} but boundary mode private allows only local steps`)
       }
     }
   }
@@ -274,6 +299,8 @@ export interface HybridPlanPorts {
   chooseLocation?(step: HybridStep): 'local' | 'cloud'
   /** Values of the plan's external input references. A missing one fails its step. */
   readonly externalInputs?: Readonly<Record<string, string>>
+  /** Maximum steps executed concurrently within a dependency layer. Default: unbounded within the layer. */
+  readonly maxParallel?: number
 }
 
 export type HybridStepStatus = 'succeeded' | 'rejected' | 'failed' | 'skipped'
@@ -302,6 +329,14 @@ export interface HybridRunResult {
  * unaccepted step are skipped. An aborted signal stops further steps.
  */
 export async function runHybridPlan(plan: HybridPlan, ports: HybridPlanPorts, signal?: AbortSignal): Promise<HybridRunResult> {
+  const maxParallel = ports.maxParallel
+  if (
+    maxParallel !== undefined
+    && maxParallel !== Number.POSITIVE_INFINITY
+    && (!Number.isSafeInteger(maxParallel) || maxParallel < 1)
+  ) {
+    throw new ValidationError('maxParallel', 'must be a positive integer', maxParallel)
+  }
   const problems = inspectHybridPlan(plan, 'hybrid')
   if (problems.boundary.length > 0) {
     throw new DataBoundaryError('DATA_BOUNDARY_DENIED', `Hybrid plan refused: ${problems.boundary.join('; ')}`)
@@ -310,86 +345,112 @@ export async function runHybridPlan(plan: HybridPlan, ports: HybridPlanPorts, si
     throw new ValidationError('plan', problems.structural.join('; '), plan.id)
   }
 
-  const byId = new Map(plan.steps.map(step => [step.id, step] as const))
+  const byId = new Map(plan.steps.map(step => [step.id.trim(), step] as const))
   const results = new Map<string, HybridStepResult>()
   const outputs = new Map<string, { readonly value: string; readonly sensitivity: Sensitivity }>()
   let aborted = false
 
   for (const layer of planDependencyLayers(plan)) {
     const steps = layer.map(item => {
-      const step = byId.get(item.id)
+      const step = byId.get(item.id.trim())
       if (!step) throw new Error(`Hybrid plan lost step ${item.id}`)
       return step
     })
     if (signal?.aborted) {
       aborted = true
-      for (const step of steps) results.set(step.id, { stepId: step.id, status: 'skipped', detail: 'aborted' })
+      for (const step of steps) {
+        const stepId = step.id.trim()
+        results.set(stepId, { stepId, status: 'skipped', detail: 'aborted' })
+      }
       continue
     }
 
-    const runnable: { step: HybridStep; location: 'local' | 'cloud'; inputs: Map<string, string> }[] = []
+    const runnable: { step: HybridStep; stepId: string; location: 'local' | 'cloud'; inputs: Map<string, string> }[] = []
     for (const step of steps) {
-      const blocker = step.dependencies.find(dependency => results.get(dependency)?.status !== 'succeeded')
+      const stepId = step.id.trim()
+      const blocker = step.dependencies.find(dependency => results.get(dependency.trim())?.status !== 'succeeded')
       if (blocker !== undefined) {
-        results.set(step.id, {
-          stepId: step.id,
+        const blockerId = blocker.trim()
+        results.set(stepId, {
+          stepId,
           status: 'skipped',
-          detail: `dependency ${blocker} did not succeed (${results.get(blocker)?.status ?? 'unknown'})`,
+          detail: `dependency ${blockerId} did not succeed (${results.get(blockerId)?.status ?? 'unknown'})`,
         })
         continue
       }
       const location = resolveLocation(step, ports)
       const privateNow = step.produces.sensitivity === 'private'
         || step.inputs.some(input => input.sensitivity === 'private')
-        || step.dependencies.some(dependency => byId.get(dependency)?.produces.sensitivity === 'private')
+        || step.dependencies.some(dependency => byId.get(dependency.trim())?.produces.sensitivity === 'private')
       if (location === 'cloud' && privateNow) {
-        throw new DataBoundaryError('DATA_BOUNDARY_DENIED', `Step ${step.id} would run in the cloud with private data; refused.`)
+        throw new DataBoundaryError('DATA_BOUNDARY_DENIED', `Step ${stepId} would run in the cloud with private data; refused.`)
       }
       const inputs = new Map<string, string>()
       let missing: string | undefined
       for (const input of step.inputs) {
-        const produced = outputs.get(input.ref)
-        const value = produced !== undefined ? produced.value : ports.externalInputs?.[input.ref]
+        const inputRef = input.ref.trim()
+        const produced = outputs.get(inputRef)
+        const value = produced !== undefined
+          ? produced.value
+          : (ports.externalInputs?.[input.ref] ?? ports.externalInputs?.[inputRef])
         if (value === undefined) {
-          missing = input.ref
+          missing = inputRef
           break
         }
-        inputs.set(input.ref, value)
+        inputs.set(inputRef, value)
       }
       if (missing !== undefined) {
-        results.set(step.id, { stepId: step.id, status: 'failed', detail: `missing input ${missing}` })
+        results.set(stepId, { stepId, status: 'failed', detail: `missing input ${missing}` })
         continue
       }
-      runnable.push({ step, location, inputs })
+      runnable.push({ step, stepId, location, inputs })
     }
 
-    await Promise.all(runnable.map(async ({ step, location, inputs }) => {
-      try {
-        const execution = await ports.execute(step, location, inputs, signal)
-        if (execution.accepted) {
-          outputs.set(step.produces.ref, { value: execution.output, sensitivity: step.produces.sensitivity })
+    const concurrency = maxParallel === undefined ? runnable.length : Math.min(runnable.length, maxParallel)
+    let cursor = 0
+    const runWorker = async (): Promise<void> => {
+      while (cursor < runnable.length) {
+        const index = cursor
+        cursor += 1
+        const entry = runnable[index]
+        if (entry === undefined) continue
+        const { step, stepId, location, inputs } = entry
+        if (signal?.aborted) {
+          aborted = true
+          results.set(stepId, { stepId, status: 'skipped', detail: 'aborted' })
+          continue
         }
-        results.set(step.id, {
-          stepId: step.id,
-          status: execution.accepted ? 'succeeded' : 'rejected',
-          location,
-          output: execution.output,
-          ...(execution.detail !== undefined ? { detail: execution.detail } : {}),
-        })
-      } catch (error) {
-        if (error instanceof DataBoundaryError) throw error
-        results.set(step.id, {
-          stepId: step.id,
-          status: 'failed',
-          location,
-          detail: signal?.aborted ? 'aborted' : error instanceof Error ? error.message : String(error),
-        })
+        try {
+          const execution = await ports.execute(step, location, inputs, signal)
+          if (execution.accepted) {
+            outputs.set(step.produces.ref.trim(), { value: execution.output, sensitivity: step.produces.sensitivity })
+          }
+          results.set(stepId, {
+            stepId,
+            status: execution.accepted ? 'succeeded' : 'rejected',
+            location,
+            output: execution.output,
+            ...(execution.detail !== undefined ? { detail: execution.detail } : {}),
+          })
+        } catch (error) {
+          if (error instanceof DataBoundaryError) throw error
+          results.set(stepId, {
+            stepId,
+            status: 'failed',
+            location,
+            detail: signal?.aborted ? 'aborted' : error instanceof Error ? error.message : String(error),
+          })
+        }
       }
-    }))
+    }
+    await Promise.all(Array.from({ length: concurrency }, runWorker))
     if (signal?.aborted) aborted = true
   }
 
-  const ordered = plan.steps.map(step => results.get(step.id) ?? { stepId: step.id, status: 'skipped' as const, detail: 'not run' })
+  const ordered = plan.steps.map(step => {
+    const stepId = step.id.trim()
+    return results.get(stepId) ?? { stepId, status: 'skipped' as const, detail: 'not run' }
+  })
   return {
     accepted: !aborted && ordered.every(result => result.status === 'succeeded'),
     aborted,
@@ -405,12 +466,13 @@ function resolveLocation(step: HybridStep, ports: HybridPlanPorts): 'local' | 'c
 
 /** External input references of a plan (not produced by any step) with their strictest declared sensitivity. */
 export function externalInputRefs(plan: HybridPlan): Map<string, Sensitivity> {
-  const produced = new Set(plan.steps.map(step => step.produces.ref))
+  const produced = new Set(plan.steps.map(step => step.produces.ref.trim()))
   const refs = new Map<string, Sensitivity>()
   for (const step of plan.steps) {
     for (const input of step.inputs) {
-      if (produced.has(input.ref)) continue
-      refs.set(input.ref, stricter(refs.get(input.ref) ?? 'shareable', input.sensitivity))
+      const ref = input.ref.trim()
+      if (produced.has(ref)) continue
+      refs.set(ref, stricter(refs.get(ref) ?? 'shareable', input.sensitivity))
     }
   }
   return refs
@@ -425,46 +487,67 @@ export function rebindHybridPlan(
   plan: HybridPlan,
   bindings: ReadonlyMap<string, HybridRef>,
 ): HybridPlan {
-  const producerOf = new Map(plan.steps.map(step => [step.produces.ref, step.id] as const))
+  const producerOf = new Map(plan.steps.map(step => [step.produces.ref.trim(), step.id.trim()] as const))
+  const stepById = new Map(plan.steps.map(step => [step.id.trim(), step] as const))
   const outputSensitivity = new Map<string, Sensitivity>()
   const rebuilt = new Map<string, HybridStep>()
   for (const layer of planDependencyLayers(plan)) {
     for (const item of layer) {
-      const step = plan.steps.find(candidate => candidate.id === item.id)
+      const step = stepById.get(item.id.trim())
       if (!step) throw new Error(`Hybrid plan lost step ${item.id}`)
+      const stepId = step.id.trim()
+      const dependencies = step.dependencies.map(dependency => dependency.trim())
       const merged = new Map<string, Sensitivity>()
       const add = (ref: string, sensitivity: Sensitivity): void => {
         merged.set(ref, stricter(merged.get(ref) ?? 'shareable', sensitivity))
       }
       let anyPrivate = false
       for (const input of step.inputs) {
-        const producerId = producerOf.get(input.ref)
+        const inputRef = input.ref.trim()
+        const producerId = producerOf.get(inputRef)
         if (producerId !== undefined) {
-          add(input.ref, stricter(input.sensitivity, outputSensitivity.get(producerId) ?? 'private'))
+          add(inputRef, stricter(input.sensitivity, outputSensitivity.get(producerId) ?? 'private'))
         } else {
-          const binding = bindings.get(input.ref)
-          if (binding) add(binding.ref, stricter(input.sensitivity, binding.sensitivity))
-          else add(input.ref, input.sensitivity)
+          const binding = bindings.get(input.ref) ?? bindings.get(inputRef)
+          if (binding) {
+            const replacementRef = binding.ref.trim()
+            if (!replacementRef) {
+              throw new ValidationError('bindings', `replacement reference for ${inputRef} cannot be empty`, binding.ref)
+            }
+            const collidingStep = producerOf.get(replacementRef)
+            if (collidingStep !== undefined) {
+              throw new ValidationError(
+                'bindings',
+                `replacement reference ${replacementRef} collides with step output produced by ${collidingStep}`,
+                binding.ref,
+              )
+            }
+            add(replacementRef, stricter(input.sensitivity, binding.sensitivity))
+          } else {
+            add(inputRef, input.sensitivity)
+          }
         }
       }
-      for (const dependency of step.dependencies) {
+      for (const dependency of dependencies) {
         if (outputSensitivity.get(dependency) === 'private') anyPrivate = true
       }
       for (const sensitivity of merged.values()) if (sensitivity === 'private') anyPrivate = true
       const sensitivity: Sensitivity = anyPrivate || step.produces.sensitivity === 'private' ? 'private' : 'shareable'
-      outputSensitivity.set(step.id, sensitivity)
-      rebuilt.set(step.id, {
+      outputSensitivity.set(stepId, sensitivity)
+      rebuilt.set(stepId, {
         ...step,
+        id: stepId,
+        dependencies,
         placement: anyPrivate ? 'local' : step.placement,
         inputs: [...merged].map(([ref, itemSensitivity]) => ({ ref, sensitivity: itemSensitivity })),
-        produces: { ref: step.produces.ref, sensitivity },
+        produces: { ref: step.produces.ref.trim(), sensitivity },
       })
     }
   }
   return {
     ...plan,
     steps: plan.steps.map(step => {
-      const next = rebuilt.get(step.id)
+      const next = rebuilt.get(step.id.trim())
       if (!next) throw new Error(`Hybrid plan lost step ${step.id}`)
       return next
     }),
@@ -497,7 +580,7 @@ function sensitivityOf(value: unknown, path: string): Sensitivity {
 
 function refOf(value: unknown, path: string): HybridRef {
   if (!isRecord(value)) throw new ValidationError(path, 'must be an object with ref and sensitivity')
-  return { ref: text(value.ref, `${path}.ref`), sensitivity: sensitivityOf(value.sensitivity, `${path}.sensitivity`) }
+  return { ref: text(value.ref, `${path}.ref`).trim(), sensitivity: sensitivityOf(value.sensitivity, `${path}.sensitivity`) }
 }
 
 /** Strictly parse untrusted JSON into a validated hybrid plan; throws a ValidationError naming the field. */
@@ -526,16 +609,16 @@ export function parseHybridPlan(value: unknown): HybridPlan {
     const args: Record<string, string> = {}
     for (const [key, argument] of Object.entries(raw.arguments)) args[key] = text(argument, `${path}.arguments.${key}`, true)
     if (!Array.isArray(raw.dependencies)) throw new ValidationError(`${path}.dependencies`, 'must be an array of step ids')
-    const dependencies = raw.dependencies.map((dependency: unknown, at: number) => text(dependency, `${path}.dependencies[${at}]`))
+    const dependencies = raw.dependencies.map((dependency: unknown, at: number) => text(dependency, `${path}.dependencies[${at}]`).trim())
     if (!Array.isArray(raw.inputs) || raw.inputs.length > MAX_INPUTS) {
       throw new ValidationError(`${path}.inputs`, `must be an array of at most ${MAX_INPUTS} references`)
     }
     const inputs = raw.inputs.map((input: unknown, at: number) => refOf(input, `${path}.inputs[${at}]`))
-    const agentId = raw.agentId === undefined ? undefined : text(raw.agentId, `${path}.agentId`)
-    const check = raw.check === undefined ? undefined : text(raw.check, `${path}.check`)
+    const agentId = raw.agentId === undefined ? undefined : text(raw.agentId, `${path}.agentId`).trim()
+    const check = raw.check === undefined ? undefined : text(raw.check, `${path}.check`).trim()
     return {
-      id: text(raw.id, `${path}.id`),
-      action: text(raw.action, `${path}.action`),
+      id: text(raw.id, `${path}.id`).trim(),
+      action: text(raw.action, `${path}.action`).trim(),
       description: text(raw.description, `${path}.description`, true),
       arguments: args,
       dependencies,
@@ -548,7 +631,7 @@ export function parseHybridPlan(value: unknown): HybridPlan {
     }
   })
   const plan: HybridPlan = {
-    id: text(value.id, 'plan.id'),
+    id: text(value.id, 'plan.id').trim(),
     objective: text(value.objective, 'plan.objective'),
     complexity: complexity as PlanComplexity,
     estimatedMinutes: minutes,

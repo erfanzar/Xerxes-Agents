@@ -726,6 +726,7 @@ function assertSafeFindPattern(pattern: string): void {
     }
     if (char === ')') {
       const hadInnerQuantifier = groupStack.pop() ?? false
+      if (hadInnerQuantifier) noteQuantifier()
       index += 1
       const quantifier = readFindQuantifier(pattern, index)
       if (quantifier !== undefined) {

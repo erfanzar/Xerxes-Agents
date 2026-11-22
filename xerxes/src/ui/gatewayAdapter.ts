@@ -3,12 +3,16 @@
 import { readTurnOutcome, turnOutcomeReason, turnOutcomeLabel } from '../types/turnOutcome.js'
 import {
   normalizeEventType,
+  type AcpStatusEventPayload,
   type AnyEvent,
+  type BtwEventKind,
+  type BtwEventPayload,
   type GatewayEvent,
   type GatewayTranscriptMessage,
   type SubagentEventPayload
 } from './gatewayTypes.js'
 import { compact } from './lib/compact.js'
+import { normalizeSwarmEventPayload } from './lib/swarmFormat.js'
 import { summarizeToolStartDisplay } from './lib/toolStartDisplay.js'
 import type { SessionInfo, Usage } from './types.js'
 
@@ -137,6 +141,30 @@ const subagentMetadata = (...sources: Record<string, unknown>[]): Partial<Subage
 export function sessionInfoFromInit(payload: Record<string, unknown>): SessionInfo {
   const skills = payload.skills
   const skillList = Array.isArray(skills) ? skills.map(s => String(s)).filter(Boolean) : []
+  const acpBinding = asRecord(payload.acp_binding)
+  const acpConnected = acpBinding.connected === true && str(acpBinding.transport) !== 'native'
+  const acpRuntimeName = acpConnected ? firstNonEmptyStr(acpBinding.name, acpBinding.agent_id) : ''
+  const acpModelLabel = acpConnected ? firstNonEmptyStr(acpBinding.current_model_name, acpBinding.current_model) : ''
+  const acpDisplayModel = acpRuntimeName
+    ? (acpModelLabel ? `${acpRuntimeName}: ${acpModelLabel}` : acpRuntimeName)
+    : ''
+  const acpModeLabel = acpConnected ? firstNonEmptyStr(acpBinding.current_mode_name, acpBinding.current_mode) : ''
+  const acpThoughtLevel = acpConnected ? optionalStr(acpBinding.thought_level) : undefined
+  const acpDiscoveredSkills = acpConnected && Array.isArray(acpBinding.discovered_skills)
+    ? acpBinding.discovered_skills
+        .map(item => asRecord(item))
+        .filter(item => typeof item.name === 'string' && item.name.trim().length > 0)
+    : []
+  const resolvedSkills = acpConnected
+    ? (acpDiscoveredSkills.length > 0
+        ? { [acpRuntimeName || 'acp']: acpDiscoveredSkills.map(item => str(item.name)) }
+        : {})
+    : (skillList.length ? { skills: skillList } : {})
+  const resolvedSkillDescriptions = acpConnected
+    ? Object.fromEntries(
+        acpDiscoveredSkills.map(item => [str(item.name), str(item.description)])
+      )
+    : asStringRecord(payload.skill_descriptions)
   return compact<SessionInfo>({
     local_provider_label: typeof payload.local_provider_label === 'string' ? payload.local_provider_label : undefined,
     remote_provider_binding_supported: typeof payload.remote_provider_binding_supported === "boolean" ? payload.remote_provider_binding_supported : undefined,
@@ -145,14 +173,14 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
     goal: optionalStr(payload.goal),
     goal_phase: optionalStr(payload.goal_phase),
     head_hash: str(payload.head_hash),
-    model: str(payload.model),
-    mode: str(payload.mode, 'code'),
+    model: acpDisplayModel || str(payload.model),
+    mode: acpModeLabel || str(payload.mode, 'code'),
     permission_mode: permissionMode(payload.permission_mode),
-    profile_name: optionalStr(payload.profile_name) ?? optionalStr(payload.agent_name),
-    reasoning_effort: str(payload.reasoning_effort),
+    profile_name: acpRuntimeName || optionalStr(payload.profile_name) || optionalStr(payload.agent_name),
+    reasoning_effort: acpThoughtLevel || str(payload.reasoning_effort),
     session_id: optionalStr(payload.session_id),
-    skillDescriptions: asStringRecord(payload.skill_descriptions),
-    skills: skillList.length ? { skills: skillList } : {},
+    skillDescriptions: resolvedSkillDescriptions,
+    skills: resolvedSkills,
     tools: {},
     usage: usageFromStatus(payload),
     version: str(payload.version)
@@ -419,6 +447,9 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       if (payload.kind === 'compressing' || payload.kind === 'compaction') {
         return [{ type: 'status.update', payload: { kind: payload.kind, text: str(payload.text) } }]
       }
+      if (payload.kind === 'plan') {
+        return [{ type: 'status.update', payload: { kind: 'info', text: str(payload.text, 'plan updated') } }]
+      }
       const mode = optionalStr(payload.mode)
       const activePermissionMode = permissionMode(payload.permission_mode)
       const reasoningEffort = optionalStr(payload.reasoning_effort)
@@ -527,7 +558,40 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'tool_result':
       return [toolComplete(payload)]
 
-    case 'approval_request':
+    case 'approval_request': {
+      const inputs = payload.inputs && typeof payload.inputs === 'object' && !Array.isArray(payload.inputs)
+        ? (payload.inputs as Record<string, unknown>)
+        : undefined
+      const cwd = optionalStr(payload.cwd)
+      const rawDiff = payload.diff && typeof payload.diff === 'object' && !Array.isArray(payload.diff)
+        ? asRecord(payload.diff)
+        : undefined
+      const diff = rawDiff
+        ? {
+            path: str(rawDiff.path),
+            ...(typeof rawDiff.old_text === 'string' ? { old_text: rawDiff.old_text } : {}),
+            ...(typeof rawDiff.new_text === 'string' ? { new_text: rawDiff.new_text } : {})
+          }
+        : undefined
+      const options = Array.isArray(payload.options)
+        ? payload.options
+            .map(item => asRecord(item))
+            .filter(item => typeof item.option_id === 'string' && item.option_id.length > 0)
+            .map(item => ({
+              option_id: str(item.option_id),
+              name: str(item.name, str(item.option_id)),
+              kind: str(item.kind)
+            }))
+        : undefined
+      const locations = Array.isArray(payload.locations)
+        ? payload.locations
+            .map(item => asRecord(item))
+            .filter(item => typeof item.path === 'string' && item.path.length > 0)
+            .map(item => ({
+              path: str(item.path),
+              ...(typeof item.line === 'number' && Number.isFinite(item.line) ? { line: Math.trunc(item.line) } : {})
+            }))
+        : undefined
       return [
         {
           type: 'approval.request',
@@ -535,10 +599,16 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
             allow_permanent: bool(payload.allow_permanent, true),
             command: str(payload.action, str(payload.name, 'tool')),
             description: str(payload.description, str(payload.action, 'approval required')),
-            request_id: str(payload.id, str(payload.request_id))
+            request_id: str(payload.id, str(payload.request_id)),
+            ...(inputs ? { inputs } : {}),
+            ...(cwd ? { cwd } : {}),
+            ...(diff ? { diff } : {}),
+            ...(options && options.length > 0 ? { options } : {}),
+            ...(locations && locations.length > 0 ? { locations } : {})
           }
         }
       ]
+    }
 
     case 'question_request':
       return [clarifyRequest(payload)]
@@ -593,8 +663,139 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     case 'subagent_event':
       return subagentEvents(payload)
 
+    case 'swarm_event':
+      return [{ type: 'swarm_event', payload: normalizeSwarmEventPayload(payload) }]
+
+    case 'btw_event':
+      return [{ type: 'btw_event', payload: normalizeBtwEventPayload(payload) }]
+
+    case 'acp_status': {
+      const acpEvent: AnyEvent = {
+        type: 'acp_status',
+        payload: payload as unknown as AcpStatusEventPayload
+      }
+      const binding = payload.binding && typeof payload.binding === 'object' && !Array.isArray(payload.binding)
+        ? asRecord(payload.binding)
+        : null
+      if (binding && binding.connected === true && str(binding.transport) !== 'native') {
+        const runtimeName = firstNonEmptyStr(binding.name, binding.agent_id) || 'ACP'
+        const modelLabel = firstNonEmptyStr(binding.current_model_name, binding.current_model)
+        const modeLabel = firstNonEmptyStr(binding.current_mode_name, binding.current_mode)
+        const thoughtLabel = optionalStr(binding.thought_level)
+        const displayModel = modelLabel ? `${runtimeName}: ${modelLabel}` : runtimeName
+        const discoveredSkills = Array.isArray(binding.discovered_skills)
+          ? binding.discovered_skills
+              .map(item => asRecord(item))
+              .filter(item => typeof item.name === 'string' && item.name.trim().length > 0)
+          : []
+        const availableCommands = Array.isArray(binding.available_commands)
+          ? binding.available_commands
+              .map(item => asRecord(item))
+              .filter(item => typeof item.name === 'string' && item.name.trim().length > 0 && item.kind !== 'skill')
+          : []
+        const statusParts = [
+          runtimeName,
+          modelLabel,
+          thoughtLabel ? `thinking: ${thoughtLabel}` : '',
+          modeLabel ? `mode: ${modeLabel}` : '',
+          discoveredSkills.length > 0 ? `${discoveredSkills.length} skills` : '',
+          availableCommands.length > 0 ? `${availableCommands.length} cmds` : ''
+        ].filter(Boolean)
+        const skillDescriptions = discoveredSkills.length > 0
+          ? Object.fromEntries(discoveredSkills.map(item => [str(item.name), str(item.description)]))
+          : undefined
+        return [
+          acpEvent,
+          {
+            type: 'session.info',
+            payload: {
+              model: displayModel,
+              profile_name: runtimeName,
+              ...(modeLabel ? { mode: modeLabel } : {}),
+              ...(thoughtLabel ? { reasoning_effort: thoughtLabel } : {}),
+              ...(skillDescriptions ? { skillDescriptions } : {}),
+              skills: discoveredSkills.length > 0
+                ? { [runtimeName]: discoveredSkills.map(item => str(item.name)) }
+                : {},
+              tools: {}
+            }
+          },
+          {
+            type: 'status.update',
+            payload: {
+              kind: 'status',
+              ...(modeLabel ? { mode: modeLabel } : {}),
+              ...(thoughtLabel ? { reasoning_effort: thoughtLabel } : {}),
+              text: statusParts.join(' · ')
+            }
+          }
+        ]
+      }
+      if (binding && binding.connected !== true) {
+        const err = optionalStr(binding.error)
+        if (err) {
+          return [
+            acpEvent,
+            {
+              type: 'notification.show',
+              payload: {
+                key: 'acp_status',
+                kind: 'ttl',
+                level: 'error',
+                text: err,
+                ttl_ms: 8000
+              }
+            },
+            {
+              type: 'status.update',
+              payload: {
+                kind: 'error',
+                text: err
+              }
+            }
+          ]
+        }
+      }
+      return [
+        acpEvent,
+        {
+          type: 'status.update',
+          payload: {
+            kind: 'status',
+            text: 'ready'
+          }
+        }
+      ]
+    }
+
     default:
       return [{ type: normalizedType, payload } as GatewayEvent]
+  }
+}
+
+export function normalizeBtwEventPayload(raw: unknown): BtwEventPayload {
+  const record = asRecord(raw)
+  const rawKind = str(record.kind)
+  const kind: BtwEventKind =
+    rawKind === 'begin' || rawKind === 'delta' || rawKind === 'end' || rawKind === 'error'
+      ? rawKind
+      : typeof record.error === 'string' && record.error
+        ? 'error'
+        : typeof record.delta === 'string'
+          ? 'delta'
+          : 'end'
+  const question = optionalStr(record.question)
+  const model = optionalStr(record.model)
+  const error = optionalStr(record.error)
+  return {
+    session_id: str(record.session_id),
+    request_id: str(record.request_id),
+    kind,
+    ...(question ? { question } : {}),
+    ...(typeof record.delta === 'string' ? { delta: record.delta } : {}),
+    ...(typeof record.answer === 'string' ? { answer: record.answer } : {}),
+    ...(model ? { model } : {}),
+    ...(error ? { error } : {})
   }
 }
 

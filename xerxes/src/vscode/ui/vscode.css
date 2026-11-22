@@ -201,3 +201,81 @@ html:root[data-host='vscode'][data-surface='panel']{--x-screen:var(--vscode-edit
 :root[data-host='vscode'] .atelier.xv .xv-runtime button{flex:0 0 auto;padding:3px 10px;border:0;border-radius:4px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);cursor:pointer}
 :root[data-host='vscode'] .atelier.xv .xv-runtime button:disabled{opacity:.6;cursor:default}
 :root[data-host='vscode'] .atelier.xv .msg-turn--user .msg__images{justify-content:flex-start}
+.xv-pill--swarm[data-working='true']{color:var(--x-working) !important;background:var(--x-accent-soft) !important}
+.xv-pill--btw[data-streaming='true']{color:var(--x-working) !important;background:var(--x-accent-soft) !important}
+
+/* ── Ephemeral Side Question (/btw) floating card above composer ───── */
+:root[data-host='vscode'] .atelier.xv .xv-btw{flex:0 0 auto;display:flex;flex-direction:column;width:calc(100% - 40px);max-width:var(--xv-column);max-height:min(44vh,360px);margin:4px auto 0;box-sizing:border-box;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-dialog);box-shadow:var(--x-elev);overflow:hidden}
+:root[data-host='vscode'] .atelier.xv .xv-btw__head{flex:none;display:flex;align-items:center;gap:6px;min-height:30px;padding:0 8px 0 11px;border-bottom:1px solid var(--x-hairline);background:var(--x-card)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__title{font:600 var(--ui-font)/1.2 var(--sans);color:var(--fg)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__badge{font:400 var(--ui-small)/1.2 var(--sans);color:var(--x-meta)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__flex{flex:1}
+:root[data-host='vscode'] .atelier.xv .xv-btw__action,:root[data-host='vscode'] .atelier.xv .xv-btw__close{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--x-meta);font:400 var(--ui-small)/1 var(--sans);cursor:pointer}
+:root[data-host='vscode'] .atelier.xv .xv-btw__action:hover,:root[data-host='vscode'] .atelier.xv .xv-btw__close:hover{background:var(--x-selected);color:var(--fg)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:176px;height:22px;min-height:22px;padding:0 6px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--x-meta);font:400 var(--ui-small)/1 var(--sans);cursor:pointer}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn:hover,:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn[aria-expanded='true']{background:var(--x-chip);border-color:var(--x-hairline);color:var(--fg)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn.is-custom{color:var(--fg)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn:focus{outline:none;box-shadow:none}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model-btn:focus-visible{outline:none;box-shadow:0 0 0 1px var(--x-accent)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__body{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:10px 12px}
+:root[data-host='vscode'] .atelier.xv .xv-btw__empty{margin:0;color:var(--x-meta);font:400 var(--ui-font)/1.5 var(--sans)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__turn{display:flex;flex-direction:column;gap:4px}
+:root[data-host='vscode'] .atelier.xv .xv-btw__turn+.xv-btw__turn{padding-top:8px;border-top:1px solid var(--x-divider)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__q{font:600 var(--ui-font)/1.4 var(--sans);color:var(--fg)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__a{display:flex;flex-direction:column;gap:4px;color:var(--x-prose);font:400 var(--ui-font)/1.5 var(--sans)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__thinking{color:var(--x-meta);font-style:italic}
+:root[data-host='vscode'] .atelier.xv .xv-btw__err{margin:0;color:var(--x-failed);font-size:var(--ui-small)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__model{color:var(--x-meta);font:400 11px/1.2 var(--mono)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__form{flex:none;display:flex;align-items:center;gap:6px;padding:6px 8px;border-top:1px solid var(--x-hairline);background:var(--vscode-input-background)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__input{flex:1 1 auto;min-width:0;border:0;outline:0;background:transparent;color:var(--vscode-input-foreground,var(--fg));font:400 var(--ui-font)/1.4 var(--sans)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__input::placeholder{color:var(--vscode-input-placeholderForeground,var(--x-meta))}
+:root[data-host='vscode'] .atelier.xv .xv-btw__send{flex:none;display:inline-grid;place-items:center;width:24px;height:24px;border:0;border-radius:4px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);cursor:pointer}
+:root[data-host='vscode'] .atelier.xv .xv-btw__send:hover:not(:disabled){background:var(--vscode-button-hoverBackground)}
+:root[data-host='vscode'] .atelier.xv .xv-btw__send:disabled{background:transparent;color:var(--x-meta);opacity:.55;cursor:default}
+
+/* ── Polished flat hairline Swarm Board styles in VS Code ─────────── */
+:root[data-host='vscode'] .xv .swarm-board{padding:10px 14px 14px;gap:8px;background:var(--x-screen)}
+:root[data-host='vscode'] .xv .swarm-board__overview,:root[data-host='vscode'] .xv .swarm-roster,:root[data-host='vscode'] .xv .swarm-feed-pane,:root[data-host='vscode'] .xv .swarm-inspector{border:0;border-radius:0;background:transparent;padding:0;box-shadow:none}
+:root[data-host='vscode'] .xv .swarm-member,:root[data-host='vscode'] .xv .swarm-msg,:root[data-host='vscode'] .xv .swarm-inspector__turn{border:0;border-bottom:1px solid var(--x-hairline);border-radius:0;background:transparent;padding:7px 2px;box-shadow:none}
+:root[data-host='vscode'] .xv .swarm-member:last-child,:root[data-host='vscode'] .xv .swarm-msg:last-child,:root[data-host='vscode'] .xv .swarm-inspector__turn:last-child{border-bottom:0}
+:root[data-host='vscode'] .xv .swarm-member__activity{color:var(--x-meta);font:400 var(--ui-small)/1.35 var(--sans)}
+:root[data-host='vscode'] .xv .swarm-inspector__bar{display:flex;align-items:center;gap:6px;padding:0 0 8px;border-bottom:1px solid var(--x-hairline)}
+:root[data-host='vscode'] .xv .swarm-inspector__spacer{flex:1}
+:root[data-host='vscode'] .xv .swarm-inspector__facts{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 0;color:var(--x-meta);font:400 var(--ui-small)/1.35 var(--sans)}
+:root[data-host='vscode'] .xv .swarm-inspector__section+.swarm-inspector__section{margin-top:10px;padding-top:10px;border-top:1px solid var(--x-hairline)}
+:root[data-host='vscode'] .xv .swarm-inspector__cap{margin:0 0 6px;color:var(--x-meta);font:600 var(--ui-small)/1.2 var(--sans);text-transform:uppercase;letter-spacing:.04em}
+:root[data-host='vscode'] .xv .swarm-inspector__tool{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:var(--ui-small)}
+:root[data-host='vscode'] .xv .swarm-inspector__tool-sum,:root[data-host='vscode'] .xv .swarm-inspector__tool-state,:root[data-host='vscode'] .xv .swarm-inspector__turn-role{color:var(--x-meta);font-size:var(--ui-small)}
+:root[data-host='vscode'] .xv .swarm-inspector__tool-state{margin-left:auto}
+:root[data-host='vscode'] .xv .swarm-composer{border-top:1px solid var(--x-hairline);padding-top:8px;background:transparent}
+:root[data-host='vscode'] .xv .swarm-composer textarea,:root[data-host='vscode'] .xv .swarm-composer input,:root[data-host='vscode'] .xv .swarm-inspector input{background:var(--vscode-input-background);color:var(--vscode-input-foreground,var(--fg));border:1px solid var(--vscode-input-border,var(--x-hairline));border-radius:4px}
+:root[data-host='vscode'] .xv .swarm-composer textarea:focus,:root[data-host='vscode'] .xv .swarm-composer input:focus,:root[data-host='vscode'] .xv .swarm-inspector input:focus{border-color:var(--x-focus);outline:0}
+:root[data-host='vscode'] .xv .swarm-board__graph{background:var(--x-screen);border-top:1px solid var(--x-hairline)}
+:root[data-host='vscode'] .xv .swarm-graph__replay{padding:7px 4px;background:transparent}
+:root[data-host='vscode'] .xv .swarm-graph__controls{padding:6px 4px}
+:root[data-host='vscode'] .xv .swarm-graph__select{background:var(--vscode-dropdown-background,var(--x-card));color:var(--vscode-dropdown-foreground,var(--fg));border-color:var(--vscode-dropdown-border,var(--x-hairline))}
+:root[data-host='vscode'] .xv .swarm-graph__stage{padding:6px 4px}
+:root[data-host='vscode'] .xv .swarm-battlefield__zone-outer{fill:var(--vscode-sideBar-background,var(--x-card))}
+:root[data-host='vscode'] .xv .swarm-graph__legend{padding:8px 4px}
+:root[data-host='vscode'] .xv .swarm-inspector__tool-output{background:var(--vscode-textCodeBlock-background,var(--x-card));border-color:var(--x-hairline)}
+:root[data-host='vscode'] .swarm-model-picker,:root[data-host='vscode'] .btw-model-pop{background:var(--vscode-menu-background,var(--x-popover,var(--x-card)));border-color:var(--vscode-menu-border,var(--x-hairline));color:var(--vscode-menu-foreground,var(--fg))}
+:root[data-host='vscode'] .swarm-model-picker__search,:root[data-host='vscode'] .swarm-model-picker__custom-input,:root[data-host='vscode'] .btw-model-pop__search,:root[data-host='vscode'] .btw-model-pop__custom-input{background:var(--vscode-input-background,var(--x-sunken));border-color:var(--vscode-input-border,var(--x-hairline));color:var(--vscode-input-foreground,var(--fg))}
+:root[data-host='vscode'] .swarm-model-picker__item:hover:not(:disabled),:root[data-host='vscode'] .btw-model-pop__item:hover:not(:disabled){background:var(--vscode-list-hoverBackground,var(--x-chip))}
+:root[data-host='vscode'] .swarm-model-picker__item.is-active,:root[data-host='vscode'] .btw-model-pop__item.is-active{background:var(--vscode-list-activeSelectionBackground,var(--x-selected));color:var(--vscode-list-activeSelectionForeground,var(--x-title))}
+
+/* ── Generative UI widget frame, ArtifactCard & LearnedBadge parity ── */
+:root[data-host='vscode'] .xv .widget-frame{border-color:var(--x-hairline);background:var(--x-card);border-radius:8px}
+:root[data-host='vscode'] .xv .widget-frame__bar{background:var(--x-card);border-bottom-color:var(--x-hairline)}
+:root[data-host='vscode'] .xv .widget-frame__badge{background:var(--x-chip);border-color:var(--x-hairline);color:var(--x-secondary)}
+:root[data-host='vscode'] .xv .widget-frame__btn{color:var(--x-secondary)}
+:root[data-host='vscode'] .xv .widget-frame__btn:hover{background:var(--vscode-toolbar-hoverBackground,var(--x-selected));color:var(--fg)}
+:root[data-host='vscode'] .xv .widget-frame__stage{background:var(--x-screen)}
+:root[data-host='vscode'] .xv .widget-frame__source{background:var(--vscode-textCodeBlock-background,var(--x-card))}
+:root[data-host='vscode'] .xv .artifact-card{width:100%;max-width:none;min-height:36px;padding:6px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-card)}
+:root[data-host='vscode'] .xv .artifact-card:hover{border-color:var(--x-separator)}
+:root[data-host='vscode'] .xv .artifact-card__icon{width:auto;height:auto;background:transparent;border:0;color:var(--x-meta)}
+:root[data-host='vscode'] .xv .artifact-card__title{color:var(--fg)}
+:root[data-host='vscode'] .xv .artifact-card__meta{color:var(--x-meta)}
+:root[data-host='vscode'] .xv .artifact-card__open{border:1px solid var(--x-hairline);background:transparent;color:var(--x-secondary);border-radius:6px}
+:root[data-host='vscode'] .xv .artifact-card__open:hover{background:var(--vscode-toolbar-hoverBackground,var(--x-selected));color:var(--fg)}
+:root[data-host='vscode'] .xv .learned-badge{background:transparent;border:0;border-radius:0;min-width:0;padding:0;color:var(--x-meta);font-variant-numeric:tabular-nums;box-shadow:none}

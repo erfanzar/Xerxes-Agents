@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { screenshotParts } from './screenshotSuperseder.js'
+
 export type TokenCountInput = string | readonly Record<string, unknown>[]
 
 /** Provider-aware token estimator with a deterministic dependency-free fallback. */
@@ -89,6 +91,7 @@ function isImagePart(value: unknown): boolean {
 }
 
 function countImageParts(value: unknown): number {
+  if (typeof value === 'string') return screenshotParts(value)?.images.length ?? 0
   if (isImagePart(value)) return 1
   if (Array.isArray(value)) return value.reduce((total: number, item) => total + countImageParts(item), 0)
   if (!value || typeof value !== 'object') return 0
@@ -98,7 +101,12 @@ function countImageParts(value: unknown): number {
 }
 
 function contentToText(value: unknown): string {
-  if (typeof value === 'string') return value
+  if (typeof value === 'string') {
+    const shot = screenshotParts(value)
+    if (!shot) return value
+    const placeholders = Array.from({ length: shot.images.length }, () => IMAGE_PART_PLACEHOLDER).join(' ')
+    return `${shot.text} ${placeholders}`.trim()
+  }
   if (isImagePart(value)) return IMAGE_PART_PLACEHOLDER
   if (Array.isArray(value)) return value.map(contentToText).join(' ')
   if (value === undefined || value === null) return ''

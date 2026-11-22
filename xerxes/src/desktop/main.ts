@@ -8,7 +8,7 @@
  * those properties are the design, not configuration.
  */
 
-import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, nativeImage, Notification, safeStorage, shell, Menu, screen, webContents, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, session as electronSession, shell, Menu, screen, webContents, type IpcMainInvokeEvent } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -18,6 +18,13 @@ import { fileURLToPath } from 'node:url'
 import { activateWorkspaceView } from './main/workspaceNavigation.js'
 import { contextKey, contextLabel, contextScope, contextSessions, latestSessionIn, sameRemote, sessionsFor, type WorkspaceContext } from './main/contextNavigation.js'
 import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, WindowLayoutRecorder, type SavedWindow } from './main/windowState.js'
+import {
+  applyChromiumPerformanceSwitches,
+  createIdleCacheTrimmer,
+  pickEvictableBackgroundViews,
+  planStartupSurfaces,
+  setBoundedMapEntry,
+} from './main/perfHygiene.js'
 import { SurfaceSession } from './main/surfaceSession.js'
 import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
@@ -39,7 +46,7 @@ import { BrowserTab } from './main/browserTab.js'
 import { startAppUpdates } from './main/appUpdateController.js'
 import { registerDaemonBridge, detachDaemon } from './main/ipc.js'
 import { dictationPort, transcribeDictation } from './main/voice.js'
-import { localDesktopWorkspaces, saveDesktopWorkspace } from './main/workspaceSettings.js'
+import { localDesktopWorkspaces, rememberDesktopWorkspace, removeDesktopWorkspace, saveDesktopWorkspace } from './main/workspaceSettings.js'
 import {
   openRemote,
   remoteTarget,
@@ -59,8 +66,9 @@ import { electronMacPermissionsPort } from './main/macPermissionsPort.js'
 import { MAC_PERMISSIONS_STATE_EVENT } from './macPermissionsShared.js'
 import { createHubHealth, createNodeHubHealthPort, registerHubHealthIpc } from './main/hubHealth.js'
 import { HUB_HEALTH_STATE_EVENT } from './hubHealthShared.js'
-import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, chatImageRequestOf, externalUrlOf } from './chatMediaShared.js'
+import { IMAGE_DATA_CHANNEL, OPEN_EXTERNAL_CHANNEL, PROJECT_ICON_CHANNEL, chatImageRequestOf, externalUrlOf } from './chatMediaShared.js'
 import { readLocalChatImage, readRemoteChatImage } from './main/chatMedia.js'
+import { resolveProjectIconDataUrl } from './main/projectFavicon.js'
 import { FILE_ACTION_CHANNEL, fileActionRequestOf } from './fileActionShared.js'
 import { performFileAction } from './main/fileActions.js'
 
@@ -91,6 +99,8 @@ process.title = APP_NAME
 // Exit before registering persistence or runtime handlers: a duplicate must not
 // overwrite the first process's window layout or attach another daemon client.
 if (!app.requestSingleInstanceLock()) app.exit(0)
+// Disable unused Chromium background networking/sync/component services before ready.
+applyChromiumPerformanceSwitches(app.commandLine)
 app.on('second-instance', () => {
   void app.whenReady().then(() => {
     const window = BrowserWindow.getFocusedWindow()
@@ -127,6 +137,7 @@ let notificationsEnabled = true
 
 /** Last goal phase seen per session, so a repeated status_update never pings twice. */
 const goalPhases = new Map<string, string>()
+const MAX_GOAL_PHASE_ENTRIES = 256
 
 function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>, stillBound: () => boolean): void {
   // Track transitions even when notifications are off, so enabling them never replays one.
@@ -134,7 +145,7 @@ function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type
   if (type === 'status_update' && typeof payload.goal_phase === 'string') {
     const key = typeof payload.session_id === 'string' ? payload.session_id : ''
     previousGoalPhase = goalPhases.get(key)
-    goalPhases.set(key, payload.goal_phase)
+    setBoundedMapEntry(goalPhases, key, payload.goal_phase, MAX_GOAL_PHASE_ENTRIES)
   }
   if (window.isDestroyed() || !Notification.isSupported()) return
   const decision = shouldNotify({ type, payload }, { enabled: notificationsEnabled, anyWindowFocused: window.isFocused() }, previousGoalPhase)
@@ -198,10 +209,10 @@ function createWindow(saved?: SavedWindow): BrowserWindow {
     // Native backdrop material is visible through navigation only. Content
     // remains opaque for legibility; the traffic lights stay system-owned.
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    // Center the 14px native buttons in the renderer's 44px top bar.
-    trafficLightPosition: { x: 20, y: 15 },
+    // Center the 14px native buttons in the renderer's 52px T3 top bar.
+    trafficLightPosition: { x: 16, y: 19 },
     ...(windowIcon ? { icon: windowIcon } : {}),
-    backgroundColor: process.platform === 'darwin' ? '#00000000' : '#202124',
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : '#000000',
     // Always active: with 'followWindow' the material went inactive whenever
     // another app had focus and stopped sampling what is behind the window,
     // so a transparent background kept showing a frozen copy of whatever was
@@ -210,10 +221,15 @@ function createWindow(saved?: SavedWindow): BrowserWindow {
     show: false,
     webPreferences: {
       contextIsolation: true,
-      // Keep daemon progress and completed IPC updates live while the window is unfocused.
+      // Keep the active window's GPU compositor and IPC updates live behind
+      // other apps / macOS Mission Control; covered workspace views are
+      // explicitly throttled via setBackgroundThrottling(true) in syncWindowVisibility.
       backgroundThrottling: false,
       nodeIntegration: false,
       sandbox: true,
+      spellcheck: false,
+      enableWebSQL: false,
+      webviewTag: false,
       preload: join(here, 'preload.js'),
     },
   })
@@ -240,7 +256,17 @@ const windowRoutes = new WindowRoutes<IpcMainInvokeEvent>()
 const registeredChannels = new Set<string>()
 const cleanupWindows = new Set<() => void>()
 
-const workspaceSurfaces = new Map<number, { host: BrowserWindow; view: WebContentsView | null }>()
+interface WorkspaceSurface {
+  readonly host: BrowserWindow
+  readonly view: WebContentsView | null
+  lastActiveAt: number
+  hasActiveTurn: boolean
+  readonly isBusy: () => boolean
+  readonly onHostHidden: (hidden: boolean) => void
+  readonly suspendBrowser: () => void
+}
+
+const workspaceSurfaces = new Map<number, WorkspaceSurface>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
 const savedHostContexts = new SavedHostContexts({ list: () => desktopMachineCommand(join(xerxesHome(), 'machines.json'), 'list') })
@@ -257,52 +283,138 @@ const surfaceSessions = new Map<number, SurfaceSession>()
 /** Views that can be closed on their own; a window's own page closes with the window. */
 const viewClosers = new Map<number, () => void>()
 /**
- * Base pages (a window's own page, not a view) currently covered by another
- * workspace view. Kept here, not only pushed: at startup the push arrives
- * before the page listens, so the page also asks as it loads.
+ * Surfaces (both base pages and WebContentsViews) currently unseen because they
+ * are covered by another workspace view, or their host window is minimized,
+ * hidden, or the system is locked/suspended. Kept here as well as pushed so a
+ * surface that finishes loading after the push asks and gets the same answer.
  */
 const occludedSurfaces = new Set<number>()
+/** Windows explicitly hidden or minimized by the user (avoids marking a booting pre-ready-to-show window occluded). */
+const hiddenWindows = new WeakSet<BrowserWindow>()
+let systemSuspendedOrLocked = false
+
+const isHostWindowHidden = (host: BrowserWindow): boolean =>
+  systemSuspendedOrLocked || host.isDestroyed() || host.isMinimized() || hiddenWindows.has(host)
+
+const isAppInteractive = (): boolean =>
+  !systemSuspendedOrLocked
+  && BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && !win.isMinimized() && !hiddenWindows.has(win))
+
+const hasFocusedWindow = (): boolean =>
+  !systemSuspendedOrLocked
+  && BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && !win.isMinimized() && !hiddenWindows.has(win) && win.isFocused())
+
+function workspaceWebContents(): Electron.WebContents[] {
+  const list: Electron.WebContents[] = []
+  for (const surface of workspaceSurfaces.values()) {
+    const target = surface.view?.webContents ?? surface.host.webContents
+    if (!target.isDestroyed()) list.push(target)
+  }
+  return list
+}
+
+const cacheTrimmer = createIdleCacheTrimmer({
+  trim: async () => {
+    // Trim only Chromium HTTP + compiled code caches; NEVER clear cookies, localStorage, or IndexedDB.
+    await Promise.allSettled([
+      electronSession.defaultSession.clearCache(),
+      electronSession.defaultSession.clearCodeCaches({}),
+    ])
+  },
+})
+
+function syncCacheTrimState(): void {
+  if (isAppInteractive()) cacheTrimmer.markForeground()
+  else cacheTrimmer.markBackground()
+}
+
+function syncWindowVisibility(host: BrowserWindow, forceNotify = false): void {
+  if (host.isDestroyed()) return
+  const activeId = activeSurfaces.get(host.id)
+  const hostHidden = isHostWindowHidden(host)
+  for (const [otherId, other] of workspaceSurfaces) {
+    if (other.host !== host) continue
+    const isActive = otherId === activeId
+    // `occluded` means covered by another workspace view inside THIS OS window.
+    // Never hide (`visibility:hidden`) or background-throttle the active surface
+    // on window hide/blur/space switch: on macOS with vibrancy, Chromium evicts
+    // the active GPU IOSurface (solid-black Mission Control thumbnail and a
+    // 4-5s repaint stall when switching back).
+    const occluded = !isActive
+    const wasOccluded = occludedSurfaces.has(otherId)
+    if (occluded) occludedSurfaces.add(otherId)
+    else occludedSurfaces.delete(otherId)
+    if (other.view) {
+      other.view.setVisible(isActive)
+      if (!other.view.webContents.isDestroyed()) {
+        other.view.webContents.setBackgroundThrottling(occluded)
+        if (forceNotify || occluded !== wasOccluded) {
+          other.view.webContents.send('desktop:occluded', occluded)
+        }
+      }
+    } else {
+      // Base page: throttle and hide only while covered by a foreground view.
+      if (!other.host.webContents.isDestroyed()) {
+        other.host.webContents.setBackgroundThrottling(occluded)
+        if (forceNotify || occluded !== wasOccluded) {
+          other.host.webContents.send('desktop:occluded', occluded)
+        }
+      }
+    }
+    other.onHostHidden(hostHidden || occluded)
+  }
+  syncCacheTrimState()
+}
+
+function syncAllWindowVisibility(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) syncWindowVisibility(win)
+  }
+  syncCacheTrimState()
+}
+
+function evictBackgroundViews(host?: BrowserWindow): void {
+  if (quitting) return
+  const hosts = host ? [host] : BrowserWindow.getAllWindows()
+  const now = Date.now()
+  for (const win of hosts) {
+    if (win.isDestroyed()) continue
+    const activeId = activeSurfaces.get(win.id)
+    const candidates = []
+    for (const [surfaceId, surface] of workspaceSurfaces) {
+      if (surface.host !== win) continue
+      candidates.push({
+        id: surfaceId,
+        isBasePage: surface.view === null,
+        isActive: surfaceId === activeId,
+        hasActiveTurn: surface.hasActiveTurn,
+        isBusy: surface.isBusy(),
+        lastActiveAt: surface.lastActiveAt,
+      })
+    }
+    for (const victimId of pickEvictableBackgroundViews(candidates, now)) {
+      viewClosers.get(victimId)?.()
+    }
+  }
+}
 
 function activateSurface(id: number): void {
   const surface = workspaceSurfaces.get(id)
   if (!surface || surface.host.isDestroyed()) return
-  for (const [otherId, other] of workspaceSurfaces) {
-    if (other.host !== surface.host) continue
-    if (other.view) {
-      const shown = otherId === id
-      other.view.setVisible(shown)
-      // Views are created unthrottled so the shown one stays live behind
-      // other apps, but in Electron that also pins the Page Visibility API to
-      // "visible". Every retained workspace kept running its timers, polls
-      // and animations at full rate while covered — ten hidden pages were
-      // most of the app's energy use. Covered views throttle like a
-      // background tab; socket and IPC events still arrive.
-      if (!other.view.webContents.isDestroyed()) {
-        other.view.webContents.setBackgroundThrottling(!shown)
-        other.view.webContents.send('desktop:occluded', !shown)
-      }
-    }
-    // The window's own page cannot be hidden like a view. With a transparent
-    // background the view on top is see-through, so a covered base page
-    // showed through it (two workspaces drawn over each other); it hides
-    // itself instead, which also stops it painting while unseen.
-    else {
-      if (otherId !== id) occludedSurfaces.add(otherId)
-      else occludedSurfaces.delete(otherId)
-      if (!other.host.webContents.isDestroyed()) other.host.webContents.send('desktop:occluded', otherId !== id)
-    }
-  }
+  surface.lastActiveAt = Date.now()
+  activeSurfaces.set(surface.host.id, id)
+  windowStates.used(id)
+  syncWindowVisibility(surface.host, true)
   // An already attached view keeps its old stacking position. Activation must
   // bring it above the other retained workspaces as well as make it visible.
   if (surface.view) surface.host.contentView.addChildView(surface.view)
-  activeSurfaces.set(surface.host.id, id)
-  windowStates.used(id)
   const contents = surface.view?.webContents ?? surface.host.webContents
-  contents.focus()
+  if (!contents.isDestroyed()) contents.focus()
   const state = windowStates.get(id)?.()
   surface.host.setTitle(state?.remote
     ? `${state.remote.alias} · ${basename(state.remote.workspacePath)} — ${APP_NAME}`
     : state?.workspace ? `${basename(state.workspace)} — ${APP_NAME}` : APP_NAME)
+  evictBackgroundViews(surface.host)
   scheduleWindowSave()
 }
 
@@ -456,7 +568,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   const window = host ?? createWindow(saved)
   const view = host ? new WebContentsView({ webPreferences: {
     contextIsolation: true, backgroundThrottling: false, nodeIntegration: false,
-    sandbox: true, preload: join(here, 'preload.js'),
+    sandbox: true, spellcheck: false, enableWebSQL: false, webviewTag: false,
+    preload: join(here, 'preload.js'),
   } }) : null
   const contents = view?.webContents ?? window.webContents
   if (view) {
@@ -501,25 +614,45 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (isMainFrame && code !== -3) void recover(`Page load failed: ${description} (${code}).`)
   })
   const id = contents.id
-  workspaceSurfaces.set(id, { host: window, view })
+  let voiceRequest: AbortController | null = null
+  const surfaceRecord: WorkspaceSurface = {
+    host: window,
+    view,
+    lastActiveAt: Date.now(),
+    hasActiveTurn: false,
+    isBusy: () => Boolean(remoteAttempt || voiceRequest),
+    onHostHidden: hidden => {
+      if (hidden) browserTab?.setBounds(null)
+    },
+    suspendBrowser: () => {
+      browserTab?.suspend()
+    },
+  }
+  workspaceSurfaces.set(id, surfaceRecord)
   surfaceSessions.set(id, session)
   activateSurface(id)
-  const attach = (next?: DaemonRpc) => registerDaemonBridge(contents, next, (type, payload) => {
-    // Some session-bound events omit the id. Capture the owning task now,
-    // before a later session.open changes what this surface shows.
-    const current = session.current
-    maybeNotify(window, contents, type, current && payload.session_id === undefined ? { ...payload, session_id: current } : payload,
-      () => workspaceSurfaces.has(id) && daemon === next)
-    // A turn that ended (perhaps because access was lost while it ran, after
-    // an app restart) leaves the conversation idle: bind it again now, so a
-    // Retry works instead of failing the same way.
-    if (type === 'turn_end' && remote && providerForwarding) void followLocalProviders(providerForwarding)
-  }, (method, result) => {
-    if (session.observe(method, result)) scheduleWindowSave()
-    // Opening or starting a conversation on an SSH host: keep it on this
-    // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
-    if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
-  })
+  const attach = (next?: DaemonRpc) => {
+    surfaceRecord.hasActiveTurn = false
+    next?.onConnection(online => { if (!online) surfaceRecord.hasActiveTurn = false })
+    registerDaemonBridge(contents, next, (type, payload) => {
+      if (type === 'turn_begin') surfaceRecord.hasActiveTurn = true
+      else if (type === 'turn_end') surfaceRecord.hasActiveTurn = false
+      // Some session-bound events omit the id. Capture the owning task now,
+      // before a later session.open changes what this surface shows.
+      const current = session.current
+      maybeNotify(window, contents, type, current && payload.session_id === undefined ? { ...payload, session_id: current } : payload,
+        () => workspaceSurfaces.has(id) && daemon === next)
+      // A turn that ended (perhaps because access was lost while it ran, after
+      // an app restart) leaves the conversation idle: bind it again now, so a
+      // Retry works instead of failing the same way.
+      if (type === 'turn_end' && remote && providerForwarding) void followLocalProviders(providerForwarding)
+    }, (method, result) => {
+      if (session.observe(method, result)) scheduleWindowSave()
+      // Opening or starting a conversation on an SSH host: keep it on this
+      // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
+      if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
+    })
+  }
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
     windowRoutes.bind(id, channel, handler)
     if (!registeredChannels.has(channel)) {
@@ -626,6 +759,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     return dir
   })
   handle('desktop:workspaces', () => remoteMachine || saved?.remote ? [] : localDesktopWorkspaces(workspaceFile()))
+  handle('desktop:remove-workspace', (_event, dir: unknown) => {
+    if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f]/.test(dir)) throw new TypeError('Invalid workspace directory')
+    if (remoteMachine || saved?.remote) return []
+    return removeDesktopWorkspace(workspaceFile(), dir)
+  })
+  handle('desktop:restore-workspace', (_event, dir: unknown) => {
+    if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f]/.test(dir)) throw new TypeError('Invalid workspace directory')
+    if (remoteMachine || saved?.remote) return []
+    return rememberDesktopWorkspace(workspaceFile(), dir)
+  })
   handle('desktop:context-scope', () => contextScope(remoteMachine ?? saved?.remote))
   // The name the sidebar gives this view's host: the SSH alias, or null for this Mac.
   handle('desktop:context-host', () => (remoteMachine ?? saved?.remote)?.alias ?? null)
@@ -699,7 +842,6 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     freshPreset = null
     return preset
   })
-  let voiceRequest: AbortController | null = null
   handle('desktop:voice', async (_event, action: unknown, value: unknown) => {
     if (action === 'cancel') {
       voiceRequest?.abort()
@@ -906,8 +1048,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       else if (action === 'save') {
         const m = remoteTarget(params.machine)
         command = 'add ' + [m.alias, m.target, m.workspacePath].map(argument).join(' ')
-      } else if (action === 'remove') command = 'remove ' + argument(params.alias)
-      else throw new Error('Unknown remote action')
+      } else if (action === 'remove') {
+        command = 'remove ' + argument(params.alias)
+        const result = await desktopMachineCommand(join(xerxesHome(), 'machines.json'), command)
+        if (typeof params.alias === 'string' && params.alias) savedHostContexts.dropAlias(params.alias)
+        return result
+      } else throw new Error('Unknown remote action')
       return desktopMachineCommand(join(xerxesHome(), 'machines.json'), command)
     },
   )
@@ -992,6 +1138,15 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     return readLocalChatImage(request.path, request.cwd ?? selectedWorkspace)
   })
+  // Real project logo / favicon discovery for local workspaces (T3 Code parity).
+  handle(PROJECT_ICON_CHANNEL, async (_event, cwd: unknown) => {
+    if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd) || /[\x00-\x1f\x7f]/.test(cwd)) return null
+    return resolveProjectIconDataUrl(cwd, bytes => {
+      const image = nativeImage.createFromBuffer(bytes)
+      if (image.isEmpty()) return null
+      return image.resize({ width: 64, quality: 'good' }).toPNG()
+    })
+  })
   // Files panel: open a workspace file in its default app, or show it in Finder.
   handle(FILE_ACTION_CHANNEL, async (_event, value: unknown) => {
     const request = fileActionRequestOf(value)
@@ -1036,7 +1191,17 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     return picked
   })
   const layoutEvents = ['move', 'resize', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen'] as const
+  const onHostHide = () => { hiddenWindows.add(window); syncWindowVisibility(window) }
+  const onHostShow = () => { hiddenWindows.delete(window); syncWindowVisibility(window) }
+  const onHostFocus = () => {
+    if (hiddenWindows.delete(window)) syncWindowVisibility(window)
+    syncCacheTrimState()
+  }
+  const onHostBlur = () => syncCacheTrimState()
+  let cleaned = false
   const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
     occludedSurfaces.delete(id)
     contextReaders.delete(id)
     surfaceSessions.delete(id)
@@ -1046,7 +1211,15 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (view && !window.isDestroyed()) {
       // A view closed on its own leaves a live window behind.
       window.contentView.removeChildView(view)
+    } else if (!view && !window.isDestroyed()) {
+      hiddenWindows.delete(window)
       for (const event of layoutEvents) window.removeListener(event as 'move', scheduleWindowSave)
+      window.removeListener('minimize', onHostHide)
+      window.removeListener('hide', onHostHide)
+      window.removeListener('restore', onHostShow)
+      window.removeListener('show', onHostShow)
+      window.removeListener('focus', onHostFocus)
+      window.removeListener('blur', onHostBlur)
     }
     if (view && !contents.isDestroyed()) contents.close()
     windowStates.delete(id)
@@ -1062,6 +1235,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     void remote?.close()
     stopHubShare()
     cleanupWindows.delete(cleanup)
+    syncCacheTrimState()
   }
   cleanupWindows.add(cleanup)
   window.once('closed', cleanup)
@@ -1102,7 +1276,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       workspace: selectedWorkspace ?? machine.workspacePath, workspacePath: machine.workspacePath, alias: machine.alias, remote: true,
       sessions: sessionsFor(cachedSessions, machine.workspacePath, folders) }
   })
-  for (const event of layoutEvents) window.on(event as 'move', scheduleWindowSave)
+  if (!view) {
+    // Attach host-level layout & visibility listeners once per BrowserWindow, not once per child view.
+    for (const event of layoutEvents) window.on(event as 'move', scheduleWindowSave)
+    window.on('minimize', onHostHide)
+    window.on('hide', onHostHide)
+    window.on('restore', onHostShow)
+    window.on('show', onHostShow)
+    window.on('focus', onHostFocus)
+    window.on('blur', onHostBlur)
+  }
   scheduleWindowSave()
   // The retained SSH view reads status and offers retry/cancel inline. A modal
   // on the host can interrupt a different, healthy workspace during restoration.
@@ -1121,7 +1304,12 @@ void app.whenReady().then(async () => {
     .then(status => console.log(`Provider CLIs ready: claude=${status.claude} codex=${status.codex}`))
     .catch(error => console.warn('Provider CLI setup failed:', error instanceof Error ? error.message : error))
   // Offers new releases from GitHub; installs only when the person says so.
-  const appUpdates = startAppUpdates({ settingsDirectory: xerxesHome(), version: app.getVersion() })
+  const appUpdates = startAppUpdates({
+    settingsDirectory: xerxesHome(),
+    version: app.getVersion(),
+    shouldRunBackgroundCheck: isAppInteractive,
+    targets: workspaceWebContents,
+  })
   // Hub cockpit: link this Mac, pair a phone and sign in to the XERXES tab.
   // The CLI, the Hub cookies and the Hub socket stay in this process.
   const hubCockpit = createHubCockpit({
@@ -1152,32 +1340,59 @@ void app.whenReady().then(async () => {
       else callback()
     },
   })
-  app.on('will-quit', () => hubCockpit.dispose())
+  app.on('will-quit', () => { appUpdates.dispose(); hubCockpit.dispose(); cacheTrimmer.dispose() })
   // macOS privacy permissions for computer use and dictation. Read silently at
   // start (no prompt), again when a window regains focus (throttled, so coming
-  // back from System Settings updates the notice), and pushed to every page.
+  // back from System Settings updates the notice), and pushed to every workspace page.
   const macPermissions = createMacPermissions(electronMacPermissionsPort({ settingsDirectory: xerxesHome(), appName: APP_NAME }))
   registerMacPermissionsIpc(ipcMain, macPermissions)
   macPermissions.onChange(state => {
-    for (const contents of webContents.getAllWebContents()) {
-      if (!contents.isDestroyed()) contents.send(MAC_PERMISSIONS_STATE_EVENT, state)
+    for (const contents of workspaceWebContents()) {
+      contents.send(MAC_PERMISSIONS_STATE_EVENT, state)
     }
   })
   if (process.platform === 'darwin') {
     macPermissions.check()
-    app.on('browser-window-focus', () => { macPermissions.recheckOnFocus() })
+    app.on('browser-window-focus', () => { if (!systemSuspendedOrLocked) macPermissions.recheckOnFocus() })
   }
   // Hub health: a notice when no Hub is set up or the saved one does not
   // answer its /healthz. Checked at start and again when a window regains focus.
   const hubHealth = createHubHealth(createNodeHubHealthPort({ home: xerxesHome() }))
   registerHubHealthIpc(ipcMain, hubHealth)
   hubHealth.onChange(state => {
-    for (const contents of webContents.getAllWebContents()) {
-      if (!contents.isDestroyed()) contents.send(HUB_HEALTH_STATE_EVENT, state)
+    for (const contents of workspaceWebContents()) {
+      contents.send(HUB_HEALTH_STATE_EVENT, state)
     }
   })
   void hubHealth.check()
-  app.on('browser-window-focus', () => { hubHealth.recheckOnFocus() })
+  app.on('browser-window-focus', () => {
+    if (systemSuspendedOrLocked) return
+    hubHealth.recheckOnFocus()
+    void savedHostContexts.refresh(openContextRemotes())
+  })
+  // Track macOS app hide/show and OS suspend/lock transitions so renderers,
+  // BrowserTabs, and background pollers pause cleanly while unseen.
+  const onSystemPause = () => {
+    systemSuspendedOrLocked = true
+    syncAllWindowVisibility()
+    for (const surface of workspaceSurfaces.values()) surface.suspendBrowser()
+    cacheTrimmer.triggerNow()
+  }
+  const onSystemResume = () => {
+    systemSuspendedOrLocked = false
+    syncAllWindowVisibility()
+  }
+  powerMonitor.on('suspend', onSystemPause)
+  powerMonitor.on('lock-screen', onSystemPause)
+  powerMonitor.on('resume', onSystemResume)
+  powerMonitor.on('unlock-screen', onSystemResume)
+  app.on('did-become-active', () => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed() && !win.isMinimized() && win.isVisible()) hiddenWindows.delete(win)
+    }
+    syncAllWindowVisibility()
+  })
+  app.on('did-resign-active', () => syncCacheTrimState())
   // The dock/taskbar icon is the phoenix mark; on macOS the running app's
   // dock tile only changes through app.dock.
   const icon = appIcon()
@@ -1186,7 +1401,12 @@ void app.whenReady().then(async () => {
   // Commands the menu can only express by asking the focused renderer:
   // the shell owns sessions, the palette and the find bar.
   const toFocused = (command: string) => () => {
-    BrowserWindow.getFocusedWindow()?.webContents.send('desktop:menu', command)
+    const win = BrowserWindow.getFocusedWindow()
+    if (!win) return
+    const activeId = activeSurfaces.get(win.id)
+    const activeSurface = activeId === undefined ? undefined : workspaceSurfaces.get(activeId)
+    const target = activeSurface?.view?.webContents ?? win.webContents
+    if (!target.isDestroyed()) target.send('desktop:menu', command)
   }
   // `role: 'appMenu'` ships no Preferences item, so ⌘, was the one binding
   // the app honoured and never advertised; there was also no Help menu and
@@ -1234,24 +1454,39 @@ void app.whenReady().then(async () => {
   ]))
   const saved = loadWindowLayout(layoutFile())
   if (saved?.length) {
-    const hosts = new Map<string, BrowserWindow>()
-    const selected: number[] = []
-    for (const state of saved) {
-      const group = state.windowGroup ?? 'legacy-workspaces'
-      const host = hosts.get(group)
-      const window = createWorkspaceWindow(state.remote ? null : state.workspace, state, undefined, host)
-      hosts.set(group, window)
-      if (state.active) selected.push(activeSurfaces.get(window.id)!)
+    // Materialize only the single active surface per OS window group on startup.
+    // Inactive accumulated views stay out of RAM (avoiding N Chromium renderer
+    // processes & N concurrent daemon session hydrations); every session remains
+    // one click away in the sidebar and saved SSH hosts list.
+    const plans = planStartupSurfaces(saved)
+    for (const { primary } of plans) {
+      const win = createWorkspaceWindow(primary.remote ? null : primary.workspace, primary)
+      const activeId = activeSurfaces.get(win.id)
+      if (activeId !== undefined) activateSurface(activeId)
     }
-    for (const id of selected) activateSurface(id)
   }
   else createWorkspaceWindow(loadWorkspace())
   // Probe saved endpoints without opening views or running setup. Results are
   // cached globally and each host has its own timeout and single-flight guard.
   void savedHostContexts.refresh(openContextRemotes())
-  const savedHostTimer = setInterval(() => { void savedHostContexts.refresh(openContextRemotes()) }, 60000)
+  const savedHostTimer = setInterval(() => {
+    if (!hasFocusedWindow()) return
+    void savedHostContexts.refresh(openContextRemotes())
+  }, 120_000)
   savedHostTimer.unref()
-  app.once('will-quit', () => { clearInterval(savedHostTimer); savedHostContexts.dispose() })
+  const idleViewTimer = setInterval(() => {
+    if (!systemSuspendedOrLocked) evictBackgroundViews()
+  }, 120_000)
+  idleViewTimer.unref()
+  app.once('will-quit', () => {
+    clearInterval(savedHostTimer)
+    clearInterval(idleViewTimer)
+    powerMonitor.removeListener('suspend', onSystemPause)
+    powerMonitor.removeListener('lock-screen', onSystemPause)
+    powerMonitor.removeListener('resume', onSystemResume)
+    powerMonitor.removeListener('unlock-screen', onSystemResume)
+    savedHostContexts.dispose()
+  })
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWorkspaceWindow(loadWorkspace()) })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

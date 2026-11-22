@@ -107,13 +107,17 @@ describe('overlay reset boundaries', () => {
         onConfirm: () => undefined,
         title: 'Confirm'
       },
-      reasoningPicker: true
+      reasoningPicker: true,
+      sideQuestion: true,
+      swarm: true
     })
 
     resetFlowOverlays()
 
     expect(getOverlayState().confirm).toBeNull()
     expect(getOverlayState().reasoningPicker).toBe(true)
+    expect(getOverlayState().sideQuestion).toBe(true)
+    expect(getOverlayState().swarm).toBe(true)
   })
 })
 
@@ -143,6 +147,8 @@ describe('background hotkey blocking policy', () => {
       ['skillsHub', { skillsHub: true }],
       ['capabilities', { capabilities: true }],
       ['sudo', { sudo: { requestId: 'r1' } }],
+      ['sideQuestion', { sideQuestion: true }],
+      ['swarm', { swarm: true }],
       ['terminals', { terminals: true }]
     ]
 

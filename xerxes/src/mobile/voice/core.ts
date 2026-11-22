@@ -44,6 +44,7 @@ const NULL_OUTPUT: AudioOutput = {
 export class VoiceClientCore {
   readonly playback: ResponsePlayback
   private link: VoiceLink | undefined
+  private connecting: Promise<VoiceLink> | undefined
   private offLink: (() => void) | undefined
   private readonly ready = new Map<string, Waiter<number>>()
   private readonly transcripts = new Map<string, Waiter<string>>()
@@ -80,24 +81,35 @@ export class VoiceClientCore {
   async ensureLink(): Promise<VoiceLink> {
     const existing = this.link
     if (existing?.open === true) return existing
+    if (this.connecting !== undefined) return this.connecting
     this.dropLink()
     const link = this.deps.createLink()
     this.link = link
     this.offLink = link.onEvent(event => this.onEvent(link, event))
-    try {
-      await link.connect()
-    } catch (error) {
-      if (this.link === link) this.dropLink()
-      throw error
-    }
-    return link
+    let attempt: Promise<VoiceLink> | undefined
+    attempt = (async (): Promise<VoiceLink> => {
+      try {
+        await link.connect()
+        if (this.link !== link) throw new VoiceRemoteError('VOICE_DISCONNECTED', 'The voice connection dropped.')
+        return link
+      } catch (error) {
+        if (this.link === link) this.dropLink()
+        throw error
+      } finally {
+        if (this.connecting === attempt) this.connecting = undefined
+      }
+    })()
+    this.connecting = attempt
+    return attempt
   }
 
   dropLink(): void {
+    this.connecting = undefined
     const link = this.link
     this.link = undefined
     this.offLink?.()
     this.offLink = undefined
+    this.rejectAll(new VoiceRemoteError('VOICE_DISCONNECTED', 'The voice connection closed.'))
     link?.close(1000, 'done')
   }
 
@@ -141,6 +153,12 @@ export class VoiceClientCore {
   }
 
   private wait<T>(map: Map<string, Waiter<T>>, id: string, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    const previous = map.get(id)
+    if (previous !== undefined) {
+      map.delete(id)
+      clearTimeout(previous.timer)
+      previous.reject(new VoiceRemoteError('VOICE_STALE', 'Superseded by a newer voice request.'))
+    }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         map.delete(id)

@@ -15,7 +15,7 @@
  * server the user started. Every side effect (running `lms`, HTTP, files'
  * existence, time) goes through `LmStudioPorts`, so tests use fakes.
  */
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -259,7 +259,14 @@ export function createLmStudioEngine(ports: LmStudioPorts, options: LmStudioOpti
 
   async function writeState(state: LmStudioState): Promise<void> {
     await mkdir(stateDir, { recursive: true, mode: 0o700 })
-    await writeFile(statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
+    const temporary = `${statePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
+      await rename(temporary, statePath)
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   const removeState = (): Promise<void> => rm(statePath, { force: true })

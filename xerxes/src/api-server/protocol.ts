@@ -185,8 +185,9 @@ function parseMessage(value: unknown, index: number): ChatMessage {
   const parameter = `messages[${index}]`
   const message = record(value, parameter)
   const role = requiredString(message.role, `${parameter}.role`)
-  if (role === 'system' || role === 'user') {
-    return { role, content: parseContent(message.content, `${parameter}.content`, false) }
+  if (role === 'system' || role === 'developer' || role === 'user') {
+    const normalizedRole = role === 'developer' ? 'system' : role
+    return { role: normalizedRole, content: parseContent(message.content, `${parameter}.content`, false) }
   }
   if (role === 'assistant') {
     const content = parseContent(message.content, `${parameter}.content`, true)
@@ -194,9 +195,14 @@ function parseMessage(value: unknown, index: number): ChatMessage {
     return toolCalls.length ? { role, content, tool_calls: toolCalls } : { role, content }
   }
   if (role === 'tool') {
-    const content = parseContent(message.content, `${parameter}.content`, false)
-    if (typeof content !== 'string') {
-      fail('tool message content must be a string.', `${parameter}.content`)
+    const parsedContent = parseContent(message.content, `${parameter}.content`, false)
+    let content: string
+    if (typeof parsedContent === 'string') {
+      content = parsedContent
+    } else if (parsedContent.every(part => part.type === 'text')) {
+      content = parsedContent.map(part => part.text).join('')
+    } else {
+      fail('tool message content must be a string or an array of text parts.', `${parameter}.content`)
     }
     const toolCallId = requiredString(message.tool_call_id, `${parameter}.tool_call_id`)
     const name = optionalString(message.name, `${parameter}.name`)
@@ -207,7 +213,7 @@ function parseMessage(value: unknown, index: number): ChatMessage {
       ...(name ? { name } : {}),
     }
   }
-  fail('role must be one of system, user, assistant, or tool.', `${parameter}.role`)
+  fail('role must be one of system, developer, user, assistant, or tool.', `${parameter}.role`)
 }
 
 function parseContent(value: unknown, parameter: string, allowsEmpty: boolean): MessageContent {
@@ -227,7 +233,10 @@ function parseContentPart(value: unknown, parameter: string): ContentPart {
   const part = record(value, parameter)
   const type = requiredString(part.type, `${parameter}.type`)
   if (type === 'text') {
-    return { type, text: requiredString(part.text, `${parameter}.text`) }
+    if (typeof part.text !== 'string') {
+      fail('must be a string.', `${parameter}.text`)
+    }
+    return { type, text: part.text }
   }
   if (type !== 'image_url') {
     fail('only text and image_url content parts are supported.', `${parameter}.type`)
@@ -262,11 +271,18 @@ function parseToolCalls(value: unknown, parameter: string): ToolCall[] {
     const functionValue = record(raw.function, `${parameter}[${index}].function`)
     const argumentsValue = functionValue.arguments
     let argumentsObject: JsonObject
-    try {
-      argumentsObject = isJsonObject(argumentsValue)
-        ? argumentsValue
-        : parseToolArguments(requiredString(argumentsValue, `${parameter}[${index}].function.arguments`))
-    } catch {
+    if (isJsonObject(argumentsValue)) {
+      argumentsObject = argumentsValue
+    } else if (typeof argumentsValue === 'string') {
+      try {
+        argumentsObject = parseToolArguments(argumentsValue)
+      } catch {
+        fail(
+          'tool call arguments must be a JSON object or JSON-encoded object.',
+          `${parameter}[${index}].function.arguments`,
+        )
+      }
+    } else {
       fail(
         'tool call arguments must be a JSON object or JSON-encoded object.',
         `${parameter}[${index}].function.arguments`,
@@ -302,7 +318,7 @@ function parseTools(value: unknown): ToolDefinition[] | undefined {
       fail('description must be a string.', `${parameter}.function.description`)
     }
     const parameters = functionValue.parameters ?? {}
-    if (!isRecord(parameters)) {
+    if (!isJsonObject(parameters)) {
       fail('parameters must be a JSON object.', `${parameter}.function.parameters`)
     }
     return {

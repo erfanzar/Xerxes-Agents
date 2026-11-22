@@ -7,6 +7,17 @@ export * from './auxiliaryClient.js'
 export * from './argumentValidation.js'
 export * from './backgroundSessions.js'
 export * from './bootstrap.js'
+export {
+  extractMutatedToolPaths,
+  formatCascadeRollbackNotice,
+  isReadOnlyInspectionTool,
+  READ_ONLY_INSPECTION_TOOL_NAMES,
+  WorkspaceCheckpointManager,
+  type CascadeAttemptSnapshot,
+  type CascadeRollbackResult,
+  type FileStateSnapshot,
+  type WorkspaceCheckpointOptions,
+} from './cascadeCheckpoints.js'
 export * from './changeGuard.js'
 export {
   INHERITABLE_CONFIG_KEYS,
@@ -34,11 +45,34 @@ export * from './insights.js'
 export * from './interrupt.js'
 export * from './interactionModes.js'
 export * from './interactionModeTool.js'
+export {
+  LEAN_CORE_TOOL_NAMES,
+  LEAN_SWE_TOOL_NAMES,
+  buildLeanSystemPrompt,
+  leanPromptSize,
+  selectLeanTools,
+  type LeanPromptSetting,
+  type LeanToolOptions,
+} from './leanPrompt.js'
 export * from './nudges.js'
 export * from './objectiveGuard.js'
 export * from './processRegistry.js'
 export * from './projectWorkspace.js'
 export * from './queryEngine.js'
+export {
+  CODE_CHECK_CODES,
+  captureCodeCheckBaseline,
+  findingFingerprint,
+  parseChecksConfig,
+  renderFindings,
+  runResultChecks,
+  snapshotInputs,
+  type CheckCode,
+  type CheckFinding,
+  type ChecksMode,
+  type ResultCheckInput,
+  type ToolRunSummary,
+} from './resultChecks.js'
 export * from './runSafety.js'
 export * from './resilience.js'
 export * from './sessionExport.js'

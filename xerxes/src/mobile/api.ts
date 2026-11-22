@@ -269,7 +269,7 @@ export function createHubHttp(fetchFn: FetchLike, options: HubHttpOptions = {}):
         const outcome = await refresh()
         if (stopped) return
         // An ok refresh re-armed through the session listener; a denied one ends the device's sign-in.
-        if (outcome.status === 'unavailable') arm(KEEPALIVE_RETRY_MS)
+        if (outcome.status === 'unavailable' || outcome.status === 'pending') arm(KEEPALIVE_RETRY_MS)
       }
       sessionListeners.add(armFromSession)
       armFromSession()

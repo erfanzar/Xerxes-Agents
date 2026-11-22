@@ -30,8 +30,28 @@ let bakedKey = ''
 let bakeTimer: ReturnType<typeof setTimeout> | undefined
 let started = false
 let scheduled = false
-const observed = new WeakSet<Element>()
+let observed = new WeakSet<Element>()
 let resizeObserver: ResizeObserver | undefined
+let mutationObserver: MutationObserver | undefined
+
+/** Whether the backdrop surface alignment observers are currently active (for tests). */
+export function isBackdropTrackingActive(): boolean {
+  return started
+}
+
+function stop(): void {
+  clearTimeout(bakeTimer)
+  bakeTimer = undefined
+  scheduled = false
+  if (!started) return
+  started = false
+  resizeObserver?.disconnect()
+  resizeObserver = undefined
+  mutationObserver?.disconnect()
+  mutationObserver = undefined
+  observed = new WeakSet<Element>()
+  if (typeof window !== 'undefined') window.removeEventListener('resize', schedule)
+}
 
 /** Where `background-size: cover; background-position: center` puts the image in the window. */
 export function coverRect(image: { width: number; height: number }, viewport: { width: number; height: number }): { x: number; y: number; width: number; height: number } {
@@ -42,6 +62,7 @@ export function coverRect(image: { width: number; height: number }, viewport: { 
 
 function update(): void {
   scheduled = false
+  if (typeof document === 'undefined' || typeof window === 'undefined' || !document.documentElement) return
   const root = document.documentElement
   if (natural) {
     const cover = coverRect(natural, { width: window.innerWidth, height: window.innerHeight })
@@ -77,6 +98,10 @@ function scheduleBake(): void {
 }
 
 async function bake(): Promise<void> {
+  if (typeof document === 'undefined' || typeof window === 'undefined' || !document.documentElement) {
+    clearBaked()
+    return
+  }
   const root = document.documentElement
   const radius = parseFloat(getComputedStyle(root).getPropertyValue('--x-panel-r')) || 0
   const image = loadedImage
@@ -124,9 +149,11 @@ async function bake(): Promise<void> {
 }
 
 function clearBaked(): void {
-  const root = document.documentElement
-  root.removeAttribute('data-backdrop-baked')
-  root.style.removeProperty('--x-backdrop-baked')
+  if (typeof document !== 'undefined' && document.documentElement) {
+    const root = document.documentElement
+    root.removeAttribute('data-backdrop-baked')
+    root.style.removeProperty('--x-backdrop-baked')
+  }
   bakedUrl = undefined
   bakedKey = ''
 }
@@ -147,27 +174,48 @@ function start(): void {
   // Surfaces mount and unmount (the rail opens and closes). Streaming text
   // also mutates the tree constantly, so only additions that are, or
   // contain, a surface schedule anything.
-  new MutationObserver(records => {
-    for (const record of records) {
-      // Streamed text lands inside the conversation, where no surface ever
-      // mounts; searching every added message subtree cost each token.
-      if (record.target instanceof Element && record.target.closest('.stream')) continue
-      for (const node of record.addedNodes) {
-        if (node instanceof Element && (node.matches(SURFACES) || node.querySelector(SURFACES))) { schedule(); return }
+  if (typeof MutationObserver !== 'undefined' && document.body) {
+    mutationObserver = new MutationObserver(records => {
+      for (const record of records) {
+        // Streamed text lands inside the conversation, where no surface ever
+        // mounts; searching every added message subtree cost each token.
+        if (record.target instanceof Element && record.target.closest('.stream')) continue
+        for (const node of record.addedNodes) {
+          if (node instanceof Element && (node.matches(SURFACES) || node.querySelector(SURFACES))) { schedule(); return }
+        }
       }
-    }
-  }).observe(document.body, { childList: true, subtree: true })
+    })
+    mutationObserver.observe(document.body, { childList: true, subtree: true })
+  }
   schedule()
 }
 
 /** Called when the background changes: learn the image's size, then align. */
 export function trackBackdropImage(src: string | undefined): void {
-  start()
   // Every applyBackdrop lands here, so a new blur level re-bakes too.
-  if (src && src === imageSrc && loadedImage) { schedule(); return }
+  if (src && src === imageSrc && loadedImage) { start(); schedule(); return }
   imageSrc = src
-  loadedImage = undefined
-  if (!src) { natural = undefined; clearBaked(); schedule(); return }
+  if (loadedImage) {
+    loadedImage.onload = null
+    loadedImage.src = ''
+    loadedImage = undefined
+  }
+  if (!src) {
+    natural = undefined
+    clearBaked()
+    // Default (none) and transparent themes have no CSS background layers to
+    // align — tear down the document.body MutationObserver and ResizeObserver
+    // so they burn zero CPU during chat streaming and panel updates.
+    const kind = typeof document !== 'undefined' ? document.documentElement?.getAttribute?.('data-backdrop') : null
+    if (kind === 'gradient') {
+      start()
+      schedule()
+    } else {
+      stop()
+    }
+    return
+  }
+  start()
   const image = new Image()
   image.onload = () => {
     if (imageSrc !== src) return

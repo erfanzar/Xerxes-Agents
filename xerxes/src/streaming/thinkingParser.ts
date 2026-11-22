@@ -73,6 +73,19 @@ export class ThinkingParser implements ThinkingStreamParser {
         this.buffer = hold ? this.buffer.slice(-hold) : ''
         break
       }
+      const after = this.buffer[index + tag.length]
+      if (after === undefined && !finalFlush) {
+        // The next character decides whether the closing tag is inline code.
+        if (index > 0) this.thinkingBuffer += this.buffer.slice(0, index)
+        this.buffer = this.buffer.slice(index)
+        break
+      }
+      const before = index > 0 ? this.buffer[index - 1] : this.thinkingBuffer.at(-1)
+      if (before === '`' || after === '`') {
+        this.thinkingBuffer += this.buffer.slice(0, index + tag.length)
+        this.buffer = this.buffer.slice(index + tag.length)
+        continue
+      }
       if (index > 0) {
         this.thinkingBuffer += this.buffer.slice(0, index)
       }

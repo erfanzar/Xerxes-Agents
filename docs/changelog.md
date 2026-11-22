@@ -7,6 +7,14 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.52 — 2026-11-23
+
+- **Immortals multi-agent swarms.** Native shared message board, interactive Swarm Board & Graph, coordinator/worker/verifier/narrator/monitor roles, bundled Immortals skills, and synced surfaces across Desktop, TUI, VS Code, and Mobile.
+- **External ACP runtimes & unified Desktop workspace.** First-class ACP integration for Claude Code, Google Antigravity, OpenAI Codex, and custom ACP commands with official brand marks, a 3-pane Provider/Model/Thinking Level/Permissions picker with live reasoning effort discovery, Machine + Project grouped Sidebar V2 with inbox triage and right-click workspace removal, icon-only right-panel tabs with a surface launcher and rehauled Lucide icons, floating Thread Details card, bottom Terminal Drawer, and Side Question (`/btw`).
+- **One-click Sign in with Slack & themed palettes.** Create a XERXES Slack app from a pre-filled manifest and sign in straight from Desktop; themed palettes and backdrops now colour Settings, menus, and controls consistently, plus four new palettes (Toxic Forest, Electric Night, Afterglow, Mahogany).
+- **Generative UI, SWE tools, LSP & performance hygiene.** Sandboxed inline HTML and 3D widgets (`Xerxes3D`) with a bundled `generative-ui` skill; native `apply_patch`, `outline`, `test_discovery`, LSP discovery, and working-set compaction; IPC event batching, bounded daemon caches, and lazy startup surface loading.
+- **Desktop reliability fixes.** Live Git branch sync across terminal and external checkouts (`git.branch`), eliminated macOS window blackout / repaint stalls on window switch by keeping the active surface unthrottled while throttling covered workspace views, removed noisy inline control-change transcript notices, fixed `Agents` and full-page layouts in Vibes and Neo, and fixed `.dictation-error` popover width and anchoring.
+
 ## 0.8.51 — 2026-11-20
 
 - **Cache numbers no longer double count.** On OpenAI-compatible streams, a frame reporting 1,000 input tokens before a later frame said 700 were cached was counted as 1,000 fresh plus 700 cached. It now ends as 300 fresh plus 700 cached.

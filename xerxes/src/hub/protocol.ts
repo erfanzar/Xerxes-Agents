@@ -29,6 +29,7 @@ export const HUB_SLACK_METHODS = [
   'supervisor.slack.status',
   'supervisor.slack.connect',
   'supervisor.slack.app.save',
+  'supervisor.slack.app.create',
   'supervisor.slack.app.remove',
   'supervisor.slack.confirm_connection',
   'supervisor.slack.disconnect',

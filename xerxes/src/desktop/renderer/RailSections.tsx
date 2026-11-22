@@ -11,15 +11,20 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { Icon } from './Icon.js'
+import { T3Icon, type T3IconName } from './T3Icons.js'
+import { XerxesThinkingMark } from './XerxesSprites.js'
 import { Markdown } from './markdown.js'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 import { copyToClipboard } from './CopyButton.js'
 import { highlightCode } from './richMarkdown.js'
 import { desktopCall, desktopError, record, text } from './desktopRpc.js'
 import { createListPoll, type ListPoll } from './listPoll.js'
 import { agentKindLabel, agentState } from './AgentRoster.js'
 import { AgentInspector } from './AgentInspector.js'
-import { parseArtifactResult } from './ArtifactCard.js'
+import { artifactFromToolResultPayload } from './ArtifactCard.js'
+import { store } from './store.js'
+import type { SwarmStatusSnapshot } from './swarmState.js'
+import { WidgetFrame } from './WidgetFrame.js'
 import type { SessionRow } from './types.js'
 
 export interface ArtifactRow {
@@ -92,27 +97,92 @@ export function documentOutline(markdown: string): Array<{ level: number; text: 
 }
 
 const sizeLabel = (bytes: number): string => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`
-const kindLabel = (row: ArtifactRow): string => row.kind === 'markdown' ? 'md' : row.kind === 'code' ? (row.language || 'code') : row.kind
 
-function SectionSearch({ placeholder, value, onChange }: { placeholder: string; value: string; onChange: (value: string) => void }): ReactElement {
-  return <label className="rsec__search"><Icon name="search" size={13} /><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
+function kindBadgeLabel(row: ArtifactRow): string {
+  if (row.kind === 'html') return 'Interactive'
+  if (row.kind === 'markdown') return 'Doc'
+  if (row.kind === 'code') return row.language || 'Code'
+  return 'Text'
 }
 
-export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBack, target }: { sessionKey: string; sessionId?: string; online: boolean; onTitle?: (title: string) => void; onBack?: () => void; target?: { readonly id: string; readonly count: number } }): ReactElement {
-  const [rows, setRows] = useState<readonly ArtifactRow[]>([])
+function kindFullLabel(row: ArtifactRow): string {
+  if (row.kind === 'html') return 'Interactive'
+  if (row.kind === 'markdown') return 'Document'
+  if (row.kind === 'code') return row.language ? `Code · ${row.language}` : 'Code'
+  return 'Text'
+}
+
+function artifactT3Icon(kind: string): T3IconName {
+  if (kind === 'html') return 'sparkles'
+  if (kind === 'code') return 'codeEditor'
+  if (kind === 'markdown') return 'fileText'
+  return 'layers'
+}
+
+/** Picks a crisp T3 Lucide glyph matching a subagent's role (research, verifier, planner, or default bot). */
+export function subagentRoleIcon(row: SessionRow): T3IconName {
+  const haystack = `${row.title} ${row.agentDetails?.baseAgent ?? ''}`.toLowerCase()
+  if (/(research|explor|search|investigat|study|read|audit)/.test(haystack)) return 'compass'
+  if (/(verif|test|check|review|lint|qa|guard|security)/.test(haystack)) return 'shieldCheck'
+  if (/(plan|architect|design|strateg)/.test(haystack)) return 'sparkles'
+  if (/(monitor|watch|stall)/.test(haystack)) return 'activity'
+  if (/(swarm|coord|orchestr|immortal)/.test(haystack)) return 'network'
+  return 'bot'
+}
+
+function editedAgeLabel(iso: string): string {
+  const age = compactAge(iso)
+  return !age || age === 'now' ? 'edited just now' : `edited ${age} ago`
+}
+
+function readingStatsLabel(markdown: string): string {
+  const trimmed = markdown.trim()
+  if (!trimmed) return ''
+  const words = trimmed.split(/\s+/).length
+  const minutes = Math.max(1, Math.round(words / 220))
+  return `${words.toLocaleString('en-US')} ${words === 1 ? 'word' : 'words'} · ${minutes} min read`
+}
+
+function SectionSearch({ placeholder, value, onChange }: { placeholder: string; value: string; onChange: (value: string) => void }): ReactElement {
+  return <label className="rsec__search"><T3Icon name="search" size={13} /><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
+}
+
+export function ArtifactsSection({
+  sessionKey,
+  sessionId,
+  online,
+  onTitle,
+  onBack,
+  target,
+  initialDocument,
+  initialSource,
+  initialRows,
+}: {
+  sessionKey: string
+  sessionId?: string
+  online: boolean
+  onTitle?: (title: string) => void
+  onBack?: () => void
+  target?: { readonly id: string; readonly count: number }
+  initialDocument?: { readonly row: ArtifactRow; readonly content: string }
+  initialSource?: boolean
+  initialRows?: readonly ArtifactRow[]
+}): ReactElement {
+  const [rows, setRows] = useState<readonly ArtifactRow[]>(initialRows ?? [])
   const [error, setError] = useState('')
   const [listError, setListError] = useState('')
-  const [loaded, setLoaded] = useState(false)
+  const [loaded, setLoaded] = useState(Boolean(initialRows))
   const [needle, setNeedle] = useState('')
-  const [pickedId, setPickedId] = useState('')
-  const [document, setDocument] = useState<{ row: ArtifactRow; content: string } | null>(null)
+  const [pickedId, setPickedId] = useState(initialDocument?.row.id ?? '')
+  const [document, setDocument] = useState<{ row: ArtifactRow; content: string } | null>(initialDocument ?? null)
   const artifactId = target?.id ?? pickedId
   const open = document?.row.id === artifactId ? document : null
   const [announced, setAnnounced] = useState<{ id: string; version: number } | null>(null)
   const listedVersion = rows.find(row => row.id === artifactId)?.version
   const announcedVersion = announced?.id === artifactId ? announced.version : undefined
-  const [source, setSource] = useState(false)
+  const [source, setSource] = useState(initialSource ?? false)
   const [outlineOpen, setOutlineOpen] = useState(false)
+  const [widgetKey, setWidgetKey] = useState(0)
   const docBody = useRef<HTMLDivElement>(null)
   const [reload, setReload] = useState(0)
   // Edit mode: a draft of the content, saved through artifacts.update.
@@ -121,6 +191,7 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
   const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle')
   const copiedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(copiedTimer.current), [])
+  useEffect(() => { setOutlineOpen(false); setWidgetKey(0) }, [artifactId])
   const copy = (value: string): void => {
     void copyToClipboard(value).then(ok => {
       setCopied(ok ? 'copied' : 'failed')
@@ -155,25 +226,64 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
       setListError(outdated ? 'outdated' : message)
       setLoaded(true)
     },
+    { pauseWhenInactive: true },
   )
   useEffect(() => {
     if (!online || unsupported.current) return
-    listPoll.current?.request(sessionKey)
+    listPoll.current?.request(sessionKey, true)
   }, [sessionKey, online, reload])
   // Artifacts arrive mid-turn; a cheap list poll keeps the section current
-  // (not against a runtime that doesn't have the method).
+  // while the window is active, pausing completely when hidden/occluded/unfocused.
   useEffect(() => {
-    const timer = setInterval(() => { if (!unsupported.current) setReload(value => value + 1) }, 5000)
-    return () => clearInterval(timer)
+    const timer = setInterval(() => {
+      if (!unsupported.current && !pageIsInactive()) setReload(value => value + 1)
+    }, 10_000)
+    const unsubPause = subscribePerfPaused(() => {
+      if (!unsupported.current && !pageIsInactive()) listPoll.current?.resume()
+    })
+    return () => {
+      clearInterval(timer)
+      unsubPause()
+    }
   }, [])
   useEffect(() => { onTitle?.(open?.row.title ?? '') }, [open?.row.title])
   useEffect(() => {
-    if (!online || !artifactId) return
+    if (!online) return
+    const pendingInputs = new Map<string, string>()
     return window.xerxes.onEvent(({ type, payload }) => {
-      if (type !== 'tool_result' || payload.name !== 'ArtifactTool' || payload.permitted === false) return
       if (sessionId && typeof payload.session_id === 'string' && payload.session_id !== sessionId) return
-      const saved = parseArtifactResult(text(payload.result))
-      if (saved?.id === artifactId) setAnnounced(previous => previous?.id === artifactId && previous.version >= saved.version ? previous : saved)
+      if (type === 'tool_call') {
+        const callId = text(payload.tool_call_id) || text(payload.id)
+        const rawArgs =
+          typeof payload.arguments === 'string'
+            ? payload.arguments
+            : payload.arguments && typeof payload.arguments === 'object'
+              ? JSON.stringify(payload.arguments)
+              : ''
+        if (callId && rawArgs) {
+          if (pendingInputs.size >= 64) {
+            const oldest = pendingInputs.keys().next().value
+            if (oldest !== undefined) pendingInputs.delete(oldest)
+          }
+          pendingInputs.set(callId, rawArgs)
+        }
+        return
+      }
+      if (type !== 'tool_result') return
+      const callId = text(payload.tool_call_id) || text(payload.id)
+      const fallbackInput = callId ? (pendingInputs.get(callId) ?? '') : ''
+      if (callId) pendingInputs.delete(callId)
+      const saved = artifactFromToolResultPayload(payload, fallbackInput)
+      if (!saved) return
+      if (saved.id.startsWith('agy:')) setReload(value => value + 1)
+      if (artifactId && saved.id === artifactId) {
+        setAnnounced(previous => {
+          if (saved.id.startsWith('agy:')) {
+            return { id: saved.id, version: (previous?.id === artifactId ? previous.version : 0) + 1 }
+          }
+          return previous?.id === artifactId && previous.version >= saved.version ? previous : saved
+        })
+      }
     })
   }, [artifactId, online, sessionId])
   // Both notification and list revisions refresh the same detail without
@@ -194,7 +304,7 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
     return () => { live = false }
   }, [artifactId, target?.count, sessionKey, online, listedVersion, announcedVersion])
   const back = (): void => {
-    setPickedId(''); setDocument(null); setDraft(null); setSource(false); setError('')
+    setPickedId(''); setDocument(null); setDraft(null); setSource(false); setOutlineOpen(false); setWidgetKey(0); setError('')
     onBack?.()
   }
   const pin = (row: ArtifactRow): void => {
@@ -204,34 +314,99 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
   }
   if (open) {
     const { row } = open
+    const isHtml = row.kind === 'html'
+    const isMarkdown = row.kind === 'markdown'
+    const hasPreviewToggle = isMarkdown || isHtml
+    const isMarkdownDoc = isMarkdown && !source && draft === null
+    const isHtmlPreview = isHtml && !source && draft === null
     // A Markdown artifact reads as a document: its own "# Title" becomes the page
     // title (shown once), and its headings make the outline.
-    const doc = row.kind === 'markdown' ? documentTitle(open.content, row.title) : null
-    const outline = doc && !source && draft === null ? documentOutline(doc.body) : []
+    const doc = isMarkdown ? documentTitle(open.content, row.title) : null
+    const outline = doc && isMarkdownDoc ? documentOutline(doc.body) : []
+    const readStats = isMarkdownDoc ? readingStatsLabel(doc?.body ?? open.content) : ''
+    const sourceLanguage = isMarkdown ? 'markdown' : isHtml ? 'html' : (row.language || '')
     const jump = (index: number): void => {
       docBody.current?.querySelectorAll('.artdoc__body :is(h1,h2,h3)')[index]?.scrollIntoView({ block: 'start' })
       setOutlineOpen(false)
     }
-    return <div className="rsec rsec--detail">
+    return <div className="rsec rsec--detail" data-kind={row.kind}>
       <div className="rsec__bar">
-        <button className="rsec__icon" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}><Icon name="sidebar" size={14} /></button>
-        {outline.length > 0 && <button className="rsec__icon artdoc__outline-toggle" aria-expanded={outlineOpen} aria-label="Outline" title="Outline" onClick={() => setOutlineOpen(value => !value)}><Icon name="listBullets" size={14} /></button>}
-        <Icon name="file" size={13} /><strong className="rsec__title" title={row.title}>{row.title}</strong>
+        <button type="button" className="rsec__icon rsec__back" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}>
+          <T3Icon name="arrowLeft" size={14} />
+        </button>
+        {outline.length > 0 && (
+          <button type="button" className="rsec__icon artdoc__outline-toggle" aria-expanded={outlineOpen} aria-label="Outline" title="Document outline" onClick={() => setOutlineOpen(value => !value)}>
+            <T3Icon name="squareMenu" size={14} />
+          </button>
+        )}
+        <span className="rsec__kind-pill" data-kind={row.kind}>{kindBadgeLabel(row)}</span>
+        <strong className="rsec__title" title={row.title}>{row.title}</strong>
+        {row.version > 1 && <span className="rsec__ver-pill">v{row.version}</span>}
         <span className="rsec__spacer" />
-        {draft !== null ? <>
-          <button className="rsec__text" onClick={() => setDraft(null)} disabled={saving}>Cancel</button>
-          <button className="rsec__text rsec__text--primary" onClick={save} disabled={saving || draft === open.content}>{saving ? 'Saving…' : 'Save'}</button>
-        </> : <>
-          <button className="rsec__icon" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} title={row.pinned ? 'Unpin' : 'Pin'} onClick={() => pin(row)}><Icon name="pin" size={14} /></button>
-          {row.kind === 'markdown' && <button className="rsec__text" aria-pressed={source} title={source ? 'Show the rendered document' : 'Show the Markdown source'} onClick={() => setSource(value => !value)}>{source ? 'Preview' : 'Source'}</button>}
-          <button className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><Icon name="note" size={14} /></button>
-          <button className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'warning' : 'copy'} size={14} /></button>
-        </>}
+        <span className="rsec__actions">
+          {draft !== null ? <>
+            <button type="button" className="rsec__text" onClick={() => setDraft(null)} disabled={saving}>Cancel</button>
+            <button type="button" className="rsec__text rsec__text--primary" onClick={save} disabled={saving || draft === open.content}>{saving ? 'Saving…' : 'Save'}</button>
+          </> : <>
+            {hasPreviewToggle && (
+              <span className="rsec__seg" role="group" aria-label="View mode">
+                <button
+                  type="button"
+                  className="rsec__seg-btn"
+                  aria-pressed={!source}
+                  title={isHtml ? 'Show live interactive preview' : 'Show rendered document'}
+                  onClick={() => setSource(false)}
+                >
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  className="rsec__seg-btn"
+                  aria-pressed={source}
+                  title={isHtml ? 'Show HTML source' : 'Show Markdown source'}
+                  onClick={() => setSource(true)}
+                >
+                  Source
+                </button>
+              </span>
+            )}
+            {isHtmlPreview && (
+              <button
+                type="button"
+                className="rsec__icon"
+                aria-label="Reload preview"
+                title="Reload preview"
+                onClick={() => setWidgetKey(value => value + 1)}
+              >
+                <T3Icon name="refresh" size={14} />
+              </button>
+            )}
+            <button type="button" className="rsec__icon" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} title={row.pinned ? 'Unpin' : 'Pin'} onClick={() => pin(row)}><T3Icon name={row.pinned ? 'pinOff' : 'pin'} size={14} /></button>
+            <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>
+            <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>
+          </>}
+        </span>
       </div>
-      <p className="rsec__meta">{row.kind === 'markdown' ? 'Document' : row.kind === 'code' ? 'Code' : row.kind === 'html' ? 'HTML' : 'Text'} · {sizeLabel(row.size)} · edited {compactAge(row.updatedAt) || 'just now'} ago{row.version > 1 ? ` · v${row.version}` : ''}</p>
+      {!isMarkdownDoc && (
+        <p className="rsec__meta">
+          <span>{kindFullLabel(row)}</span>
+          <span className="rsec__meta-dot" aria-hidden="true">·</span>
+          <span>{sizeLabel(row.size)}</span>
+          <span className="rsec__meta-dot" aria-hidden="true">·</span>
+          <span>{editedAgeLabel(row.updatedAt)}</span>
+          {row.version > 1 && <>
+            <span className="rsec__meta-dot" aria-hidden="true">·</span>
+            <span className="rsec__meta-ver">v{row.version}</span>
+          </>}
+          {draft !== null && <>
+            <span className="rsec__meta-dot" aria-hidden="true">·</span>
+            <span className="rsec__meta-editing">Editing</span>
+          </>}
+        </p>
+      )}
       {error && <p className="studio-error" role="alert">{error}</p>}
       {outlineOpen && outline.length > 0 && <nav className="artdoc__outline" aria-label="Outline">
-        {outline.map((heading, index) => <button key={index} data-level={heading.level} title={heading.text} onClick={() => jump(index)}>{heading.text}</button>)}
+        {outline.map((heading, index) => <button type="button" key={index} data-level={heading.level} title={heading.text} onClick={() => jump(index)}>{heading.text}</button>)}
       </nav>}
       <div className="rsec__body" ref={docBody}>
         {draft !== null
@@ -241,24 +416,44 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
                 if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save() }
                 if (event.key === 'Escape') { event.preventDefault(); setDraft(null) }
               }} />
-          : source || row.kind !== 'markdown'
-            ? <pre className="rsec__source"><code>{row.kind === 'markdown' ? highlightCode(open.content, 'markdown') : row.language ? highlightCode(open.content, row.language) : open.content}</code></pre>
-            : <article className="artdoc">
-                <header className="artdoc__head">
-                  <h1 className="artdoc__title">{doc?.title ?? row.title}</h1>
-                  <p className="artdoc__chips">
-                    {dateLabel(row.updatedAt) && <span className="artdoc__chip"><Icon name="clock" size={12} />{dateLabel(row.updatedAt)}</span>}
-                    {row.version > 1 && <span className="artdoc__chip">v{row.version}</span>}
-                    <span className="artdoc__chip">{sizeLabel(row.size)}</span>
-                  </p>
-                </header>
-                <Markdown text={doc?.body ?? open.content} className="rsec__doc artdoc__body" />
-              </article>}
+          : isHtmlPreview
+            ? <div className="rsec__widget-stage">
+                <WidgetFrame
+                  key={`${row.id}:${row.version}:${widgetKey}`}
+                  html={open.content}
+                  title={row.title}
+                  mode="panel"
+                  artifactId={row.id}
+                  className="rsec__widget-frame"
+                />
+              </div>
+            : source || !isMarkdown
+              ? <pre className="rsec__source"><code>{sourceLanguage ? highlightCode(open.content, sourceLanguage) : open.content}</code></pre>
+              : <article className="artdoc">
+                  <header className="artdoc__head">
+                    <h1 className="artdoc__title">{doc?.title ?? row.title}</h1>
+                    <div className="artdoc__chips rsec__meta">
+                      <span className="artdoc__chip artdoc__chip--kind" data-kind={row.kind}>Document</span>
+                      <span className="artdoc__chip">{sizeLabel(row.size)}</span>
+                      <span className="artdoc__chip">
+                        <T3Icon name="timer" size={11} />
+                        {dateLabel(row.updatedAt) ? `${dateLabel(row.updatedAt)} · ${editedAgeLabel(row.updatedAt)}` : editedAgeLabel(row.updatedAt)}
+                      </span>
+                      {row.version > 1 && <span className="artdoc__chip artdoc__chip--ver">v{row.version}</span>}
+                      {readStats && <span className="artdoc__chip">{readStats}</span>}
+                    </div>
+                  </header>
+                  <Markdown text={doc?.body ?? open.content} className="rsec__doc artdoc__body" />
+                </article>}
       </div>
     </div>
   }
   if (artifactId) return <div className="rsec rsec--detail">
-    <div className="rsec__bar"><button className="rsec__icon" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}><Icon name="sidebar" size={14} /></button></div>
+    <div className="rsec__bar">
+      <button type="button" className="rsec__icon rsec__back" aria-label="Back to artifacts" title="Back to artifacts" onClick={back}>
+        <T3Icon name="arrowLeft" size={14} />
+      </button>
+    </div>
     {error ? <p className="studio-error" role="alert">{error}</p> : <p className="rsec__empty" role="status">{online ? 'Opening document…' : 'Waiting for workspace connection…'}</p>}
   </div>
   const shown = rows.filter(row => !needle || row.title.toLowerCase().includes(needle.toLowerCase()))
@@ -269,17 +464,36 @@ export function ArtifactsSection({ sessionKey, sessionId, online, onTitle, onBac
       : (listError || error) && <p className="studio-error" role="alert">{listError || error}</p>}
     {loaded && !listError && rows.length === 0 && <p className="rsec__empty">No artifacts yet. Reports, plans and documents the agent saves with the artifact tool appear here.</p>}
     {shown.length > 0 && <div className="rsec__group"><span>Artifacts</span><span className="rsec__count">{shown.length}</span></div>}
-    {shown.map(row => <div className="rsec__row" key={row.id}>
-      <button className="rsec__open" onClick={() => { setError(''); setPickedId(row.id) }} title={row.title}>
-        <Icon name="file" size={13} /><span className="rsec__name">{row.title}</span><span className="rsec__kind">• {kindLabel(row)}</span>
+    {shown.map(row => <div className="rsec__row rsec__row--artifact" key={row.id}>
+      <button type="button" className="rsec__open" onClick={() => { setError(''); setPickedId(row.id) }} title={row.title}>
+        <span className="rsec__row-icon" data-kind={row.kind} aria-hidden="true"><T3Icon name={artifactT3Icon(row.kind)} size={14} /></span>
+        <span className="rsec__name">{row.title}</span>
+        <span className="rsec__kind-pill" data-kind={row.kind}>{kindBadgeLabel(row)}</span>
+        {row.version > 1 && <span className="rsec__ver-pill">v{row.version}</span>}
         <span className="rsec__age">{compactAge(row.updatedAt)}</span>
       </button>
-      <button className="rsec__icon rsec__pin" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} onClick={() => pin(row)}><Icon name="pin" size={13} /></button>
+      <button type="button" className="rsec__icon rsec__pin" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} onClick={() => pin(row)}><T3Icon name={row.pinned ? 'pinOff' : 'pin'} size={13} /></button>
     </div>)}
   </div>
 }
 
-export function SubagentsSection({ rows, onInspect, sessionKey, online, onTitle }: { rows: readonly SessionRow[]; onInspect?: (id: string) => void; sessionKey?: string; online?: boolean; onTitle?: (title: string) => void }): ReactElement {
+export function SubagentsSection({
+  rows,
+  onInspect,
+  sessionKey,
+  online,
+  onTitle,
+  swarm,
+  onOpenSwarm,
+}: {
+  rows: readonly SessionRow[]
+  onInspect?: (id: string) => void
+  sessionKey?: string
+  online?: boolean
+  onTitle?: (title: string) => void
+  swarm?: SwarmStatusSnapshot | null
+  onOpenSwarm?: () => void
+}): ReactElement {
   const [needle, setNeedle] = useState('')
   const [hideFinished, setHideFinished] = useState(false)
   // A subagent opens inside the panel (Sections › Subagents › title), never over the conversation.
@@ -291,9 +505,10 @@ export function SubagentsSection({ rows, onInspect, sessionKey, online, onTitle 
   if (openRow && sessionKey !== undefined) {
     return <div className="rsec rsec--detail rsec--agent">
       <div className="rsec__bar">
-        <button className="rsec__icon" aria-label="Back to subagents" onClick={() => setOpenId('')}><span className="settings-back__icon"><Icon name="arrow" size={13} /></span></button>
+        <button className="rsec__icon" aria-label="Back to subagents" onClick={() => setOpenId('')}><T3Icon name="arrowLeft" size={14} /></button>
+        <span className="rsec__agent-ico" data-tone={agentState(openRow.status).tone} aria-hidden="true"><T3Icon name={subagentRoleIcon(openRow)} size={14} /></span>
         <strong className="rsec__title" title={openRow.title}>{openRow.title}</strong>
-        {onInspect && <button className="rsec__icon" aria-label="Open in the conversation" title="Open in the conversation" onClick={() => onInspect(openRow.id)}><Icon name="expand" size={13} /></button>}
+        {onInspect && <button className="rsec__icon" aria-label="Open in the conversation" title="Open in the conversation" onClick={() => onInspect(openRow.id)}><T3Icon name="maximize" size={13} /></button>}
       </div>
       <div className="rsec__body rsec__agent"><AgentInspector row={openRow} rows={rows} sessionKey={sessionKey} online={online ?? false} /></div>
     </div>
@@ -303,21 +518,56 @@ export function SubagentsSection({ rows, onInspect, sessionKey, online, onTitle 
   const line = (row: SessionRow): ReactElement => {
     const state = agentState(row.status)
     const kind = agentKindLabel(row.agentDetails)
-    return <button key={row.id} className="rsec__open rsec__row" data-tone={state.tone} onClick={() => sessionKey !== undefined ? setOpenId(row.id) : onInspect?.(row.id)} title={row.title}>
-      <Icon name="agents" size={13} /><span className="rsec__name">{row.title}</span>
+    const roleIcon = subagentRoleIcon(row)
+    return <button key={row.id} className="rsec__open rsec__row rsec__row--subagent" data-tone={state.tone} onClick={() => sessionKey !== undefined ? setOpenId(row.id) : onInspect?.(row.id)} title={row.title}>
+      <span className="rsec__agent-ico" data-tone={state.tone} aria-hidden="true">
+        {state.tone === 'working'
+          ? <XerxesThinkingMark size={14} active />
+          : state.tone === 'failed'
+            ? <T3Icon name="alertCircle" size={14} />
+            : <T3Icon name={roleIcon} size={14} />}
+      </span>
+      <span className="rsec__name">{row.title}</span>
       {kind && <span className="rsec__kind">• {kind}</span>}
-      {state.tone !== 'done' && <span className="rsec__state">{state.label.toLowerCase()}</span>}
+      {state.tone !== 'done'
+        ? <span className="rsec__state" data-tone={state.tone}>{state.label.toLowerCase()}</span>
+        : <span className="rsec__done-ico" aria-hidden="true"><T3Icon name="check" size={12} /></span>}
       <span className="rsec__age">{row.age}</span>
     </button>
   }
   return <div className="rsec">
     <SectionSearch placeholder="Search subagents" value={needle} onChange={setNeedle} />
-    {rows.length === 0 && <p className="rsec__empty">No subagents in this task yet.</p>}
+    {rows.length === 0 && (
+      swarm?.active ? (() => {
+        const livingWorkers = swarm.members.filter(
+          member => member.role !== 'coordinator' && !member.killed && member.state !== 'killed',
+        )
+        const runningWorkers = livingWorkers.filter(member => member.state === 'working').length
+        const summary = runningWorkers > 0
+          ? `${runningWorkers} Immortals ${runningWorkers === 1 ? 'worker' : 'workers'} running`
+          : livingWorkers.length > 0
+            ? `${livingWorkers.length} Immortals ${livingWorkers.length === 1 ? 'worker' : 'workers'} active`
+            : 'Immortals swarm active'
+        return <div className="rsec__empty rsec__empty--swarm" role="status">
+          <span>{summary} — </span>
+          <button
+            type="button"
+            className="linkish rsec__swarm-jump"
+            onClick={() => {
+              if (onOpenSwarm) onOpenSwarm()
+              else store.openSwarmBoard()
+            }}
+          >
+            Open Immortals →
+          </button>
+        </div>
+      })() : <p className="rsec__empty">No subagents in this task yet.</p>
+    )}
     {running.length > 0 && <><div className="rsec__group"><span>Running</span><span className="rsec__count">{running.length}</span></div>{running.map(line)}</>}
     {finished.length > 0 && <>
       {/* the hide/show control sits on the Finished header, above the rows it folds. */}
       <div className="rsec__group"><span>Finished</span><span className="rsec__count">{finished.length}</span>
-        <button className="rsec__toggle" aria-expanded={!hideFinished} onClick={() => setHideFinished(value => !value)}>{hideFinished ? 'Show finished' : 'Hide finished'}<Icon name="caretDown" size={11} /></button>
+        <button className="rsec__toggle" aria-expanded={!hideFinished} onClick={() => setHideFinished(value => !value)}>{hideFinished ? 'Show finished' : 'Hide finished'}<T3Icon name={hideFinished ? 'chevronRight' : 'chevronDown'} size={12} /></button>
       </div>
       {!hideFinished && finished.map(line)}
     </>}

@@ -66,13 +66,17 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
     <button aria-pressed={wrap} onClick={() => setWrap(value => !value)}>Wrap lines</button>
     <button disabled={!text} onClick={copy}>{copied || 'Copy output'}</button>
   </>
-  const body = <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{text || empty}</pre>
+  const displayText = compact ? text.replace(/(?:\r?\n[ \t]*)+$/, '') : text
+  const body = <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{displayText || empty}</pre>
+  const fullscreenBody = compact
+    ? <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{text || empty}</pre>
+    : body
   const fullscreen = expanded && createPortal(<dialog ref={dialog} className="output-dialog" aria-label={`${label} expanded`} onCancel={() => setExpanded(false)} onClose={() => setExpanded(false)}>
     <header><h2>{label}</h2>{controls}<button autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
-    {body}
+    {fullscreenBody}
   </dialog>, document.body)
   // A preview is capped (about 14 lines) and does not scroll, so the wheel keeps moving the page.
-  const lineCount = text ? text.split('\n').length : 0
+  const lineCount = displayText ? displayText.split('\n').length : 0
   if (compact) return <section className="output-viewer output-viewer--compact" aria-label={`${label} viewer`} data-full={full || undefined}>
     {body}
     {lineCount > PREVIEW_LINES && <button className="output-viewer__more" aria-expanded={full} onClick={() => setFull(value => !value)}>{full ? 'Show less' : `Show all ${lineCount.toLocaleString()} lines`}</button>}

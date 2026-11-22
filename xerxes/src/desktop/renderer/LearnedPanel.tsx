@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react'
+import { isExternalAcpBinding } from './AcpRuntimePicker.js'
 import { store, type Snapshot, type Store } from './store.js'
 import { proposalKindLabel, proposalPreview, type LearningTarget, type Lesson, type ReflectionNotice, type StoredReflectionProposal } from './learning.js'
 import { Icon } from './Icon.js'
@@ -9,27 +10,137 @@ import { Icon } from './Icon.js'
 type Actions = Pick<Store, 'refreshLearning' | 'reviewLearning' | 'reviewAllLearning' | 'openLearning'>
 interface ReviewProps { readonly snap: Snapshot; readonly actions: Actions }
 
+export interface LearningReviewControlsProps extends ReviewProps {
+  readonly target: LearningTarget
+  readonly id: string
+  readonly approved?: boolean
+  readonly disabled?: boolean
+  readonly initialReasonOpen?: boolean
+  /** Optional leading action (e.g. `Review` in inline ReflectionCard) placed on the same compact row. */
+  readonly children?: ReactNode
+}
+
+export interface LearningReviewControlsViewProps extends Omit<LearningReviewControlsProps, 'initialReasonOpen'> {
+  readonly reasonOpen: boolean
+  readonly onOpenReason: () => void
+  readonly onCancelReason: () => void
+}
+
 export function LearnedBadge({ snap }: { snap: Snapshot }): ReactElement | null {
+  if (isExternalAcpBinding(snap.acpBinding)) return null
   const count = (snap.learningCounts?.pending_proposals ?? 0) + (snap.learningCounts?.pending_lessons ?? 0)
   return count ? <span className="learned-badge" aria-label={`${count} pending learned items`}>{count}</span> : null
 }
 
-/** The click is the approval; reasons never travel through chat or slash text. */
-export function LearningReviewControls({ target, id, approved = false, disabled = false, snap, actions }: ReviewProps & { target: LearningTarget; id: string; approved?: boolean; disabled?: boolean }): ReactElement {
+/** Pure presentational review bar: compact single action row by default; reject/rollback reason discloses on demand. */
+export function LearningReviewControlsView({
+  target,
+  id,
+  approved = false,
+  disabled = false,
+  snap,
+  actions,
+  reasonOpen,
+  onOpenReason,
+  onCancelReason,
+  children,
+}: LearningReviewControlsViewProps): ReactElement {
   const busy = Boolean(disabled || snap.learningReviewBusy || snap.learningLoading || snap.connection !== 'online')
   const action = approved ? 'rollback' : 'reject'
   const label = approved ? 'Roll back' : 'Reject'
-  return <div className="learning-review">
-    {!approved && <button className="btn btn--solid learning-review__approve" disabled={busy} onClick={() => void actions.reviewLearning(target, id, 'approve')}>Approve</button>}
-    <form className="learning-reason" onSubmit={event => {
-      event.preventDefault()
-      const input = event.currentTarget.elements.namedItem('reason') as HTMLInputElement | null
-      void actions.reviewLearning(target, id, action, input?.value ?? '')
-    }}>
-      <label><span className="studio-muted">Reason to {approved ? 'roll back' : 'reject'} (required)</span><input name="reason" required disabled={busy} autoComplete="off" aria-label={`Reason to ${approved ? 'roll back' : 'reject'} ${target} ${id}`} /></label>
-      <button type="submit" className="btn" disabled={busy}>{label}</button>
-    </form>
-  </div>
+  const confirmLabel = approved ? 'Confirm roll back' : 'Confirm reject'
+  const showReasonForm = reasonOpen && !disabled
+  return (
+    <div
+      className="learning-review"
+      style={{ alignItems: showReasonForm ? 'flex-end' : 'center', gap: '8px', marginTop: '10px', paddingTop: '10px' }}
+    >
+      {children}
+      {!approved && (
+        <button
+          type="button"
+          className="btn btn--solid learning-review__approve"
+          disabled={busy}
+          onClick={() => void actions.reviewLearning(target, id, 'approve')}
+        >
+          Approve
+        </button>
+      )}
+      {!showReasonForm ? (
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          aria-expanded={false}
+          onClick={onOpenReason}
+        >
+          {label}
+        </button>
+      ) : (
+        <form
+          className="learning-reason"
+          style={{ flexBasis: '100%', marginTop: '4px' }}
+          onSubmit={event => {
+            event.preventDefault()
+            const input = event.currentTarget.elements.namedItem('reason') as HTMLInputElement | null
+            const reason = input?.value ?? ''
+            if (!reason.trim()) return
+            void actions.reviewLearning(target, id, action, reason)
+          }}
+        >
+          <label>
+            <span className="studio-muted">Reason to {approved ? 'roll back' : 'reject'} (required)</span>
+            <input
+              name="reason"
+              required
+              autoFocus
+              disabled={busy}
+              autoComplete="off"
+              placeholder={approved ? 'Why roll back this lesson…' : 'Why reject this proposal…'}
+              aria-label={`Reason to ${approved ? 'roll back' : 'reject'} ${target} ${id}`}
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onCancelReason()
+                }
+              }}
+            />
+          </label>
+          <button type="submit" className="btn" disabled={busy}>
+            {confirmLabel}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={onCancelReason}
+          >
+            Cancel
+          </button>
+        </form>
+      )}
+    </div>
+  )
+}
+
+/** The click is the approval; reasons never travel through chat or slash text. */
+export function LearningReviewControls({
+  initialReasonOpen = false,
+  ...props
+}: LearningReviewControlsProps): ReactElement {
+  const [reasonOpen, setReasonOpen] = useState(initialReasonOpen)
+  useEffect(() => {
+    if (props.disabled) setReasonOpen(false)
+  }, [props.disabled, props.id, props.approved])
+  return (
+    <LearningReviewControlsView
+      {...props}
+      reasonOpen={reasonOpen}
+      onOpenReason={() => setReasonOpen(true)}
+      onCancelReason={() => setReasonOpen(false)}
+    />
+  )
 }
 
 function ReviewResult({ target, id, snap }: { target: LearningTarget; id: string; snap: Snapshot }): ReactElement | null {
@@ -146,15 +257,24 @@ export function LearnedPanel({ snap, actions = store }: { snap: Snapshot; action
   </div>
 }
 
-export function ReflectionCard({ reflection, snap, actions = store }: ReviewProps & { reflection: ReflectionNotice }): ReactElement {
+export function ReflectionCard({ reflection, snap, actions = store }: ReviewProps & { reflection: ReflectionNotice }): ReactElement | null {
+  if (isExternalAcpBinding(snap.acpBinding)) return null
   const stored = snap.learning?.proposals.find(row => row.id === reflection.id)
   // A notification says a proposal was created, not that it is still pending.
   const pending = stored?.status === 'pending'
+  const reviewButton = <button type="button" className="btn" onClick={() => actions.openLearning(reflection.id)}>Review</button>
   return <section className="railcard learned-card learned-notice" aria-label="What Xerxes learned">
     <div className="railcard__head"><Icon name="info" size={14} /><strong className="railcard__title">{proposalKindLabel(reflection.kind)}</strong>{stored && <span className="railcard__meta">{stored.status}</span>}</div>
     <h3>{reflection.target}</h3><p className="learning-prose">{reflection.rationale}</p><p className="studio-muted">{reflection.evidence_count} quoted evidence {reflection.evidence_count === 1 ? 'line' : 'lines'}. Nothing is applied without approval.</p>
-    <button className="btn" onClick={() => actions.openLearning(reflection.id)}>Review</button>
-    {(pending || !stored) && <LearningReviewControls target="proposal" id={reflection.id} snap={snap} actions={actions} disabled={!stored} />}
+    {(pending || !stored) ? (
+      <LearningReviewControls target="proposal" id={reflection.id} snap={snap} actions={actions} disabled={!stored}>
+        {reviewButton}
+      </LearningReviewControls>
+    ) : (
+      <div className="learning-review" style={{ alignItems: 'center', gap: '8px', marginTop: '10px', paddingTop: '10px' }}>
+        {reviewButton}
+      </div>
+    )}
     {!stored && <p className="studio-muted">Open Review to load the proposal and its current status before deciding.</p>}
     {stored?.hint && <p>{stored.hint}</p>}
     <ReviewResult target="proposal" id={reflection.id} snap={snap} />
@@ -162,7 +282,8 @@ export function ReflectionCard({ reflection, snap, actions = store }: ReviewProp
   </section>
 }
 
-export function ConnectedReflectionCard({ reflection }: { reflection: ReflectionNotice }): ReactElement {
+export function ConnectedReflectionCard({ reflection }: { reflection: ReflectionNotice }): ReactElement | null {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  if (isExternalAcpBinding(snap.acpBinding)) return null
   return <ReflectionCard reflection={reflection} snap={snap} actions={store} />
 }

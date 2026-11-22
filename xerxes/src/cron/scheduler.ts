@@ -142,7 +142,9 @@ export class CronScheduler {
   }
 
   private withinExpiry(job: CronJob, now: Date): boolean {
-    if (job.expiresAt === undefined || now.getTime() < Date.parse(job.expiresAt)) return true
+    if (job.expiresAt === undefined) return true
+    const expiryMs = Date.parse(job.expiresAt)
+    if (Number.isFinite(expiryMs) && now.getTime() < expiryMs) return true
     this.store.update(job.id, { paused: true, metadata: { ...job.metadata, schedule_expired_at: job.expiresAt } })
     return false
   }
@@ -225,7 +227,8 @@ export class CronScheduler {
       // Commit intent before calling the model. An unfinished receipt after
       // restart requires review: external effects cannot safely be replayed.
       const receipt = { state: 'running', occurrence: job.nextRunAt, started_at: now.toISOString() }
-      if (!this.store.update(job.id, { metadata: { ...job.metadata, execution_receipt: receipt } })) throw new Error('Schedule removed before execution')
+      const preRunMetadata = this.store.get(job.id)?.metadata ?? job.metadata
+      if (!this.store.update(job.id, { metadata: { ...preRunMetadata, execution_receipt: receipt } })) throw new Error('Schedule removed before execution')
       phase = 'execution'
       const output = await this.runJob(job, signal, clock)
       phase = 'completion'
@@ -327,23 +330,32 @@ export class CronScheduler {
     readonly settle: () => void
   } {
     const enabled = Number.isFinite(timeout) && timeout > 0
+    let remainingMs = timeout
+    let startedAt: number | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
     let settled = false
     let expire!: (error: Error) => void
     const expired = new Promise<never>((_resolve, reject) => { expire = reject })
+    const triggerTimeout = (): void => {
+      timer = undefined
+      startedAt = undefined
+      remainingMs = 0
+      const error = new Error(`job ${jobId} timed out after ${timeout}ms`)
+      controller.abort(error)
+      expire(error)
+    }
     const disarm = (): void => {
       if (timer) clearTimeout(timer)
       timer = undefined
+      if (startedAt !== undefined) {
+        remainingMs = Math.max(0, remainingMs - (performance.now() - startedAt))
+        startedAt = undefined
+      }
     }
     const arm = (): void => {
-      disarm()
-      if (!enabled || settled || controller.signal.aborted) return
-      timer = setTimeout(() => {
-        timer = undefined
-        const error = new Error(`job ${jobId} timed out after ${timeout}ms`)
-        controller.abort(error)
-        expire(error)
-      }, timeout)
+      if (!enabled || settled || controller.signal.aborted || startedAt !== undefined) return
+      startedAt = performance.now()
+      timer = setTimeout(triggerTimeout, Math.max(0, Math.ceil(remainingMs)))
       // NOTE: no unref() here. On Windows, an unref'd timer that is the
       // only pending handle never fires (the event loop sleeps), which
       // would let a hung job wedge the scheduler forever. The timer is
@@ -390,7 +402,7 @@ export class CronScheduler {
       this.scheduleNext(job, now, false, metadata)
       return
     }
-    const attempts = retryCount(job.metadata) + 1
+    const attempts = retryCount(currentMetadata) + 1
     if (attempts > (job.maxRetries ?? this.maxOneShotRetries)) {
       // Retries exhausted: keep the job, record the failure, and pause it so an
       // operator can inspect and resume it instead of losing it silently.

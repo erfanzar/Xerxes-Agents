@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { AuthenticatedContext } from '../identityPort.js'
-import { HubProtocolError, readId, type HubMethod } from '../protocol.js'
+import { HUB_LIMITS, HubProtocolError, readId, utf8ByteLength, type HubMethod } from '../protocol.js'
 import type { HubMethodContext, HubMethodHandler } from '../server.js'
 import { actionToWire, type ActionService } from './actions.js'
 import { MAX_MESSAGE_CHARS, autopilotThreadId, messageToWire, stepToWire, type MessageSource, type SupervisorThreads, type ThreadMessage, type ThreadRecord, type UserPrincipal } from './threads.js'
@@ -53,19 +53,35 @@ function requireUser(context: AuthenticatedContext): UserPrincipal {
 }
 
 function snapshot(core: SupervisorHandlerCore, thread: ThreadRecord, principal: UserPrincipal): Record<string, unknown> {
-  return {
+  let messages = core.threads.messagesFor(thread.id, principal.id).map(messageToWire)
+  let steps = core.threads.stepsFor(thread.id, principal.id).map(stepToWire)
+  const confirmations = core.actions.cardsFor(thread.id).map(actionToWire)
+  const participants = thread.kind === 'shared' ? core.threads.participants(thread.id).map(person => ({ id: person.id, name: person.displayName })) : []
+  const model = typeof core.modelId === 'function' ? core.modelId() : core.modelId
+  const configStatus = core.configStatus?.().status ?? 'configured'
+  const busy = core.threads.isWorking(thread.id)
+  const usage = core.usage()
+  const build = (): Record<string, unknown> => ({
     thread_id: thread.id,
     kind: thread.kind,
     title: thread.title,
-    messages: core.threads.messagesFor(thread.id, principal.id).map(messageToWire),
-    steps: core.threads.stepsFor(thread.id, principal.id).map(stepToWire),
-    confirmations: core.actions.cardsFor(thread.id).map(actionToWire),
-    participants: thread.kind === 'shared' ? core.threads.participants(thread.id).map(person => ({ id: person.id, name: person.displayName })) : [],
-    model: typeof core.modelId === 'function' ? core.modelId() : core.modelId,
-    config_status: core.configStatus?.().status ?? 'configured',
-    busy: core.threads.isWorking(thread.id),
-    usage: core.usage(),
+    messages,
+    steps,
+    confirmations,
+    participants,
+    model,
+    config_status: configStatus,
+    busy,
+    usage,
+  })
+  // Bound thread snapshots within the Hub normal frame budget by trimming oldest steps, then oldest messages.
+  while (steps.length > 0 && utf8ByteLength(JSON.stringify(build())) > HUB_LIMITS.normalFrameBytes) {
+    steps = steps.slice(Math.max(1, Math.ceil(steps.length / 2)))
   }
+  while (messages.length > 1 && utf8ByteLength(JSON.stringify(build())) > HUB_LIMITS.normalFrameBytes) {
+    messages = messages.slice(Math.max(1, Math.ceil(messages.length / 2)))
+  }
+  return build()
 }
 
 export function createSupervisorHandlers(core: SupervisorHandlerCore): SupervisorHandlers {

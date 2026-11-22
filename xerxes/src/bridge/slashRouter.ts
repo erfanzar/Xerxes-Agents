@@ -67,8 +67,8 @@ const PERMISSION_MODES = ['auto', 'accept-all', 'manual'] as const
 const SKILL_NAME = /^[A-Za-z0-9_-]+$/
 const ROUTED_COMMANDS = new Set([
   'agents', 'clear', 'commands', 'compact', 'config', 'context', 'cost', 'debug', 'exit', 'help', 'history',
-  'model', 'permissions', 'plan', 'provider', 'reasoning', 'sampling', 'skill', 'skill-create', 'skills',
-  'tools', 'usage', 'verbose', 'yolo',
+  'immortals', 'model', 'permissions', 'plan', 'provider', 'reasoning', 'sampling', 'skill', 'skill-create', 'skills',
+  'swarm', 'tools', 'usage', 'verbose', 'yolo',
 ])
 
 export type BridgeSlashConfig = Record<string, unknown>
@@ -177,6 +177,7 @@ export interface BridgeSlashRouterHost {
   /** Live efforts for the configured model, when the host can reach the provider. */
   reasoningLevels?(): readonly string[] | undefined
   readonly skills?: BridgeSlashSkillsPort
+  swarm?(args: string): Promise<string> | string
   tools?(): Promise<readonly BridgeSlashTool[]> | readonly BridgeSlashTool[]
 }
 
@@ -301,6 +302,9 @@ export class BridgeSlashRouter {
         return this.plan(parsed)
       case 'agents':
         return this.agents(parsed)
+      case 'immortals':
+      case 'swarm':
+        return this.swarm(parsed)
       case 'exit':
         return this.exit(parsed)
       default:
@@ -668,6 +672,24 @@ export class BridgeSlashRouter {
     return result(parsed.name, lines.join('\n'), 'handled')
   }
 
+  private async swarm(parsed: ParsedBridgeSlashCommand): Promise<BridgeSlashResult> {
+    const args = parsed.args.trim()
+    if (this.host.swarm !== undefined) {
+      return result(parsed.name, await this.host.swarm(args), 'handled')
+    }
+    if (args && !isSwarmControlSubcommand(args)) {
+      const coordinatorSkillName = this.host.skills?.registry.get('immortals-coordinator') !== undefined
+        ? 'immortals-coordinator'
+        : this.host.skills?.registry.get('swarm-coordinator') !== undefined
+          ? 'swarm-coordinator'
+          : undefined
+      if (coordinatorSkillName !== undefined) {
+        return this.invokeSkill(parsed, `${coordinatorSkillName}:${args}`)
+      }
+    }
+    return unavailable(parsed.name, 'Immortals coordination requires a configured Immortals host.')
+  }
+
   private async exit(parsed: ParsedBridgeSlashCommand): Promise<BridgeSlashResult> {
     const exit = this.host.exit
     if (exit === undefined) {
@@ -765,7 +787,12 @@ function applyProfile(config: BridgeSlashConfig, profile: BridgeProviderProfile)
   } else {
     delete config.api_key
   }
-  for (const [name, value] of Object.entries(profile.sampling)) config[name] = value
+  for (const parameter of SAMPLING_PARAMS) delete config[parameter]
+  delete config.service_tier
+  for (const [name, value] of Object.entries(profile.sampling)) {
+    if (value === null || value === undefined) continue
+    config[name] = value
+  }
 }
 
 function configText(config: BridgeSlashConfig): string {
@@ -850,6 +877,16 @@ function parseSkillInvocation(raw: string): { readonly args: string; readonly na
   const name = (separator < 0 ? input : input.slice(0, separator)).trim()
   if (!name) return undefined
   return { name, args: separator < 0 ? '' : input.slice(separator + 1).trim() }
+}
+
+function isSwarmControlSubcommand(args: string): boolean {
+  const lower = args.trim().toLowerCase()
+  return lower === 'board'
+    || lower === 'status'
+    || lower === 'channels'
+    || lower === 'stop'
+    || lower === 'kill'
+    || lower.startsWith('kill ')
 }
 
 function replaceConfig(target: BridgeSlashConfig, source: BridgeSlashConfig): void {

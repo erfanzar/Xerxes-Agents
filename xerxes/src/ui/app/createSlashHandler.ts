@@ -17,12 +17,23 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
   const { catalog } = ctx.local
   const { page, send, sys } = ctx.transcript
 
-  const handler = (cmd: string): boolean => {
-    const flight = ++ctx.slashFlightRef.current
+  const dispatch = (cmd: string, flight: number, visited: ReadonlySet<string>): boolean => {
     const ui = getUiState()
     const sid = ui.sid
     const parsed = parseSlashCommand(cmd)
     const argTail = parsed.arg ? ` ${parsed.arg}` : ''
+    const pageTitle = parsed.name ? parsed.name[0]!.toUpperCase() + parsed.name.slice(1) : 'Command'
+    const nextVisited = parsed.name ? new Set([...visited, parsed.name.toLowerCase()]) : visited
+
+    const followAlias = (rawTarget: string): boolean => {
+      const normalizedTarget = rawTarget.startsWith('/') ? rawTarget : `/${rawTarget}`
+      const targetName = parseSlashCommand(normalizedTarget).name
+      if (!targetName || nextVisited.has(targetName)) {
+        sys(`error: command alias loop for /${parsed.name || targetName || 'command'}`)
+        return true
+      }
+      return dispatch(`${normalizedTarget}${argTail}`, flight, nextVisited)
+    }
 
     const stale = () => flight !== ctx.slashFlightRef.current || getUiState().sid !== sid
 
@@ -56,7 +67,7 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
 
       if (exact) {
         if (exact.toLowerCase() !== needle) {
-          return handler(`${exact}${argTail}`)
+          return followAlias(exact)
         }
       } else {
         const matches = [
@@ -68,7 +79,7 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
         ]
 
         if (matches.length === 1 && matches[0]!.toLowerCase() !== needle) {
-          return handler(`${matches[0]}${argTail}`)
+          return followAlias(matches[0]!)
         }
 
         if (matches.length > 1) {
@@ -96,7 +107,7 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
 
         const long = text.length > 180 || text.split('\n').filter(Boolean).length > 2
 
-        long ? page(text, parsed.name[0]!.toUpperCase() + parsed.name.slice(1)) : sys(text)
+        long ? page(text, pageTitle) : sys(text)
       })
       .catch(() => {
         gw.request('command.dispatch', { arg: parsed.arg, name: parsed.name, session_id: sid })
@@ -109,7 +120,7 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
             if (slashText) {
               const long = slashText.length > 180 || slashText.split('\n').filter(Boolean).length > 2
 
-              long ? page(slashText, parsed.name[0]!.toUpperCase() + parsed.name.slice(1)) : sys(slashText)
+              long ? page(slashText, pageTitle) : sys(slashText)
               return
             }
 
@@ -125,7 +136,7 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
             }
 
             if (d.type === 'alias') {
-              return handler(`/${d.target}${argTail}`)
+              return followAlias(d.target)
             }
 
             if (d.type === 'skill') {
@@ -160,5 +171,5 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
     return true
   }
 
-  return handler
+  return (cmd: string): boolean => dispatch(cmd, ++ctx.slashFlightRef.current, new Set())
 }

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useEffect, useState, type ReactElement } from 'react'
+import { pageIsInactive, subscribePerfPaused } from './pageVisibility.js'
 
 import {
   AUTOPILOT_EXPIRY_LAPSED_NOTE, autopilotExpiresAt, autopilotExpiryOptions, defaultAutopilotExpiry, effectiveExpiryChoice, isExpiryLapsed,
@@ -91,8 +92,9 @@ export function WatchStrip({ rows, now }: { readonly rows: readonly WatchRow[]; 
   const any = cards.length > 0
   useEffect(() => {
     if (!any) return
-    const timer = setInterval(() => setTick(Date.now()), 1_000)
-    return () => clearInterval(timer)
+    const timer = setInterval(() => { if (!pageIsInactive()) setTick(Date.now()) }, 1_000)
+    const unsub = subscribePerfPaused(() => { if (!pageIsInactive()) setTick(Date.now()) })
+    return () => { clearInterval(timer); unsub() }
   }, [any])
   if (!any) return null
   return (

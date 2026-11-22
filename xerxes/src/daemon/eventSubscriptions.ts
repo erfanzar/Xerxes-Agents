@@ -9,6 +9,9 @@ import { EVENT_BATCH_BYTES, EVENT_HARD_BYTES, eventBytes, TransportEventJournal,
 
 /** How often a pump held back by a full write queue checks again. */
 const BACKPRESSURE_RETRY_MS = 20;
+/** Hard cap on queued event entries per subscription alongside the byte cap. */
+const MAX_SUBSCRIPTION_QUEUED_EVENTS = 10_000;
+const cachedEventBytes = new WeakMap<object, number>();
 
 interface Subscription {
   readonly id: string;
@@ -21,6 +24,7 @@ interface Subscription {
   cursor: string;
   watermark: number;
   queuedBytes: number;
+  queuedEvents: number;
   paused: boolean;
   timer: ReturnType<typeof setTimeout> | undefined;
 }
@@ -40,10 +44,16 @@ export class EventSubscriptions {
       for (const subscription of this.subscriptions.values()) {
         if (!events) { this.gap(subscription, 'journal_unavailable'); continue; }
         if (subscription.paused) continue;
-        for (const event of events) if (event.sequence > subscription.watermark && this.accepts(subscription, event)) subscription.queuedBytes += Math.min(eventBytes(event), subscription.maxBytes);
+        for (const event of events) {
+          if (event.sequence > subscription.watermark && this.accepts(subscription, event)) {
+            subscription.queuedBytes += queuedEventBytes(event, subscription.maxBytes);
+            subscription.queuedEvents += 1;
+          }
+        }
         // The queue is represented by cursors, not duplicate payloads. Bound the backlog anyway.
-        if (subscription.queuedBytes > this.maxQueueBytes) this.gap(subscription, 'retention');
-        else this.schedule(subscription);
+        if (subscription.queuedBytes > this.maxQueueBytes || subscription.queuedEvents > MAX_SUBSCRIPTION_QUEUED_EVENTS) {
+          this.gap(subscription, 'retention');
+        } else this.schedule(subscription);
       }
     });
   }
@@ -59,7 +69,7 @@ export class EventSubscriptions {
       sessions: params.session_ids === undefined ? undefined : new Set(strings(params.session_ids, 'session_ids')),
       detail: params.detail, maxBytes: byteLimit(params.max_batch_bytes), send,
       cursor: after ?? this.journal.watermark, watermark: this.journal.sequence,
-      queuedBytes: 0, paused: Boolean(checked.reason), timer: undefined,
+      queuedBytes: 0, queuedEvents: 0, paused: Boolean(checked.reason), timer: undefined,
     };
     // Synchronous install + watermark capture; no commit can sneak between these operations.
     this.subscriptions.set(subscription.id, subscription);
@@ -82,6 +92,7 @@ export class EventSubscriptions {
       subscription.cursor = page.next_cursor;
       subscription.watermark = this.journal.sequence;
       subscription.queuedBytes = 0;
+      subscription.queuedEvents = 0;
       this.schedule(subscription);
     }
     return { ok: true, events: page.events, next_cursor: page.next_cursor, has_more: page.has_more,
@@ -95,6 +106,13 @@ export class EventSubscriptions {
   disconnect(owner: object): void {
     for (const subscription of this.subscriptions.values()) if (subscription.owner === owner) this.remove(subscription);
   }
+  /** True when at least one active subscription explicitly watches `sessionId`. */
+  hasSessionSubscription(sessionId: string): boolean {
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.sessions?.has(sessionId)) return true;
+    }
+    return false;
+  }
   close(): void {
     this.unlisten();
     for (const subscription of this.subscriptions.values()) this.remove(subscription);
@@ -105,9 +123,12 @@ export class EventSubscriptions {
     return subscription;
   }
   private accepts(subscription: Subscription, event: TransportEvent): boolean {
+    if (!subscription.projects.has(event.project_dir)) return false;
+    if (subscription.sessions && (event.session_id === undefined || !subscription.sessions.has(event.session_id))) return false;
+    if (subscription.detail === 'conversation') return true;
+    if (event.type === 'swarm_event' && event.payload.kind === 'member_activity') return false;
     const type = detailEventType(event.type, event.payload);
-    return subscription.projects.has(event.project_dir) && (!subscription.sessions || (event.session_id !== undefined && subscription.sessions.has(event.session_id)))
-      && (subscription.detail === 'conversation' || !['text_part', 'think_part', 'thinking_part', 'text_delta', 'thinking_delta'].includes(type));
+    return !['text_part', 'think_part', 'thinking_part', 'text_delta', 'thinking_delta'].includes(type);
   }
   private schedule(subscription: Subscription): void {
     if (subscription.timer || subscription.paused || !this.subscriptions.has(subscription.id)) return;
@@ -125,22 +146,27 @@ export class EventSubscriptions {
     const through = checked.sequence < subscription.watermark ? subscription.watermark : this.journal.sequence;
     const page = this.journal.read(subscription.cursor, { maxBytes: subscription.maxBytes, through, accepts: event => this.accepts(subscription, event) });
     if (page.reason) { this.gap(subscription, page.reason); return; }
-    const drainedLiveBytes = page.events.reduce((sum, event) => {
-      const size = event.payload.truncated === true && typeof event.payload.original_bytes === 'number'
-        ? event.payload.original_bytes : eventBytes(event);
-      return event.sequence > subscription.watermark ? sum + Math.min(size, subscription.maxBytes) : sum;
-    }, 0);
+    let drainedLiveBytes = 0;
+    let drainedLiveEvents = 0;
+    for (const event of page.events) {
+      if (event.sequence > subscription.watermark) {
+        drainedLiveBytes += queuedEventBytes(event, subscription.maxBytes);
+        drainedLiveEvents += 1;
+      }
+    }
     subscription.queuedBytes = Math.max(0, subscription.queuedBytes - drainedLiveBytes);
+    subscription.queuedEvents = Math.max(0, subscription.queuedEvents - drainedLiveEvents);
     subscription.cursor = page.next_cursor;
     if (page.events.length) this.send(subscription, 'event_batch', { subscription_id: subscription.id, events: page.events, through_cursor: page.next_cursor });
     if (page.has_more || subscription.cursor !== this.journal.watermark) this.schedule(subscription);
-    else { subscription.watermark = this.journal.sequence; subscription.queuedBytes = 0; }
+    else { subscription.watermark = this.journal.sequence; subscription.queuedBytes = 0; subscription.queuedEvents = 0; }
   }
   private gap(subscription: Subscription, reason: EventGapReason, requested = subscription.cursor): void {
     if (subscription.timer) clearTimeout(subscription.timer);
     subscription.timer = undefined;
     subscription.paused = true;
     subscription.queuedBytes = 0;
+    subscription.queuedEvents = 0;
     this.send(subscription, 'event_gap', { subscription_id: subscription.id, requested_cursor: requested,
       oldest_cursor: this.journal.oldestCursor, watermark: this.journal.watermark, reason });
   }
@@ -155,6 +181,17 @@ export class EventSubscriptions {
     if (subscription.timer) clearTimeout(subscription.timer);
     this.subscriptions.delete(subscription.id);
   }
+}
+function queuedEventBytes(event: { readonly payload: JsonRpcPayload }, maxBytes: number): number {
+  if (event.payload.truncated === true && typeof event.payload.original_bytes === 'number') {
+    return Math.min(event.payload.original_bytes, maxBytes);
+  }
+  let size = cachedEventBytes.get(event);
+  if (size === undefined) {
+    size = eventBytes(event);
+    cachedEventBytes.set(event, size);
+  }
+  return Math.min(size, maxBytes);
 }
 function detailEventType(type: string, payload: JsonRpcPayload, depth = 0): string {
   if (depth >= 4) return type;

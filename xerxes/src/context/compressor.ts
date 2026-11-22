@@ -1,9 +1,16 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import {
+  DEFAULT_SWE_WORKING_SET_BUDGET_CHARS,
+  extractSweWorkingSet,
+  hasSweWorkingSetEntries,
+  renderSweWorkingSet,
+  stripSweWorkingSet,
+} from './sweWorkingSet.js'
+import { SmartTokenCounter } from './tokenCounter.js'
 import { repairToolMessageSequence } from './toolPairRepair.js'
 import { pruneToolMessages } from './toolResultPruner.js'
-import { SmartTokenCounter } from './tokenCounter.js'
 
 export const COMPACTION_REFERENCE_PREFIX = '[CONTEXT COMPACTION — REFERENCE ONLY]'
 
@@ -43,6 +50,8 @@ export interface ContextCompressorOptions {
    */
   readonly forceSummarize?: boolean
   readonly model?: string
+  /** Optional external prior summary text whose `<swe-working-set>` block is carried forward. */
+  readonly priorSummary?: string
   readonly protectFirst?: number
   readonly protectLast?: number
   readonly summarizer?: Summarizer
@@ -51,6 +60,7 @@ export interface ContextCompressorOptions {
   readonly summaryMinTokens?: number
   readonly threshold?: number
   readonly tokenCounter?: SmartTokenCounter
+  readonly workingSetBudgetChars?: number
 }
 
 /** Pre-prunes tool data then safely folds the unprotected middle into a reference-only summary. */
@@ -63,8 +73,10 @@ export class ContextCompressor {
   readonly summaryMaxTokens: number
   readonly summaryMinTokens: number
   readonly threshold: number
+  private readonly priorSummary: string | undefined
   private readonly summarizer: Summarizer | undefined
   private readonly tokenCounter: SmartTokenCounter
+  private readonly workingSetBudgetChars: number
 
   constructor(options: ContextCompressorOptions = {}) {
     this.threshold = options.threshold ?? 0.75
@@ -80,8 +92,10 @@ export class ContextCompressor {
     this.summaryMaxTokens = options.summaryMaxTokens ?? 12_000
     this.summaryBudgetRatio = options.summaryBudgetRatio ?? 0.2
     this.forceSummarize = options.forceSummarize ?? false
+    this.priorSummary = options.priorSummary
     this.summarizer = options.summarizer
     this.tokenCounter = options.tokenCounter ?? new SmartTokenCounter({ model: options.model ?? 'gpt-4' })
+    this.workingSetBudgetChars = options.workingSetBudgetChars ?? DEFAULT_SWE_WORKING_SET_BUDGET_CHARS
   }
 
   compress(messages: readonly ContextMessage[]): CompressionResult {
@@ -113,9 +127,12 @@ export class ContextCompressor {
     const count = pruned.messages.length
     const headCount = Math.min(this.protectFirst, count)
     const tailCount = Math.min(this.protectLast, Math.max(0, count - headCount))
+    const middleEnd = tailCount ? count - tailCount : count
     let head = pruned.messages.slice(0, headCount)
     const tail = tailCount ? pruned.messages.slice(count - tailCount) : []
-    let middle = tailCount ? pruned.messages.slice(headCount, count - tailCount) : pruned.messages.slice(headCount)
+    let middle = pruned.messages.slice(headCount, middleEnd)
+    let rawMiddle = messages.slice(headCount, middleEnd)
+    let callContextEnd = headCount
     if (!middle.length) {
       return {
         messages: pruned.messages,
@@ -152,22 +169,118 @@ export class ContextCompressor {
       prior = headPrior
       head = head.slice(0, -1)
       priorFromHead = true
+      callContextEnd = Math.max(0, headCount - 1)
     } else if (middlePrior !== undefined) {
       prior = middlePrior
       middle = middle.slice(1)
+      rawMiddle = rawMiddle.slice(1)
     }
+    if (!middle.length) {
+      return {
+        messages: pruned.messages,
+        compressed: pruned.prunedCount > 0,
+        tokensBefore,
+        tokensAfter: afterPrune,
+        protectedFirst: head.length + (priorFromHead ? 1 : 0),
+        protectedLast: tailCount,
+        compressedCount: 0,
+        prunedToolResults: pruned.prunedCount,
+        summaryTokens: 0,
+        metadata: { strategy: 'no-middle' },
+      }
+    }
+
+    const priorWorkingSetSource = prior ?? this.priorSummary
+    const ledger = extractSweWorkingSet(rawMiddle, {
+      ...(priorWorkingSetSource === undefined ? {} : { priorSummary: priorWorkingSetSource }),
+      callContextMessages: messages.slice(0, callContextEnd),
+    })
+
     const budget = this.summaryBudget(this.count(middle))
-    const wrapped = wrapSummary(prior, this.summarizer(middle, budget))
-    const summaryMessage: ContextMessage = { role: 'user', content: wrapped, [COMPACTION_SUMMARY_MARKER]: true }
+    const effectiveSummaryTokenCap = Math.min(this.summaryMaxTokens, Math.max(budget, 320))
+    const hasWorkingSet = hasSweWorkingSetEntries(ledger) && this.workingSetBudgetChars > 0
+
+    let wsCharBudget = hasWorkingSet
+      ? Math.min(this.workingSetBudgetChars, Math.max(180, Math.floor(effectiveSummaryTokenCap * 0.48) * 4))
+      : 0
+    let workingSetBlock = wsCharBudget > 0 ? renderSweWorkingSet(ledger, wsCharBudget) : ''
+    const reservedWsTokens = workingSetBlock ? this.tokenCounter.countTokens(workingSetBlock) : 0
+    const summarizerBudget = Math.max(1, budget - reservedWsTokens)
+    const rawSummary = this.summarizer(middle, summarizerBudget)
+
+    const proseWrapped = wrapSummary(prior, rawSummary, '')
+    let wrapped = workingSetBlock ? wrapSummary(prior, rawSummary, workingSetBlock) : proseWrapped
+
+    // Keep total summary within effectiveSummaryTokenCap when adding `<swe-working-set>`.
+    if (workingSetBlock) {
+      const proseTokens = this.tokenCounter.countTokens(proseWrapped)
+      if (proseTokens < effectiveSummaryTokenCap) {
+        while (workingSetBlock && this.tokenCounter.countTokens(wrapped) > effectiveSummaryTokenCap) {
+          wsCharBudget = Math.floor(wsCharBudget * 0.7)
+          if (wsCharBudget < 96) {
+            workingSetBlock = ''
+            wrapped = proseWrapped
+            break
+          }
+          workingSetBlock = renderSweWorkingSet(ledger, wsCharBudget)
+          wrapped = workingSetBlock ? wrapSummary(prior, rawSummary, workingSetBlock) : proseWrapped
+        }
+      } else {
+        workingSetBlock = ''
+        wrapped = proseWrapped
+      }
+    }
+
     // Cutting the middle can leave the head ending in assistant tool_calls whose results
     // were summarized away, or the tail beginning with orphan tool results. Repair the
     // window here so every caller receives a provider-safe sequence.
-    const output = repairToolMessageSequence([...head, summaryMessage, ...tail])
+    const buildOutput = (summaryContent: string): ContextMessage[] => {
+      const summaryMessage: ContextMessage = {
+        role: 'user',
+        content: summaryContent,
+        [COMPACTION_SUMMARY_MARKER]: true,
+      }
+      return repairToolMessageSequence([...head, summaryMessage, ...tail])
+    }
+
+    let output = buildOutput(wrapped)
+    let tokensAfter = this.count(output)
+
+    // Never allow `<swe-working-set>` alone to prevent a shrinking pass from shrinking below tokensBefore.
+    if (workingSetBlock && tokensAfter >= tokensBefore) {
+      const proseOutput = buildOutput(proseWrapped)
+      const proseAfter = this.count(proseOutput)
+      if (proseAfter < tokensBefore) {
+        let shrinkBudget = Math.min(wsCharBudget, Math.max(96, (tokensBefore - proseAfter - 1) * 4))
+        let fitted = false
+        for (let step = 0; step < 4 && shrinkBudget >= 96; step += 1) {
+          const candidateBlock = renderSweWorkingSet(ledger, shrinkBudget)
+          if (!candidateBlock) break
+          const candidateWrapped = wrapSummary(prior, rawSummary, candidateBlock)
+          const candidateOutput = buildOutput(candidateWrapped)
+          const candidateTokens = this.count(candidateOutput)
+          if (candidateTokens < tokensBefore) {
+            wrapped = candidateWrapped
+            output = candidateOutput
+            tokensAfter = candidateTokens
+            fitted = true
+            break
+          }
+          shrinkBudget = Math.floor(shrinkBudget * 0.65)
+        }
+        if (!fitted) {
+          wrapped = proseWrapped
+          output = proseOutput
+          tokensAfter = proseAfter
+        }
+      }
+    }
+
     return {
       messages: output,
       compressed: true,
       tokensBefore,
-      tokensAfter: this.count(output),
+      tokensAfter,
       protectedFirst: head.length + (priorFromHead ? 1 : 0),
       protectedLast: tailCount,
       compressedCount: middle.length,
@@ -260,8 +373,23 @@ function unchanged(messages: ContextMessage[], tokens: number): CompressionResul
  */
 export const COMPACTION_ARCHIVE_NOTE = 'Earlier turns are archived verbatim. If an exact value, path, error or decision is missing here, recover it with session_search.'
 
-function wrapSummary(prior: string | undefined, summary: string): string {
-  const priorBody = prior?.replace(COMPACTION_ARCHIVE_NOTE, '').trim()
-  const body = priorBody ? `${priorBody}\n\n---\n\n${summary.trim()}` : summary.trim()
-  return `${COMPACTION_REFERENCE_PREFIX}\n\n${body}`
+function stripSummaryHeaders(text: string): string {
+  let rest = text.trimStart()
+  for (;;) {
+    if (rest.startsWith(COMPACTION_REFERENCE_PREFIX)) rest = rest.slice(COMPACTION_REFERENCE_PREFIX.length).trimStart()
+    else if (rest.startsWith(COMPACTION_ARCHIVE_NOTE)) rest = rest.slice(COMPACTION_ARCHIVE_NOTE.length).trimStart()
+    else return stripSweWorkingSet(rest)
+  }
+}
+
+function wrapSummary(prior: string | undefined, summary: string, workingSetBlock: string): string {
+  const priorBody = prior === undefined ? '' : stripSummaryHeaders(prior)
+  const summaryBody = stripSummaryHeaders(summary)
+  const proseBody = priorBody && summaryBody
+    ? `${priorBody}\n\n---\n\n${summaryBody}`
+    : priorBody || summaryBody
+  const fullBody = proseBody && workingSetBlock
+    ? `${proseBody}\n\n${workingSetBlock}`
+    : proseBody || workingSetBlock
+  return `${COMPACTION_REFERENCE_PREFIX}\n\n${fullBody}`
 }

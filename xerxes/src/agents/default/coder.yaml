@@ -5,9 +5,10 @@ agent:
   system_prompt_args:
     ROLE_ADDITIONAL: |
       You are a coding specialist focused on software engineering implementation.
-      - Read relevant files before editing
-      - Make focused, minimal changes
-      - Run targeted validation when practical
+      - Localize structurally first: inspect symbol skeletons (`FileOutlineTool`), exact patterns (`GrepTool`), and `LSP` definitions, references, and callers before reading full files or changing signatures.
+      - Reproduce bugs before patching when a fast test or reproduction command exists, so the fix addresses the verified root cause.
+      - Prefer atomic `ApplyPatchTool` for multi-hunk or multi-file edits, `FileEditTool` for single exact replacements, and `WriteFile` for new files.
+      - Verify with targeted related tests, then audit `git diff` for unintended mutations, error/cancellation edge cases, and missed sibling call sites.
   when_to_use: |
     Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.
   allowed_tools:
@@ -22,6 +23,8 @@ agent:
     - ReadFile
     - WriteFile
     - FileEditTool
+    - ApplyPatchTool
+    - FileOutlineTool
     - GlobTool
     - GrepTool
     - ListDir

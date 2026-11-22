@@ -21,7 +21,8 @@ import type {
  */
 export const OPENROUTER_IMAGES_API = 'openrouter-images'
 
-const DATA_URL_PATTERN = /^data:([^;]+);base64,(.+)$/
+const MIME_TYPE_PATTERN = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
+const BASE64_BODY_PATTERN = /^[A-Za-z0-9+/_-]+=*$/
 
 /** Never rejects: failures land in the returned result (pi-ai parity). */
 export async function generateImagesViaOpenRouter(
@@ -141,9 +142,20 @@ function parseImagePart(value: unknown): ImagesContent | undefined {
       ? stringAt(asRecord(imageUrl), 'url')
       : undefined
   if (!url) return undefined
-  const matches = DATA_URL_PATTERN.exec(url)
-  if (!matches?.[1] || !matches[2]) return undefined
-  return { type: 'image', data: matches[2], mimeType: matches[1] }
+  return parseBase64DataUrl(url)
+}
+
+function parseBase64DataUrl(url: string): ImagesContent | undefined {
+  if (url.length < 13 || url.slice(0, 5).toLowerCase() !== 'data:') return undefined
+  const comma = url.indexOf(',', 5)
+  if (comma <= 5) return undefined
+  const parameters = url.slice(5, comma).split(';').map(part => part.trim())
+  if (parameters.length < 2 || parameters.at(-1)?.toLowerCase() !== 'base64') return undefined
+  const mimeType = parameters[0]?.toLowerCase() ?? ''
+  if (!MIME_TYPE_PATTERN.test(mimeType)) return undefined
+  const data = url.slice(comma + 1).replace(/[\t\r\n ]+/g, '')
+  if (!data || !BASE64_BODY_PATTERN.test(data)) return undefined
+  return { type: 'image', data, mimeType }
 }
 
 const RETRYABLE_STATUS = new Set([408, 409, 429])
@@ -183,7 +195,9 @@ async function postWithRetry(
       if (attempt >= maxRetries || !retryable(response)) {
         return response
       }
-      await sleep(retryDelayMs(response, attempt, maxRetryDelayMs), options)
+      const delayMs = retryDelayMs(response, attempt, maxRetryDelayMs)
+      await response.body?.cancel().catch(() => undefined)
+      await sleep(delayMs, options, deadline.signal)
     }
   } finally {
     deadline.dispose()
@@ -224,10 +238,41 @@ function cappedServerDelay(delayMs: number, maxRetryDelayMs: number): number {
   return delayMs
 }
 
-function sleep(ms: number, options: ImagesOptions): Promise<void> {
+async function sleep(ms: number, options: ImagesOptions, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw abortReasonError(signal)
   const delay = Math.max(0, ms)
-  if (options.sleep) return options.sleep(delay)
-  return new Promise(resolve => setTimeout(resolve, delay))
+  if (options.sleep) {
+    let onAbort: (() => void) | undefined
+    try {
+      await Promise.race([
+        options.sleep(delay),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(abortReasonError(signal))
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        }),
+      ])
+    } finally {
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+    }
+    return
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortReasonError(signal))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, delay)
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+}
+
+function abortReasonError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('request aborted')
 }
 
 interface RequestDeadline {

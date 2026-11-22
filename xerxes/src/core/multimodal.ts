@@ -41,21 +41,59 @@ export async function downloadImage(url: string, options: DownloadImageOptions =
     ...(options.signal ? { signal: options.signal } : {}),
   })
   if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined)
     throw new Error('Error downloading image: HTTP ' + response.status)
   }
   const declaredLength = Number(response.headers.get('content-length') ?? 0)
   if (Number.isFinite(declaredLength) && declaredLength > maximum) {
+    await response.body?.cancel().catch(() => undefined)
     throw new Error('Image exceeds maximum size of ' + maximum + ' bytes')
   }
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (bytes.byteLength > maximum) {
-    throw new Error('Image exceeds maximum size of ' + maximum + ' bytes')
-  }
+  const bytes = await readBoundedImageBytes(response, maximum, options.signal)
   const mediaType = normalizeImageMediaType(response.headers.get('content-type')) ?? sniffImageMediaType(bytes)
   if (!mediaType) {
     throw new Error('Downloaded content is not a recognized image format')
   }
   return { bytes, mediaType }
+}
+
+async function readBoundedImageBytes(
+  response: Response,
+  maximum: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array(0)
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  const onAbort = (): void => {
+    void reader.cancel(signal?.reason).catch(() => undefined)
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    for (;;) {
+      signal?.throwIfAborted()
+      const step = await reader.read()
+      signal?.throwIfAborted()
+      if (step.done) break
+      total += step.value.byteLength
+      if (total > maximum) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error('Image exceeds maximum size of ' + maximum + ' bytes')
+      }
+      chunks.push(step.value)
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+    reader.releaseLock()
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
 }
 
 /** Decode a data URL, a base64 image payload, or already-materialized bytes. */
@@ -69,7 +107,7 @@ export function coerceImage(value: BinaryImage | Uint8Array | string, mediaType 
   if (typeof value !== 'string' || !value.trim()) {
     throw new ValidationError('image', 'must be non-empty bytes, base64, or a data URL', value)
   }
-  const dataUrl = value.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  const dataUrl = value.match(/^data:([^;,]+)(?:;[^;,]+)*;base64,([A-Za-z0-9+/=\s]+)$/i)
   if (dataUrl) {
     return {
       mediaType: normalizeRequiredImageMediaType(dataUrl[1]!),

@@ -1,6 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { copyTurnOutcome } from '../types/turnOutcome.js'
+import {
+  compressFailureSalientText,
+  fitSurrogateSafeText,
+  hasSalientFailureLines,
+  isCommandOrDiagnosticTool,
+  safeSlicePrefix,
+} from './failureSalientPreview.js'
+import { omittedScreenshotMarker, SCREENSHOT_RESULT_PREFIX } from './screenshotSuperseder.js'
 
 export const DEFAULT_TOOL_RESULT_MAX_CHARS = 4_000
 export const DEFAULT_TOOL_RESULT_HEAD_LINES = 40
@@ -10,6 +18,7 @@ export interface ToolResultPruneOptions {
   readonly headLines?: number
   readonly maxChars?: number
   readonly tailLines?: number
+  readonly toolName?: string
 }
 
 export interface MessagePruneOptions extends ToolResultPruneOptions {
@@ -26,15 +35,25 @@ export function pruneToolResult<T>(content: T, options: ToolResultPruneOptions =
   if (typeof content !== 'string') {
     return { content, pruned: false }
   }
-  const maxChars = options.maxChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
+  const maxChars = Math.max(1, Math.trunc(options.maxChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS))
   if (content.length <= maxChars) {
     return { content, pruned: false }
   }
+  if (content.startsWith(SCREENSHOT_RESULT_PREFIX)) {
+    return { content: omittedScreenshotMarker(content), pruned: true }
+  }
   if (isBinaryBlob(content)) {
-    return { content: `[${content.length} bytes of binary content elided by pre-pruning]`, pruned: true }
+    const marker = `[${content.length} bytes of binary content elided by pre-pruning]`
+    return { content: marker.length <= maxChars ? marker : safeSlicePrefix(marker, maxChars), pruned: true }
   }
   return {
-    content: truncateText(content, options.headLines ?? DEFAULT_TOOL_RESULT_HEAD_LINES, options.tailLines ?? DEFAULT_TOOL_RESULT_TAIL_LINES, maxChars),
+    content: truncateText(
+      content,
+      options.headLines ?? DEFAULT_TOOL_RESULT_HEAD_LINES,
+      options.tailLines ?? DEFAULT_TOOL_RESULT_TAIL_LINES,
+      maxChars,
+      options.toolName,
+    ),
     pruned: true,
   }
 }
@@ -45,12 +64,37 @@ export function pruneToolMessages<T extends Record<string, unknown>>(
   options: MessagePruneOptions = {},
 ): { readonly messages: T[]; readonly prunedCount: number } {
   const protectedStart = Math.max(0, messages.length - (options.protectLast ?? 4))
+  const callToolNames = new Map<string, string>()
+  for (const message of messages) {
+    if (!Array.isArray(message.tool_calls)) continue
+    for (const call of message.tool_calls) {
+      if (typeof call !== 'object' || call === null) continue
+      const record = call as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id : ''
+      const fn = typeof record.function === 'object' && record.function !== null
+        ? record.function as Record<string, unknown>
+        : undefined
+      const name = typeof fn?.name === 'string'
+        ? fn.name
+        : typeof record.name === 'string' ? record.name : ''
+      if (id && name) callToolNames.set(id, name)
+    }
+  }
+
   let prunedCount = 0
   const prunedMessages = messages.map((message, index) => {
     if (message.role !== 'tool' || index >= protectedStart) {
       return message
     }
-    const pruned = pruneToolResult(message.content, options)
+    const inferredName = typeof message.name === 'string'
+      ? message.name
+      : typeof message.tool_call_id === 'string'
+        ? callToolNames.get(message.tool_call_id)
+        : undefined
+    const messageOptions: ToolResultPruneOptions = options.toolName !== undefined || inferredName === undefined
+      ? options
+      : { ...options, toolName: inferredName }
+    const pruned = pruneToolResult(message.content, messageOptions)
     if (!pruned.pruned) {
       return message
     }
@@ -74,19 +118,73 @@ function isBinaryBlob(content: string): boolean {
   return nonPrintable > sample.length * 0.3
 }
 
-function truncateText(content: string, headLines: number, tailLines: number, maxChars: number): string {
+function truncateText(
+  content: string,
+  headLines: number,
+  tailLines: number,
+  maxChars: number,
+  toolName: string | undefined,
+): string {
+  const safeHeadLines = Math.max(0, Math.trunc(headLines))
+  const safeTailLines = Math.max(0, Math.trunc(tailLines))
   const lines = content.split(/\r?\n/)
-  if (lines.length > headLines + tailLines) {
-    const omitted = lines.length - headLines - tailLines
-    const head = headLines > 0 ? lines.slice(0, headLines).join('\n') : ''
+  const strictGuard = !isCommandOrDiagnosticTool(toolName)
+
+  if (lines.length > safeHeadLines + safeTailLines) {
+    const middleSlice = lines.slice(safeHeadLines, safeTailLines > 0 ? lines.length - safeTailLines : lines.length)
+    const middleHasFailures = hasSalientFailureLines(
+      middleSlice,
+      strictGuard ? { strictSourceCodeGuard: true } : {},
+    )
+    if (middleHasFailures) {
+      return compressFailureSalientText(content, {
+        maxChars,
+        headLines: Math.min(safeHeadLines, 16),
+        tailLines: Math.min(safeTailLines, 16),
+        contextLines: 2,
+        omissionLabel: 'lines omitted by pre-pruning',
+        annotateHeadAndTailRanges: false,
+        ...(strictGuard ? { strictSourceCodeGuard: true } : {}),
+      })
+    }
+
+    const omitted = lines.length - safeHeadLines - safeTailLines
+    const head = safeHeadLines > 0 ? lines.slice(0, safeHeadLines).join('\n') : ''
     // slice(-0) === slice(0), so guard explicitly: a zero tail must not re-append every line.
-    const tail = tailLines > 0 ? lines.slice(-tailLines).join('\n') : ''
-    return [head, `[... ${omitted} lines omitted by pre-pruning ...]`, tail].filter(part => part.length > 0).join('\n\n')
+    const tail = safeTailLines > 0 ? lines.slice(-safeTailLines).join('\n') : ''
+    const plain = [head, `[... ${omitted} lines omitted by pre-pruning ...]`, tail]
+      .filter(part => part.length > 0)
+      .join('\n\n')
+    if (plain.length <= maxChars) return plain
+
+    return compressFailureSalientText(content, {
+      maxChars,
+      headLines: safeHeadLines,
+      tailLines: safeTailLines,
+      contextLines: 2,
+      omissionLabel: 'lines omitted by pre-pruning',
+      annotateHeadAndTailRanges: false,
+      ...(strictGuard ? { strictSourceCodeGuard: true } : {}),
+    })
   }
-  const headCharacters = Math.max(1, Math.floor(maxChars / 2))
-  const tailCharacters = Math.max(1, maxChars - headCharacters)
-  const omitted = content.length - headCharacters - tailCharacters
-  return `${content.slice(0, headCharacters)}\n\n[... ${omitted} chars omitted by pre-pruning ...]\n\n${content.slice(-tailCharacters)}`
+
+  if (hasSalientFailureLines(lines, strictGuard ? { strictSourceCodeGuard: true } : {})) {
+    return compressFailureSalientText(content, {
+      maxChars,
+      headLines: Math.min(safeHeadLines, 10),
+      tailLines: Math.min(safeTailLines, 12),
+      contextLines: 2,
+      omissionLabel: 'lines omitted by pre-pruning',
+      annotateHeadAndTailRanges: false,
+      ...(strictGuard ? { strictSourceCodeGuard: true } : {}),
+    })
+  }
+
+  return fitSurrogateSafeText(
+    content,
+    maxChars,
+    omitted => `\n\n[... ${omitted} chars omitted by pre-pruning ...]\n\n`,
+  )
 }
 
 export interface ToolResultShedOptions<T> {

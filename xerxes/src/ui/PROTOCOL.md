@@ -227,7 +227,7 @@ params fall back to per-connection defaults.
 | `slash`                              | `{ command }`                                  | `{ ok }`                                                       | Native daemon slash dispatch; unsupported commands report an explicit result. Client-side controls (`/paste`, `/queue`, `/skin`, `/statusbar`, `/voice`) additionally return `handled: boolean` — see below. |
 | `set_plan_mode`                      | `{ enabled \| plan_mode, mode? }`              | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
 | `set_mode`                           | `{ mode }`                                     | `{ ok }`                                                       | Re-emits `StatusUpdate`.                                                          |
-| `permission_response`                | `{ request_id, response }`                     | `{ ok }`                                                       | `response ∈ approve \| approve_for_session \| reject`. Answers `ApprovalRequest`. |
+| `permission_response`                | `{ request_id, response, option_id? }`         | `{ ok }`                                                       | `response ∈ approve \| approve_for_session \| reject` (optional `option_id` selects a specific ACP permission option). Answers `ApprovalRequest`. |
 | `question_response`                  | `{ request_id, answers }`                      | `{ ok }`                                                       | `answers: {questionId: value}`. Answers `QuestionRequest`.                        |
 | `channel.list`                       | `{}`                                           | `{ ok, channels }`                                             | Multi-platform channels.                                                          |
 | `channel.enable` / `channel.disable` | `{ name }`                                     | `{ ok }`                                                       |                                                                                   |
@@ -263,6 +263,7 @@ params fall back to per-connection defaults.
 | `context_breakdown`     | `{ session_key? }`                                           | `{ ok, ... }`                                              | Per-section context accounting behind the context inspector.                                                                                       |
 | `changes.undo`          | `{ session_key?, path? }`                                    | `{ ok, ... }`                                              | Reverse recorded text edits for one exact recorded path, or all of them when `path` is empty. Not a general Git discard.                            |
 | `workspace.worktree`    | `{ session_key?, action: "create", name }`                   | `{ ok, ... }`                                              | Only `action: "create"` is supported; any other action is an explicit error.                                                                        |
+| `git.branch` | `{ session_key? }` | `{ ok, branch }` | Lightweight current Git branch name of the session cwd (`""` outside a repository or on detached HEAD). |
 | `git.status` | `{ session_key? }` | `{ ok, repository \| null, reason? }` | Source Control state of the repository containing the session cwd: branch, upstream, ahead/behind, and staged / unstaged / untracked / conflict groups (porcelain v2). `repository: null` outside a git worktree. |
 | `git.diff` | `{ session_key?, path, staged?, untracked?, commit?, orig_path? }` | `{ ok, lines, truncated }` | One file: index vs HEAD when `staged`, worktree vs index otherwise, `/dev/null` vs file when `untracked`; with `commit` (a hash), the file as that commit changed it (`orig_path` for renames). |
 | `git.show` | `{ session_key?, commit }` | `{ ok, commit, files }` | One commit by hash: subject, body, author, date, parent count, and the files it changed against its first parent (`--root` for the first commit). Refs and ranges are refused. |
@@ -403,6 +404,9 @@ losing turn output.
 | `cron_complete`      | broadcast  | `job_id, deliver, recipient, archive_path`. |
 | `background.complete`| connection | `task_id, text` — a `turn.background` task settled. Dot-separated by history; it is not a namespace. |
 | `ui_command`         | connection | `action, argument, session_key` — a control only a UI can perform (`paste`, `queue`, `skin`, `statusbar`, `voice`). A headless client may ignore it; the daemon still reports the slash outcome separately. |
+| `swarm_event`        | broadcast  | `session_id, kind, head, status?, message?, member?, activity?` — live Xerxes Immortals lifecycle, worker activity, or board update (`titled`, `member_added`, `member_updated`, `member_killed`, `member_activity`, `message_posted`, `channel_updated`, `overview_updated`). |
+| `btw_event`          | broadcast  | `session_id, request_id, kind, question?, delta?, answer?, model?, error?, tool?` — live ephemeral side-question (`/btw` / `/side`) stream (`begin`, `delta`, `tool`, `end`, `error`). Never mutates session history. |
+| `acp_status`         | broadcast  | `session_id, binding, agents?` — active external ACP runtime binding (`AcpSessionBinding \| null`, e.g., Claude Code, Antigravity, custom stdio ACP, or `null` for native Xerxes) and discovered agent roster. |
 
 **Reflection proposal notifications.** The native `notification` payload for a new stored proposal is exactly:
 
@@ -2897,3 +2901,148 @@ message }`) or `cancelled`.
 `provider_list` adds `active_chosen` (false while only the built-in Claude Code
 fallback is active, which nothing runs on) and a per-profile `local` flag (data
 trust local: a Private or Hybrid worker).
+
+### Xerxes Immortals (additive v35)
+
+Session-scoped multi-agent coordination over a durable shared message board. Each
+method accepts `{ session_id?, session_key? }` and bypasses the foreground turn
+queue so UI clients can inspect, post to, or control Immortals while coordinator
+and worker turns execute in flight. (Wire method names `swarm.*` and event name
+`swarm_event` are preserved for backwards compatibility.)
+
+- `swarm.status` `{ session_id?, session_key? }` → `SwarmStatusSnapshot`
+  (`{ active, session_id, title, board: "local", open_board, head, overview,
+  channels, members }`).
+- `swarm.board` `{ session_id?, session_key?, since?, limit?, seqs?, channel? }`
+  → `{ head, messages }`, chronological `SwarmBoardMessage` records (`{ seq,
+  agent, channel, text, mentions, channel_mentions, broadcast, time }`).
+- `swarm.post` `{ session_id?, session_key?, text, channel?, as_feedback? }` →
+  `{ status: "posted", seq, channel }`. When `as_feedback: true`, the daemon
+  formats the post as `@narrator user feedback: <sanitized text>` (stripping `@`
+  prefixes before roster/group names so workers are not woken directly).
+- `swarm.kill` `{ session_id?, session_key?, name }` → `{ status: "killed",
+  killed: string[] }`. Accepts a member name, sharded group base name, or `"all"`.
+- `swarm.model` `{ session_id?, session_key?, name?, model?, reason? }` → `{ status:
+  "switched", name, model }`. Switches a `waiting` or `stopped` member (or the
+  coordinator) onto `model` while preserving its conversation history.
+- `swarm.inspect` `{ session_id?, session_key?, name, limit? }` →
+  `SwarmMemberInspectResult` (`{ session_id, member, conversation_id, activity,
+  messages, total_messages }`). Read-only bounded snapshot of a member's live
+  tool/stream activity and conversation turns.
+- `swarm.activate` `{ session_id?, session_key?, enabled? }` → `{ ok: true,
+  active, prompt_overlay }`. Enables or disables `immortals-coordinator` guidance for
+  the target session prior to submitting `/immortals <task>` (legacy alias `/swarm <task>`).
+
+`swarm_event` (event, broadcast) `{ session_id, kind, head, status?, message? }`
+streams roster, channel, overview, and board updates live to attached clients.
+
+### Ephemeral Side Question (additive v35)
+
+Read-only, concurrent side-thread Q&A (`/btw` / `/side`) over a snapshot of the
+session's conversation history. Bypasses the foreground turn queue so side
+questions can run while a main turn or swarm is active without interrupting it
+or mutating persisted session messages.
+
+- `session.side_question` `{ session_id?: string, session_key?: string, request_id?: string, question: string, model?: string, history?: Array<{ role: "user" | "assistant"; content: string }> }`
+  → `{ ok: boolean, request_id: string, session_id: string, question: string, answer: string, model: string, error?: string }`.
+  Passing optional `model` selects an alternate model/profile solely for this
+  side question without changing the foreground session's model. `/btw --model <id> <question>`
+  (and `-m <id>`) parses the same override.
+
+`btw_event` (event, broadcast) `{ session_id, request_id, kind: "begin" | "delta" | "tool" | "end" | "error", question?, delta?, answer?, model?, error?, tool?: { name: string, target?: string, status: "running" | "done" | "error" } }`
+streams live ephemeral answer deltas and read-only tool badges to attached
+clients without entering the foreground transcript.
+
+### External ACP Agents (additive v35)
+
+Session-scoped external agent bridge supporting **Claude Code** (native ACP
+bridge or official `claude` CLI `stream-json`), **Google Antigravity**
+(`antigravity-acp`, `agy acp`, or `antigravity acp`), and custom stdio ACP
+agents (`~/.xerxes/acp-agents.json` or explicit command). All eight RPCs bypass
+the foreground turn queue; `acp.agents` and `acp.catalog` are read-only.
+
+- `acp.agents` `{ session_id?, session_key? }` → `{ ok: true, agents: AcpExternalAgentInfo[], active: AcpSessionBinding | null }`.
+- `acp.catalog` `{ session_id?, session_key? }`
+  → `{ ok: true, connected: boolean, binding?: AcpSessionBinding, commands: AcpAvailableCommand[], skills: AcpDiscoveredSkill[], capabilities?: AcpRuntimeCapabilities, config_options: AcpConfigOption[] }`.
+  Returns the connected external ACP runtime's automatically discovered slash
+  commands (`kind !== "skill"`), classified runtime-native skills
+  (`discovered_skills`), full `capabilities` (`prompt`, `session`, `mcp`,
+  `auth_methods`, `meta`), and all advertised `config_options` — strictly
+  isolated from Xerxes's native bundled skills and daemon commands. Returns
+  `connected: false` with empty arrays when native Xerxes is active.
+- `acp.connect` `{ session_id?, session_key?, agent_id, cwd?, command?, args?, mode_id?, resume_session_id?, fresh? }`
+  → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string, install_hint?: string }`.
+  Passing `agent_id: "xerxes"` disconnects any active external agent and
+  returns the native Xerxes binding. When `resume_session_id` is supplied (or a
+  reopened session's `session.metadata.acp_binding` matches `agent_id` + `cwd`
+  unless `fresh: true`), stdio ACP agents advertising `sessionCapabilities.resume`
+  reattach via zero-replay `session/resume` before falling back to
+  `session/load` → `session/new`, and automatically restore the persisted or
+  requested `mode_id` (`auto`, `turbo`, `accept-edits`, `plan`) if the agent
+  resets mode to `default` on resume. On stdio ACP agents, `initialize` populates
+  `agent_version`, `agent_title`, and structured `capabilities`, while
+  `session/new` / `session/resume` and `available_commands_update` populate
+  `current_model`, `current_model_name`, `models`, `current_mode`,
+  `current_mode_name`, `modes` (augmented with host-enforced `turbo` right after
+  `auto` when the agent advertises modes without a native unrestricted mode),
+  `model_config_id`, `mode_config_id`,
+  `config_options` (all select/boolean/string options), `thought_level`,
+  `thought_levels`, `thought_level_config_id`, `available_commands` (including
+  `input_hint`, `kind`, `source`), and `discovered_skills` onto `binding`.
+- `acp.disconnect` `{ session_id?, session_key? }` → `{ ok: true, disconnected: boolean, binding: null }`.
+  Calls `session/close` (short timeout) when advertised before tearing down the
+  external subprocess.
+- `acp.cancel` `{ session_id?, session_key? }` → `{ ok: true, cancelled: boolean }`.
+- `acp.set_model` `{ session_id?, session_key?, model_id }`
+  → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string }`.
+  Switches the connected external ACP agent's active model (using
+  `session/set_config_option` / `session/set_model` fallback for stdio ACP, or
+  `--model` for Claude Code `stream-json`), refreshes dynamic `config_options`
+  and `thought_levels`, persists `session.metadata.acp_binding`, and broadcasts
+  `acp_status`.
+- `acp.set_mode` `{ session_id?, session_key?, mode_id }`
+  → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string }`.
+  Switches the connected external ACP agent's active mode (preferring
+  `session/set_config_option` when a `mode` config option exists, with
+  `session/set_mode` fallback), persists `session.metadata.acp_binding`, and
+  broadcasts `acp_status`. Selecting `turbo` on an agent without native `turbo`
+  switches the underlying ACP session to `auto` (or the nearest permissive
+  native mode), auto-approves incoming `session/request_permission` prompts
+  immediately (including resolving any currently waiting approval card), and
+  preserves `turbo` across agent `current_mode_update` / `config_option_update`
+  frames until the user explicitly selects another mode.
+- `acp.set_config_option` `{ session_id?, session_key?, config_id, value }`
+  → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string }`.
+  Updates any ACP config option (select, boolean, or string — such as
+  `thought_level`, `model`, `mode`, or agent-defined options) via
+  `session/set_config_option`, refreshes dynamic `config_options`
+  and `thought_levels`, persists `session.metadata.acp_binding`, and broadcasts
+  `acp_status`.
+
+`acp_status` (event, broadcast) `{ session_id, binding: AcpSessionBinding | null, agents?: AcpExternalAgentInfo[] }`
+notifies attached clients whenever a session switches between native Xerxes and
+an external ACP runtime, receives `available_commands_update` or
+`config_option_update`, updates its active external model/mode/thinking/config
+options, or loses an unexpected external subprocess exit (`binding.connected: false`
+with actionable `binding.error`). Session payloads (`initialize`, `session.open`,
+`session.status`, `session.active_list`) carry live `acp_binding` when connected
+and `saved_acp_binding` (`connected: false`) when a reopened session has a
+persisted binding available for reconnect/resume.
+When a session has a connected external ACP binding:
+- `complete` enforces strict runtime isolation, returning only the connected
+  ACP runtime's discovered commands and skills plus minimal non-colliding host
+  controls (`/acp`, and `/new`, `/clear`, `/export` when not shadowed) — never
+  Xerxes's native daemon commands or bundled skills.
+- `slash` routes any `/<name>` matching the connected ACP runtime's
+  `available_commands` or `discovered_skills` directly to the external ACP agent
+  (keeping `/acp ...` on the Xerxes host) and never falls through to Xerxes's
+  native skill registry. Disconnecting restores full native Xerxes completions
+  and slash routing immediately.
+- Ordinary `turn.submit` / `prompt` calls route transparently through the bridge
+  (even without a configured native Xerxes LLM provider), supporting multimodal
+  images, `@file` resources, mid-turn `turn.steer` follow-ups, rich
+  `approval_request` frames (`inputs`, `cwd`, `diff`, `options`, accurate
+  `allow_permanent`), structured `diff` + `locations` on `tool_call`/`tool_result`,
+  live `usage_update` context telemetry, `session_info_update` titles, and `plan`
+  todo snapshots, while persisting the completed exchange (`messages`,
+  `tool_executions`, and `thinking_content`) onto the session transcript.

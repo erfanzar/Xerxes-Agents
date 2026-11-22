@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { modelsDev, type LiveCost } from './modelsDev.js'
+import { modelsDev, reportedModelCapability, type LiveCost } from './modelsDev.js'
 import { ConfigurationError, ValidationError } from '../core/errors.js'
 
 export type ProviderTransport = 'anthropic' | 'claude-code' | 'openai'
@@ -656,17 +656,37 @@ export function providerBilledBySubscription(provider: string | undefined, optio
   return config?.billing === 'subscription'
 }
 
+function nonNegativeFinite(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function explicitProviderPrefix(model: string): ProviderName | undefined {
+  const slash = model.indexOf('/')
+  if (slash <= 0) return undefined
+  const prefix = model.slice(0, slash).trim().toLowerCase()
+  return PROVIDER_ALIASES[prefix] ?? (isProviderName(prefix) ? prefix : undefined)
+}
+
 /**
  * What a run cost, in USD, from published prices only: the provider's own,
  * else models.dev's. Undefined when nobody publishes a price for the model —
  * an unknown cost, never an invented one (and never a fake $0).
  */
 export function calcCost(model: string, inputTokens: number, outputTokens: number, source: CostSource = {}): number | undefined {
-  const price = source.reported ?? modelsDev.find({ model, ...(source.provider ? { provider: source.provider } : {}), ...(source.baseUrl ? { baseUrl: source.baseUrl } : {}) })?.cost
-  if (!price || price.input === undefined || price.output === undefined) return undefined
+  if (!nonNegativeFinite(inputTokens) || !nonNegativeFinite(outputTokens)) return undefined
+  if (source.cacheReadTokens !== undefined && !nonNegativeFinite(source.cacheReadTokens)) return undefined
+  if (source.cacheWriteTokens !== undefined && !nonNegativeFinite(source.cacheWriteTokens)) return undefined
+  const providerHint = source.provider?.trim() || explicitProviderPrefix(model)
+  const price = source.reported
+    ?? (providerHint ? reportedModelCapability(providerHint, model)?.cost : undefined)
+    ?? modelsDev.find({ model, ...(source.provider ? { provider: source.provider } : {}), ...(source.baseUrl ? { baseUrl: source.baseUrl } : {}) })?.cost
+  if (!price || !nonNegativeFinite(price.input) || !nonNegativeFinite(price.output)) return undefined
+  if (source.cacheReadTokens && price.cacheRead !== undefined && !nonNegativeFinite(price.cacheRead)) return undefined
+  if (source.cacheWriteTokens && price.cacheWrite !== undefined && !nonNegativeFinite(price.cacheWrite)) return undefined
   const cacheRead = source.cacheReadTokens && price.cacheRead !== undefined ? source.cacheReadTokens * price.cacheRead : 0
   const cacheWrite = source.cacheWriteTokens && price.cacheWrite !== undefined ? source.cacheWriteTokens * price.cacheWrite : 0
-  return (inputTokens * price.input + outputTokens * price.output + cacheRead + cacheWrite) / 1_000_000
+  const total = (inputTokens * price.input + outputTokens * price.output + cacheRead + cacheWrite) / 1_000_000
+  return nonNegativeFinite(total) ? total : undefined
 }
 
 /** Transient-failure patience for the route that would serve this model. */

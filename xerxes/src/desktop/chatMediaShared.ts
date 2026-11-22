@@ -16,6 +16,21 @@
 
 export const OPEN_EXTERNAL_CHANNEL = 'desktop:open-external'
 export const IMAGE_DATA_CHANNEL = 'desktop:image-data'
+export const PROJECT_ICON_CHANNEL = 'desktop:project-icon'
+
+export const PROJECT_ICON_MAX_DATA_BYTES = 512 * 1024
+const PROJECT_ICON_DATA_URL = /^data:(image\/(?:png|jpeg|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon));base64,([A-Za-z0-9+/]*={0,2})$/i
+
+/** Validates a project logo data URL crossing the preload bridge. */
+export function asProjectIconDataUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null
+  const match = PROJECT_ICON_DATA_URL.exec(value)
+  if (!match?.[1]) return null
+  const data = match[2] ?? ''
+  if (!data || data.length % 4 !== 0) return null
+  if (Math.floor((data.length * 3) / 4) > PROJECT_ICON_MAX_DATA_BYTES) return null
+  return `data:${match[1].toLowerCase()};base64,${data}`
+}
 
 export const CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 export const CHAT_IMAGE_PATH_MAX_LENGTH = 4096

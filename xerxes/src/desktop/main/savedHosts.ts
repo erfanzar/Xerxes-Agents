@@ -123,6 +123,17 @@ export class SavedHostContexts {
     return { machine: remoteTarget({ ...entry.machine, workspacePath: row.cwd }), sessionId: row.id }
   }
 
+  /** Immediately evict a removed SSH host alias so the sidebar updates without waiting for the 60s poll. */
+  dropAlias(alias: string): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.machine.alias === alias || entry.context.alias === alias) {
+        entry.controller?.abort()
+        this.entries.delete(key)
+      }
+    }
+    this.lastRegistry = -Infinity
+  }
+
   dispose(): void {
     this.disposed = true
     for (const entry of this.entries.values()) entry.controller?.abort()

@@ -7,7 +7,7 @@ import { parseTerminalFont, UI_SCALES } from '../src/desktop/renderer/displayPre
 import { PALETTES, paletteTokens, paletteVariant } from '../src/desktop/renderer/palettes.js'
 
 test('every theme has the colours the app paints, in both variants it offers', () => {
-  expect(PALETTES.map(palette => palette.name)).toEqual(['claude', 'nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk', 'toxic-forest', 'electric-night', 'afterglow', 'mahogany'])
+  expect(PALETTES.map(palette => palette.name)).toEqual(['t3-code', 't3-chat', 'grove', 'ocean', 't3-ember', 'iris', 'claude', 'nous', 'github', 'catppuccin', 'everforest', 'solarized', 'nous-alt', 'midnight', 'ember', 'mono', 'slate', 'cyberpunk', 'toxic-forest', 'electric-night', 'afterglow', 'mahogany'])
   for (const palette of PALETTES) {
     for (const wanted of ['light', 'dark'] as const) {
       const { colors } = paletteVariant(palette, wanted)

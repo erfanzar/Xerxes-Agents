@@ -23,6 +23,11 @@ export function summarizeToolStartDisplay(name: string, context: string, verbose
     return { context: `run: ${label}` }
   }
 
+  const swarmSummary = summarizeSwarmTool(toolName, context, verboseArgs)
+  if (swarmSummary !== null) {
+    return { context: swarmSummary }
+  }
+
   const fileOperation = summarizeFileOperation(toolName, context, verboseArgs)
   if (fileOperation) {
     return fileOperation
@@ -369,4 +374,60 @@ function compact(raw: string): string {
   const oneLine = raw.replace(/\s+/g, ' ').trim()
 
   return oneLine.length > MAX_FALLBACK_CHARS ? `${oneLine.slice(0, MAX_FALLBACK_CHARS - 1)}…` : oneLine
+}
+
+function summarizeSwarmTool(toolName: string, context: string, verboseArgs?: string): string | null {
+  const parsed = parseObject(verboseArgs || context) ?? parseObject(context)
+  if (toolName === 'swarm') {
+    if (!parsed) return null
+    const action = typeof parsed.action === 'string' ? parsed.action.trim() : ''
+    const name = typeof parsed.name === 'string' ? parsed.name.trim() : ''
+    if (action === 'add' && name) {
+      const count = Array.isArray(parsed.tasks)
+        ? parsed.tasks.length
+        : typeof parsed.n === 'number' && parsed.n > 1
+          ? Math.trunc(parsed.n)
+          : 1
+      return count > 1 ? `add @${name}-1..${count}` : `add @${name}`
+    }
+    if (action === 'kill' && name) return name === 'all' ? 'kill all' : `kill @${name}`
+    if (action === 'title' && typeof parsed.title === 'string') return compact(`title: ${parsed.title}`)
+    if (action === 'model') {
+      const target = name ? `@${name}` : 'self'
+      const model = typeof parsed.model === 'string' && parsed.model.trim() ? ` → ${parsed.model.trim()}` : ''
+      return compact(`model ${target}${model}`)
+    }
+    if (action === 'channel') {
+      const op = typeof parsed.op === 'string' ? parsed.op.trim() : 'list'
+      const ch = typeof parsed.channel === 'string' && parsed.channel.trim() ? ` #${parsed.channel.trim()}` : ''
+      return compact(`channel ${op}${ch}`)
+    }
+    return action || null
+  }
+  if (toolName === 'postmessage') {
+    if (!parsed) return null
+    const ch = typeof parsed.channel === 'string' && parsed.channel.trim() ? `#${parsed.channel.trim()}: ` : ''
+    const text = typeof parsed.text === 'string' ? parsed.text : ''
+    return compact(`${ch}${text}`)
+  }
+  if (toolName === 'readboard') {
+    if (!parsed) return null
+    if (parsed.status === true) return 'roster status'
+    if (Array.isArray(parsed.seqs) && parsed.seqs.length > 0) return `seqs ${parsed.seqs.slice(0, 5).map(s => `#${String(s)}`).join(', ')}`
+    if (typeof parsed.since === 'number') return `since #${Math.trunc(parsed.since)}`
+    if (typeof parsed.channel === 'string' && parsed.channel.trim()) return `#${parsed.channel.trim()}`
+    return 'recent'
+  }
+  if (toolName === 'swarmwait') {
+    if (!parsed) return null
+    const since = typeof parsed.since === 'number' ? `since #${Math.trunc(parsed.since)}` : 'board'
+    return parsed.mentions_only === false ? `${since} · all posts` : since
+  }
+  if (toolName === 'swarmoverview') {
+    if (!parsed) return 'update overview'
+    return typeof parsed.summary === 'string' && parsed.summary.trim()
+      ? compact(parsed.summary)
+      : 'update overview'
+  }
+  return null
 }

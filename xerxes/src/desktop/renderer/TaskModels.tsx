@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { pageIsInactive } from './pageVisibility.js'
 
 import {
   compactBytes, compactTokens, costLabel, modelRoleLabel, modelUsageSummary, processedTokens, taskModelsOf, taskSplit, usd,
@@ -56,7 +57,7 @@ export function useTaskModels(snap: Snapshot): TaskModels | null {
   useEffect(() => { void refresh() }, [refresh, snap.turnActive])
   useEffect(() => {
     if (!snap.turnActive || !online) return
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void refresh() }, LIVE_MS)
+    const timer = setInterval(() => { if (!pageIsInactive()) void refresh() }, LIVE_MS)
     return () => clearInterval(timer)
   }, [refresh, snap.turnActive, online])
   return value

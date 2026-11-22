@@ -35,10 +35,14 @@ export class LspManager {
     if (signal?.aborted) throw cancelled()
     this.reconfiguring = true
     try {
-      const changed = new Set(this.servers.filter(before => {
-        const after = servers.find(server => server.name === before.name)
-        return JSON.stringify(before) !== JSON.stringify(after)
-      }).map(server => server.name))
+      const previousNames = new Set(this.servers.map(server => server.name))
+      const changed = new Set([
+        ...this.servers.filter(before => {
+          const after = servers.find(server => server.name === before.name)
+          return JSON.stringify(before) !== JSON.stringify(after)
+        }).map(server => server.name),
+        ...servers.filter(after => !previousNames.has(after.name)).map(server => server.name),
+      ])
       const targets = [...this.entries.keys()].filter(key => changed.has((JSON.parse(key) as [string, string])[1]))
       const results = await Promise.allSettled(targets.map(key => this.releaseKey(key)))
       if (results.some(result => result.status === 'rejected')) throw new Error('Language server cleanup failed; settings were not saved')
@@ -111,9 +115,13 @@ export class LspManager {
     const canonical = await realpath(root)
     const filePath = await new WorkspacePathResolver(canonical).resolve(requestedPath)
     if (this.reconfiguring) throw new Error('LSP settings update in progress; retry shortly')
-    const name = basename(filePath)
-    const server = this.servers.filter(server => server.enabled && server.extensions.some(ext => name.endsWith(ext)))
-      .sort((a, b) => Math.max(...b.extensions.filter(ext => name.endsWith(ext)).map(ext => ext.length)) - Math.max(...a.extensions.filter(ext => name.endsWith(ext)).map(ext => ext.length)))[0]
+    const name = basename(filePath).toLowerCase()
+    const matchingExtLengths = (candidate: LspServerConfig) => candidate.extensions
+      .filter(ext => name.endsWith(ext.toLowerCase()))
+      .map(ext => ext.length)
+    const server = this.servers
+      .filter(candidate => candidate.enabled && matchingExtLengths(candidate).length > 0)
+      .sort((a, b) => Math.max(...matchingExtLengths(b)) - Math.max(...matchingExtLengths(a)))[0]
     if (!server) throw new Error('No enabled LSP server is configured for this file type')
     if (this.closing) throw new Error('LSP manager is closed')
     if (signal?.aborted) throw cancelled()

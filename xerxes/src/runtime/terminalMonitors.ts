@@ -280,6 +280,17 @@ export class TerminalMonitors {
     } catch (error) { this.reactionMailbox?.cancel(owner, watch.id); this.finish(watch, 'stopped'); throw error }
   }
 
+  /** Fast zero-I/O check for whether `owner` has any live or opening monitors. */
+  hasActiveWatches(owner: string): boolean {
+    for (const watch of this.watches.values()) {
+      if (watch.owner === owner && watch.state === 'watching') return true
+    }
+    for (const item of this.opening) {
+      if (item.owner === owner) return true
+    }
+    return false
+  }
+
   list(owner: string): MonitorSummary[] {
     const live = [...this.watches.values()].filter(w => w.owner === owner).map(w => this.snapshot(w))
     const ids = new Set(live.map(w => w.id))
@@ -447,10 +458,12 @@ export class TerminalMonitors {
     if (watch.state !== 'watching') return
     watch.unsubscribe()
     if (watch.timer) clearTimeout(watch.timer)
+    delete watch.timer
     watch.state = state
     if (watch.source && state !== 'interrupted') watch.sourceStatus = `Source closed (${state}).`
     watch.partial = ''
     delete watch.matchedLine
+    watch.seen.clear()
     if (state === 'interrupted' && watch.source?.kind === 'file') watch.sourceStatus = 'File watch interrupted. Changes during downtime were not observed; create a new watch.'
     if (state === 'interrupted' && watch.source?.kind === 'websocket') watch.sourceStatus = 'WebSocket watch interrupted. Messages during downtime were not observed; create a new watch.'
     if (state === 'interrupted' && watch.source?.kind === 'webhook') watch.sourceStatus = 'Webhook watch interrupted. Deliveries during downtime were not observed; create a new watch.'
@@ -469,11 +482,13 @@ export class TerminalMonitors {
   private fail(watch: Watch, error: unknown): void {
     watch.unsubscribe()
     if (watch.timer) clearTimeout(watch.timer)
+    delete watch.timer
     this.reactionMailbox?.cancel(watch.owner, watch.id)
     watch.state = 'failed'
     this.activityChanges.notify()
     watch.partial = ''
     delete watch.matchedLine
+    watch.seen.clear()
     watch.error = error instanceof Error ? error.message : String(error)
     try {
       this.history.finish(watch.owner, watch.id, 'failed', { error: watch.error, output: this.output(watch) })

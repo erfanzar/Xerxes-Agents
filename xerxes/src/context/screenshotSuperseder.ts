@@ -13,7 +13,7 @@ export const SCREENSHOT_RESULT_PREFIX = '{"_multimodal":true'
 export const SCREENSHOT_OMITTED_PREFIX = '[screenshot omitted:'
 
 const CAPTURE_DIMENSIONS_PATTERN = /Screen capture:\s*(\d+)\s*x\s*(\d+)/
-const IMAGE_BASE64_PATTERN = /;base64,([A-Za-z0-9+/=]+)/
+const IMAGE_BASE64_PATTERN = /;base64,([A-Za-z0-9+/=\r\n]+)/
 
 /** True when a tool-message content string carries an inline screenshot payload. */
 export function isScreenshotToolResult(content: unknown): content is string {
@@ -75,7 +75,7 @@ export function screenshotParts(content: unknown): ScreenshotParts | undefined {
     if (row['type'] === 'text' && typeof row['text'] === 'string') texts.push(row['text'])
     const url = row['image_url']
     const href = typeof url === 'object' && url !== null ? (url as Record<string, unknown>)['url'] : undefined
-    const match = typeof href === 'string' ? /^data:(image\/[a-z+.-]+);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(href) : null
+    const match = typeof href === 'string' ? /^data:(image\/[a-z0-9+.-]+);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(href) : null
     if (match?.[1] && match[2]) images.push({ mediaType: match[1].toLowerCase(), data: match[2].replaceAll(/\s/g, '') })
   }
   if (!images.length) return undefined
@@ -103,8 +103,8 @@ export function omittedScreenshotMarker(content: string): string {
           if (typeof url !== 'object' || url === null) continue
           const href = (url as Record<string, unknown>)['url']
           if (typeof href !== 'string') continue
-          const base64 = IMAGE_BASE64_PATTERN.exec(href)?.[1]
-          if (base64) bytes = Math.floor((base64.length * 3) / 4)
+          const base64 = IMAGE_BASE64_PATTERN.exec(href)?.[1]?.replaceAll(/\s/g, '')
+          if (base64) bytes = (bytes ?? 0) + Math.floor((base64.length * 3) / 4)
         }
       }
     }

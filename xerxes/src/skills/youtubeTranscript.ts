@@ -281,12 +281,22 @@ function acceptedLanguages(languages: readonly string[] | undefined): string {
 }
 
 function decodeHtml(value: string): string {
-  return value
-    .replaceAll('&amp;', '&')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&#39;', "'")
-    .replace(/&#(\d+);/g, (_match, decimal: string) => String.fromCodePoint(Number(decimal)))
-    .replace(/&#x([\da-f]+);/gi, (_match, hexadecimal: string) => String.fromCodePoint(Number.parseInt(hexadecimal, 16)))
+  return value.replace(/&(?:#x([\da-f]+)|#(\d+)|lt|gt|quot|apos|amp);/gi, (whole, hex?: string, dec?: string) => {
+    if (hex !== undefined || dec !== undefined) {
+      const code = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(dec ?? '', 10)
+      return isValidHtmlCodePoint(code) ? String.fromCodePoint(code) : whole
+    }
+    switch (whole.toLowerCase()) {
+      case '&lt;': return '<'
+      case '&gt;': return '>'
+      case '&quot;': return '"'
+      case '&apos;': return "'"
+      case '&amp;': return '&'
+      default: return whole
+    }
+  })
+}
+
+function isValidHtmlCodePoint(code: number): boolean {
+  return Number.isSafeInteger(code) && code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)
 }

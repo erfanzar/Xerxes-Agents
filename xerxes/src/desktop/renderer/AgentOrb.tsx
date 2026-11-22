@@ -2,23 +2,30 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * The agent's status mark: a dotted "thinking orb" whose motion says what the
- * turn is doing — scanning a globe while it searches, scrambling bands while
- * it reasons, a sash while it writes.
+ * The agent's app-wide status mark: Xerxes's minimalist architectural Derafsh
+ * Kaviani bookplate (`size >= 36`) and 8-ray Kavian starburst (`size < 36`)
+ * rendered via `<XerxesStatusMark />`.
  *
- * The drawings are the hand-tuned presets from `thinking-orbs` (MIT, Jakub
- * Antalik), rendered through its raw painters rather than its component. The
- * component runs one requestAnimationFrame loop per orb at the display rate;
- * three orbs on a 120 Hz panel woke the renderer 360 times a second during a
- * turn. Here every orb shares one timer at ORB_FPS, and the timer stops while
- * the window is unfocused, hidden or covered by another workspace, while an
- * orb is off-screen, under reduced motion, and once an orb has settled.
+ * Motion runs on GPU-composited CSS keyframes that pause automatically when
+ * `live === false`, once `settleMs` elapses, under `prefers-reduced-motion`,
+ * or while the window is unfocused or occluded.
+ *
+ * The legacy `OrbEngine` and `wake()` exports remain available for headless
+ * clock/preset unit tests (`desktopAgentOrb.test.tsx`).
  */
 
-import { useEffect, useRef, type ReactElement } from 'react'
+import { memo, useEffect, useState, type ReactElement } from 'react'
 import { MODE_FRAMES, paintFrame, resolvePreset, type ModeKey, type ModeOpts, type OrbSize, type OrbState } from 'thinking-orbs/engine'
 
+import {
+  XerxesStatusMark,
+  resolveXerxesStatusTone,
+  type XerxesStatusState,
+} from './XerxesSprites.js'
+
 export type { OrbSize, OrbState }
+export type AgentOrbState = XerxesStatusState
+export type AgentOrbSize = OrbSize | number
 
 const ORB_FPS = 30
 /** Where a still orb is drawn: a representative pose, as the library's reduced-motion frame. */
@@ -115,12 +122,14 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let framePending = 0
 const FRAME_LOST_MS = 1000
 let lastTick = 0
-let watching = false
 
 function paused(): boolean {
   if (typeof document === 'undefined') return true
   const root = document.documentElement
-  return document.hidden || root.hasAttribute('data-window-unfocused') || root.hasAttribute('data-occluded')
+  return document.hidden
+    || root.getAttribute('data-perf-paused') === 'true'
+    || root.hasAttribute('data-window-unfocused')
+    || root.hasAttribute('data-occluded')
 }
 
 function tick(now: number): void {
@@ -150,77 +159,45 @@ export function wake(): void {
   }, 1000 / ORB_FPS)
 }
 
-function watchEnvironment(): void {
-  if (watching || typeof document === 'undefined') return
-  watching = true
-  document.addEventListener('visibilitychange', wake)
-  // Focus, occlusion and theme all live on the root element's attributes.
-  new MutationObserver(() => {
-    for (const engine of mounted) engine.paint()
-    wake()
-  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-window-unfocused', 'data-occluded', 'data-theme'] })
-}
-
-let intersections: IntersectionObserver | null = null
-const byCanvas = new WeakMap<Element, OrbEngine>()
-function observeVisibility(canvas: HTMLCanvasElement, engine: OrbEngine): void {
-  if (typeof IntersectionObserver === 'undefined') return
-  intersections ??= new IntersectionObserver(entries => {
-    for (const entry of entries) {
-      const found = byCanvas.get(entry.target)
-      if (found) found.visible = entry.isIntersecting
-    }
-    wake()
-  })
-  byCanvas.set(canvas, engine)
-  intersections.observe(canvas)
-}
-
 export interface AgentOrbProps {
-  readonly state: OrbState
-  /** A tuned preset: 20 inline with text, 32 compact, 64 as the main mark. */
-  readonly size: OrbSize
+  readonly state: AgentOrbState
+  /** Rendered size in CSS px: 14–24 compact 8-ray Kavian star, 36–64 minimalist Derafsh Kaviani bookplate. */
+  readonly size: AgentOrbSize
   readonly live?: boolean
   readonly settleMs?: number
   readonly className?: string
   readonly label?: string
 }
 
-export function AgentOrb({ state, size, live = true, settleMs, className, label }: AgentOrbProps): ReactElement {
-  const canvas = useRef<HTMLCanvasElement>(null)
-  const engine = useRef<OrbEngine | null>(null)
+export const AgentOrb = memo(function AgentOrb({ state, size, live = true, settleMs, className, label }: AgentOrbProps): ReactElement {
+  const [settled, setSettled] = useState(false)
 
   useEffect(() => {
-    const element = canvas.current
-    if (!element) return
-    watchEnvironment()
-    const created = new OrbEngine(element, size, { state, live, settleMs }, globalThis.devicePixelRatio || 1)
-    engine.current = created
-    mounted.add(created)
-    observeVisibility(element, created)
-    created.paint()
-    wake()
-    return () => {
-      mounted.delete(created)
-      intersections?.unobserve(element)
-      created.dispose()
-      engine.current = null
+    setSettled(false)
+    if (!live || settleMs === undefined) return
+    if (settleMs <= 0) {
+      setSettled(true)
+      return
     }
-    // Size fixes the canvas and preset; state changes go through update().
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size])
-
-  useEffect(() => {
-    const current = engine.current
-    if (!current) return
-    current.update({ state, live, settleMs })
-    // Repaint now: a paused ticker would otherwise leave the old state's
-    // drawing up until focus returns.
-    current.paint()
-    wake()
+    const handle = setTimeout(() => setSettled(true), settleMs)
+    return () => clearTimeout(handle)
   }, [state, live, settleMs])
 
-  return <span className={`agent-orb${className ? ` ${className}` : ''}`} data-state={state} style={{ width: size, height: size }} role={label ? 'img' : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
-    <canvas ref={canvas} />
-  </span>
-}
+  const isLive = live && !settled
+  const tone = resolveXerxesStatusTone(state)
+
+  return (
+    <span
+      className={`agent-orb${className ? ` ${className}` : ''}`}
+      data-state={state}
+      data-tone={tone}
+      data-live={isLive ? 'true' : 'false'}
+      style={{ width: size, height: size }}
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+    >
+      <XerxesStatusMark state={state} size={size} live={isLive} />
+    </span>
+  )
+})

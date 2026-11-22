@@ -76,6 +76,18 @@ export function readHealthz(status: number, text: string): Pick<HubHealthState, 
   return { kind: 'unreachable', detail: 'the address answered, but not as a Xerxes Hub', workspaces: null }
 }
 
+function sameHealthState(a: HubHealthState, b: HubHealthState): boolean {
+  return a.kind === b.kind
+    && a.target === b.target
+    && a.origin === b.origin
+    && a.detail === b.detail
+    && a.dismissed.not_configured === b.dismissed.not_configured
+    && a.dismissed.unreachable === b.dismissed.unreachable
+    && a.workspaces?.total === b.workspaces?.total
+    && a.workspaces?.online === b.workspaces?.online
+    && a.workspaces?.degraded === b.workspaces?.degraded
+}
+
 export function createHubHealth(port: HubHealthPort): HubHealth {
   const listeners = new Set<(state: HubHealthState) => void>()
   let dismissed = port.readDismissed()
@@ -84,9 +96,12 @@ export function createHubHealth(port: HubHealthPort): HubHealth {
   let lastCheck = -Infinity
 
   const publish = (next: HubHealthState): HubHealthState => {
+    const changed = !sameHealthState(current, next)
     current = next
-    for (const listener of listeners) {
-      try { listener(next) } catch { /* one page's fault must not stop the others */ }
+    if (changed) {
+      for (const listener of listeners) {
+        try { listener(next) } catch { /* one page's fault must not stop the others */ }
+      }
     }
     return next
   }

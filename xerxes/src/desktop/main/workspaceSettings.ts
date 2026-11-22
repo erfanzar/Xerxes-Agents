@@ -61,3 +61,68 @@ export function saveDesktopWorkspace(file: string, directory: string): void {
     renameSync(temporary, file)
   } finally { rmSync(temporary, {force:true}) }
 }
+
+function canonicalWorkspaceKey(directory: string): string {
+  const trimmed = directory.replace(/\/+$/, '') || '/'
+  try {
+    return existsSync(trimmed) ? realpathSync(trimmed).replace(/\/+$/, '') || '/' : trimmed
+  } catch {
+    return trimmed
+  }
+}
+
+/**
+ * Remove a remembered local workspace folder from the desktop sidebar list.
+ * Never touches or deletes any user files on disk.
+ */
+export function removeDesktopWorkspace(file: string, directory: string, exists: (path: string) => boolean = existsSync): string[] {
+  if (!isAbsolute(directory) || /[\0\r\n\x00-\x1f]/.test(directory)) throw new Error('Choose an absolute workspace folder')
+  const record = readWorkspaceRecord(file)
+  if (!record) throw new Error('Could not read the saved workspace list; leaving it untouched')
+  const rawTarget = directory.replace(/\/+$/, '') || '/'
+  const resolvedTarget = canonicalWorkspaceKey(directory)
+  const matches = (candidate: string): boolean => {
+    const clean = candidate.replace(/\/+$/, '') || '/'
+    return clean === rawTarget || canonicalWorkspaceKey(candidate) === resolvedTarget
+  }
+  const remaining = loadDesktopWorkspaces(file).filter(path => !matches(path))
+  const currentWorkspace = typeof record.workspace === 'string' && !matches(record.workspace)
+    ? record.workspace
+    : remaining[0]
+  if (existsSync(file) || remaining.length > 0) {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    const temporary = `${file}.${randomUUID()}.tmp`
+    try {
+      const payload = currentWorkspace
+        ? { workspace: currentWorkspace, directories: remaining }
+        : { directories: remaining }
+      writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { mode: 0o600 })
+      renameSync(temporary, file)
+    } finally {
+      rmSync(temporary, { force: true })
+    }
+  }
+  return remaining.filter(path => exists(path))
+}
+
+/**
+ * Re-add a local workspace folder to the remembered sidebar list without
+ * changing the default launch workspace (used when undoing sidebar removal).
+ */
+export function rememberDesktopWorkspace(file: string, directory: string, exists: (path: string) => boolean = existsSync): string[] {
+  if (!isAbsolute(directory) || /[\0\r\n\x00-\x1f]/.test(directory)) throw new Error('Choose an absolute workspace folder')
+  const record = readWorkspaceRecord(file)
+  if (!record) throw new Error('Could not read the saved workspace list; leaving it untouched')
+  const target = exists(directory) ? canonicalWorkspaceKey(directory) : (directory.replace(/\/+$/, '') || '/')
+  const directories = [...new Set([...loadDesktopWorkspaces(file), target])]
+  const workspace = typeof record.workspace === 'string' && isAbsolute(record.workspace) ? record.workspace : target
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+  const temporary = `${file}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, `${JSON.stringify({ workspace, directories })}\n`, { mode: 0o600 })
+    renameSync(temporary, file)
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+  return directories.filter(path => exists(path))
+}

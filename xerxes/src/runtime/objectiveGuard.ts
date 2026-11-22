@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { isReadOnlyInvocation, isReadOnlyShellCommand } from '../security/shellAnalysis.js'
 import { renderIntervention } from './interventions.js'
 import { normalizeInteractionMode } from './interactionModes.js'
 
@@ -38,9 +39,19 @@ const UNRESOLVED_MARKERS = [
   'failing test',
   'remaining failure',
   'remaining issue',
-  'losses',
   'loses by',
 ] as const
+
+const NEGATABLE_UNRESOLVED_MARKERS = new Set<string>([
+  'unmet',
+  'failing benchmark',
+  'failing test',
+  'remaining failure',
+  'remaining issue',
+])
+
+const POSITIVE_LOSSES_PATTERN = /\b(?:[1-9]\d*\s+losses|(?:has|with|remaining|still)\s+losses|benchmark\s+losses)\b/u
+const NEGATED_PREFIX_PATTERN = /\b(?:0|zero|no|none|without|fixed|resolved)\s+(?:the\s+|all\s+|any\s+|prior\s+|previous\s+)?$/u
 
 const RUNAWAY_FINAL_MARKERS = [
   'want me to',
@@ -97,6 +108,15 @@ const EXPLICIT_VERIFICATION_TOOL_NAMES = new Set([
   'verify_tool',
 ])
 
+const READ_ONLY_OBJECTIVE_TOOL_NAMES = new Set([
+  'file_outline',
+  'file_outline_tool',
+  'glob_tool',
+  'grep_tool',
+  'list_dir',
+  'read_file',
+])
+
 const MUTATING_TOOL_NAMES = new Set([
   'agent_memory_append',
   'agent_memory_journal',
@@ -105,6 +125,7 @@ const MUTATING_TOOL_NAMES = new Set([
   'agent_tool',
   'append_file',
   'apply_patch',
+  'apply_patch_tool',
   'copy_file',
   'delete_file',
   'enter_worktree_tool',
@@ -203,7 +224,7 @@ export function inspectObjectiveResponse(
 
   const lowered = stripped.toLowerCase()
   const success = firstMarker(lowered, VERIFIED_SUCCESS_MARKERS)
-  const unresolved = firstMarker(lowered, UNRESOLVED_MARKERS)
+  const unresolved = findUnresolvedMarker(lowered)
   if (success && !unresolved) {
     if (hasCurrentTurnVerification(options.evidence)) return allowStop()
     return continueObjective(
@@ -292,7 +313,7 @@ function isVerificationExecution(execution: ObjectiveToolExecutionEvidence): boo
   if (name === 'bash') {
     return isVerificationShellCommand(stringValue(execution.inputs.command))
   }
-  if (name !== 'write_stdin') return false
+  if (name !== 'write_stdin' && name !== 'check_command') return false
 
   const structured = parsedRecord(execution.result)
   if (!structured || structured.running === true) return false
@@ -300,10 +321,30 @@ function isVerificationExecution(execution: ObjectiveToolExecutionEvidence): boo
   return exitCode === 0 && isVerificationShellCommand(stringValue(structured.command))
 }
 
+/** True when `toolName` is a strictly read-only inspection tool (`FileOutlineTool`, `ReadFile`, etc.). */
+export function isReadOnlyObjectiveTool(toolName: string): boolean {
+  return READ_ONLY_OBJECTIVE_TOOL_NAMES.has(normalizedToolName(toolName))
+}
+
 function isMutatingExecution(execution: ObjectiveToolExecutionEvidence): boolean {
   const name = normalizedToolName(execution.name)
+  if (READ_ONLY_OBJECTIVE_TOOL_NAMES.has(name)) return false
   if (MUTATING_TOOL_NAMES.has(name)) return true
-  if (name === 'exec_command' || name === 'bash' || name === 'write_stdin') return true
+  if (name === 'bash') {
+    if (stringValue(execution.inputs.stdin) !== '') return true
+    return !isReadOnlyShellCommand(stringValue(execution.inputs.command))
+  }
+  if (name === 'exec_command') {
+    if (stringValue(execution.inputs.stdin) !== '') return true
+    const cmd = stringValue(execution.inputs.cmd)
+    const args = execution.inputs.args
+    if (Array.isArray(args) && args.every((argument): argument is string => typeof argument === 'string')) {
+      return !isReadOnlyInvocation(cmd, args)
+    }
+    if (args === undefined) return !isReadOnlyShellCommand(cmd)
+    return true
+  }
+  if (name === 'write_stdin') return true
   if (name === 'json_processor') return execution.inputs.operation === 'save'
   if (name === 'csv_processor') {
     return execution.inputs.operation === 'write' || execution.inputs.operation === 'convert'
@@ -332,6 +373,7 @@ function isVerificationShellCommand(command: string): boolean {
     .filter(Boolean)
     .some(segment => {
       const words = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(unquote) ?? []
+      while (words.length > 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0] ?? '')) words.shift()
       const executable = words[0]
       return executable !== undefined && isVerificationArgv(executable, words.slice(1))
     })
@@ -341,9 +383,13 @@ function isVerificationArgv(command: string, args: readonly string[]): boolean {
   const executable = command.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? ''
   const normalizedArgs = args.map(argument => argument.trim()).filter(Boolean)
   if (DIRECT_VERIFICATION_COMMANDS.has(executable)) return true
+  if (executable === 'git') {
+    return firstCommandArgument(normalizedArgs) === 'diff' && normalizedArgs.includes('--check')
+  }
   if (executable === 'go') return firstCommandArgument(normalizedArgs) === 'test'
   if (executable === 'cargo') {
-    return ['bench', 'build', 'check', 'clippy', 'test'].includes(firstCommandArgument(normalizedArgs))
+    const cargoArgs = normalizedArgs[0]?.startsWith('+') ? normalizedArgs.slice(1) : normalizedArgs
+    return ['bench', 'build', 'check', 'clippy', 'test'].includes(firstCommandArgument(cargoArgs))
   }
   if (executable === 'dotnet') {
     return ['build', 'test'].includes(firstCommandArgument(normalizedArgs))
@@ -365,6 +411,18 @@ function isVerificationArgv(command: string, args: readonly string[]): boolean {
     if (subcommand === 'x') return DIRECT_VERIFICATION_COMMANDS.has(argumentAfter(normalizedArgs, 'x'))
     return subcommand === 'run' && VERIFICATION_SCRIPT_NAMES.test(argumentAfter(normalizedArgs, 'run'))
   }
+  if (executable === 'npx') {
+    return DIRECT_VERIFICATION_COMMANDS.has(firstCommandArgument(normalizedArgs))
+  }
+  if (executable === 'uv') {
+    return firstCommandArgument(normalizedArgs) === 'run'
+      && DIRECT_VERIFICATION_COMMANDS.has(argumentAfter(normalizedArgs, 'run'))
+  }
+  if (executable === 'python' || executable === 'python3') {
+    const moduleIndex = normalizedArgs.findIndex(argument => argument === '-m')
+    const target = moduleIndex >= 0 ? (normalizedArgs[moduleIndex + 1]?.toLowerCase() ?? '') : ''
+    return target === 'unittest' || DIRECT_VERIFICATION_COMMANDS.has(target)
+  }
   if (executable === 'npm' || executable === 'pnpm' || executable === 'yarn') {
     const subcommand = firstCommandArgument(normalizedArgs)
     if (VERIFICATION_SCRIPT_NAMES.test(subcommand)) return true
@@ -373,10 +431,14 @@ function isVerificationArgv(command: string, args: readonly string[]): boolean {
   return false
 }
 
+const VALUE_TAKING_COMMAND_FLAGS = new Set([
+  '--cwd', '--config', '--filter', '--prefix', '--package', '--manifest-path', '-C', '-p',
+])
+
 function firstCommandArgument(args: readonly string[]): string {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index] ?? ''
-    if (argument === '--cwd' || argument === '--config' || argument === '--filter') {
+    if (VALUE_TAKING_COMMAND_FLAGS.has(argument)) {
       index += 1
       continue
     }
@@ -426,6 +488,22 @@ function firstMarker(text: string, markers: readonly string[]): string {
   for (const marker of markers) {
     if (text.includes(marker)) return marker
   }
+  return ''
+}
+
+function findUnresolvedMarker(text: string): string {
+  for (const marker of UNRESOLVED_MARKERS) {
+    let searchFrom = 0
+    while (searchFrom < text.length) {
+      const index = text.indexOf(marker, searchFrom)
+      if (index < 0) break
+      if (!NEGATABLE_UNRESOLVED_MARKERS.has(marker)) return marker
+      const prefix = text.slice(Math.max(0, index - 36), index)
+      if (!NEGATED_PREFIX_PATTERN.test(prefix)) return marker
+      searchFrom = index + marker.length
+    }
+  }
+  if (POSITIVE_LOSSES_PATTERN.test(text)) return 'losses'
   return ''
 }
 

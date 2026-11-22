@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
 
 import { SHARED_LESSON_LIMITS } from '../memory/sharedLessonWire.js'
+import { canonicalJson } from '../security/hubAuthEnvelope.js'
 import { HubDaemonClient, DaemonRpcError, DaemonTransportError } from './daemonClient.js'
 import type { DaemonCallOptions, DaemonHandshake, HubDaemonClientOptions } from './daemonClient.js'
 import { HubOperatorError, isPrivateProviderType, parseUpstreamEvent } from './ports.js'
@@ -336,7 +337,7 @@ export class HubRuntimePool {
     if (!lane) return
     lane.workspaces.delete(workspaceId)
     if (lane.workspaces.size > 0) return
-    lane.active = false; lane.abort.abort(); clearTimeout(lane.poll); lane.client.close()
+    lane.active = false; lane.abort.abort(); clearTimeout(lane.poll); this.dropDeltas(lane); lane.client.close()
     for (const control of lane.controls.values()) control.client.close()
     lane.controls.clear()
     this.lanes.delete(lane)
@@ -571,7 +572,7 @@ export class HubRuntimePool {
     if (runtimeId) {
       const existing = this.runtimes.get(runtimeId)
       if (existing && existing !== lane && existing.client.online) {
-        lane.active = false; lane.abort.abort(); lane.client.close(); await lane.tunnel?.close(); this.lanes.delete(lane)
+        lane.active = false; lane.abort.abort(); this.dropDeltas(lane); lane.client.close(); await lane.tunnel?.close(); this.lanes.delete(lane)
         for (const [id, workspace] of lane.workspaces) { existing.workspaces.set(id, workspace); this.owners.set(id, existing) }
         for (const key of lane.endpointKeys) { existing.endpointKeys.add(key); this.endpoints.set(key, existing) }
         this.enqueue(existing, () => this.configure(existing)); await existing.tail; return
@@ -580,7 +581,7 @@ export class HubRuntimePool {
         // The lane that owned this runtime cannot reach it (its socket moved, e.g. a
         // re-linked tunnel); this one just did. Keep the live lane and fold the dead
         // one into it. Folding the other way closed the only working connection.
-        existing.active = false; existing.abort.abort(); clearTimeout(existing.poll); existing.client.close()
+        existing.active = false; existing.abort.abort(); clearTimeout(existing.poll); this.dropDeltas(existing); existing.client.close()
         for (const control of existing.controls.values()) control.client.close()
         existing.controls.clear(); this.lanes.delete(existing)
         await existing.tunnel?.close()
@@ -669,10 +670,17 @@ export class HubRuntimePool {
         continue
       }
       await this.ingest(lane, backfill)
-      if (backfill.has_more !== true) return cursor
       const next = backfill.next_cursor ?? backfill.through_cursor
-      if (typeof next !== 'string' || next === cursor) throw new Error('Daemon backfill did not advance its cursor')
-      cursor = next
+      if (backfill.has_more === true) {
+        if (typeof next !== 'string' || !next || next === cursor) throw new Error('Daemon backfill did not advance its cursor')
+        cursor = next
+        continue
+      }
+      if (Array.isArray(backfill.events) && backfill.events.length > 0 && typeof next === 'string' && next) {
+        cursor = next
+      }
+      await this.flushDeltas(lane)
+      return cursor
     }
     throw new Error('Daemon journal catch-up exceeded the bounded page budget')
   }
@@ -870,7 +878,7 @@ export class HubRuntimePool {
       if (normalized !== undefined) {
         const { field, text: delta, event: canonical } = normalized
         const { [field]: _text, ...rest } = canonical.payload
-        const key = JSON.stringify([canonical.type, canonical.project_dir, canonical.session_id ?? null, rest])
+        const key = canonicalJson([canonical.type, canonical.project_dir, canonical.session_id ?? null, rest])
         if (lane.deltas !== undefined && lane.deltas.key !== key) await this.flushDeltas(lane)
         if (lane.deltas === undefined) lane.deltas = { key, field, first: canonical, last: canonical, text: delta, generation: lane.generation }
         else { lane.deltas.last = canonical; lane.deltas.text += delta }

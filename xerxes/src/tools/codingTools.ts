@@ -6,10 +6,10 @@ import { cp, lstat, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/pro
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
-import { ToolRegistry } from '../executors/toolRegistry.js'
+import { ToolRegistry, type ToolCapabilities } from '../executors/toolRegistry.js'
 import type { JsonObject, ToolDefinition } from '../types/toolCalls.js'
 import type { FileToolContext } from './fileState.js'
-import { guardedCreate, guardedWrite, recordFileRead, withStaleNotice } from './fileState.js'
+import { fileStateTracker, guardedCreate, guardedWrite, recordFileRead, withStaleNotice } from './fileState.js'
 import {
   DEFAULT_MAX_READ_FILE_BYTES,
   enforceReadWindowCeiling,
@@ -247,23 +247,40 @@ export const CODING_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   ANALYZE_CODE_STRUCTURE_DEFINITION,
 ]
 
+const CODING_READ_ONLY_CAPABILITIES: Partial<ToolCapabilities> = Object.freeze({
+  concurrencySafe: true,
+  defer: true,
+  destructive: false,
+  openWorld: false,
+  readOnly: true,
+})
+
+const CODING_WRITE_CAPABILITIES: Partial<ToolCapabilities> = Object.freeze({
+  concurrencySafe: false,
+  defer: true,
+  destructive: true,
+  interruptBehavior: 'block',
+  openWorld: false,
+  readOnly: false,
+})
+
 /** Register the lower-case compatibility surface used by the universal coding agent. */
 export function registerCodingTools(registry: ToolRegistry, paths: WorkspacePathResolver): void {
-  registry.register(CODING_READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context))
-  registry.register(CODING_WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context))
-  registry.register(LIST_DIRECTORY_DEFINITION, inputs => listDirectory(inputs, paths))
-  registry.register(COPY_FILE_DEFINITION, inputs => copyFile(inputs, paths))
-  registry.register(MOVE_FILE_DEFINITION, inputs => moveFile(inputs, paths))
-  registry.register(DELETE_FILE_DEFINITION, inputs => deleteFile(inputs, paths))
-  registry.register(GIT_STATUS_DEFINITION, inputs => gitStatus(inputs, paths))
-  registry.register(GIT_DIFF_DEFINITION, inputs => gitDiff(inputs, paths))
-  registry.register(GIT_APPLY_PATCH_DEFINITION, inputs => gitApplyPatch(inputs, paths))
-  registry.register(GIT_LOG_DEFINITION, inputs => gitLog(inputs, paths))
-  registry.register(GIT_ADD_DEFINITION, inputs => gitAdd(inputs, paths))
-  registry.register(CREATE_DIFF_DEFINITION, createDiff)
-  registry.register(APPLY_DIFF_DEFINITION, applyDiff)
-  registry.register(FIND_AND_REPLACE_DEFINITION, (inputs, context) => findAndReplace(inputs, paths, context))
-  registry.register(ANALYZE_CODE_STRUCTURE_DEFINITION, inputs => analyzeCodeStructure(inputs, paths))
+  registry.register(CODING_READ_FILE_DEFINITION, (inputs, context) => readFile(inputs, paths, context), 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(CODING_WRITE_FILE_DEFINITION, (inputs, context) => writeFile(inputs, paths, context), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(LIST_DIRECTORY_DEFINITION, inputs => listDirectory(inputs, paths), 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(COPY_FILE_DEFINITION, inputs => copyFile(inputs, paths), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(MOVE_FILE_DEFINITION, (inputs, context) => moveFile(inputs, paths, context), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(DELETE_FILE_DEFINITION, (inputs, context) => deleteFile(inputs, paths, context), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(GIT_STATUS_DEFINITION, inputs => gitStatus(inputs, paths), 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(GIT_DIFF_DEFINITION, inputs => gitDiff(inputs, paths), 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(GIT_APPLY_PATCH_DEFINITION, (inputs, context) => gitApplyPatch(inputs, paths, context), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(GIT_LOG_DEFINITION, inputs => gitLog(inputs, paths), 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(GIT_ADD_DEFINITION, inputs => gitAdd(inputs, paths), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(CREATE_DIFF_DEFINITION, createDiff, 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(APPLY_DIFF_DEFINITION, applyDiff, 'default', CODING_READ_ONLY_CAPABILITIES)
+  registry.register(FIND_AND_REPLACE_DEFINITION, (inputs, context) => findAndReplace(inputs, paths, context), 'default', CODING_WRITE_CAPABILITIES)
+  registry.register(ANALYZE_CODE_STRUCTURE_DEFINITION, inputs => analyzeCodeStructure(inputs, paths), 'default', CODING_READ_ONLY_CAPABILITIES)
 }
 
 function codingDefinition(
@@ -494,7 +511,11 @@ export async function copyFile(inputs: JsonObject, paths: WorkspacePathResolver)
 }
 
 /** Move one workspace-contained file tree to another workspace-contained target. */
-export async function moveFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function moveFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const source = requiredString(inputs, 'source')
   const destination = requiredString(inputs, 'destination')
   const overwrite = optionalBoolean(inputs, 'overwrite', false)
@@ -562,11 +583,19 @@ export async function moveFile(inputs: JsonObject, paths: WorkspacePathResolver)
     })
     await rm(checkedSource, { force: true, recursive: sourceInfo.isDirectory() })
   }
+  if (context?.sessionId) {
+    fileStateTracker.forget(context.sessionId, checkedSource)
+    fileStateTracker.forget(context.sessionId, checkedDestination)
+  }
   return 'Successfully moved ' + (await paths.relative(sourcePath)) + ' to ' + (await paths.relative(destinationPath))
 }
 
 /** Delete a workspace-contained path while protecting the workspace root and large directories by default. */
-export async function deleteFile(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function deleteFile(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const candidate = requiredString(inputs, 'path')
   const force = optionalBoolean(inputs, 'force', false)
   const target = await paths.resolve(candidate)
@@ -589,9 +618,11 @@ export async function deleteFile(inputs: JsonObject, paths: WorkspacePathResolve
   const checkedTarget = await paths.recheck(target)
   if (targetInfo.isDirectory()) {
     await rm(checkedTarget, { force: false, recursive: true })
+    if (context?.sessionId) fileStateTracker.forget(context.sessionId, checkedTarget)
     return 'Successfully deleted directory: ' + relativePath
   }
   await unlink(checkedTarget)
+  if (context?.sessionId) fileStateTracker.forget(context.sessionId, checkedTarget)
   return 'Successfully deleted file: ' + relativePath
 }
 
@@ -634,64 +665,167 @@ export async function gitDiff(inputs: JsonObject, paths: WorkspacePathResolver):
 }
 
 /** Check or apply a unified patch through direct Git argv execution. */
-export async function gitApplyPatch(inputs: JsonObject, paths: WorkspacePathResolver): Promise<string> {
+export async function gitApplyPatch(
+  inputs: JsonObject,
+  paths: WorkspacePathResolver,
+  context?: FileToolContext,
+): Promise<string> {
   const patch = requiredText(inputs, 'patch_content')
   const repo = await resolveRepository(inputs, paths)
   const checkOnly = optionalBoolean(inputs, 'check_only', false)
   // The repo only passed a lexical resolve; a patch path beneath an in-repo
   // symlink could write outside the workspace. Enumerate every file the patch
-  // touches and validate each through the symlink-aware workspace resolver
-  // before Git sees the patch.
+  // touches (including extended rename/copy/mode headers) and validate each
+  // through the symlink-aware workspace resolver before Git sees the patch.
+  const resolvedTargets: string[] = []
   for (const patchPath of extractPatchFilePaths(patch)) {
-    await paths.resolve(join(repo, patchPath))
+    resolvedTargets.push(await paths.resolve(join(repo, patchPath)))
   }
   const arguments_ = ['apply']
   if (checkOnly) {
     arguments_.push('--check')
   }
   await runGit(repo, arguments_, patch)
+  if (!checkOnly && context?.sessionId) {
+    for (const target of resolvedTargets) {
+      fileStateTracker.forget(context.sessionId, target)
+    }
+  }
   return checkOnly ? 'Patch can be applied cleanly' : 'Patch applied successfully'
 }
 
 /**
- * Enumerate the file paths a unified patch touches, from its `---`/`+++`
- * header pairs. A `---` line only counts as a header when the next line starts
- * with `+++`, which can misread contrived hunk content as a header; that false
- * positive only adds an extra containment check, never a bypass. C-quoted
- * paths (special characters) are rejected because they cannot be validated
- * unambiguously.
+ * Enumerate every file path a unified or extended Git patch touches, across
+ * `diff --git`, `rename`/`copy`, and `---`/`+++` headers, while rejecting
+ * symbolic-link mode patches (`120000`) and C-quoted paths.
  */
 function extractPatchFilePaths(patch: string): string[] {
   const lines = patch.split('\n')
   const result: string[] = []
+  let inHunk = false
+  let hunkRemainingOld = 0
+  let hunkRemainingNew = 0
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? ''
-    const next = lines[index + 1] ?? ''
+    const rawLine = lines[index] ?? ''
+    const line = rawLine.replace(/\r$/, '')
+    if (inHunk) {
+      if (hunkRemainingOld === 0 && hunkRemainingNew === 0) {
+        inHunk = false
+      } else {
+        const prefix = line[0]
+        if (prefix === ' ') {
+          hunkRemainingOld = Math.max(0, hunkRemainingOld - 1)
+          hunkRemainingNew = Math.max(0, hunkRemainingNew - 1)
+          continue
+        }
+        if (prefix === '-') {
+          hunkRemainingOld = Math.max(0, hunkRemainingOld - 1)
+          continue
+        }
+        if (prefix === '+') {
+          hunkRemainingNew = Math.max(0, hunkRemainingNew - 1)
+          continue
+        }
+        if (line === '\\ No newline at end of file') {
+          continue
+        }
+        inHunk = false
+      }
+    }
+
+    const hunkHeader = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    if (hunkHeader) {
+      hunkRemainingOld = hunkHeader[2] === undefined ? 1 : Number(hunkHeader[2])
+      hunkRemainingNew = hunkHeader[4] === undefined ? 1 : Number(hunkHeader[4])
+      inHunk = hunkRemainingOld > 0 || hunkRemainingNew > 0
+      continue
+    }
+
+    // Creating or altering a Git symlink (`120000`) inside a multi-file patch lets
+    // a later hunk write through the newly created link outside the workspace.
+    if (/^(?:new file mode|deleted file mode|old mode|new mode)\s+120000$/.test(line)
+      || /^index\s+[0-9a-f]+\.\.[0-9a-f]+\s+120000$/i.test(line)) {
+      throw new ValidationError(
+        'patch_content',
+        'cannot create or modify symbolic links (mode 120000)',
+        line,
+      )
+    }
+
+    if (line.startsWith('diff --git ')) {
+      for (const parsedPath of parseDiffGitHeaderPaths(line.slice('diff --git '.length))) {
+        result.push(parsedPath)
+      }
+      continue
+    }
+
+    for (const headerPrefix of ['rename from ', 'rename to ', 'copy from ', 'copy to '] as const) {
+      if (line.startsWith(headerPrefix)) {
+        const normalized = normalizePatchHeaderPath(line.slice(headerPrefix.length), false)
+        if (normalized !== undefined) result.push(normalized)
+        break
+      }
+    }
+
+    const next = (lines[index + 1] ?? '').replace(/\r$/, '')
     if (!line.startsWith('--- ') || !next.startsWith('+++ ')) {
       continue
     }
     for (const raw of [line.slice(4), next.slice(4)]) {
-      // Strip a trailing timestamp tab and CRLF carriage return, then the
-      // default a/ b/ prefix.
-      const withoutTimestamp = (raw.split('\t')[0] ?? raw).replace(/\r$/, '')
-      if (withoutTimestamp.startsWith('"')) {
-        throw new ValidationError(
-          'patch_content',
-          'contains a quoted file path that cannot be containment-checked; apply it manually',
-          withoutTimestamp,
-        )
-      }
-      const name = withoutTimestamp.startsWith('a/') || withoutTimestamp.startsWith('b/')
-        ? withoutTimestamp.slice(2)
-        : withoutTimestamp
-      if (name === '/dev/null') {
-        continue
-      }
-      result.push(name)
+      const normalized = normalizePatchHeaderPath(raw.split('\t')[0] ?? raw, true)
+      if (normalized !== undefined) result.push(normalized)
     }
     index += 1
   }
   return result
+}
+
+function parseDiffGitHeaderPaths(rest: string): string[] {
+  if (rest.includes('"')) {
+    throw new ValidationError(
+      'patch_content',
+      'contains a quoted file path that cannot be containment-checked; apply it manually',
+      rest,
+    )
+  }
+  if (!rest.startsWith('a/')) return []
+  // Symmetric `a/<path> b/<path>` handles filenames with spaces unambiguously.
+  if (rest.length >= 7 && (rest.length - 5) % 2 === 0) {
+    const candidateLength = (rest.length - 5) / 2
+    const candidate = rest.slice(2, 2 + candidateLength)
+    if (`a/${candidate} b/${candidate}` === rest) {
+      const normalized = normalizePatchHeaderPath(candidate, false)
+      return normalized === undefined ? [] : [normalized]
+    }
+  }
+  const splitIndex = rest.indexOf(' b/')
+  if (splitIndex < 2) return []
+  const left = normalizePatchHeaderPath(rest.slice(2, splitIndex), false)
+  const right = normalizePatchHeaderPath(rest.slice(splitIndex + 3), false)
+  return [left, right].filter((value): value is string => value !== undefined)
+}
+
+function normalizePatchHeaderPath(raw: string, stripAbPrefix: boolean): string | undefined {
+  if (raw.startsWith('"')) {
+    throw new ValidationError(
+      'patch_content',
+      'contains a quoted file path that cannot be containment-checked; apply it manually',
+      raw,
+    )
+  }
+  if (raw === '/dev/null') {
+    return undefined
+  }
+  const name = stripAbPrefix && (raw.startsWith('a/') || raw.startsWith('b/'))
+    ? raw.slice(2)
+    : raw
+  if (name === '/dev/null') {
+    return undefined
+  }
+  if (name.startsWith('/')) {
+    throw new ValidationError('patch_content', 'must use repository-relative paths, not absolute paths', raw)
+  }
+  return name
 }
 
 /** Return bounded Git history from a workspace-contained repository. */
@@ -1251,8 +1385,10 @@ export async function findAndReplace(
   // Last await before the guarded region; the backup, the substitution and the write
   // all see the same bytes, so the backup can never record a state that was not replaced.
   const checkedTarget = await paths.recheck(target)
+  const checkedBackup = backupPath === undefined ? undefined : await paths.recheck(backupPath)
 
   let count = 0
+  let backupWritten = false
   const written = guardedWrite({
     absolutePath: checkedTarget,
     displayPath: filePath,
@@ -1270,37 +1406,42 @@ export async function findAndReplace(
           filePath,
         )
       }
-      if (backupPath !== undefined) {
-        writeFileSync(backupPath, content)
-      }
+      let next: string
       if (pattern !== undefined) {
         count = [...content.matchAll(pattern)].length
         // A function replacer keeps $-sequences in the replacement literal,
         // consistent with the literal search modes below.
-        return content.replace(pattern, () => replacement)
+        next = content.replace(pattern, () => replacement)
+      } else {
+        // Literal modes: a model supplies LF-only search text even for CRLF
+        // files. Retry with the file's dominant EOL, and write the replacement
+        // back in that EOL so Windows checkouts are not converted to LF.
+        const fileEol = dominantEol(content)
+        const effectiveSearch =
+          fileEol === '\r\n' && search.includes('\n') && !content.includes(search)
+            ? normalizeLineEndings(search).replaceAll('\n', fileEol)
+            : search
+        const effectiveReplacement =
+          fileEol === '\r\n' ? normalizeLineEndings(replacement).replaceAll('\n', fileEol) : replacement
+        if (caseSensitive) {
+          count = content.split(effectiveSearch).length - 1
+          next = content.replaceAll(effectiveSearch, () => effectiveReplacement)
+        } else {
+          const literalPattern = new RegExp(escapeRegularExpression(effectiveSearch), 'gi')
+          next = content.replace(literalPattern, () => {
+            count += 1
+            return effectiveReplacement
+          })
+        }
       }
-      // Literal modes: a model supplies LF-only search text even for CRLF
-      // files. Retry with the file's dominant EOL, and write the replacement
-      // back in that EOL so Windows checkouts are not converted to LF.
-      const fileEol = dominantEol(content)
-      const effectiveSearch =
-        fileEol === '\r\n' && search.includes('\n') && !content.includes(search)
-          ? normalizeLineEndings(search).replaceAll('\n', fileEol)
-          : search
-      const effectiveReplacement =
-        fileEol === '\r\n' ? normalizeLineEndings(replacement).replaceAll('\n', fileEol) : replacement
-      if (caseSensitive) {
-        count = content.split(effectiveSearch).length - 1
-        return content.replaceAll(effectiveSearch, () => effectiveReplacement)
+      if (checkedBackup !== undefined && next !== content) {
+        writeFileSync(checkedBackup, content)
+        backupWritten = true
       }
-      const literalPattern = new RegExp(escapeRegularExpression(effectiveSearch), 'gi')
-      return content.replace(literalPattern, () => {
-        count += 1
-        return effectiveReplacement
-      })
+      return next
     },
   })
-  const backupMessage = backupPath === undefined ? '' : ' (backup saved as ' + basename(backupPath) + ')'
+  const backupMessage = !backupWritten || checkedBackup === undefined ? '' : ' (backup saved as ' + basename(checkedBackup) + ')'
   return withStaleNotice(
     written.staleNotice,
     'Replaced ' + count + ' occurrence(s) in ' + relativePath + backupMessage,

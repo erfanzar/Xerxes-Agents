@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { timingSafeEqual } from 'node:crypto'
+import { isIP } from 'node:net'
 
 import type { WebhookCapableChannel, WebhookHeaders } from './webhooks.js'
 import type { ChannelManager } from './manager.js'
@@ -128,7 +129,10 @@ async function readBody(request: Request, limit: number): Promise<Uint8Array> {
       const { done, value } = await reader.read()
       if (done) break
       size += value.byteLength
-      if (size > limit) throw new WebhookBodyTooLargeError()
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined)
+        throw new WebhookBodyTooLargeError()
+      }
       chunks.push(value)
     }
   } finally {
@@ -197,10 +201,15 @@ function nonBlank(value: string | undefined): string | undefined {
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase()
-  return normalized === 'localhost'
-    || normalized === '::1'
-    || normalized === '[::1]'
-    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+  if (normalized === 'localhost') return true
+  const bare = normalized.replace(/^\[|\]$/g, '')
+  if (isIP(bare) === 4) {
+    return bare.startsWith('127.')
+  }
+  if (isIP(bare) === 6) {
+    return bare === '::1' || bare === '0:0:0:0:0:0:0:1' || (bare.startsWith('::ffff:127.') && isIP(bare.slice(7)) === 4)
+  }
+  return false
 }
 
 function normalizedPrefix(value: string): string {

@@ -102,6 +102,7 @@ const nativeFileMonitorSource: FileMonitorSource = {
       if (timer !== undefined) clearTimeout(timer)
       if (poll !== undefined) clearInterval(poll)
       timer = undefined
+      poll = undefined
       for (const watcher of watchers) watcher.close()
       watchers.length = 0
       signal?.removeEventListener('abort', abort)

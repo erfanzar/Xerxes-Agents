@@ -60,6 +60,7 @@ export class DaemonEvaluationSessionPort implements EvaluationSessionPort {
 
   async reset(): Promise<void> {
     this.assertStarted()
+    if (this.activeSessionKey) this.runtime.cancelTurn(this.activeSessionKey)
     await this.openFreshSession()
   }
 
@@ -139,7 +140,7 @@ export class DaemonEvaluationSessionPort implements EvaluationSessionPort {
       }
     } finally {
       request.signal.removeEventListener('abort', cancel)
-      if (request.signal.aborted && !ended) cancel()
+      if (!ended) cancel()
     }
   }
 
@@ -163,8 +164,8 @@ export class DaemonEvaluationSessionPort implements EvaluationSessionPort {
 
 function evaluationEventFromDaemon(event: DaemonEvent): EvaluationEvent | undefined {
   if (event.type === 'text_part') {
-    const text = stringValue(event.payload.text)
-    return text ? { type: 'text', text } : undefined
+    const text = typeof event.payload.text === 'string' ? event.payload.text : ''
+    return text.length > 0 ? { type: 'text', text } : undefined
   }
   if (event.type === 'tool_call') {
     const name = stringValue(event.payload.name)

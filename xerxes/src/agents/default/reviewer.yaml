@@ -14,6 +14,7 @@ agent:
     Use this agent for an independent read-only review when the delegation includes changed paths or diff context. Return prioritized findings and verification gaps to the parent agent.
   allowed_tools:
     - ReadFile
+    - FileOutlineTool
     - GlobTool
     - GrepTool
     - ListDir
@@ -23,6 +24,7 @@ agent:
     - AskUserQuestionTool
     - WriteFile
     - FileEditTool
+    - ApplyPatchTool
     - exec_command
     - TodoWriteTool
     - SkillTool

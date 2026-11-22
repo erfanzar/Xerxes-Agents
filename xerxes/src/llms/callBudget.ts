@@ -86,6 +86,9 @@ export class ModelCallBudget {
         const input = this.inputTokens + usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0)
         const output = this.outputTokens + usage.outputTokens
         if (!Number.isSafeInteger(input) || !Number.isSafeInteger(output) || !Number.isSafeInteger(input + output)) {
+          if (!this.closed) {
+            try { this.persist() } catch { /* checkpointFailure is recorded on this.checkpointFailure */ }
+          }
           this.closed = true
           this.deniedTokens = new ModelTokenBudgetError('Model token accounting overflow')
           throw this.deniedTokens

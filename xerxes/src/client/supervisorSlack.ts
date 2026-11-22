@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { isRecord, type HubSlackMethod } from '../hub/protocol.js'
+import { isSlackConfigToken, slackAppManifest, USER_SCOPES } from '../hub/slack/manifest.js'
 import { HubRequestError } from './hubConnection.js'
 
 /**
@@ -12,6 +13,8 @@ import { HubRequestError } from './hubConnection.js'
  * connect {} → { authorize_url, expires_at?, pairing_code? } (trusted browser endpoint; poll status)
  * app.save { client_id, client_secret } → status shape (the owner's own Slack app; the Hub checks it with Slack,
  *   stores it host-only and never returns the secret; browser sign-in then works with no Hub settings)
+ * app.create { config_token } → status shape (the Hub creates the owner's XERXES app with apps.manifest.create
+ *   using a one-time app configuration token, saves its credentials, and never stores or returns the token)
  * app.remove {} → status shape (only while no account is connected)
  * confirm_connection { team_id, user_id } → status shape (exact identity after browser authorization)
  * disconnect { team_id, user_id } → status shape
@@ -75,6 +78,7 @@ export interface SupervisorSlackClient {
   status(): Promise<SlackStatus>
   connect(): Promise<SlackAuthorization>
   saveApp(app: { readonly clientId: string; readonly clientSecret: string }): Promise<SlackStatus>
+  createApp(configToken: string): Promise<SlackStatus>
   removeApp(): Promise<SlackStatus>
   confirmConnection(account: SlackIds): Promise<SlackStatus>
   disconnect(account: SlackIds): Promise<SlackStatus>
@@ -86,20 +90,12 @@ export interface SupervisorSlackClient {
   send(contact: SlackContact, draft: SlackDraft): Promise<SlackDm>
 }
 
-/** User scopes the Hub requires (mirrors hub/slack/oauth.ts USER_SCOPES). */
-export const SLACK_USER_SCOPES = ['users:read', 'users:read.email', 'im:write', 'im:read', 'im:history', 'chat:write'] as const
+/** User scopes the Hub requires; the manifest is shared with the Hub so both always agree. */
+export const SLACK_USER_SCOPES = USER_SCOPES
+export { isSlackConfigToken, slackAppManifest }
 
-/**
- * The Slack app manifest for the owner's own XERXES app: user scopes only (XERXES acts as you),
- * no bot, no Socket Mode, no token rotation, and this Hub's callback as the only redirect URL.
- */
-export function slackAppManifest(redirectUrl: string): string {
-  return JSON.stringify({
-    display_information: { name: 'XERXES', description: 'Lets XERXES read and reply to direct messages you approve, as you.' },
-    oauth_config: { redirect_urls: [redirectUrl], scopes: { user: [...SLACK_USER_SCOPES] } },
-    settings: { org_deploy_enabled: false, socket_mode_enabled: false, token_rotation_enabled: false },
-  })
-}
+/** Where Slack lists "Your App Configuration Tokens" (Generate Token). */
+export const SLACK_CONFIG_TOKEN_PAGE = 'https://api.slack.com/apps'
 
 /** Opens Slack's "create app" page with the manifest pre-filled. */
 export function slackCreateAppUrl(redirectUrl: string): string {
@@ -222,6 +218,12 @@ export function createSupervisorSlackClient(options: {
         throw new Error('Paste the Client ID and Client Secret from your Slack app’s Basic Information page.')
       }
       const result = parseStatus(await call('supervisor.slack.app.save', { client_id, client_secret }))
+      return result.browser_sign_in === true ? result : invalid()
+    },
+    createApp: async configToken => {
+      const config_token = configToken.trim()
+      if (!isSlackConfigToken(config_token)) throw new Error('Paste the Access Token from Your App Configuration Tokens. It starts with xoxe.xoxp-.')
+      const result = parseStatus(await call('supervisor.slack.app.create', { config_token }))
       return result.browser_sign_in === true ? result : invalid()
     },
     removeApp: async () => parseStatus(await call('supervisor.slack.app.remove')),

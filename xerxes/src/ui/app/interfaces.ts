@@ -118,7 +118,9 @@ export interface OverlayState {
   activity: boolean
   monitors: boolean
   runs: boolean
+  sideQuestion: boolean
   snapshots: boolean
+  swarm: boolean
   workspaces: boolean
   modelPicker: boolean
   reasoningPicker: boolean

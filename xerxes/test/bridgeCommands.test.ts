@@ -17,7 +17,7 @@ import {
 test('bridge command registry preserves canonical metadata, aliases, categories, and registry order', () => {
   expect(CATEGORIES).toContain('session')
   expect(resolveCommand('/loop list')).toMatchObject({ name: 'loop', category: 'activity', argsHint: '[list|pause|resume|cancel|run <id>]' })
-  expect(listCommands('activity').map(command => command.name).sort()).toEqual(['activity', 'agents', 'goal', 'loop', 'monitors', 'runs', 'schedules'])
+  expect(listCommands('activity').map(command => command.name).sort()).toEqual(['activity', 'agents', 'goal', 'immortals', 'loop', 'monitors', 'runs', 'schedules'])
   expect(new Set(COMMAND_REGISTRY.map(command => command.name)).size).toBe(COMMAND_REGISTRY.length)
   expect(resolveCommand('/forge')).toMatchObject({ name: 'forge', category: 'tools' })
   expect(resolveCommand('/file README.md')).toMatchObject({ name: 'file', argsHint: '<path>' })
@@ -46,6 +46,21 @@ test('local-model is the displayed command and bonsai remains a legacy alias', (
   expect(listCommands().map(entry => entry.name)).not.toContain('bonsai')
   expect(telegramBotCommands().map(entry => entry.command)).toContain('local_model')
   expect(telegramBotCommands().map(entry => entry.command)).not.toContain('bonsai')
+})
+
+test('immortals is the displayed command and swarm remains a legacy alias', () => {
+  const command = resolveCommand('/immortals')
+  expect(command).toMatchObject({
+    name: 'immortals',
+    aliases: ['swarm'],
+    category: 'activity',
+    argsHint: '[<task>|board|status|channels|kill <name|all>|stop]',
+  })
+  expect(resolveCommand('/swarm build auth')).toBe(command)
+  expect(listCommands().map(entry => entry.name)).toContain('immortals')
+  expect(listCommands().map(entry => entry.name)).not.toContain('swarm')
+  expect(telegramBotCommands().map(entry => entry.command)).toContain('immortals')
+  expect(telegramBotCommands().map(entry => entry.command)).not.toContain('swarm')
 })
 
 test('surface filters keep CLI-only definitions out of gateways and honor gateway-only definitions', () => {

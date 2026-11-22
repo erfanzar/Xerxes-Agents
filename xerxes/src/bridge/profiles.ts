@@ -623,10 +623,11 @@ function modelRecord<Value>(
 ): Value | undefined {
   const configured = model.trim()
   if (!configured || !records) return undefined
-  const exact = records[configured]
-  if (exact !== undefined) return exact
+  if (Object.hasOwn(records, configured)) return records[configured]
   const slash = configured.indexOf('/')
-  return slash < 0 ? undefined : records[configured.slice(slash + 1)]
+  if (slash < 0) return undefined
+  const suffix = configured.slice(slash + 1)
+  return Object.hasOwn(records, suffix) ? records[suffix] : undefined
 }
 
 /** Resolve a user override over provider-reported context metadata. */

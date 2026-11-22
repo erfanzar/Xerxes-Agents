@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 import { daemonProjects, runHubCli } from '../src/hub/cli.js'
 import type { CommandResult, CommandRunner } from '../src/hub/commandRunner.js'
-import { HubLinkError, runHubLink, runLinkTunnel, validateSshTarget } from '../src/hub/hubLink.js'
+import { HubLinkError, linkFailureMessage, linkRetryDelayMs, parseSshConfigDump, pinHostKeys, runHubLink, runLinkTunnel, validateSshTarget } from '../src/hub/hubLink.js'
 import { HubSetupError, parseTailscaleStatus, runHubSetup } from '../src/hub/hubSetup.js'
 import { hubPaths } from '../src/hub/paths.js'
 import { installUserService, renderLaunchAgent, renderSystemdUnit, UserServiceError } from '../src/hub/serviceUnits.js'
@@ -228,6 +228,74 @@ describe('hub link', () => {
     expect(attached).toContain('ControlMaster=no')
     expect(attached).toContain('ControlPath=none')
     expect(attached[attached.indexOf('-R') + 1]).toBe('/home/x/.xerxes/tunnels/m.sock:/Users/me/d.sock')
+  })
+
+  const sshDump = 'host 209.38.102.184\nhostname 209.38.102.184\nport 22\nuserknownhostsfile /u/.ssh/known_hosts /u/.ssh/known_hosts2\n'
+  const hubKey = '209.38.102.184 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHubKeyForTestsOnly'
+
+  test('ssh -G output resolves the host-key name (port and HostKeyAlias aware) and the user known_hosts files', () => {
+    expect(parseSshConfigDump(sshDump)).toEqual({ name: '209.38.102.184', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
+    expect(parseSshConfigDump('hostname h.example\nport 2222\nuserknownhostsfile ~/.ssh/known_hosts /abs/kh\n')).toEqual({ name: '[h.example]:2222', files: ['/abs/kh'] })
+    expect(parseSshConfigDump('hostname h\nport 22\nhostkeyalias hub\nuserknownhostsfile /k\n')?.name).toBe('hub')
+    expect(parseSshConfigDump('port 22\n')).toBeUndefined()
+  })
+
+  test('the link pins host keys the user already trusts and keeps them after ~/.ssh/known_hosts is cleaned up', async () => {
+    const dir = await tempDir('xh-pin-')
+    const pinned = join(dir, 'hub', 'known_hosts')
+    let userTrusts = true
+    const fake = fakeRunner(argv => {
+      if (argv[1] === '-G') return { stdout: sshDump }
+      if (argv[1] === '-F') return userTrusts && argv[4] === '/u/.ssh/known_hosts' ? { stdout: `# Host 209.38.102.184 found: line 3\n${hubKey}\n` } : { code: 1 }
+      return undefined
+    })
+    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@209.38.102.184', knownHostsPath: pinned }
+    expect(await pinHostKeys(input, fake.run)).toEqual({ name: '209.38.102.184', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
+    expect(await readFile(pinned, 'utf8')).toBe(`${hubKey}\n`)
+    expect((await stat(pinned)).mode & 0o777).toBe(0o600)
+    await pinHostKeys(input, fake.run)
+    expect(await readFile(pinned, 'utf8')).toBe(`${hubKey}\n`)
+    userTrusts = false
+    await pinHostKeys(input, fake.run)
+    expect(await readFile(pinned, 'utf8')).toBe(`${hubKey}\n`)
+    await expect(pinHostKeys({ ...input, knownHostsPath: 'relative/kh' }, fake.run)).rejects.toThrow(HubLinkError)
+  })
+
+  test('a refused tunnel logs why, backs off, records its state, and the next good attempt checks the pinned keys first', async () => {
+    const dir = await tempDir('xh-tunnel-')
+    const pinned = join(dir, 'known_hosts')
+    const statePath = join(dir, 'link-hub.json')
+    let reachable = false
+    const fake = fakeRunner(argv => {
+      if (argv[1] === '-G') return { stdout: sshDump }
+      if (argv[1] === '-F') return { code: 1 }
+      if ((argv.at(-1) ?? '').startsWith('rm -f')) return reachable ? undefined : { code: 255, stderr: 'Host key verification failed.\r\n' }
+      return undefined
+    })
+    const sleeps: number[] = [], logs: string[] = []
+    let attached: readonly string[] = []
+    const deps = { run: fake.run, runAttached: async (argv: readonly string[]) => { attached = argv; return 0 }, sleep: async (ms: number) => { sleeps.push(ms) }, log: (line: string) => { logs.push(line) }, now: () => new Date('2026-11-23T00:00:00Z') }
+    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@209.38.102.184', remoteSocket: '/home/x/.xerxes/tunnels/m.sock', localSocket: '/Users/me/d.sock', knownHostsPath: pinned, statePath }
+    expect(await runLinkTunnel(input, deps)).toBe(255)
+    expect(await runLinkTunnel(input, deps)).toBe(255)
+    expect(attached).toEqual([])
+    expect(sleeps).toEqual([5_000, 10_000])
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toContain('has no trusted SSH host key')
+    expect(logs[1]).toContain('failure 2')
+    expect(JSON.parse(await readFile(statePath, 'utf8'))).toMatchObject({ failures: 2, last_error: expect.stringContaining('no trusted SSH host key') })
+    reachable = true
+    expect(await runLinkTunnel(input, deps)).toBe(0)
+    expect(JSON.parse(await readFile(statePath, 'utf8'))).toMatchObject({ failures: 0, connected_at: '2026-11-23T00:00:00.000Z' })
+    expect(attached).toContain(`UserKnownHostsFile=${pinned} /u/.ssh/known_hosts /u/.ssh/known_hosts2`)
+    expect(attached).toContain('ExitOnForwardFailure=yes')
+  })
+
+  test('failure messages name the action and the backoff is capped', () => {
+    expect(linkFailureMessage('@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@', 'x@h')).toContain('CHANGED')
+    expect(linkFailureMessage('x@h: Permission denied (publickey).', 'x@h')).toContain('refused this machine')
+    expect(linkFailureMessage('ssh: connect to host h port 22: Network is unreachable', 'x@h')).toContain('Network is unreachable')
+    expect([1, 2, 3, 7, 50].map(linkRetryDelayMs)).toEqual([5_000, 10_000, 20_000, 300_000, 300_000])
   })
 })
 

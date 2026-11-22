@@ -21,6 +21,7 @@ export const MAX_ACP_FRAME_BYTES = 16 * 1024 * 1024
 /** Incrementally accounts for bytes in the current NDJSON frame. */
 export class AcpFrameByteCounter {
   private currentBytes = 0
+  private stickyExceeded = false
   private scannedBytes = 0
 
   constructor(private readonly maxBytes = MAX_ACP_FRAME_BYTES) {}
@@ -28,12 +29,19 @@ export class AcpFrameByteCounter {
   append(chunk: Uint8Array): void {
     for (const byte of chunk) {
       this.scannedBytes += 1
-      this.currentBytes = byte === 0x0a ? 0 : this.currentBytes + 1
+      if (byte === 0x0a) {
+        this.currentBytes = 0
+      } else {
+        this.currentBytes += 1
+        if (this.currentBytes > this.maxBytes) {
+          this.stickyExceeded = true
+        }
+      }
     }
   }
 
   get exceedsLimit(): boolean {
-    return this.currentBytes > this.maxBytes
+    return this.stickyExceeded || this.currentBytes > this.maxBytes
   }
 
   /** Exposed so fragmented-input tests can assert accounting remains linear. */
@@ -81,7 +89,11 @@ export class StdioJsonRpcServer {
         frameBytes.append(value)
         buffer += decoder.decode(value, { stream: true })
         buffer = await this.handleCompleteLines(buffer, send)
-        if (this.running && frameBytes.exceedsLimit) {
+        if (!this.running) {
+          await reader.cancel().catch(() => undefined)
+          break
+        }
+        if (frameBytes.exceedsLimit) {
           await send(acpJsonRpcFailure(
             null,
             ACP_JSON_RPC_ERRORS.invalidRequest,

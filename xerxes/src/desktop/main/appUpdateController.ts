@@ -26,23 +26,38 @@ export type AppUpdateState =
   | { readonly phase: 'error'; readonly message: string; readonly release?: AvailableRelease }
 
 const FIRST_CHECK_DELAY_MS = 20_000
-/** GitHub allows 60 unauthenticated requests an hour; this is 12. */
-const CHECK_INTERVAL_MS = 5 * 60 * 1000
+/** Check GitHub releases every 30 minutes while active (avoids chatty idle wakeups). */
+const CHECK_INTERVAL_MS = 30 * 60 * 1000
 
-export function startAppUpdates(options: { readonly settingsDirectory: string; readonly version: string }): { readonly check: () => Promise<AppUpdateState> } {
+export interface AppUpdatesOptions {
+  readonly settingsDirectory: string
+  readonly version: string
+  /** Optional gate to skip routine background checks when all windows are hidden/locked/suspended. */
+  readonly shouldRunBackgroundCheck?: () => boolean
+  /** Optional target webContents selector so internal update notices skip untrusted BrowserTab pages. */
+  readonly targets?: () => readonly Electron.WebContents[]
+}
+
+export function startAppUpdates(options: AppUpdatesOptions): { readonly check: () => Promise<AppUpdateState>; readonly dispose: () => void } {
   const settingsFile = join(options.settingsDirectory, 'desktop-update.json')
   let state: AppUpdateState = { phase: 'idle' }
   let installing = false
-  // "Not now" holds for the rest of this run: a routine check every five
-  // minutes must not reopen the same prompt. A newer release, or an explicit
-  // check, still shows.
+  let disposed = false
+  // "Not now" holds for the rest of this run: a routine check must not reopen
+  // the same prompt. A newer release, or an explicit check, still shows.
   let dismissed: string | undefined
   const broadcast = () => {
-    for (const contents of webContents.getAllWebContents()) {
+    const list = options.targets ? options.targets() : webContents.getAllWebContents()
+    for (const contents of list) {
       if (!contents.isDestroyed()) contents.send('desktop:app-update-state', state)
     }
   }
-  const set = (next: AppUpdateState) => { state = next; broadcast() }
+  const set = (next: AppUpdateState) => {
+    // Avoid waking every renderer process when routine idle checks confirm nothing changed.
+    if (next.phase === 'idle' && state.phase === 'idle') return
+    state = next
+    broadcast()
+  }
   const skipped = async (): Promise<string | undefined> => {
     try {
       const value: unknown = JSON.parse(await readFile(settingsFile, 'utf8'))
@@ -127,7 +142,21 @@ export function startAppUpdates(options: { readonly settingsDirectory: string; r
       default: throw new Error('Unknown app update action')
     }
   })
-  setTimeout(() => void check(false), FIRST_CHECK_DELAY_MS).unref?.()
-  setInterval(() => void check(false), CHECK_INTERVAL_MS).unref?.()
-  return { check: () => check(true) }
+  const runBackgroundCheck = () => {
+    if (disposed) return
+    if (options.shouldRunBackgroundCheck && !options.shouldRunBackgroundCheck()) return
+    void check(false)
+  }
+  const initialTimer = setTimeout(runBackgroundCheck, FIRST_CHECK_DELAY_MS)
+  initialTimer.unref?.()
+  const intervalTimer = setInterval(runBackgroundCheck, CHECK_INTERVAL_MS)
+  intervalTimer.unref?.()
+  return {
+    check: () => check(true),
+    dispose() {
+      disposed = true
+      clearTimeout(initialTimer)
+      clearInterval(intervalTimer)
+    },
+  }
 }

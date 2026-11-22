@@ -25,6 +25,7 @@ import { Icon } from './Icon.js'
 import { toolOrbState, toolPhrase } from './activityPhrase.js'
 import { SessionDiagnostics } from './SessionDiagnostics.js'
 import { elapsedOf } from './duration.js'
+import { ElapsedClock } from './ElapsedClock.js'
 import { AgentOrb, type OrbState } from './AgentOrb.js'
 
 
@@ -95,13 +96,17 @@ export function RailStatus({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <section className="railcard railcard--status railstatus" data-tone={state.tone} aria-label="Task status">
       <div className="railstatus__head">
-        {/* The orb moves only while work is in flight or the agent waits on
-            you; at rest it is a still frame. A failure keeps its red dot. */}
-        {state.tone === 'failed'
-          ? <span className="railstatus__dot" aria-hidden="true" />
-          : <AgentOrb className="railstatus__orb" size={20} state={orbStateOf(snap)} live={state.tone === 'working' || state.tone === 'needs'} />}
+        {/* The Cosmic Simurgh status mark animates while work is in flight,
+            pulses warm gold when awaiting input, glows rose on failure, and
+            rests quietly when idle. */}
+        <AgentOrb
+          className="railstatus__orb"
+          size={20}
+          state={state.tone === 'failed' ? 'failed' : state.tone === 'needs' ? 'needs' : orbStateOf(snap)}
+          live={state.tone === 'working' || state.tone === 'needs' || state.tone === 'failed'}
+        />
         <strong>{state.label}</strong>
-        {stoppable && <span className="railstatus__clock">{elapsedOf(snap.turnSeconds)}</span>}
+        {stoppable && <ElapsedClock active={snap.turnActive} since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={elapsedOf} className="railstatus__clock" />}
         {snap.costBasis !== 'subscription' && snap.costUsd != null && snap.costUsd > 0 && !stoppable && (
           <span className="railstatus__cost">${snap.costUsd.toFixed(snap.costUsd < 0.01 ? 4 : 2)}</span>
         )}

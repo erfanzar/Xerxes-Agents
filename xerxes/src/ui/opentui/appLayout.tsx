@@ -94,6 +94,8 @@ import { rebasePasteResult } from './pasteRebase.js'
 import { ReasoningPicker } from './reasoningPicker.js'
 import { Box, Span, Text } from './primitives.js'
 import { SessionPicker } from './sessionPicker.js'
+import { SideQuestionOverlay } from './sideQuestionOverlay.js'
+import { SwarmOverlay } from './swarmOverlay.js'
 import { LearningOverlay } from './learningOverlay.js'
 
 const TEXTAREA_KEY_BINDINGS: KeyBinding[] = [
@@ -2135,6 +2137,12 @@ export function AppLayout({
       {overlay.agentSettings ? <AgentSettingsOverlay t={t} /> : null}
       {overlay.runs ? <RunOverlay key={ui.sid ?? ui.info?.session_id} t={t} /> : null}
       {overlay.snapshots ? <SnapshotOverlay t={t} /> : null}
+      {overlay.sideQuestion ? (
+        <SideQuestionOverlay key={ui.sid ?? ui.info?.session_id ?? 'btw'} sessionId={ui.sid ?? ui.info?.session_id} t={t} />
+      ) : null}
+      {overlay.swarm ? (
+        <SwarmOverlay key={ui.sid ?? ui.info?.session_id ?? 'swarm'} sessionId={ui.sid ?? ui.info?.session_id} t={t} />
+      ) : null}
       {overlay.workspaces ? <WorkspaceOverlay t={t} /> : null}
       {overlay.skillsHub ? <InfoOverlay kind='skillsHub' /> : null}
       {overlay.pluginsHub ? <InfoOverlay kind='pluginsHub' /> : null}

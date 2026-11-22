@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+
 import { type OAuthFetch } from '../mcp/oauth.js'
-// Licensed under the Apache License, Version 2.0.
 
 /**
  * Radius gateway OAuth, mirroring pi-ai `auth/oauth/radius.ts`: a pi-messages
@@ -18,8 +18,8 @@ import { timingSafeEqual } from 'node:crypto'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { xerxesHome as defaultXerxesHome } from '../daemon/paths.js'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { openInBrowser } from './codexLogin.js'
 import {
   generatePkceS256,
@@ -27,7 +27,9 @@ import {
   pollDeviceCodeFlow,
   positiveNumberField,
   readJsonObject,
+  removeOAuthCredentialFile,
   stringField,
+  writeOAuthCredentialFile,
   type OAuthFlowCredential,
 } from './oauthFlows.js'
 
@@ -202,31 +204,17 @@ export async function loginRadiusWithBrowser(
     readonly signal?: AbortSignal
     readonly openUrl?: (url: string) => void
     readonly now?: () => number
+    readonly fetchImplementation?: OAuthFetch
+    readonly callbackPort?: number
+    readonly timeoutMs?: number
   } = {},
 ): Promise<RadiusCredential> {
+  if (options.signal?.aborted) throw new Error('Login cancelled')
   const { verifier, challenge } = await generatePkceS256()
   const state = crypto.randomUUID()
-  const redirectUri = `http://127.0.0.1:${CALLBACK_PORT}${CALLBACK_PATH}`
-  const authorizeUrl = new URL(authorizationEndpoint)
-  authorizeUrl.search = new URLSearchParams({
-    response_type: 'code',
-    client_id: RADIUS_OAUTH_CLIENT_ID,
-    redirect_uri: redirectUri,
-    scope: RADIUS_OAUTH_SCOPE,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    handoff: 'url',
-    state,
-  }).toString()
-
-  let callbackCode: string | undefined
-  let wake: (() => void) | undefined
-  const codeReceived = new Promise<void>(resolve => {
-    wake = resolve
-  })
   const server = Bun.serve({
     hostname: '127.0.0.1',
-    port: CALLBACK_PORT,
+    port: options.callbackPort ?? CALLBACK_PORT,
     fetch(request) {
       const url = new URL(request.url)
       if (url.pathname !== CALLBACK_PATH) {
@@ -264,11 +252,41 @@ export async function loginRadiusWithBrowser(
     },
   })
 
+  const boundPort = Number(server.url.port) || (options.callbackPort ?? CALLBACK_PORT)
+  const redirectUri = `http://127.0.0.1:${boundPort}${CALLBACK_PATH}`
+  const authorizeUrl = new URL(authorizationEndpoint)
+  authorizeUrl.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: RADIUS_OAUTH_CLIENT_ID,
+    redirect_uri: redirectUri,
+    scope: RADIUS_OAUTH_SCOPE,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    handoff: 'url',
+    state,
+  }).toString()
+
+  let callbackCode: string | undefined
+  let timedOut = false
+  let wake: (() => void) | undefined
+  const codeReceived = new Promise<void>(resolve => {
+    wake = resolve
+  })
+  const onAbort = (): void => wake?.()
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+  if (options.signal?.aborted) onAbort()
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1_000
+  const timer = setTimeout(() => {
+    timedOut = true
+    wake?.()
+  }, timeoutMs)
+
   try {
     ;(options.openUrl ?? openInBrowser)(authorizeUrl.toString())
     await codeReceived
     if (!callbackCode) {
       if (options.signal?.aborted) throw new Error('Login cancelled')
+      if (timedOut) throw new Error('Radius OAuth browser login timed out')
       throw new Error('OAuth callback did not complete.')
     }
     return await requestRadiusToken(gateway, {
@@ -279,6 +297,8 @@ export async function loginRadiusWithBrowser(
       code_verifier: verifier,
     }, options)
   } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onAbort)
     void server.stop(true)
   }
 }
@@ -387,7 +407,7 @@ export class RadiusOAuthSession {
   private readonly home: string
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
-  private pending: Promise<RadiusCredential> | undefined
+  private readonly pendingByGateway = new Map<string, Promise<RadiusCredential>>()
 
   constructor(options: RadiusOAuthSessionOptions = {}) {
     this.environment = options.environment ?? process.env
@@ -413,13 +433,34 @@ export class RadiusOAuthSession {
 
   /** Return a usable credential, refreshing when at or near expiry. */
   async credential(explicitGateway?: string, signal?: AbortSignal): Promise<RadiusCredential> {
-    if (this.pending) return this.pending
-    const flight = this.resolve(explicitGateway, signal)
-    const tracked = flight.finally(() => {
-      if (this.pending === tracked) this.pending = undefined
+    if (signal?.aborted) throw signal.reason ?? new Error('Radius credential request aborted')
+    const gateway = this.resolveGateway(explicitGateway)
+    let flight = this.pendingByGateway.get(gateway)
+    if (!flight) {
+      const created = this.resolve(gateway)
+      const tracked = created.finally(() => {
+        if (this.pendingByGateway.get(gateway) === tracked) this.pendingByGateway.delete(gateway)
+      })
+      void tracked.catch(() => undefined)
+      this.pendingByGateway.set(gateway, tracked)
+      flight = tracked
+    }
+    if (!signal) return flight
+    const joined = flight
+    return new Promise<RadiusCredential>((resolveCaller, rejectCaller) => {
+      const onAbort = (): void => rejectCaller(signal.reason ?? new Error('Radius credential request aborted'))
+      signal.addEventListener('abort', onAbort, { once: true })
+      joined.then(
+        credential => {
+          signal.removeEventListener('abort', onAbort)
+          resolveCaller(credential)
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort)
+          rejectCaller(error)
+        },
+      )
     })
-    this.pending = tracked
-    return tracked
   }
 
   /** Re-mint the access token from the stored refresh token. */
@@ -480,12 +521,7 @@ export class RadiusOAuthSession {
 
   /** Remove the stored credential. Returns whether one existed. */
   async logout(): Promise<boolean> {
-    try {
-      await rm(this.credentialPath())
-      return true
-    } catch {
-      return false
-    }
+    return removeOAuthCredentialFile(this.credentialPath())
   }
 
   /** Where the credential persists, for status/logout surfaces. */
@@ -538,8 +574,6 @@ export class RadiusOAuthSession {
   }
 
   private async persist(credential: RadiusCredential): Promise<void> {
-    const path = this.credentialPath()
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(credential, null, 2)}\n`, 'utf8')
+    await writeOAuthCredentialFile(this.credentialPath(), credential)
   }
 }

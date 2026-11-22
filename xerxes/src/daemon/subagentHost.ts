@@ -2015,6 +2015,12 @@ export function daemonEventFromSubagent(
   event: SubAgentEvent,
   historySessionId: string | undefined,
 ): DaemonEvent | undefined {
+  // Lifecycle boundaries carry the full static descriptor (`goal`, `rules`, `toolsets`,
+  // file sets). High-frequency streaming deltas omit static prompt/toolset blobs so
+  // every token/tool tick does not repeat kilobytes of unchanged metadata across
+  // sockets and the event journal.
+  const isLifecycleBoundary = event.type === 'spawn' || event.type === 'done' || event.type === 'cancelled'
+  const includeFiles = isLifecycleBoundary || (event.type === 'tool_end' && (event.filesRead.length > 0 || event.filesWritten.length > 0))
   const base = {
     agent_id: event.taskId,
     agent_name: event.agent,
@@ -2022,16 +2028,13 @@ export function daemonEventFromSubagent(
     title: event.title,
     creator_id: event.creatorId || null,
     depth: event.depth,
-    files_read: event.filesRead,
-    files_written: event.filesWritten,
-    goal: event.goal,
+    ...(includeFiles ? { files_read: event.filesRead, files_written: event.filesWritten } : {}),
+    ...(isLifecycleBoundary ? { goal: event.goal, rules: event.rules, toolsets: event.toolsets } : {}),
     ...(historySessionId ? { history_session_id: historySessionId } : {}),
     parent_id: event.parentId || null,
     model: event.model || undefined,
     ...(event.providerProfile ? { provider_profile: event.providerProfile } : {}),
     ...(event.reasoningEffort ? { reasoning_effort: event.reasoningEffort } : {}),
-    rules: event.rules,
-    toolsets: event.toolsets,
     tool_count: event.toolCalls,
     ...(event.apiCalls === undefined ? {} : { api_calls: event.apiCalls }),
     ...(event.inputTokens === undefined ? {} : { input_tokens: event.inputTokens }),

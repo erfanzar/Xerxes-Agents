@@ -12,7 +12,7 @@ import {
   type SessionResetPolicy,
   type SessionResetPolicyInput,
 } from './sessionReset.js'
-import { chunkText } from './textChunking.js'
+import { chunkText, sliceWithoutLoneSurrogate } from './textChunking.js'
 import { createChannelMessage, MessageDirection, type ChannelMessage } from './types.js'
 
 const DEFAULT_TYPING_INTERVAL = 8_000
@@ -149,7 +149,10 @@ export class ChannelTurnRouter {
   /** Accept one inbound message, serializing concurrent deliveries for its conversation. */
   async handle(message: ChannelMessage): Promise<void> {
     if (!message.text.trim()) return
-    if (message.channelUserId === undefined && message.roomId === undefined) {
+    const userId = nonBlank(message.channelUserId)
+    const roomId = nonBlank(message.roomId)
+    const chatType = stringMetadata(message, 'chat_type').toLowerCase()
+    if ((userId === undefined && roomId === undefined) || (isGroupChatType(chatType) && roomId === undefined)) {
       // Without a user or room identity every anonymous sender would collapse
       // into one shared daemon session; reject the message instead of pooling.
       this.report(new ChannelRoutingError(message.channel), message)
@@ -157,15 +160,16 @@ export class ChannelTurnRouter {
     }
     const key = channelSessionKey(message)
     const slash = parseChannelCommand(message.text)
-    if (slash?.name === 'stop' || slash?.name === 'cancel') {
+    if (slash && isImmediateChannelCommand(slash.name)) {
       await this.journalInbound(message)
       await this.handleCommand(message, key, slash)
       return
     }
-    // The waiting turn holds this conversation's queue, so its answer must not
-    // queue behind it.
+    // The waiting turn holds this conversation's queue, so any non-immediate
+    // message or command while waiting must be routed here instead of hanging
+    // behind the parked turn.
     const wait = this.waits.get(key)
-    if (wait && (!slash || slash.name === 'approve' || slash.name === 'deny' || slash.name === 'answer')) {
+    if (wait) {
       await this.journalInbound(message)
       await this.answerWait(message, key, wait, slash)
       return
@@ -251,6 +255,7 @@ export class ChannelTurnRouter {
       return
     }
     if (command.name === 'stop' || command.name === 'cancel') {
+      this.waits.delete(sessionKey)
       await this.reply(message, this.runtime.cancelTurn(sessionKey)
         ? 'Cancellation requested.'
         : 'No active channel turn to cancel.')
@@ -498,7 +503,7 @@ export class ChannelTurnRouter {
   private async journalAssistant(message: ChannelMessage, response: string): Promise<void> {
     await this.appendJournal(message, [
       '[' + message.channel + ':' + channelJournalTarget(message) + '] xerxes:',
-      sanitizeJournalOutput(response).slice(0, JOURNAL_RESPONSE_MAX_CHARS),
+      sliceWithoutLoneSurrogate(sanitizeJournalOutput(response), JOURNAL_RESPONSE_MAX_CHARS),
     ].join(' '))
   }
 
@@ -564,10 +569,27 @@ export class ChannelRoutingError extends Error {
 export function channelSessionKey(message: ChannelMessage): string {
   const chatType = stringMetadata(message, 'chat_type').toLowerCase()
   const threadId = stringMetadata(message, 'thread_id') || 'main'
-  if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
-    return message.channel + ':chat:' + (message.roomId ?? '') + ':thread:' + threadId
+  const roomId = nonBlank(message.roomId) ?? ''
+  const userId = nonBlank(message.channelUserId)
+  if (isGroupChatType(chatType)) {
+    return message.channel + ':chat:' + roomId + ':thread:' + threadId
   }
-  return message.channel + ':private:' + (message.channelUserId ?? message.roomId ?? '')
+  return message.channel + ':private:' + (userId ?? roomId)
+}
+
+function isGroupChatType(chatType: string): boolean {
+  return chatType === 'group' || chatType === 'supergroup' || chatType === 'channel'
+}
+
+function isImmediateChannelCommand(name: string): boolean {
+  return name === 'stop'
+    || name === 'cancel'
+    || name === 'help'
+    || name === 'commands'
+    || name === 'status'
+    || name === 'context'
+    || name === 'usage'
+    || name === 'history'
 }
 
 /** Make the inbound origin explicit to the model without merging platform metadata into user text. */
@@ -776,7 +798,7 @@ function waitPrompt(wait: ChannelWait, payload: Readonly<Record<string, unknown>
   if (wait.kind === 'approval') {
     const action = stringPayload(payload, 'description') || stringPayload(payload, 'tool_name') || stringPayload(payload, 'name') || 'a tool call'
     return [
-      'Approval needed: ' + action.slice(0, JOURNAL_RESPONSE_MAX_CHARS),
+      'Approval needed: ' + sliceWithoutLoneSurrogate(action, JOURNAL_RESPONSE_MAX_CHARS),
       'Reply /approve to allow it or /deny to refuse; /stop cancels the turn.',
     ].join('\n')
   }
@@ -853,7 +875,7 @@ function telegramMessageId(response: Readonly<Record<string, unknown>>): string 
  */
 function previewText(text: string): string {
   if (text.length <= MAX_PREVIEW_CHARS) return text
-  return text.slice(0, MAX_PREVIEW_CHARS - PREVIEW_TRUNCATION_MARKER.length) + PREVIEW_TRUNCATION_MARKER
+  return sliceWithoutLoneSurrogate(text, MAX_PREVIEW_CHARS - PREVIEW_TRUNCATION_MARKER.length) + PREVIEW_TRUNCATION_MARKER
 }
 
 function channelJournalTarget(message: ChannelMessage): string {

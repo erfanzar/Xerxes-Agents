@@ -42,6 +42,17 @@ export const nodeHubHttp: HubHttp = request =>
       reject(new Error('The Hub address must be http(s).'))
       return
     }
+    let settled = false
+    const settleResolve = (value: HubHttpResponse): void => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const settleReject = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
     const body = Buffer.from(request.body, 'utf8')
     const req = (secure ? https : http).request(
       url,
@@ -62,13 +73,16 @@ export const nodeHubHttp: HubHttp = request =>
           }
           chunks.push(chunk)
         })
-        response.on('error', reject)
+        response.on('error', error => settleReject(error instanceof Error ? error : new Error(String(error))))
         response.on('end', () => {
-          resolve({ status: response.statusCode ?? 0, setCookies: response.headers['set-cookie'] ?? [], body: Buffer.concat(chunks).toString('utf8') })
+          settleResolve({ status: response.statusCode ?? 0, setCookies: response.headers['set-cookie'] ?? [], body: Buffer.concat(chunks).toString('utf8') })
+        })
+        response.on('close', () => {
+          if (!response.complete) settleReject(new Error('The Hub connection closed before the response finished.'))
         })
       },
     )
     req.on('timeout', () => req.destroy(new Error('The Hub did not answer in time.')))
-    req.on('error', reject)
+    req.on('error', error => settleReject(error instanceof Error ? error : new Error(String(error))))
     req.end(body)
   })

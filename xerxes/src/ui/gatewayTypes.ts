@@ -18,7 +18,9 @@ export interface GatewayCompletionItem {
   display: string
   /** Daemon command category, used to order the bare-slash menu. */
   group?: string
+  kind?: 'command' | 'skill'
   meta?: string
+  source?: string
   text: string
 }
 
@@ -795,6 +797,488 @@ export interface SpawnTreeLoadResponse {
   subagents?: unknown[]
 }
 
+// ── Native Swarm (v35) ───────────────────────────────────────────────
+
+export type SwarmMemberRole = 'coordinator' | 'worker' | 'narrator' | 'monitor'
+export type SwarmWorkspaceMode = 'inherit' | 'share' | 'branch'
+export type SwarmMemberState = 'waiting' | 'working' | 'stopped' | 'killed'
+
+export interface SwarmOverviewSnapshot {
+  markdown: string
+  summary?: string
+  updated_at?: string
+  author?: string
+}
+
+export interface SwarmChannelSnapshot {
+  name: string
+  topic: string
+  created_by: string
+  archived: boolean
+  subscriber_count: number
+}
+
+export interface SwarmMemberSnapshot {
+  name: string
+  group?: string
+  role: SwarmMemberRole
+  added_by?: string
+  conversation_id?: string
+  model: string
+  model_display_name: string
+  workspace: SwarmWorkspaceMode
+  workspace_path?: string
+  channels: string[]
+  state: SwarmMemberState
+  killed: boolean
+  current_activity?: string
+  parked_since?: number
+  mentions_only?: boolean
+  last_read_seq: number
+  last_post_seq?: number
+  last_post_time?: string
+  error?: string
+}
+
+export type SwarmActivityPhase = 'idle' | 'thinking' | 'responding' | 'tool'
+
+export interface SwarmWorkerToolActivity {
+  id: string
+  name: string
+  summary?: string
+  status: 'running' | 'done' | 'error'
+  started_at: string
+  finished_at?: string
+  result_preview?: string
+}
+
+export interface SwarmMemberActivitySnapshot {
+  phase: SwarmActivityPhase
+  summary?: string
+  active_tools: SwarmWorkerToolActivity[]
+  recent_tools: SwarmWorkerToolActivity[]
+  live_text_preview?: string
+  updated_at?: string
+}
+
+export interface SwarmInspectToolCall {
+  id: string
+  name: string
+  args_preview: string
+}
+
+export interface SwarmInspectMessage {
+  index: number
+  role: 'user' | 'assistant' | 'tool'
+  text: string
+  tool_name?: string
+  tool_calls?: SwarmInspectToolCall[]
+}
+
+export interface SwarmInspectParams {
+  session_id?: string | null
+  name: string
+  limit?: number
+}
+
+export interface SwarmMemberInspectResponse {
+  ok?: boolean
+  session_id: string
+  member: SwarmMemberSnapshot
+  conversation_id: string
+  activity: SwarmMemberActivitySnapshot
+  messages: SwarmInspectMessage[]
+  total_messages: number
+  error?: string
+}
+
+export interface SwarmStatusSnapshot {
+  active: boolean
+  session_id: string
+  title: string
+  board: 'local'
+  open_board: string
+  head: number
+  tail_from_seq?: number
+  overview: SwarmOverviewSnapshot | null
+  channels: SwarmChannelSnapshot[]
+  members: SwarmMemberSnapshot[]
+}
+
+export interface SwarmBoardMessage {
+  seq: number
+  agent: string
+  channel: string
+  text: string
+  mentions: string[]
+  channel_mentions: string[]
+  broadcast: boolean
+  time: string
+}
+
+export type SwarmBoardParams = {
+  session_id?: string | null
+  since?: number
+  limit?: number
+  seqs?: number[]
+  channel?: string
+}
+
+export interface SwarmBoardResponse {
+  head: number
+  messages: SwarmBoardMessage[]
+}
+
+export type SwarmPostParams = {
+  session_id?: string | null
+  text: string
+  channel?: string
+  as_feedback?: boolean
+}
+
+export interface SwarmPostResponse {
+  status: 'posted'
+  seq: number
+  channel: string
+}
+
+export type SwarmKillParams = {
+  session_id?: string | null
+  name: string
+}
+
+export interface SwarmKillResponse {
+  ok?: boolean
+  status?: 'killed'
+  killed?: string[]
+  error?: string
+}
+
+export type SwarmModelParams = {
+  session_id?: string | null
+  name?: string
+  model?: string
+  reason?: string
+}
+
+export interface SwarmModelResponse {
+  ok?: boolean
+  status?: 'switched'
+  name?: string
+  model?: string
+  error?: string
+}
+
+export type SwarmActivateParams = {
+  session_id?: string | null
+  enabled?: boolean
+}
+
+export interface SwarmActivateResponse {
+  ok?: boolean
+  active?: boolean
+  prompt_overlay?: string
+  error?: string
+}
+
+export interface SwarmEventPayload {
+  session_id: string
+  kind: string
+  head: number
+  status?: SwarmStatusSnapshot
+  message?: SwarmBoardMessage
+  member_name?: string
+  member?: SwarmMemberSnapshot
+  activity?: SwarmMemberActivitySnapshot
+}
+
+// ── Ephemeral Side Question (/btw · v35) ──────────────────────────────
+
+export interface SideQuestionHistoryTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export type SideQuestionParams = {
+  session_id?: string | null
+  session_key?: string
+  request_id?: string
+  question: string
+  model?: string
+  history?: readonly SideQuestionHistoryTurn[]
+}
+
+export interface SideQuestionResponse {
+  ok: boolean
+  request_id: string
+  session_id: string
+  question: string
+  answer: string
+  model: string
+  error?: string
+}
+
+export type BtwEventKind = 'begin' | 'delta' | 'tool' | 'end' | 'error'
+
+export interface BtwEventToolInfo {
+  readonly name: string
+  readonly target?: string
+  readonly status: 'running' | 'done' | 'error'
+}
+
+export interface BtwEventPayload {
+  session_id: string
+  request_id: string
+  kind: BtwEventKind
+  question?: string
+  delta?: string
+  answer?: string
+  model?: string
+  error?: string
+  tool?: BtwEventToolInfo
+}
+
+// ── External ACP Agents (v35) ─────────────────────────────────────────
+
+export type AcpExternalAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
+export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json'
+
+export interface AcpExternalAgentInfo {
+  readonly id: string
+  readonly name: string
+  readonly provider: AcpExternalAgentProvider
+  readonly transport: AcpExternalAgentTransport
+  readonly available: boolean
+  readonly command?: string
+  readonly args?: readonly string[]
+  readonly binaryPath?: string
+  readonly version?: string
+  readonly installHint?: string
+  readonly description: string
+}
+
+export interface AcpExternalModelOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpExternalModeOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpExternalConfigOptionChoice {
+  readonly value: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpExternalConfigOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+  readonly category?: string
+  readonly type: string
+  readonly current_value: string
+  readonly options: readonly AcpExternalConfigOptionChoice[]
+}
+
+export interface AcpExternalCommandOption {
+  readonly name: string
+  readonly description?: string
+  readonly input_hint?: string
+  readonly kind?: 'command' | 'skill'
+  readonly source?: string
+}
+
+export type AcpAvailableCommand = AcpExternalCommandOption
+export type AcpConfigOption = AcpExternalConfigOption
+
+export interface AcpRuntimePromptCapabilities {
+  readonly image: boolean
+  readonly audio: boolean
+  readonly embedded_context: boolean
+}
+
+export interface AcpRuntimeSessionCapabilities {
+  readonly load: boolean
+  readonly resume: boolean
+  readonly list: boolean
+  readonly close: boolean
+  readonly additional_directories: boolean
+}
+
+export interface AcpRuntimeMcpCapabilities {
+  readonly http: boolean
+  readonly sse: boolean
+}
+
+export interface AcpRuntimeAuthMethod {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpRuntimeCapabilities {
+  readonly prompt: AcpRuntimePromptCapabilities
+  readonly session: AcpRuntimeSessionCapabilities
+  readonly mcp: AcpRuntimeMcpCapabilities
+  readonly auth_methods: readonly AcpRuntimeAuthMethod[]
+  readonly meta?: Readonly<Record<string, unknown>>
+}
+
+export interface AcpDiscoveredSkill {
+  readonly name: string
+  readonly description?: string
+  readonly source?: string
+  readonly path?: string
+  readonly slash_command?: string
+}
+
+export interface AcpSessionBinding {
+  readonly session_id: string
+  readonly agent_id: string
+  readonly name: string
+  readonly provider: AcpExternalAgentProvider
+  readonly transport: AcpExternalAgentTransport
+  readonly cwd: string
+  readonly external_session_id?: string
+  readonly connected: boolean
+  readonly command?: string
+  readonly error?: string
+  readonly agent_version?: string
+  readonly agent_title?: string
+  readonly capabilities?: AcpRuntimeCapabilities
+  readonly current_model?: string
+  readonly current_model_name?: string
+  readonly models?: readonly AcpExternalModelOption[]
+  readonly current_mode?: string
+  readonly current_mode_name?: string
+  readonly modes?: readonly AcpExternalModeOption[]
+  readonly model_config_id?: string
+  readonly mode_config_id?: string
+  readonly config_options?: readonly AcpExternalConfigOption[]
+  readonly thought_level?: string
+  readonly thought_levels?: readonly AcpExternalModeOption[]
+  readonly thought_level_config_id?: string
+  readonly available_commands?: readonly AcpExternalCommandOption[]
+  readonly discovered_skills?: readonly AcpDiscoveredSkill[]
+}
+
+export type AcpAgentsParams = {
+  session_id?: string | null
+  session_key?: string
+}
+
+export interface AcpAgentsResponse {
+  ok: boolean
+  agents: AcpExternalAgentInfo[]
+  active: AcpSessionBinding | null
+  error?: string
+}
+
+export type AcpCatalogParams = {
+  session_id?: string | null
+  session_key?: string
+}
+
+export interface AcpCatalogResponse {
+  ok: boolean
+  connected: boolean
+  binding?: AcpSessionBinding
+  commands: AcpAvailableCommand[]
+  skills: AcpDiscoveredSkill[]
+  capabilities?: AcpRuntimeCapabilities
+  config_options: AcpExternalConfigOption[]
+  error?: string
+}
+
+export type AcpConnectParams = {
+  session_id?: string | null
+  session_key?: string
+  agent_id: string
+  cwd?: string
+  command?: string
+  args?: readonly string[]
+  mode_id?: string
+  resume_session_id?: string
+}
+
+export interface AcpConnectResponse {
+  ok: boolean
+  binding?: AcpSessionBinding
+  error?: string
+  install_hint?: string
+}
+
+export type AcpDisconnectParams = {
+  session_id?: string | null
+  session_key?: string
+}
+
+export interface AcpDisconnectResponse {
+  ok: boolean
+  disconnected?: boolean
+  binding: AcpSessionBinding | null
+  error?: string
+}
+
+export type AcpCancelParams = {
+  session_id?: string | null
+  session_key?: string
+}
+
+export interface AcpCancelResponse {
+  ok: boolean
+  cancelled?: boolean
+  error?: string
+}
+
+export type AcpSetModelParams = {
+  session_id?: string | null
+  session_key?: string
+  model_id: string
+}
+
+export interface AcpSetModelResponse {
+  ok: boolean
+  binding?: AcpSessionBinding
+  error?: string
+}
+
+export type AcpSetModeParams = {
+  session_id?: string | null
+  session_key?: string
+  mode_id: string
+}
+
+export interface AcpSetModeResponse {
+  ok: boolean
+  binding?: AcpSessionBinding
+  error?: string
+}
+
+export type AcpSetConfigOptionParams = {
+  session_id?: string | null
+  session_key?: string
+  config_id: string
+  value: string
+}
+
+export interface AcpSetConfigOptionResponse {
+  ok: boolean
+  binding?: AcpSessionBinding
+  error?: string
+}
+
+export interface AcpStatusEventPayload {
+  session_id: string
+  binding: AcpSessionBinding | null
+  agents?: AcpExternalAgentInfo[]
+}
+
 export type GatewayEvent =
   | { payload: { workspace: string; counts: LearningCounts }; type: 'learning.changed'; session_id?: string }
   | { payload?: { skin?: GatewaySkin }; session_id?: string; type: 'gateway.ready' }
@@ -897,7 +1381,17 @@ export type GatewayEvent =
       type: 'clarify.resolved'
     }
   | {
-      payload: { allow_permanent?: boolean; command: string; description: string; request_id: string }
+      payload: {
+        allow_permanent?: boolean
+        command: string
+        cwd?: string
+        description: string
+        diff?: { new_text?: string; old_text?: string; path: string }
+        inputs?: Record<string, unknown>
+        locations?: Array<{ line?: number; path: string }>
+        options?: Array<{ kind: string; name: string; option_id: string }>
+        request_id: string
+      }
       session_id?: string
       type: 'approval.request'
     }
@@ -920,5 +1414,8 @@ export type GatewayEvent =
     }
   | { payload?: { message?: string }; session_id?: string; type: 'error' }
   | { payload?: { session_id?: string; title?: string }; session_id?: string; type: 'session_title' }
+  | { payload: SwarmEventPayload; session_id?: string; type: 'swarm_event' }
+  | { payload: BtwEventPayload; session_id?: string; type: 'btw_event' }
+  | { payload: AcpStatusEventPayload; session_id?: string; type: 'acp_status' }
 
 export type AnyEvent = GatewayEvent | { payload?: Record<string, unknown>; session_id?: string; type: string }

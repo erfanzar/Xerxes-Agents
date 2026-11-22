@@ -152,6 +152,15 @@ export function revealedToolNames(messages: readonly ChatMessage[]): ReadonlySet
     // Only a successful tool result can have loaded a schema; an errored search
     // returned nothing, and user text must not be able to conjure tools.
     if (message.role !== 'tool' || message.is_error === true) continue
+    if (message.added_tool_names?.length) {
+      for (const name of message.added_tool_names) {
+        if (name) names.add(name)
+      }
+      continue
+    }
+    // Only ToolSearchTool (or unattributed legacy search results) may reveal schemas from text;
+    // file/web/search outputs echoing `"loaded_tool"` must never conjure deferred schemas.
+    if (message.name !== undefined && message.name !== 'ToolSearchTool') continue
     // matchAll clones the regex, so the shared /g literal keeps no lastIndex state.
     for (const match of message.content.matchAll(TOOL_SEARCH_LOADED_PATTERN)) {
       const name = match[1]
@@ -374,7 +383,15 @@ export class ToolRegistry implements ToolExecutor {
     }
     const registered = this.pick(this.entries.get(call.function.name) ?? [], context.agentId)
     if (!registered) {
-      throw new FunctionExecutionError(call.function.name, 'is not registered')
+      const visibleNames = this.definitions(context.agentId).map(entry => entry.function.name)
+      const suggestion = suggestRegisteredToolName(call.function.name, visibleNames)
+      const deferredNote = suggestion !== undefined
+        && this.deferredToolLoading
+        && this.capabilities(suggestion, context.agentId).defer
+        ? ' (load its schema first with ToolSearchTool)'
+        : ''
+      const suffix = suggestion === undefined ? '' : `; did you mean "${suggestion}"${deferredNote}?`
+      throw new FunctionExecutionError(call.function.name, `is not registered${suffix}`)
     }
     const validation = validateToolArguments(
       call.function.name,
@@ -489,16 +506,80 @@ function refineCapabilities(
   args: Readonly<Record<string, unknown>>,
 ): ToolCapabilities {
   if (declared.concurrencySafe || !SHELL_TOOL_NAMES.has(name)) return declared
+  // A script or payload fed over stdin is never a static read-only invocation.
+  if (args.stdin !== undefined) return declared
   const command = typeof args.cmd === 'string' ? args.cmd : undefined
   if (!command) return declared
-  const argv = Array.isArray(args.args)
-    ? args.args.filter((value): value is string => typeof value === 'string')
-    : []
+  let argv: readonly string[] = []
+  if (args.args !== undefined) {
+    if (!Array.isArray(args.args) || !args.args.every((value): value is string => typeof value === 'string')) {
+      return declared
+    }
+    argv = args.args
+  }
   // The same analyzer the permission gate already trusts for this tool.
   return isReadOnlyInvocation(command, argv)
-    ? { ...declared, concurrencySafe: true }
+    ? Object.freeze({ ...declared, concurrencySafe: true })
     : declared
 }
 
 /** Tools whose arguments are a shell invocation the read-only analyzer understands. */
 const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(['exec_command'])
+
+function normalizeToolKey(name: string): string {
+  return name.replace(/[_-]+/g, '').toLowerCase()
+}
+
+function suggestRegisteredToolName(requested: string, candidates: readonly string[]): string | undefined {
+  const key = normalizeToolKey(requested.trim())
+  if (!key) return undefined
+  for (const candidate of candidates) {
+    if (normalizeToolKey(candidate) === key) return candidate
+  }
+  if (key.length >= 4) {
+    for (const candidate of candidates) {
+      const candidateKey = normalizeToolKey(candidate)
+      if (`${key}tool` === candidateKey || key === candidateKey.replace(/tool$/, '')) {
+        return candidate
+      }
+    }
+    let best: string | undefined
+    let bestDistance = 3
+    let tied = false
+    for (const candidate of candidates) {
+      const candidateKey = normalizeToolKey(candidate)
+      if (Math.abs(candidateKey.length - key.length) > 2) continue
+      const distance = boundedEditDistance(key, candidateKey, 2)
+      if (distance < bestDistance) {
+        best = candidate
+        bestDistance = distance
+        tied = false
+      } else if (distance === bestDistance) {
+        tied = true
+      }
+    }
+    if (!tied && bestDistance <= 2) return best
+  }
+  return undefined
+}
+
+function boundedEditDistance(left: string, right: string, maxDistance: number): number {
+  let previous = Array.from({ length: right.length + 1 }, (_value, index) => index)
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i]
+    let rowMin = i
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1
+      const value = Math.min(
+        (previous[j] ?? maxDistance + 1) + 1,
+        (current[j - 1] ?? maxDistance + 1) + 1,
+        (previous[j - 1] ?? maxDistance + 1) + cost,
+      )
+      current.push(value)
+      if (value < rowMin) rowMin = value
+    }
+    if (rowMin > maxDistance) return maxDistance + 1
+    previous = current
+  }
+  return previous[right.length] ?? maxDistance + 1
+}

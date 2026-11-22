@@ -88,15 +88,15 @@ export class MCPHttpClientTransport {
   }
 
   /** Send one JSON-RPC frame through the configured transport. */
-  async send(frame: MCPOutboundFrame): Promise<void> {
+  async send(frame: MCPOutboundFrame, signal?: AbortSignal): Promise<void> {
     if (this.closed) {
       throw new MCPConnectionError(`MCP HTTP transport for ${this.serverName} is closed`)
     }
     if (this.kind === 'sse') {
-      await this.sendLegacyFrame(frame)
+      await this.sendLegacyFrame(frame, signal)
       return
     }
-    await this.sendStreamableFrame(frame)
+    await this.sendStreamableFrame(frame, signal)
   }
 
   /** Record the protocol version negotiated by initialize for subsequent HTTP requests. */
@@ -234,7 +234,7 @@ export class MCPHttpClientTransport {
     this.onClosed?.(error)
   }
 
-  private async sendLegacyFrame(frame: MCPOutboundFrame): Promise<void> {
+  private async sendLegacyFrame(frame: MCPOutboundFrame, callerSignal?: AbortSignal): Promise<void> {
     const endpoint = this.legacyEndpoint
     if (!endpoint) {
       throw new MCPConnectionError(`MCP legacy SSE server ${this.serverName} has not sent a message endpoint`)
@@ -251,10 +251,10 @@ export class MCPHttpClientTransport {
         throw httpStatusError(this.serverName, response, 'sending a legacy SSE message')
       }
       await cancelBody(response)
-    })
+    }, callerSignal)
   }
 
-  private async sendStreamableFrame(frame: MCPOutboundFrame): Promise<void> {
+  private async sendStreamableFrame(frame: MCPOutboundFrame, callerSignal?: AbortSignal): Promise<void> {
     await this.runWithTimeout(`MCP Streamable HTTP request to ${this.serverName}`, async signal => {
       const response = await this.fetchImpl(this.endpoint, {
         body: JSON.stringify(frame),
@@ -305,7 +305,7 @@ export class MCPHttpClientTransport {
       throw new MCPProtocolError(
         `MCP Streamable HTTP server ${this.serverName} returned unsupported content type ${displayContentType(response)}`,
       )
-    })
+    }, callerSignal)
   }
 
   private handleStreamableSseEvent(event: SSEEvent): void {
@@ -372,22 +372,42 @@ export class MCPHttpClientTransport {
     }
   }
 
-  private async runWithTimeout<T>(label: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  private async runWithTimeout<T>(
+    label: string,
+    operation: (signal: AbortSignal) => Promise<T>,
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
+    if (callerSignal?.aborted) {
+      throw new MCPConnectionError(`${label} was aborted`)
+    }
     const controller = new AbortController()
     let timedOut = false
+    let callerAborted = false
+    const onCallerAbort = (): void => {
+      callerAborted = true
+      controller.abort()
+    }
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true })
     const timeout = setTimeout(() => {
       timedOut = true
       controller.abort()
     }, this.timeoutMs)
     try {
+      if (callerSignal?.aborted) {
+        onCallerAbort()
+      }
       return await operation(controller.signal)
     } catch (error) {
+      if (callerAborted) {
+        throw new MCPConnectionError(`${label} was aborted`)
+      }
       if (timedOut) {
         throw new MCPConnectionError(`${label} timed out after ${this.timeoutMs}ms`)
       }
       throw asHttpTransportError(error)
     } finally {
       clearTimeout(timeout)
+      callerSignal?.removeEventListener('abort', onCallerAbort)
     }
   }
 }

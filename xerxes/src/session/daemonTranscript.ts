@@ -42,6 +42,32 @@ export type RawMessage = Record<string, unknown>
  * bounded head read answers the question without paying for the history.
  */
 const TRANSCRIPT_HEAD_BYTES = 32 * 1024
+/**
+ * Upper bound for progressive head reads when a session's `metadata` grows
+ * past 32 KiB (for example long `file_reads` or `compaction_history` records).
+ * Stops immediately once `MESSAGES_KEY_MARKER` or EOF is reached so large
+ * sessions never fall back to full transcript + `.jsonl` replay during listing.
+ */
+const TRANSCRIPT_HEAD_STEP_BYTES: readonly number[] = [
+  TRANSCRIPT_HEAD_BYTES,
+  256 * 1024,
+  1024 * 1024,
+  4 * 1024 * 1024,
+]
+const MAX_LISTING_HEADER_CACHE = 2_048
+const LISTING_METADATA_KEYS: readonly string[] = [
+  'title',
+  'title_derived',
+  'project_root',
+  'last_message_at',
+  'parent_session_id',
+  'root_session_id',
+  'subagent_id',
+  'session_kind',
+  'model',
+  'status',
+  'goal_changes',
+]
 
 /**
  * `JSON.stringify(record, null, 2)` writes every top-level key behind a newline
@@ -343,6 +369,11 @@ export class DaemonTranscriptStore {
   private readonly currentProjectDirectory: string
   private readonly directory: string
   private readonly sidecars = new MetadataSidecarStore()
+  private readonly listingHeaderCache = new Map<string, {
+    readonly modifiedAtMillis: number
+    readonly sizeBytes: number
+    readonly result: DaemonTranscriptHeaderResult
+  }>()
   private readonly lockStaleMs: number
   private readonly lockWaitMs: number
   private readonly workspaceRoot: string | undefined
@@ -393,13 +424,34 @@ export class DaemonTranscriptStore {
    * sessions or reloads every file to be safe.
    */
   async readHeader(sessionId: string): Promise<DaemonTranscriptHeaderResult> {
-    let head: string
+    let head = ''
     try {
       const handle = await open(this.pathFor(sessionId), 'r')
       try {
-        const buffer = Buffer.allocUnsafe(TRANSCRIPT_HEAD_BYTES)
-        const { bytesRead } = await handle.read(buffer, 0, TRANSCRIPT_HEAD_BYTES, 0)
-        head = buffer.toString('utf8', 0, bytesRead)
+        let totalRead = 0
+        const chunks: Buffer[] = []
+        for (const targetBytes of TRANSCRIPT_HEAD_STEP_BYTES) {
+          const toRead = targetBytes - totalRead
+          if (toRead <= 0) break
+          const chunk = Buffer.allocUnsafe(toRead)
+          let chunkRead = 0
+          while (chunkRead < toRead) {
+            const { bytesRead } = await handle.read(chunk, chunkRead, toRead - chunkRead, totalRead + chunkRead)
+            if (bytesRead === 0) break
+            chunkRead += bytesRead
+          }
+          if (chunkRead > 0) {
+            chunks.push(chunkRead === toRead ? chunk : chunk.subarray(0, chunkRead))
+            totalRead += chunkRead
+          }
+          head = chunks.length === 1 ? chunks[0]!.toString('utf8') : Buffer.concat(chunks, totalRead).toString('utf8')
+          if (!head.trimStart().startsWith('{')) {
+            return { kind: 'unreadable' }
+          }
+          if (head.includes(MESSAGES_KEY_MARKER) || chunkRead < toRead) {
+            break
+          }
+        }
       } finally {
         await handle.close()
       }
@@ -410,6 +462,50 @@ export class DaemonTranscriptStore {
       return { kind: 'unreadable' }
     }
     return this.parseHeader(head, sessionId)
+  }
+
+  /**
+   * Read a compact, `mtime+size`-validated header for session listings.
+   * Strips bulky non-listing metadata keys (`file_reads`, `compaction_history`,
+   * subagent snapshots) before caching in a bounded LRU so listing thousands
+   * of sessions stays fast and never pins megabytes of metadata in RAM.
+   */
+  async readListingHeader(
+    sessionId: string,
+    hint?: Pick<DaemonTranscriptEntry, 'modifiedAtMillis' | 'sizeBytes'>,
+  ): Promise<DaemonTranscriptHeaderResult> {
+    if (hint) {
+      const cached = this.listingHeaderCache.get(sessionId)
+      if (cached && cached.modifiedAtMillis === hint.modifiedAtMillis && cached.sizeBytes === hint.sizeBytes) {
+        this.listingHeaderCache.delete(sessionId)
+        this.listingHeaderCache.set(sessionId, cached)
+        return cached.result
+      }
+    }
+    const rawResult = await this.readHeader(sessionId)
+    const compactResult: DaemonTranscriptHeaderResult = rawResult.kind === 'header'
+      ? {
+          kind: 'header',
+          header: {
+            ...rawResult.header,
+            metadata: compactListingMetadata(rawResult.header.metadata),
+          },
+        }
+      : rawResult
+    if (hint) {
+      this.listingHeaderCache.delete(sessionId)
+      this.listingHeaderCache.set(sessionId, {
+        modifiedAtMillis: hint.modifiedAtMillis,
+        sizeBytes: hint.sizeBytes,
+        result: compactResult,
+      })
+      while (this.listingHeaderCache.size > MAX_LISTING_HEADER_CACHE) {
+        const oldest = this.listingHeaderCache.keys().next().value
+        if (oldest === undefined) break
+        this.listingHeaderCache.delete(oldest)
+      }
+    }
+    return compactResult
   }
 
   /** Enumerate transcript files by `stat` alone, newest modification first. */
@@ -572,6 +668,7 @@ export class DaemonTranscriptStore {
       // The snapshot above covers only events the caller actually loaded into
       // `messages`. Events appended concurrently or after that load remain
       // beyond its inherited byte watermark and replay on the next resume.
+      this.listingHeaderCache.delete(transcript.sessionId)
       options.onSavedGeneration?.(generation)
     })
   }
@@ -627,6 +724,7 @@ export class DaemonTranscriptStore {
   /** Remove one persisted transcript by its canonical resume id. */
   async remove(sessionId: string): Promise<boolean> {
     return this.serializeTranscriptWrite(sessionId, async () => {
+      this.listingHeaderCache.delete(sessionId)
       const path = this.pathFor(sessionId)
       // An orphaned journal would resurrect the deleted history the next time
       // this id is opened, so it goes with the snapshot. A journal alone is a
@@ -866,15 +964,40 @@ export class DaemonTranscriptStore {
   /** Splice uncovered append-only message events onto a freshly parsed snapshot. */
   private async replayMessageJournal(sessionId: string, raw: unknown): Promise<void> {
     if (!isRecord(raw) || !Array.isArray(raw.messages)) return
-    let contents: Uint8Array
+    const journalPath = this.journalPathFor(sessionId)
+    let fileSize: number
     try {
-      contents = await readFile(this.journalPathFor(sessionId))
+      fileSize = (await stat(journalPath)).size
     } catch {
       return
     }
+    if (fileSize === 0) return
     const offset = optionalNonNegativeInteger(raw.event_log_offset) ?? 0
-    const safeOffset = offset <= contents.byteLength ? offset : 0
-    const decoded = readTranscriptEventRecords(contents.subarray(safeOffset), sessionId, safeOffset)
+    const safeOffset = offset <= fileSize ? offset : 0
+    // Common case: snapshot already covers the entire event log. Skip reading
+    // what can be a 50-130 MiB `.jsonl` file into RAM just to slice 0 bytes.
+    if (safeOffset >= fileSize) return
+    const remaining = fileSize - safeOffset
+    let slice: Buffer
+    try {
+      const handle = await open(journalPath, 'r')
+      try {
+        const buffer = Buffer.allocUnsafe(remaining)
+        let totalRead = 0
+        while (totalRead < remaining) {
+          const { bytesRead } = await handle.read(buffer, totalRead, remaining - totalRead, safeOffset + totalRead)
+          if (bytesRead === 0) break
+          totalRead += bytesRead
+        }
+        slice = totalRead === remaining ? buffer : buffer.subarray(0, totalRead)
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      return
+    }
+    if (slice.byteLength === 0) return
+    const decoded = readTranscriptEventRecords(slice, sessionId, safeOffset)
 
     const appends = decoded.records.flatMap(record => record.event.type === 'message_appended'
       ? [{ index: record.event.index, endOffset: record.endOffset, message: record.event.message, cwd: record.event.cwd }]
@@ -1258,6 +1381,16 @@ function optionalNonNegativeInteger(value: unknown): number | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function compactListingMetadata(metadata: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  const compact: Record<string, unknown> = {}
+  for (const key of LISTING_METADATA_KEYS) {
+    if (Object.hasOwn(metadata, key)) {
+      compact[key] = metadata[key]
+    }
+  }
+  return compact
 }
 
 function booleanValue(value: unknown): boolean {

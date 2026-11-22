@@ -299,13 +299,39 @@ function scalarText(value: unknown, field: string): string {
 }
 
 function compareVersions(left: string, right: string): number {
-  const a = left.split('-', 1)[0]!.split('.').map(Number)
-  const b = right.split('-', 1)[0]!.split('.').map(Number)
+  const [leftCore = '', leftPre] = splitPrerelease(left)
+  const [rightCore = '', rightPre] = splitPrerelease(right)
+  const a = leftCore.split('.').map(Number)
+  const b = rightCore.split('.').map(Number)
   for (let index = 0; index < 3; index += 1) {
     const delta = (a[index] ?? 0) - (b[index] ?? 0)
     if (delta !== 0) return delta
   }
-  return left.localeCompare(right)
+  if (leftPre === undefined && rightPre === undefined) return 0
+  // SemVer 2.0.0 §11.3: a normal version has higher precedence than a pre-release version.
+  if (leftPre === undefined) return 1
+  if (rightPre === undefined) return -1
+  const leftParts = leftPre.split('.')
+  const rightParts = rightPre.split('.')
+  const count = Math.max(leftParts.length, rightParts.length)
+  for (let index = 0; index < count; index += 1) {
+    const leftId = leftParts[index]
+    const rightId = rightParts[index]
+    if (leftId === undefined) return -1
+    if (rightId === undefined) return 1
+    if (leftId === rightId) continue
+    const leftNumeric = /^\d+$/.test(leftId)
+    const rightNumeric = /^\d+$/.test(rightId)
+    if (leftNumeric && rightNumeric) return Number(leftId) - Number(rightId)
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
+    return leftId < rightId ? -1 : 1
+  }
+  return 0
+}
+
+function splitPrerelease(version: string): [string, string | undefined] {
+  const dash = version.indexOf('-')
+  return dash < 0 ? [version, undefined] : [version.slice(0, dash), version.slice(dash + 1)]
 }
 
 function text(value: unknown): string {

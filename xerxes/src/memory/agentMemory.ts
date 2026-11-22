@@ -123,11 +123,28 @@ export function renderMemoryChanges(
     if (!after.has(key)) blocks.push(`### [${old.scope}] ${old.path} (deleted)`)
   }
   if (!blocks.length) return ''
-  return clipMemoryText([
+  const budget = MAX_MEMORY_SECTION_BYTES / 2
+  const header = [
     '## Memory written since this conversation began',
     'Your persistent memory section was loaded when the conversation started; these are later changes to it.',
-    ...blocks,
-  ].join('\n\n'), MAX_MEMORY_SECTION_BYTES / 2, 'memory changes')
+  ].join('\n\n')
+  const kept: string[] = []
+  let usedBytes = Buffer.byteLength(header, 'utf8')
+  for (const [index, block] of blocks.entries()) {
+    const remaining = blocks.length - index - 1
+    const omissionReserve = remaining > 0
+      ? Buffer.byteLength(`\n\n… [${remaining} additional memory change(s) omitted to fit turn budget]`, 'utf8')
+      : 0
+    const candidateBytes = Buffer.byteLength('\n\n', 'utf8') + Buffer.byteLength(block, 'utf8')
+    if (kept.length > 0 && usedBytes + candidateBytes + omissionReserve > budget) {
+      const omitted = blocks.length - kept.length
+      kept.push(`… [${omitted} additional memory change(s) omitted to fit turn budget]`)
+      break
+    }
+    kept.push(block)
+    usedBytes += candidateBytes
+  }
+  return [header, ...kept].join('\n\n')
 }
 
 export interface MemoryPromptOptions {

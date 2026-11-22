@@ -27,7 +27,7 @@ export function webviewTransport(api: WebviewApi, events: Pick<Window, 'addEvent
       else waiting.reject(new Error(frame.error))
       return
     }
-    for (const listener of listeners.get(frame.channel) ?? []) {
+    for (const listener of [...(listeners.get(frame.channel) ?? [])]) {
       try { listener(frame.value) } catch { /* a renderer fault must not break the bridge */ }
     }
   })
@@ -37,14 +37,22 @@ export function webviewTransport(api: WebviewApi, events: Pick<Window, 'addEvent
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject })
         const frame: InvokeFrame = { kind: 'invoke', id, channel, args }
-        api.postMessage(frame)
+        try {
+          api.postMessage(frame)
+        } catch (error) {
+          pending.delete(id)
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
       })
     },
     on(channel, listener) {
       let set = listeners.get(channel)
       if (!set) { set = new Set(); listeners.set(channel, set) }
       set.add(listener)
-      return () => { set.delete(listener) }
+      return () => {
+        set.delete(listener)
+        if (set.size === 0 && listeners.get(channel) === set) listeners.delete(channel)
+      }
     },
     setZoomFactor: zoom,
   }

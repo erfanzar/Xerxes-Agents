@@ -45,8 +45,22 @@ export function estimateCostUsd(
   inputTokens: number,
   outputTokens: number,
 ): number | undefined {
-  if (route.inputUsdPerMTok === undefined || route.outputUsdPerMTok === undefined) return undefined
-  return (inputTokens * route.inputUsdPerMTok + outputTokens * route.outputUsdPerMTok) / 1_000_000
+  if (
+    route.inputUsdPerMTok === undefined
+    || route.outputUsdPerMTok === undefined
+    || !Number.isFinite(route.inputUsdPerMTok)
+    || route.inputUsdPerMTok < 0
+    || !Number.isFinite(route.outputUsdPerMTok)
+    || route.outputUsdPerMTok < 0
+    || !Number.isFinite(inputTokens)
+    || inputTokens < 0
+    || !Number.isFinite(outputTokens)
+    || outputTokens < 0
+  ) {
+    return undefined
+  }
+  const total = (inputTokens * route.inputUsdPerMTok + outputTokens * route.outputUsdPerMTok) / 1_000_000
+  return Number.isFinite(total) && total >= 0 ? total : undefined
 }
 
 /** One short line plus the excluded routes, for `/route explain`. */
@@ -150,6 +164,9 @@ export class PolicyRouter {
     if (req.placement === 'local' && route.trust !== 'local') return 'placement requires a local route'
     if (req.placement === 'cloud' && route.trust === 'local') return 'placement requires a cloud route'
     const outputTokens = req.estimatedOutputTokens ?? 0
+    if (!Number.isFinite(req.estimatedInputTokens) || req.estimatedInputTokens < 0 || !Number.isFinite(outputTokens) || outputTokens < 0) {
+      return 'estimated token count is invalid'
+    }
     if (route.contextLimit !== undefined && route.contextLimit < req.estimatedInputTokens + outputTokens) {
       return `context limit ${route.contextLimit} is below the estimated ${req.estimatedInputTokens + outputTokens} tokens`
     }
@@ -158,12 +175,13 @@ export class PolicyRouter {
       if (route.tier < req.minTier) return `tier ${route.tier} is below the required tier ${req.minTier}`
     }
     if (budget?.remainingUsd !== undefined) {
+      if (!Number.isFinite(budget.remainingUsd)) return 'remaining USD budget is invalid'
       const cost = estimateCostUsd(route, req.estimatedInputTokens, outputTokens)
       if (cost !== undefined && cost > budget.remainingUsd) {
         return `estimated $${cost.toFixed(4)} exceeds the remaining budget $${budget.remainingUsd.toFixed(4)}`
       }
     }
-    if (budget?.remainingCalls !== undefined && budget.remainingCalls <= 0 && route.trust !== 'local') {
+    if (budget?.remainingCalls !== undefined && (!Number.isFinite(budget.remainingCalls) || budget.remainingCalls <= 0) && route.trust !== 'local') {
       return 'no cloud calls remain in the budget'
     }
     return undefined

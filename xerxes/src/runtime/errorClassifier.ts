@@ -50,6 +50,7 @@ const RETRYABLE_KINDS = new Set<ErrorKind>([
 const PLAN_EXHAUSTED: readonly RegExp[] = [
   /usage[_ ]?limit/i,
   /insufficient[_ ]?(?:quota|balance|credits?)/i,
+  /credit balance is too low/i,
   /exceeded your (?:current )?(?:quota|plan)/i,
   /(?:plan|subscription)(?:'s)? (?:quota|limit) (?:is |has been )?(?:exhausted|reached|exceeded)/i,
   /\bout of (?:credits|quota)\b/i,
@@ -155,14 +156,23 @@ export class ErrorClassifier {
       if (details.status === 400 && matchesPatterns(ErrorKind.CONTEXT_OVERFLOW, details.message)) {
         return classified(ErrorKind.CONTEXT_OVERFLOW, error, details.message, retryAfter)
       }
-      // 429 covers both a burst limit (wait and retry) and a used-up plan
-      // (retrying for a minute changes nothing). The body tells them apart.
-      if (details.status === 429 && PLAN_EXHAUSTED.some(pattern => pattern.test(details.message))) {
+      // Anthropic and OpenAI-compatible gateways also report exhausted credit
+      // balances as HTTP 400 ("Your credit balance is too low") or HTTP 429
+      // ("usage_limit_reached", "insufficient_quota"). Classify both as
+      // non-retryable quota exhaustion so account failover can trigger.
+      if ((details.status === 400 || details.status === 429) && PLAN_EXHAUSTED.some(pattern => pattern.test(details.message))) {
         return classified(ErrorKind.QUOTA_EXCEEDED, error, details.message, retryAfter)
       }
       return classified(statusKind, error, details.message, retryAfter)
     }
 
+    // Message-only errors (e.g. "HTTP 429: You exceeded your current quota" or
+    // "429 usage_limit_reached") contain both 429/rate-limit tokens and plan
+    // exhaustion wording; check plan exhaustion before RATE_LIMIT so stringified
+    // errors match their structured 429 counterparts.
+    if (PLAN_EXHAUSTED.some(pattern => pattern.test(details.message))) {
+      return classified(ErrorKind.QUOTA_EXCEEDED, error, details.message, retryAfter)
+    }
     for (const [kind] of PATTERNS) {
       if (matchesPatterns(kind, details.message)) {
         return classified(kind, error, details.message, retryAfter)
@@ -224,9 +234,13 @@ function describeError(error: unknown): ErrorDetails {
   if (error instanceof Error) {
     const record = error as unknown as Record<string, unknown>
     const structuredDetails = isRecord(record.details) ? record.details : undefined
-    const code = stringProperty(record, 'code') ?? (structuredDetails && stringProperty(structuredDetails, 'code'))
+    const causeRecord = isRecord(record.cause) ? record.cause : undefined
+    const code = stringProperty(record, 'code')
+      ?? (structuredDetails && stringProperty(structuredDetails, 'code'))
+      ?? (causeRecord && stringProperty(causeRecord, 'code'))
     const status = numberProperty(record, 'status', 'statusCode')
       ?? (structuredDetails && numberProperty(structuredDetails, 'status', 'statusCode'))
+      ?? (causeRecord && numberProperty(causeRecord, 'status', 'statusCode'))
     const optional: { code?: string; status?: number } = {}
     if (code !== undefined) optional.code = code
     if (status !== undefined) optional.status = status
@@ -260,6 +274,7 @@ function matchesPatterns(kind: ErrorKind, message: string): boolean {
 
 function kindForStatus(status: number | undefined): ErrorKind | undefined {
   if (status === 429) return ErrorKind.RATE_LIMIT
+  if (status === 402) return ErrorKind.QUOTA_EXCEEDED
   if (status === 401 || status === 403) return ErrorKind.AUTH
   if (status === 400) return ErrorKind.BAD_REQUEST
   if (status === 408) return ErrorKind.TIMEOUT
@@ -271,17 +286,28 @@ function structuredRetryAfter(error: unknown): number | undefined {
   if (!isRecord(error)) return undefined
   const direct = numberProperty(error, 'retryAfterSeconds', 'retryAfter')
   if (direct !== undefined && direct >= 0) return direct
+  const directMs = numberProperty(error, 'retryAfterMs')
+  if (directMs !== undefined && directMs >= 0) return directMs / 1000
   const details = error.details
   if (!isRecord(details)) return undefined
   const nested = numberProperty(details, 'retryAfterSeconds', 'retryAfter')
-  return nested !== undefined && nested >= 0 ? nested : undefined
+  if (nested !== undefined && nested >= 0) return nested
+  const nestedMs = numberProperty(details, 'retryAfterMs')
+  return nestedMs !== undefined && nestedMs >= 0 ? nestedMs / 1000 : undefined
 }
 
 function parseRetryAfter(message: string): number | undefined {
-  const match = /retry[- ]after[:\s]+(\d+(?:\.\d+)?)/i.exec(message)
+  const msHeader = /retry[- ]after[- ]ms[:\s]+(\d+(?:\.\d+)?)/i.exec(message)
+  if (msHeader?.[1]) {
+    const parsedMs = Number(msHeader[1])
+    return Number.isFinite(parsedMs) ? parsedMs / 1000 : undefined
+  }
+  const match = /retry[- ]after[:\s]+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec(?:onds?)?)?(?![a-z])/i.exec(message)
   if (!match?.[1]) return undefined
   const parsed = Number(match[1])
-  return Number.isFinite(parsed) ? parsed : undefined
+  if (!Number.isFinite(parsed)) return undefined
+  const unit = match[2]?.toLowerCase() ?? ''
+  return unit.startsWith('ms') || unit.startsWith('millisecond') ? parsed / 1000 : parsed
 }
 
 function isFetchNetworkFailure(error: unknown, message: string): boolean {

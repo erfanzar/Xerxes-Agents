@@ -25,10 +25,10 @@ function rule(name: string, pattern: RegExp, replacement = REDACTED): RedactionR
  * is the same group-preserving shape as CREDENTIAL_REDACTION_RULES.
  */
 export const DEFAULT_REDACTION_RULES: readonly RedactionRule[] = Object.freeze([
-  rule('api_key_field', /(api[_-]?key)([\s:="']+)([A-Za-z0-9._-]{8,})/gi, '$1$2' + REDACTED),
+  rule('api_key_field', /(api[_-]?key)([\s:="']+)([A-Za-z0-9._~+/-]{8,}={0,2})/gi, '$1$2' + REDACTED),
   rule('openai_token', /\bsk-[A-Za-z0-9_-]{16,}\b/g, REDACTED),
   rule('anthropic_token', /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, REDACTED),
-  rule('bearer_header', /(authorization:\s*bearer)(\s+)([A-Za-z0-9._-]+)/gi, '$1$2' + REDACTED),
+  rule('bearer_header', /(authorization:\s*bearer)(\s+)([A-Za-z0-9._~+/-]+={0,2})/gi, '$1$2' + REDACTED),
   rule('password_field', /(password)([\s:="']+)(\S+)/gi, '$1$2' + REDACTED),
   rule('jwt_token', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, REDACTED),
   rule('phone_us', /\b(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, REDACTED),
@@ -41,15 +41,31 @@ export const DEFAULT_REDACTION_RULES: readonly RedactionRule[] = Object.freeze([
 /** Case-insensitive object keys that must never be emitted with their values. */
 export const SENSITIVE_FIELD_NAMES = new Set<string>([
   'api_key',
+  'api-key',
   'apikey',
+  'x_api_key',
+  'x-api-key',
   'token',
   'access_token',
   'refresh_token',
+  'auth_token',
+  'x_auth_token',
+  'x-auth-token',
   'password',
   'secret',
   'client_secret',
+  'private_key',
+  'private-key',
   'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
 ])
+
+function isSensitiveFieldName(key: string): boolean {
+  const lower = key.toLowerCase()
+  return SENSITIVE_FIELD_NAMES.has(lower) || SENSITIVE_FIELD_NAMES.has(lower.replaceAll('-', '_'))
+}
 
 /** Apply each configured rule to a string without mutating the input. */
 export function redactString(text: string, rules: readonly RedactionRule[] = DEFAULT_REDACTION_RULES): string {
@@ -63,8 +79,9 @@ export function redactString(text: string, rules: readonly RedactionRule[] = DEF
 /**
  * Clone and recursively redact an arbitrary payload for logs, diagnostics, or audit records.
  *
- * Cycles become a clear marker rather than throwing while constructing an error report. Plain
- * records and arrays are retained; other host objects are converted only when they are Errors.
+ * Cycles become a clear marker rather than throwing while constructing an error report. Shared
+ * non-circular DAG references are preserved rather than mislabeled as circular. Plain records and
+ * arrays are retained; other host objects are converted only when they are Errors.
  */
 export function redactPayload(value: unknown, rules: readonly RedactionRule[] = DEFAULT_REDACTION_RULES): unknown {
   return redactValue(value, rules, new WeakSet<object>())
@@ -75,13 +92,17 @@ function redactValue(value: unknown, rules: readonly RedactionRule[], seen: Weak
   if (value === null || typeof value !== 'object') return value
   if (seen.has(value)) return '[Circular]'
   seen.add(value)
-  if (Array.isArray(value)) return value.map(item => redactValue(item, rules, seen))
-  if (value instanceof Error) {
-    return { name: value.name, message: redactString(value.message, rules) }
+  try {
+    if (Array.isArray(value)) return value.map(item => redactValue(item, rules, seen))
+    if (value instanceof Error) {
+      return { name: value.name, message: redactString(value.message, rules) }
+    }
+    const result: Record<string, unknown> = {}
+    for (const [key, nested] of Object.entries(value)) {
+      result[key] = isSensitiveFieldName(key) ? REDACTED : redactValue(nested, rules, seen)
+    }
+    return result
+  } finally {
+    seen.delete(value)
   }
-  const result: Record<string, unknown> = {}
-  for (const [key, nested] of Object.entries(value)) {
-    result[key] = SENSITIVE_FIELD_NAMES.has(key.toLowerCase()) ? REDACTED : redactValue(nested, rules, seen)
-  }
-  return result
 }

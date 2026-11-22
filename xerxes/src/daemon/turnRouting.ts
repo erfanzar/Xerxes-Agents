@@ -11,11 +11,12 @@
  */
 
 import type { ProviderProfile } from '../bridge/profiles.js'
+import { contextCalibrationRatio, estimateContextTokens } from '../context/windowUsage.js'
 import type { LlmClient } from '../llms/client.js'
 import type { ProviderOverrides } from '../llms/providerRegistry.js'
 import { parseRoutingConfig } from '../routing/config.js'
 import { PolicyRouter, renderRouteDecision } from '../routing/router.js'
-import type { DataBoundaryMode, DataTrust, StepKind, TaskRequirements } from '../routing/types.js'
+import type { BudgetState, DataBoundaryMode, DataTrust, StepKind, TaskRequirements } from '../routing/types.js'
 import { deriveDataTrust } from '../security/dataBoundary.js'
 
 /** The provider half of a routed turn, the same shape `resolveSessionProvider` returns. */
@@ -44,6 +45,10 @@ export interface TurnRoutingSession {
   readonly cwd: string
   readonly messages: readonly unknown[]
   readonly metadata: Record<string, unknown>
+  readonly requestScaffold?: {
+    readonly systemPrompt?: string | undefined
+    readonly toolSchemas?: readonly Readonly<Record<string, unknown>>[] | undefined
+  } | undefined
 }
 
 export interface TurnRouterOptions<S extends TurnRoutingSession> {
@@ -53,6 +58,10 @@ export interface TurnRouterOptions<S extends TurnRoutingSession> {
   readonly boundaryMode: (session: S) => DataBoundaryMode
   /** Whether this session's context already holds private data (boundary taint). */
   readonly touchesPrivate?: (session: S) => boolean
+  /** Optional remaining USD / cloud-call budget consulted during route selection. */
+  readonly budgetForSession?: (session: S) => BudgetState | undefined
+  /** Optional expected reply token reserve so context-limit exclusion includes output headroom. */
+  readonly estimatedOutputTokens?: (session: S, model: string) => number | undefined
   readonly buildProvider: (profile: ProviderProfile, model: string) => RoutedProvider
 }
 
@@ -70,14 +79,30 @@ export function turnKind(text: string): StepKind {
   return 'analysis'
 }
 
-/** chars/4, the same estimate the prompt budget uses; bounded by what is cheap to measure. */
-function estimateTokens(session: TurnRoutingSession, text: string): number {
-  let chars = text.length
-  for (const message of session.messages) {
-    chars += typeof message === 'string' ? message.length : JSON.stringify(message ?? '').length
-    if (chars > 4_000_000) break
+function asContextMessage(message: unknown): Readonly<Record<string, unknown>> {
+  if (typeof message === 'string') return { role: 'user', content: message }
+  if (message !== null && typeof message === 'object' && !Array.isArray(message)) {
+    return message as Readonly<Record<string, unknown>>
   }
-  return Math.ceil(chars / 4)
+  return { role: 'user', content: String(message ?? '') }
+}
+
+/**
+ * Estimate input tokens using the shared context estimator so inline base64
+ * screenshots count as vision tiles (~1.6K tokens) rather than raw base64 text,
+ * and request scaffolding + provider calibration are honored when available.
+ */
+export function estimateTurnRoutingTokens(session: TurnRoutingSession, model: string, text: string): number {
+  const normalizedMessages = [
+    ...session.messages.map(asContextMessage),
+    ...(text ? [{ role: 'user', content: text }] : []),
+  ]
+  const rawEstimate = estimateContextTokens(normalizedMessages, {
+    model,
+    ...(session.requestScaffold?.systemPrompt ? { systemPrompt: session.requestScaffold.systemPrompt } : {}),
+    ...(session.requestScaffold?.toolSchemas?.length ? { toolSchemas: session.requestScaffold.toolSchemas } : {}),
+  })
+  return Math.ceil(rawEstimate * contextCalibrationRatio(session.metadata, model))
 }
 
 /**
@@ -87,7 +112,7 @@ function estimateTokens(session: TurnRoutingSession, text: string): number {
 export function createTurnRouter<S extends TurnRoutingSession>(
   options: TurnRouterOptions<S>,
 ): (session: S, model: string, text: string) => TurnRoute | undefined {
-  return (session, _model, text) => {
+  return (session, model, text) => {
     const routing = parseRoutingConfig(options.runtime(), options.env ?? process.env)
     if (routing.mode === 'off') return undefined
     const router = new PolicyRouter({
@@ -100,13 +125,15 @@ export function createTurnRouter<S extends TurnRoutingSession>(
       },
     })
     const kind = turnKind(text)
+    const estimatedOutput = options.estimatedOutputTokens?.(session, model)
     const request: TaskRequirements = {
       kind,
       touchesPrivate: options.touchesPrivate?.(session) ?? false,
-      estimatedInputTokens: estimateTokens(session, text),
+      estimatedInputTokens: estimateTurnRoutingTokens(session, model, text),
+      ...(estimatedOutput === undefined ? {} : { estimatedOutputTokens: estimatedOutput }),
       needsTools: true,
     }
-    const decision = router.decide(request)
+    const decision = router.decide(request, options.budgetForSession?.(session))
     if (!decision.ok) return { ok: false, reason: renderRouteDecision(decision) }
     const profile = options.profiles.get(decision.route.profile)
     if (!profile) return { ok: false, reason: `route ${decision.route.id} names provider profile "${decision.route.profile}", which does not exist` }

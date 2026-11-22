@@ -38,7 +38,7 @@
 :root[data-style='neo']:not(#neo) .atelier *,
 :root[data-style='neo']:not(#neo) .runtime-popover{border-radius:0}
 /* Indicators that are round by meaning, not by decoration. */
-:root[data-style='neo']:not(#neo) .atelier :is(.agent-orb,.agent-orb canvas,.dot,.sess__dot,.railstatus__dot,.railrow__dot,.command-activity__dot,.offline__dot,.runtime-status__dot,.relaybadge__dot,.approval__dot,.wgroup__mark,.resumerow__dot,.welcome__sep,.usage-plan__dot,.studio-spinner,.acard__spin,.todo__icon,.railtodos__mark){border-radius:50%}
+:root[data-style='neo']:not(#neo) .atelier :is(.agent-orb,.agent-orb canvas,.dot,.sess__dot,.railstatus__dot,.railrow__dot,.command-activity__dot,.offline__dot,.runtime-status__dot,.relaybadge__dot,.approval__dot,.wgroup__mark,.resumerow__dot,.welcome__sep,.usage-plan__dot,.studio-spinner,.acard__spin,.todo__icon,.railtodos__mark,.swarm-board__dot,.swarm-member__dot,.sections-menu__dot){border-radius:50%}
 :root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.palette-card,.composer-dock,.seg button,.btn,.chipbtn,.cchip,.provcard,.pcard,.activity-group){box-shadow:none}
 :root[data-style='neo']:not(#neo) ::-webkit-scrollbar-thumb{border-radius:0;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 14%,transparent)}
 :root[data-style='neo']:not(#neo) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:1px solid var(--x-accent);outline-offset:1px;border-radius:0}
@@ -104,8 +104,13 @@
    the controls inside the prompt. */
 :root[data-style='neo']:not(#neo) .atelier .composer::before{content:'❯';font:700 14px/1.45 var(--mono);color:var(--x-accent)}
 /* The composer is a grid (layout.css) and .composer is display:contents, so the
-   prompt glyph is its own grid item: pin it over the input's first line. */
-:root[data-style='neo']:not(#neo) .atelier .composer-wrap>.composer-dock>.composer::before{grid-column:1;grid-row:5;align-self:start;justify-self:start;padding:12px 0 0 16px;pointer-events:none;z-index:1}
+   prompt glyph is its own grid item: sit right after the + attach button (left:8px, 28px wide). */
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock)>.composer-dock>.composer::before{grid-column:1;grid-row:5;align-self:start;justify-self:start;padding:11px 0 0 38px;pointer-events:none;z-index:1}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap:not(.agent-dock) .composer__input{padding-left:54px}
+/* XERXES Supervisor has no leading + attach button, so its ❯ glyph aligns at the input's left inset. */
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock>.composer-dock>.composer::before{padding-left:14px}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock .composer__input{padding-left:32px}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock>.composer__toolbar{justify-content:flex-start}
 /* The subagent box is a flex row: the glyph sits on the input's first line, not below it. */
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock>.composer::before{flex:none;align-self:flex-start;padding:5px 0}
 /* The subagent box keeps its dock (display:block there): frame it directly. */
@@ -137,8 +142,4 @@
 :root[data-style='neo']:not(#neo) .atelier .welcome{background-image:linear-gradient(var(--neo-grid) 1px,transparent 1px),linear-gradient(90deg,var(--neo-grid) 1px,transparent 1px);background-size:32px 32px;background-position:center center}
 :root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark,
 :root[data-style='neo']:not(#neo) .atelier .sidebar-wordmark{font-family:var(--mono);font-weight:800;letter-spacing:-.06em;line-height:.94}
-:root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark::after{content:'_';color:var(--x-accent);animation:neo-blink 1.1s steps(1) infinite}
-@media (prefers-reduced-motion:reduce){
-  :root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark::after{animation:none}
-}
-@keyframes neo-blink{0%,100%{opacity:1}50%{opacity:0}}
+:root[data-style='neo']:not(#neo) .atelier .welcome h1.welcome__wordmark::after{content:'_';color:var(--x-accent)}

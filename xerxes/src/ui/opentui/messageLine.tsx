@@ -30,6 +30,7 @@ import { reconcileSpawnRoster, spawnRosterFromLine, workflowRunFromLine } from '
 import { subagentCardAccent, subagentCardModel } from '../lib/subagentCards.js'
 import { fmtDuration, subagentElapsedSeconds } from '../lib/subagentElapsed.js'
 import { groupToolRun, toolRunSpawnRoster, type ToolRunGroup } from '../lib/toolRun.js'
+import { formatSwarmMarkdownHint, SWARM_BOARD_TUI_HINT } from '../lib/swarmFormat.js'
 import { estimateTokensRough, fmtK, parseToolTrailResultLine, toolTrailParts } from '../lib/text.js'
 import { splitStreamingRender, STREAMING_CHUNKS_EMPTY, type StreamingChunks } from '../lib/streamingMarkdown.js'
 import type { Theme } from '../theme.js'
@@ -61,15 +62,39 @@ const TABLE_OPTIONS = {
 }
 
 function Markdown({ content, t }: { content: string; t: Theme }) {
+  const { content: cleanContent, hasSwarmBoardLink } = formatSwarmMarkdownHint(content)
+
+  if (!hasSwarmBoardLink) {
+    return (
+      <markdown
+        conceal
+        content={content}
+        flexShrink={0}
+        selectable
+        syntaxStyle={getSyntaxStyle(t)}
+        tableOptions={{ ...TABLE_OPTIONS, borderColor: t.color.border }}
+      />
+    )
+  }
+
   return (
-    <markdown
-      conceal
-      content={content}
-      flexShrink={0}
-      selectable
-      syntaxStyle={getSyntaxStyle(t)}
-      tableOptions={{ ...TABLE_OPTIONS, borderColor: t.color.border }}
-    />
+    <Box flexDirection="column" flexShrink={0}>
+      {cleanContent ? (
+        <markdown
+          conceal
+          content={cleanContent}
+          flexShrink={0}
+          selectable
+          syntaxStyle={getSyntaxStyle(t)}
+          tableOptions={{ ...TABLE_OPTIONS, borderColor: t.color.border }}
+        />
+      ) : null}
+      <Box flexShrink={0} marginTop={cleanContent ? 1 : 0} onClick={() => patchOverlayState({ swarm: true })}>
+        <Text color={t.color.accent} wrap="truncate-end">
+          {`✦ ${SWARM_BOARD_TUI_HINT}`}
+        </Text>
+      </Box>
+    </Box>
   )
 }
 

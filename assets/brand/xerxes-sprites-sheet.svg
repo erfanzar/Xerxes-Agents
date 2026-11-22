@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280" width="760" height="280" role="img" aria-label="Xerxes Role Icons Sheet">
+  <rect x="1" y="1" width="758" height="278" rx="14" fill="#101010" stroke="#262626" stroke-width="1" />
+  <text x="20" y="24"><tspan fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">Xerxes Role Icons</tspan><tspan dx="10" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">· 24×24 · 1.5px stroke · 5 roles × 3 states</tspan></text>
+  <line x1="1" y1="36" x2="759" y2="36" stroke="#262626" stroke-width="1" />
+
+  <g>
+    <text x="176" y="53" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="600">Coordinator</text>
+    <text x="176" y="66" text-anchor="middle" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5">Hub network</text>
+    <text x="298" y="53" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="600">Worker</text>
+    <text x="298" y="66" text-anchor="middle" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5">Terminal</text>
+    <text x="420" y="53" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="600">Verifier</text>
+    <text x="420" y="66" text-anchor="middle" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5">Circle check</text>
+    <text x="542" y="53" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="600">Narrator</text>
+    <text x="542" y="66" text-anchor="middle" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5">Summary</text>
+    <text x="664" y="53" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="600">Monitor</text>
+    <text x="664" y="66" text-anchor="middle" fill="#737373" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5">Activity</text>
+  </g>
+
+  <g>
+    <circle cx="28" cy="104" r="3" fill="#ededed" />
+    <text x="40" y="108" fill="#a3a3a3" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="500">Active</text>
+    <rect x="126" y="78" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(165.0,93.0) scale(0.9167)" fill="none" stroke="#ededed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.00"><circle cx="12" cy="5.5" r="2.5" /><circle cx="6" cy="18.5" r="2.5" /><circle cx="18" cy="18.5" r="2.5" /><path d="M 12 8 V 12" /><path d="M 6 16 V 13.5 C 6 12.67 6.67 12 7.5 12 H 16.5 C 17.33 12 18 12.67 18 13.5 V 16" /></g>
+    <rect x="248" y="78" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(287.0,93.0) scale(0.9167)" fill="none" stroke="#ededed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.00"><path d="M 4.5 7 L 10.5 12 L 4.5 17" /><path d="M 12.5 17 H 19.5" /></g>
+    <rect x="370" y="78" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(409.0,93.0) scale(0.9167)" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.00"><circle cx="12" cy="12" r="8.5" /><path d="M 8.5 12.2 L 10.8 14.5 L 15.8 9.5" /></g>
+    <rect x="492" y="78" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(531.0,93.0) scale(0.9167)" fill="none" stroke="#ededed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.00"><path d="M 4.5 7 H 19.5" /><path d="M 4.5 12 H 16.5" /><path d="M 4.5 17 H 12.5" /></g>
+    <rect x="614" y="78" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(653.0,93.0) scale(0.9167)" fill="none" stroke="#ededed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.00"><path d="M 3 12 H 7 L 9.5 6 L 14.5 18 L 17 12 H 21" /></g>
+    <circle cx="28" cy="168" r="3" fill="#737373" />
+    <text x="40" y="172" fill="#a3a3a3" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="500">Waiting</text>
+    <rect x="126" y="142" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(165.0,157.0) scale(0.9167)" fill="none" stroke="#ededed" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.86"><circle cx="12" cy="5.5" r="2.5" /><circle cx="6" cy="18.5" r="2.5" /><circle cx="18" cy="18.5" r="2.5" /><path d="M 12 8 V 12" /><path d="M 6 16 V 13.5 C 6 12.67 6.67 12 7.5 12 H 16.5 C 17.33 12 18 12.67 18 13.5 V 16" /></g>
+    <rect x="248" y="142" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(287.0,157.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"><path d="M 4.5 7 L 10.5 12 L 4.5 17" /><path d="M 12.5 17 H 19.5" /></g>
+    <rect x="370" y="142" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(409.0,157.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"><circle cx="12" cy="12" r="8.5" /><path d="M 8.5 12.2 L 10.8 14.5 L 15.8 9.5" /></g>
+    <rect x="492" y="142" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(531.0,157.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"><path d="M 4.5 7 H 19.5" /><path d="M 4.5 12 H 16.5" /><path d="M 4.5 17 H 12.5" /></g>
+    <rect x="614" y="142" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(653.0,157.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"><path d="M 3 12 H 7 L 9.5 6 L 14.5 18 L 17 12 H 21" /></g>
+    <circle cx="28" cy="232" r="3" fill="#3fb950" />
+    <text x="40" y="236" fill="#a3a3a3" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="500">Completed</text>
+    <rect x="126" y="206" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(165.0,221.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"><circle cx="12" cy="5.5" r="2.5" /><circle cx="6" cy="18.5" r="2.5" /><circle cx="18" cy="18.5" r="2.5" /><path d="M 12 8 V 12" /><path d="M 6 16 V 13.5 C 6 12.67 6.67 12 7.5 12 H 16.5 C 17.33 12 18 12.67 18 13.5 V 16" /></g>
+    <rect x="248" y="206" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(287.0,221.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"><path d="M 4.5 7 L 10.5 12 L 4.5 17" /><path d="M 12.5 17 H 19.5" /></g>
+    <rect x="370" y="206" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(409.0,221.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"><circle cx="12" cy="12" r="8.5" /><path d="M 8.5 12.2 L 10.8 14.5 L 15.8 9.5" /></g>
+    <rect x="492" y="206" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(531.0,221.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"><path d="M 4.5 7 H 19.5" /><path d="M 4.5 12 H 16.5" /><path d="M 4.5 17 H 12.5" /></g>
+    <rect x="614" y="206" width="100" height="52" rx="10" fill="#141414" stroke="#262626" stroke-width="1" />
+    <g transform="translate(653.0,221.0) scale(0.9167)" fill="none" stroke="#737373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"><path d="M 3 12 H 7 L 9.5 6 L 14.5 18 L 17 12 H 21" /></g>
+  </g>
+</svg>

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { AgentDefinition } from './definitions.js'
+import { toolListAdmits, toolPatternMatches } from './toolPatterns.js'
 import { captureModelCallScopes, serializeModelCallScopes, withCapturedModelCallScopes, type ModelCallBinding, type ModelCallScope } from '../llms/callBudget.js'
 import { WorktreeSetupError } from './worktreeOptions.js'
 import { ValidationError } from '../core/errors.js'
@@ -1010,12 +1011,17 @@ export class SubAgentManager {
    */
   async retry(taskIdOrName: string, input = '', reconfigure?: SubagentRetryConfiguration): Promise<SubAgentTask | undefined> {
     let task = this.resolveTask(taskIdOrName)
-    if (task === undefined) task = this.rebuildArchivedTask(taskIdOrName)
-    if (task === undefined) return undefined
-    if (this.setups.has(task.id) || !TERMINAL_STATUSES.has(task.status)) {
+    if (task !== undefined && (this.setups.has(task.id) || !TERMINAL_STATUSES.has(task.status))) {
       if (reconfigure) throw new ValidationError('selection', 'cannot reconfigure a running agent; wait for it to finish or stop it first', task.id)
       return task
     }
+    if (task === undefined && this.resolveArchivedTask(taskIdOrName) === undefined) return undefined
+    const liveTasks = [...this.tasks.values()].filter(
+      candidate => !TERMINAL_STATUSES.has(candidate.status) || this.setups.has(candidate.id),
+    ).length
+    if (liveTasks >= this.maxSpawnedAgents) throw new SpawnBudgetExhaustedError(this.maxSpawnedAgents)
+    if (task === undefined) task = this.rebuildArchivedTask(taskIdOrName)
+    if (task === undefined) return undefined
     const runtime = this.runtimes.get(task.id)
     // Tasks rejected before runtime registration (for example by the depth
     // ceiling) have nothing coherent to resume. Setup failures retain runtime.
@@ -1024,6 +1030,9 @@ export class SubAgentManager {
     const previousResult = task.result
     const previousStatus = task.status
     const previousConfig = runtime.config
+    const previousWorktree = runtime.worktree
+    const previousWorktreePath = task.worktreePath
+    const previousWorktreeBranch = task.worktreeBranch
     const previousSelection = { model: task.model, providerProfile: task.providerProfile, reasoningEffort: task.reasoningEffort, providerRoute: task.providerRoute }
     // Transition synchronously so a concurrent retry observes a non-terminal
     // status and joins this attempt instead of starting a duplicate.
@@ -1041,6 +1050,7 @@ export class SubAgentManager {
     const controller = new AbortController()
     this.setups.set(task.id, setup.promise)
     this.setupControllers.set(task.id, controller)
+    let allocatedRetryWorktree = false
     try {
       // A cancelled attempt may still be settling its runner turn; two turns
       // of one identity must never write the same conversation concurrently.
@@ -1062,7 +1072,10 @@ export class SubAgentManager {
         task.reasoningEffort = reconfigure.reasoningEffort
         task.providerRoute = reconfigure.providerRoute
       }
-      if (runtime.isolation === 'worktree') await this.recreateRetryWorktree(task, runtime, controller.signal)
+      if (runtime.isolation === 'worktree') {
+        await this.recreateRetryWorktree(task, runtime, controller.signal)
+        allocatedRetryWorktree = true
+      }
       controller.signal.throwIfAborted()
       const handle = this.handleManager.listHandles().find(candidate => candidate.id === task.id)
       if (handle === undefined) {
@@ -1101,6 +1114,13 @@ export class SubAgentManager {
         task.worktreeBranch = error.worktree.branch
         await this.fail(task, errorMessage(error))
         throw error
+      }
+      if (allocatedRetryWorktree) {
+        await this.cleanupWorktree(task)
+        runtime.worktree = previousWorktree
+        runtime.cleanup = undefined
+        task.worktreePath = previousWorktreePath
+        task.worktreeBranch = previousWorktreeBranch
       }
       task.status = previousStatus
       task.error = previousError
@@ -1877,38 +1897,35 @@ export function filterSubagentTools<T extends Record<string, unknown>>(
   const config = options.config ?? {}
   const whitelist = stringList(config._toolsWhitelist)
   const allowedTools = stringList(config._toolsAllowed)
-  const excluded = new Set(stringList(config._toolsExcluded))
+  const excluded = stringList(config._toolsExcluded)
   const delegationBlocked = options.isSubagent && config._allowSubagentDelegation !== true
   const denied = (toolName: string): string => `Error: tool '${toolName}' is not allowed for this agent.`
+  const admits = (toolName: string): boolean => {
+    if (!toolName || toolName === '\0') return false
+    if (delegationBlocked && SUBAGENT_BLOCKED_TOOLS.has(toolName)) return false
+    if (whitelist.length && !toolListAdmits(whitelist, toolName)) return false
+    if (allowedTools.length && !toolListAdmits(allowedTools, toolName)) return false
+    if (excluded.length && toolListAdmits(excluded, toolName)) return false
+    return true
+  }
   if (options.toolSchemas === undefined) {
     // Without schemas the full allow-set is unknown, so fail closed: enforce every
     // configured restriction and the recursive-delegation guard on the executor.
     const execute = options.toolExecutor === undefined
       ? undefined
       : (toolName: string, inputs: Readonly<Record<string, unknown>>) => {
-        if (delegationBlocked && SUBAGENT_BLOCKED_TOOLS.has(toolName)) return denied(toolName)
-        if (whitelist.length && !whitelist.includes(toolName)) return denied(toolName)
-        if (allowedTools.length && !allowedTools.includes(toolName)) return denied(toolName)
-        if (excluded.has(toolName)) return denied(toolName)
+        if (!admits(toolName)) return denied(toolName)
         return options.toolExecutor!(toolName, inputs)
       }
     return Object.freeze({ toolSchemas: Object.freeze([]), execute })
   }
   const schemas = options.toolSchemas
-  const allNames = new Set(schemas.flatMap(schema => typeof schema.name === 'string' && schema.name ? [schema.name] : []))
-  const allowed = new Set(whitelist.length ? whitelist : allNames)
-  if (allowedTools.length) {
-    for (const name of [...allowed]) if (!allowedTools.includes(name)) allowed.delete(name)
-  }
-  for (const name of excluded) allowed.delete(name)
-  if (delegationBlocked) {
-    for (const name of SUBAGENT_BLOCKED_TOOLS) allowed.delete(name)
-  }
-  const toolSchemas = Object.freeze(schemas.filter(schema => typeof schema.name === 'string' && allowed.has(schema.name)))
+  const schemaNames = new Set(schemas.flatMap(schema => typeof schema.name === 'string' && schema.name ? [schema.name] : []))
+  const toolSchemas = Object.freeze(schemas.filter(schema => typeof schema.name === 'string' && admits(schema.name)))
   const execute = options.toolExecutor === undefined
     ? undefined
     : (toolName: string, inputs: Readonly<Record<string, unknown>>) => {
-      if (!allowed.has(toolName)) return denied(toolName)
+      if (!schemaNames.has(toolName) || !admits(toolName)) return denied(toolName)
       return options.toolExecutor!(toolName, inputs)
     }
   return Object.freeze({ toolSchemas, execute })
@@ -1963,8 +1980,27 @@ function effectiveConfig(
 function intersectToolLists(caller: readonly string[], definition: readonly string[] | null): string[] | undefined {
   if (definition === null) return caller.length ? [...caller] : undefined
   if (!caller.length) return definition.length ? [...definition] : ['\0']
-  const intersection = caller.filter(name => definition.includes(name))
-  return intersection.length ? intersection : ['\0']
+  const intersection = new Set<string>()
+  for (const left of caller) {
+    for (const right of definition) {
+      const narrower = intersectToolPattern(left, right)
+      if (narrower !== undefined) intersection.add(narrower)
+    }
+  }
+  return intersection.size ? [...intersection] : ['\0']
+}
+
+function intersectToolPattern(left: string, right: string): string | undefined {
+  const leftWildcard = left.length > 1 && left.endsWith('*')
+  const rightWildcard = right.length > 1 && right.endsWith('*')
+  if (!leftWildcard && !rightWildcard) return left === right ? left : undefined
+  if (!leftWildcard) return toolPatternMatches(right, left) ? left : undefined
+  if (!rightWildcard) return toolPatternMatches(left, right) ? right : undefined
+  const leftPrefix = left.slice(0, -1)
+  const rightPrefix = right.slice(0, -1)
+  if (leftPrefix.startsWith(rightPrefix)) return left
+  if (rightPrefix.startsWith(leftPrefix)) return right
+  return undefined
 }
 
 function titleFromPrompt(prompt: string, name?: string): string {
@@ -1988,11 +2024,11 @@ function freezeLabels(values: readonly string[] | undefined): readonly string[] 
 function configuredToolsets(config: Readonly<Record<string, unknown>>): readonly string[] {
   const whitelist = stringList(config._toolsWhitelist)
   const explicitlyAllowed = stringList(config._toolsAllowed)
-  const excluded = new Set(stringList(config._toolsExcluded))
+  const excluded = stringList(config._toolsExcluded)
   const constrained = whitelist.length
-    ? whitelist.filter(name => !explicitlyAllowed.length || explicitlyAllowed.includes(name))
+    ? (explicitlyAllowed.length ? (intersectToolLists(whitelist, explicitlyAllowed) ?? []) : whitelist)
     : explicitlyAllowed
-  return freezeLabels(constrained.filter(name => !excluded.has(name)))
+  return freezeLabels(constrained.filter(name => name !== '\0' && !toolListAdmits(excluded, name)))
 }
 
 function runtimePolicyRules(config: Readonly<Record<string, unknown>>, isolation: string): readonly string[] {

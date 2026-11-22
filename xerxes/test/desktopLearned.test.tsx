@@ -8,7 +8,7 @@ import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
 import { isGroupedActivity } from '../src/desktop/renderer/activityGroups.js'
 import { Store, type XerxesLike } from '../src/desktop/renderer/store.js'
 import type { DaemonEvent } from '../src/desktop/renderer/types.js'
-import { LearnedBadge, LearnedLessons, LearnedPanel, LearningReviewControls, ProposalCard, LessonCard, ReflectionCard } from '../src/desktop/renderer/LearnedPanel.js'
+import { LearnedBadge, LearnedLessons, LearnedPanel, LearningReviewControls, LearningReviewControlsView, ProposalCard, LessonCard, ReflectionCard } from '../src/desktop/renderer/LearnedPanel.js'
 import { readLearningList, reflectionNotice } from '../src/desktop/renderer/learning.js'
 import { createBridge } from '../src/desktop/bridgeApi.js'
 import type { StoredReflectionProposal } from '../src/runtime/reflection.js'
@@ -152,19 +152,44 @@ test('the actual Review and Approve button callbacks open the target and send on
   review.props.onClick!()
   expect(store.getSnapshot().learningOpen).toBe(true)
   expect(store.getSnapshot().learningProposalId).toBe('p1')
-  const controls = LearningReviewControls({ target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store })
+  // Default inline ReflectionCard keeps Review · Approve · Reject compact with no permanent reject input box.
+  const compactHtml = renderToStaticMarkup(createElement(ReflectionCard, { reflection, snap: store.getSnapshot(), actions: store }))
+  expect(compactHtml).toContain('>Review</button>')
+  expect(compactHtml).toContain('>Approve</button>')
+  expect(compactHtml).toContain('>Reject</button>')
+  expect(compactHtml).not.toContain('name="reason"')
+  const controls = LearningReviewControlsView({ target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store, reasonOpen: false, onOpenReason: () => {}, onCancelReason: () => {} })
   const approve = elements(controls).find(element => element.type === 'button' && element.props.children === 'Approve')!
   approve.props.onClick!(); approve.props.onClick!(); await Bun.sleep(0)
   expect(bridge.calls.filter(call => call.method === 'learning.review')).toHaveLength(1)
   expect(store.getSnapshot().learningResults?.['proposal:p1']?.report).toContain('Applied')
 })
 
-test('the Reject form requires a reason and its submit callback sends that reason directly', async () => {
+test('the Reject form discloses on demand, requires a reason, and sends that reason directly', async () => {
   const { store, bridge } = await setup()
-  const controls = LearningReviewControls({ target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store })
-  const input = elements(controls).find(element => element.type === 'input')!
+  let opened = false
+  let cancelled = false
+  const collapsed = LearningReviewControlsView({ target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store, reasonOpen: false, onOpenReason: () => { opened = true }, onCancelReason: () => {} })
+  expect(elements(collapsed).find(element => element.type === 'input')).toBeUndefined()
+  const rejectTrigger = elements(collapsed).find(element => element.type === 'button' && element.props.children === 'Reject')!
+  rejectTrigger.props.onClick!()
+  expect(opened).toBe(true)
+
+  const disclosed = LearningReviewControlsView({ target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store, reasonOpen: true, onOpenReason: () => {}, onCancelReason: () => { cancelled = true } })
+  const input = elements(disclosed).find(element => element.type === 'input')!
   expect(input.props.required).toBe(true)
-  const form = elements(controls).find(element => element.type === 'form')!
+  const confirmBtn = elements(disclosed).find(element => element.type === 'button' && element.props.children === 'Confirm reject')!
+  expect(confirmBtn).toBeDefined()
+  const cancelBtn = elements(disclosed).find(element => element.type === 'button' && element.props.children === 'Cancel')!
+  cancelBtn.props.onClick!()
+  expect(cancelled).toBe(true)
+
+  const disclosedHtml = renderToStaticMarkup(createElement(LearningReviewControls, { target: 'proposal', id: 'p1', snap: store.getSnapshot(), actions: store, initialReasonOpen: true }))
+  expect(disclosedHtml).toContain('name="reason"')
+  expect(disclosedHtml).toContain('Confirm reject')
+  expect(disclosedHtml).toContain('Cancel')
+
+  const form = elements(disclosed).find(element => element.type === 'form')!
   let prevented = false
   const submit = (value: string) => form.props.onSubmit!({ preventDefault: () => { prevented = true }, currentTarget: { elements: { namedItem: () => ({ value }) } } } as unknown as FormEvent<HTMLFormElement>)
   submit(' '); expect(bridge.calls.filter(call => call.method === 'learning.review')).toHaveLength(0)
@@ -179,8 +204,10 @@ test('badge markup shows pending sum; all review buttons are disabled while refr
   const html = renderToStaticMarkup(createElement(LearnedBadge, { snap: store.getSnapshot() }))
   expect(html).toContain('7 pending learned items'); expect(html).toContain('>7<')
   for (const update of [{ learningLoading: true }, { learningReviewBusy: true }, { connection: 'offline' as const }]) {
-    const controls = LearningReviewControls({ target: 'proposal', id: 'p1', snap: { ...store.getSnapshot(), ...update }, actions: store })
-    expect(elements(controls).filter(element => element.type === 'button').every(button => button.props.disabled)).toBe(true)
+    for (const reasonOpen of [false, true]) {
+      const controls = LearningReviewControlsView({ target: 'proposal', id: 'p1', snap: { ...store.getSnapshot(), ...update }, actions: store, reasonOpen, onOpenReason: () => {}, onCancelReason: () => {} })
+      expect(elements(controls).filter(element => element.type === 'button').every(button => button.props.disabled)).toBe(true)
+    }
   }
 })
 

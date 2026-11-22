@@ -28,22 +28,22 @@ test('Vibes sidebar shows Claude Code rows (XERXES lives in the XERXES | Code sw
   expect(menu).not.toContain('<span>XERXES</span>')
 })
 
-test('Vibes and Neo share the Claude sidebar; only an unstyled page (VS Code high contrast) keeps the old rows', () => {
+test('Vibes and Neo share the T3 Code Sidebar V2; only an unstyled page (VS Code high contrast) keeps the classic rows', () => {
   const snap = new Store().getSnapshot()
   for (const style of ['vibes', 'neo']) {
     stamp(style)
-    const claude = renderToStaticMarkup(createElement(Sidebar, { snap, page: null }))
-    expect(claude).toContain('vibes-nav')
-    expect(claude).toContain('vibes-foot__settings')
-    expect(claude).toContain('vibes-mode')
-    expect(claude).not.toContain('sidebar-wordmark')
-    expect(claude).not.toContain('Search message history')
+    const t3 = renderToStaticMarkup(createElement(Sidebar, { snap, page: null }))
+    expect(t3).toContain('data-app-sidebar="true"')
+    expect(t3).toContain('t3-side__toolbar')
+    expect(t3).toContain('vibes-foot__settings')
+    expect(t3).toContain('t3-wordmark')
+    expect(t3).not.toContain('sidebar-wordmark')
   }
 
   for (const style of [null]) {
     stamp(style)
     const classic = renderToStaticMarkup(createElement(Sidebar, { snap, page: null }))
-    expect(classic).not.toContain('vibes-nav')
+    expect(classic).not.toContain('t3-side__toolbar')
     expect(classic).not.toContain('vibes-foot')
     expect(classic).toContain('sidebar-wordmark')
     expect(classic).toContain('Skills &amp; tools')

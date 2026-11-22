@@ -21,6 +21,7 @@ import { inspectWorkspaceHooks, type WorkspaceHookInspection } from "../extensio
 import { disarmGoal } from "../runtime/goalDomain.js";
 import { GOAL_WAKE_KEY, readGoalWake } from "../runtime/goalWake.js";
 import { normalizeInteractionMode } from "../runtime/interactionModes.js";
+import { triggerSoftGc } from "../runtime/memoryGuard.js";
 import {
   appendContextDelta,
   contextDeltaFor,
@@ -44,6 +45,7 @@ import { processAtMentions } from "./atMentions.js";
 import { imageUrlContentParts, type TurnImage } from "./images.js";
 import { DEFAULT_PERMISSION_MODE } from "../streaming/permissions.js";
 import { steerMessage, steerText, type SteerAuthor, type SteerInput } from "../streaming/steer.js";
+import type { LlmClient } from "../llms/client.js";
 import type { XerxesActor } from "../types/messages.js";
 import { applyInteractionRecords, authorSummary } from "./collaboration.js";
 import { resolveProjectDirectory, xerxesHome } from "./paths.js";
@@ -61,6 +63,8 @@ export const BUN_DAEMON_BUILD_ID =
   process.env.XERXES_DAEMON_BUILD_ID?.trim() || `bun-runtime-v${XERXES_VERSION}`;
 /** Maximum hints retained between active-turn provider/tool boundaries. */
 export const MAX_ACTIVE_TURN_STEERS = 64;
+/** Default cap on simultaneously retained idle sessions in daemon RAM. */
+export const DEFAULT_MAX_LOADED_SESSIONS = 12;
 
 export interface DaemonEvent {
   readonly payload: JsonRpcPayload;
@@ -245,8 +249,15 @@ export interface RuntimeToolInventoryEntry {
   readonly reason: string;
 }
 
+export interface RuntimeSwarmHooks {
+  readonly ensureSession?: (session: DaemonSession) => Promise<void>;
+  readonly sessionAdapter: (session: DaemonSession) => unknown;
+}
+
 export interface TurnRunner {
   toolInventory?(session: DaemonSession): readonly RuntimeToolInventoryEntry[];
+  attachSwarmHooks?(hooks: RuntimeSwarmHooks): void;
+  defaultLlmClient?(): LlmClient | undefined;
   /**
    * The running turn's messages so far, in session form — a superset of
    * `session.messages`, which only catches up when the turn ends. A client
@@ -490,7 +501,16 @@ export interface DaemonRuntime {
     enabled: boolean,
   ): Promise<DaemonSession | undefined>;
   sessionStatus(sessionKey: string): DaemonSession | undefined;
+  /** O(1) lookup of a currently loaded session by its persisted id. */
+  sessionById?(sessionId: string): DaemonSession | undefined;
+  /** Persist and dehydrate idle, unpinned loaded sessions past the RAM cap. */
+  evictIdleSessions?(options?: {
+    readonly maxLoaded?: number;
+    readonly isPinned?: (session: DaemonSession) => boolean;
+  }): Promise<readonly string[]>;
   toolInventory?(sessionKey: string): readonly RuntimeToolInventoryEntry[] | undefined;
+  attachSwarmHooks?(hooks: RuntimeSwarmHooks): void;
+  defaultLlmClient?(): LlmClient | undefined;
   inspectHooks?(sessionKey: string): WorkspaceHookInspection | undefined;
   /** Release host-owned resources such as native delegated-agent managers. */
   shutdown?(): Promise<void>;
@@ -537,6 +557,10 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly interactions?: DaemonInteractionBoard;
   /** Live daemon settings used for status, reload, and runner reconstruction. */
   readonly runtimeSettings?: JsonRpcPayload;
+  /** Maximum idle loaded sessions retained in RAM before LRU eviction back to disk (0 disables). */
+  readonly maxLoadedSessions?: number;
+  /** Host predicate returning true when a loaded session must never be LRU-evicted. */
+  readonly isSessionPinned?: (session: DaemonSession) => boolean;
   readonly sessionDirectory?: string;
   /** Cancel resources owned exclusively by a session before it is evicted. */
   readonly onSessionEvict?: (sessionId: string) => unknown;
@@ -612,6 +636,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly options: InMemoryDaemonRuntimeOptions;
   private readonly runtimeSettings: JsonRpcPayload;
   private readonly sessions = new Map<string, DaemonSession>();
+  private readonly sessionsById = new Map<string, DaemonSession>();
+  private readonly sessionLastTouched = new Map<string, number>();
+  private touchCounter = 0;
+  private readonly maxLoadedSessions: number;
+  private idleSessionPinCheck: ((session: DaemonSession) => boolean) | undefined;
+  private idleEvictionInFlight: Promise<string[]> | undefined;
   private readonly exclusiveSessionWrites = new Set<string>();
   private readonly sessionWrites = new WeakMap<DaemonSession, Promise<unknown>>();
   /** Coalesces async transcript loads so one key cannot initialize twice. */
@@ -636,6 +666,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly steerQueues = new Map<string, SteerInput[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
   private turnRunner: TurnRunner;
+  private swarmHooks: RuntimeSwarmHooks | undefined;
   private readonly workspaceRoot: string;
 
   constructor(
@@ -667,6 +698,25 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       turnRunner ??
       options.turnRunnerFactory?.(this.runtimeSettings) ??
       new EchoTurnRunner();
+    this.maxLoadedSessions =
+      typeof options.maxLoadedSessions === "number" && Number.isSafeInteger(options.maxLoadedSessions) && options.maxLoadedSessions >= 0
+        ? options.maxLoadedSessions
+        : DEFAULT_MAX_LOADED_SESSIONS;
+    this.idleSessionPinCheck = options.isSessionPinned;
+  }
+
+  /** Install or replace the host pin predicate used by idle-session LRU eviction. */
+  setIdleSessionPinCheck(check: ((session: DaemonSession) => boolean) | undefined): void {
+    this.idleSessionPinCheck = check;
+  }
+
+  attachSwarmHooks(hooks: RuntimeSwarmHooks): void {
+    this.swarmHooks = hooks;
+    this.turnRunner.attachSwarmHooks?.(hooks);
+  }
+
+  defaultLlmClient(): LlmClient | undefined {
+    return this.turnRunner.defaultLlmClient?.();
   }
 
   cancelAllTurns(): number {
@@ -803,6 +853,111 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
     this.sessions.delete(sessionKey);
+    this.sessionLastTouched.delete(sessionKey);
+    if (session && this.sessionsById.get(session.id) === session) {
+      this.sessionsById.delete(session.id);
+    }
+  }
+
+  /**
+   * Persist and release idle, unpinned loaded sessions beyond `maxLoaded` in
+   * least-recently-used order so large historical transcripts do not stay
+   * pinned in RAM after the user switches away.
+   */
+  async evictIdleSessions(options?: {
+    readonly maxLoaded?: number;
+    readonly isPinned?: (session: DaemonSession) => boolean;
+  }): Promise<string[]> {
+    const limit = options?.maxLoaded ?? this.maxLoadedSessions;
+    if (limit <= 0 || this.sessions.size <= limit) {
+      return [];
+    }
+    if (this.idleEvictionInFlight && options === undefined) {
+      return this.idleEvictionInFlight;
+    }
+    const pinCheck = options?.isPinned ?? this.idleSessionPinCheck;
+    const isProtected = (key: string, session: DaemonSession): boolean => {
+      if (session.activeTurnId || session.status !== "idle") return true;
+      if (this.abortControllers.has(key)) return true;
+      if (this.sessionOpenPromises.has(key)) return true;
+      if (this.exclusiveSessionWrites.has(session.id)) return true;
+      if (this.hasPendingSteer(key)) return true;
+      if ((this.options.runningSubagents?.(session.id) ?? 0) > 0) return true;
+      if (pinCheck?.(session) === true) return true;
+      return false;
+    };
+
+    const run = (async (): Promise<string[]> => {
+      const evictedIds: string[] = [];
+      let releasedLargeSession = false;
+      const candidates = [...this.sessions.entries()].sort((left, right) => {
+        const leftTouch = this.sessionLastTouched.get(left[0]) ?? 0;
+        const rightTouch = this.sessionLastTouched.get(right[0]) ?? 0;
+        return leftTouch - rightTouch;
+      });
+
+      for (const [key, session] of candidates) {
+        if (this.sessions.size <= limit) break;
+        if (this.sessions.get(key) !== session) continue;
+        if (isProtected(key, session)) continue;
+
+        const hasHistory = transcriptHasHistory({
+          messages: session.messages,
+          turnCount: session.turnCount,
+          metadata: session.metadata,
+        });
+        if (hasHistory) {
+          try {
+            await this.saveSession(session, "append");
+          } catch {
+            // Never drop a session whose durable save failed.
+            continue;
+          }
+        }
+        // Re-verify after the save await: a turn, steer, or client may have attached.
+        if (this.sessions.get(key) !== session || isProtected(key, session)) {
+          continue;
+        }
+        if (session.messages.length >= 20) {
+          releasedLargeSession = true;
+        }
+        this.turnRunner.dropSession?.(session.id);
+        const inFlightRunner = this.inFlightTurnRunners.get(session.id);
+        if (inFlightRunner && inFlightRunner !== this.turnRunner) {
+          inFlightRunner.dropSession?.(session.id);
+        }
+        this.pendingDefaultSessions.delete(key);
+        this.steerQueues.delete(key);
+        this.steerWakes.delete(key);
+        this.directSubagentClaims.get(key)?.();
+        this.directSubagentClaims.delete(key);
+        this.sessions.delete(key);
+        this.sessionLastTouched.delete(key);
+        if (this.sessionsById.get(session.id) === session) {
+          this.sessionsById.delete(session.id);
+        }
+        evictedIds.push(session.id);
+      }
+      if (releasedLargeSession) {
+        triggerSoftGc();
+      }
+      return evictedIds;
+    })();
+
+    if (options === undefined) {
+      this.idleEvictionInFlight = run.finally(() => {
+        if (this.idleEvictionInFlight === run) {
+          this.idleEvictionInFlight = undefined;
+        }
+      });
+      return this.idleEvictionInFlight;
+    }
+    return run;
+  }
+
+  private touchSession(sessionKey: string): void {
+    this.touchCounter += 1;
+    this.sessionLastTouched.set(sessionKey, this.touchCounter);
   }
 
   private queueBackgroundOwnerCleanup(sessionId: string): void {
@@ -964,7 +1119,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     entry: DaemonTranscriptEntry,
     projectDirectory: string | undefined,
   ): Promise<SavedDaemonSession | undefined> {
-    const result = await this.transcriptStore.readHeader(entry.sessionId);
+    const result = await this.transcriptStore.readListingHeader(entry.sessionId, entry);
     const fastHeader =
       result.kind === "header" && result.header.turnCount > 0 ? result.header : undefined;
     if (fastHeader) {
@@ -1107,6 +1262,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         existing.modelPinned = true;
       }
       applySystemPromptAddendum(existing, options.systemPromptAddendum);
+      this.touchSession(key);
       return existing;
     }
 
@@ -1287,7 +1443,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         disarmGoal(session.id);
       }
       this.sessions.set(key, session);
+      this.sessionsById.set(session.id, session);
+      this.touchSession(key);
       if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
+      if (this.maxLoadedSessions > 0 && this.sessions.size > this.maxLoadedSessions) {
+        void this.evictIdleSessions().catch(() => undefined);
+      }
       // SessionStart hook (Claude Code parity): fired once per process for a
       // newly opened session, with `resumed` distinguishing a fresh session
       // from one reloaded from disk. Observer-only; failures are isolated by
@@ -1331,6 +1492,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       this.turnRunner =
         this.options.turnRunnerFactory(this.runtimeSettings) ??
         new EchoTurnRunner();
+      if (this.swarmHooks) {
+        this.turnRunner.attachSwarmHooks?.(this.swarmHooks);
+      }
     }
     for (const [key, session] of this.sessions.entries()) {
       // A session with a turn in flight captured its model at turn start; the
@@ -1550,8 +1714,15 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   sessionStatus(sessionKey: string): DaemonSession | undefined {
     const session = this.sessions.get(sessionKey);
-    if (session) this.options.refreshSubagents?.(session);
+    if (session) {
+      this.touchSession(sessionKey);
+      this.options.refreshSubagents?.(session);
+    }
     return session;
+  }
+
+  sessionById(sessionId: string): DaemonSession | undefined {
+    return this.sessionsById.get(sessionId);
   }
 
   lspSettings(): LspSettingsView | undefined { return this.options.lspSettings?.(); }
@@ -1797,6 +1968,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.cancelRequested = false;
     session.activeTurnId = newSessionId();
     session.lastActive = Date.now();
+    this.touchSession(sessionKey);
     const turnRunner = this.turnRunner;
     const runnerManagesState = turnRunner.managesSessionState === true;
     const assistantParts: string[] = [];

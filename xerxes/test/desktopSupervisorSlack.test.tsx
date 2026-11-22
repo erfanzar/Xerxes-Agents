@@ -8,7 +8,9 @@ import { HubRequestError } from '../src/client/hubConnection.js'
 import { initialHubState, type HubState } from '../src/client/hubStore.js'
 import { createSupervisorSlackClient, slackCreateAppUrl, slackUnavailable, SlackBrokerUnavailable, type SlackContact } from '../src/client/supervisorSlack.js'
 import { SupervisorView } from '../src/desktop/renderer/SupervisorPage.js'
-import { SlackAppSetup, SlackDirectMessage } from '../src/desktop/renderer/SupervisorSlack.js'
+import {
+  BrowserNotOpenedError, connectError, launchSlackSignIn, setupError, SlackAppSetup, SlackDirectMessage,
+} from '../src/desktop/renderer/SupervisorSlack.js'
 import type { HubSlackMethod } from '../src/hub/protocol.js'
 
 const contact = { team_id: 'T01TEST', user_id: 'U01PEER', display_name: 'Jordan', mode: 'draft' } satisfies SlackContact
@@ -189,13 +191,19 @@ test('status accepts only the Hub Slack callback as the manifest redirect', asyn
 })
 
 test('app setup is two in-app steps with a pre-filled user-scope manifest that points back at this Hub', () => {
-  const html = renderToStaticMarkup(<SlackAppSetup redirectUrl={redirect} disabled={false} openApp={() => {}} onSave={() => {}} />)
+  const html = renderToStaticMarkup(<SlackAppSetup redirectUrl={redirect} disabled={false} openApp={() => {}} openTokenPage={() => {}} onCreate={() => {}} onSave={() => {}} />)
+  expect(html).toContain('Set up automatically')
+  expect(html).toContain('Open Slack token page')
+  expect(html).toContain('Set it up by hand instead')
   expect(html).toContain('Create XERXES app in Slack')
   expect(html).toContain('Copy manifest')
   expect(html).toContain('Client ID')
   expect(html).toContain('type="password"')
-  expect(html).not.toContain('xoxp-')
-  expect(html.match(/<li>/g)).toHaveLength(2)
+  // The old paste-a-user-token field is gone; only the one-time configuration token is asked for.
+  expect(html).not.toContain('User OAuth Token')
+  expect(html).toContain('xoxe.xoxp-')
+  // Two automatic steps, plus two manual fallback steps inside the collapsed section.
+  expect(html.match(/<li>/g)).toHaveLength(4)
   const url = new URL(slackCreateAppUrl(redirect))
   expect(url.origin + url.pathname).toBe('https://api.slack.com/apps')
   const manifest = JSON.parse(url.searchParams.get('manifest_json') ?? '{}')
@@ -204,4 +212,36 @@ test('app setup is two in-app steps with a pre-filled user-scope manifest that p
   expect(manifest.oauth_config.scopes.bot).toBeUndefined()
   expect(manifest.features).toBeUndefined()
   expect(manifest.settings.socket_mode_enabled).toBe(false)
+})
+
+test('setupError avoids duplicate Try again copy while still adding retry guidance when absent', () => {
+  const alreadyActionable = 'Slack couldn’t create the XERXES app. Try again, or set it up by hand.'
+  expect(setupError(new HubRequestError('unavailable', alreadyActionable))).toBe(alreadyActionable)
+  expect(setupError(new HubRequestError('unavailable', 'Slack is temporarily unavailable.')))
+    .toBe('Slack is temporarily unavailable. Try again in a moment.')
+  expect(setupError(new HubRequestError('rate_limited', 'Slack rate limited the request.')))
+    .toBe('Slack rate limited the request. Try again in a moment.')
+})
+
+test('launchSlackSignIn and connectError keep Sign in with Slack retryable when browser launch fails', async () => {
+  const authorizeUrl = 'https://slack.com/oauth/v2/authorize?state=retryable-state'
+  const { client, calls } = fake({ 'supervisor.slack.connect': { authorize_url: authorizeUrl } })
+
+  await expect(launchSlackSignIn({ client, openOAuth: async () => false, current: () => true, now: () => 1_000 }))
+    .rejects.toBeInstanceOf(BrowserNotOpenedError)
+  await expect(launchSlackSignIn({ client, openOAuth: async () => { throw new Error('launcher error') }, current: () => true, now: () => 1_000 }))
+    .rejects.toBeInstanceOf(BrowserNotOpenedError)
+  expect(connectError(new BrowserNotOpenedError())).toBe('Could not open Slack in your browser. Click Sign in with Slack to try again.')
+  expect(connectError(new HubRequestError('conflict', 'Slack authorization is already pending. Finish it or wait for it to expire.')))
+    .toBe('Slack authorization is already pending. Finish it or wait for it to expire.')
+  expect(connectError(new HubRequestError('unavailable', 'Slack is temporarily unavailable.')))
+    .toBe('Managed Slack sign-in is currently unavailable.')
+
+  const opened = await launchSlackSignIn({ client, openOAuth: async url => url === authorizeUrl, current: () => true, now: () => 1_000 })
+  expect(opened).toEqual({
+    kind: 'opened',
+    until: 121_000,
+    note: 'Finish signing in to Slack in your browser, then return here to confirm your account.',
+  })
+  expect(calls).toHaveLength(3)
 })

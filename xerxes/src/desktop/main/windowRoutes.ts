@@ -1,6 +1,14 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+const RENDERER_METHOD_PATTERN = /^[A-Za-z0-9_.]{1,128}$/
+/** Host-owned daemon transport methods that an untrusted renderer or webview must never invoke directly. */
+const HOST_ONLY_DAEMON_METHODS: ReadonlySet<string> = new Set(['provider.remote.reply', 'connection.lease'])
+
+export function isAllowedRendererDaemonMethod(method: unknown): method is string {
+  return typeof method === 'string' && RENDERER_METHOD_PATTERN.test(method) && !HOST_ONLY_DAEMON_METHODS.has(method)
+}
+
 /** Route host capabilities by the sending renderer, never by the focused window. */
 export class WindowRoutes<Event extends { sender: { id: number } }> {
   private readonly windows = new Map<number, Map<string, (event: Event, args: unknown[]) => unknown>>()

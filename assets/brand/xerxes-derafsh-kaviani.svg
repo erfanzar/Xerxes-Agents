@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 300" width="260" height="300" role="img" aria-label="Xerxes Agents Architectural X-Prism Mark">
+  <rect x="1" y="1" width="258" height="298" rx="20" fill="#101010" stroke="#262626" stroke-width="1" />
+  <g transform="translate(56.0,46.0) scale(3.0833)">
+    <path d="M 31.5 8 L 41.5 8 L 30.8 21.7 L 25.8 15.3 Z" fill="#ededed" fill-opacity="0.42" />
+    <path d="M 16.5 40 L 6.5 40 L 17.2 26.3 L 22.2 32.7 Z" fill="#ededed" fill-opacity="0.42" />
+    <path d="M 6.5 8 L 16.5 8 L 25.6 19.65 L 20.6 26.05 Z" fill="#ededed" />
+    <path d="M 41.5 40 L 31.5 40 L 22.4 28.35 L 27.4 21.95 Z" fill="#ededed" />
+  </g>
+  <text x="130.0" y="268" text-anchor="middle" fill="#ededed" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" letter-spacing="4">XERXES</text>
+  <text x="130.0" y="284" text-anchor="middle" fill="#737373" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" letter-spacing="1.6">MULTI-AGENT RUNTIME</text>
+</svg>

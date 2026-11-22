@@ -468,6 +468,38 @@ test('a subagent run closing adds no transcript row; other run results still do'
   expect(isAgentRunNotice({ title: 'Something', body: 'agent failed: x' })).toBe(false)
 })
 
+test('routine composer/picker control confirmations stay out of the transcript while warnings, errors and help output remain', async () => {
+  const { BlockBuilder, isControlStateNotice } = await import('../src/desktop/renderer/blocks.js')
+  const builder = new BlockBuilder()
+  for (const body of [
+    'Model set to claude-code/opus.',
+    'Model set to claude-code/default.',
+    'Agents: `eager`.',
+    'Thinking: `high`.',
+    'Permission mode: `accept-all`.',
+    'YOLO mode ON.',
+    'Switched to provider profile `claude-code`.',
+    'provider `anthropic` saved and activated',
+  ]) {
+    expect(isControlStateNotice({ category: 'slash', type: 'result', severity: 'info', body })).toBe(true)
+    builder.push('notification', { category: 'slash', type: 'result', severity: 'info', body })
+  }
+  expect(builder.snapshot(false).filter(block => block.kind === 'notice')).toEqual([])
+
+  // Warnings, errors, and multi-line command queries still show.
+  builder.push('notification', { category: 'slash', type: 'result', severity: 'warning', body: 'Model set to invalid-model.' })
+  builder.push('notification', { category: 'slash', type: 'result', severity: 'error', body: 'Thinking: `high`.' })
+  builder.push('notification', { category: 'slash', type: 'result', severity: 'info', body: 'Thinking: `high`\nLevels: low | medium | high\nSet with `/thinking <level>`.' })
+  builder.push('notification', { category: 'slash', type: 'result', severity: 'info', body: 'Agents: `auto` (off, auto or eager).' })
+  const kept = builder.snapshot(false).filter(block => block.kind === 'notice').map(block => block.kind === 'notice' ? block.text : '')
+  expect(kept).toEqual([
+    'Model set to invalid-model.',
+    'Thinking: `high`.',
+    'Thinking: `high`\nLevels: low | medium | high\nSet with `/thinking <level>`.',
+    'Agents: `auto` (off, auto or eager).',
+  ])
+})
+
 test('a stored message with an attached image replays the image in the person\'s bubble', () => {
   const png = 'data:image/png;base64,iVBORw0KGgo='
   const blocks = blocksFromStoredMessages([

@@ -63,6 +63,10 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('goal', 'Set or view the goal for a long-running task', 'activity', {
     argsHint: '[<objective>|clear|edit <objective>|pause|resume|milestone [<text>|clear]]',
   }),
+  command('immortals', 'Coordinate a parallel multi-agent Immortals force on a shared message board or open the Immortals Board', 'activity', {
+    aliases: ['swarm'],
+    argsHint: '[<task>|board|status|channels|kill <name|all>|stop]',
+  }),
   command('branch', 'Fork this session through a completed retained turn or its current end', 'session', { argsHint: '[--through-turn N] [label]' }),
   command('branches', 'List branches of this session', 'session'),
   command('compact', 'Compress the conversation', 'session', { aliases: ['compress'] }),
@@ -78,7 +82,10 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
     argsHint: '[prompt]',
     cliOnly: true,
   }),
-  command('btw', 'Inject side-channel context', 'session'),
+  command('btw', 'Ask an ephemeral side question without interrupting or polluting the conversation', 'session', {
+    aliases: ['side'],
+    argsHint: '[--model <model>] [question]',
+  }),
   command('queue', 'Show or manage queued prompts', 'session', { cliOnly: true }),
   command('status', 'Show platform / session status', 'info'),
   command('resume', 'Resume a saved session', 'session', { argsHint: '<id|name>' }),
@@ -105,6 +112,9 @@ export const COMMAND_REGISTRY: readonly CommandDefinition[] = Object.freeze([
   command('permissions', 'View / set permission mode', 'config'),
   command('debug', 'Toggle debug output', 'config', { cliOnly: true }),
 
+  command('acp', 'Connect or manage external ACP agents (Claude Code, Antigravity, or custom stdio ACP)', 'tools', {
+    argsHint: '[list|status|catalog|use <claude-code|antigravity|xerxes>|model <id>|mode <id>|thinking <level>|config <id> <value>|disconnect]',
+  }),
   command('mcp', 'Inspect MCP connection health or reconnect a server', 'tools', { argsHint: '[status|reconnect <name>]' }),
   command('lsp', 'Inspect language-server health or release a workspace host', 'tools', { argsHint: '[status|release <name>]' }),
   command('tools', 'Inspect registered tools and session exposure', 'tools'),

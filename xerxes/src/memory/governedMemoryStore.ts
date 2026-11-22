@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { parseJsonlEventLog, truncateTornTail } from '../core/jsonlEventLog.js'
 import type { JsonObject } from '../types/toolCalls.js'
+
+const governedMemoryWrites = new Map<string, Promise<void>>()
 
 export type ReviewStatus = 'pending' | 'approved' | 'rejected'
 export type SensitivityLevel = 'public' | 'internal' | 'confidential' | 'restricted'
@@ -106,51 +108,87 @@ export class GovernedMemoryStore {
   }
 
   async record(options: RecordMemoryOptions): Promise<MemoryRecord> {
-    const record = buildRecord(options, this.now())
-    const event: GovernedMemoryEvent = { type: 'recorded', record }
-    await this.append(event)
-    const state = await this.load()
-    const persisted = state.records.get(options.id)
-    if (persisted === undefined) throw new Error('memory record creation failed')
-    return persisted
+    return this.serializeWrite(async () => {
+      const record = buildRecord(options, this.now())
+      const event: GovernedMemoryEvent = { type: 'recorded', record }
+      await this.appendUnlocked(event)
+      const state = await this.load()
+      const persisted = state.records.get(options.id)
+      if (persisted === undefined) throw new Error('memory record creation failed')
+      return persisted
+    })
   }
 
   async review(id: string, status: ReviewStatus, reason?: string): Promise<void> {
-    await this.append({ type: 'reviewed', id, status, reviewedAt: this.now(), ...(reason === undefined ? {} : { reason }) })
+    await this.serializeWrite(() => this.appendUnlocked({ type: 'reviewed', id, status, reviewedAt: this.now(), ...(reason === undefined ? {} : { reason }) }))
   }
 
   /** Sharing metadata is append-only too; never re-record or resurrect an expired identity. */
   async updatePayload(id: string, patch: JsonObject): Promise<void> {
-    await this.append({ type: 'payload_updated', id, patch })
+    await this.serializeWrite(() => this.appendUnlocked({ type: 'payload_updated', id, patch }))
   }
 
   async classify(id: string, sensitivity: SensitivityLevel): Promise<void> {
-    await this.append({ type: 'classified', id, sensitivity, classifiedAt: this.now() })
+    await this.serializeWrite(() => this.appendUnlocked({ type: 'classified', id, sensitivity, classifiedAt: this.now() }))
   }
 
   async correct(options: { readonly originalId: string; readonly newId: string; readonly content: string; readonly reason: string; readonly payload?: JsonObject }): Promise<MemoryRecord> {
-    const original = (await this.load()).records.get(options.originalId)
-    if (original === undefined) throw new Error('original memory record not found')
-    const recordOptions: RecordMemoryOptions = {
-      id: options.newId,
-      content: options.content,
-      source: original.source,
-      agentId: original.agentId,
-      sensitivity: original.sensitivity,
-      correctionOf: options.originalId,
-      correctionReason: options.reason,
+    if (options.newId === options.originalId) {
+      throw new Error('corrected memory record must use a distinct id')
     }
-    if (original.turnId !== undefined) recordOptions.turnId = original.turnId
-    if (original.expiresAt !== undefined) recordOptions.expiresAt = original.expiresAt
-    const payload = options.payload ?? original.payload
-    return this.record({ ...recordOptions, ...(payload === undefined ? {} : { payload }) })
+    return this.serializeWrite(async () => {
+      const history = await this.loadHistory()
+      if (history.records.has(options.newId)) {
+        throw new Error('corrected memory record id already exists')
+      }
+      const original = (await this.load()).records.get(options.originalId)
+      if (original === undefined) throw new Error('original memory record not found')
+      const recordOptions: RecordMemoryOptions = {
+        id: options.newId,
+        content: options.content,
+        source: original.source,
+        agentId: original.agentId,
+        sensitivity: original.sensitivity,
+        correctionOf: options.originalId,
+        correctionReason: options.reason,
+      }
+      if (original.turnId !== undefined) recordOptions.turnId = original.turnId
+      if (original.expiresAt !== undefined) recordOptions.expiresAt = original.expiresAt
+      const payload = options.payload ?? original.payload
+      const record = buildRecord({ ...recordOptions, ...(payload === undefined ? {} : { payload }) }, this.now())
+      await this.appendUnlocked({ type: 'recorded', record })
+      const persisted = (await this.load()).records.get(options.newId)
+      if (persisted === undefined) throw new Error('memory record creation failed')
+      return persisted
+    })
   }
 
   async expire(id: string, reason?: string, provenance?: { readonly at: number; readonly payload: JsonObject }): Promise<void> {
-    await this.append({ type: 'expired', id, expiredAt: provenance?.at ?? this.now(), ...(reason === undefined ? {} : { reason }), ...(provenance === undefined ? {} : { payload: provenance.payload }) })
+    await this.serializeWrite(() => this.appendUnlocked({
+      type: 'expired',
+      id,
+      expiredAt: provenance?.at ?? this.now(),
+      ...(reason === undefined ? {} : { reason }),
+      ...(provenance === undefined ? {} : { payload: provenance.payload }),
+    }))
   }
 
-  private async append(event: GovernedMemoryEvent): Promise<void> {
+  private async serializeWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const key = resolve(this.logPath)
+    const previous = governedMemoryWrites.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(done => { release = done })
+    governedMemoryWrites.set(key, current)
+    await previous.catch(() => undefined)
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (governedMemoryWrites.get(key) === current) governedMemoryWrites.delete(key)
+    }
+  }
+
+  private async appendUnlocked(event: GovernedMemoryEvent): Promise<void> {
     await mkdir(dirname(this.logPath), { recursive: true })
     // Repair a tail torn by an earlier crash before adding to it; appending
     // onto a partial record fuses the two into one malformed middle line.

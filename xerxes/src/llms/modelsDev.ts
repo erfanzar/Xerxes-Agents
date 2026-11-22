@@ -191,10 +191,64 @@ function isLocalEndpoint(endpoint: string): boolean {
 const sameCapability = (a: LiveModelCapability, b: LiveModelCapability) =>
   a.contextLimit === b.contextLimit && a.maxOutputTokens === b.maxOutputTokens && JSON.stringify(a.reasoning) === JSON.stringify(b.reasoning)
 
+const sameCost = (a: LiveCost | undefined, b: LiveCost | undefined): boolean =>
+  a?.input === b?.input && a?.output === b?.output && a?.cacheRead === b?.cacheRead && a?.cacheWrite === b?.cacheWrite
+
+function consensusCapability(matches: readonly LiveModelCapability[]): LiveModelCapability | undefined {
+  const first = matches[0]
+  if (!first || !matches.every(found => sameCapability(found, first))) return undefined
+  const unanimousCost = matches.every(found => sameCost(found.cost, first.cost))
+  const unanimousTemperature = matches.every(found => found.temperature === first.temperature)
+  const { cost: _cost, temperature: _temperature, ...shared } = first
+  return {
+    ...shared,
+    ...(unanimousCost && first.cost ? { cost: first.cost } : {}),
+    ...(unanimousTemperature && first.temperature !== undefined ? { temperature: first.temperature } : {}),
+  }
+}
+
 export interface ModelsDevQuery {
   readonly baseUrl?: string
   readonly provider?: string
   readonly model: string
+}
+
+const CANONICAL_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+  'claude-code': 'claude-code',
+  codex: 'openai-codex',
+  chatgpt: 'openai-codex',
+  'openai-codex': 'openai-codex',
+  copilot: 'github-copilot',
+  'gh-copilot': 'github-copilot',
+  'github-copilot': 'github-copilot',
+  'azure-openai': 'azure',
+  'azure-openai-responses': 'azure',
+  bedrock: 'amazon-bedrock',
+  aws: 'amazon-bedrock',
+  'amazon-bedrock': 'amazon-bedrock',
+  groqcloud: 'groq',
+  'x-ai': 'xai',
+  hf: 'huggingface',
+  'hugging-face': 'huggingface',
+  moonshot: 'moonshotai',
+  'moonshot-cn': 'moonshotai-cn',
+  'zai-coding': 'zai-coding-cn',
+  bigmodel: 'zai-coding-cn',
+  vercel: 'vercel-ai-gateway',
+  'vercel-gateway': 'vercel-ai-gateway',
+  'opencode-zen': 'opencode',
+  cloudflare: 'cloudflare-ai-gateway',
+  'cf-ai-gateway': 'cloudflare-ai-gateway',
+  'pi-gateway': 'radius',
+  vertex: 'google-vertex',
+  'google-vertex': 'google-vertex',
+  'workers-ai': 'cloudflare-workers-ai',
+  'cf-workers-ai': 'cloudflare-workers-ai',
+}
+
+function canonicalProviderId(raw: string): string {
+  const normalized = raw.trim().toLowerCase().replaceAll('_', '-')
+  return CANONICAL_PROVIDER_ALIASES[normalized] ?? normalized
 }
 
 /**
@@ -202,12 +256,18 @@ export interface ModelsDevQuery {
  * models.dev does not describe it unambiguously.
  */
 /** Xerxes provider names whose models.dev provider id differs. */
-const MODELS_DEV_PROVIDER_IDS: Readonly<Record<string, string>> = { gemini: 'google' }
+const MODELS_DEV_PROVIDER_IDS: Readonly<Record<string, readonly string[]>> = {
+  gemini: ['google'],
+  qwen: ['alibaba', 'qwen'],
+  zhipu: ['zai', 'zhipuai', 'zai-coding-plan', 'zhipu'],
+  'kimi-code': ['kimi-for-coding', 'kimi-code'],
+}
 
 export function findInModelsDev(providers: readonly ModelsDevProvider[], query: ModelsDevQuery): LiveModelCapability | undefined {
   const model = query.model.trim()
   if (!model) return undefined
-  const bare = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model
+  const slash = model.indexOf('/')
+  const bare = slash >= 0 ? model.slice(slash + 1) : model
   const lookup = (provider: ModelsDevProvider) => provider.models.get(model) ?? provider.models.get(bare)
   const endpoint = endpointKey(query.baseUrl)
   if (endpoint) {
@@ -221,21 +281,29 @@ export function findInModelsDev(providers: readonly ModelsDevProvider[], query: 
     const host = endpoint.split('/')[0]
     const sameHost = providers.filter(provider => endpointKey(provider.api)?.split('/')[0] === host).map(lookup)
       .filter((found): found is LiveModelCapability => found !== undefined)
-    if (sameHost.length && sameHost.every(found => sameCapability(found, sameHost[0]!))) return sameHost[0]
+    const hostConsensus = consensusCapability(sameHost)
+    if (hostConsensus) return hostConsensus
   }
   // A self-hosted server (local or private address) runs its own build of a
   // model — its window can differ from the vendor's, so an id match alone
   // does not describe it.
   if (endpoint && isLocalEndpoint(endpoint)) return undefined
   // Xerxes and models.dev name some vendors differently: Xerxes' `gemini` is models.dev's `google`.
-  const wanted = query.provider?.trim().toLowerCase()
-  const catalogId = wanted ? MODELS_DEV_PROVIDER_IDS[wanted] ?? wanted : undefined
-  const named = providers.find(provider => provider.id === catalogId)
-  const byName = named ? lookup(named) : undefined
-  if (byName) return byName
+  const explicitWanted = query.provider?.trim() ? canonicalProviderId(query.provider) : undefined
+  const prefixWanted = !explicitWanted && slash > 0 ? canonicalProviderId(model.slice(0, slash)) : undefined
+  for (const wanted of [explicitWanted, prefixWanted]) {
+    if (!wanted) continue
+    const catalogIds = MODELS_DEV_PROVIDER_IDS[wanted] ?? [wanted]
+    const matches = catalogIds
+      .flatMap(id => providers.filter(provider => provider.id === id))
+      .map(lookup)
+      .filter((found): found is LiveModelCapability => found !== undefined)
+    if (matches.length === 1) return matches[0]
+    const vendorConsensus = consensusCapability(matches)
+    if (vendorConsensus) return vendorConsensus
+  }
   const everywhere = providers.map(lookup).filter((found): found is LiveModelCapability => found !== undefined)
-  if (everywhere.length && everywhere.every(found => sameCapability(found, everywhere[0]!))) return everywhere[0]
-  return undefined
+  return consensusCapability(everywhere)
 }
 
 export interface ModelsDevOptions {
@@ -315,7 +383,15 @@ export const modelsDev = new ModelsDevCatalog()
 // ── What providers reported ─────────────────────────────────────────────
 
 const reported = new Map<string, LiveModelCapability>()
-const reportKey = (provider: string, model: string) => `${provider.trim().toLowerCase()}\u0000${model.includes('/') ? model.slice(model.indexOf('/') + 1) : model}`
+function reportKey(provider: string, model: string): string {
+  const canonicalProvider = canonicalProviderId(provider)
+  const trimmedModel = model.trim()
+  const slash = trimmedModel.indexOf('/')
+  const strippedModel = slash > 0 && canonicalProviderId(trimmedModel.slice(0, slash)) === canonicalProvider
+    ? trimmedModel.slice(slash + 1)
+    : trimmedModel
+  return `${canonicalProvider}\u0000${strippedModel}`
+}
 
 /**
  * Record what a provider said about one of its models (its /models entry,

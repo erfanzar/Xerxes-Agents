@@ -198,7 +198,16 @@ function validateOcrPage(page: OcrDocumentPage): void {
 }
 
 function validateMarkerImage(name: string, bytes: Uint8Array): void {
-  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+  if (
+    !name
+    || !name.trim()
+    || name === '.'
+    || name === '..'
+    || name.includes('/')
+    || name.includes('\\')
+    || name.includes('\0')
+    || /^[A-Za-z]:/.test(name)
+  ) {
     throw new MarkerExtractionError(`OCR converter returned an unsafe image name: ${JSON.stringify(name)}`)
   }
   if (!(bytes instanceof Uint8Array)) {

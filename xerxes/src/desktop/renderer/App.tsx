@@ -8,25 +8,42 @@ import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect
 import { CommandPalette, PickerLayer, DelegationMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
-import { store, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
+import { resolveExternalAcpCatalog, showsImmortalsForSession, store, type CompletionHintItem, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
-import type { AgentMember, Block } from './types.js'
-import { applyCompletion, wantsHints, type HintItem } from './hints.js'
+import type { AgentMember, ApprovalResponse, Block } from './types.js'
+import { applyCompletion, wantsHints } from './hints.js'
 import { SIDEBAR_SECTION_ROWS, groupByWorkspace, hostOfScope, limitRows, loadCollapsedSections, saveCollapsedSections, sidebarOrder, sidebarSections } from './workspaceGroups.js'
 import { CopyButton } from './CopyButton.js'
 import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
 import { Markdown } from './markdown.js'
+import { WidgetOpenArtifactContext, WidgetSessionContext } from './WidgetFrame.js'
 import { CodeRunContext } from './codeRun.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PANEL_SIZES, PanelDivider, panelWidthOf, usePanelLayout, vibesPanelLayout } from './layout.js'
 import { useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
-import { activitySummary, approvalTitle, liveActivityPhrase, thinkingHeadingOf } from './activityPhrase.js'
-import { ToolCallRow, toolHasFailed } from "./Execution.js"
-import { ArtifactCard, ArtifactToast, artifactOfTool, latestArtifactId } from './ArtifactCard.js'
+import { approvalTitle, thinkingHeadingOf } from './activityPhrase.js'
+import { ToolCallRow } from "./Execution.js"
+import { lineDiff } from './FileToolRow.js'
+import { trimmedChangedLines } from './blocks.js'
+import { ToolTimelineGroup } from './ToolTimeline.js'
+import { ArtifactToast, latestArtifactId } from './ArtifactCard.js'
+import {
+  AcpActiveBanner,
+  AcpExtraConfigPickers,
+  AcpModePicker,
+  AcpModelPicker,
+  AcpRuntimePicker,
+  AcpThinkingPicker,
+  activeAcpModelLabel,
+  activeAcpSummaryParts,
+  isExternalAcpBinding,
+  transportBadgeLabel,
+} from './AcpRuntimePicker.js'
+import { AgentBrandGlyph, XerxesBrandEmblem } from './XerxesSprites.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
@@ -36,6 +53,7 @@ import { OutputViewer } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { RelayBadge } from './RelayBadge.js'
 import { isVscodeHost } from './host.js'
+import { pageIsInactive } from './pageVisibility.js'
 import { RailStatus, currentActionOf, orbStateOf } from './RailStatus.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AgentsCard } from './AgentsCard.js'
@@ -50,6 +68,7 @@ import { HubHealthNotice } from './HubHealthNotice.js'
 export { SessionDiagnostics } from './SessionDiagnostics.js'
 import { ErrorBoundary } from './ErrorBoundary.js'
 import { FindBar } from './FindBar.js'
+import { ElapsedClock } from './ElapsedClock.js'
 import { Shortcuts } from './Shortcuts.js'
 import { FirstRunSetup } from './Setup.js'
 import { ModelSplitChip } from './TaskModels.js'
@@ -59,7 +78,24 @@ import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
 import { pullRequestPrompt } from './GitPanel.js'
 import { elapsedOf } from './duration.js'
+import { swarmMemberCounts } from './swarmState.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
+import { T3Sidebar, type T3SidebarRow } from './T3Sidebar.js'
+import { ThreadDetailsCard } from './ThreadDetailsCard.js'
+import { TerminalDrawer, loadTerminalDrawerHeight } from './TerminalDrawer.js'
+import { RightPanelLauncher } from './RightPanelLauncher.js'
+import { T3ModelPicker } from './T3ModelPicker.js'
+import { ProjectMonogram } from './ProjectMonogram.js'
+import { T3Icon } from './T3Icons.js'
+import {
+  isSnoozedActive,
+  setSettledInState,
+  setSnoozedInState,
+  setThreadInboxState,
+  snoozePresets,
+  togglePinInState,
+  useThreadInbox,
+} from './threadInbox.js'
 
 const ActivityVisible = createContext(false)
 
@@ -107,7 +143,7 @@ function Announcer({ snap }: { snap: Snapshot }): ReactElement {
 
 /** Names the rail in a boundary fallback: "Files could not be shown". */
 function railLabel(rail: RailPanel): string {
-  return rail === 'subagents' ? 'Subagents' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'background' ? 'Background' : rail === 'browser' ? 'Browser' : rail === 'usage' ? 'Usage' : 'Activity'
+  return rail === 'subagents' ? 'Subagents' : rail === 'swarm' ? 'Immortals Board' : rail === 'btw' ? 'Side question' : rail === 'docs' ? 'Artifacts' : rail === 'files' ? 'Project files' : rail === 'outputs' ? 'Outputs' : rail === 'review' ? 'Source control' : rail === 'terminal' ? 'Terminal' : rail === 'background' ? 'Background' : rail === 'browser' ? 'Browser' : rail === 'usage' ? 'Usage' : 'Activity'
 }
 
 /** Blinking tail shown on streaming blocks. */
@@ -178,15 +214,45 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const { layout: storedLayout, setLayout } = usePanelLayout()
   const vibesStyle = useVibesStyle()
   const layout = vibesStyle ? vibesPanelLayout(storedLayout) : storedLayout
+  const inbox = useThreadInbox()
+  // T3 Code: null = auto (open inline in the top-right gutter on wide windows when right panel is closed).
+  const [detailsChoice, setDetailsChoice] = useState<boolean | null>(null)
+  const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false)
+  const [terminalDrawerHeight, setTerminalDrawerHeight] = useState<number>(loadTerminalDrawerHeight)
+  const lastRailRef = useRef<RailPanel | null>(null)
+  const [railLauncherOpen, setRailLauncherOpen] = useState(false)
   const [narrowNavigation, setNarrowNavigation] = useState(false)
   const [windowWidth, setWindowWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
   useEffect(() => { const resize = () => setWindowWidth(window.innerWidth); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize) }, [])
+  // Keep the workspace Git branch current across embedded terminal checkouts,
+  // external editors, and agent turns without re-initializing the session.
+  useEffect(() => {
+    if (snap.connection !== 'online' || !snap.cwd) return
+    const sync = (): void => { if (!pageIsInactive()) void store.refreshBranch() }
+    const onFocus = (): void => { void store.refreshBranch() }
+    const onVis = (): void => { if (typeof document !== 'undefined' && document.visibilityState === 'visible') void store.refreshBranch() }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVis)
+    const timer = setInterval(sync, 4_000)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVis)
+      clearInterval(timer)
+    }
+  }, [snap.connection, snap.cwd, snap.currentId])
+  useEffect(() => {
+    if (snap.connection === 'online' && snap.cwd && !snap.turnActive) {
+      void store.refreshBranch()
+    }
+  }, [snap.connection, snap.cwd, snap.turnActive])
   // The sidebar stays at 820 px; it only turns into a drawer below 640 px.
   const narrow = windowWidth < 640
   const focused = narrow ? !narrowNavigation : layout.sidebarHidden
   /** The active right-panel tab's key (railTabs.ts); undefined until the user opens or closes one. */
   const [railChoice, setRailChoice] = useState<string | null | undefined>(undefined)
   const [railTabs, setRailTabs] = useState<readonly RailTab[]>([])
+  const [dismissedActiveSwarmId, setDismissedActiveSwarmId] = useState('')
+  useEffect(() => { if (!snap.swarm?.active) setDismissedActiveSwarmId('') }, [snap.swarm?.active, snap.currentId])
   const [filesExpanded, setFilesExpanded] = useState(false)
   const [reviewPath, setReviewPath] = useState('')
   /** A file to open in Files (a tool row's path); the count re-opens the same one. */
@@ -203,33 +269,146 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const inspectorMax = Math.max(panelMin, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
   const panelWidth = Math.max(panelMin, Math.min(inspectorMax, panelWidthOf(layout, shownPanel)))
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + panelWidth + 320
-  // Show activity on entry without covering the conversation in a narrow window.
-  // An explicit open/close choice survives session changes and resizing.
-  const railKey = railChoice === undefined ? (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null) : railChoice
+  // In T3 Code (`vibes`/`neo`), the right panel starts closed and the floating ThreadDetailsCard
+  // occupies the top-right gutter on wide windows. Classic keeps Activity open on entry.
+  const railKey = railChoice === undefined ? (vibesStyle ? null : (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null)) : railChoice
   const rail: RailPanel | null = railKey ? panelOfKey(railKey) : null
-  // The entry tab (Activity) is shown before anything was opened explicitly.
-  const shownTabs = rail && railKey && !railTabs.some(tab => tabKey(tab) === railKey) ? openTab(railTabs, { panel: rail }, railKey) : railTabs
+  if (rail) lastRailRef.current = rail
+  const detailsInlineEligible = vibesStyle && !isVscodeHost() && !snap.noWorkspace && rail === null && !railLauncherOpen && windowWidth >= 1220
+  const detailsMode: 'inline' | 'popover' = detailsInlineEligible ? 'inline' : 'popover'
+  const detailsOpen = detailsChoice === null ? detailsInlineEligible : detailsChoice
+  // The entry tab (Activity) is shown before anything was opened explicitly; active swarms appear in the tab bar automatically unless closed.
+  const entryTabs = rail && railKey && !railTabs.some(tab => tabKey(tab) === railKey) ? openTab(railTabs, { panel: rail }, railKey) : railTabs
+  const activeSwarmIdentity = snap.swarm?.active ? (snap.swarm.session_id || snap.currentId || 'active') : ''
+  const shownTabs = activeSwarmIdentity && dismissedActiveSwarmId !== activeSwarmIdentity && !entryTabs.some(tab => tab.panel === 'swarm')
+    ? openTab(entryTabs, { panel: 'swarm' }, railKey ?? undefined)
+    : entryTabs
   /** Open (or focus) a tab: a section, or one item inside it such as an artifact. Null closes the panel. */
   const setRail = (next: RailPanel | null, item?: string, title?: string): void => {
-    if (next === null) { setRailChoice(null); return }
+    if (next === null) {
+      setRailLauncherOpen(false)
+      setRailChoice(null)
+      return
+    }
+    if (next === 'swarm') setDismissedActiveSwarmId('')
+    setRailLauncherOpen(false)
+    lastRailRef.current = next
     const tab: RailTab = item ? { panel: next, item, ...(title ? { title } : {}) } : { panel: next }
     const key = tabKey(tab)
     setRailTabs(openTab(shownTabs, tab, key))
     setRailChoice(key)
   }
+  const toggleRightPanel = (): void => {
+    if (rail !== null || railLauncherOpen) {
+      setRail(null)
+      store.closeSwarmBoard()
+      store.closeSideQuestion()
+    } else if (shownTabs.length > 0 || lastRailRef.current !== null) {
+      const target = lastRailRef.current ?? shownTabs[shownTabs.length - 1]!.panel
+      setRail(target)
+    } else if (vibesStyle) {
+      setRailLauncherOpen(true)
+    } else {
+      setRail('activity')
+    }
+  }
+  const toggleTerminalDrawer = (): void => setTerminalDrawerOpen(value => !value)
+  const toggleDetails = (): void => setDetailsChoice(current => !(current === null ? detailsInlineEligible : current))
   const toggleSidebar = () => narrow ? setNarrowNavigation(value => !value) : setLayout({ sidebarHidden: !focused })
   // In a narrow window (the VS Code sidebar, a small app window) the task
   // list is a drawer over the conversation: picking a task closes it.
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
-  const chrome: WindowChromeState = { sidebarVisible: !focused, inspectorOpen: rail !== null, toggleSidebar }
   const [page, setPage] = useState<DesktopPageName | null>(null)
-  // Vibes: XERXES is its own mode (Claude's Chat | Code), so the task's side
-  // panel and its openers step aside while it is shown. Other styles unchanged.
+  // Back / Forward navigation history across opened threads and pages (T3 Code sidebar chrome).
+  type NavEntry = { readonly sessionId: string; readonly page: DesktopPageName | null }
+  const [navHistory, setNavHistory] = useState<{ readonly entries: readonly NavEntry[]; readonly index: number }>(() => ({
+    entries: snap.currentId || page ? [{ sessionId: snap.currentId, page }] : [],
+    index: snap.currentId || page ? 0 : -1,
+  }))
+  const navReplaying = useRef(false)
+  useEffect(() => {
+    if (!snap.currentId && page === null) return
+    if (navReplaying.current) {
+      navReplaying.current = false
+      return
+    }
+    setNavHistory(current => {
+      const top = current.entries[current.index]
+      if (top && top.sessionId === snap.currentId && top.page === page) return current
+      const nextEntries = [...current.entries.slice(0, current.index + 1), { sessionId: snap.currentId, page }].slice(-40)
+      return { entries: nextEntries, index: nextEntries.length - 1 }
+    })
+  }, [snap.currentId, page])
+  const canGoBack = navHistory.index > 0
+  const canGoForward = navHistory.index >= 0 && navHistory.index < navHistory.entries.length - 1
+  const visitNavEntry = (entry: NavEntry): void => {
+    navReplaying.current = true
+    setPage(entry.page)
+    setPanel(null)
+    setSelectedAgent('')
+    if (entry.sessionId && entry.sessionId !== store.getSnapshot().currentId) {
+      void store.openSession(entry.sessionId)
+    }
+  }
+  const goBack = (): void => {
+    if (!canGoBack) return
+    const nextIndex = navHistory.index - 1
+    const target = navHistory.entries[nextIndex]
+    if (!target) return
+    setNavHistory(current => ({ ...current, index: nextIndex }))
+    visitNavEntry(target)
+  }
+  const goForward = (): void => {
+    if (!canGoForward) return
+    const nextIndex = navHistory.index + 1
+    const target = navHistory.entries[nextIndex]
+    if (!target) return
+    setNavHistory(current => ({ ...current, index: nextIndex }))
+    visitNavEntry(target)
+  }
+  // Command Palette T3 layout actions.
+  const t3ActionRef = useRef({ toggleTerminalDrawer, toggleDetails, toggleRightPanel, inbox })
+  t3ActionRef.current = { toggleTerminalDrawer, toggleDetails, toggleRightPanel, inbox }
+  useEffect(() => {
+    const onAction = (event: Event): void => {
+      const detail = (event as CustomEvent<unknown>).detail
+      if (detail === 'toggle-terminal-drawer') t3ActionRef.current.toggleTerminalDrawer()
+      else if (detail === 'toggle-thread-details') t3ActionRef.current.toggleDetails()
+      else if (detail === 'toggle-right-panel') t3ActionRef.current.toggleRightPanel()
+      else if (detail === 'toggle-sidebar-view') {
+        const cur = t3ActionRef.current.inbox.state.viewMode
+        t3ActionRef.current.inbox.setViewMode(cur === 'inbox' ? 'folders' : 'inbox')
+      }
+    }
+    window.addEventListener('xerxes:t3-action', onAction)
+    return () => window.removeEventListener('xerxes:t3-action', onAction)
+  }, [])
+  const chrome: WindowChromeState = {
+    sidebarVisible: !focused,
+    inspectorOpen: rail !== null || railLauncherOpen,
+    toggleSidebar,
+    detailsOpen,
+    detailsMode,
+    toggleDetails,
+    terminalDrawerOpen,
+    terminalDrawerHeight,
+    setTerminalDrawerHeight,
+    toggleTerminalDrawer,
+    toggleRightPanel,
+    railMaximized: filesExpanded,
+    ...(!contextRequiresFullWidth ? { toggleRailMaximized: () => setFilesExpanded(value => !value) } : {}),
+    canGoBack,
+    canGoForward,
+    goBack,
+    goForward,
+    inbox,
+  }
+  // XERXES supervisor is its own full view, so the task's side panel steps aside while it is shown.
   const xerxesMode = vibesStyle && page === 'xerxes'
   // Which stylesheet takeovers are in effect, named once so the decision
   // dock below and the CSS cannot disagree about when .chat is gone.
   // Git sits in the rail like the others; only its expanded diff view takes the window.
-  const contextFull = Boolean(rail && (filesExpanded || contextRequiresFullWidth))
+  const contextFull = Boolean((rail || railLauncherOpen) && (filesExpanded || contextRequiresFullWidth))
   // An open sub-agent takes the conversation's place, composer and cards included.
   const agentOpen = page === null && Boolean(selectedAgent)
   const chatHidden = { contextFull, any: contextFull || agentOpen }
@@ -253,7 +432,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // Every right-panel view opens as a tab; the list is the one source, so a new view cannot fall through to a dialog.
     else if (next !== null && (RAIL_PANELS as readonly string[]).includes(next)) setRail(next as RailPanel, next === 'docs' ? filePath : undefined)
     else if (next === 'agents' || next === 'xerxes' || next === 'extensions' || next === 'artifacts' || next === 'schedules') { setPage(next); setPanel(null); setSelectedAgent('') }
-    else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning() }
+    else if (next === null) { setPage(null); setPanel(null); setSelectedAgent(''); store.closeLearning(); store.closeSwarmBoard() }
     else setPanel(next)
   }
   // Tasks, Agents and XERXES are independent destinations. Every explicit
@@ -277,8 +456,10 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (pending && (!pending.sessionId || pending.sessionId === snap.currentId)) { pendingArtifact.current = null; navigate('docs', pending.artifactId) }
   }, [snap.cwd, snap.currentId, snap.sessionOpenRevision])
   useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
+  useEffect(() => { if (snap.swarmOpen) { setPage(null); setPanel(null); setSelectedAgent(''); setRail('swarm') } }, [snap.swarmOpenRevision])
+  useEffect(() => { if (snap.sideQuestionOpen) { setPage(null); setPanel(null); setSelectedAgent(''); setRail('btw') } }, [snap.sideQuestionOpenRevision])
   return (
-    <DesktopNavigation.Provider value={navigate}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
+    <DesktopNavigation.Provider value={navigate}><WidgetSessionContext.Provider value={snap.sessionKey}><WidgetOpenArtifactContext.Provider value={artifactId => navigate('docs', artifactId)}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${panelWidth}px` } as React.CSSProperties}>
       {/* No title bar: its controls live in the sidebar's top row and the
           conversation header — one row, as in Claude's app. */}
@@ -288,12 +469,31 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         {narrow && narrowNavigation && <div className="side-scrim" aria-hidden="true" onClick={() => setNarrowNavigation(false)} />}
         {!focused && <PanelDivider label="Resize sessions" value={layout.sidebarWidth} min={180} max={360} onChange={sidebarWidth => setLayout({ sidebarWidth })} />}
         {snap.noWorkspace ? snap.storageScope?.startsWith('ssh:') ? <RemoteWorkspaceGate /> : <WorkspaceGate /> : <ErrorBoundary label="This conversation"><Chat snap={snap} page={page} agent={agentOpen ? selectedAgent : ''} openAgent={setSelectedAgent} /></ErrorBoundary>}
-        {!rail && !snap.noWorkspace && !xerxesMode && <FloatingRail open={navigate} />}
-        {rail && !xerxesMode && <PanelDivider label="Resize inspector" value={panelWidth} min={panelMin} max={inspectorMax} reverse onChange={width => setLayout({ panelWidths: { ...layout.panelWidths, [rail]: width } })} />}
-        {rail && !xerxesMode && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => setRail(null)} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} tabs={shownTabs} activeKey={railKey ?? rail}
+        {!rail && !railLauncherOpen && !snap.noWorkspace && !xerxesMode && !vibesStyle && <FloatingRail open={navigate} swarmActive={Boolean(snap.swarm?.active)} externalAcp={isExternalAcpBinding(snap.acpBinding)} showImmortals={showsImmortalsForSession(snap)} />}
+        {(rail || railLauncherOpen) && !xerxesMode && <PanelDivider label="Resize inspector" value={panelWidth} min={panelMin} max={inspectorMax} reverse onChange={width => setLayout({ panelWidths: { ...layout.panelWidths, [rail ?? 'activity']: width } })} />}
+        {rail && !xerxesMode && <ErrorBoundary label={railLabel(rail)}><DesktopRail panel={rail} snap={snap} close={() => { setRail(null); store.closeSwarmBoard(); store.closeSideQuestion() }} filesExpanded={filesExpanded} reviewPath={reviewPath} filesTarget={filesTarget} artifactTarget={artifactTarget} tabs={shownTabs} activeKey={railKey ?? rail}
           onSelectTab={key => setRailChoice(key)}
-          onCloseTab={key => { const next = closeTab(shownTabs, key, railKey ?? rail); setRailTabs(next.tabs); setRailChoice(next.active) }}
+          onCloseTab={key => {
+            if (key === 'swarm') { store.closeSwarmBoard(); if (activeSwarmIdentity) setDismissedActiveSwarmId(activeSwarmIdentity) }
+            if (key === 'btw') store.closeSideQuestion()
+            const next = closeTab(shownTabs, key, railKey ?? rail)
+            setRailTabs(next.tabs)
+            setRailChoice(next.active)
+            if (next.active === null) {
+              lastRailRef.current = null
+              if (vibesStyle) setRailLauncherOpen(true)
+            }
+          }}
           onRetitle={(key, title) => setRailTabs(tabs => retitleTab(tabs, key, title))} {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value), setExpanded: setFilesExpanded } : {})} activityDetails={<ActivityDetails snap={snap} selectedAgent={agentOpen ? selectedAgent : ''} />} /></ErrorBoundary>}
+        {!rail && railLauncherOpen && !xerxesMode && (
+          <RightPanelLauncher
+            snap={snap}
+            onPick={surface => navigate(surface)}
+            onClose={() => setRailLauncherOpen(false)}
+            filesExpanded={filesExpanded}
+            {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})}
+          />
+        )}
         {!snap.noWorkspace && <ArtifactToast sessionId={snap.currentId} showingArtifacts={rail === 'docs'} />}
 
       </div>
@@ -331,9 +531,26 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
         <span>{snap.workspaceError || 'Opening workspace…'}</span>
         {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
       </div>}
-      <GlobalKeys snap={snap} closeSurface={panel || page ? () => { setPanel(null); setPage(null) } : null} />
+      <GlobalKeys
+        snap={snap}
+        closeSurface={detailsOpen && detailsMode === 'popover' ? () => setDetailsChoice(false) : panel || page ? () => { setPanel(null); setPage(null) } : null}
+        toggleTerminalDrawer={toggleTerminalDrawer}
+        toggleRightPanel={toggleRightPanel}
+        undoInbox={inbox.undo ? inbox.applyUndo : null}
+        toggleSwarm={() => {
+          if (rail === 'swarm') {
+            store.closeSwarmBoard()
+            if (activeSwarmIdentity) setDismissedActiveSwarmId(activeSwarmIdentity)
+            const next = closeTab(shownTabs, 'swarm', railKey ?? 'swarm')
+            setRailTabs(next.tabs)
+            setRailChoice(next.active)
+          } else {
+            store.openSwarmBoard()
+          }
+        }}
+      />
     </div>
-    </WindowChrome.Provider></ActivityVisible.Provider></DesktopNavigation.Provider>
+    </WindowChrome.Provider></ActivityVisible.Provider></WidgetOpenArtifactContext.Provider></WidgetSessionContext.Provider></DesktopNavigation.Provider>
   )
 }
 
@@ -344,33 +561,65 @@ interface WindowChromeState {
   readonly sidebarVisible: boolean
   readonly inspectorOpen: boolean
   readonly toggleSidebar: () => void
+  readonly detailsOpen?: boolean
+  readonly detailsMode?: 'inline' | 'popover'
+  readonly toggleDetails?: () => void
+  readonly terminalDrawerOpen?: boolean
+  readonly terminalDrawerHeight?: number
+  readonly setTerminalDrawerHeight?: (height: number) => void
+  readonly toggleTerminalDrawer?: () => void
+  readonly toggleRightPanel?: () => void
+  readonly railMaximized?: boolean
+  readonly toggleRailMaximized?: () => void
+  readonly canGoBack?: boolean
+  readonly canGoForward?: boolean
+  readonly goBack?: () => void
+  readonly goForward?: () => void
+  readonly inbox?: ReturnType<typeof useThreadInbox>
 }
 
 const WindowChrome = createContext<WindowChromeState>({ sidebarVisible: true, inspectorOpen: false, toggleSidebar: () => {} })
 
 function SidebarToggle(): ReactElement {
   const chrome = useContext(WindowChrome)
-  return <button className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}><Icon name="sidebar" /></button>
+  const vibes = useVibesStyle()
+  return <button className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}>{vibes ? <T3Icon name="panelLeft" size={15} /> : <Icon name="sidebar" />}</button>
 }
 
 /**
  * While the inspector is closed, a slim column of icons opens one of its
  * sections. Vibes and Neo show it as a row of icons in the header (vibes.css).
  */
-function FloatingRail({ open }: { open: (panel: DesktopPanel) => void }): ReactElement {
+export function FloatingRail({
+  open,
+  swarmActive = false,
+  externalAcp = false,
+  showImmortals,
+}: {
+  open: (panel: DesktopPanel) => void
+  swarmActive?: boolean
+  externalAcp?: boolean
+  showImmortals?: boolean
+}): ReactElement {
   const vibes = useVibesStyle()
-  // The rail: Subagents, Artifacts, Changes, Files, Terminal (then Activity).
-  const items = [
+  // The rail: Subagents, Immortals (shown on native Xerxes, Antigravity / swarm-capable ACP, or active swarm), Side question, Artifacts, Changes, Files, Terminal (then Activity).
+  const allItems = [
     { panel: 'subagents', icon: 'agents', label: 'Subagents' },
+    { panel: 'swarm', icon: 'tree', label: swarmActive ? 'Immortals (active)' : 'Immortals' },
+    { panel: 'btw', icon: 'chat', label: 'Side question' },
     { panel: 'docs', icon: 'stack', label: 'Artifacts' },
     { panel: 'review', icon: 'changes', label: 'Changes' },
     { panel: 'files', icon: 'folder', label: 'Files' },
     { panel: 'terminal', icon: 'terminal', label: 'Terminal' },
     { panel: 'activity', icon: vibes ? 'listBullets' : 'activity', label: 'Activity' },
   ] as const
+  const includeSwarm = showImmortals ?? (!externalAcp || swarmActive)
+  const items = includeSwarm
+    ? allItems
+    : allItems.filter(item => item.panel !== 'swarm')
   return <nav className="floatrail" aria-label="Open a side panel">
     <button type="button" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" size={16} /></button>
-    {items.map(item => <button key={item.panel} type="button" title={item.label} aria-label={item.label} onClick={() => open(item.panel)}><Icon name={item.icon} size={16} /></button>)}
+    {items.map(item => <button key={item.panel} type="button" data-live={(item.panel === 'swarm' && swarmActive) || undefined} title={item.label} aria-label={item.label} onClick={() => open(item.panel)}><Icon name={item.icon} size={16} /></button>)}
   </nav>
 }
 
@@ -384,7 +633,7 @@ function WorkspaceTools(_props: { snap: Snapshot; inspectorOpen: boolean }): Rea
 
 
 /** One workspace-level home for connection, version mismatch and recovery. */
-function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: boolean }): ReactElement {
+function RuntimeStatus({ snap, compact = false, iconOnly = false }: { snap: Snapshot; compact?: boolean; iconOnly?: boolean }): ReactElement {
   const navigate = useDesktopNavigation()
   const [expanded, setExpanded] = useState(false)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -415,10 +664,25 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
     return () => { window.removeEventListener('resize', place); document.removeEventListener('mousedown', dismiss); document.removeEventListener('keydown', escape) }
   }, [expanded, label, snap.daemonWarning, snap.runtimeUpdateMessage])
   return <>
-    <button ref={trigger} className={'runtime-status' + (compact ? ' runtime-status--compact' : '')} aria-label={'Workspace runtime: ' + label} aria-expanded={expanded} aria-haspopup="dialog" onClick={() => setExpanded(value => !value)}>
-      <span className="runtime-status__dot" data-state={snap.connection} data-warning={Boolean(snap.daemonWarning)} />
-      <span>{label}</span>
-    </button>
+    {iconOnly ? (
+      <button
+        ref={trigger}
+        type="button"
+        className={`t3-icon-btn t3-runtime-icon${snap.daemonWarning ? ' has-update' : ''}${snap.connection === 'offline' ? ' is-offline' : ''}`}
+        title={label}
+        aria-label={'Workspace runtime: ' + label}
+        aria-expanded={expanded}
+        aria-haspopup="dialog"
+        onClick={() => setExpanded(value => !value)}
+      >
+        <T3Icon name="circleArrowUp" size={15} />
+      </button>
+    ) : (
+      <button ref={trigger} className={'runtime-status' + (compact ? ' runtime-status--compact' : '')} aria-label={'Workspace runtime: ' + label} aria-expanded={expanded} aria-haspopup="dialog" onClick={() => setExpanded(value => !value)}>
+        <span className="runtime-status__dot" data-state={snap.connection} data-warning={Boolean(snap.daemonWarning)} />
+        <span>{label}</span>
+      </button>
+    )}
     {expanded && createPortal(<div ref={popup} className="runtime-popover" role="dialog" aria-label="Workspace runtime" tabIndex={-1}>
       <header><strong>Workspace runtime</strong><button aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}><Icon name="close" size={13} /></button></header>
       <p role="status" aria-live="polite">{snap.connection === 'online' ? 'Connected to this workspace' : label}</p>
@@ -449,7 +713,12 @@ function RuntimeStatus({ snap, compact = false }: { snap: Snapshot; compact?: bo
  * so the current session keeps its connection and draft.
  */
 function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
-  const groups = groupByWorkspace(snap.sessions, snap.cwd, snap.workspaceDirectories)
+  const chrome = useContext(WindowChrome)
+  const hiddenSet = new Set((chrome.inbox?.state.hiddenWorkspaces ?? []).map(dir => dir.replace(/\/+$/, '') || '/'))
+  const groups = groupByWorkspace(snap.sessions, snap.cwd, snap.workspaceDirectories).filter(group => {
+    const clean = group.cwd.replace(/\/+$/, '') || '/'
+    return clean === (snap.cwd.replace(/\/+$/, '') || '/') || !hiddenSet.has(clean)
+  })
   const statusFor = (cwd: string): string => (cwd === snap.cwd ? 'current' : `${groups.find(g => g.cwd === cwd)?.rows.length ?? 0} tasks`)
   return (
     <>
@@ -674,6 +943,7 @@ function copyTextFallback(text: string): void {
  * deliberately absent — no dead switches.
  */
 function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement | null {
+  const chrome = useContext(WindowChrome)
   const [renaming, setRenaming] = useState(menu?.renaming ?? false)
   // Delete asks in the menu itself: VS Code webviews block modal browser
   // dialogs (a confirm prompt returns false without showing anything).
@@ -745,6 +1015,52 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
               <Icon name="note" size={13} /> Rename…
             </button>
             <div className="menu__sep" />
+            {(() => {
+              const inboxState = chrome.inbox?.state
+              const pinned = inboxState?.pinnedIds.includes(menu.id) ?? false
+              const settled = inboxState?.settledIds.includes(menu.id) ?? false
+              const snoozed = inboxState ? isSnoozedActive(inboxState.snoozed, menu.id) : false
+              const title = menu.title || 'Thread'
+              return (
+                <>
+                  <button
+                    role="menuitem"
+                    className="menu__item"
+                    onClick={() => {
+                      if (chrome.inbox) chrome.inbox.togglePin(menu.id, title)
+                      else setThreadInboxState(current => togglePinInState(current, menu.id))
+                      store.closeSessionMenu()
+                    }}
+                  >
+                    <T3Icon name={pinned ? 'pinOff' : 'pin'} size={13} /> {pinned ? 'Unpin' : 'Pin'}
+                  </button>
+                  <button
+                    role="menuitem"
+                    className="menu__item"
+                    onClick={() => {
+                      const wakeAt = snoozed ? null : snoozePresets()[0]!.wakeAt
+                      if (chrome.inbox) chrome.inbox.snooze(menu.id, title, wakeAt)
+                      else setThreadInboxState(current => setSnoozedInState(current, menu.id, wakeAt))
+                      store.closeSessionMenu()
+                    }}
+                  >
+                    <T3Icon name="alarmClock" size={13} /> {snoozed ? 'Wake now' : 'Snooze 1 hour'}
+                  </button>
+                  <button
+                    role="menuitem"
+                    className="menu__item"
+                    onClick={() => {
+                      if (chrome.inbox) chrome.inbox.settle(menu.id, title, !settled)
+                      else setThreadInboxState(current => setSettledInState(current, menu.id, !settled))
+                      store.closeSessionMenu()
+                    }}
+                  >
+                    <T3Icon name={settled ? 'undo' : 'check'} size={13} /> {settled ? 'Restore to Inbox' : 'Settle'}
+                  </button>
+                  <div className="menu__sep" />
+                </>
+              )
+            })()}
             <button role="menuitem" className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
               <Icon name="copy" size={13} /> Copy ID
             </button>
@@ -847,6 +1163,87 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
   const sections = sidebarSections(groups, snap.contexts ?? [], snap.contextHost ?? hostOfScope(snap.storageScope))
   const online = snap.connection === 'online'
   const vibes = useVibesStyle()
+  const fallbackInbox = useThreadInbox()
+  const inbox = chrome.inbox ?? fallbackInbox
+
+  if (vibes) {
+    const activeProvider = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding.provider : 'xerxes' as const
+    const t3Rows: T3SidebarRow[] = [
+      ...rows.map(row => ({
+        id: row.id,
+        key: row.key,
+        title: row.title,
+        ...(snap.snippets[row.id] !== undefined ? { snippet: snap.snippets[row.id] } : {}),
+        status: row.status,
+        age: row.age,
+        current: row.current,
+        turns: row.turns,
+        cwd: row.cwd || snap.cwd,
+        ...(row.cwd === snap.cwd && snap.branch ? { branch: snap.branch } : {}),
+        provider: row.current ? activeProvider : 'xerxes',
+        opensWindow: snap.turnActive && row.id !== snap.currentId,
+      })),
+      ...sections
+        .filter((section): section is Extract<typeof section, { kind: 'context' }> => section.kind === 'context')
+        .flatMap(section =>
+          section.rows
+            .filter(row => !needle || row.title.toLowerCase().includes(needle))
+            .map(row => ({
+              id: row.id,
+              key: row.id,
+              title: row.title,
+              status: row.status,
+              age: '',
+              current: false,
+              turns: 0,
+              cwd: row.cwd || section.cwd,
+              host: section.host,
+              contextId: section.context.id,
+            })),
+        ),
+    ]
+    return (
+      <T3Sidebar
+        snap={snap}
+        page={page}
+        sections={sections}
+        allRows={t3Rows}
+        filter={filter}
+        setFilter={setFilter}
+        inbox={inbox.state}
+        undo={inbox.undo}
+        onUndo={() => {
+          const entry = inbox.undo
+          inbox.applyUndo()
+          if (entry?.verb === 'Removed' && entry.threadId) {
+            void store.restoreWorkspace(entry.threadId)
+          }
+        }}
+        onDismissUndo={inbox.dismissUndo}
+        onSetViewMode={inbox.setViewMode}
+        onToggleProjectScope={inbox.toggleProjectScope}
+        onClearProjectScope={inbox.clearProjectScope}
+        onTogglePin={inbox.togglePin}
+        onSettle={inbox.settle}
+        onSnooze={inbox.snooze}
+        onToggleShelf={inbox.toggleShelf}
+        onRemoveWorkspace={(cwd, label) => {
+          inbox.hideWorkspace(cwd, label)
+          void store.removeWorkspace(cwd)
+        }}
+        onRemoveRemoteHost={alias => {
+          void store.removeRemoteHost(alias)
+        }}
+        canGoBack={chrome.canGoBack ?? false}
+        canGoForward={chrome.canGoForward ?? false}
+        onGoBack={chrome.goBack ?? (() => {})}
+        onGoForward={chrome.goForward ?? (() => {})}
+        onOpen={open}
+        sidebarToggle={<SidebarToggle />}
+        runtimeStatus={<RuntimeStatus snap={snap} iconOnly />}
+      />
+    )
+  }
 
   return (
     <aside id="session-sidebar" className="side" aria-label="Sessions">
@@ -1026,6 +1423,8 @@ export function VibesSideNav({ snap, page, filter, setFilter, defaultMoreOpen = 
         {moreOpen && <div ref={menu} className="vibes-nav__menu" role="menu" aria-label="More">
           <button role="menuitem" aria-current={page === null || undefined} onClick={pick(() => open(null))}><Icon name="chat" /><span>Tasks</span></button>
           <button role="menuitem" aria-current={page === 'agents' || undefined} onClick={pick(() => open('agents'))}><Icon name="agents" /><span>Agents</span></button>
+          {showsImmortalsForSession(snap) && <button role="menuitem" disabled={!online} onClick={pick(() => open('swarm'))}><Icon name="tree" /><span>Immortals</span></button>}
+          <button role="menuitem" disabled={!online} onClick={pick(() => open('btw'))}><Icon name="chat" /><span>Side question</span></button>
           <button role="menuitem" aria-current={page === 'schedules' || undefined} disabled={!online} onClick={pick(() => open('schedules'))}><Icon name="clock" /><span>Scheduled jobs</span></button>
           <hr />
           <button role="menuitem" disabled={!online} onClick={pick(() => setFiltering(true))}><Icon name="search" /><span>Filter tasks…</span></button>
@@ -1107,12 +1506,23 @@ function SessionCell({
 function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot; page: DesktopPageName | null; agent?: string; openAgent?: (id: string) => void }): ReactElement {
   const open = useDesktopNavigation()
   const chrome = useContext(WindowChrome)
+  const vibes = useVibesStyle()
   // DeepSeek Harness's layout: the header counts the task's sub-agents and
   // switches between them; an open one replaces the conversation below.
   const fleet = useMemo(() => activityFleetRows(snap.fleet, snap.blocks), [snap.fleet, snap.blocks])
   const agentRow = agent ? fleet.find(row => row.id === agent || row.agentDetails?.requestKey === agent) : undefined
   const working = fleet.filter(row => agentState(row.status).priority < 2).length
-  const taskTitle = snap.currentTitle || (snap.connection === 'online' ? 'New task' : 'Not connected')
+  const taskTitle = snap.currentTitle || (snap.connection === 'online' ? 'New thread' : 'Not connected')
+  const projectLabel = workspaceLabel(snap.cwd)
+  const [renamingTitle, setRenamingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState(taskTitle)
+  useEffect(() => { setRenamingTitle(false); setTitleDraft(taskTitle) }, [snap.currentId, taskTitle])
+  const commitTitleRename = (): void => {
+    const trimmed = titleDraft.trim()
+    setRenamingTitle(false)
+    if (!trimmed || trimmed === taskTitle || !snap.currentId) return
+    void store.renameSession(snap.sessionKey || snap.currentId, trimmed)
+  }
   const changes = snap.changes
   const totals = useMemo(() => ({
     adds: changes.reduce((sum, file) => sum + file.adds, 0),
@@ -1126,26 +1536,203 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
 
   return (
     <main className="chat">
-      <header className="chat__head chat__head--minimal">
+      <header className={`chat__head chat__head--minimal${vibes ? ' t3-topbar' : ''}`} data-workspace-header={vibes ? 'true' : undefined}>
         {!chrome.sidebarVisible && <SidebarToggle />}
-        {agent && !onPage ? <nav className="agent-crumb" aria-label="Sub-agent">
-          <button className="agent-crumb__parent" title="Back to the task's conversation" onClick={() => openAgent('')}>{taskTitle}</button>
-          <span className="agent-crumb__sep" aria-hidden="true">/</span>
-          <AgentMenu rows={fleet} {...(agentRow ? { currentId: agentRow.id } : {})} label={agentRow?.title ?? 'Agent'} title="Switch agent" onPick={openAgent} />
-        </nav> : <span className="chat__title">{page ? PAGE_TITLES[page] : taskTitle}</span>}
+        {vibes ? (
+          agent && !onPage ? (
+            <nav className="t3-breadcrumb agent-crumb" aria-label="Sub-agent">
+              {snap.cwd && (
+                <>
+                  <button type="button" className="t3-breadcrumb__project" title={snap.cwd} onClick={() => store.openWorkspaceMenu()}>
+                    <ProjectMonogram name={projectLabel} seed={snap.cwd} size={16} />
+                    <span>{projectLabel}</span>
+                  </button>
+                  <span className="t3-breadcrumb__sep" aria-hidden="true">/</span>
+                </>
+              )}
+              <button type="button" className="agent-crumb__parent" title="Back to the task's conversation" onClick={() => openAgent('')}>{taskTitle}</button>
+              <span className="t3-breadcrumb__sep" aria-hidden="true">/</span>
+              <AgentMenu rows={fleet} {...(agentRow ? { currentId: agentRow.id } : {})} label={agentRow?.title ?? 'Agent'} title="Switch agent" onPick={openAgent} />
+            </nav>
+          ) : onPage ? (
+            <nav className="t3-breadcrumb" aria-label="Page breadcrumb">
+              {snap.cwd && (
+                <>
+                  <button
+                    type="button"
+                    className="t3-breadcrumb__project"
+                    title={`Back to ${projectLabel}`}
+                    onClick={() => open(null)}
+                  >
+                    <ProjectMonogram name={projectLabel} seed={snap.cwd} size={16} />
+                    <span>{projectLabel}</span>
+                  </button>
+                  <span className="t3-breadcrumb__sep" aria-hidden="true">/</span>
+                </>
+              )}
+              <span className="chat__title t3-breadcrumb__title">{page === 'extensions' && isExternalAcpBinding(snap.acpBinding) ? 'Customize' : PAGE_TITLES[page]}</span>
+            </nav>
+          ) : (
+            <nav className="t3-breadcrumb" aria-label="Workspace breadcrumb">
+              {snap.cwd && (
+                <>
+                  <button
+                    type="button"
+                    className="t3-breadcrumb__project"
+                    title={`${snap.cwd} — switch project`}
+                    onClick={() => store.openWorkspaceMenu()}
+                  >
+                    <ProjectMonogram name={projectLabel} seed={snap.cwd} size={16} />
+                    <span>{projectLabel}</span>
+                  </button>
+                  <span className="t3-breadcrumb__sep" aria-hidden="true">/</span>
+                </>
+              )}
+              {renamingTitle ? (
+                <input
+                  className="t3-breadcrumb__rename"
+                  autoFocus
+                  spellCheck={false}
+                  aria-label="Rename thread"
+                  value={titleDraft}
+                  onChange={event => setTitleDraft(event.target.value)}
+                  onBlur={commitTitleRename}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter') { event.preventDefault(); commitTitleRename() }
+                    else if (event.key === 'Escape') { event.preventDefault(); setRenamingTitle(false); setTitleDraft(taskTitle) }
+                  }}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="chat__title t3-breadcrumb__thread"
+                  title="Double-click to rename · Click for thread actions"
+                  onDoubleClick={() => { if (snap.currentId) { setTitleDraft(taskTitle); setRenamingTitle(true) } }}
+                  onClick={event => {
+                    if (!snap.currentId) return
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    store.openSessionMenu({ id: snap.currentId, key: snap.sessionKey || snap.currentId, title: taskTitle }, rect.left, rect.bottom + 4)
+                  }}
+                >
+                  <span className="t3-breadcrumb__thread-text">{taskTitle}</span>
+                </button>
+              )}
+            </nav>
+          )
+        ) : (
+          agent && !onPage ? <nav className="agent-crumb" aria-label="Sub-agent">
+            <button className="agent-crumb__parent" title="Back to the task's conversation" onClick={() => openAgent('')}>{taskTitle}</button>
+            <span className="agent-crumb__sep" aria-hidden="true">/</span>
+            <AgentMenu rows={fleet} {...(agentRow ? { currentId: agentRow.id } : {})} label={agentRow?.title ?? 'Agent'} title="Switch agent" onPick={openAgent} />
+          </nav> : <span className="chat__title">{page ? (page === 'extensions' && isExternalAcpBinding(snap.acpBinding) ? 'Customize' : PAGE_TITLES[page]) : taskTitle}</span>
+        )}
         {!onPage && !agent && fleet.length > 0 && <AgentMenu variant="count" rows={fleet} label={<>{fleet.length} agent{fleet.length === 1 ? '' : 's'}{working > 0 && <span className="agent-menu__live">{working} working</span>}</>} title="Open a sub-agent" onPick={openAgent} />}
-        {!onPage && !agent && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>}
+        {!onPage && !agent && (isExternalAcpBinding(snap.acpBinding) ? (() => {
+          const summary = activeAcpSummaryParts(snap.acpBinding).join(' · ')
+          return (
+            <span
+              className="hchip chat__kind chat__acp"
+              data-provider={snap.acpBinding.provider}
+              title={`External runtime: ${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''}`}
+            >
+              <AgentBrandGlyph provider={snap.acpBinding.provider} size={12} />
+              <span>{snap.acpBinding.name} · {transportBadgeLabel(snap.acpBinding.transport)}</span>
+            </span>
+          )
+        })() : (
+          !vibes && <span className="hchip chat__kind" title="Agent preset for this session · fixed after its first turn">{snap.currentAgentPreset === 'creator' ? 'Creator mode' : (snap.currentAgentPreset || 'default')}</span>
+        ))}
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
         {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null); if (agent) openAgent('') }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
         {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
+        {!onPage && !agent && snap.swarm?.active && (() => {
+          const swarmCounts = swarmMemberCounts(snap.swarm.members)
+          return (
+            <button
+              type="button"
+              className="chat__view chat__swarm"
+              data-working={swarmCounts.working > 0 ? 'true' : undefined}
+              title="Open the Immortals Board"
+              aria-label="Open Immortals Board"
+              onClick={() => open('swarm')}
+            >
+              <Icon name="tree" size={13} /> Immortals{' '}
+              <span className="pillcount">
+                {swarmCounts.working > 0 ? `${swarmCounts.working} working` : `${snap.swarm.members.length}`}
+              </span>
+            </button>
+          )
+        })()}
         {page === null && changes.length > 0 && <button className={`chat__view${snap.tab === 'changes' ? ' is-on' : ''}`} aria-pressed={snap.tab === 'changes'} onClick={() => store.setTab(snap.tab === 'changes' ? 'activity' : 'changes')}>
           Session edits <span className="pillcount"><span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span></span>
         </button>}
-        {!onPage && !agent && !snap.noWorkspace && <SectionsMenu snap={snap} />}
-        {!chrome.sidebarVisible && <RuntimeStatus snap={snap} compact />}
-        {!chrome.inspectorOpen && <WorkspaceTools snap={snap} inspectorOpen={false} />}
+        {vibes ? (
+          !onPage && !snap.noWorkspace && (
+            <div className="t3-panel-controls" data-panel-layout-controls="true" role="group" aria-label="Panel layout controls">
+              <button
+                type="button"
+                className={`t3-icon-btn${chrome.detailsOpen ? ' is-selected' : ''}`}
+                data-thread-details-toggle="true"
+                aria-pressed={Boolean(chrome.detailsOpen)}
+                aria-label="Toggle thread details"
+                title="Thread details"
+                onClick={() => chrome.toggleDetails?.()}
+              >
+                <T3Icon name="squareMenu" size={15} />
+              </button>
+              <button
+                type="button"
+                className={`t3-icon-btn${chrome.terminalDrawerOpen ? ' is-selected' : ''}`}
+                aria-pressed={Boolean(chrome.terminalDrawerOpen)}
+                aria-label="Toggle terminal drawer"
+                title="Toggle terminal drawer (⌘J)"
+                onClick={() => chrome.toggleTerminalDrawer?.()}
+              >
+                <T3Icon name="panelBottom" size={15} />
+              </button>
+              <button
+                type="button"
+                className={`t3-icon-btn${chrome.inspectorOpen ? ' is-selected' : ''}`}
+                aria-pressed={chrome.inspectorOpen}
+                aria-label="Toggle right panel"
+                title="Toggle right panel (⌘\)"
+                onClick={() => chrome.toggleRightPanel?.()}
+              >
+                <T3Icon name="panelRight" size={15} />
+              </button>
+              {chrome.inspectorOpen && chrome.toggleRailMaximized && (
+                <button
+                  type="button"
+                  className={`t3-icon-btn${chrome.railMaximized ? ' is-selected' : ''}`}
+                  aria-pressed={Boolean(chrome.railMaximized)}
+                  aria-label={chrome.railMaximized ? 'Restore right panel size' : 'Maximize right panel'}
+                  title={chrome.railMaximized ? 'Restore right panel' : 'Maximize right panel'}
+                  onClick={chrome.toggleRailMaximized}
+                >
+                  <T3Icon name={chrome.railMaximized ? 'minimize' : 'maximize'} size={14} />
+                </button>
+              )}
+            </div>
+          )
+        ) : (
+          <>
+            {!onPage && !agent && !snap.noWorkspace && <SectionsMenu snap={snap} />}
+            {!chrome.sidebarVisible && <RuntimeStatus snap={snap} compact />}
+            {!chrome.inspectorOpen && <WorkspaceTools snap={snap} inspectorOpen={false} />}
+          </>
+        )}
       </header>
+
+      {vibes && !onPage && chrome.detailsOpen && (
+        <ThreadDetailsCard
+          snap={snap}
+          mode={chrome.detailsMode ?? 'popover'}
+          onClose={() => chrome.toggleDetails?.()}
+          onNavigate={open}
+          onOpenTerminal={() => chrome.toggleTerminalDrawer?.()}
+        />
+      )}
 
       {page === 'xerxes' && <SupervisorPage />}
       {page && page !== 'xerxes' && <DesktopPage panel={page} snap={snap} />}
@@ -1156,6 +1743,7 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
             <button className="btn" onClick={() => openAgent('')}>Back to the conversation</button>
           </div></div></section>)}
       <div className="conversation-surface" hidden={page !== null || Boolean(agent)}>
+      {vibes && <div className="t3-topbar-fade" aria-hidden="true" />}
       {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
       {snap.tab === 'activity' && <Stream snap={snap} />}
       {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
@@ -1165,6 +1753,18 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
       </div>
       {/* Hidden, not unmounted, so a half-typed task message survives a visit to a page. */}
       <div className="chat__composer-host" hidden={onPage || Boolean(agent)}><Composer snap={snap} /></div>
+      {vibes && !onPage && !agent && chrome.terminalDrawerOpen && (
+        <TerminalDrawer
+          snap={snap}
+          height={chrome.terminalDrawerHeight ?? 280}
+          onResize={height => chrome.setTerminalDrawerHeight?.(height)}
+          onMoveToRightPanel={() => {
+            chrome.toggleTerminalDrawer?.()
+            open('terminal')
+          }}
+          onClose={() => chrome.toggleTerminalDrawer?.()}
+        />
+      )}
     </main>
   )
 }
@@ -1200,12 +1800,94 @@ function ConnectionBanner({ snap }: { snap: Snapshot }): ReactElement {
 
 // ── Activity stream ─────────────────────────────────────────────────────
 
+/** Number of trailing transcript activity groups rendered eagerly before progressive reveal. */
+export const TRANSCRIPT_TAIL_GROUPS = 50
+
+/**
+ * Subscribe a tail-windowed transcript container to top-scroll reveal and
+ * in-page Find triggers (both DOM `Cmd/Ctrl+F` and native macOS `Edit > Find`,
+ * which dispatches the custom `xerxes:find` event without a DOM `keydown`).
+ */
+export function attachTranscriptExpandListeners(
+  el: Pick<HTMLElement, 'scrollTop' | 'addEventListener' | 'removeEventListener'> | null,
+  win: Pick<Window, 'addEventListener' | 'removeEventListener'> | null,
+  onExpandMore: () => void,
+  onExpandAll: () => void,
+): () => void {
+  const onScroll = (): void => {
+    if (el && el.scrollTop < 160) onExpandMore()
+  }
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+      onExpandAll()
+    }
+  }
+  el?.addEventListener('scroll', onScroll, { passive: true })
+  win?.addEventListener('keydown', onKeyDown)
+  win?.addEventListener('xerxes:find', onExpandAll)
+  return () => {
+    el?.removeEventListener('scroll', onScroll)
+    win?.removeEventListener('keydown', onKeyDown)
+    win?.removeEventListener('xerxes:find', onExpandAll)
+  }
+}
+
+const StreamGroupRow = memo(function StreamGroupRow({
+  group,
+  disclosed,
+  active,
+  turnActive,
+  inlineApproval,
+  approval,
+  permissionMode,
+  changes,
+}: {
+  readonly group: readonly Block[]
+  readonly disclosed: boolean
+  readonly active: boolean
+  readonly turnActive: boolean
+  readonly inlineApproval: boolean
+  readonly approval: Snapshot['approval']
+  readonly permissionMode: string
+  readonly changes: Snapshot['changes']
+}): ReactElement {
+  return (
+    <div className="stream__group" data-history-anchor={group[0]!.id}>
+      {disclosed
+        ? <ActivityGroup blocks={group} active={active} turnActive={turnActive} />
+        : group.map(block => <BlockView key={block.id} block={block} />)}
+      {inlineApproval && approval && <ApprovalCard approval={approval} policy={permissionMode} inline />}
+      <FilesChangedCard group={group} changes={changes} />
+    </div>
+  )
+})
+
+function sameBlockList(a: readonly Block[] | undefined, b: readonly Block[]): boolean {
+  if (!a || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 function Stream({ snap }: { snap: Snapshot }): ReactElement {
-  const { ref, loadOlder, following, scrollToLatest } = useTranscriptScroll(`${snap.currentId}:${snap.sessionOpenRevision}`, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
+  const sessionScope = `${snap.currentId}:${snap.sessionOpenRevision}`
+  const { ref, loadOlder, following, scrollToLatest } = useTranscriptScroll(sessionScope, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
+  const [windowLimit, setWindowLimit] = useState(TRANSCRIPT_TAIL_GROUPS)
+  useEffect(() => {
+    setWindowLimit(TRANSCRIPT_TAIL_GROUPS)
+  }, [sessionScope])
+
   // 'Stream thinking' off hides reasoning trails from the feed — the daemon
   // still streams them; this is a display choice, not a policy change.
-  const visible = snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')
-  const blocks = snap.failed && !snap.turnActive ? withoutDuplicateFailure(visible, snap.failed.error) : visible
+  const visible = useMemo(
+    () => (snap.streamThinking ? snap.blocks : snap.blocks.filter(b => b.kind !== 'thinking')),
+    [snap.streamThinking, snap.blocks],
+  )
+  const blocks = useMemo(
+    () => (snap.failed && !snap.turnActive ? withoutDuplicateFailure(visible, snap.failed.error) : visible),
+    [snap.failed, snap.turnActive, visible],
+  )
   const offline = snap.connection === 'offline'
   const existingWork = Boolean(parseGoal(snap.goal) || snap.fleet.length || snap.todos?.length || snap.plan)
   const empty = snap.connection === 'online' && blocks.every(block => block.kind === 'notice' && !block.error) && !snap.turnActive
@@ -1225,6 +1907,37 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const inlineApproval = approval !== null && approvalIndex !== -1
   const floatApproval = approval !== null && !inlineApproval
   const failedCard = snap.failed && !snap.turnActive ? <FailedCard failed={snap.failed} /> : null
+
+  // Preserve `===` group array references for settled historical groups so
+  // streaming deltas at the bottom never re-render older ToolTimelineGroups.
+  const groupCacheRef = useRef<Map<string, readonly Block[]>>(new Map())
+  const allGroups = useMemo(() => {
+    const raw = keyedActivityGroups(blocks, approval?.toolCallId)
+    const nextCache = new Map<string, readonly Block[]>()
+    const stabilized = raw.map(entry => {
+      const prev = groupCacheRef.current.get(entry.key)
+      const stableBlocks = sameBlockList(prev, entry.blocks) ? prev! : entry.blocks
+      nextCache.set(entry.key, stableBlocks)
+      return { key: entry.key, blocks: stableBlocks }
+    })
+    groupCacheRef.current = nextCache
+    return stabilized
+  }, [blocks, approval?.toolCallId])
+
+  const hiddenGroupCount = Math.max(0, allGroups.length - windowLimit)
+  const shownGroups = hiddenGroupCount > 0 ? allGroups.slice(hiddenGroupCount) : allGroups
+
+  // Auto-expand earlier transcript groups when scrolling near top or opening in-page Find
+  // (both DOM Cmd/Ctrl+F and native macOS Edit > Find via `xerxes:find`).
+  useEffect(() => {
+    if (hiddenGroupCount <= 0) return
+    return attachTranscriptExpandListeners(
+      ref.current,
+      typeof window !== 'undefined' ? window : null,
+      () => setWindowLimit(current => current + TRANSCRIPT_TAIL_GROUPS),
+      () => setWindowLimit(current => Math.max(current, allGroups.length)),
+    )
+  }, [hiddenGroupCount, allGroups.length, ref])
 
   if (offline && blocks.length === 0 && !question) {
     return <div className="stream" ref={ref}><Offline cwd={snap.cwd} error={snap.error} /></div>
@@ -1246,17 +1959,38 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
         {existingWork ? <TaskContinuation snap={snap} /> : <Welcome snap={snap} />}
       </> : (
         <div className="stream__col">
-          {(snap.historyMore || snap.historyError) && <div className="history-pager">
+          {(snap.historyMore || snap.historyError) && hiddenGroupCount === 0 && <div className="history-pager">
             <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading earlier conversation…' : snap.historyError ? 'Retry loading earlier conversation' : 'Show earlier conversation'}</button>
             {snap.historyError && <p role="alert">{snap.historyError}</p>}
           </div>}
-          {keyedActivityGroups(blocks, approval?.toolCallId).map(({ key, blocks: group }, index, groups) => (
-            <div key={`${snap.currentId}:${key}`} data-history-anchor={group[0]!.id}>
-              {isDisclosedActivity(group, approval?.toolCallId) ? <ActivityGroup blocks={group} active={snap.turnActive && index === groups.length - 1} turnActive={snap.turnActive} /> : group.map(block => <BlockView key={block.id} block={block} />)}
-              {inlineApproval && group.some(block => block === blocks[approvalIndex]) && <ApprovalCard approval={approval} policy={snap.permissionMode} inline />}
-              <FilesChangedCard group={group} changes={snap.changes} />
+          {hiddenGroupCount > 0 && (
+            <div className="history-pager history-pager--window">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setWindowLimit(current => current + TRANSCRIPT_TAIL_GROUPS)}
+              >
+                Show earlier messages ({hiddenGroupCount})
+              </button>
             </div>
-          ))}
+          )}
+          {shownGroups.map(({ key, blocks: group }, index) => {
+            const isLast = index === shownGroups.length - 1
+            const hasInlineApproval = inlineApproval && group.some(block => block === blocks[approvalIndex])
+            return (
+              <StreamGroupRow
+                key={`${snap.currentId}:${key}`}
+                group={group}
+                disclosed={isDisclosedActivity(group, approval?.toolCallId)}
+                active={snap.turnActive && isLast}
+                turnActive={snap.turnActive}
+                inlineApproval={hasInlineApproval}
+                approval={hasInlineApproval ? approval : null}
+                permissionMode={snap.permissionMode}
+                changes={snap.changes}
+              />
+            )
+          })}
           {failedCard}
         </div>
       )}
@@ -1317,7 +2051,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
 
   // VS Code: a compact start, like its other chat views; no wordmark.
   if (isVscodeHost()) return <div className="welcome welcome--compact">
-    <AgentOrb className="welcome__orb" size={32} state="breathing" />
+    <XerxesBrandEmblem className="welcome__emblem welcome__emblem--compact" size={40} animate motion="css" />
     <h1 className="welcome__compact-title">What should Xerxes do{place ? <> in <b>{place}</b></> : ''}?</h1>
     {dirty > 0 && <p className="welcome__dirty">{dirty} uncommitted {dirty === 1 ? 'file' : 'files'} <b>+{adds}</b> <i>−{dels}</i></p>}
     {resumable.length > 0 && <section className="welcome__resume" aria-label="Recent tasks here">
@@ -1331,9 +2065,14 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
   </div>
 
   return <div className="welcome">
-    {/* No settle time: it stopped after nine seconds and read as frozen. The
-        ticker still pauses it while the window is hidden, unfocused or covered. */}
-    <AgentOrb className="welcome__orb" size={64} state="breathing" />
+    <img
+      className="welcome__logo welcome__emblem xerxes-brand-emblem"
+      src="./logo-128.png"
+      alt="Xerxes"
+      width={64}
+      height={64}
+      draggable={false}
+    />
     <h1 className="welcome__wordmark">XERXES</h1>
 
     {place ? (
@@ -1390,7 +2129,9 @@ function WorkspaceGate(): ReactElement {
   return (
     <main className="chat">
       <div className="wsgate">
-        <div className="wsgate__mark"><Icon name="folder" size={26} /></div>
+        <div className="wsgate__mark">
+          <img className="welcome__logo" src="./logo-128.png" alt="Xerxes" width={48} height={48} draggable={false} />
+        </div>
         <h1>Welcome to Xerxes.</h1>
         <p>
           Choose the folder you want to work in. Next, connect a model provider and start your first task. Your existing files stay in place.
@@ -1408,7 +2149,7 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
   const kind = connectionFailureKind(error)
   return (
     <div className="offline">
-      <div className="offline__dot" />
+      <div className="offline__mark"><AgentOrb size={32} state={kind === 'transport' ? 'connecting' : 'breathing'} live={kind === 'transport'} /></div>
       <h1>{kind === 'transport' ? 'Connecting to the shared daemon' : kind === 'session' ? 'Session belongs to another workspace' : 'Could not open this workspace'}</h1>
       {error && <p className="connection-error" role="alert">{error}</p>}
       <p>
@@ -1420,48 +2161,9 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
   )
 }
 
-export function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['blocks']; active: boolean; turnActive: boolean }): ReactElement {
-  const tools = blocks.flatMap(block => block.kind === 'tools' ? block.items : [])
-  const failures = tools.filter(toolHasFailed).length + blocks.filter(block => block.kind === 'notice' && block.error).length + blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'failed').length : 0), 0)
-  const liveAgents = blocks.reduce((total, block) => total + (block.kind === 'agents' ? block.members.filter(member => member.status === 'working' || member.status === 'running').length : 0), 0)
-  // Subagents may outlive the turn. That is not the turn still "Working" —
-  // the group reads as finished and notes who is still out.
-  const running = active || tools.some(item => item.state === 'working') || blocks.some(block => block.kind === 'thinking' && block.streaming) || turnActive && liveAgents > 0
-  const [expanded, setExpanded] = useState(false)
-  const [inspected, setInspected] = useState(false)
-  const artifacts = tools.flatMap(item => { const artifact = artifactOfTool(item); return artifact ? [artifact] : [] })
-  return <><details className={`activity-group${running ? ' is-running' : ''}`} open={expanded} onToggle={event => { setExpanded(event.currentTarget.open); if (event.currentTarget.open) setInspected(true) }}>
-    {/* One quiet line, the chevron trailing the text: "Ran 3 commands, read a file ›". */}
-    <summary>{running
-      ? <span className="activity-group__live"><span className="activity-group__working">Working</span><LivePhrase text={liveActivityPhrase(blocks)} /></span>
-      : <span className="activity-group__done">{activitySummary(blocks)}{liveAgents > 0 && <span className="activity-group__pending"> · {liveAgents} agent{liveAgents === 1 ? '' : 's'} still running</span>}</span>}{failures > 0 && <strong>{failures} failed</strong>}<Icon name="chevron" size={13} /></summary>
-    <div className="activity-group__body">{(expanded || inspected) && blocks.map((block, index) => <BlockView key={block.id} block={block} />)}</div>
-  </details>
-  {/* A saved artifact is a result the user must see: while the group is collapsed its card stays outside it. */}
-  {!expanded && artifacts.map(artifact => <ArtifactCard key={`${artifact.id}:${artifact.version}`} artifact={artifact} />)}
-  </>
-}
-
-/**
- * One status phrase that crossfades when it changes: the outgoing phrase
- * lifts away while the incoming one settles in the same grid cell, so the
- * header never jumps width mid-swap. Reduced motion swaps instantly (CSS).
- */
-function LivePhrase({ text }: { text: string }): ReactElement {
-  const [phrase, setPhrase] = useState<{ text: string; key: number; leaving: { text: string; key: number } | null }>({ text, key: 0, leaving: null })
-  useEffect(() => {
-    setPhrase(prev => prev.text === text ? prev : { text, key: prev.key + 1, leaving: { text: prev.text, key: prev.key } })
-  }, [text])
-  useEffect(() => {
-    if (!phrase.leaving) return
-    const timer = setTimeout(() => setPhrase(prev => ({ ...prev, leaving: null })), 320)
-    return () => clearTimeout(timer)
-  }, [phrase.leaving])
-  return <span className="live-phrase">
-    {phrase.leaving && <span key={phrase.leaving.key} className="live-phrase__item is-leaving" aria-hidden="true">{phrase.leaving.text}</span>}
-    <span key={phrase.key} className={`live-phrase__item${phrase.key ? ' is-entering' : ''}`} title={phrase.text}>{phrase.text}</span>
-  </span>
-}
+export const ActivityGroup = memo(function ActivityGroup({ blocks, active, turnActive }: { blocks: Snapshot['blocks']; active: boolean; turnActive: boolean }): ReactElement {
+  return <ToolTimelineGroup blocks={blocks} active={active} turnActive={turnActive} />
+})
 
 /**
  * One action row per finished reply, under its last paragraph (Claude's):
@@ -1497,7 +2199,7 @@ function ReplyActionRow({ blockId }: { blockId: number }): ReactElement | null {
   return <div className={`msg__actions msg__actions--reply${end.latest ? ' is-latest' : ''}`}><CopyButton icon text={end.text} label="Copy reply" /></div>
 }
 
-function UserMessage({ text, images = [] }: { text: string; images?: readonly string[] }): ReactElement {
+const UserMessage = memo(function UserMessage({ text, images = [] }: { text: string; images?: readonly string[] }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const long = text.length > 1600 || text.split('\n').length > 16
   // The wrapper carries the bubble's right alignment so the copy row can sit
@@ -1512,10 +2214,10 @@ function UserMessage({ text, images = [] }: { text: string; images?: readonly st
     </div>}
     <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
   </div>
-}
+})
 
 /** Agent prose whose shell code blocks offer Run: an idle Terminal shell (or a new one) runs it, shown in the rail. */
-function RunnableReply({ text, streaming }: { text: string; streaming: boolean }): ReactElement {
+const RunnableReply = memo(function RunnableReply({ text, streaming }: { text: string; streaming: boolean }): ReactElement {
   const navigate = useDesktopNavigation()
   const run = useCallback(async (command: string) => {
     await store.runInTerminal(command)
@@ -1526,7 +2228,7 @@ function RunnableReply({ text, streaming }: { text: string; streaming: boolean }
       <Markdown text={text} className="md--agent" tail={streaming ? CARET : undefined} />
     </CodeRunContext.Provider>
   )
-}
+})
 
 // Memoized: the turn clock re-renders the conversation every second, and an
 // unchanged block (same object) has nothing new to draw.
@@ -1598,7 +2300,128 @@ export const BlockView = memo(function BlockView({ block }: { block: Snapshot['b
 })
 
 /** Command-shaped tools read as a command; everything else as its fields. */
-const COMMAND_KEYS = ['command', 'cmd', 'script', 'shell'] as const
+const COMMAND_KEYS = ['command', 'cmd', 'CommandLine', 'script', 'shell'] as const
+const COMMAND_KEY_LOWER = new Set(COMMAND_KEYS.map(key => key.toLowerCase()))
+const APPROVAL_PLUMBING_KEYS = new Set([
+  'waitmsbeforeasync',
+  'toolsummary',
+  'tool_summary',
+  'safetoautorun',
+  'blocking',
+  'isdaemon',
+])
+const APPROVAL_DIFF_OMIT_KEYS = new Set([
+  'path', 'Path', 'file_path',
+  'Target', 'Replacement', 'old_string', 'new_string', 'old_text', 'new_text', 'oldText', 'newText',
+  'content', 'Content',
+])
+const APPROVAL_DIFF_PREVIEW_LINES = 16
+
+function approvalToolSummaryOf(inputs: Readonly<Record<string, unknown>> | undefined): string | null {
+  if (!inputs) return null
+  const raw = inputs.toolSummary ?? inputs.tool_summary
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
+
+/** Map digit shortcuts (`1`/`2`/`3`) on an approval card, respecting `allowPermanent === false`. */
+export function approvalKeyAction(key: string, allowPermanent?: boolean): ApprovalResponse | null {
+  if (key === '1') return 'allow_once'
+  if (key === '2') return allowPermanent === false ? 'deny' : 'allow_session'
+  if (key === '3') return 'deny'
+  return null
+}
+
+function approvalDiffOf(
+  approval: NonNullable<Snapshot['approval']>,
+): { readonly path: string; readonly before: string; readonly after: string } | null {
+  const inputs = approval.inputs
+  const inputPath = inputs
+    ? (typeof inputs.file_path === 'string' && inputs.file_path.trim())
+      || (typeof inputs.path === 'string' && inputs.path.trim())
+      || (typeof inputs.Path === 'string' && inputs.Path.trim())
+      || ''
+    : ''
+  if (approval.diff && (approval.diff.oldText !== undefined || approval.diff.newText !== undefined)) {
+    const rawBefore = approval.diff.oldText ?? ''
+    const rawAfter = approval.diff.newText ?? ''
+    if (rawBefore && rawAfter) {
+      const span = trimmedChangedLines(rawBefore, rawAfter, 3)
+      return {
+        path: approval.diff.path || inputPath,
+        before: span.before.join('\n'),
+        after: span.after.join('\n'),
+      }
+    }
+    return { path: approval.diff.path || inputPath, before: rawBefore, after: rawAfter }
+  }
+  if (!inputs) return null
+  const before =
+    typeof inputs.old_string === 'string'
+      ? inputs.old_string
+      : typeof inputs.Target === 'string'
+        ? inputs.Target
+        : typeof inputs.old_text === 'string'
+          ? inputs.old_text
+          : typeof inputs.oldText === 'string'
+            ? inputs.oldText
+            : undefined
+  const after =
+    typeof inputs.new_string === 'string'
+      ? inputs.new_string
+      : typeof inputs.Replacement === 'string'
+        ? inputs.Replacement
+        : typeof inputs.new_text === 'string'
+          ? inputs.new_text
+          : typeof inputs.newText === 'string'
+            ? inputs.newText
+            : typeof inputs.content === 'string'
+              ? inputs.content
+              : typeof inputs.Content === 'string'
+                ? inputs.Content
+                : undefined
+  if (before === undefined && after === undefined) return null
+  return { path: inputPath, before: before ?? '', after: after ?? '' }
+}
+
+function ApprovalDiffPreview({ diff }: { readonly diff: { readonly path: string; readonly before: string; readonly after: string } }): ReactElement {
+  const [expanded, setExpanded] = useState(false)
+  const lines = useMemo(() => lineDiff(diff.before, diff.after), [diff.before, diff.after])
+  const adds = useMemo(() => lines.filter(line => line.kind === 'add').length, [lines])
+  const dels = useMemo(() => lines.filter(line => line.kind === 'del').length, [lines])
+  const shown = expanded ? lines : lines.slice(0, APPROVAL_DIFF_PREVIEW_LINES)
+  const hiddenCount = lines.length - shown.length
+
+  return (
+    <div className="approval__diff" role="region" aria-label={diff.path ? `Proposed diff for ${diff.path}` : 'Proposed diff'}>
+      <div className="approval__diff-head">
+        <span className="approval__diff-path" title={diff.path || undefined}>{diff.path || 'File changes'}</span>
+        <span className="approval__diff-stats">
+          <span className="add">+{adds}</span>
+          {dels > 0 && <span className="del">−{dels}</span>}
+        </span>
+      </div>
+      <pre className="approval__diff-code">
+        {shown.map((line, index) => (
+          <span key={index} className={`approval__diff-line approval__diff-line--${line.kind}`}>
+            <span className="approval__diff-sign" aria-hidden="true">
+              {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '}
+            </span>
+            <code>{line.text || ' '}</code>
+          </span>
+        ))}
+      </pre>
+      {lines.length > APPROVAL_DIFF_PREVIEW_LINES && (
+        <button
+          type="button"
+          className="approval__diff-more"
+          onClick={() => setExpanded(value => !value)}
+        >
+          {expanded ? 'Show less' : `Show ${hiddenCount} more line${hiddenCount === 1 ? '' : 's'}`}
+        </button>
+      )}
+    </div>
+  )
+}
 
 /**
  * What the decision is actually about. The daemon ships the tool's real
@@ -1607,20 +2430,51 @@ const COMMAND_KEYS = ['command', 'cmd', 'script', 'shell'] as const
  * between approving `send_message(telegram)` and approving a message you
  * have read.
  */
-function ApprovalBody({ approval }: { approval: NonNullable<Snapshot['approval']> }): ReactElement | null {
+function ApprovalBody({
+  approval,
+  hideToolSummary = false,
+}: {
+  approval: NonNullable<Snapshot['approval']>
+  hideToolSummary?: boolean
+}): ReactElement | null {
+  const diff = approvalDiffOf(approval)
   const inputs = approval.inputs
-  if (!inputs) return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
-  const entries = Object.entries(inputs).filter(([, value]) => value !== null && value !== undefined && value !== '')
-  if (entries.length === 0) return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
-  const command = entries.find(([key]) => (COMMAND_KEYS as readonly string[]).includes(key))
-  if (command && typeof command[1] === 'string') {
-    const rest = entries.filter(entry => entry !== command)
+  const toolSummary = approvalToolSummaryOf(inputs)
+  const showInlineSummary = Boolean(toolSummary && !hideToolSummary && toolSummary !== approval.reason)
+  const entries = inputs
+    ? Object.entries(inputs).filter(([, value]) => value !== null && value !== undefined && value !== '')
+    : []
+  if (diff) {
+    const rest = entries.filter(
+      ([key]) => !APPROVAL_DIFF_OMIT_KEYS.has(key) && !APPROVAL_PLUMBING_KEYS.has(key.toLowerCase()),
+    )
     return <>
+      {showInlineSummary && <p className="approval__reason">{toolSummary}</p>}
+      <ApprovalDiffPreview diff={diff} />
+      {rest.length > 0 && <ApprovalFields entries={rest} />}
+    </>
+  }
+  if (entries.length === 0) return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
+  const command = entries.find(([key]) => COMMAND_KEY_LOWER.has(key.toLowerCase()))
+  if (command && typeof command[1] === 'string') {
+    const rest = entries.filter(
+      ([key]) => !COMMAND_KEY_LOWER.has(key.toLowerCase()) && !APPROVAL_PLUMBING_KEYS.has(key.toLowerCase()),
+    )
+    return <>
+      {showInlineSummary && <p className="approval__reason">{toolSummary}</p>}
       <pre className="approval__desc">{command[1]}</pre>
       {rest.length > 0 && <ApprovalFields entries={rest} />}
     </>
   }
-  return <ApprovalFields entries={entries} />
+  const visibleEntries = entries.filter(([key]) => !APPROVAL_PLUMBING_KEYS.has(key.toLowerCase()))
+  if (visibleEntries.length === 0) {
+    if (showInlineSummary) return <p className="approval__reason">{toolSummary}</p>
+    return approval.description ? <pre className="approval__desc">{approval.description}</pre> : null
+  }
+  return <>
+    {showInlineSummary && <p className="approval__reason">{toolSummary}</p>}
+    <ApprovalFields entries={visibleEntries} />
+  </>
 }
 
 function ApprovalFields({ entries }: { entries: readonly [string, unknown][] }): ReactElement {
@@ -1641,7 +2495,7 @@ export function isPlanExitApproval(approval: Pick<NonNullable<Snapshot['approval
   return /^ExitPlanMode(Tool)?$/.test(approval.toolName || approval.action || '')
 }
 
-function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean; blocks?: readonly Block[] }): ReactElement {
+export function ApprovalCard(props: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean; blocks?: readonly Block[] }): ReactElement {
   const { blocks, ...rest } = props
   return isPlanExitApproval(props.approval) ? <PlanApprovalCard approval={props.approval} planId={latestArtifactId(blocks ?? store.getSnapshot().blocks)} /> : <ToolApprovalCard {...rest} />
 }
@@ -1749,6 +2603,10 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
 function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
   const card = useRef<HTMLDivElement>(null)
   const vibes = useVibesStyle()
+  const canAllowSession = approval.allowPermanent !== false
+  const toolSummary = approvalToolSummaryOf(approval.inputs)
+  const subtitle = approval.reason || toolSummary
+  const hideBodySummary = Boolean(toolSummary && subtitle === toolSummary)
   // role="alertdialog" that never takes focus announces nothing, and the
   // 1/2/3 keys it advertises are dropped while the composer (auto-focused
   // on entry) holds focus. Moving focus here fixes both at once — and it
@@ -1762,7 +2620,7 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
   }, [approval.id])
   if (vibes) {
     // Same card as the Vibes question: the "Needs your input" label, then what is asked
-    // on the header band, the exact command or fields, and the three answers at the right.
+    // on the header band, the exact command or fields, and the answers at the right.
     // Keys 1/2/3 still answer while the card has focus (the window handler accepts .vq--approval).
     const title = approvalTitle(approval.toolName || approval.action || '')
     return (
@@ -1774,12 +2632,12 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
             <span className="vq__qtitle" title={approval.toolName || approval.action || undefined}>{title}</span>
             <button type="button" className="vq__hide" title="Hide until you decide; the request stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
           </div>
-          {approval.reason && <p className="vq__reason">{approval.reason}</p>}
-          <div className="vq__body"><ApprovalBody approval={approval} /></div>
+          {subtitle && <p className="vq__reason">{subtitle}</p>}
+          <div className="vq__body"><ApprovalBody approval={approval} hideToolSummary={hideBodySummary} /></div>
           {approval.cwd && <p className="vq__cwd" title={approval.cwd}>in {approval.cwd}</p>}
           <div className="vq__actions">
-            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>3</kbd></button>
-            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'allow_session')}>Allow for this session <kbd>2</kbd></button>
+            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
+            {canAllowSession && <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'allow_session')}>Allow for this session <kbd>2</kbd></button>}
             <button type="button" className="vq__submit" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>⌘</kbd><kbd>↵</kbd></button>
           </div>
         </div>
@@ -1793,12 +2651,12 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
         <span className="approval__title" title={approval.toolName || approval.action || undefined}>{approvalTitle(approval.toolName || approval.action || '')}</span>
         <button className="approval__dismiss" title="Hide until you decide — the request stays pending" aria-label="Hide this request" onClick={() => store.dismissInteraction()}><Icon name="close" size={13} /></button>
       </div>
-      {approval.reason && <p className="approval__reason">{approval.reason}</p>}
-      <ApprovalBody approval={approval} />
+      {subtitle && <p className="approval__reason">{subtitle}</p>}
+      <ApprovalBody approval={approval} hideToolSummary={hideBodySummary} />
       <div className="approval__row">
         <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>1</kbd></button>
-        <button className="btn" onClick={() => store.approve(approval.id, 'allow_session')}>This session <kbd>2</kbd></button>
-        <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>3</kbd></button>
+        {canAllowSession && <button className="btn" onClick={() => store.approve(approval.id, 'allow_session')}>This session <kbd>2</kbd></button>}
+        <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
       </div>
       <p className="approval__cwd" title={approval.cwd || undefined}>
         <span className="appr-policy">Policy: {(approval.permissionMode ?? policy) || 'runtime default'}</span>{approval.cwd && <> · in {approval.cwd}</>}
@@ -1859,6 +2717,44 @@ function optionParts(option: string): { label: string; detail: string } {
   return at > 0 ? { label: option.slice(0, at), detail: option.slice(at + 3) } : { label: option, detail: '' }
 }
 
+/** Toggle a choice in single-select or multi-select question state. */
+export function toggleQuestionOption(
+  current: readonly string[],
+  option: string,
+  multiSelect = false,
+): string[] {
+  if (multiSelect) {
+    return current.includes(option) ? current.filter(item => item !== option) : [...current, option]
+  }
+  return current.includes(option) ? [] : [option]
+}
+
+/**
+ * Format QuestionCard answers into wire-compatible `Record<string, string>`.
+ * Multi-select answers join chosen option titles (and any custom Other entry)
+ * with `\n` so option titles containing commas stay unambiguous across ACP & TUI.
+ */
+export function formatQuestionAnswers(
+  items: NonNullable<Snapshot['question']>['items'],
+  selections: Readonly<Record<string, readonly string[]>>,
+  others: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const answers: Record<string, string> = {}
+  for (const item of items) {
+    const custom = others[item.id]?.trim() ?? ''
+    const picked = selections[item.id] ?? []
+    if (item.multiSelect) {
+      const combined = custom ? [...picked, custom] : [...picked]
+      if (combined.length > 0) answers[item.id] = combined.join('\n')
+    } else if (custom) {
+      answers[item.id] = custom
+    } else if (picked.length > 0) {
+      answers[item.id] = picked.join(', ')
+    }
+  }
+  return answers
+}
+
 function QuestionCard({
   question,
   plan,
@@ -1874,14 +2770,7 @@ function QuestionCard({
     (item.allowFreeform && !!others[item.id]?.trim()) || (selections[item.id]?.length ?? 0) > 0)
   const submit = (): void => {
     if (!canSubmit) return
-    const answers: Record<string, string> = {}
-    for (const item of question.items) {
-      const custom = others[item.id]?.trim()
-      const picked = selections[item.id] ?? []
-      if (custom) answers[item.id] = custom
-      else if (picked.length) answers[item.id] = picked.join(', ')
-    }
-    store.answerQuestion(question.requestId, answers)
+    store.answerQuestion(question.requestId, formatQuestionAnswers(question.items, selections, others))
   }
   // Number keys choose options while the card is up (not while typing); the
   // hints are only honest for the FIRST question — later ones have no keys.
@@ -1897,8 +2786,11 @@ function QuestionCard({
       const option = item.options[number - 1]
       if (!option) return
       event.preventDefault()
-      setSelections(prev => ({ ...prev, [item.id]: [option] }))
-      setOthers(prev => ({ ...prev, [item.id]: '' }))
+      setSelections(prev => ({
+        ...prev,
+        [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, item.multiSelect === true),
+      }))
+      if (!item.multiSelect) setOthers(prev => ({ ...prev, [item.id]: '' }))
     }
     const onEnter = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter') return
@@ -1919,8 +2811,8 @@ function QuestionCard({
   if (review) return <PlanReviewCard question={question} plan={plan} />
   if (vibes) {
     // Claude Code's question card: a "Needs your input" pill, the question on a
-    // header band, radio rows (label over a grey description), an Other row,
-    // then Skip and Submit (⌘↵) at the right. Same state and answers as below.
+    // header band, radio/checkbox rows (label over a grey description), an Other
+    // row, then Skip and Submit (⌘↵) at the right.
     const skippable = question.items.every(item => item.allowFreeform)
     const skip = (): void => store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
     return (
@@ -1930,27 +2822,60 @@ function QuestionCard({
           {question.items.map((item, qi) => {
             const picked = selections[item.id] ?? []
             const other = others[item.id] ?? ''
+            const multi = item.multiSelect === true
             return (
-              <div key={item.id} className="vq__item">
-                <div className="vq__q"><Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" /></div>
-                <div className="vq__opts" role="radiogroup" aria-label={item.question}>
+              <div key={item.id} className="vq__item" data-multi={multi ? 'true' : undefined}>
+                <div className="vq__q">
+                  <Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" />
+                  {multi && <span className="vq__multi-hint">Select all that apply</span>}
+                </div>
+                <div className="vq__opts" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
                   {item.options.map(option => {
                     const on = picked.includes(option)
                     const { label, detail } = optionParts(option)
                     return (
-                      <button key={option} type="button" role="radio" aria-checked={on} className="vq__opt"
-                        onClick={() => { setOthers(prev => ({ ...prev, [item.id]: '' })); setSelections(prev => ({ ...prev, [item.id]: on ? [] : [option] })) }}>
-                        <span className="vq__radio" aria-hidden="true" />
+                      <button
+                        key={option}
+                        type="button"
+                        role={multi ? 'checkbox' : 'radio'}
+                        aria-checked={on}
+                        className="vq__opt"
+                        onClick={() => {
+                          if (!multi) setOthers(prev => ({ ...prev, [item.id]: '' }))
+                          setSelections(prev => ({
+                            ...prev,
+                            [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, multi),
+                          }))
+                        }}
+                      >
+                        {multi
+                          ? <span className="vq__check" aria-hidden="true">{on ? <Icon name="check" size={12} /> : null}</span>
+                          : <span className="vq__radio" aria-hidden="true" />}
                         <span className="vq__text"><span className="vq__label">{label}</span>{detail && <span className="vq__detail">{detail}</span>}</span>
                       </button>
                     )
                   })}
                   {item.allowFreeform && (
-                    <label className="vq__opt vq__opt--other" aria-checked={other.trim() !== ''} role="radio">
-                      <span className="vq__radio" aria-hidden="true" />
-                      <input aria-label="Other answer" placeholder={item.placeholder || 'Other'} spellCheck={false} value={other}
-                        onChange={e => { const value = e.target.value; setOthers(prev => ({ ...prev, [item.id]: value })); setSelections(prev => ({ ...prev, [item.id]: [] })) }}
-                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); submit() } }} />
+                    <label
+                      className="vq__opt vq__opt--other"
+                      aria-checked={other.trim() !== ''}
+                      role={multi ? 'checkbox' : 'radio'}
+                    >
+                      {multi
+                        ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
+                        : <span className="vq__radio" aria-hidden="true" />}
+                      <input
+                        aria-label="Other answer"
+                        placeholder={item.placeholder || 'Other'}
+                        spellCheck={false}
+                        value={other}
+                        onChange={e => {
+                          const value = e.target.value
+                          setOthers(prev => ({ ...prev, [item.id]: value }))
+                          if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
+                        }}
+                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); submit() } }}
+                      />
                     </label>
                   )}
                 </div>
@@ -1973,25 +2898,32 @@ function QuestionCard({
       </div>
       {question.items.map((item, qi) => {
         const picked = selections[item.id] ?? []
+        const multi = item.multiSelect === true
         return (
           <div key={item.id} style={{ display: 'grid', gap: 6 }}>
             {/* The question is the agent's prose: paths in backticks and short
                 lists read as they were written, not as raw markup. */}
-            <div className="qcard__q"><Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" /></div>
+            <div className="qcard__q">
+              <Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" />
+              {multi && <span className="vq__multi-hint">Select all that apply</span>}
+            </div>
             {item.options.length > 0 && (
-              <div className="optlist">
+              <div className="optlist" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
                 {item.options.map((option, oi) => {
                   const on = picked.includes(option)
                   return (
                     <button
                       key={option}
+                      type="button"
+                      role={multi ? 'checkbox' : 'radio'}
+                      aria-checked={on}
                       className={`opt${on ? ' is-approve' : ''}`}
-                      aria-pressed={on}
                       onClick={() => {
-                        setOthers(prev => ({ ...prev, [item.id]: '' }))
-                        // One answer per question: a second click moves the
-                        // choice instead of sending "A, B".
-                        setSelections(prev => ({ ...prev, [item.id]: on ? [] : [option] }))
+                        if (!multi) setOthers(prev => ({ ...prev, [item.id]: '' }))
+                        setSelections(prev => ({
+                          ...prev,
+                          [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, multi),
+                        }))
                       }}
                     >
                       <span className="opt__label">{option}</span>
@@ -2012,7 +2944,7 @@ function QuestionCard({
                   value={others[item.id] ?? ''}
                   onChange={e => {
                     setOthers(prev => ({ ...prev, [item.id]: e.target.value }))
-                    setSelections(prev => ({ ...prev, [item.id]: [] }))
+                    if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                   }}
                 />
               </div>
@@ -2204,7 +3136,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const workspace = (snap.storageScope ?? '') + snap.cwd
   const key = draftKey(workspace, snap.currentId || snap.sessionKey)
   const [draft, setDraft] = useState(() => readDraft(key))
-  const [hints, setHints] = useState<{ items: HintItem[]; index: number } | null>(null)
+  const [hints, setHints] = useState<{ items: CompletionHintItem[]; index: number } | null>(null)
   const [images, setImages] = useState<ComposerImage[]>([])
   const attach = (files: Iterable<File>): void => {
     void composerImages(files).then(added => { if (added.length) setImages(current => [...current, ...added]) })
@@ -2297,9 +3229,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         .catch(() => { if (hintSeq.current === seq) setHints({items: [], index: 0}) })
     }, 90)
     return () => clearTimeout(timer)
-  }, [draft, snap.connection])
+  }, [draft, snap.connection, snap.acpBinding?.connected, snap.acpBinding?.agent_id, snap.acpBinding?.available_commands, snap.acpBinding?.discovered_skills])
 
-  const pickHint = (item: HintItem): void => {
+  const pickHint = (item: CompletionHintItem): void => {
     hintSeq.current += 1
     setDraft(applyCompletion(item.value))
     setHints(null)
@@ -2315,6 +3247,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       ?.scrollIntoView({ block: 'nearest' })
   }, [hints?.index, hints?.items.length])
 
+  const externalAcp = isExternalAcpBinding(snap.acpBinding)
+  const acpSupportsImages = !externalAcp || snap.acpBinding?.capabilities?.prompt.image !== false
+  const hasAcpPlanMode = externalAcp && Boolean(snap.acpBinding?.modes?.some(mode => /^(plan|planning)$/i.test(mode.id)))
+  const inPlanMode = externalAcp
+    ? /^(plan|planning)$/i.test(snap.acpBinding?.current_mode ?? '')
+    : snap.planMode
   const ready = snap.connection === 'online' && !snap.compacting
   const placeholder =
     snap.connection !== 'online'
@@ -2323,7 +3261,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         ? 'Steer now — queued until this step settles'
         : snap.compacting
           ? 'Compacting the conversation — you can send when it finishes'
-          : snap.planMode
+          : inPlanMode
           ? 'Planning — describe the outcome, or /plan <msg> to steer'
           : 'Describe what you need'
   // VS Code has Source Control for the repo line, and no dictation in a webview.
@@ -2346,14 +3284,14 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       {hints && (
         <div className="hints">
           <div className="hints__header">
-            <strong>Commands & skills</strong>
+            <strong>{externalAcp ? `${snap.acpBinding!.name} commands & skills` : 'Commands & skills'}</strong>
             <span>{hints.items.length} available</span>
           </div>
           <div className="hints__list" role="listbox" aria-label="Command and skill hints" ref={hintsRef}>
           {hints.items.length === 0 && <div className="hints__empty">No matches. Try another name or description.</div>}
           {hints.items.map((item, index) => (
             <button
-              key={item.value}
+              key={`${item.runtimeProvider ?? item.kind}:${item.value}`}
               type="button"
               role="option"
               aria-selected={index === hints.index}
@@ -2361,7 +3299,15 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               onMouseEnter={() => setHints({ ...hints, index })}
               onClick={() => pickHint(item)}
             >
-              <span className="hints__label">{item.label}<small>{item.kind === "skill" ? "Skill" : "Command"}</small></span>
+              <span className="hints__label">
+                {item.label}
+                <small
+                  className={item.runtimeProvider ? 'hints__badge hints__badge--acp' : undefined}
+                  data-provider={item.runtimeProvider}
+                >
+                  {item.badge ?? (item.kind === 'skill' ? 'Skill' : 'Command')}
+                </small>
+              </span>
               <span className="hints__meta">{item.meta}</span>
             </button>
           ))}
@@ -2375,11 +3321,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       {snap.submissionPending && !snap.turnActive && !snap.compacting && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
       {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`} role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} />{snap.stopArmed
         ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>
-        : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<span className="streamstatus__clock">{turnDurOf(snap.turnSeconds)}</span></div>}
+        : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<ElapsedClock active={snap.turnActive} since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={turnDurOf} className="streamstatus__clock" /></div>}
       <ComposerTaskSummary snap={snap} />
-      {!vscode && <RepoBar snap={snap} />}
+      {!vscode && !vibes && <RepoBar snap={snap} />}
+      <AcpActiveBanner snap={snap} />
       <div className="composer-dock">
-      <div className="composer" onDragOver={e => { if (Array.from(e.dataTransfer.items).some(item => item.type.startsWith('image/'))) e.preventDefault() }} onDrop={e => { const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/')); if (files.length) { e.preventDefault(); attach(files) } }}>
+      <div className="composer" onDragOver={e => { if (acpSupportsImages && Array.from(e.dataTransfer.items).some(item => item.type.startsWith('image/'))) e.preventDefault() }} onDrop={e => { if (!acpSupportsImages) return; const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/')); if (files.length) { e.preventDefault(); attach(files) } }}>
         {images.length > 0 && <div className="composer__images" aria-label="Attached images">
           {images.map(image => <div key={image.id} className="composer__image">
             <img src={`data:${image.mediaType};base64,${image.data}`} alt={image.name} />
@@ -2396,6 +3343,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           spellCheck={false}
           onChange={e => { hintSeq.current += 1; setHints(null); setDraft(e.target.value); grow() }}
           onPaste={e => {
+            if (!acpSupportsImages) return
             // A screenshot arrives as a file; text in the same paste still pastes.
             const files = Array.from(e.clipboardData.files).filter(file => file.type.startsWith('image/'))
             if (!files.length) return
@@ -2404,7 +3352,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           }}
           onKeyDown={e => {
             // Shift+Tab switches between plan mode and normal mode, as in Claude Code.
-            if (e.key === 'Tab' && e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); store.togglePlanMode(); return }
+            if ((!externalAcp || hasAcpPlanMode) && e.key === 'Tab' && e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); store.togglePlanMode(); return }
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             else if (hints && hints.items.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
               // Hints own the arrows while open; the caret keeps them when closed.
@@ -2429,64 +3377,130 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         />
         {/* Stop while a turn runs and nothing is typed; otherwise send (or queue). */}
         {(snap.turnActive || snap.submissionPending) && !draft.trim() && !images.length
-          ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}><Icon name="stop" size={18} /></button>
+          ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}>{vibes ? <T3Icon name="stopSquare" size={14} /> : <Icon name="stop" size={18} />}</button>
           : <button
               className="composer__send"
               disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending}
               title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
               onClick={send}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
-            ><Icon name={vibes ? 'enter' : 'arrowUp'} size={16} /></button>}
+            >{vibes ? <T3Icon name="arrowUp" size={16} /> : <Icon name="arrowUp" size={16} />}</button>}
       </div>
       </div>
-      <div className="composer__toolbar">
-        <button className="cchip composer__icon" title="Add files or folders as context" aria-label="Add context" onClick={() => open('files')}><Icon name="plus" size={16} /></button>
-        {!vscode && <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />}
-        <button
-          className="cchip composer__text composer__perm"
-          title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
-          onClick={() => store.openSettings('permissions')}
-        >{permissionLabel(snap.permissionMode)}</button>
-        <button
-          className={`cchip composer__text composer__plan${snap.planMode ? ' is-on' : ''}`}
-          aria-pressed={snap.planMode}
-          title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
-          onClick={() => store.togglePlanMode()}
-        >{snap.planMode ? 'Plan first' : 'Plan'}</button>
-        <div className="chipanchor">
+      {vibes && !vscode ? (
+        <div className="composer__toolbar t3-composer-toolbar">
           <button
-            className={`cchip composer__text delegation-chip${snap.delegationMode === 'auto' ? '' : ' is-on'}`}
-            aria-haspopup="dialog"
-            aria-expanded={snap.delegationMenuOpen}
-            title="How eagerly this task uses agents and workflows — click to change"
-            onClick={() => store.toggleDelegationMenu()}
-          >{!vibes && <Icon name="agents" size={14} />}Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
-          <PickerLayer>
-          {snap.delegationMenuOpen && <DelegationMenu snap={snap} onClose={() => store.closeDelegationMenu()} />}
-          </PickerLayer>
+            type="button"
+            className="cchip composer__icon t3-attach-btn"
+            data-images-supported={acpSupportsImages ? 'true' : 'false'}
+            title={
+              acpSupportsImages
+                ? 'Add files or folders as context'
+                : `Add files or folders as context · ${snap.acpBinding!.name} does not support image attachments`
+            }
+            aria-label="Add context"
+            onClick={() => open('files')}
+          >
+            <T3Icon name="paperclip" size={16} />
+          </button>
+          {snap.sideQuestionStreaming && (
+            <button
+              type="button"
+              className="cchip composer__text composer__aside is-on"
+              title="Open side question (⌘;)"
+              onClick={() => open('btw')}
+            >
+              Ask aside
+            </button>
+          )}
+          <span className="composer__flex" />
+          {!externalAcp && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
+          <T3ModelPicker snap={snap} />
+          <Dictation compact sessionKey={snap.sessionKey} onText={text => { setDraft(value => (value ? value + ' ' : '') + text) }} />
         </div>
-        <span className="composer__flex" />
-        {snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
-        <div className="chipanchor composer__model">
+      ) : (
+        <div className="composer__toolbar">
           <button
-            className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}
-            title="Model — click to change"
-            onClick={() => store.toggleModelMenu()}
-          >{snap.model ? bareModelName(snap.model) : 'Choose model'}</button>
-          <PickerLayer>
-          {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
-          {snap.pickerOpen && <ModelPicker snap={snap} onClose={() => store.closePicker()} />}
-          {snap.reasoningPickerOpen && <ReasoningPicker snap={snap} onClose={() => store.closeReasoningPicker()} />}
-          </PickerLayer>
+            className="cchip composer__icon"
+            data-images-supported={acpSupportsImages ? 'true' : 'false'}
+            title={
+              acpSupportsImages
+                ? 'Add files or folders as context'
+                : `Add files or folders as context · ${snap.acpBinding!.name} does not support image attachments`
+            }
+            aria-label="Add context"
+            onClick={() => open('files')}
+          ><Icon name="plus" size={16} /></button>
+          {!vscode && <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />}
+          {!externalAcp && (
+            <>
+              <button
+                className="cchip composer__text composer__perm"
+                title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
+                onClick={() => store.openSettings('permissions')}
+              >{permissionLabel(snap.permissionMode)}</button>
+              <button
+                className={`cchip composer__text composer__plan${snap.planMode ? ' is-on' : ''}`}
+                aria-pressed={snap.planMode}
+                title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
+                onClick={() => store.togglePlanMode()}
+              >{snap.planMode ? 'Plan first' : 'Plan'}</button>
+              <div className="chipanchor">
+                <button
+                  className={`cchip composer__text delegation-chip${snap.delegationMode === 'auto' ? '' : ' is-on'}`}
+                  aria-haspopup="dialog"
+                  aria-expanded={snap.delegationMenuOpen}
+                  title="How eagerly this task uses agents and workflows — click to change"
+                  onClick={() => store.toggleDelegationMenu()}
+                >{!vibes && <Icon name="agents" size={14} />}Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
+                <PickerLayer>
+                {snap.delegationMenuOpen && <DelegationMenu snap={snap} onClose={() => store.closeDelegationMenu()} />}
+                </PickerLayer>
+              </div>
+            </>
+          )}
+          <button
+            type="button"
+            className={`cchip composer__text composer__aside${snap.sideQuestionStreaming ? ' is-on' : ''}`}
+            disabled={snap.connection !== 'online'}
+            title="Ask an ephemeral side question without interrupting or polluting this chat (⌘; or /btw)"
+            onClick={() => open('btw')}
+          >{!vibes && <Icon name="chat" size={14} />}Ask aside</button>
+          <span className="composer__flex" />
+          {!externalAcp && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
+          <AcpRuntimePicker snap={snap} compact={vscode} />
+          {externalAcp ? (
+            <>
+              <AcpModelPicker snap={snap} compact={vscode} />
+              <AcpThinkingPicker snap={snap} compact={vscode} />
+              <AcpModePicker snap={snap} compact={vscode} />
+              <AcpExtraConfigPickers snap={snap} compact={vscode} />
+            </>
+          ) : (
+            <>
+              <div className="chipanchor composer__model">
+                <button
+                  className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}
+                  title="Model — click to change"
+                  onClick={() => store.toggleModelMenu()}
+                >{snap.model ? bareModelName(snap.model) : 'Choose model'}</button>
+                <PickerLayer>
+                {snap.modelMenuOpen && <ModelMenu snap={snap} onClose={() => store.closeModelMenu()} />}
+                {snap.pickerOpen && <ModelPicker snap={snap} onClose={() => store.closePicker()} />}
+                {snap.reasoningPickerOpen && <ReasoningPicker snap={snap} onClose={() => store.closeReasoningPicker()} />}
+                </PickerLayer>
+              </div>
+              {snap.reasoningLevels.length > 0 && <button
+                className="cchip composer__text composer__effort"
+                title="Reasoning effort — click to change"
+                onClick={() => store.toggleReasoningPicker()}
+              >{capitalizeWord(snap.reasoningEffort || 'default')}</button>}
+              <ModelSplitChip snap={snap} onOpen={() => open('usage')} />
+            </>
+          )}
+          <ContextRing snap={snap} onOpen={() => open('usage')} />
         </div>
-        {snap.reasoningLevels.length > 0 && <button
-          className="cchip composer__text composer__effort"
-          title="Reasoning effort — click to change"
-          onClick={() => store.toggleReasoningPicker()}
-        >{capitalizeWord(snap.reasoningEffort || 'default')}</button>}
-        <ModelSplitChip snap={snap} onOpen={() => open('usage')} />
-        <ContextRing snap={snap} onOpen={() => open('usage')} />
-      </div>
+      )}
     </div>
   )
 }
@@ -2526,14 +3540,18 @@ interface RepoSummary { readonly branch: string | null; readonly lines: { readon
  */
 function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
   const open = useDesktopNavigation()
+  const vibes = useVibesStyle()
   const [repo, setRepo] = useState<RepoSummary | null>(null)
   const [hidden, setHidden] = useState(() => hiddenRepoBars.has(snap.cwd))
-  useEffect(() => { setHidden(hiddenRepoBars.has(snap.cwd)); setRepo(null) }, [snap.cwd])
+  const [creatingWorktree, setCreatingWorktree] = useState(false)
+  const [worktreeName, setWorktreeName] = useState('')
+  useEffect(() => { setHidden(hiddenRepoBars.has(snap.cwd)); setRepo(null); setCreatingWorktree(false) }, [snap.cwd])
   const refresh = useCallback(async () => {
     if (!snap.cwd || snap.connection !== 'online') return
     try {
       const result = await desktopCall(window.xerxes, snap.sessionKey, 'git.status', {})
       const status = result.repository as ScmStatus | null | undefined
+      if (status !== undefined) store.syncBranch(status?.branch ?? '')
       setRepo(status ? {
         branch: status.branch,
         lines: status.lines ?? null,
@@ -2553,28 +3571,74 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
   }, [refresh])
   if (hidden || !snap.cwd) return null
   const changed = repo !== null && repo.files > 0
+  const branchName = repo?.branch ?? snap.branch
+  const folder = homeLabel(snap)
   // Line totals when there are any; otherwise (only new files, or an older
   // runtime without totals) the file count — never a misleading "+0 −0".
   const lines = repo?.lines && repo.lines.added + repo.lines.removed > 0 ? repo.lines : null
-  return <div className="repobar">
-    <button className="repobar__where" title={`${snap.cwd} — change folder`} onClick={() => open('workspace')}>
-      <span className="repobar__folder">{homeLabel(snap)}</span>
-      {(repo?.branch ?? snap.branch) && <span className="repobar__branch">{repo?.branch ?? snap.branch}</span>}
+  const submitWorktree = (): void => {
+    const trimmed = worktreeName.trim()
+    setCreatingWorktree(false)
+    setWorktreeName('')
+    if (trimmed) void store.createWorktree(trimmed)
+  }
+  return <div className={`repobar${vibes ? ' t3-context-strip' : ''}`} data-context-strip={vibes ? 'true' : undefined}>
+    <button type="button" className="repobar__where" title={`${snap.cwd} — switch project`} onClick={() => vibes ? store.openWorkspaceMenu() : open('workspace')}>
+      {vibes && <ProjectMonogram name={folder} seed={snap.cwd} size={14} />}
+      <span className="repobar__folder">{folder}</span>
+      {branchName && (
+        <span className="repobar__branch">
+          {vibes && <Icon name="branch" size={11} />}
+          {branchName}
+        </span>
+      )}
     </button>
+    {vibes && (
+      <div className="t3-wt-anchor">
+        <button
+          type="button"
+          className="t3-strip-btn"
+          title="Create a new isolated git worktree"
+          onClick={() => setCreatingWorktree(value => !value)}
+        >
+          <T3Icon name="worktree" size={12} />
+          <span>New worktree</span>
+        </button>
+        {creatingWorktree && (
+          <div className="t3-wt-pop" role="dialog" aria-label="New worktree">
+            <input
+              type="text"
+              autoFocus
+              spellCheck={false}
+              placeholder="branch / worktree name…"
+              aria-label="Worktree branch name"
+              value={worktreeName}
+              onChange={event => setWorktreeName(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter') { event.preventDefault(); submitWorktree() }
+                else if (event.key === 'Escape') { event.preventDefault(); setCreatingWorktree(false); setWorktreeName('') }
+              }}
+            />
+            <button type="button" className="t3-wt-pop__go" disabled={!worktreeName.trim()} onClick={submitWorktree}>Create</button>
+          </div>
+        )}
+      </div>
+    )}
     <span className="composer__flex" />
-    {changed && <button className="repobar__diff" title={`${repo.files} changed file${repo.files === 1 ? '' : 's'} — open Git`} onClick={() => open('review')}>
+    {changed && <button type="button" className="repobar__diff" title={`${repo.files} changed file${repo.files === 1 ? '' : 's'} — open Git`} onClick={() => open('review')}>
       {lines
         ? <><span className="repobar__added">+{lines.added}</span><span className="repobar__removed">−{lines.removed}</span></>
         : <span>{repo.files} file{repo.files === 1 ? '' : 's'}</span>}
     </button>}
-    {repo && <button className="repobar__action" onClick={() => open('review')}>{changed ? 'Review' : 'Git'}</button>}
+    {repo && <button type="button" className="repobar__action" onClick={() => open('review')}>{changed ? 'Review' : 'Git'}</button>}
     {repo && <button
+      type="button"
       className="repobar__action repobar__pr"
       disabled={snap.connection !== 'online' || snap.turnActive || snap.submissionPending}
       title={snap.turnActive ? 'Available when the current turn finishes' : 'Ask the agent to commit, push and open a pull request with gh'}
       onClick={() => void store.submit(pullRequestPrompt(repo.branch ?? snap.branch ?? null), 'Create a pull request')}
-    >Create PR</button>}
-    <button className="repobar__close" aria-label="Hide repository line" title="Hide until restart" onClick={() => { hiddenRepoBars.add(snap.cwd); setHidden(true) }}><Icon name="close" size={14} /></button>
+    >{vibes && <T3Icon name="gitPr" size={11} />}Create PR</button>}
+    {!vibes && <button type="button" className="repobar__close" aria-label="Hide repository line" title="Hide until restart" onClick={() => { hiddenRepoBars.add(snap.cwd); setHidden(true) }}><Icon name="close" size={14} /></button>}
   </div>
 }
 
@@ -2588,12 +3652,120 @@ const hiddenRepoBars = new Set<string>()
  * was also edited earlier.
  */
 export function FilesChangedCard({ group, changes }: { group: readonly Snapshot['blocks'][number][]; changes: Snapshot['changes'] }): ReactElement | null {
+  const vibes = useVibesStyle()
+  const open = useDesktopNavigation()
+  const [expandedDirs, setExpandedDirs] = useState<ReadonlySet<string>>(() => new Set())
   const checkpoint = group.find(block => block.kind === 'checkpoint')
   if (!checkpoint || checkpoint.kind !== 'checkpoint') return null
   const files = changes.filter(file => file.turn === checkpoint.turn)
   if (!files.length) return null
   const adds = files.reduce((sum, file) => sum + file.adds, 0)
   const dels = files.reduce((sum, file) => sum + file.dels, 0)
+
+  if (vibes) {
+    // Group changed files by top-level directory (matching T3 Code's ChangedFilesCard).
+    const folderMap = new Map<string, { name: string; files: typeof files; adds: number; dels: number }>()
+    const rootFiles: typeof files = []
+    for (const file of files) {
+      const normalized = file.path.replaceAll('\\', '/').replace(/^\.\//, '')
+      const slash = normalized.indexOf('/')
+      if (slash <= 0) {
+        rootFiles.push(file)
+      } else {
+        const dir = normalized.slice(0, slash)
+        const existing = folderMap.get(dir)
+        if (existing) {
+          existing.files = [...existing.files, file]
+          existing.adds += file.adds
+          existing.dels += file.dels
+        } else {
+          folderMap.set(dir, { name: dir, files: [file], adds: file.adds, dels: file.dels })
+        }
+      }
+    }
+    const folders = [...folderMap.values()]
+    const allOpen = folders.length > 0 && folders.every(dir => expandedDirs.has(dir.name))
+    const toggleAll = (): void => {
+      setExpandedDirs(allOpen ? new Set() : new Set(folders.map(dir => dir.name)))
+    }
+    const toggleDir = (dir: string): void => {
+      setExpandedDirs(current => {
+        const next = new Set(current)
+        if (!next.delete(dir)) next.add(dir)
+        return next
+      })
+    }
+    const fmtCompact = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(n))
+    return (
+      <section className="fileschanged t3-changed-card" aria-label={`Files changed in turn ${checkpoint.turn}`}>
+        <header className="t3-changed-card__head">
+          <span className="t3-changed-card__title">{files.length} changed {files.length === 1 ? 'file' : 'files'}</span>
+          <span className="t3-changed-card__stats">
+            <span className="fileschanged__add">+{fmtCompact(adds)}</span>
+            <span className="fileschanged__del">-{fmtCompact(dels)}</span>
+          </span>
+          <span className="composer__flex" />
+          {folders.length > 0 && (
+            <button type="button" className="t3-changed-card__btn" aria-label={allOpen ? 'Collapse all folders' : 'Expand all folders'} onClick={toggleAll}>
+              <T3Icon name="chevronsUpDown" size={12} />
+            </button>
+          )}
+          <button type="button" className="t3-changed-card__btn t3-changed-card__open" onClick={() => open('review')}>
+            <T3Icon name="fileDiff" size={12} />
+            <span>Open diff</span>
+          </button>
+        </header>
+        <div className="t3-changed-card__body">
+          {folders.map(dir => {
+            const isOpen = expandedDirs.has(dir.name)
+            return (
+              <div key={dir.name} className="t3-changed-dir">
+                <button type="button" className="t3-changed-dir__row" aria-expanded={isOpen} onClick={() => toggleDir(dir.name)}>
+                  <T3Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} className="t3-changed-dir__chev" />
+                  <T3Icon name="folder" size={13} className="t3-changed-dir__ico" />
+                  <span className="t3-changed-dir__name">{dir.name}</span>
+                  <span className="t3-changed-dir__stats">
+                    <span className="fileschanged__add">+{fmtCompact(dir.adds)}</span>
+                    <span className="fileschanged__del">-{fmtCompact(dir.dels)}</span>
+                  </span>
+                </button>
+                {isOpen && (
+                  <ul className="fileschanged__list t3-changed-dir__files">
+                    {dir.files.map(file => (
+                      <li key={file.path}>
+                        <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
+                          <Icon name="file" size={12} />
+                          <span className="fileschanged__path">{file.path.slice(dir.name.length + 1)}</span>
+                          <span className="fileschanged__add">+{file.adds}</span>
+                          <span className="fileschanged__del">-{file.dels}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )
+          })}
+          {rootFiles.length > 0 && (
+            <ul className="fileschanged__list">
+              {rootFiles.map(file => (
+                <li key={file.path}>
+                  <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
+                    <Icon name="file" size={12} />
+                    <span className="fileschanged__path">{file.path}</span>
+                    {file.isNew && <span className="fileschanged__new">new</span>}
+                    <span className="fileschanged__add">+{file.adds}</span>
+                    <span className="fileschanged__del">-{file.dels}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+    )
+  }
+
   return <section className="fileschanged" aria-label={`Files changed in turn ${checkpoint.turn}`}>
     <header className="fileschanged__head">
       <span>Files changed</span>
@@ -2668,13 +3840,75 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
   const goal = parseGoal(snap.goal)
   // The agent open in the conversation's place: its details live here, not in its chat.
   const openAgent = selectedAgent ? fleet.find(row => row.id === selectedAgent || row.agentDetails?.requestKey === selectedAgent) : undefined
+  const externalBinding = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
+  const railSnap = externalBinding
+    ? { ...snap, model: activeAcpModelLabel(externalBinding) }
+    : snap
+  const acpCatalog = externalBinding ? resolveExternalAcpCatalog(externalBinding) : null
+  const acpCaps = externalBinding?.capabilities
+  const capabilityBadges = acpCaps
+    ? [
+        acpCaps.prompt.image ? 'Images' : null,
+        acpCaps.prompt.embedded_context ? 'Context' : null,
+        acpCaps.prompt.audio ? 'Audio' : null,
+        acpCaps.session.resume ? 'Resume' : null,
+        acpCaps.session.load ? 'Load' : null,
+        acpCaps.mcp.http || acpCaps.mcp.sse ? 'MCP' : null,
+      ].filter((label): label is string => Boolean(label))
+    : []
   return (
     <aside className="activity-details">
       {openAgent && <AgentDetailsCard key={openAgent.id} row={openAgent} rows={fleet} sessionKey={snap.sessionKey} />}
       {/* Zone 1 — always populated, always first. The rail used to open on
           ten collapsed sections, so it looked identical whether the agent
           was idle, running three subagents, or had failed. */}
-      <RailStatus snap={snap} />
+      <RailStatus snap={railSnap} />
+
+      {externalBinding && (
+        <section className="railcard railcard--environment" aria-label="Environment" data-provider={externalBinding.provider}>
+          <header className="railcard__head">
+            <span className="railcard__title">Environment</span>
+            <span className="railcard__meta">
+              {transportBadgeLabel(externalBinding.transport)}
+              {externalBinding.agent_version
+                ? ` · ${externalBinding.agent_version.startsWith('v') ? externalBinding.agent_version : `v${externalBinding.agent_version}`}`
+                : ''}
+            </span>
+          </header>
+          <div className="rail-env">
+            <div className="rail-env__row">
+              <AgentBrandGlyph provider={externalBinding.provider} size={14} />
+              <span className="rail-env__label">{externalBinding.name}</span>
+              {externalBinding.external_session_id && (
+                <span className="rail-env__meta" title={externalBinding.external_session_id}>
+                  {externalBinding.external_session_id.slice(0, 8)}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="rail-env__row rail-env__row--btn"
+              title={`Inspect ${externalBinding.name} skills, commands and capabilities`}
+              onClick={() => navigate('extensions')}
+            >
+              <Icon name="tools" size={14} />
+              <span className="rail-env__label">
+                {acpCatalog && (acpCatalog.skills.length > 0 || acpCatalog.commands.length > 0)
+                  ? `${acpCatalog.skills.length} ${acpCatalog.skills.length === 1 ? 'skill' : 'skills'} · ${acpCatalog.commands.length} ${acpCatalog.commands.length === 1 ? 'command' : 'commands'}`
+                  : 'Runtime features'}
+              </span>
+              <span className="rail-env__meta">Customize</span>
+            </button>
+            {capabilityBadges.length > 0 && (
+              <div className="rail-env__caps" aria-label="Runtime capabilities">
+                {capabilityBadges.map(badge => (
+                  <span key={badge} className="rail-env__cap">{badge}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Zone 2 — only what is true right now. Each of these is absent
           unless it has something to say. */}
@@ -2704,6 +3938,25 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
         </section>
       ) : null}
 
+      {snap.swarm?.active ? (() => {
+        const swarmCounts = swarmMemberCounts(snap.swarm.members)
+        return (
+          <section className="railcard railcard--swarm" aria-label="Immortals">
+            <header className="railcard__head">
+              <span className="railcard__title">{snap.swarm.title || 'Immortals'}</span>
+              <span className="railcard__meta" data-tone={swarmCounts.working > 0 ? 'working' : undefined}>
+                {swarmCounts.working} working · {swarmCounts.waiting} waiting
+              </span>
+            </header>
+            <div className="railswarm">
+              <button type="button" className="chipbtn" onClick={() => navigate('swarm')}>
+                Open Immortals Board
+              </button>
+            </div>
+          </section>
+        )
+      })() : null}
+
       <RailWorkflows rows={fleet} onInspect={id => navigate('activity', id)} />
       <RailAgents rows={fleet.filter(row => !row.agentDetails?.group)} onInspect={id => navigate('activity', id)} />
 
@@ -2717,8 +3970,33 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
 
 // ── Global keys ─────────────────────────────────────────────────────────
 
-/** ⌘K palette · ⌘N new task · ⌘, settings · Esc stop · 1/2/3 approvals. */
-function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() => void) | null }): ReactElement | null {
+/** True for `Alt+S` / macOS `Option+S` (matches `code === 'KeyS'` because macOS reports `key === 'ß'`). */
+export function isImmortalsShortcutEvent(
+  event: Pick<KeyboardEvent, 'altKey' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'code'>,
+): boolean {
+  return event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.code === 'KeyS'
+}
+
+/** ⌘K palette · ⌘N new task · ⌘, settings · ⌘J terminal drawer · ⌘\ right panel · ⌥S Immortals · Esc stop · 1/2/3 approvals. */
+function GlobalKeys({
+  snap,
+  closeSurface,
+  toggleSwarm,
+  toggleTerminalDrawer,
+  toggleRightPanel,
+  undoInbox,
+}: {
+  snap: Snapshot
+  closeSurface: (() => void) | null
+  toggleSwarm?: () => void
+  toggleTerminalDrawer?: () => void
+  toggleRightPanel?: () => void
+  undoInbox?: (() => void) | null
+}): ReactElement | null {
+  const toggleSwarmRef = useRef(toggleSwarm)
+  toggleSwarmRef.current = toggleSwarm
+  const t3KeysRef = useRef({ toggleTerminalDrawer, toggleRightPanel, undoInbox })
+  t3KeysRef.current = { toggleTerminalDrawer, toggleRightPanel, undoInbox }
   // Native menu items are the discoverable half of the keyboard contract;
   // routing them here keeps one implementation per command.
   useEffect(() => window.xerxes.onMenuCommand?.(command => {
@@ -2736,6 +4014,12 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
       // A native modal owns keyboard focus, including Escape. Reading output
       // must never cancel the running task underneath it.
       if (event.defaultPrevented || document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')) return
+      if (isImmortalsShortcutEvent(event)) {
+        event.preventDefault()
+        if (toggleSwarmRef.current) toggleSwarmRef.current()
+        else store.openSwarmBoard()
+        return
+      }
       const meta = event.metaKey || event.ctrlKey
       if (meta && event.key === ',') {
         event.preventDefault()
@@ -2771,6 +4055,34 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
         event.preventDefault()
         window.dispatchEvent(new CustomEvent('xerxes:shortcuts'))
         return
+      }
+      if (meta && event.key === ';') {
+        event.preventDefault()
+        store.openSideQuestion()
+        return
+      }
+      if ((meta && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'j') || (event.ctrlKey && !event.metaKey && event.key === '`')) {
+        if (t3KeysRef.current.toggleTerminalDrawer) {
+          event.preventDefault()
+          t3KeysRef.current.toggleTerminalDrawer()
+          return
+        }
+      }
+      if (meta && !event.shiftKey && !event.altKey && event.key === '\\') {
+        if (t3KeysRef.current.toggleRightPanel) {
+          event.preventDefault()
+          t3KeysRef.current.toggleRightPanel()
+          return
+        }
+      }
+      if (meta && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z' && t3KeysRef.current.undoInbox) {
+        const target = event.target as HTMLElement | null
+        const editing = Boolean(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable))
+        if (!editing) {
+          event.preventDefault()
+          t3KeysRef.current.undoInbox()
+          return
+        }
       }
       if (event.key === 'Escape') {
         if (snap.paletteOpen) {
@@ -2854,9 +4166,11 @@ function GlobalKeys({ snap, closeSurface }: { snap: Snapshot; closeSurface: (() 
       if (!snap.approval || event.metaKey || event.ctrlKey || event.altKey) return
       const active = document.activeElement
       if (!(active instanceof HTMLElement) || !active.closest('.approval, .vq--approval')) return
-      if (event.key === '1') { event.preventDefault(); store.approve(snap.approval.id, 'allow_once') }
-      else if (event.key === '2') { event.preventDefault(); store.approve(snap.approval.id, 'allow_session') }
-      else if (event.key === '3') { event.preventDefault(); store.approve(snap.approval.id, 'deny') }
+      const action = approvalKeyAction(event.key, snap.approval.allowPermanent)
+      if (action) {
+        event.preventDefault()
+        store.approve(snap.approval.id, action)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

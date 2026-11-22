@@ -41,6 +41,12 @@ const headers = {
   'x-frame-options': 'DENY',
 }
 const json = (data: object, status = 200, extra?: Record<string, string>): Response => Response.json(data, { status, headers: { ...headers, ...extra } })
+const escapeHtml = (value: string): string => value
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;')
 const page = (content: string, status = 200, extra?: Record<string, string>): Response => new Response(
   `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Slack to Xerxes</title><main><h1>Connect Slack to Xerxes</h1>${content}</main></html>`,
   { status, headers: { ...headers, 'content-type': 'text/html; charset=utf-8', ...extra } },
@@ -167,13 +173,13 @@ export function createSlackBroker(options: SlackBrokerOptions): { handle(request
         const fresh = random(32)
         return page(`<p>Paste the pairing code shown in Xerxes Desktop. Do not use a code sent by someone else.</p><form method="post" action="${browserPath(id)}"><label>Pairing code <input name="code" required maxlength="22" autocomplete="off" autocapitalize="off" spellcheck="false"></label><button>Continue to Slack</button></form>`,
           200, { ...formHeaders, ...(nonce === undefined
-            ? { 'set-cookie': cookie(id, `${fresh}.${sign(id, fresh)}`, Math.ceil((flow.expires - now()) / 1000)) } : {}) })
+            ? { 'set-cookie': cookie(id, `${fresh}.${sign(id, fresh)}`, Math.max(1, Math.ceil((flow.expires - now()) / 1000))) } : {}) })
       }
       if (phase.browser !== nonce) return invalid()
       // A link (rather than a cross-origin form redirect) works with form-action 'self'.
-      if (phase.type === 'slack') return page(`<p><a rel="noreferrer" href="${phase.authorizeUrl.replaceAll('&', '&amp;')}">Continue to Slack</a></p>`)
+      if (phase.type === 'slack') return page(`<p><a rel="noreferrer" href="${escapeHtml(phase.authorizeUrl)}">Continue to Slack</a></p>`)
       if (phase.type === 'review') {
-        return page(`<p>Slack authorized workspace <strong>${phase.grant.team_id}</strong> and user <strong>${phase.grant.user_id}</strong>. Verify these IDs before connecting this Slack account to Xerxes.</p><form method="post" action="${browserPath(id)}"><button name="decision" value="approve">Connect this account</button> <button name="decision" value="deny">Reject</button></form>`, 200, formHeaders)
+        return page(`<p>Slack authorized workspace <strong>${escapeHtml(phase.grant.team_id)}</strong> and user <strong>${escapeHtml(phase.grant.user_id)}</strong>. Verify these IDs before connecting this Slack account to Xerxes.</p><form method="post" action="${browserPath(id)}"><button name="decision" value="approve">Connect this account</button> <button name="decision" value="deny">Reject</button></form>`, 200, formHeaders)
       }
       return page(phase.type === 'denied' ? '<p>Slack authorization was not completed. Return to Xerxes.</p>'
         : phase.type === 'ready' ? '<p>Account approved. Return to Xerxes.</p>' : '<p>Slack authorization is in progress.</p>')
@@ -247,7 +253,10 @@ export function createSlackBroker(options: SlackBrokerOptions): { handle(request
     if (!matches(DIGEST, data?.id) || !matches(VERIFIER, data.verifier)) return json({ error: 'invalid_request' }, 400)
     const flow = active(data.id)
     if (!flow || !equal(flow.challenge, sha(data.verifier))) return json({ status: 'expired' })
-    if (flow.phase.type === 'denied') return json({ status: 'denied' })
+    if (flow.phase.type === 'denied') {
+      drop(data.id, flow)
+      return json({ status: 'denied' })
+    }
     if (flow.phase.type !== 'ready') return json({ status: 'pending' })
     const { grant } = flow.phase
     drop(data.id, flow)
@@ -262,17 +271,17 @@ export function createSlackBroker(options: SlackBrokerOptions): { handle(request
     const allow = path === AUTHORIZE ? 'GET, POST' : path === CALLBACK ? 'GET' : path === START || path === REDEEM ? 'POST' : undefined
     if (!allow) return json({ error: 'not_found' }, 404)
     if (!allow.split(', ').includes(request.method)) return json({ error: 'method_not_allowed' }, 405, { allow })
+    const time = now()
+    if (time >= windowEnd) { windowEnd = time + WINDOW_MS; requests = 0; starts = 0 }
+    const retryAfter = (): Record<string, string> => ({ 'retry-after': String(Math.max(1, Math.ceil((windowEnd - time) / 1000))) })
+    if (++requests > 2048) return json({ error: 'rate_limited' }, 429, retryAfter())
     if (path === START) {
       const authorization = request.headers.get('authorization') ?? ''
       const credential = authorization.slice(7)
       if (!authorization.startsWith('Bearer ') || !matches(DIGEST, credential) || !equal(sha(credential), enrolled)) {
         return json({ error: 'unauthorized' }, 401, { 'www-authenticate': 'Bearer' })
       }
-    }
-    const time = now()
-    if (time >= windowEnd) { windowEnd = time + WINDOW_MS; requests = 0; starts = 0 }
-    if (++requests > 2048 || (path === START && ++starts > 128)) {
-      return json({ error: 'rate_limited' }, 429, { 'retry-after': String(Math.ceil((windowEnd - time) / 1000)) })
+      if (++starts > 128) return json({ error: 'rate_limited' }, 429, retryAfter())
     }
     switch (path) {
       case START: return start(request)

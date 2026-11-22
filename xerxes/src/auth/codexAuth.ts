@@ -84,10 +84,14 @@ function requestDeadline(signal?: AbortSignal): {
     () => controller.abort(new Error(`Codex request timed out after ${CODEX_REQUEST_TIMEOUT_MS}ms`)),
     CODEX_REQUEST_TIMEOUT_MS,
   )
-  const dispose = () => clearTimeout(timer)
+  const onAbort = (): void => controller.abort(signal?.reason)
+  const dispose = (): void => {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
   if (!signal) return { dispose, signal: controller.signal }
   if (signal.aborted) controller.abort(signal.reason)
-  else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  else signal.addEventListener('abort', onAbort, { once: true })
   return { dispose, signal: controller.signal }
 }
 

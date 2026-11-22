@@ -28,7 +28,30 @@ import {
   usageFromStatus
 } from './gatewayAdapter.js'
 import type {
+  AcpAgentsParams,
+  AcpAgentsResponse,
+  AcpAvailableCommand,
+  AcpCancelParams,
+  AcpCancelResponse,
+  AcpCatalogParams,
+  AcpCatalogResponse,
+  AcpConnectParams,
+  AcpConnectResponse,
+  AcpDisconnectParams,
+  AcpDisconnectResponse,
+  AcpDiscoveredSkill,
+  AcpExternalAgentInfo,
+  AcpExternalConfigOption,
+  AcpRuntimeCapabilities,
+  AcpSessionBinding,
+  AcpSetConfigOptionParams,
+  AcpSetConfigOptionResponse,
+  AcpSetModeParams,
+  AcpSetModeResponse,
+  AcpSetModelParams,
+  AcpSetModelResponse,
   AnyEvent,
+  BtwEventPayload,
   GatewayTranscriptMessage,
   LiveSessionStatus,
   LearningListResponse,
@@ -36,11 +59,27 @@ import type {
   LearningReviewResponse,
   SessionInflightTurn,
   SessionInflightTool,
-  SubagentSnapshotPayload
+  SideQuestionParams,
+  SideQuestionResponse,
+  SubagentSnapshotPayload,
+  SwarmActivateParams,
+  SwarmActivateResponse,
+  SwarmBoardParams,
+  SwarmBoardResponse,
+  SwarmInspectParams,
+  SwarmKillParams,
+  SwarmKillResponse,
+  SwarmMemberInspectResponse,
+  SwarmModelParams,
+  SwarmModelResponse,
+  SwarmPostParams,
+  SwarmPostResponse,
+  SwarmStatusSnapshot
 } from './gatewayTypes.js'
 import { normalizeEventType } from './gatewayTypes.js'
 import { controlChannelPath, isWindows } from './lib/hostPlatform.js'
 import { ImageAttachmentError, loadImageAttachment, resolveAttachmentPath } from './lib/imageAttachment.js'
+import { normalizeSwarmBoardResponse, normalizeSwarmInspectResponse, normalizeSwarmStatus } from './lib/swarmFormat.js'
 import type { SessionInfo, Usage } from './types.js'
 import { compact } from './lib/compact.js'
 
@@ -732,6 +771,7 @@ export class GatewayClient extends EventEmitter {
     // A partial line buffered from a dead socket must not prefix the first
     // frame decoded on its replacement.
     this.buffer = ''
+    sock.setMaxListeners?.(32)
     sock.setEncoding('utf8')
     sock.on('data', (chunk: string) => this.onData(chunk))
     sock.on('error', err => this.emitClient('gateway.error', { message: String((err as Error).message ?? err) }))
@@ -791,13 +831,19 @@ export class GatewayClient extends EventEmitter {
 
   // ── Line framing ────────────────────────────────────────────────────
 
+  private exceedsFrameLimit(text: string): boolean {
+    if (text.length > MAX_GATEWAY_FRAME_BYTES) return true
+    if (text.length * 3 <= MAX_GATEWAY_FRAME_BYTES) return false
+    return Buffer.byteLength(text, 'utf8') > MAX_GATEWAY_FRAME_BYTES
+  }
+
   private onData(chunk: string): void {
     this.buffer += chunk
     let nl = this.buffer.indexOf('\n')
     while (nl !== -1) {
       const line = this.buffer.slice(0, nl)
       this.buffer = this.buffer.slice(nl + 1)
-      if (Buffer.byteLength(line, 'utf8') > MAX_GATEWAY_FRAME_BYTES) {
+      if (this.exceedsFrameLimit(line)) {
         this.closeForOversizedFrame()
         return
       }
@@ -806,7 +852,7 @@ export class GatewayClient extends EventEmitter {
       }
       nl = this.buffer.indexOf('\n')
     }
-    if (Buffer.byteLength(this.buffer, 'utf8') > MAX_GATEWAY_FRAME_BYTES) {
+    if (this.exceedsFrameLimit(this.buffer)) {
       this.closeForOversizedFrame()
     }
   }
@@ -921,6 +967,31 @@ export class GatewayClient extends EventEmitter {
           }
         }
       }
+      if (normalizeEventType(type) === 'btw_event' && payload.kind === 'tool') {
+        const sessionId = typeof payload.session_id === 'string' ? payload.session_id : ''
+        const rawTool = isRecord(payload.tool) ? payload.tool : null
+        const toolName = rawTool && typeof rawTool.name === 'string' ? rawTool.name.trim() : ''
+        if (toolName) {
+          const status = rawTool?.status === 'running' || rawTool?.status === 'error' ? rawTool.status : 'done'
+          const target = typeof rawTool?.target === 'string' && rawTool.target.trim() ? rawTool.target.trim() : undefined
+          const btwPayload: BtwEventPayload = {
+            session_id: sessionId,
+            request_id: typeof payload.request_id === 'string' ? payload.request_id : '',
+            kind: 'tool',
+            ...(typeof payload.model === 'string' && payload.model.trim() ? { model: payload.model.trim() } : {}),
+            tool: {
+              name: toolName,
+              ...(target ? { target } : {}),
+              status
+            }
+          }
+          const evt: AnyEvent = sessionId
+            ? { type: 'btw_event', payload: btwPayload, session_id: sessionId }
+            : { type: 'btw_event', payload: btwPayload }
+          this.emitEvent(evt)
+          return
+        }
+      }
       for (const evt of adaptDaemonEvent(type, payload)) {
         const sessionId = typeof payload.session_id === 'string'
           ? payload.session_id
@@ -940,6 +1011,21 @@ export class GatewayClient extends EventEmitter {
   /** Send a JSON-RPC request and await its result. */
   request(method: 'learning.list', params?: { session_key?: string }): Promise<LearningListResponse>
   request(method: 'learning.review', params: LearningReviewParams): Promise<LearningReviewResponse>
+  request(method: 'swarm.status', params?: { session_id?: string | null }): Promise<SwarmStatusSnapshot>
+  request(method: 'swarm.board', params?: SwarmBoardParams): Promise<SwarmBoardResponse>
+  request(method: 'swarm.post', params: SwarmPostParams): Promise<SwarmPostResponse>
+  request(method: 'swarm.kill', params: SwarmKillParams): Promise<SwarmKillResponse>
+  request(method: 'swarm.model', params?: SwarmModelParams): Promise<SwarmModelResponse>
+  request(method: 'swarm.activate', params?: SwarmActivateParams): Promise<SwarmActivateResponse>
+  request(method: 'session.side_question', params: SideQuestionParams): Promise<SideQuestionResponse>
+  request(method: 'acp.agents', params?: AcpAgentsParams): Promise<AcpAgentsResponse>
+  request(method: 'acp.catalog', params?: AcpCatalogParams): Promise<AcpCatalogResponse>
+  request(method: 'acp.connect', params: AcpConnectParams): Promise<AcpConnectResponse>
+  request(method: 'acp.disconnect', params?: AcpDisconnectParams): Promise<AcpDisconnectResponse>
+  request(method: 'acp.cancel', params?: AcpCancelParams): Promise<AcpCancelResponse>
+  request(method: 'acp.set_model', params: AcpSetModelParams): Promise<AcpSetModelResponse>
+  request(method: 'acp.set_mode', params: AcpSetModeParams): Promise<AcpSetModeResponse>
+  request(method: 'acp.set_config_option', params: AcpSetConfigOptionParams): Promise<AcpSetConfigOptionResponse>
   request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>
   request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     return this.requestCompat<T>(method, params)
@@ -1054,6 +1140,7 @@ export class GatewayClient extends EventEmitter {
       case 'snapshot.list':
       case 'snapshot.preview':
       case 'snapshot.restoreFile':
+      case 'skill_suggestions':
         return this.rawRequest<T>(method, { ...params, session_key: this.keyFor(params.session_id) })
 
       case 'slash.exec':
@@ -1114,6 +1201,54 @@ export class GatewayClient extends EventEmitter {
 
       case 'reasoning.levels':
         return this.reasoningLevels() as Promise<T>
+
+      case 'swarm.status':
+        return this.swarmStatus(params as { session_id?: string | null }) as Promise<T>
+
+      case 'swarm.board':
+        return this.swarmBoard(params as SwarmBoardParams) as Promise<T>
+
+      case 'swarm.post':
+        return this.swarmPost(params as unknown as SwarmPostParams) as Promise<T>
+
+      case 'swarm.kill':
+        return this.swarmKill(params as unknown as SwarmKillParams) as Promise<T>
+
+      case 'swarm.model':
+        return this.swarmModel(params as SwarmModelParams) as Promise<T>
+
+      case 'swarm.inspect':
+        return this.swarmInspect(params as unknown as SwarmInspectParams) as Promise<T>
+
+      case 'swarm.activate':
+        return this.swarmActivate(params as SwarmActivateParams) as Promise<T>
+
+      case 'session.side_question':
+        return this.sideQuestion(params as unknown as SideQuestionParams) as Promise<T>
+
+      case 'acp.agents':
+        return this.acpAgents(params as AcpAgentsParams) as Promise<T>
+
+      case 'acp.catalog':
+        return this.acpCatalog(params as AcpCatalogParams) as Promise<T>
+
+      case 'acp.connect':
+        return this.acpConnect(params as unknown as AcpConnectParams) as Promise<T>
+
+      case 'acp.disconnect':
+        return this.acpDisconnect(params as AcpDisconnectParams) as Promise<T>
+
+      case 'acp.cancel':
+        return this.acpCancel(params as AcpCancelParams) as Promise<T>
+
+      case 'acp.set_model':
+        return this.acpSetModel(params as unknown as AcpSetModelParams) as Promise<T>
+
+      case 'acp.set_mode':
+        return this.acpSetMode(params as unknown as AcpSetModeParams) as Promise<T>
+
+      case 'acp.set_config_option':
+        return this.acpSetConfigOption(params as unknown as AcpSetConfigOptionParams) as Promise<T>
 
       default:
         return this.rawRequest<T>(method, params)
@@ -1886,7 +2021,7 @@ export class GatewayClient extends EventEmitter {
   }
 
   private approvalRespond(params: Record<string, unknown>): Promise<unknown> {
-    const choice = String(params.choice ?? '')
+    const choice = String(params.choice ?? params.decision ?? '')
     const response =
       choice === 'always'
         ? 'always'
@@ -1895,6 +2030,7 @@ export class GatewayClient extends EventEmitter {
         : choice === 'deny' || choice === 'reject'
           ? 'reject'
           : 'approve'
+    const optionId = optionalTrimmedText(params.option_id)
     const sessionId = String(params.session_id ?? '').trim()
     const requestId = String(
       params.request_id || (sessionId ? this.approvalRequestIds.get(sessionId) : '') || this.lastApprovalRequestId
@@ -1903,7 +2039,11 @@ export class GatewayClient extends EventEmitter {
       this.approvalRequestIds.delete(sessionId)
     }
 
-    return this.rawRequest('permission_response', { request_id: requestId, response })
+    return this.rawRequest('permission_response', {
+      request_id: requestId,
+      response,
+      ...(optionId ? { option_id: optionId } : {})
+    })
   }
 
   private clarifyRespond(params: Record<string, unknown>): Promise<unknown> {
@@ -1917,13 +2057,20 @@ export class GatewayClient extends EventEmitter {
 
   private async complete(method: string, params: Record<string, unknown>): Promise<RpcObject> {
     const text = method === 'complete.path' ? String(params.word ?? '') : String(params.text ?? '')
-    const raw = (await this.rawRequest('complete', method === 'complete.path' && typeof params.path_prefix === 'string'
-      ? { path_prefix: params.path_prefix } : { text })) as RpcObject
+    const sessionKey = params.session_id !== undefined ? this.keyFor(params.session_id) : this.activeSessionKey
+    const raw = (await this.rawRequest('complete', {
+      ...(method === 'complete.path' && typeof params.path_prefix === 'string'
+        ? { path_prefix: params.path_prefix }
+        : { text }),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    })) as RpcObject
     const items = Array.isArray(raw.completions)
       ? raw.completions.map((item: RpcObject) => ({
           display: String(item.label ?? item.value ?? ''),
-          group: item.category ? String(item.category) : undefined,
+          group: item.category ? String(item.category) : (item.kind === 'skill' ? 'skills' : undefined),
+          ...(item.kind === 'command' || item.kind === 'skill' ? { kind: item.kind } : {}),
           meta: item.meta ? String(item.meta) : undefined,
+          ...(typeof item.source === 'string' && item.source ? { source: item.source } : {}),
           text: String(item.value ?? '')
         }))
       : []
@@ -2026,6 +2173,302 @@ export class GatewayClient extends EventEmitter {
       source: String(raw.source ?? ''),
       shape: String(raw.shape ?? ''),
       note: String(raw.note ?? '')
+    }
+  }
+
+  // ── Native Swarm RPC helpers ────────────────────────────────────────
+
+  private swarmSessionParams(sessionId?: unknown): RpcObject {
+    const sid = optionalTrimmedText(sessionId)
+    const sessionKey = this.keyFor(sid)
+    return {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    }
+  }
+
+  async swarmStatus(params: { session_id?: string | null } = {}): Promise<SwarmStatusSnapshot> {
+    const sid = optionalTrimmedText(params.session_id) ?? ''
+    const raw = await this.nativeSuccess('swarm.status', this.swarmSessionParams(params.session_id))
+    return normalizeSwarmStatus(raw, sid)
+  }
+
+  async swarmBoard(params: SwarmBoardParams = {}): Promise<SwarmBoardResponse> {
+    const channel = optionalTrimmedText(params.channel)
+    const seqs = Array.isArray(params.seqs)
+      ? params.seqs.filter((seq): seq is number => typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0)
+      : undefined
+    const raw = await this.nativeSuccess('swarm.board', {
+      ...this.swarmSessionParams(params.session_id),
+      ...(typeof params.since === 'number' && Number.isFinite(params.since) ? { since: Math.trunc(params.since) } : {}),
+      ...(typeof params.limit === 'number' && Number.isFinite(params.limit) ? { limit: Math.trunc(params.limit) } : {}),
+      ...(seqs ? { seqs } : {}),
+      ...(channel ? { channel } : {})
+    })
+    return normalizeSwarmBoardResponse(raw)
+  }
+
+  async swarmPost(params: SwarmPostParams): Promise<SwarmPostResponse> {
+    const channel = optionalTrimmedText(params.channel)
+    const raw = await this.nativeSuccess('swarm.post', {
+      ...this.swarmSessionParams(params.session_id),
+      text: String(params.text ?? ''),
+      ...(channel ? { channel } : {}),
+      ...(params.as_feedback === true ? { as_feedback: true } : {})
+    })
+    return {
+      status: 'posted',
+      seq: nonNegativeInteger(raw.seq) ?? 0,
+      channel: optionalTrimmedText(raw.channel) ?? channel ?? 'main'
+    }
+  }
+
+  async swarmKill(params: SwarmKillParams): Promise<SwarmKillResponse> {
+    const raw = await this.nativeSuccess('swarm.kill', {
+      ...this.swarmSessionParams(params.session_id),
+      name: String(params.name ?? '').trim()
+    })
+    const killed = Array.isArray(raw.killed)
+      ? raw.killed.map(item => String(item).trim()).filter(Boolean)
+      : undefined
+    return {
+      ...(typeof raw.ok === 'boolean' ? { ok: raw.ok } : {}),
+      status: 'killed',
+      ...(killed ? { killed } : {})
+    }
+  }
+
+  async swarmModel(params: SwarmModelParams = {}): Promise<SwarmModelResponse> {
+    const name = optionalTrimmedText(params.name)
+    const model = optionalTrimmedText(params.model)
+    const reason = optionalTrimmedText(params.reason)
+    const raw = await this.nativeSuccess('swarm.model', {
+      ...this.swarmSessionParams(params.session_id),
+      ...(name ? { name } : {}),
+      ...(model ? { model } : {}),
+      ...(reason ? { reason } : {})
+    })
+    const switchedName = optionalTrimmedText(raw.name) ?? name
+    const switchedModel = optionalTrimmedText(raw.model) ?? model
+    return {
+      ...(typeof raw.ok === 'boolean' ? { ok: raw.ok } : {}),
+      status: 'switched',
+      ...(switchedName ? { name: switchedName } : {}),
+      ...(switchedModel ? { model: switchedModel } : {})
+    }
+  }
+
+  async swarmInspect(params: SwarmInspectParams): Promise<SwarmMemberInspectResponse> {
+    const sid = optionalTrimmedText(params.session_id) ?? ''
+    const name = String(params.name ?? '').trim()
+    const raw = await this.nativeSuccess('swarm.inspect', {
+      ...this.swarmSessionParams(params.session_id),
+      name,
+      ...(typeof params.limit === 'number' && Number.isFinite(params.limit) ? { limit: Math.trunc(params.limit) } : {})
+    })
+    return normalizeSwarmInspectResponse(raw, sid, name)
+  }
+
+  async swarmActivate(params: SwarmActivateParams = {}): Promise<SwarmActivateResponse> {
+    const raw = await this.nativeSuccess('swarm.activate', {
+      ...this.swarmSessionParams(params.session_id),
+      enabled: params.enabled !== false
+    })
+    const promptOverlay = optionalTrimmedText(raw.prompt_overlay)
+    return {
+      ok: raw.ok !== false,
+      active: raw.active !== false,
+      ...(promptOverlay ? { prompt_overlay: promptOverlay } : {})
+    }
+  }
+
+  async sideQuestion(params: SideQuestionParams): Promise<SideQuestionResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const requestId = optionalTrimmedText(params.request_id)
+    const question = String(params.question ?? '').trim()
+    const model = optionalTrimmedText(params.model)
+    const history = Array.isArray(params.history)
+      ? params.history
+          .filter(
+            row =>
+              Boolean(row) &&
+              (row.role === 'user' || row.role === 'assistant') &&
+              typeof row.content === 'string' &&
+              row.content.trim().length > 0
+          )
+          .map(row => ({ role: row.role, content: row.content }))
+      : undefined
+    const raw = (await this.rawRequest<RpcObject>('session.side_question', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      ...(requestId ? { request_id: requestId } : {}),
+      question,
+      ...(model ? { model } : {}),
+      ...(history && history.length > 0 ? { history } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok !== false,
+      request_id: optionalTrimmedText(raw.request_id) ?? requestId ?? '',
+      session_id: optionalTrimmedText(raw.session_id) ?? sid ?? '',
+      question: typeof raw.question === 'string' && raw.question ? raw.question : question,
+      answer: typeof raw.answer === 'string' ? raw.answer : '',
+      model: optionalTrimmedText(raw.model) ?? '',
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpAgents(params: AcpAgentsParams = {}): Promise<AcpAgentsResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const raw = (await this.rawRequest<RpcObject>('acp.agents', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok !== false,
+      agents: Array.isArray(raw.agents) ? (raw.agents as AcpExternalAgentInfo[]) : [],
+      active: isRecord(raw.active) ? (raw.active as unknown as AcpSessionBinding) : null,
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpCatalog(params: AcpCatalogParams = {}): Promise<AcpCatalogResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const raw = (await this.rawRequest<RpcObject>('acp.catalog', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok !== false,
+      connected: raw.connected === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      commands: Array.isArray(raw.commands) ? (raw.commands as AcpAvailableCommand[]) : [],
+      skills: Array.isArray(raw.skills) ? (raw.skills as AcpDiscoveredSkill[]) : [],
+      ...(isRecord(raw.capabilities)
+        ? { capabilities: raw.capabilities as unknown as AcpRuntimeCapabilities }
+        : {}),
+      config_options: Array.isArray(raw.config_options)
+        ? (raw.config_options as AcpExternalConfigOption[])
+        : [],
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpConnect(params: AcpConnectParams): Promise<AcpConnectResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const agentId = String(params.agent_id ?? '').trim()
+    const cwd = optionalTrimmedText(params.cwd)
+    const command = optionalTrimmedText(params.command)
+    const resumeSessionId = optionalTrimmedText(params.resume_session_id)
+    const args = Array.isArray(params.args)
+      ? params.args.filter((item): item is string => typeof item === 'string')
+      : undefined
+    const raw = (await this.rawRequest<RpcObject>('acp.connect', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      agent_id: agentId,
+      ...(cwd ? { cwd } : {}),
+      ...(command ? { command } : {}),
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    const installHint = optionalTrimmedText(raw.install_hint)
+    return {
+      ok: raw.ok === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      ...(error ? { error } : {}),
+      ...(installHint ? { install_hint: installHint } : {})
+    }
+  }
+
+  async acpDisconnect(params: AcpDisconnectParams = {}): Promise<AcpDisconnectResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const raw = (await this.rawRequest<RpcObject>('acp.disconnect', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok !== false,
+      disconnected: raw.disconnected === true,
+      binding: null,
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpCancel(params: AcpCancelParams = {}): Promise<AcpCancelResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const raw = (await this.rawRequest<RpcObject>('acp.cancel', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok !== false,
+      cancelled: raw.cancelled === true,
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpSetModel(params: AcpSetModelParams): Promise<AcpSetModelResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const modelId = String(params.model_id ?? '').trim()
+    const raw = (await this.rawRequest<RpcObject>('acp.set_model', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      model_id: modelId
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpSetMode(params: AcpSetModeParams): Promise<AcpSetModeResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const modeId = String(params.mode_id ?? '').trim()
+    const raw = (await this.rawRequest<RpcObject>('acp.set_mode', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      mode_id: modeId
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpSetConfigOption(params: AcpSetConfigOptionParams): Promise<AcpSetConfigOptionResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const configId = String(params.config_id ?? '').trim()
+    const value = String(params.value ?? '').trim()
+    const raw = (await this.rawRequest<RpcObject>('acp.set_config_option', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      config_id: configId,
+      value
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      ...(error ? { error } : {})
     }
   }
 

@@ -109,17 +109,21 @@ export class FrameDecoder {
       if (opcode >= 8 && (length > 125 || !fin)) throw new Error('invalid control frame')
       if (bytes.length < offset + length) break
       frames.push({ fin, opcode, payload: Buffer.from(bytes.subarray(offset, offset + length)) })
-      this.buffer = bytes.subarray(offset + length)
+      const nextOffset = offset + length
+      this.buffer = nextOffset >= bytes.length ? EMPTY : bytes.subarray(nextOffset)
     }
     return frames
   }
 }
 
-function closePayload(code: number, reason: string): Buffer {
-  const text = Buffer.from(reason, 'utf8').subarray(0, 123)
-  const out = Buffer.alloc(2 + text.length)
+/** Build a valid RFC 6455 close payload, truncating at a UTF-8 code-point boundary within 123 bytes. */
+export function closePayload(code: number, reason: string): Buffer {
+  const full = Buffer.from(reason, 'utf8')
+  let end = Math.min(full.length, 123)
+  while (end > 0 && end < full.length && (full[end]! & 0xc0) === 0x80) end -= 1
+  const out = Buffer.alloc(2 + end)
   out.writeUInt16BE(code, 0)
-  text.copy(out, 2)
+  full.copy(out, 2, 0, end)
   return out
 }
 
@@ -136,6 +140,7 @@ export function wrapHubSocket(socket: Duplex, handlers: HubSocketHandlers, optio
   const textDecoder = new TextDecoder('utf-8', { fatal: true })
   let fragments: Buffer[] = []
   let fragmentBytes = 0
+  let fragmentMode: 0 | 1 | 2 = 0
   let finished = false
   let closing = false
 
@@ -159,17 +164,54 @@ export function wrapHubSocket(socket: Duplex, handlers: HubSocketHandlers, optio
 
   const onFrame = (frame: RawFrame): void => {
     switch (frame.opcode) {
-      case 0x0:
       case 0x1: {
-        if (frame.opcode === 0x1 && fragments.length > 0) { fail(1002, 'unexpected text frame'); return }
-        if (frame.opcode === 0x0 && fragments.length === 0) { fail(1002, 'unexpected continuation'); return }
+        if (fragmentMode !== 0) { fail(1002, 'unexpected text frame'); return }
+        if (frame.payload.length > options.maxMessageBytes) { fail(1009, 'message too large'); return }
+        if (!frame.fin) {
+          fragmentMode = 1
+          fragmentBytes = frame.payload.length
+          fragments = [frame.payload]
+          return
+        }
+        let text: string
+        try {
+          text = textDecoder.decode(frame.payload)
+        } catch {
+          fail(1007, 'invalid text')
+          return
+        }
+        handlers.message(text)
+        return
+      }
+      case 0x2: {
+        if (fragmentMode !== 0) { fail(1002, 'unexpected binary frame'); return }
+        if (frame.payload.length > options.maxMessageBytes) { fail(1009, 'message too large'); return }
+        if (!frame.fin) {
+          fragmentMode = 2
+          fragmentBytes = frame.payload.length
+          return
+        }
+        handlers.binary()
+        return
+      }
+      case 0x0: {
+        if (fragmentMode === 0) { fail(1002, 'unexpected continuation'); return }
         fragmentBytes += frame.payload.length
         if (fragmentBytes > options.maxMessageBytes) { fail(1009, 'message too large'); return }
+        if (fragmentMode === 2) {
+          if (frame.fin) {
+            fragmentMode = 0
+            fragmentBytes = 0
+            handlers.binary()
+          }
+          return
+        }
         fragments.push(frame.payload)
         if (!frame.fin) return
         const whole = fragments.length === 1 ? fragments[0]! : Buffer.concat(fragments)
         fragments = []
         fragmentBytes = 0
+        fragmentMode = 0
         let text: string
         try {
           text = textDecoder.decode(whole)
@@ -180,12 +222,18 @@ export function wrapHubSocket(socket: Duplex, handlers: HubSocketHandlers, optio
         handlers.message(text)
         return
       }
-      case 0x2:
-        handlers.binary()
-        return
       case 0x8: {
+        if (frame.payload.length === 1) { fail(1002, 'invalid close frame'); return }
         const code = frame.payload.length >= 2 ? frame.payload.readUInt16BE(0) : 1005
-        const reason = frame.payload.length > 2 ? frame.payload.subarray(2).toString('utf8') : ''
+        let reason = ''
+        if (frame.payload.length > 2) {
+          try {
+            reason = textDecoder.decode(frame.payload.subarray(2))
+          } catch {
+            fail(1007, 'invalid close reason')
+            return
+          }
+        }
         if (!closing) {
           closing = true
           write(0x8, frame.payload.length >= 2 ? frame.payload.subarray(0, 2) : EMPTY)
@@ -277,6 +325,10 @@ export const connectHubSocket = (target: HubSocketTarget, handlers: HubSocketHan
     },
   })
   request.on('upgrade', (response, socket, head) => {
+    if (ended) {
+      socket.destroy()
+      return
+    }
     if (response.statusCode !== 101 || response.headers['sec-websocket-accept'] !== expected) {
       socket.destroy()
       failBeforeOpen('The Hub did not accept the connection.')
@@ -306,8 +358,8 @@ export const connectHubSocket = (target: HubSocketTarget, handlers: HubSocketHan
     },
     close(code, reason) {
       if (inner !== undefined) { inner.close(code, reason); return }
-      request.destroy()
       end(code ?? 1000, reason ?? '')
+      request.destroy()
     },
   }
 }

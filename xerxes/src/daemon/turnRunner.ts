@@ -99,7 +99,7 @@ import { imageUrlContentParts } from './images.js'
 import type { RawMessage, TranscriptMessageJournalAppend } from '../session/daemonTranscript.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
 import type { DaemonInteractionBoard, DaemonQuestion } from './interactions.js'
-import type { DaemonEvent, DaemonSession, RuntimeToolInventoryEntry, TurnRunControls, TurnRunner } from './runtime.js'
+import type { DaemonEvent, DaemonSession, RuntimeSwarmHooks, RuntimeToolInventoryEntry, TurnRunControls, TurnRunner } from './runtime.js'
 import {
   recoverSubagentSnapshots,
   type SubagentTurnCoordinator,
@@ -122,6 +122,23 @@ export interface PromptProfileTurn {
   readonly model: string
   /** The routed profile, when policy routing chose a route. */
   readonly profile?: string
+}
+
+export interface SessionSwarmTurnAdapter {
+  readonly tools: readonly ToolDefinition[]
+  readonly executor: ToolExecutor
+  readonly capabilities?: (
+    toolName: string,
+    agentId?: string,
+    args?: Readonly<Record<string, unknown>>,
+  ) => {
+    readonly concurrencySafe: boolean
+    readonly interruptBehavior: 'block' | 'cancel'
+  }
+  readonly promptOverlay?: string
+  readonly contextNotice?: string
+  readonly onTurnStart?: () => void
+  readonly onTurnEnd?: () => void
 }
 
 export interface AgentTurnRunnerOptions {
@@ -326,6 +343,8 @@ export interface AgentTurnRunnerOptions {
     readonly concurrencySafe: boolean
     readonly interruptBehavior: 'block' | 'cancel'
   }
+  /** Per-session Native Swarm coordinator tools, executor, and prompt/board notices. */
+  readonly swarmSessionAdapter?: (session: DaemonSession) => SessionSwarmTurnAdapter | undefined
   /**
    * Run the workspace type-checker at turn end and report only the diagnostics
    * this turn introduced. Off by default because it spawns a real subprocess:
@@ -429,9 +448,25 @@ export class AgentTurnRunner implements TurnRunner {
     return state ? sessionMessagesOf(state) : undefined
   }
   private readonly toolResultStores = new Map<string, ToolResultStorage>()
+  private attachedSwarmHooks: RuntimeSwarmHooks | undefined
 
   constructor(private readonly options: AgentTurnRunnerOptions) {
     this.snapshots = options.promptSnapshots ?? new SessionPromptSnapshots()
+  }
+
+  attachSwarmHooks(hooks: RuntimeSwarmHooks): void {
+    this.attachedSwarmHooks = hooks
+  }
+
+  defaultLlmClient(): LlmClient | undefined {
+    return this.options.llm
+  }
+
+  private resolveSwarmSessionAdapter(session: DaemonSession): SessionSwarmTurnAdapter | undefined {
+    if (this.options.swarmSessionAdapter) {
+      return this.options.swarmSessionAdapter(session)
+    }
+    return this.attachedSwarmHooks?.sessionAdapter(session) as SessionSwarmTurnAdapter | undefined
   }
 
   toolInventory(session: DaemonSession): RuntimeToolInventoryEntry[] {
@@ -439,13 +474,22 @@ export class AgentTurnRunner implements TurnRunner {
     if (this.options.agentDefinitions && !agent) throw new ValidationError('agent_id', 'is not a registered agent profile', session.agentId)
     const mode = interactionModeAgent(this.options.agentDefinitions, session.interactionMode)
     if (mode === null) throw new ValidationError('interaction_mode', 'does not have a registered enforcement profile', session.interactionMode)
-    const all = this.options.toolRegistry?.definitions() ?? this.options.tools ?? []
-    const permitted = toolsForAgent(toolsForAgent(all, agent), mode) ?? []
-    const effective = session.metadata.session_kind === 'subagent' ? toolsForResumedSubagent(permitted, session.metadata) : permitted
-    const allowed = new Set(effective?.map(tool => tool.function.name))
-    const loaded = new Set((this.options.toolRegistry?.deferredToolLoading
-      ? this.options.toolRegistry.definitionsForTranscript(session.messages.flatMap(messageToChatMessage))
-      : this.options.tools ?? []).map(tool => tool.function.name))
+    const swarmAdapter = session.metadata.session_kind === 'subagent' || normalizeInteractionMode(session.interactionMode) !== 'code'
+      ? undefined
+      : this.resolveSwarmSessionAdapter(session)
+    const swarmTools = swarmAdapter?.tools ?? []
+    const baseAll = this.options.toolRegistry?.definitions() ?? this.options.tools ?? []
+    const all = mergeToolDefinitions(baseAll, swarmTools)
+    const permitted = toolsForAgent(toolsForAgent(baseAll, agent), mode) ?? []
+    const effectiveBase = session.metadata.session_kind === 'subagent' ? toolsForResumedSubagent(permitted, session.metadata) : permitted
+    const effective = mergeToolDefinitions(effectiveBase ?? [], swarmTools)
+    const allowed = new Set(effective.map(tool => tool.function.name))
+    const loaded = new Set([
+      ...(this.options.toolRegistry?.deferredToolLoading
+        ? this.options.toolRegistry.definitionsForTranscript(session.messages.flatMap(messageToChatMessage))
+        : this.options.tools ?? []).map(tool => tool.function.name),
+      ...swarmTools.map(tool => tool.function.name),
+    ])
     return all.map(tool => {
       const name = tool.function.name
       const exposure = !allowed.has(name) ? 'filtered' as const : loaded.has(name) ? 'loaded' as const : this.options.toolRegistry?.deferredToolLoading ? 'deferred' as const : 'unexposed' as const
@@ -466,6 +510,10 @@ export class AgentTurnRunner implements TurnRunner {
     this.liveStates.delete(session.id)
     if (this.options.beforeTurn) {
       try { await this.options.beforeTurn(session) } catch { /* bounded host preparation; never fails the turn */ }
+      signal.throwIfAborted()
+    }
+    if (this.attachedSwarmHooks?.ensureSession && session.metadata.session_kind !== 'subagent') {
+      try { await this.attachedSwarmHooks.ensureSession(session) } catch { /* bounded swarm state hydration */ }
       signal.throwIfAborted()
     }
     // An account near its limit hands the turn to a sibling sign-in with room, and says so.
@@ -572,6 +620,10 @@ export class AgentTurnRunner implements TurnRunner {
     const modeTools = toolsForAgent(selectedTools, modeAgent)
     const resumedSubagent = session.metadata.session_kind === 'subagent'
     if (resumedSubagent) state.metadata.status = 'running'
+    const swarmAdapter = resumedSubagent || normalizeInteractionMode(session.interactionMode) !== 'code'
+      ? undefined
+      : this.resolveSwarmSessionAdapter(session)
+    const swarmToolNames = new Set((swarmAdapter?.tools ?? []).map(tool => tool.function.name))
     const surfaceTools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
     // Lean prompt profile (off by default): core tools only, short descriptions.
     const lean = this.options.promptProfileForSession?.(session, {
@@ -579,7 +631,10 @@ export class AgentTurnRunner implements TurnRunner {
       ...(contextLimit === undefined ? {} : { contextLimit }),
       ...(route?.ok ? { profile: route.profile } : {}),
     }) === 'lean'
-    const tools = lean && surfaceTools ? selectLeanTools(surfaceTools) : surfaceTools
+    const baseTools = lean && surfaceTools ? selectLeanTools(surfaceTools) : surfaceTools
+    const tools = swarmAdapter?.tools.length
+      ? mergeToolDefinitions(baseTools ?? [], swarmAdapter.tools)
+      : baseTools
     // The session's own mode wins over the runner default, so the pin reaches
     // the permission broker rather than only the status line.
     const sessionPermissionMode = permissionModeValue(session.permissionMode) ?? this.options.permissionMode
@@ -683,11 +738,15 @@ export class AgentTurnRunner implements TurnRunner {
       catch (error) { if (!signal.aborted) console.error('Approved lesson recall failed:', error) }
       signal.throwIfAborted()
     }
+    const renderedContextDeltas = [
+      renderContextDeltas(contextDeltas),
+      swarmAdapter?.contextNotice?.trim() ?? '',
+    ].filter(Boolean).join('\n\n')
     const turnSegments = assembleTurnContext({
       approvedLessons,
       ...(promptDay && promptDay !== today ? { dateChange: `Today's date is now ${today}.` } : {}),
       ...(goalChanged ? { goalStatus } : {}),
-      contextDeltas: renderContextDeltas(contextDeltas),
+      contextDeltas: renderedContextDeltas,
       // The lean prompt re-reads the instruction files every turn, within its
       // budget; the update layer would resend whole files.
       ...(instructionUpdates && !lean ? { instructionUpdates } : {}),
@@ -711,12 +770,21 @@ export class AgentTurnRunner implements TurnRunner {
       reflection: this.options.reflectionMode?.(session) ?? 'all',
     })
     this.snapshots.learningPolicy.set(session.id, learningPolicy)
+    const combinedAddendum = [
+      systemPromptAddendum(session),
+      swarmAdapter?.promptOverlay?.trim() ?? '',
+    ].filter(Boolean).join('\n\n')
     // Lean: the terse prompt is the whole system prompt (about 3K tokens with
     // the core tool schemas). Turn context, goals and lessons still ride with
     // the user message.
-    const systemSegments = lean ? [{ name: 'bootstrap', text: bootstrapPrompt }] : assembleContextLayers({
+    const systemSegments = lean
+      ? [
+          { name: 'bootstrap', text: bootstrapPrompt },
+          ...(swarmAdapter?.promptOverlay?.trim() ? [{ name: 'swarm', text: swarmAdapter.promptOverlay.trim() }] : []),
+        ]
+      : assembleContextLayers({
       learningPolicy,
-      addendum: systemPromptAddendum(session),
+      addendum: combinedAddendum,
       ...(compacts ? { compaction: 'Long conversations are summarized automatically when context fills, and work continues. Do not cut work short, skip verification, or hand off because the conversation is long.' } : {}),
       agentPrompt: promptAgent?.systemPrompt ?? '',
       bootstrap: bootstrapPrompt,
@@ -788,7 +856,20 @@ export class AgentTurnRunner implements TurnRunner {
       ...(tools ? { toolSchemas: tools.map(tool => tool as unknown as Readonly<Record<string, unknown>>) } : {}),
     }
     const baseToolExecutor = interactiveToolExecutor(this.options.toolExecutor, this.options.interactions, session.id, this.options.questionAutoAnswerMs ?? DEFAULT_QUESTION_AUTO_ANSWER_MS)
-    const toolExecutor = baseToolExecutor && editFeedback ? editFeedback.wrap(baseToolExecutor) : baseToolExecutor
+    const editedToolExecutor = baseToolExecutor && editFeedback ? editFeedback.wrap(baseToolExecutor) : baseToolExecutor
+    const toolExecutor: ToolExecutor | undefined = swarmAdapter
+      ? {
+          execute: (call, context, execSignal) => {
+            if (swarmToolNames.has(call.function.name)) {
+              return swarmAdapter.executor.execute(call, context, execSignal)
+            }
+            if (!editedToolExecutor) {
+              throw new Error(`No tool executor registered for "${call.function.name}"`)
+            }
+            return editedToolExecutor.execute(call, context, execSignal)
+          },
+        }
+      : editedToolExecutor
     const auditContext = {
       sessionId: session.id,
       agentId: session.agentId,
@@ -835,6 +916,7 @@ export class AgentTurnRunner implements TurnRunner {
     let turnErrored = false
     let turnFinished = false
     try {
+      swarmAdapter?.onTurnStart?.()
       if (!promptBudget.ok) {
         // Identity is the set of exceeded caps, not their changing sizes or
         // order. Session metadata survives runner rebuilds and transcript resume.
@@ -968,7 +1050,7 @@ export class AgentTurnRunner implements TurnRunner {
         // A used-up plan can be healed mid-turn by whatever the user just
         // changed (switched account, new login, edited key): rebuild from the
         // live profile so the loop can compare and retry as the new identity.
-        ...(!requiresLocal && this.options.resolveSessionProvider ? {
+        ...(!requiresLocal && !route?.ok && this.options.resolveSessionProvider ? {
           // After a quota error the loop polls this for a new credential; the first poll starts a
           // same-family failover, and once it re-pins the session the next poll returns the new account.
           refreshLlm: (() => {
@@ -980,7 +1062,8 @@ export class AgentTurnRunner implements TurnRunner {
                   .then(switched => { if (switched) failoverNotice = `Switched to ${switched.to}: ${switched.reason}.` })
                   .catch(() => undefined)
               }
-              return this.options.resolveSessionProvider?.(session, attemptModel)?.llm
+              const refreshed = this.options.resolveSessionProvider?.(session, attemptModel)?.llm
+              return refreshed ? gateLlmClient(refreshed, this.options.outboundGateForSession?.(session, attemptModel)) : undefined
             }
           })(),
         } : {}),
@@ -1046,7 +1129,16 @@ export class AgentTurnRunner implements TurnRunner {
         // Declared per tool at registration. Absent, the loop stays strictly
         // sequential, so an undeclared tool can never be run concurrently by
         // accident.
-        ...(this.options.toolCapabilities ? { capabilities: this.options.toolCapabilities } : {}),
+        ...((this.options.toolCapabilities || swarmAdapter?.capabilities) ? {
+          capabilities: (toolName: string, agentId?: string, args?: Readonly<Record<string, unknown>>) => {
+            if (swarmToolNames.has(toolName) && swarmAdapter?.capabilities) {
+              return swarmAdapter.capabilities(toolName, agentId, args)
+            }
+            return this.options.toolCapabilities
+              ? this.options.toolCapabilities(toolName, agentId, args)
+              : { concurrencySafe: false, interruptBehavior: 'cancel' as const }
+          },
+        } : {}),
         // Without this the denial guard still stops a refusal loop, but the
         // audit event that records why stays at zero production callers.
         ...(this.options.auditEmitter
@@ -1248,6 +1340,7 @@ export class AgentTurnRunner implements TurnRunner {
       })
       throw error
     } finally {
+      swarmAdapter?.onTurnEnd?.()
       if (resumedSubagent) {
         state.metadata.status = signal.aborted ? 'cancelled' : resumedSubagentOutcome
       }
@@ -1265,7 +1358,7 @@ export class AgentTurnRunner implements TurnRunner {
       // Deliver the checker's verdict as a fact rather than leaving the model
       // to claim the edit compiled. Only paths this turn actually mutated are
       // reported, so a repo with pre-existing errors stays quiet.
-      if (this.options.editDiagnostics && turnMutatedFiles(state)) {
+      if (this.options.editDiagnostics && turnMutatedFiles(state, executionsBefore)) {
         const diagnostics = await editFeedback?.report(signal).catch(() => '')
         if (diagnostics) {
           state.messages.push({ role: 'user', content: diagnostics, origin: 'harness' })
@@ -1484,8 +1577,8 @@ function boundedToolResultPreview(toolName: string, content: string, path: strin
 }
 
 /** True when this turn wrote to the workspace, so a diagnostics pass can earn its latency. */
-function turnMutatedFiles(state: AgentState): boolean {
-  return state.toolExecutions.some(execution => {
+function turnMutatedFiles(state: AgentState, executionsBefore = 0): boolean {
+  return state.toolExecutions.slice(executionsBefore).some(execution => {
     if (typeof execution !== 'object' || execution === null) return false
     const record = execution as { name?: unknown; permitted?: unknown }
     return record.permitted === true && typeof record.name === 'string' && MUTATING_TOOL_NAMES.has(record.name)
@@ -1770,6 +1863,30 @@ interface MemoryForTurn {
 
 function systemPromptAddendum(session: DaemonSession): string {
   return session.systemPromptAddendum?.trim() ?? ''
+}
+
+function mergeToolDefinitions(
+  base: readonly ToolDefinition[],
+  extra: readonly ToolDefinition[],
+): ToolDefinition[] {
+  if (!extra.length) return [...base]
+  const seen = new Set<string>()
+  const merged: ToolDefinition[] = []
+  for (const tool of base) {
+    if (seen.has(tool.function.name)) continue
+    seen.add(tool.function.name)
+    merged.push(tool)
+  }
+  for (const tool of extra) {
+    const existingIndex = merged.findIndex(item => item.function.name === tool.function.name)
+    if (existingIndex >= 0) {
+      merged[existingIndex] = tool
+    } else {
+      seen.add(tool.function.name)
+      merged.push(tool)
+    }
+  }
+  return merged
 }
 
 /**

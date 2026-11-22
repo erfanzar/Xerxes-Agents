@@ -232,6 +232,12 @@ export class CallEngine {
     // The person is mid-sentence: keep their audio and phase; only the notice changes.
     if (this.busyHearing()) { if (notice !== undefined) this.update({ notice }); return }
     this.resetInput()
+    if (this.connected && this.pendingSend && this.lifetime && !this.lifetime.signal.aborted) {
+      const pending = this.pendingSend
+      this.pendingSend = undefined
+      void this.ask(pending.text, pending.messageId, 0)
+      return
+    }
     const held = this.held
     if (held && !held.turn.signal.aborted && !this.busyHearing()) {
       this.held = undefined

@@ -4,12 +4,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- No remote origins: the renderer loads only what it ships with. The one
-         frame source is a blob: the page makes from a workspace PDF, which
-         Chromium's built-in viewer shows (Files panel). -->
+    <!-- No remote origins: the renderer loads only what it ships with. `frame-src blob:`
+         hosts workspace PDFs and sandboxed `allow-scripts` Generative UI widgets;
+         `script-src 'self' data:` lets those sandboxed blob iframes run base64
+         `data:text/javascript` scripts without permitting `'unsafe-inline'` in the host. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; frame-src blob:;"
+      content="default-src 'none'; script-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; frame-src blob:;"
     />
     <title>Xerxes Agents</title>
     <link rel="stylesheet" href="./theme.css" />

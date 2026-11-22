@@ -16,9 +16,20 @@
  */
 
 import { todoItemsOf, todosFromResult, type TodoItem } from './todoState.js'
-import { pageIsBackground } from './pageVisibility.js'
+import { pageIsBackground, pageIsInactive } from './pageVisibility.js'
+import { hideWorkspaceInState, normalizeWorkspacePath, setThreadInboxState, unhideWorkspaceInState } from './threadInbox.js'
 import type { WorkspaceContext } from '../main/contextNavigation.js'
-import { BlockBuilder, blocksFromStoredMessages, editStatsOf, parseArgs, toolFailureText } from './blocks.js'
+import {
+  BlockBuilder,
+  blocksFromStoredMessages,
+  editStatsOf,
+  normalizeToolName,
+  parseArgs,
+  parseStructuredDiff,
+  toolFailureText,
+  trimmedChangedLines,
+  type StructuredDiffPayload,
+} from './blocks.js'
 import {
   daemonCompatibilityWarning,
   DESKTOP_DAEMON_PROTOCOL,
@@ -31,6 +42,25 @@ import { historyBlocks, readHistoryPage, type HistoryPage } from './history.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { desktopCall, desktopError, text } from './desktopRpc.js'
 import { learningCounts, readLearningList, type LearningAction, type LearningCounts, type LearningList, type LearningResult, type LearningTarget } from './learning.js'
+import {
+  applySwarmStatusDelta,
+  mergeSwarmMessages,
+  parseSwarmBoard,
+  parseSwarmEvent,
+  parseSwarmMemberInspect,
+  parseSwarmMessage,
+  parseSwarmSlashCommand,
+  parseSwarmStatus,
+  type SwarmBoardMessage,
+  type SwarmMemberInspectResult,
+  type SwarmStatusSnapshot,
+} from './swarmState.js'
+import {
+  applyBtwEventPayload,
+  parseSideQuestionSlashCommand,
+  settleSideQuestionTools,
+  type SideQuestionTurn,
+} from './sideQuestionState.js'
 import { agentGroupOf, foldAgentEvent } from './agentEvents.js'
 import { parseGoal } from './goalText.js'
 import { agentStatusOf, syncAgentMembers } from './agentMembers.js'
@@ -77,6 +107,7 @@ import { withoutTurnContext } from './transcriptContent.js'
 export type Connection = 'connecting' | 'online' | 'offline'
 
 const STREAM_THINKING_KEY = 'xerxes.streamThinking'
+const SIDE_QUESTION_MODEL_KEY = 'xerxes.sideQuestion.model'
 
 /** Persisted display preference; defaults on everywhere (SSR/test safe). */
 function readStreamThinking(): boolean {
@@ -96,6 +127,770 @@ function writeStreamThinking(value: boolean): void {
   }
 }
 
+/** Persisted Side Question model override (`''` = follow current session model). */
+function readSideQuestionModel(): string {
+  try {
+    return (typeof localStorage === 'undefined' ? null : localStorage.getItem(SIDE_QUESTION_MODEL_KEY))?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writeSideQuestionModel(model: string): void {
+  try {
+    if (!model) localStorage?.removeItem(SIDE_QUESTION_MODEL_KEY)
+    else localStorage?.setItem(SIDE_QUESTION_MODEL_KEY, model)
+  } catch {
+    // A blocked storage area keeps the choice session-scoped.
+  }
+}
+
+export type AcpAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
+export type AcpAgentTransport = 'native' | 'acp' | 'claude-stream-json'
+
+export interface AcpExternalAgentInfo {
+  readonly id: string
+  readonly name: string
+  readonly provider: AcpAgentProvider
+  readonly transport: AcpAgentTransport
+  readonly available: boolean
+  readonly command?: string
+  readonly args?: readonly string[]
+  readonly binaryPath?: string
+  readonly version?: string
+  readonly installHint?: string
+  readonly description: string
+}
+
+export interface AcpExternalModelOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpExternalModeOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpExternalThoughtLevelOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpConfigSelectOption {
+  readonly value: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpConfigOption {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+  readonly category?: string
+  readonly type: string
+  readonly current_value: string
+  readonly options: readonly AcpConfigSelectOption[]
+}
+
+export interface AcpAuthMethodInfo {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface AcpRuntimeCapabilities {
+  readonly prompt: {
+    readonly image: boolean
+    readonly audio: boolean
+    readonly embedded_context: boolean
+  }
+  readonly session: {
+    readonly load: boolean
+    readonly resume: boolean
+    readonly list: boolean
+    readonly close: boolean
+    readonly additional_directories: boolean
+  }
+  readonly mcp: {
+    readonly http: boolean
+    readonly sse: boolean
+  }
+  readonly auth_methods: readonly AcpAuthMethodInfo[]
+  readonly meta?: Readonly<Record<string, unknown>>
+}
+
+export interface AcpAvailableCommand {
+  readonly name: string
+  readonly description?: string
+  readonly input_hint?: string
+  readonly kind?: 'command' | 'skill'
+  readonly source?: string
+}
+
+export interface AcpDiscoveredSkill {
+  readonly name: string
+  readonly description?: string
+  readonly source?: string
+  readonly path?: string
+  readonly slash_command?: string
+}
+
+export interface AcpCatalogResult {
+  readonly ok: boolean
+  readonly connected: boolean
+  readonly binding?: AcpSessionBinding | null
+  readonly commands: readonly AcpAvailableCommand[]
+  readonly skills: readonly AcpDiscoveredSkill[]
+  readonly capabilities?: AcpRuntimeCapabilities
+  readonly config_options: readonly AcpConfigOption[]
+}
+
+export interface ApprovalDiff {
+  readonly path: string
+  readonly oldText?: string
+  readonly newText?: string
+}
+
+export interface ApprovalOption {
+  readonly optionId: string
+  readonly name: string
+  readonly kind: string
+}
+
+export interface DesktopApproval extends Approval {
+  readonly allowPermanent?: boolean
+  readonly diff?: ApprovalDiff
+  readonly options?: readonly ApprovalOption[]
+}
+
+export interface CompletionHintItem {
+  readonly value: string
+  readonly label: string
+  readonly meta: string
+  readonly kind: 'command' | 'skill'
+  readonly badge?: string
+  readonly runtimeProvider?: string
+}
+
+export interface AcpSessionBinding {
+  readonly session_id: string
+  readonly agent_id: string
+  readonly name: string
+  readonly provider: AcpAgentProvider
+  readonly transport: AcpAgentTransport
+  readonly cwd: string
+  readonly external_session_id?: string
+  readonly connected: boolean
+  readonly command?: string
+  readonly error?: string
+  readonly agent_version?: string
+  readonly agent_title?: string
+  readonly capabilities?: AcpRuntimeCapabilities
+  readonly current_model?: string
+  readonly current_model_name?: string
+  readonly models?: readonly AcpExternalModelOption[]
+  readonly current_mode?: string
+  readonly current_mode_name?: string
+  readonly modes?: readonly AcpExternalModeOption[]
+  readonly model_config_id?: string
+  readonly mode_config_id?: string
+  readonly config_options?: readonly AcpConfigOption[]
+  readonly thought_level?: string
+  readonly thought_levels?: readonly AcpExternalThoughtLevelOption[]
+  readonly thought_level_config_id?: string
+  readonly available_commands?: readonly AcpAvailableCommand[]
+  readonly discovered_skills?: readonly AcpDiscoveredSkill[]
+}
+
+function parseAcpProvider(value: unknown): AcpAgentProvider {
+  return value === 'xerxes'
+    || value === 'claude-code'
+    || value === 'antigravity'
+    || value === 'codex'
+    || value === 'acp'
+    ? value
+    : 'acp'
+}
+
+function parseAcpTransport(value: unknown): AcpAgentTransport {
+  return value === 'native' || value === 'acp' || value === 'claude-stream-json'
+    ? value
+    : 'acp'
+}
+
+export function parseAcpExternalAgent(value: unknown): AcpExternalAgentInfo | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Readonly<Record<string, unknown>>
+  const id = typeof row.id === 'string' ? row.id.trim() : ''
+  if (!id) return null
+  const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id
+  const command = typeof row.command === 'string' && row.command.trim() ? row.command.trim() : undefined
+  const args = Array.isArray(row.args)
+    ? row.args.filter((item): item is string => typeof item === 'string')
+    : undefined
+  const binaryPath = typeof row.binaryPath === 'string' && row.binaryPath.trim()
+    ? row.binaryPath.trim()
+    : typeof row.binary_path === 'string' && row.binary_path.trim()
+      ? row.binary_path.trim()
+      : undefined
+  const version = typeof row.version === 'string' && row.version.trim() ? row.version.trim() : undefined
+  const installHint = typeof row.installHint === 'string' && row.installHint.trim()
+    ? row.installHint.trim()
+    : typeof row.install_hint === 'string' && row.install_hint.trim()
+      ? row.install_hint.trim()
+      : undefined
+  const description = typeof row.description === 'string' ? row.description.trim() : ''
+  return {
+    id,
+    name,
+    provider: parseAcpProvider(row.provider),
+    transport: parseAcpTransport(row.transport),
+    available: row.available === true,
+    ...(command ? { command } : {}),
+    ...(args ? { args } : {}),
+    ...(binaryPath ? { binaryPath } : {}),
+    ...(version ? { version } : {}),
+    ...(installHint ? { installHint } : {}),
+    description,
+  }
+}
+
+export function parseAcpExternalAgents(value: unknown): readonly AcpExternalAgentInfo[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(parseAcpExternalAgent)
+    .filter((item): item is AcpExternalAgentInfo => item !== null)
+}
+
+function parseAcpExternalOption(value: unknown): AcpExternalModelOption | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Readonly<Record<string, unknown>>
+  const id =
+    typeof row.id === 'string' && row.id.trim()
+      ? row.id.trim()
+      : typeof row.modelId === 'string' && row.modelId.trim()
+        ? row.modelId.trim()
+        : typeof row.value === 'string' && row.value.trim()
+          ? row.value.trim()
+          : ''
+  if (!id) return null
+  const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id
+  const description = typeof row.description === 'string' && row.description.trim() ? row.description.trim() : undefined
+  return {
+    id,
+    name,
+    ...(description ? { description } : {}),
+  }
+}
+
+function parseAcpExternalOptions(value: unknown): readonly AcpExternalModelOption[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const parsed: AcpExternalModelOption[] = []
+  for (const item of value) {
+    const option = parseAcpExternalOption(item)
+    if (!option || seen.has(option.id)) continue
+    seen.add(option.id)
+    parsed.push(option)
+  }
+  return parsed.length > 0 ? parsed : undefined
+}
+
+function parseAcpConfigOptions(value: unknown): readonly AcpConfigOption[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const parsed: AcpConfigOption[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const row = item as Readonly<Record<string, unknown>>
+    const id = typeof row.id === 'string' ? row.id.trim() : ''
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id
+    const description = typeof row.description === 'string' && row.description.trim() ? row.description.trim() : undefined
+    const category = typeof row.category === 'string' && row.category.trim() ? row.category.trim() : undefined
+    const type = typeof row.type === 'string' && row.type.trim() ? row.type.trim() : 'select'
+    const rawCurrent = row.current_value ?? row.currentValue
+    const currentValue =
+      typeof rawCurrent === 'string' && rawCurrent.trim()
+        ? rawCurrent.trim()
+        : typeof rawCurrent === 'boolean' || typeof rawCurrent === 'number'
+          ? String(rawCurrent)
+          : ''
+    const rawOptions = Array.isArray(row.options) ? row.options : []
+    const options: AcpConfigSelectOption[] = []
+    const seenOpts = new Set<string>()
+    for (const rawOpt of rawOptions) {
+      if (!rawOpt || typeof rawOpt !== 'object' || Array.isArray(rawOpt)) continue
+      const opt = rawOpt as Readonly<Record<string, unknown>>
+      const optValue =
+        typeof opt.value === 'string' && opt.value.trim()
+          ? opt.value.trim()
+          : typeof opt.id === 'string' && opt.id.trim()
+            ? opt.id.trim()
+            : ''
+      if (!optValue || seenOpts.has(optValue)) continue
+      seenOpts.add(optValue)
+      const optName = typeof opt.name === 'string' && opt.name.trim() ? opt.name.trim() : optValue
+      const optDesc = typeof opt.description === 'string' && opt.description.trim() ? opt.description.trim() : undefined
+      options.push({
+        value: optValue,
+        name: optName,
+        ...(optDesc ? { description: optDesc } : {}),
+      })
+    }
+    parsed.push({
+      id,
+      name,
+      ...(description ? { description } : {}),
+      ...(category ? { category } : {}),
+      type,
+      current_value: currentValue,
+      options,
+    })
+  }
+  return parsed.length > 0 ? parsed : undefined
+}
+
+function parseAcpAvailableCommands(value: unknown): readonly AcpAvailableCommand[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const parsed: AcpAvailableCommand[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const row = item as Readonly<Record<string, unknown>>
+    const rawName = typeof row.name === 'string' ? row.name.trim().replace(/^\/+/, '') : ''
+    if (!rawName) continue
+    const key = rawName.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const description = typeof row.description === 'string' && row.description.trim() ? row.description.trim() : undefined
+    const inputObj = row.input && typeof row.input === 'object' && !Array.isArray(row.input)
+      ? (row.input as Readonly<Record<string, unknown>>)
+      : null
+    const inputHint =
+      typeof row.input_hint === 'string' && row.input_hint.trim()
+        ? row.input_hint.trim()
+        : typeof row.inputHint === 'string' && row.inputHint.trim()
+          ? row.inputHint.trim()
+          : typeof inputObj?.hint === 'string' && inputObj.hint.trim()
+            ? inputObj.hint.trim()
+            : undefined
+    const kind = row.kind === 'skill' || row.kind === 'command' ? row.kind : undefined
+    const source = typeof row.source === 'string' && row.source.trim() ? row.source.trim() : undefined
+    parsed.push({
+      name: rawName,
+      ...(description ? { description } : {}),
+      ...(inputHint ? { input_hint: inputHint } : {}),
+      ...(kind ? { kind } : {}),
+      ...(source ? { source } : {}),
+    })
+  }
+  return parsed.length > 0 ? parsed : undefined
+}
+
+function parseAcpDiscoveredSkills(value: unknown): readonly AcpDiscoveredSkill[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const parsed: AcpDiscoveredSkill[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const row = item as Readonly<Record<string, unknown>>
+    const rawName = typeof row.name === 'string' ? row.name.trim().replace(/^\/+/, '') : ''
+    if (!rawName) continue
+    const key = rawName.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const description = typeof row.description === 'string' && row.description.trim() ? row.description.trim() : undefined
+    const source = typeof row.source === 'string' && row.source.trim() ? row.source.trim() : undefined
+    const path = typeof row.path === 'string' && row.path.trim() ? row.path.trim() : undefined
+    const rawSlash =
+      typeof row.slash_command === 'string' && row.slash_command.trim()
+        ? row.slash_command.trim()
+        : typeof row.slashCommand === 'string' && row.slashCommand.trim()
+          ? row.slashCommand.trim()
+          : undefined
+    const slashCommand = rawSlash ? (rawSlash.startsWith('/') ? rawSlash : `/${rawSlash}`) : undefined
+    parsed.push({
+      name: rawName,
+      ...(description ? { description } : {}),
+      ...(source ? { source } : {}),
+      ...(path ? { path } : {}),
+      ...(slashCommand ? { slash_command: slashCommand } : {}),
+    })
+  }
+  return parsed.length > 0 ? parsed : undefined
+}
+
+function parseAcpRuntimeCapabilities(value: unknown): AcpRuntimeCapabilities | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const row = value as Readonly<Record<string, unknown>>
+  const promptObj =
+    row.prompt && typeof row.prompt === 'object' && !Array.isArray(row.prompt)
+      ? (row.prompt as Readonly<Record<string, unknown>>)
+      : row.promptCapabilities && typeof row.promptCapabilities === 'object' && !Array.isArray(row.promptCapabilities)
+        ? (row.promptCapabilities as Readonly<Record<string, unknown>>)
+        : null
+  const sessionObj =
+    row.session && typeof row.session === 'object' && !Array.isArray(row.session)
+      ? (row.session as Readonly<Record<string, unknown>>)
+      : row.sessionCapabilities && typeof row.sessionCapabilities === 'object' && !Array.isArray(row.sessionCapabilities)
+        ? (row.sessionCapabilities as Readonly<Record<string, unknown>>)
+        : null
+  const mcpObj =
+    row.mcp && typeof row.mcp === 'object' && !Array.isArray(row.mcp)
+      ? (row.mcp as Readonly<Record<string, unknown>>)
+      : row.mcpCapabilities && typeof row.mcpCapabilities === 'object' && !Array.isArray(row.mcpCapabilities)
+        ? (row.mcpCapabilities as Readonly<Record<string, unknown>>)
+        : null
+  const rawAuth = Array.isArray(row.auth_methods)
+    ? row.auth_methods
+    : Array.isArray(row.authMethods)
+      ? row.authMethods
+      : []
+  const authMethods: AcpAuthMethodInfo[] = []
+  const seenAuth = new Set<string>()
+  for (const item of rawAuth) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const auth = item as Readonly<Record<string, unknown>>
+    const id = typeof auth.id === 'string' && auth.id.trim() ? auth.id.trim() : ''
+    if (!id || seenAuth.has(id)) continue
+    seenAuth.add(id)
+    const name = typeof auth.name === 'string' && auth.name.trim() ? auth.name.trim() : id
+    const description = typeof auth.description === 'string' && auth.description.trim() ? auth.description.trim() : undefined
+    authMethods.push({ id, name, ...(description ? { description } : {}) })
+  }
+  const metaObj =
+    row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)
+      ? (row.meta as Readonly<Record<string, unknown>>)
+      : row._meta && typeof row._meta === 'object' && !Array.isArray(row._meta)
+        ? (row._meta as Readonly<Record<string, unknown>>)
+        : undefined
+  const flag = (obj: Readonly<Record<string, unknown>> | null, ...keys: readonly string[]): boolean => {
+    if (!obj) return false
+    for (const key of keys) {
+      const entry = obj[key]
+      if (entry === true) return true
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) return true
+    }
+    return false
+  }
+  return {
+    prompt: {
+      image: flag(promptObj, 'image'),
+      audio: flag(promptObj, 'audio'),
+      embedded_context: flag(promptObj, 'embedded_context', 'embeddedContext'),
+    },
+    session: {
+      load: flag(sessionObj, 'load') || row.loadSession === true,
+      resume: flag(sessionObj, 'resume'),
+      list: flag(sessionObj, 'list'),
+      close: flag(sessionObj, 'close'),
+      additional_directories: flag(sessionObj, 'additional_directories', 'additionalDirectories'),
+    },
+    mcp: {
+      http: flag(mcpObj, 'http'),
+      sse: flag(mcpObj, 'sse'),
+    },
+    auth_methods: authMethods,
+    ...(metaObj ? { meta: metaObj } : {}),
+  }
+}
+
+/** Xerxes-bundled native skills that must NEVER leak into an external ACP runtime's catalog or completions. */
+const XERXES_NATIVE_ONLY_SKILLS = new Set([
+  'immortals-coordinator',
+  'immortals-monitor',
+  'immortals-narrator',
+  'xerxes-plugin-creator',
+])
+
+export function isXerxesNativeOnlySkill(name: string, source?: string): boolean {
+  const clean = name.trim().replace(/^\/+/, '').toLowerCase()
+  if (!clean) return false
+  if (XERXES_NATIVE_ONLY_SKILLS.has(clean)) return true
+  if (clean.startsWith('immortals-')) return true
+  if (source && /xerxes[-_\s]?bundled/i.test(source)) return true
+  return false
+}
+
+/** Deduplicated, runtime-isolated ACP commands & skills derived from a session binding. */
+export function resolveExternalAcpCatalog(
+  binding: AcpSessionBinding | null | undefined,
+): {
+  readonly commands: readonly AcpAvailableCommand[]
+  readonly skills: readonly AcpDiscoveredSkill[]
+} {
+  if (!binding?.connected || binding.transport === 'native') {
+    return { commands: [], skills: [] }
+  }
+  const skillByKey = new Map<string, AcpDiscoveredSkill>()
+  for (const skill of binding.discovered_skills ?? []) {
+    if (isXerxesNativeOnlySkill(skill.name, skill.source)) continue
+    const key = skill.name.trim().toLowerCase()
+    if (!key || skillByKey.has(key)) continue
+    skillByKey.set(key, {
+      ...skill,
+      slash_command: skill.slash_command?.startsWith('/')
+        ? skill.slash_command
+        : `/${skill.slash_command ?? skill.name}`,
+    })
+  }
+  const commands: AcpAvailableCommand[] = []
+  const seenCmd = new Set<string>()
+  for (const cmd of binding.available_commands ?? []) {
+    const cleanName = cmd.name.trim().replace(/^\/+/, '')
+    const key = cleanName.toLowerCase()
+    if (!key || isXerxesNativeOnlySkill(cleanName, cmd.source)) continue
+    if (cmd.kind === 'skill') {
+      if (!skillByKey.has(key)) {
+        skillByKey.set(key, {
+          name: cleanName,
+          ...(cmd.description ? { description: cmd.description } : {}),
+          ...(cmd.source ? { source: cmd.source } : {}),
+          slash_command: `/${cleanName}`,
+        })
+      }
+      continue
+    }
+    if (skillByKey.has(key) || seenCmd.has(key)) continue
+    seenCmd.add(key)
+    commands.push({ ...cmd, name: cleanName })
+  }
+  return {
+    commands,
+    skills: [...skillByKey.values()],
+  }
+}
+
+/**
+ * Whether Immortals UI entry points (FloatingRail, More menu, Rail + menu)
+ * should be shown for this session. Always visible on native Xerxes, whenever
+ * a swarm is active, or when connected to Antigravity / any ACP runtime that
+ * advertises a `swarm` command.
+ */
+export function showsImmortalsForSession(
+  snap: Pick<Snapshot, 'acpBinding' | 'swarm'>,
+): boolean {
+  const binding = snap.acpBinding
+  const externalAcp = Boolean(binding?.connected && binding.transport !== 'native')
+  if (!externalAcp) return true
+  if (snap.swarm?.active) return true
+  if (binding?.provider === 'antigravity') return true
+  if (binding?.available_commands?.some(cmd => cmd.name.trim().replace(/^\/+/, '').toLowerCase() === 'swarm')) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Decide whether a slash command typed while connected to an external ACP runtime
+ * should bypass Xerxes's native slash handlers and forward directly to the ACP agent.
+ * Keeps `/acp ...`, `/immortals ...`, and host-owned Immortals UI control commands
+ * (`/swarm`, `/swarm board`, `/swarm ui`, `/swarm status`, `/swarm channels`,
+ * `/swarm stop`, `/swarm kill <target>`) on the host while still forwarding
+ * `/swarm <task description>` directly to ACP so starting an ACP swarm works.
+ */
+export function shouldForwardSlashToAcp(
+  text: string,
+  binding: AcpSessionBinding | null | undefined,
+): boolean {
+  if (!binding?.connected || binding.transport === 'native') return false
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('/')) return false
+  const [command = ''] = trimmed.split(/\s+/)
+  const bare = command.replace(/^\/+/, '').toLowerCase()
+  if (!bare || bare === 'acp' || bare === 'immortals') return false
+  if (bare === 'swarm') {
+    const swarmCmd = parseSwarmSlashCommand(trimmed)
+    if (swarmCmd && swarmCmd.kind !== 'activate_task') return false
+  }
+  if (binding.available_commands?.some(cmd => cmd.name.trim().replace(/^\/+/, '').toLowerCase() === bare)) {
+    return true
+  }
+  if (binding.discovered_skills?.some(skill => {
+    const skillName = skill.name.trim().replace(/^\/+/, '').toLowerCase()
+    const slashName = skill.slash_command?.trim().replace(/^\/+/, '').toLowerCase()
+    return skillName === bare || slashName === bare
+  })) {
+    return true
+  }
+  return false
+}
+
+export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Readonly<Record<string, unknown>>
+  const agentId = typeof row.agent_id === 'string' ? row.agent_id.trim() : ''
+  if (!agentId) return null
+  const sessionId = typeof row.session_id === 'string' ? row.session_id.trim() : ''
+  const name =
+    typeof row.name === 'string' && row.name.trim()
+      ? row.name.trim()
+      : typeof row.agent_name === 'string' && row.agent_name.trim()
+        ? row.agent_name.trim()
+        : agentId
+  const cwd = typeof row.cwd === 'string' ? row.cwd : ''
+  const externalSessionId =
+    typeof row.external_session_id === 'string' && row.external_session_id.trim()
+      ? row.external_session_id.trim()
+      : undefined
+  const command = typeof row.command === 'string' && row.command.trim() ? row.command.trim() : undefined
+  const error = typeof row.error === 'string' && row.error.trim() ? row.error.trim() : undefined
+  const agentVersion =
+    typeof row.agent_version === 'string' && row.agent_version.trim()
+      ? row.agent_version.trim()
+      : typeof row.agentVersion === 'string' && row.agentVersion.trim()
+        ? row.agentVersion.trim()
+        : undefined
+  const agentTitle =
+    typeof row.agent_title === 'string' && row.agent_title.trim()
+      ? row.agent_title.trim()
+      : typeof row.agentTitle === 'string' && row.agentTitle.trim()
+        ? row.agentTitle.trim()
+        : undefined
+  const capabilities = parseAcpRuntimeCapabilities(row.capabilities)
+  const configOptions = parseAcpConfigOptions(row.config_options ?? row.configOptions)
+  const modelConfig = configOptions?.find(opt => opt.category === 'model' || opt.id === 'model')
+  const modeConfig = configOptions?.find(opt => opt.category === 'mode' || opt.id === 'mode')
+  const thoughtConfig = configOptions?.find(opt => opt.category === 'thought_level' || opt.id === 'thought_level')
+  const currentModel =
+    typeof row.current_model === 'string' && row.current_model.trim()
+      ? row.current_model.trim()
+      : typeof row.model_id === 'string' && row.model_id.trim()
+        ? row.model_id.trim()
+        : modelConfig?.current_value || undefined
+  const models =
+    parseAcpExternalOptions(row.models)
+    ?? (modelConfig?.options.length
+      ? modelConfig.options.map(opt => ({
+          id: opt.value,
+          name: opt.name,
+          ...(opt.description ? { description: opt.description } : {}),
+        }))
+      : undefined)
+  const currentModelName =
+    typeof row.current_model_name === 'string' && row.current_model_name.trim()
+      ? row.current_model_name.trim()
+      : currentModel
+        ? models?.find(opt => opt.id === currentModel)?.name
+        : undefined
+  const currentMode =
+    typeof row.current_mode === 'string' && row.current_mode.trim()
+      ? row.current_mode.trim()
+      : typeof row.mode_id === 'string' && row.mode_id.trim()
+        ? row.mode_id.trim()
+        : modeConfig?.current_value || undefined
+  const modes =
+    parseAcpExternalOptions(row.modes)
+    ?? (modeConfig?.options.length
+      ? modeConfig.options.map(opt => ({
+          id: opt.value,
+          name: opt.name,
+          ...(opt.description ? { description: opt.description } : {}),
+        }))
+      : undefined)
+  const currentModeName =
+    typeof row.current_mode_name === 'string' && row.current_mode_name.trim()
+      ? row.current_mode_name.trim()
+      : currentMode
+        ? modes?.find(opt => opt.id === currentMode)?.name
+        : undefined
+  const modelConfigId =
+    typeof row.model_config_id === 'string' && row.model_config_id.trim()
+      ? row.model_config_id.trim()
+      : modelConfig?.id
+  const modeConfigId =
+    typeof row.mode_config_id === 'string' && row.mode_config_id.trim()
+      ? row.mode_config_id.trim()
+      : modeConfig?.id
+  const thoughtLevel =
+    typeof row.thought_level === 'string' && row.thought_level.trim()
+      ? row.thought_level.trim()
+      : thoughtConfig?.current_value || undefined
+  const thoughtLevels =
+    parseAcpExternalOptions(row.thought_levels)
+    ?? (thoughtConfig?.options.length
+      ? thoughtConfig.options.map(opt => ({
+          id: opt.value,
+          name: opt.name,
+          ...(opt.description ? { description: opt.description } : {}),
+        }))
+      : undefined)
+  const thoughtLevelConfigId =
+    typeof row.thought_level_config_id === 'string' && row.thought_level_config_id.trim()
+      ? row.thought_level_config_id.trim()
+      : thoughtConfig?.id
+  const availableCommands = parseAcpAvailableCommands(row.available_commands ?? row.availableCommands)
+  const discoveredSkills = parseAcpDiscoveredSkills(row.discovered_skills ?? row.discoveredSkills)
+  return {
+    session_id: sessionId,
+    agent_id: agentId,
+    name,
+    provider: parseAcpProvider(row.provider),
+    transport: parseAcpTransport(row.transport),
+    cwd,
+    ...(externalSessionId ? { external_session_id: externalSessionId } : {}),
+    connected: row.connected === true,
+    ...(command ? { command } : {}),
+    ...(error ? { error } : {}),
+    ...(agentVersion ? { agent_version: agentVersion } : {}),
+    ...(agentTitle ? { agent_title: agentTitle } : {}),
+    ...(capabilities ? { capabilities } : {}),
+    ...(currentModel ? { current_model: currentModel } : {}),
+    ...(currentModelName ? { current_model_name: currentModelName } : {}),
+    ...(models ? { models } : {}),
+    ...(currentMode ? { current_mode: currentMode } : {}),
+    ...(currentModeName ? { current_mode_name: currentModeName } : {}),
+    ...(modes ? { modes } : {}),
+    ...(modelConfigId ? { model_config_id: modelConfigId } : {}),
+    ...(modeConfigId ? { mode_config_id: modeConfigId } : {}),
+    ...(configOptions ? { config_options: configOptions } : {}),
+    ...(thoughtLevel ? { thought_level: thoughtLevel } : {}),
+    ...(thoughtLevels ? { thought_levels: thoughtLevels } : {}),
+    ...(thoughtLevelConfigId ? { thought_level_config_id: thoughtLevelConfigId } : {}),
+    ...(availableCommands ? { available_commands: availableCommands } : {}),
+    ...(discoveredSkills ? { discovered_skills: discoveredSkills } : {}),
+  }
+}
+
+export function parseAcpCatalogResult(
+  value: unknown,
+  fallbackBinding: AcpSessionBinding | null = null,
+): AcpCatalogResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Readonly<Record<string, unknown>>
+  const binding = parseAcpSessionBinding(row.binding) ?? fallbackBinding
+  const connected = typeof row.connected === 'boolean' ? row.connected : Boolean(binding?.connected)
+  const capabilities = parseAcpRuntimeCapabilities(row.capabilities) ?? binding?.capabilities
+  const configOptions = parseAcpConfigOptions(row.config_options ?? row.configOptions) ?? binding?.config_options ?? []
+  const rawCommands = parseAcpAvailableCommands(row.commands ?? row.available_commands ?? row.availableCommands)
+  const rawSkills = parseAcpDiscoveredSkills(row.skills ?? row.discovered_skills ?? row.discoveredSkills)
+  const mergedBinding: AcpSessionBinding | null = binding
+    ? {
+        ...binding,
+        ...(capabilities ? { capabilities } : {}),
+        ...(configOptions.length > 0 ? { config_options: configOptions } : {}),
+        ...(rawCommands ? { available_commands: rawCommands } : {}),
+        ...(rawSkills ? { discovered_skills: rawSkills } : {}),
+      }
+    : null
+  const resolved = resolveExternalAcpCatalog(mergedBinding)
+  return {
+    ok: row.ok !== false,
+    connected,
+    ...(mergedBinding ? { binding: mergedBinding } : {}),
+    commands: resolved.commands,
+    skills: resolved.skills,
+    ...(capabilities ? { capabilities } : {}),
+    config_options: configOptions,
+  }
+}
+
 /** Slow fleet cadence while agent-family tools run — snapshots lag the event. */
 const FLEET_POLL_MS = 2_000
 
@@ -108,7 +903,9 @@ const FLEET_POLL_MS = 2_000
 const AGENT_FAMILY_TOOLS = new Set([
   'agent', 'agenttool',
   'spawnagents',
-  'workflow',
+  'workflow', 'run_workflow', 'runworkflow',
+  'invoke_subagent', 'invokesubagent',
+  'manage_subagents', 'managesubagents',
   'handoff', 'handofftool',
   'sendmessage', 'sendmessagetool',
   'taskcreate', 'taskcreatetool',
@@ -117,24 +914,26 @@ const AGENT_FAMILY_TOOLS = new Set([
   'awaitagents', 'resetagent',
 ])
 
-function isAgentFamilyTool(name: unknown): boolean {
+export function isAgentFamilyTool(name: unknown): boolean {
   if (typeof name !== 'string' || !name) return false
-  const tail = name.split(/[.:]/).pop() ?? name
-  return AGENT_FAMILY_TOOLS.has(tail.toLowerCase())
+  const tail = (name.split(/[.:/]/).pop() ?? name).trim().toLowerCase()
+  return AGENT_FAMILY_TOOLS.has(tail) || AGENT_FAMILY_TOOLS.has(tail.replace(/[_-]+/g, ''))
 }
 
 /** The spawn-capable subset — these open members on the turn's agents card. */
 const SPAWN_TOOLS = new Set([
   'agent', 'agenttool',
   'spawnagents',
-  'workflow',
+  'workflow', 'run_workflow', 'runworkflow',
+  'invoke_subagent', 'invokesubagent',
   'taskcreate', 'taskcreatetool',
   'handoff', 'handofftool',
 ])
 
-function isSpawnTool(name: unknown): boolean {
+export function isSpawnTool(name: unknown): boolean {
   if (typeof name !== 'string' || !name) return false
-  return SPAWN_TOOLS.has((name.split(/[.:]/).pop() ?? name).toLowerCase())
+  const tail = (name.split(/[.:/]/).pop() ?? name).trim().toLowerCase()
+  return SPAWN_TOOLS.has(tail) || SPAWN_TOOLS.has(tail.replace(/[_-]+/g, ''))
 }
 
 /** Snapshot statuses fold onto the card's display vocabulary. */
@@ -265,27 +1064,76 @@ const RUNNING_ELSEWHERE = /still running a turn under another connection/i
 
 export function spawnMembersOf(name: unknown, args: unknown, callId: string): AgentMember[] {
   const parsed = parseArgs(args)
+  const promptOf = (value: Record<string, unknown>): string =>
+    str(value.prompt) || str(value.Prompt) || str(value.task) || str(value.Task)
+  const baseAgentOf = (value: Record<string, unknown>): string =>
+    str(value.subagent_type)
+    || str(value.subagent_name)
+    || str(value.SubagentName)
+    || str(value.TypeName)
+    || str(value.type_name)
+    || str(value.Role)
+    || str(value.role)
+    || str(value.target_agent)
+    || str(value.agent)
   const label = (value: Record<string, unknown>, index: number): string =>
-    str(value.title) || str(value.name) || str(value.description) || str(value.prompt).slice(0, 60) || `agent ${index + 1}`
+    str(value.title)
+    || str(value.Title)
+    || str(value.name)
+    || str(value.Name)
+    || str(value.subagent_name)
+    || str(value.SubagentName)
+    || str(value.Role)
+    || str(value.role)
+    || str(value.description)
+    || str(value.Description)
+    || str(value.TypeName)
+    || str(value.type_name)
+    || promptOf(value).slice(0, 60)
+    || `agent ${index + 1}`
   const raw = parsed.agents
-  // A workflow's agents are unknown until its script starts them; they join
+  // A native workflow's agents are unknown until its script starts them; they join
   // the card from their own events, tagged with the run and phase.
   if (typeof name === 'string' && /(^|[.:])workflow$/i.test(name)) return []
   if (Array.isArray(raw) && raw.length) {
     return raw.map((item, index) => {
       const record = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
-      return { key: `${callId}:${index}`, title: label(record, index), status: 'working', baseAgent: str(record.agent) || str(record.subagent_type), prompt: str(record.prompt), model: str(record.model), providerProfile: str(record.provider_profile), reasoningEffort: str(record.reasoning_effort) }
+      return {
+        key: `${callId}:${index}`,
+        title: label(record, index),
+        status: 'working',
+        baseAgent: str(record.agent) || baseAgentOf(record),
+        prompt: promptOf(record),
+        model: str(record.model) || str(record.Model),
+        providerProfile: str(record.provider_profile),
+        reasoningEffort: str(record.reasoning_effort),
+      }
     })
   }
   if (!isSpawnTool(name)) return []
-  return [{ key: `${callId}:0`, title: label(parsed, 0), status: 'working', baseAgent: str(parsed.subagent_type) || str(parsed.target_agent) || str(parsed.agent), prompt: str(parsed.prompt), model: str(parsed.model), providerProfile: str(parsed.provider_profile), reasoningEffort: str(parsed.reasoning_effort) }]
+  return [{
+    key: `${callId}:0`,
+    title: label(parsed, 0),
+    status: 'working',
+    baseAgent: baseAgentOf(parsed),
+    prompt: promptOf(parsed),
+    model: str(parsed.model) || str(parsed.Model),
+    providerProfile: str(parsed.provider_profile),
+    reasoningEffort: str(parsed.reasoning_effort),
+  }]
 }
 
 function agentReceiptRows(value: unknown): Record<string, unknown>[] {
   if (typeof value === 'string') { try {value=JSON.parse(value)} catch {return []} }
   if (!value || typeof value !== 'object') return []
   const object=value as Record<string, unknown>
-  const rows=Array.isArray(value) ? value : Array.isArray(object.agents) ? object.agents : object.id ? [object] : []
+  const rows=Array.isArray(value)
+    ? value
+    : Array.isArray(object.agents)
+      ? object.agents
+      : (object.id || object.conversation_id || object.conversationId)
+        ? [object]
+        : []
   return rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
 }
 
@@ -317,6 +1165,29 @@ export interface ContextBreakdown {
 }
 
 export interface Snapshot {
+  readonly swarm?: SwarmStatusSnapshot | null
+  readonly swarmMessages?: readonly SwarmBoardMessage[]
+  readonly swarmInspect?: SwarmMemberInspectResult | null
+  readonly swarmInspectTarget?: string
+  readonly swarmLoading?: boolean
+  readonly swarmError?: string | null
+  readonly swarmOpen?: boolean
+  readonly swarmOpenRevision?: number
+  readonly sideQuestionTurns?: readonly SideQuestionTurn[]
+  readonly sideQuestionStreaming?: boolean
+  readonly sideQuestionError?: string | null
+  readonly sideQuestionOpen?: boolean
+  readonly sideQuestionOpenRevision?: number
+  /** Persisted Side Question model override (`''` = follow session model). */
+  readonly sideQuestionModel?: string
+  /** Discovered external ACP agent runtimes (`acp.agents`). */
+  readonly acpAgents?: readonly AcpExternalAgentInfo[]
+  /** Active external ACP runtime bound to the current session, or null when using native Xerxes. */
+  readonly acpBinding?: AcpSessionBinding | null
+  /** Persisted external ACP runtime from a prior run on a reopened session (when not connected yet). */
+  readonly savedAcpBinding?: AcpSessionBinding | null
+  readonly acpConnecting?: boolean
+  readonly acpError?: string | null
   readonly learning?: LearningList | null
   readonly learningCounts?: LearningCounts
   readonly learningLoading?: boolean
@@ -407,7 +1278,7 @@ export interface Snapshot {
   /** The connection's bound daemon session key — what key-scoped RPCs address. */
   readonly sessionKey: string
   readonly goal: string
-  readonly approval: Approval | null
+  readonly approval: DesktopApproval | null
   readonly question: import('./types.js').TaskQuestion | null
   /**
    * The person hid the pending approval or question card. The request is
@@ -426,6 +1297,8 @@ export interface Snapshot {
   readonly compacting?: string
   readonly turnFailed: boolean
   readonly turnSeconds: number
+  /** Epoch ms when the active turn started; drives isolated leaf `<ElapsedClock>` without global 1s re-renders. */
+  readonly turnStartedAt?: number | null
   readonly blocks: readonly Block[]
   readonly historyMore?: boolean
   readonly historyLoading?: boolean
@@ -868,11 +1741,16 @@ export function isPlanReview(question: import('./types.js').TaskQuestion): boole
   return haystack.includes('plan') && (haystack.includes('approve') || haystack.includes('accept'))
 }
 
-const LOG_CAP = 400
+export const LOG_CAP = 300
 const SNIPPET_CAP = 64
+const SNIPPET_MAP_CAP = 128
+const MAX_DIFF_LINES_PER_FILE = 1_200
+const MAX_AGENT_TEXT_CHARS = 256_000
+const BACKGROUND_STREAM_FRAME_MS = 250
+const SWARM_INSPECT_THROTTLE_MS = 750
 const HEARTBEAT_MS = 5_000
 /** A visible but unfocused window refreshes its session lists this often. */
-const UNFOCUSED_LIST_REFRESH_MS = 30_000
+const UNFOCUSED_LIST_REFRESH_MS = 60_000
 /** How long a first Escape over a running turn waits for the second that stops it. */
 export const STOP_CONFIRM_MS = 2_000
 
@@ -921,6 +1799,12 @@ export class Store {
   /** Edit totals when the current turn began — a checkpoint marks only this turn's change. */
   private turnStartTotals = { adds: 0, dels: 0 }
   private logRing: LogEntry[] = []
+  private logView: readonly LogEntry[] = []
+  private logDirty = false
+  private pendingPatch: Record<string, unknown> | null = null
+  private frameDirty = false
+  private lastSwarmInspectAt = 0
+  private swarmInspectTimer: ReturnType<typeof setTimeout> | null = null
   private planState: PlanState | null = null
   private failure: FailedTurn | null = null
   private turnCount = 0
@@ -938,12 +1822,35 @@ export class Store {
   private snippetRetryAt = new Map<string, number>()
   /** Latest session-search request; stale responses must not win. */
   private searchSeq = 0
+  private swarmLoadVersion = 0
+  private acpLoadVersion = 0
+  private lastAcpConnect: {
+    readonly agentId: string
+    readonly custom?: { readonly command: string; readonly args?: readonly string[] }
+    readonly modeId?: string
+    readonly resumeSessionId?: string
+  } | null = null
+  private foldedToolIds = new Set<string>()
   private ttftTotalMs = 0
   private ttftSamples = 0
   private activeMetricTools = new Set<string>()
 
   constructor() {
     this.frame = this.frozen({
+      swarm: null,
+      swarmMessages: [],
+      swarmInspect: null,
+      swarmInspectTarget: '',
+      swarmLoading: false,
+      swarmError: null,
+      swarmOpen: false,
+      swarmOpenRevision: 0,
+      sideQuestionModel: readSideQuestionModel(),
+      acpAgents: [],
+      acpBinding: null,
+      savedAcpBinding: null,
+      acpConnecting: false,
+      acpError: null,
       connection: 'connecting',
       noWorkspace: false,
       cwd: '',
@@ -1002,6 +1909,7 @@ export class Store {
       turnActive: false, networkRetrying: false,
       turnFailed: false,
       turnSeconds: 0,
+      turnStartedAt: null,
       blocks: [],
       error: null,
       tab: 'activity',
@@ -1067,7 +1975,13 @@ export class Store {
     return () => this.listeners.delete(listener)
   }
 
-  getSnapshot = (): Snapshot => this.frame
+  getSnapshot = (): Snapshot => (this.frameDirty ? this.materializeFrame() : this.frame)
+
+  /** Synchronously flush any coalesced streaming update and notify subscribers. */
+  flush = (): void => {
+    if (this.frameDirty) this.materializeFrame()
+    this.emit(true)
+  }
 
   // ── Actions ──────────────────────────────────────────────────────────
 
@@ -1076,6 +1990,820 @@ export class Store {
   }
 
   closeLearning(): void { this.patch({ learningOpen: false }) }
+
+  openSwarmBoard(inspectMember?: string): void {
+    const cleanMember = inspectMember?.trim() ?? ''
+    this.patch({
+      swarmOpen: true,
+      swarmOpenRevision: (this.frame.swarmOpenRevision ?? 0) + 1,
+      ...(cleanMember ? { swarmInspectTarget: cleanMember } : {}),
+    })
+    if (this.frame.connection === 'online') {
+      void this.refreshSwarm()
+      if (cleanMember) void this.inspectSwarmMember(cleanMember)
+    }
+  }
+
+  closeSwarmBoard(): void {
+    if (this.frame.swarmOpen || this.frame.swarmInspectTarget) {
+      this.patch({ swarmOpen: false, swarmInspectTarget: '' })
+    }
+  }
+
+  async openSwarmConversation(conversationId: string): Promise<boolean> {
+    const needle = conversationId.trim().toLowerCase()
+    const matchMember = () => this.frame.swarm?.members.find(
+      member =>
+        member.conversation_id?.trim().toLowerCase() === needle
+        || member.name.trim().toLowerCase() === needle,
+    )
+    let matched = needle ? matchMember() : undefined
+    if (!matched && needle && this.frame.connection === 'online') {
+      await this.refreshSwarm({ silent: true })
+      matched = matchMember()
+    }
+    if (matched) {
+      this.openSwarmBoard(matched.name)
+      return true
+    }
+    this.openSwarmBoard()
+    return false
+  }
+
+  openSideQuestion(): void {
+    this.patch({
+      sideQuestionOpen: true,
+      sideQuestionOpenRevision: (this.frame.sideQuestionOpenRevision ?? 0) + 1,
+    })
+  }
+
+  closeSideQuestion(): void {
+    if (this.frame.sideQuestionOpen) this.patch({ sideQuestionOpen: false })
+  }
+
+  clearSideQuestion(): void {
+    this.patch({
+      sideQuestionTurns: [],
+      sideQuestionStreaming: false,
+      sideQuestionError: null,
+    })
+  }
+
+  setSideQuestionModel(model: string): void {
+    const clean = model.trim()
+    writeSideQuestionModel(clean)
+    this.patch({ sideQuestionModel: clean })
+  }
+
+  async askSideQuestion(question: string, model?: string): Promise<boolean> {
+    const clean = question.trim()
+    this.openSideQuestion()
+    if (!clean) return true
+    const { isCurrent } = this.captureSessionRequest()
+    const priorTurns = this.frame.sideQuestionTurns ?? []
+    const history = priorTurns
+      .filter(turn => turn.status === 'done' && turn.answer.trim().length > 0)
+      .flatMap(turn => [
+        { role: 'user' as const, content: turn.question },
+        { role: 'assistant' as const, content: turn.answer },
+      ])
+    const requestedModel = (model ?? this.frame.sideQuestionModel ?? '').trim()
+    const requestId = crypto.randomUUID()
+    const optimistic: SideQuestionTurn = {
+      requestId,
+      question: clean,
+      answer: '',
+      model: requestedModel || this.frame.model,
+      status: 'streaming',
+    }
+    this.patch({
+      sideQuestionTurns: [...priorTurns, optimistic],
+      sideQuestionStreaming: true,
+      sideQuestionError: null,
+    })
+    try {
+      const result = await this.bridge.call(
+        'session.side_question',
+        this.swarmParams({
+          request_id: requestId,
+          question: clean,
+          ...(requestedModel ? { model: requestedModel } : {}),
+          ...(history.length > 0 ? { history } : {}),
+        }),
+      )
+      if (!isCurrent()) return result.ok !== false
+      const currentTurns = this.frame.sideQuestionTurns ?? []
+      const answer = str(result.answer)
+      const resolvedModel = str(result.model)
+      if (result.ok === false) {
+        const err = str(result.error) || 'Side question failed'
+        const updated = currentTurns.map(turn => {
+          if (turn.requestId !== requestId) return turn
+          const settledTools = settleSideQuestionTools(turn.tools, 'error')
+          return {
+            ...turn,
+            ...(answer ? { answer } : {}),
+            ...(resolvedModel ? { model: resolvedModel } : {}),
+            ...(settledTools ? { tools: settledTools } : {}),
+            status: 'error' as const,
+            error: err,
+          }
+        })
+        this.patch({
+          sideQuestionTurns: updated,
+          sideQuestionStreaming: updated.some(turn => turn.status === 'streaming'),
+          sideQuestionError: err,
+        })
+        return false
+      }
+      const updated = currentTurns.map(turn => {
+        if (turn.requestId !== requestId) return turn
+        const settledTools = settleSideQuestionTools(turn.tools, 'done')
+        return {
+          ...turn,
+          answer: answer || turn.answer,
+          ...(resolvedModel ? { model: resolvedModel } : {}),
+          ...(settledTools ? { tools: settledTools } : {}),
+          status: 'done' as const,
+        }
+      })
+      this.patch({
+        sideQuestionTurns: updated,
+        sideQuestionStreaming: updated.some(turn => turn.status === 'streaming'),
+        sideQuestionError: null,
+      })
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        const err = desktopError(error)
+        const currentTurns = this.frame.sideQuestionTurns ?? []
+        const updated = currentTurns.map(turn => {
+          if (turn.requestId !== requestId) return turn
+          const settledTools = settleSideQuestionTools(turn.tools, 'error')
+          return {
+            ...turn,
+            ...(settledTools ? { tools: settledTools } : {}),
+            status: 'error' as const,
+            error: err,
+          }
+        })
+        this.patch({
+          sideQuestionTurns: updated,
+          sideQuestionStreaming: updated.some(turn => turn.status === 'streaming'),
+          sideQuestionError: err,
+        })
+      }
+      return false
+    }
+  }
+
+  clearAcpError(): void {
+    if (this.frame.acpError) this.patch({ acpError: null })
+  }
+
+  dismissSavedAcpBinding(): void {
+    if (this.frame.savedAcpBinding) this.patch({ savedAcpBinding: null })
+  }
+
+  hasRetryableAcpTarget(): boolean {
+    return Boolean(this.lastAcpConnect || this.frame.savedAcpBinding || (this.frame.acpBinding && this.frame.acpBinding.transport !== 'native'))
+  }
+
+  async refreshAcpAgents(options: { readonly silent?: boolean } = {}): Promise<void> {
+    const { isCurrent } = this.captureSessionRequest()
+    const version = ++this.acpLoadVersion
+    const current = (): boolean => isCurrent() && version === this.acpLoadVersion
+    try {
+      const raw = await this.bridge.call('acp.agents', this.swarmParams())
+      if (!current()) return
+      if (raw.ok === false || raw.kind === 'error') {
+        const message = str(raw.error) || str(raw.message) || 'acp.agents failed'
+        if (options.silent && /unknown method/i.test(message)) return
+        if (!options.silent) this.patch({ acpError: message })
+        return
+      }
+      const agents = parseAcpExternalAgents(raw.agents)
+      const active = parseAcpSessionBinding(raw.active)
+      this.patch({
+        acpAgents: agents,
+        acpBinding: active,
+        ...(active?.connected ? { savedAcpBinding: null } : {}),
+        acpError: null,
+      })
+    } catch (error) {
+      if (!current()) return
+      const message = desktopError(error)
+      if (options.silent && /unknown method|not found/i.test(message)) return
+      if (!options.silent) this.patch({ acpError: message })
+    }
+  }
+
+  async connectAcpAgent(
+    agentId: string,
+    custom?: { readonly command: string; readonly args?: readonly string[] },
+    options?: { readonly modeId?: string; readonly resumeSessionId?: string },
+  ): Promise<boolean> {
+    const cleanId = agentId.trim()
+    if (!cleanId) return false
+    if (cleanId === 'xerxes') return this.disconnectAcpAgent()
+    const resumeSessionId = options?.resumeSessionId?.trim() || undefined
+    const modeId = options?.modeId?.trim() || undefined
+    this.lastAcpConnect = {
+      agentId: cleanId,
+      ...(custom ? { custom } : {}),
+      ...(modeId ? { modeId } : {}),
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    }
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpConnecting: true, acpError: null })
+    try {
+      const result = await this.bridge.call(
+        'acp.connect',
+        this.swarmParams({
+          agent_id: cleanId,
+          ...(this.frame.cwd ? { cwd: this.frame.cwd } : {}),
+          ...(custom?.command?.trim() ? { command: custom.command.trim() } : {}),
+          ...(custom?.args && custom.args.length > 0 ? { args: [...custom.args] } : {}),
+          ...(modeId ? { mode_id: modeId } : {}),
+          ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {}),
+        }),
+      )
+      if (!isCurrent()) return result.ok === true
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || `Could not connect to ${cleanId}`
+        const hint = str(result.install_hint) || str(result.installHint)
+        this.patch({
+          acpConnecting: false,
+          acpError: hint && !err.includes(hint) ? `${err} — ${hint}` : err,
+        })
+        return false
+      }
+      const binding = parseAcpSessionBinding(result.binding)
+      this.patch({
+        acpBinding: binding,
+        ...(binding?.connected ? { savedAcpBinding: null } : {}),
+        acpConnecting: false,
+        acpError: null,
+        ...(binding?.connected && binding.transport !== 'native'
+          ? {
+              modelMenuOpen: false,
+              pickerOpen: false,
+              reasoningPickerOpen: false,
+              delegationMenuOpen: false,
+            }
+          : {}),
+      })
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpConnecting: false, acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  async reconnectSavedAcp(): Promise<boolean> {
+    const saved = this.frame.savedAcpBinding
+    if (!saved || !saved.agent_id) return false
+    const isBuiltIn = saved.agent_id === 'antigravity' || saved.agent_id === 'claude-code' || saved.agent_id === 'codex'
+    const custom = !isBuiltIn && saved.command ? { command: saved.command } : undefined
+    const connectOpts = {
+      ...(saved.external_session_id ? { resumeSessionId: saved.external_session_id } : {}),
+      ...(saved.current_mode ? { modeId: saved.current_mode } : {}),
+    }
+    return this.connectAcpAgent(
+      saved.agent_id,
+      custom,
+      Object.keys(connectOpts).length > 0 ? connectOpts : undefined,
+    )
+  }
+
+  async retryAcpConnect(): Promise<boolean> {
+    if (this.lastAcpConnect) {
+      const { agentId, custom, modeId, resumeSessionId } = this.lastAcpConnect
+      const savedMode = this.frame.savedAcpBinding?.agent_id === agentId
+        ? this.frame.savedAcpBinding.current_mode
+        : undefined
+      const effectiveModeId = savedMode || modeId
+      const connectOpts = {
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        ...(effectiveModeId ? { modeId: effectiveModeId } : {}),
+      }
+      return this.connectAcpAgent(
+        agentId,
+        custom,
+        Object.keys(connectOpts).length > 0 ? connectOpts : undefined,
+      )
+    }
+    if (this.frame.savedAcpBinding) {
+      return this.reconnectSavedAcp()
+    }
+    const active = this.frame.acpBinding
+    if (active && active.transport !== 'native') {
+      const connectOpts = {
+        ...(active.external_session_id ? { resumeSessionId: active.external_session_id } : {}),
+        ...(active.current_mode ? { modeId: active.current_mode } : {}),
+      }
+      return this.connectAcpAgent(
+        active.agent_id,
+        undefined,
+        Object.keys(connectOpts).length > 0 ? connectOpts : undefined,
+      )
+    }
+    const err = this.frame.acpError ?? ''
+    if (/\b(antigravity|agy)\b/i.test(err)) return this.connectAcpAgent('antigravity')
+    if (/\bclaude\b/i.test(err)) return this.connectAcpAgent('claude-code')
+    return false
+  }
+
+  async setAcpConfigOption(configId: string, value: string): Promise<boolean> {
+    const cleanConfigId = configId.trim()
+    const cleanValue = value.trim()
+    if (!cleanConfigId || !cleanValue) return false
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpError: null })
+    try {
+      const result = await this.bridge.call(
+        'acp.set_config_option',
+        this.swarmParams({ config_id: cleanConfigId, value: cleanValue }),
+      )
+      if (!isCurrent()) return result.ok === true
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || `Could not update ${cleanConfigId} to ${cleanValue}`
+        this.patch({ acpError: err })
+        return false
+      }
+      const parsed = parseAcpSessionBinding(result.binding)
+      if (parsed) {
+        this.patch({ acpBinding: parsed, acpError: null })
+      } else if (this.frame.acpBinding) {
+        const prev = this.frame.acpBinding
+        const updatedConfigs = prev.config_options?.map(opt =>
+          opt.id === cleanConfigId ? { ...opt, current_value: cleanValue } : opt,
+        )
+        const isThought =
+          cleanConfigId === (prev.thought_level_config_id ?? 'thought_level')
+          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'thought_level')
+        const isModel =
+          cleanConfigId === (prev.model_config_id ?? 'model')
+          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'model')
+        const isMode =
+          cleanConfigId === (prev.mode_config_id ?? 'mode')
+          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'mode')
+        const matchedModel = isModel ? prev.models?.find(m => m.id === cleanValue) : undefined
+        const matchedMode = isMode ? prev.modes?.find(m => m.id === cleanValue) : undefined
+        this.patch({
+          acpBinding: {
+            ...prev,
+            ...(updatedConfigs ? { config_options: updatedConfigs } : {}),
+            ...(isThought ? { thought_level: cleanValue } : {}),
+            ...(isModel ? { current_model: cleanValue, current_model_name: matchedModel?.name ?? cleanValue } : {}),
+            ...(isMode ? { current_mode: cleanValue, current_mode_name: matchedMode?.name ?? cleanValue } : {}),
+          },
+          acpError: null,
+        })
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  async setAcpThoughtLevel(level: string): Promise<boolean> {
+    const configId = this.frame.acpBinding?.thought_level_config_id || 'thought_level'
+    return this.setAcpConfigOption(configId, level)
+  }
+
+  async setAcpModel(modelId: string): Promise<boolean> {
+    const cleanId = modelId.trim()
+    if (!cleanId) return false
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpError: null })
+    try {
+      const result = await this.bridge.call(
+        'acp.set_model',
+        this.swarmParams({ model_id: cleanId }),
+      )
+      if (!isCurrent()) return result.ok === true
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || `Could not switch external model to ${cleanId}`
+        this.patch({ acpError: err })
+        return false
+      }
+      const parsed = parseAcpSessionBinding(result.binding)
+      if (parsed) {
+        this.patch({ acpBinding: parsed, acpError: null })
+      } else if (this.frame.acpBinding) {
+        const matched = this.frame.acpBinding.models?.find(m => m.id === cleanId)
+        this.patch({
+          acpBinding: {
+            ...this.frame.acpBinding,
+            current_model: cleanId,
+            current_model_name: matched?.name ?? cleanId,
+          },
+          acpError: null,
+        })
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  async setAcpMode(modeId: string): Promise<boolean> {
+    const cleanId = modeId.trim()
+    if (!cleanId) return false
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpError: null })
+    try {
+      const result = await this.bridge.call(
+        'acp.set_mode',
+        this.swarmParams({ mode_id: cleanId }),
+      )
+      if (!isCurrent()) return result.ok === true
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || `Could not switch external mode to ${cleanId}`
+        this.patch({ acpError: err })
+        return false
+      }
+      const parsed = parseAcpSessionBinding(result.binding)
+      if (parsed) {
+        this.patch({ acpBinding: parsed, acpError: null })
+      } else if (this.frame.acpBinding) {
+        const matched = this.frame.acpBinding.modes?.find(m => m.id === cleanId)
+        this.patch({
+          acpBinding: {
+            ...this.frame.acpBinding,
+            current_mode: cleanId,
+            current_mode_name: matched?.name ?? cleanId,
+          },
+          acpError: null,
+        })
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  async disconnectAcpAgent(): Promise<boolean> {
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpConnecting: true, acpError: null })
+    try {
+      const result = await this.bridge.call('acp.disconnect', this.swarmParams())
+      if (!isCurrent()) return result.ok !== false
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || 'Could not disconnect external agent'
+        this.patch({ acpConnecting: false, acpError: err })
+        return false
+      }
+      this.lastAcpConnect = null
+      this.patch({
+        acpBinding: null,
+        savedAcpBinding: null,
+        acpConnecting: false,
+        acpError: null,
+      })
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpConnecting: false, acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  /**
+   * Fetch the connected ACP runtime's automatically discovered skills, commands,
+   * capabilities, and config options (`acp.catalog`), gracefully falling back to
+   * metadata already present on `snap.acpBinding`.
+   */
+  async loadAcpCatalog(options: { readonly silent?: boolean } = {}): Promise<AcpCatalogResult | null> {
+    const fallbackBinding = this.frame.acpBinding
+    const fallback = (): AcpCatalogResult | null => {
+      if (!fallbackBinding?.connected || fallbackBinding.transport === 'native') return null
+      const resolved = resolveExternalAcpCatalog(fallbackBinding)
+      return {
+        ok: true,
+        connected: true,
+        binding: fallbackBinding,
+        commands: resolved.commands,
+        skills: resolved.skills,
+        ...(fallbackBinding.capabilities ? { capabilities: fallbackBinding.capabilities } : {}),
+        config_options: fallbackBinding.config_options ?? [],
+      }
+    }
+    const { isCurrent } = this.captureSessionRequest()
+    try {
+      const raw = await this.bridge.call('acp.catalog', this.swarmParams())
+      if (!isCurrent()) return null
+      if (raw.ok === false || raw.kind === 'error') {
+        const message = str(raw.error) || str(raw.message) || 'acp.catalog failed'
+        if (/unknown method|not found/i.test(message)) return fallback()
+        if (!options.silent) this.patch({ acpError: message })
+        return fallback()
+      }
+      const parsed = parseAcpCatalogResult(raw, this.frame.acpBinding ?? null)
+      if (!parsed) return fallback()
+      if (parsed.connected && parsed.binding && parsed.binding.transport !== 'native') {
+        this.patch({ acpBinding: parsed.binding })
+      }
+      return parsed
+    } catch (error) {
+      if (!isCurrent()) return null
+      const message = desktopError(error)
+      if (!options.silent && !/unknown method|not found/i.test(message)) {
+        this.patch({ acpError: message })
+      }
+      return fallback()
+    }
+  }
+
+  private applyBtwEvent(payload: Readonly<Record<string, unknown>>): void {
+    const current = this.getSnapshot()
+    const folded = applyBtwEventPayload(current.sideQuestionTurns ?? [], payload)
+    if (!folded) return
+    const update = {
+      sideQuestionTurns: folded.turns,
+      sideQuestionStreaming: folded.streaming,
+      sideQuestionError: folded.error,
+    }
+    // Coalesce high-frequency streaming deltas onto frame boundaries; flush
+    // immediately on terminal transitions (completion / error / start).
+    const kind = str(payload.kind)
+    const streamingDelta = folded.streaming && !folded.error && (kind === 'delta' || kind === 'text' || kind === 'think' || kind === 'thinking' || kind === 'text_part' || kind === 'think_part')
+    if (streamingDelta) this.patchSoft(update)
+    else this.patch(update)
+  }
+
+  private swarmParams(extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      ...(this.sessionKey ? { session_key: this.sessionKey } : {}),
+      ...(this.frame.currentId ? { session_id: this.frame.currentId } : {}),
+      ...extra,
+    }
+  }
+
+  async refreshSwarm(options: { channel?: string; silent?: boolean } = {}): Promise<void> {
+    const { isCurrent } = this.captureSessionRequest()
+    const version = ++this.swarmLoadVersion
+    const current = (): boolean => isCurrent() && version === this.swarmLoadVersion
+    if (!options.silent) this.patch({ swarmLoading: true, swarmError: null })
+    try {
+      const rawStatus = await this.bridge.call('swarm.status', this.swarmParams())
+      if (!current()) return
+      if (rawStatus.ok === false || rawStatus.kind === 'error') {
+        const message = str(rawStatus.error) || str(rawStatus.message) || 'swarm.status failed'
+        if (options.silent && /unknown method/i.test(message)) return
+        throw new Error(message)
+      }
+      const status = parseSwarmStatus(rawStatus)
+      if (!status) {
+        if (!options.silent) this.patch({ swarmLoading: false })
+        return
+      }
+      const shouldReadBoard = status.active || status.head > 0 || !options.silent
+      let messages = this.frame.swarmMessages ?? []
+      if (shouldReadBoard) {
+        const boardParams: Record<string, unknown> = {
+          limit: 200,
+          ...(options.channel && options.channel !== '*' ? { channel: options.channel } : {}),
+        }
+        const rawBoard = await this.bridge.call('swarm.board', this.swarmParams(boardParams))
+        if (!current()) return
+        if (rawBoard.ok === false || rawBoard.kind === 'error') {
+          const message = str(rawBoard.error) || str(rawBoard.message) || 'swarm.board failed'
+          if (!options.silent || !/unknown method/i.test(message)) throw new Error(message)
+        } else {
+          const board = parseSwarmBoard(rawBoard)
+          if (board) {
+            messages = mergeSwarmMessages(messages, board.messages)
+          }
+        }
+      }
+      if (current()) {
+        this.patch({
+          swarm: status,
+          swarmMessages: messages,
+          swarmLoading: false,
+          swarmError: null,
+        })
+      }
+    } catch (error) {
+      if (!current()) return
+      const message = desktopError(error)
+      if (options.silent && /unknown method/i.test(message)) return
+      this.patch({ swarmLoading: false, swarmError: message })
+    }
+  }
+
+  async postToSwarm(input: {
+    readonly text: string
+    readonly channel?: string
+    readonly asFeedback?: boolean
+  }): Promise<boolean> {
+    const clean = input.text.trim()
+    if (!clean) return false
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ swarmError: null })
+    const targetChannel = input.channel && input.channel !== '*' ? input.channel : 'main'
+    try {
+      const result = await this.bridge.call(
+        'swarm.post',
+        this.swarmParams({
+          text: clean,
+          channel: targetChannel,
+          ...(input.asFeedback ? { as_feedback: true } : {}),
+        }),
+      )
+      if (result.ok === false || result.kind === 'error') {
+        throw new Error(str(result.error) || str(result.message) || 'Could not post to Immortals Board')
+      }
+      if (isCurrent()) {
+        const echoed = parseSwarmMessage(result.message)
+        if (echoed) {
+          this.patch({
+            swarmMessages: mergeSwarmMessages(this.frame.swarmMessages ?? [], [echoed]),
+            ...(this.frame.swarm ? { swarm: { ...this.frame.swarm, head: Math.max(this.frame.swarm.head, echoed.seq) } } : {}),
+          })
+        }
+        void this.refreshSwarm({ silent: true })
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) this.patch({ swarmError: desktopError(error) })
+      return false
+    }
+  }
+
+  async killSwarmMember(name: string): Promise<boolean> {
+    const clean = name.trim()
+    if (!clean) return false
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ swarmError: null })
+    try {
+      const result = await this.bridge.call('swarm.kill', this.swarmParams({ name: clean }))
+      if (result.ok === false || result.kind === 'error') {
+        throw new Error(str(result.error) || str(result.message) || `Could not stop ${clean}`)
+      }
+      if (isCurrent()) await this.refreshSwarm({ silent: true })
+      return true
+    } catch (error) {
+      if (isCurrent()) this.patch({ swarmError: desktopError(error) })
+      return false
+    }
+  }
+
+  async switchSwarmMemberModel(name: string, model?: string): Promise<boolean> {
+    const cleanName = name.trim()
+    if (!cleanName) return false
+    const cleanModel = model?.trim()
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ swarmError: null })
+    try {
+      const result = await this.bridge.call(
+        'swarm.model',
+        this.swarmParams({
+          name: cleanName,
+          ...(cleanModel ? { model: cleanModel } : {}),
+        }),
+      )
+      if (result.ok === false || result.kind === 'error') {
+        throw new Error(str(result.error) || str(result.message) || `Could not switch model for ${cleanName}`)
+      }
+      if (isCurrent()) await this.refreshSwarm({ silent: true })
+      return true
+    } catch (error) {
+      if (isCurrent()) this.patch({ swarmError: desktopError(error) })
+      return false
+    }
+  }
+
+  async activateSwarm(enabled = true): Promise<boolean> {
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ swarmError: null })
+    try {
+      const result = await this.bridge.call('swarm.activate', this.swarmParams({ enabled }))
+      if (result.ok === false || result.kind === 'error') {
+        throw new Error(str(result.error) || str(result.message) || 'Could not activate Immortals mode')
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) this.fail(error)
+      return false
+    }
+  }
+
+  async inspectSwarmMember(name: string, limit = 60): Promise<SwarmMemberInspectResult | null> {
+    const clean = name.trim()
+    if (!clean) {
+      this.patch({ swarmInspect: null })
+      return null
+    }
+    const { isCurrent } = this.captureSessionRequest()
+    try {
+      const result = await this.bridge.call('swarm.inspect', this.swarmParams({ name: clean, limit }))
+      if (result.ok === false || result.kind === 'error') {
+        throw new Error(str(result.error) || str(result.message) || `Could not inspect @${clean}`)
+      }
+      const parsed = parseSwarmMemberInspect(result)
+      if (isCurrent() && parsed) {
+        this.patch({ swarmInspect: parsed })
+      }
+      return parsed
+    } catch (error) {
+      if (isCurrent() && !/unknown method/i.test(desktopError(error))) {
+        this.patch({ swarmError: desktopError(error) })
+      }
+      return null
+    }
+  }
+
+  closeSwarmInspect(): void {
+    if (this.frame.swarmInspect || this.frame.swarmInspectTarget) {
+      this.patch({ swarmInspect: null, swarmInspectTarget: '' })
+    }
+  }
+
+  private scheduleSwarmInspectRefresh(memberName: string): void {
+    const now = Date.now()
+    const wait = SWARM_INSPECT_THROTTLE_MS - (now - this.lastSwarmInspectAt)
+    if (wait <= 0) {
+      this.lastSwarmInspectAt = now
+      void this.inspectSwarmMember(memberName)
+      return
+    }
+    if (this.swarmInspectTimer) return
+    this.swarmInspectTimer = setTimeout(() => {
+      this.swarmInspectTimer = null
+      const open = this.getSnapshot().swarmInspect
+      if (open && open.member.name === memberName) {
+        this.lastSwarmInspectAt = Date.now()
+        void this.inspectSwarmMember(memberName)
+      }
+    }, wait)
+  }
+
+  private applySwarmEvent(payload: Readonly<Record<string, unknown>>): void {
+    const parsed = parseSwarmEvent(payload)
+    if (!parsed) return
+    const snap = this.getSnapshot()
+    const isActivityTick = parsed.kind === 'member_activity'
+    const nextStatus = parsed.status
+      ? parsed.status
+      : snap.swarm
+        ? applySwarmStatusDelta(snap.swarm, parsed)
+        : undefined
+    const statusChanged = nextStatus !== undefined && nextStatus !== snap.swarm
+    const nextMessages = parsed.message
+      ? mergeSwarmMessages(snap.swarmMessages ?? [], [parsed.message])
+      : undefined
+    const openInspect = snap.swarmInspect
+    const targetName = parsed.member?.name ?? parsed.member_name
+    const updatedInspectMember =
+      openInspect
+        ? parsed.member && parsed.member.name === openInspect.member.name
+          ? parsed.member
+          : nextStatus?.members.find(m => m.name === openInspect.member.name)
+        : undefined
+    const inspectMemberChanged = Boolean(updatedInspectMember && updatedInspectMember !== openInspect?.member)
+    const inspectActivityApplies = Boolean(openInspect && parsed.activity && (!targetName || targetName === openInspect.member.name))
+    const nextInspect =
+      openInspect && (inspectMemberChanged || inspectActivityApplies)
+        ? {
+            ...openInspect,
+            ...(updatedInspectMember ? { member: updatedInspectMember } : {}),
+            ...(inspectActivityApplies && parsed.activity ? { activity: parsed.activity } : {}),
+          }
+        : undefined
+    if (statusChanged || nextMessages !== undefined || nextInspect !== undefined) {
+      const update = {
+        ...(statusChanged && nextStatus !== undefined ? { swarm: nextStatus } : {}),
+        ...(nextMessages !== undefined ? { swarmMessages: nextMessages } : {}),
+        ...(nextInspect !== undefined ? { swarmInspect: nextInspect } : {}),
+      }
+      if (isActivityTick && nextMessages === undefined) this.patchSoft(update)
+      else this.patch(update)
+    }
+    if (openInspect && (isActivityTick || parsed.kind === 'member_updated') && (!targetName || targetName === openInspect.member.name)) {
+      if (isActivityTick) this.scheduleSwarmInspectRefresh(openInspect.member.name)
+      else void this.inspectSwarmMember(openInspect.member.name)
+    }
+    // Lightweight member_activity deltas intentionally omit `status` (saving ~28 KB/tick).
+    // Only trigger a fallback full refresh when we have no hydrated swarm yet or a non-activity event lacked payload.
+    if (!parsed.status && !parsed.message && !parsed.member && !(isActivityTick && snap.swarm)) {
+      void this.refreshSwarm({ silent: true })
+    }
+  }
 
   /** Latest request wins; session switches and workspace broadcasts invalidate old replies. */
   async refreshLearning(): Promise<void> {
@@ -1245,7 +2973,11 @@ export class Store {
   private async refreshContexts(): Promise<void> {
     if (!this.bridge.getContexts || this.refreshingContexts) return
     this.refreshingContexts = true
-    try { this.patch({ contexts: await this.bridge.getContexts() }) }
+    try {
+      const contexts = await this.bridge.getContexts()
+      const prev = this.getSnapshot().contexts
+      if (JSON.stringify(prev) !== JSON.stringify(contexts)) this.patch({ contexts })
+    }
     catch (error) { this.patch({ workspaceError: desktopError(error) }) }
     finally { this.refreshingContexts = false }
   }
@@ -1302,6 +3034,59 @@ export class Store {
     }
   }
 
+  private async submitPrompt(
+    promptText: string,
+    display?: string,
+    images: readonly ComposerImage[] = [],
+  ): Promise<boolean> {
+    const trimmed = promptText.trim()
+    if (!trimmed) return false
+    const shown = display?.trim() || trimmed
+    if (this.frame.turnActive) return this.steer(trimmed, images)
+    const sessionKey = this.sessionKey
+    if (this.preparingSubmissions.has(sessionKey)) return false
+    this.lastUser = shown
+    const optimistic = {
+      text: shown,
+      id: this.builder.pushUser(shown, false, images.map(image => `data:${image.mediaType};base64,${image.data}`)),
+      acknowledged: false,
+    }
+    this.optimisticSubmissions.set(sessionKey, optimistic)
+    this.preparingSubmissions.set(sessionKey, optimistic)
+    this.notify()
+    try {
+      // A submission id makes a busy session (a goal round, monitor or
+      // schedule preparing its turn before turn_begin) refuse the submit
+      // up front. Without one the daemon acknowledged it {ok:true} and only
+      // then dropped it, so the bubble looked delivered and the draft was gone.
+      const result = await this.bridge.call('turn.submit', {
+        session_key: sessionKey,
+        text: trimmed,
+        submission_id: crypto.randomUUID(),
+        ...(shown === trimmed ? {} : { display_text: shown }),
+        ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}),
+      })
+      if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
+      if (this.sessionKey === sessionKey) this.cameOnline()
+      return true
+    } catch (error) {
+      // The daemon rejected the submit (e.g. no provider configured): the
+      // optimistic bubble never happened — roll it back rather than leave
+      // a delivered-looking ghost above the error.
+      if (this.preparingSubmissions.get(sessionKey) === optimistic) this.preparingSubmissions.delete(sessionKey)
+      if (this.optimisticSubmissions.get(sessionKey) === optimistic) this.optimisticSubmissions.delete(sessionKey)
+      if (this.sessionKey === sessionKey) {
+        if (!optimistic.acknowledged) this.builder.rollbackUser(shown)
+        this.fail(error)
+      }
+      return optimistic.acknowledged
+    } finally {
+      // RPC acceptance precedes snapshot preparation and turn_begin. Keep
+      // the pending state until the daemon actually starts or ends the turn.
+      this.notify()
+    }
+  }
+
   /**
    * Submit or steer. While a turn runs, text goes to `turn.steer` — the
    * daemon queues it between steps and the store mirrors it visibly; when
@@ -1311,42 +3096,47 @@ export class Store {
   async submit(text: string, display?: string, images: readonly ComposerImage[] = []): Promise<boolean> {
     const trimmed = text.trim()
     if (!trimmed) return false
-    const shown = display?.trim() || trimmed
-    // While a turn runs a message steers it, images included: they reach the
-    // model at the next step boundary, like the text.
-    if (this.frame.turnActive && !trimmed.startsWith('/')) return this.steer(trimmed, images)
     if (!trimmed.startsWith('/')) {
-      const sessionKey = this.sessionKey
-      if (this.preparingSubmissions.has(sessionKey)) return false
-      this.lastUser = shown
-      const optimistic = { text: shown, id: this.builder.pushUser(shown, false, images.map(image => `data:${image.mediaType};base64,${image.data}`)), acknowledged: false }
-      this.optimisticSubmissions.set(sessionKey, optimistic)
-      this.preparingSubmissions.set(sessionKey, optimistic)
-      this.notify()
-      try {
-        // A submission id makes a busy session (a goal round, monitor or
-        // schedule preparing its turn before turn_begin) refuse the submit
-        // up front. Without one the daemon acknowledged it {ok:true} and only
-        // then dropped it, so the bubble looked delivered and the draft was gone.
-        const result = await this.bridge.call('turn.submit', { session_key: sessionKey, text: trimmed, submission_id: crypto.randomUUID(), ...(shown === trimmed ? {} : { display_text: shown }), ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
-        if (result.ok === false) throw new Error(str(result.error) || 'Submission refused')
-        if (this.sessionKey === sessionKey) this.cameOnline()
+      return this.submitPrompt(trimmed, display, images)
+    }
+    // Strict external ACP routing: any slash command or discovered skill
+    // advertised by the connected ACP runtime forwards directly to that agent
+    // instead of being hijacked by Xerxes's native slash handlers (`/acp` stays host-owned).
+    if (shouldForwardSlashToAcp(trimmed, this.frame.acpBinding)) {
+      return this.submitPrompt(trimmed, display, images)
+    }
+    const sideCmd = parseSideQuestionSlashCommand(trimmed)
+    if (sideCmd) {
+      if (sideCmd.kind === 'open') {
+        this.openSideQuestion()
         return true
-      } catch (error) {
-        // The daemon rejected the submit (e.g. no provider configured): the
-        // optimistic bubble never happened — roll it back rather than leave
-        // a delivered-looking ghost above the error.
-        if (this.preparingSubmissions.get(sessionKey) === optimistic) this.preparingSubmissions.delete(sessionKey)
-        if (this.optimisticSubmissions.get(sessionKey) === optimistic) this.optimisticSubmissions.delete(sessionKey)
-        if (this.sessionKey === sessionKey) {
-          if (!optimistic.acknowledged) this.builder.rollbackUser(shown)
-          this.fail(error)
+      }
+      return this.askSideQuestion(sideCmd.question, sideCmd.model)
+    }
+    const swarmCmd = parseSwarmSlashCommand(trimmed)
+    if (swarmCmd) {
+      if (swarmCmd.kind === 'open_board') {
+        this.openSwarmBoard()
+        return true
+      }
+      if (swarmCmd.kind === 'kill') {
+        const ok = await this.killSwarmMember(swarmCmd.target)
+        if (!ok) {
+          this.fail(new Error(this.frame.swarmError || `Could not stop ${swarmCmd.target}`))
+          return false
         }
-        return optimistic.acknowledged
-      } finally {
-        // RPC acceptance precedes snapshot preparation and turn_begin. Keep
-        // the pending state until the daemon actually starts or ends the turn.
+        this.builder.push('notification', {
+          severity: 'info',
+          message: swarmCmd.target === 'all' ? 'Stopped all Immortals workers.' : `Stopped Immortals member @${swarmCmd.target}.`,
+        })
         this.notify()
+        return true
+      }
+      if (swarmCmd.kind === 'activate_task') {
+        const activated = await this.activateSwarm(true)
+        if (!activated) return false
+        this.openSwarmBoard()
+        return this.submitPrompt(swarmCmd.task, undefined, images)
       }
     }
     // /goal routes to its dedicated durable-state RPC; everything else goes
@@ -1359,6 +3149,11 @@ export class Store {
     if (trimmed === '/plan' || trimmed.startsWith('/plan ') || trimmed === '/plan off') {
       // /plan steers planning; the mode flip itself is the RPC's job.
       const rest = trimmed.slice(5).trim()
+      const acpPlan = this.acpPlanModePair()
+      if (acpPlan && (!rest || rest === 'off' || rest === 'on')) {
+        const target = rest === 'off' ? acpPlan.defaultId : rest === 'on' ? acpPlan.planId : acpPlan.isPlan ? acpPlan.defaultId : acpPlan.planId
+        return this.setAcpMode(target)
+      }
       if (!rest || rest === 'off') return this.setPlanMode(!this.frame.planMode)
       else return this.steer(rest)
     }
@@ -1392,6 +3187,7 @@ export class Store {
       }
       this.notify()
       if (trimmed.startsWith('/permissions')) void this.loadProviders()
+      if (trimmed === '/acp' || trimmed.startsWith('/acp ')) void this.refreshAcpAgents({ silent: true })
       void this.refreshSessions()
       return result.ok === true
     } catch (error) {
@@ -1472,6 +3268,8 @@ export class Store {
     // Leaving the card up would offer buttons that can only answer
     // "refused" while keeping the header stuck on "needs input".
     if (this.frame.approval || this.frame.question) this.patch({ approval: null, question: null })
+    // `turn.cancel` already routes through `cancelTrackedTurn` to cancel an
+    // active external ACP turn cleanly — do not also fire `acp.cancel` here.
     void this.bridge
       .call('turn.cancel', { session_key: this.sessionKey })
       .catch(error => this.fail(error))
@@ -1746,6 +3544,7 @@ export class Store {
 
   /** A new task in `cwd`: this view for the current folder, a fresh view for another. */
   newChatIn(cwd: string): void {
+    if (cwd) setThreadInboxState(current => unhideWorkspaceInState(current, cwd))
     if (!cwd || cwd === this.frame.cwd) { this.newChat(); return }
     if (!this.bridge.openWorkspaceWindow) { this.enterWorkspace(cwd); return }
     void this.bridge.openWorkspaceWindow(cwd, undefined, { fresh: true }).catch(error => this.fail(error))
@@ -1820,6 +3619,7 @@ export class Store {
   private respondApproval(requestId: string, response: ApprovalResponse, planMode?: 'accept-all' | 'manual'): void {
     const pending = this.frame.approval
     if (pending?.id !== requestId) return
+    if (response === 'allow_session' && pending.allowPermanent === false) return
     if (pending.autoAcceptAt !== undefined) {
       const { autoAcceptAt: _deadline, ...manualOnly } = pending
       this.patch({ approval: manualOnly })
@@ -1833,8 +3633,19 @@ export class Store {
     const wire = response === 'allow_once' ? 'approve'
       : response === 'allow_session' ? 'approve_for_session'
       : 'reject'
+    const matchedOption = pending.options?.find(opt =>
+      response === 'allow_once'
+        ? opt.kind === 'allow_once'
+        : response === 'allow_session'
+          ? opt.kind === 'allow_always'
+          : opt.kind === 'reject_once' || opt.kind === 'reject_always',
+    )
     void this.bridge
-      .call('permission_response', { request_id: requestId, response: wire })
+      .call('permission_response', {
+        request_id: requestId,
+        response: wire,
+        ...(matchedOption ? { option_id: matchedOption.optionId } : {}),
+      })
       .then(result => {
         // approval_response can remove the card before the RPC reply. Only
         // the daemon-confirmed winner may change this session's policy.
@@ -2105,22 +3916,169 @@ export class Store {
   }
 
   /**
-   * Live daemon completions for a partial draft: slash-command prefixes and
-   * `/skill <name>` references (the same registry `/skills` lists). The one
-   * completion source of truth — the TUI's — not a GUI-local copy.
+   * Live runtime-scoped completions for a partial draft:
+   * - On Xerxes Native: daemon slash commands + `/skill <name>` references.
+   * - On an external ACP runtime: STRICTLY scoped to the connected ACP runtime's
+   *   automatically discovered commands & skills plus `/acp` (and minimal
+   *   non-colliding host commands when explicitly typed), excluding all Xerxes
+   *   native commands and bundled skills (`immortals-*`, etc.).
    */
-  async completeText(text: string): Promise<{ value: string; label: string; meta: string; kind: 'command' | 'skill' }[]> {
-    const queries = /^\/[^\s]*$/.test(text) && text !== '/skill'
+  async completeText(text: string): Promise<CompletionHintItem[]> {
+    const binding = this.frame.acpBinding
+    const isExternal = Boolean(binding?.connected && binding.transport !== 'native')
+    const isSlashPrefix = /^\/[^\s]*$/.test(text)
+
+    if (isExternal && binding) {
+      const { commands, skills } = resolveExternalAcpCatalog(binding)
+      const acpNames = new Set<string>([
+        ...commands.map(cmd => cmd.name.toLowerCase()),
+        ...skills.map(skill => skill.name.toLowerCase()),
+        ...skills.map(skill => (skill.slash_command ?? skill.name).replace(/^\/+/, '').toLowerCase()),
+      ])
+
+      const skillPrefixMatch = /^\/skill\s+(.*)$/i.exec(text)
+      if (skillPrefixMatch) {
+        const needle = skillPrefixMatch[1]!.trim().toLowerCase()
+        return skills
+          .filter(skill =>
+            !needle
+            || skill.name.toLowerCase().includes(needle)
+            || (skill.description?.toLowerCase().includes(needle) ?? false)
+            || (skill.source?.toLowerCase().includes(needle) ?? false),
+          )
+          .map(skill => {
+            const slash = skill.slash_command?.startsWith('/') ? skill.slash_command : `/${skill.name}`
+            return {
+              value: slash,
+              label: slash,
+              meta: skill.description || `${binding.name} skill`,
+              kind: 'skill' as const,
+              badge: skill.source || binding.name,
+              runtimeProvider: binding.provider,
+            }
+          })
+      }
+
+      if (/^\/acp\s/i.test(text)) {
+        const res = await this.bridge.call('complete', { text })
+        const items = Array.isArray(res.completions) ? res.completions : []
+        return items
+          .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+          .map(item => {
+            const value = str(item.value)
+            return {
+              value,
+              label: str(item.label) || value,
+              meta: str(item.meta),
+              kind: 'command' as const,
+              badge: 'Host',
+            }
+          })
+          .filter(item => Boolean(item.value))
+      }
+
+      if (!isSlashPrefix) return []
+      const needle = text.slice(1).toLowerCase()
+      const matches = (name: string, desc?: string, source?: string): boolean =>
+        !needle
+        || name.toLowerCase().includes(needle)
+        || (desc?.toLowerCase().includes(needle) ?? false)
+        || (source?.toLowerCase().includes(needle) ?? false)
+
+      const acpCommands: CompletionHintItem[] = commands
+        .filter(cmd => matches(cmd.name, cmd.description, cmd.source))
+        .map(cmd => ({
+          value: `/${cmd.name}`,
+          label: `/${cmd.name}`,
+          meta: cmd.description || `${binding.name} command`,
+          kind: 'command' as const,
+          badge: cmd.source || binding.name,
+          runtimeProvider: binding.provider,
+        }))
+
+      const acpSkills: CompletionHintItem[] = skills
+        .filter(skill => matches(skill.name, skill.description, skill.source))
+        .map(skill => {
+          const slash = skill.slash_command?.startsWith('/') ? skill.slash_command : `/${skill.name}`
+          return {
+            value: slash,
+            label: slash,
+            meta: skill.description || `${binding.name} skill`,
+            kind: 'skill' as const,
+            badge: skill.source || 'Skill',
+            runtimeProvider: binding.provider,
+          }
+        })
+
+      const hostItems: CompletionHintItem[] = []
+      if (matches('acp', 'Switch or manage ACP runtime', 'host')) {
+        hostItems.push({
+          value: '/acp',
+          label: '/acp',
+          meta: 'Switch or manage ACP runtime',
+          kind: 'command',
+          badge: 'Host',
+        })
+      }
+      if (needle.length > 0) {
+        const minimalHostCommands: readonly { readonly name: string; readonly meta: string }[] = [
+          { name: 'new', meta: 'Start a new conversation' },
+          { name: 'clear', meta: 'Clear the current conversation' },
+          { name: 'export', meta: 'Export conversation transcript' },
+        ]
+        for (const hostCmd of minimalHostCommands) {
+          if (acpNames.has(hostCmd.name)) continue
+          if (!matches(hostCmd.name, hostCmd.meta, 'host')) continue
+          hostItems.push({
+            value: `/${hostCmd.name}`,
+            label: `/${hostCmd.name}`,
+            meta: hostCmd.meta,
+            kind: 'command',
+            badge: 'Host',
+          })
+        }
+      }
+
+      const ordered = [...acpCommands, ...acpSkills, ...hostItems]
+      const seen = new Set<string>()
+      return ordered.filter(entry => {
+        const key = `${entry.kind}:${entry.value.trim().toLowerCase()}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+    }
+
+    const queries = isSlashPrefix && text !== '/skill'
       ? [text, '/skill ' + text.slice(1)] : [text]
-    const results = await Promise.all(queries.map(text => this.bridge.call('complete', { text })))
+    const results = await Promise.all(queries.map(query => this.bridge.call('complete', { text: query })))
     const completions = results.flatMap(result => Array.isArray(result.completions) ? result.completions : [])
-    return completions
+    const mapped: CompletionHintItem[] = completions
       .map(raw => {
         const entry = (raw ?? {}) as Record<string, unknown>
         const value = str(entry.value)
-        return { value, label: str(entry.label) || value, meta: str(entry.meta), kind: (entry.category !== undefined ? 'command' : 'skill') as 'command' | 'skill' }
+        return {
+          value,
+          label: str(entry.label) || value,
+          meta: str(entry.meta),
+          kind: (entry.category !== undefined ? 'command' : 'skill') as 'command' | 'skill',
+        }
       })
-      .filter((entry, index, entries) => entry.value && entries.findIndex(other => other.value === entry.value) === index)
+      .filter(entry => Boolean(entry.value))
+
+    const nativeCommands = mapped.filter(entry => entry.kind === 'command')
+    const skills = mapped.filter(entry => entry.kind === 'skill')
+    const ordered: CompletionHintItem[] = [...nativeCommands, ...skills]
+    const seen = new Set<string>()
+    return ordered.filter(entry => {
+      const key =
+        entry.kind === 'skill'
+          ? 'skill:' + entry.label.replace(/^\/+/, '').trim().toLowerCase()
+          : 'cmd:' + entry.value.trim().toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
   }
 
   /**
@@ -2130,13 +4088,17 @@ export class Store {
   chooseWorkspace(): Promise<void> {
     return this.requestWorkspace(async () => {
       if (!this.bridge.chooseWorkspace) throw new Error('This host cannot open a workspace folder.')
-      await this.bridge.chooseWorkspace()
+      const picked = await this.bridge.chooseWorkspace()
+      if (typeof picked === 'string' && picked) {
+        setThreadInboxState(current => unhideWorkspaceInState(current, picked))
+      }
     })
   }
 
   openWorkspaceWindow(directory?: string): Promise<void> {
     return this.requestWorkspace(async () => {
       if (!this.bridge.openWorkspaceWindow) throw new Error('This desktop build cannot open additional windows. Relaunch the updated app.')
+      if (directory) setThreadInboxState(current => unhideWorkspaceInState(current, directory))
       await this.bridge.openWorkspaceWindow(directory)
     })
   }
@@ -2144,9 +4106,58 @@ export class Store {
   /** Enter a known workspace folder (sidebar header, switcher menu) — retargets the daemon. */
   enterWorkspace(cwd: string): Promise<void> {
     if (!cwd) return Promise.resolve()
+    setThreadInboxState(current => unhideWorkspaceInState(current, cwd))
     return this.requestWorkspace(async () => {
       if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspace folders.')
       await this.bridge.useWorkspace(cwd)
+    })
+  }
+
+  /**
+   * Remove a local project folder from the sidebar and remembered workspace list.
+   * Never deletes files on disk; switches to another remaining workspace if the
+   * removed folder is currently open.
+   */
+  removeWorkspace(cwd: string): Promise<void> {
+    const clean = normalizeWorkspacePath(cwd)
+    if (!clean) return Promise.resolve()
+    setThreadInboxState(current => hideWorkspaceInState(current, clean))
+    return this.requestWorkspace(async () => {
+      const remaining = this.bridge.removeWorkspace
+        ? await this.bridge.removeWorkspace(clean)
+        : (this.frame.workspaceDirectories ?? []).filter(dir => normalizeWorkspacePath(dir) !== clean)
+      this.patch({ workspaceDirectories: remaining })
+      if (normalizeWorkspacePath(this.frame.cwd) === clean) {
+        const fallback = remaining.find(dir => normalizeWorkspacePath(dir) !== clean)
+        if (fallback && this.bridge.useWorkspace) {
+          setThreadInboxState(current => unhideWorkspaceInState(current, fallback))
+          await this.bridge.useWorkspace(fallback)
+        }
+      }
+    })
+  }
+
+  /** Restore a workspace folder to the sidebar list (Undo of removeWorkspace). */
+  restoreWorkspace(cwd: string): Promise<void> {
+    const clean = normalizeWorkspacePath(cwd)
+    if (!clean) return Promise.resolve()
+    setThreadInboxState(current => unhideWorkspaceInState(current, clean))
+    return this.requestWorkspace(async () => {
+      const directories = this.bridge.restoreWorkspace
+        ? await this.bridge.restoreWorkspace(clean)
+        : [...new Set([...(this.frame.workspaceDirectories ?? []), clean])]
+      this.patch({ workspaceDirectories: directories })
+    })
+  }
+
+  /** Remove a saved SSH host from the sidebar without touching the remote machine. */
+  removeRemoteHost(alias: string): Promise<void> {
+    const clean = alias.trim()
+    if (!clean) return Promise.resolve()
+    return this.requestWorkspace(async () => {
+      if (!this.bridge.remote) throw new Error('This host cannot remove SSH workspaces.')
+      await this.bridge.remote('remove', { alias: clean })
+      await this.refreshContexts()
     })
   }
 
@@ -2194,6 +4205,7 @@ export class Store {
       }
       const applied = str(result.model)
       if (applied) this.patch({ model: applied })
+      this.loadReasoningLevels({ silent: true })
     }).catch(error => { if (isCurrent()) this.fail(error) })
   }
 
@@ -2283,7 +4295,30 @@ export class Store {
       .catch(error => { if (isCurrent()) this.fail(error); return false })
   }
 
+  private acpPlanModePair(): { readonly planId: string; readonly defaultId: string; readonly isPlan: boolean } | null {
+    const binding = this.frame.acpBinding
+    if (!binding?.connected || binding.transport === 'native' || !binding.modes?.length) return null
+    const planMode =
+      binding.modes.find(mode => mode.id.toLowerCase() === 'plan')
+      ?? binding.modes.find(mode => mode.id.toLowerCase() === 'planning')
+    if (!planMode) return null
+    const defaultMode =
+      binding.modes.find(mode => mode.id.toLowerCase() === 'default')
+      ?? binding.modes.find(mode => mode.id !== planMode.id)
+    if (!defaultMode) return null
+    return {
+      planId: planMode.id,
+      defaultId: defaultMode.id,
+      isPlan: (binding.current_mode ?? '').toLowerCase() === planMode.id.toLowerCase(),
+    }
+  }
+
   togglePlanMode(): void {
+    const acpPlan = this.acpPlanModePair()
+    if (acpPlan) {
+      void this.setAcpMode(acpPlan.isPlan ? acpPlan.defaultId : acpPlan.planId)
+      return
+    }
     this.setPlanMode(!this.frame.planMode)
   }
 
@@ -2398,27 +4433,77 @@ export class Store {
     this.patch({ pickerOpen: false })
   }
 
-  /** Reasoning levels are asked of the daemon per open — they differ per model. */
-  openReasoningPicker(): void {
+  /** Adopt a freshly observed Git branch for the active workspace without re-initializing. */
+  syncBranch(branch: string | null | undefined): void {
+    const clean = typeof branch === 'string' ? branch.trim() : ''
+    if (clean === this.frame.branch) return
+    this.patch({ branch: clean })
+  }
+
+  private branchRefreshPending = false
+  private supportsGitBranch = true
+
+  /**
+   * Re-read the active workspace's live Git branch so terminal checkouts,
+   * external editors, and agent commands never leave the sidebar or welcome
+   * header stuck on an old branch. Uses lightweight `git.branch` when the
+   * daemon supports it, falling back to `git.status` on an older live daemon.
+   */
+  async refreshBranch(): Promise<void> {
+    if (this.branchRefreshPending || this.frame.connection !== 'online' || !this.frame.cwd) return
     const { sessionKey, isCurrent } = this.captureSessionRequest()
-    this.patch({
-      reasoningPickerOpen: true,
-      settingsOpen: false,
-      paletteOpen: false,
-      pickerOpen: false,
-      modelMenuOpen: false,
-      wsMenuOpen: false,
-      reasoningLoading: true,
-    })
+    this.branchRefreshPending = true
+    try {
+      if (this.supportsGitBranch) {
+        try {
+          const result = await this.bridge.call('git.branch', { session_key: sessionKey })
+          if (!isCurrent()) return
+          if (result.ok !== false && typeof result.branch === 'string') {
+            this.syncBranch(result.branch)
+            return
+          }
+          if (result.code === 'git-unknown-method' || /unknown git method/i.test(str(result.error))) {
+            this.supportsGitBranch = false
+          } else {
+            return
+          }
+        } catch {
+          this.supportsGitBranch = false
+        }
+      }
+      const status = await this.bridge.call('git.status', { session_key: sessionKey })
+      if (!isCurrent() || status.ok === false || !('repository' in status)) return
+      const repo = status.repository
+      if (repo && typeof repo === 'object' && !Array.isArray(repo)) {
+        const record = repo as Record<string, unknown>
+        this.syncBranch(typeof record.branch === 'string' ? record.branch : '')
+      } else if (repo === null) {
+        this.syncBranch('')
+      }
+    } catch {
+      // Outside a git repository or offline daemon: leave branch untouched.
+    } finally {
+      this.branchRefreshPending = false
+    }
+  }
+
+  /** Ask the daemon for the active session model's reasoning/thinking levels. */
+  loadReasoningLevels(options: { readonly silent?: boolean } = {}): void {
+    const silent = options.silent === true
+    if (silent && this.frame.connection !== 'online') return
+    const { sessionKey, isCurrent } = this.captureSessionRequest()
+    if (!silent) this.patch({ reasoningLoading: true })
     void this.bridge.call('reasoning_levels', { session_key: sessionKey }).then(result => {
       if (!isCurrent()) return
       if (result.ok === false) {
-        this.builder.push('notification', {
-          severity: 'error',
-          message: str(result.error) || 'reasoning levels unavailable',
-        })
-        this.patch({ reasoningLoading: false })
-        this.notify()
+        if (!silent) {
+          this.builder.push('notification', {
+            severity: 'error',
+            message: str(result.error) || 'reasoning levels unavailable',
+          })
+          this.patch({ reasoningLoading: false })
+          this.notify()
+        }
         return
       }
       const levels = Array.isArray(result.levels)
@@ -2431,7 +4516,7 @@ export class Store {
         : []
       const current = str(result.current)
       this.patch({
-        reasoningLoading: false,
+        ...(!silent ? { reasoningLoading: false } : {}),
         reasoningLevels: levels,
         reasoningDefault: str(result.default),
         reasoningNote: str(result.note),
@@ -2439,9 +4524,24 @@ export class Store {
       })
     }).catch(error => {
       if (!isCurrent()) return
-      this.patch({ reasoningLoading: false })
-      this.fail(error)
+      if (!silent) {
+        this.patch({ reasoningLoading: false })
+        this.fail(error)
+      }
     })
+  }
+
+  /** Reasoning levels are asked of the daemon per open — they differ per model. */
+  openReasoningPicker(): void {
+    this.patch({
+      reasoningPickerOpen: true,
+      settingsOpen: false,
+      paletteOpen: false,
+      pickerOpen: false,
+      modelMenuOpen: false,
+      wsMenuOpen: false,
+    })
+    this.loadReasoningLevels({ silent: false })
   }
 
   closeReasoningPicker(): void {
@@ -2540,6 +4640,10 @@ export class Store {
 
   toggleWorkspaceMenu(): void {
     this.patch({ wsMenuOpen: !this.frame.wsMenuOpen, paletteOpen: false, pickerOpen: false })
+  }
+
+  openWorkspaceMenu(): void {
+    this.patch({ wsMenuOpen: true, paletteOpen: false, pickerOpen: false })
   }
 
   closeWorkspaceMenu(): void {
@@ -3360,12 +5464,11 @@ export class Store {
   private async beat(shown = false): Promise<void> {
     if (!shown && pageIsBackground()) return
     const now = Date.now()
-    const unfocused = typeof document !== 'undefined' && document.documentElement.hasAttribute('data-window-unfocused')
+    const unfocused = pageIsInactive()
     if (!shown && unfocused && now - this.lastListRefresh < UNFOCUSED_LIST_REFRESH_MS && this.frame.connection === 'online') return
     this.lastListRefresh = now
     void this.refreshContexts()
     if (this.frame.noWorkspace) return
-    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
     if (this.updatingRuntime || this.openingFreshTask || this.openingSession) return
     if (this.frame.connection === 'online') {
       this.refreshSessions()
@@ -3381,6 +5484,11 @@ export class Store {
       // call dies, which every action already routes through fail().
       return
     }
+    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => {
+      if (JSON.stringify(this.getSnapshot().workspaceDirectories) !== JSON.stringify(workspaceDirectories)) {
+        this.patch({ workspaceDirectories })
+      }
+    }).catch(error => this.patch({ workspaceError: desktopError(error) }))
     if (connectionFailureKind(this.frame.error) !== 'transport') return
     await this.retryConnection()
   }
@@ -3396,6 +5504,9 @@ export class Store {
     // Passthrough — the wrapper must forward EVERY preload method or the
     // optional calls silently do nothing.
     getWorkspaceDirectories: () => window.xerxes.getWorkspaceDirectories?.() ?? Promise.resolve([]),
+    removeWorkspace: dir => window.xerxes.removeWorkspace?.(dir) ?? Promise.resolve([]),
+    restoreWorkspace: dir => window.xerxes.restoreWorkspace?.(dir) ?? Promise.resolve([]),
+    remote: (action, params) => window.xerxes.remote?.(action, params) ?? Promise.reject(new Error('This host cannot manage remote workspaces.')),
     // Without these two the menu's Check for Updates… and the update prompt
     // never reached the window: the check ran and its answer was dropped.
     appUpdate: action => window.xerxes.appUpdate?.(action) ?? Promise.reject(new Error('Update the desktop app to check for updates.')),
@@ -3509,10 +5620,11 @@ export class Store {
       if (!raw || typeof raw !== 'object') continue
       const execution = raw as Record<string, unknown>
       if (execution.permitted === false || execution.error) continue
-      const args = parseArgs(execution.arguments ?? execution.input)
-      const stats = editStatsOf(execution.name, args)
+      const args = parseArgs(execution.arguments ?? execution.inputs ?? execution.input)
+      const structuredDiff = parseStructuredDiff(execution.diff)
+      const stats = editStatsOf(execution.name, args, structuredDiff, execution.locations)
       if (!stats) continue
-      this.foldChange(stats, args, str(execution.name))
+      this.foldChange(stats, args, str(execution.name), structuredDiff)
       folded = true
     }
     if (folded) this.patch({ changes: [...this.changes.values()] })
@@ -3630,7 +5742,7 @@ export class Store {
       contextMax: contextLimit,
       approval: null,
       ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { question: null, goal: '' } : {}),
-      ...(daemonInTurn ? {} : { turnActive: false, turnSeconds: 0 }),
+      ...(daemonInTurn ? { turnStartedAt: this.frame.turnStartedAt ?? Date.now() } : { turnActive: false, turnSeconds: 0, turnStartedAt: null }),
       // initialize reports THIS session's policy — /permissions pins the
       // mode per session, so the daemon-wide runtime.status would lie about
       // what the next tool call will actually face.
@@ -3655,6 +5767,57 @@ export class Store {
     }
     this.loadSkillSuggestions()
     this.loadCreatorTrace()
+    const inlineSwarm = parseSwarmStatus(result.swarm ?? session.swarm)
+    if (explicitNavigation || !preserveLiveTranscript) {
+      this.swarmLoadVersion++
+      this.patch({
+        swarm: inlineSwarm,
+        swarmMessages: [],
+        swarmInspect: null,
+        swarmInspectTarget: '',
+        swarmLoading: false,
+        swarmError: null,
+        swarmOpen: false,
+      })
+    } else if (inlineSwarm) {
+      this.patch({ swarm: inlineSwarm })
+    }
+    void this.refreshSwarm({ silent: true })
+    const sessionMetadata =
+      session.metadata && typeof session.metadata === 'object' && !Array.isArray(session.metadata)
+        ? (session.metadata as Readonly<Record<string, unknown>>)
+        : null
+    const rawLiveAcp = parseAcpSessionBinding(result.acp_binding ?? session.acp_binding)
+    const rawSavedAcp = parseAcpSessionBinding(result.saved_acp_binding ?? session.saved_acp_binding)
+    const rawMetaAcp = parseAcpSessionBinding(sessionMetadata?.acp_binding)
+    const inlineAcpBinding = rawLiveAcp?.connected
+      ? rawLiveAcp
+      : !rawLiveAcp && !rawSavedAcp && rawMetaAcp?.connected
+        ? rawMetaAcp
+        : null
+    const savedAcpBinding = inlineAcpBinding
+      ? null
+      : rawSavedAcp
+        ? { ...rawSavedAcp, connected: false }
+        : rawLiveAcp && !rawLiveAcp.connected
+          ? rawLiveAcp
+          : rawMetaAcp && !rawMetaAcp.connected
+            ? rawMetaAcp
+            : null
+    if (explicitNavigation || !preserveLiveTranscript) {
+      this.acpLoadVersion++
+      this.patch({
+        acpBinding: inlineAcpBinding,
+        savedAcpBinding,
+        acpConnecting: false,
+        acpError: rawLiveAcp?.error ?? null,
+      })
+    } else if (inlineAcpBinding || savedAcpBinding) {
+      this.patch({
+        ...(inlineAcpBinding ? { acpBinding: inlineAcpBinding, savedAcpBinding: null } : { savedAcpBinding }),
+      })
+    }
+    void this.refreshAcpAgents({ silent: true })
     this.learningReviewToken = null
     this.learningLoadVersion++
     this.patch({ learning: null, learningCounts: { pending_proposals: 0, pending_lessons: 0 }, learningResults: {}, learningReviewBusy: false, learningOpen: false })
@@ -3944,7 +6107,7 @@ export class Store {
         this.stopFleetPoll()
         return
       }
-      if (pageIsBackground()) return
+      if (pageIsInactive()) return
       this.refreshFleet()
     }, FLEET_POLL_MS)
   }
@@ -4001,7 +6164,11 @@ export class Store {
     const read = { again: false }
     this.sessionsRead = read
     const revision = ++this.sessionsRefresh
-    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => this.patch({ workspaceDirectories })).catch(error => this.patch({ workspaceError: desktopError(error) }))
+    void this.bridge.getWorkspaceDirectories?.().then(workspaceDirectories => {
+      if (JSON.stringify(this.getSnapshot().workspaceDirectories) !== JSON.stringify(workspaceDirectories)) {
+        this.patch({ workspaceDirectories })
+      }
+    }).catch(error => this.patch({ workspaceError: desktopError(error) }))
     const saved = this.bridge
       .call('session.list', { kind: 'main', scope: 'global', limit: 60 })
       .then(result => normalize(result.sessions, this.frame.currentId))
@@ -4035,7 +6202,14 @@ export class Store {
       for (const row of [...(savedRows ?? []), ...all]) {
         if (row.activeAt !== undefined) sessionActivity[row.id] = Math.max(sessionActivity[row.id] ?? 0, row.activeAt)
       }
-      this.patch({ live, sessions: history, sessionActivity })
+      const prev = this.getSnapshot()
+      if (
+        JSON.stringify(prev.live) !== JSON.stringify(live)
+        || JSON.stringify(prev.sessions) !== JSON.stringify(history)
+        || JSON.stringify(prev.sessionActivity) !== JSON.stringify(sessionActivity)
+      ) {
+        this.patch({ live, sessions: history, sessionActivity })
+      }
       this.enrichUntitled(history)
     }).finally(() => {
       if (this.sessionsRead === read) this.sessionsRead = null
@@ -4136,6 +6310,55 @@ export class Store {
       void this.refreshLearning()
       return
     }
+    if (type === 'swarm_event') {
+      const sid = str(payload.session_id)
+      const knownIds = [this.frame.currentId, this.sessionKey, this.frame.swarm?.session_id ?? ''].filter(Boolean)
+      if (sid && knownIds.length > 0 && !knownIds.includes(sid)) return
+      this.applySwarmEvent(payload)
+      return
+    }
+    if (type === 'btw_event') {
+      const sid = str(payload.session_id)
+      const knownIds = [this.frame.currentId, this.sessionKey].filter(Boolean)
+      if (sid && knownIds.length > 0 && !knownIds.includes(sid)) return
+      this.applyBtwEvent(payload)
+      return
+    }
+    if (type === 'acp_status') {
+      const sid = str(payload.session_id)
+      const knownIds = [this.frame.currentId, this.sessionKey].filter(Boolean)
+      if (sid && knownIds.length > 0 && !knownIds.includes(sid)) return
+      const binding = parseAcpSessionBinding(payload.binding)
+      const agents = Array.isArray(payload.agents) ? parseAcpExternalAgents(payload.agents) : undefined
+      const isConnectedExternal = Boolean(binding?.connected && binding.transport !== 'native')
+      const statusError = binding?.error ?? (str(payload.error) || null)
+      const fallbackSaved =
+        !isConnectedExternal && binding && binding.transport !== 'native'
+          ? { ...binding, connected: false }
+          : !isConnectedExternal && statusError && this.frame.acpBinding && this.frame.acpBinding.transport !== 'native'
+            ? { ...this.frame.acpBinding, connected: false }
+            : undefined
+      this.patch({
+        acpBinding: isConnectedExternal ? binding : null,
+        ...(isConnectedExternal
+          ? { savedAcpBinding: null }
+          : fallbackSaved !== undefined
+            ? { savedAcpBinding: fallbackSaved }
+            : {}),
+        acpConnecting: false,
+        acpError: statusError,
+        ...(agents ? { acpAgents: agents } : {}),
+        ...(isConnectedExternal
+          ? {
+              modelMenuOpen: false,
+              pickerOpen: false,
+              reasoningPickerOpen: false,
+              delegationMenuOpen: false,
+            }
+          : {}),
+      })
+      return
+    }
     // Background turns (bg-* sessions) share this connection's event pipe
     // with a session_id tag. They must never touch the foreground fold —
     // the TUI applies the same filter. They drive the jobs chip instead.
@@ -4146,8 +6369,12 @@ export class Store {
     }
     switch (type) {
       case 'subagent_event': {
-        const fleet = foldAgentEvent(this.frame.fleet, payload)
-        this.patch({ fleet })
+        const current = this.getSnapshot()
+        const fleet = foldAgentEvent(current.fleet, payload)
+        const status = str(payload.status).toLowerCase()
+        const terminal = status === 'completed' || status === 'succeeded' || status === 'failed' || status === 'cancelled' || status === 'interrupted'
+        if (terminal) this.patch({ fleet })
+        else this.patchSoft({ fleet })
         this.syncAgentMembersFromFleet(fleet)
         return
       }
@@ -4197,19 +6424,21 @@ export class Store {
         // First fleet read of the turn; agent-family tool calls below keep
         // the panel polling while spawns actually run.
         this.refreshFleet()
-        break
+        return
       }
       case 'text_part': {
-        this.setMetricPhase('llm')
-        if (typeof payload.text === 'string' && payload.text) this.agentText += payload.text
+        this.setMetricPhase('llm', true)
+        if (typeof payload.text === 'string' && payload.text && this.agentText.length < MAX_AGENT_TEXT_CHARS) {
+          this.agentText += payload.text.slice(0, MAX_AGENT_TEXT_CHARS - this.agentText.length)
+        }
         this.builder.push(type, payload)
         this.notify()
-        break
+        return
       }
       case 'think_part':
       case 'tool_result':
       case 'notification':
-        if (type === 'think_part') this.setMetricPhase('llm')
+        if (type === 'think_part') this.setMetricPhase('llm', true)
         if (type === 'tool_result' && payload.permitted !== false && !payload.error) {
           const todos = todosFromResult(payload.name, payload.return_value)
           if (todos !== null) this.patch({ todos })
@@ -4219,6 +6448,9 @@ export class Store {
         // showing "blocked · Rounds 0/1" for a goal the agent had already
         // resumed with no limits.
         if (type === 'tool_result' && GOAL_WRITE_TOOLS.has(str(payload.name))) void this.refreshGoal()
+        if (type === 'tool_result' && /(^|[.:/])(swarm|post_message|swarm_overview)$/i.test(str(payload.name))) {
+          void this.refreshSwarm({ silent: true })
+        }
         if (type === 'tool_result' && /(^|[.:])workflow$/i.test(str(payload.name))) this.foldWorkflowResult(payload.return_value ?? payload.result)
         if (type === 'tool_result' && payload.permitted !== false && !payload.error && Array.isArray(payload.display_blocks)) {
           for (const block of payload.display_blocks) {
@@ -4236,7 +6468,7 @@ export class Store {
           if (suggestion) {
             this.patch({
               skillSuggestions: [
-                ...this.frame.skillSuggestions.filter(row => row.skillName !== suggestion.skillName),
+                ...this.getSnapshot().skillSuggestions.filter(row => row.skillName !== suggestion.skillName),
                 suggestion,
               ].slice(-32),
             })
@@ -4261,28 +6493,40 @@ export class Store {
             this.pendingAgentCalls.delete(id)
             this.activeMetricTools.delete(id)
           }
+          if (payload.permitted !== false && !payload.error && (!id || !this.foldedToolIds.has(id))) {
+            const resultDiff = parseStructuredDiff(payload.diff)
+            const resultArgs = parseArgs(payload.arguments)
+            const resultStats = editStatsOf(payload.name, resultArgs, resultDiff, payload.locations)
+            if (resultStats) {
+              if (id) this.foldedToolIds.add(id)
+              this.foldChange(resultStats, resultArgs, str(payload.name), resultDiff)
+            }
+          }
           const durationMs = Math.max(0, num(payload.duration_ms) ?? 0)
-          this.patch({
-            toolDurationMs: this.frame.toolDurationMs + durationMs,
-            toolSteps: this.frame.toolSteps + 1,
+          const current = this.getSnapshot()
+          this.patchSoft({
+            toolDurationMs: current.toolDurationMs + durationMs,
+            toolSteps: current.toolSteps + 1,
+            ...(this.activeMetricTools.size === 0 && current.metricPhase !== 'llm'
+              ? { metricPhase: 'llm' as const, metricPhaseStartedAt: Date.now() }
+              : {}),
           })
-          if (this.activeMetricTools.size === 0) this.setMetricPhase('llm')
           if (isAgentFamilyTool(payload.name)) {
             const reports = agentReceiptRows(payload.return_value ?? payload.result)
             const members = [...this.agentMembers.values()].filter(member => member.key.startsWith(`${id}:`))
             for (const [index, value] of reports.entries()) {
               const report = value && typeof value === 'object' ? value as Record<string, unknown> : {}
-              const runtimeId = str(report.id)
+              const runtimeId = str(report.id) || str(report.conversation_id) || str(report.conversationId)
               if (!runtimeId || !str(report.status)) continue
               const member = members[index]
-              const previous = this.frame.fleet.find(row => row.id === runtimeId)
+              const previous = this.getSnapshot().fleet.find(row => row.id === runtimeId)
               const title = str(report.title) || previous?.title || member?.title || runtimeId
               if (member) {
                 this.agentMembers.set(member.key, {...member, runtimeId, title, status:agentStatusOf(str(report.status))})
               }
               const row: SessionRow = {...(previous ?? {id:runtimeId,key:runtimeId,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false}),title,status:str(report.status),
                 agentDetails:{filesRead:[],filesWritten:[],...previous?.agentDetails,summary:str(report.summary),error:str(report.error),model:str(report.model)||previous?.agentDetails?.model||'',baseAgent:str(report.agent_id)||member?.baseAgent||previous?.agentDetails?.baseAgent||'',goal:member?.prompt||previous?.agentDetails?.goal||'',requestKey:member?.key||previous?.agentDetails?.requestKey||"",lastReceiptAt:Date.now()}}
-              this.patch({fleet:[...this.frame.fleet.filter(row=>row.id!==runtimeId),row]})
+              this.patch({fleet:[...this.getSnapshot().fleet.filter(row=>row.id!==runtimeId),row]})
             }
             if (reports.length) this.builder.pushAgents([...this.agentMembers.values()])
             this.refreshFleet()
@@ -4303,17 +6547,21 @@ export class Store {
         }
         this.builder.push(type, payload)
         this.notify()
-        break
+        return
       case 'tool_call': {
         // The first computer-use step is when its macOS permissions matter.
         if (payload.name === 'computer_use' && !this.frame.computerUseWanted) this.patch({ computerUseWanted: true })
-        const stats = editStatsOf(payload.name, payload.arguments)
-        if (stats) this.foldChange(stats, parseArgs(payload.arguments), str(payload.name))
-        this.builder.push(type, payload)
+        const structuredDiff = parseStructuredDiff(payload.diff)
+        const parsedCallArgs = parseArgs(payload.arguments)
+        const stats = editStatsOf(payload.name, parsedCallArgs, structuredDiff, payload.locations)
         const metricToolId = str(payload.tool_call_id) || str(payload.id)
+        if (stats) {
+          if (metricToolId) this.foldedToolIds.add(metricToolId)
+          this.foldChange(stats, parsedCallArgs, str(payload.name), structuredDiff)
+        }
+        this.builder.push(type, payload)
         if (metricToolId) this.activeMetricTools.add(metricToolId)
-        this.setMetricPhase('tool')
-        this.notify()
+        this.setMetricPhase('tool', true)
         // Agent-family calls move the fleet panel while they run — spawn
         // manifests persist inside tool execution, so refresh now AND keep
         // polling until the matching tool_result lands.
@@ -4332,9 +6580,9 @@ export class Store {
           }
           this.refreshFleet()
           this.startFleetPoll()
-          this.notify()
         }
-        break
+        this.notify()
+        return
       }
       case 'steer_applied': {
         // The model has the steer now: it is no longer queued. Match by text,
@@ -4357,8 +6605,8 @@ export class Store {
           if (!ours && text) { this.builder.pushUser(text); shownOther = true }
         }
         if (queue !== this.queue) { this.queue = queue; this.patch({ queue }) }
-        if (shownOther) this.notify()
-        break
+        else if (shownOther) this.notify()
+        return
       }
       case 'steer_input': {
         // Acceptance echo, not consumption: the daemon emits this the moment
@@ -4366,7 +6614,7 @@ export class Store {
         // silently at the next step boundary. The mirror therefore lives
         // until turn_end, which is the one boundary we do observe.
         const content = str(payload.content)
-        if (!content) break
+        if (!content) return
         const id = str(payload.client_steer_id)
         const pending = id ? this.pendingSteers.get(id) : [...this.pendingSteers.values()].find(item => item.session === this.sessionKey && item.text === content && !item.echoed)
         if (pending) pending.echoed = true
@@ -4375,7 +6623,7 @@ export class Store {
           if (pending) pending.shown = true
           this.notify()
         }
-        break
+        return
       }
       case 'session_title': {
         // Broadcast event: every session that earns a title (subagents,
@@ -4383,28 +6631,29 @@ export class Store {
         const title = str(payload.title)
         const forUs = !payload.session_id || str(payload.session_id) === this.frame.currentId
         if (title && forUs) this.patch({ currentTitle: title })
-        break
+        return
       }
       case 'agent_preset_selected': {
         const selected = str(payload.agent_preset)
         if (selected) this.patch({ currentAgentPreset: selected })
-        break
+        return
       }
       case 'channel_status': {
         // Daemon-wide broadcast (no session tag): any enable/disable — from
         // this shell, the TUI, or the webhook itself — keeps the panel true.
         this.applyChannelStatus(channelStatusFrom(payload))
-        break
+        return
       }
       case 'status_update': {
         this.refreshProviderRelay()
+        const current = this.getSnapshot()
+        const patch: Record<string, unknown> = {}
         // Progress while compacting; the full status echo that follows
         // (it carries turn_count) is sent once the task is free again.
-        if (payload.kind === 'compressing') this.patch({ compacting: str(payload.text) || 'Compacting the conversation…' })
-        else if (this.frame.compacting && payload.turn_count !== undefined) this.patch({ compacting: undefined })
-        if (payload.kind === 'network_retry') this.patch({ networkRetrying: true })
-        if (payload.kind === 'provider_ready') this.patch({ networkRetrying: false })
-        const patch: Record<string, unknown> = {}
+        if (payload.kind === 'compressing') patch.compacting = str(payload.text) || 'Compacting the conversation…'
+        else if (current.compacting && payload.turn_count !== undefined) patch.compacting = undefined
+        if (payload.kind === 'network_retry') patch.networkRetrying = true
+        if (payload.kind === 'provider_ready') patch.networkRetrying = false
         if (typeof payload.model === 'string' && payload.model) patch.model = payload.model
         if (typeof payload.context_tokens === 'number') patch.contextTokens = payload.context_tokens
         if (typeof payload.max_context === 'number') {
@@ -4420,10 +6669,10 @@ export class Store {
         if (typeof payload.llm_duration_ms === 'number' && Number.isFinite(payload.llm_duration_ms)) {
           if (cumulativeTelemetry) {
             patch.llmDurationMs = Math.max(0, payload.llm_duration_ms)
-            patch.llmSteps = Math.max(0, Math.trunc(typeof payload.llm_steps === 'number' ? payload.llm_steps : this.frame.llmSteps))
+            patch.llmSteps = Math.max(0, Math.trunc(typeof payload.llm_steps === 'number' ? payload.llm_steps : current.llmSteps))
           } else {
-            patch.llmDurationMs = this.frame.llmDurationMs + Math.max(0, payload.llm_duration_ms)
-            patch.llmSteps = this.frame.llmSteps + 1
+            patch.llmDurationMs = current.llmDurationMs + Math.max(0, payload.llm_duration_ms)
+            patch.llmSteps = current.llmSteps + 1
             patch.metricPhase = 'llm'
             patch.metricPhaseStartedAt = Date.now()
           }
@@ -4480,11 +6729,11 @@ export class Store {
           patch.permissionMode = payload.permission_mode
         }
         this.patch(patch)
-        break
+        return
       }
       case 'approval_request': {
         const id = str(payload.id) || str(payload.request_id)
-        if (!id || this.frame.approval?.id === id) break
+        if (!id || this.frame.approval?.id === id) return
         const name = str(payload.tool_name) || str(payload.name) || str(payload.action)
         const autoAcceptAt = /^ExitPlanMode(Tool)?$/.test(name) ? Date.now() + 180_000 : undefined
         // The daemon attaches the real arguments as `inputs` (and older
@@ -4495,6 +6744,28 @@ export class Store {
           : payload.arguments && typeof payload.arguments === 'object' && !Array.isArray(payload.arguments)
             ? payload.arguments as Record<string, unknown>
             : null
+        const diff = parseStructuredDiff(payload.diff)
+        const options: ApprovalOption[] = Array.isArray(payload.options)
+          ? payload.options
+              .map(raw => {
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+                const row = raw as Readonly<Record<string, unknown>>
+                const optionId = str(row.option_id) || str(row.optionId)
+                if (!optionId) return null
+                return {
+                  optionId,
+                  name: str(row.name) || optionId,
+                  kind: str(row.kind) || 'allow_once',
+                }
+              })
+              .filter((opt): opt is ApprovalOption => opt !== null)
+          : []
+        const allowPermanent =
+          typeof payload.allow_permanent === 'boolean'
+            ? payload.allow_permanent
+            : options.length > 0
+              ? options.some(opt => opt.kind === 'allow_always')
+              : undefined
         const description =
           str(payload.description) ||
           `${str(payload.name)} ${str(JSON.stringify(payload.arguments ?? ''))}`.trim()
@@ -4510,10 +6781,13 @@ export class Store {
             ...(str(payload.cwd) ? { cwd: str(payload.cwd) } : {}),
             ...(str(payload.reason) ? { reason: str(payload.reason) } : {}),
             ...(str(payload.permission_mode) ? { permissionMode: str(payload.permission_mode) } : {}),
+            ...(allowPermanent !== undefined ? { allowPermanent } : {}),
+            ...(diff ? { diff } : {}),
+            ...(options.length > 0 ? { options } : {}),
           },
           interactionHidden: false,
         })
-        break
+        return
       }
       case 'question_request': {
         const requestId = str(payload.id)
@@ -4525,10 +6799,11 @@ export class Store {
             question: str(item.question),
             options: Array.isArray(item.options) ? item.options.filter(o => typeof o === 'string') : [],
             allowFreeform: item.allow_free_form !== false,
+            ...(item.multi_select === true || item.multiSelect === true ? { multiSelect: true } : {}),
             ...(str(item.placeholder) ? { placeholder: str(item.placeholder) } : {}),
           }
         }).filter(item => item.question)
-        if (!requestId || items.length === 0) break
+        if (!requestId || items.length === 0) return
         const question = {
           requestId,
           toolCallId: str(payload.tool_call_id),
@@ -4539,21 +6814,21 @@ export class Store {
         if (isPlanReview(question) && this.agentText.trim()) {
           this.capturePlan(this.agentText)
         }
-        break
+        return
       }
       // Every window showing the request hears its answer, including one
       // answered from another window or the TUI: the card is dead from then on.
       case 'question_response': {
         const id = str(payload.id)
         if (this.frame.question?.requestId === id) this.patch({ question: null })
-        break
+        return
       }
       case 'approval_response': {
         // Answered here or in another window on the same session: the card can
         // no longer be answered, so it must not keep saying it waits for you.
         const id = str(payload.request_id) || str(payload.id)
         if (id && this.frame.approval?.id === id) this.patch({ approval: null })
-        break
+        return
       }
       case 'turn_end': {
         for (const [id, steer] of this.pendingSteers) if (steer.session === this.sessionKey) this.pendingSteers.delete(id)
@@ -4584,8 +6859,13 @@ export class Store {
         // here when the card is already terminal; their terminal statuses
         // land on the committed card as the snapshots settle.
         if (![...this.agentMembers.values()].some(m => m.status === 'working')) this.stopFleetPoll()
+        const elapsedSeconds = this.frame.turnStartedAt != null
+          ? Math.max(this.frame.turnSeconds, Math.floor((Date.now() - this.frame.turnStartedAt) / 1000))
+          : this.frame.turnSeconds
         this.patch({
           turnActive: false,
+          turnSeconds: elapsedSeconds,
+          turnStartedAt: null,
           turnFailed: this.failure !== null,
           failed: this.failure,
           queue: this.queue,
@@ -4602,14 +6882,14 @@ export class Store {
         this.loadSkillSuggestions()
         this.loadCreatorTrace()
         void this.refreshSessions()
-        break
+        return
       }
       case 'local_setup': {
         const job = localSetupJobView(payload.job)
         if (!job) break
         this.patch({ localSetup: { ...this.frame.localSetup, job } })
         if (job.state === 'done') void this.localSetupFinished()
-        break
+        return
       }
       default:
         break
@@ -4623,23 +6903,65 @@ export class Store {
     stats: { path: string; adds: number; dels: number; isNew: boolean },
     args: Record<string, unknown>,
     name: string,
+    structuredDiff?: StructuredDiffPayload | null,
   ): void {
     const previous = this.changes.get(stats.path)
-    const oldLines = typeof args.old_string === 'string' ? args.old_string.replace(/\n$/, '').split('\n') : []
-    const newLines = typeof args.new_string === 'string'
-      ? args.new_string.replace(/\n$/, '').split('\n')
-      : typeof args.content === 'string'
-        ? args.content.replace(/\n$/, '').split('\n')
-        : []
+    const argOld =
+      typeof args.old_string === 'string'
+        ? args.old_string
+        : typeof args.Target === 'string'
+          ? args.Target
+          : typeof args.old_text === 'string'
+            ? args.old_text
+            : typeof args.oldText === 'string'
+              ? args.oldText
+              : undefined
+    const argNew =
+      typeof args.new_string === 'string'
+        ? args.new_string
+        : typeof args.Replacement === 'string'
+          ? args.Replacement
+          : typeof args.new_text === 'string'
+            ? args.new_text
+            : typeof args.newText === 'string'
+              ? args.newText
+              : typeof args.content === 'string'
+                ? args.content
+                : typeof args.Content === 'string'
+                  ? args.Content
+                  : undefined
+    const hasArgEdit = argOld !== undefined || argNew !== undefined
+    let oldLines: readonly string[] = []
+    let newLines: readonly string[] = []
+    if (hasArgEdit) {
+      oldLines = argOld ? argOld.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+      newLines = argNew ? argNew.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+    } else if (structuredDiff) {
+      if (structuredDiff.oldText && structuredDiff.newText) {
+        const span = trimmedChangedLines(structuredDiff.oldText, structuredDiff.newText, 0)
+        oldLines = span.before
+        newLines = span.after
+      } else {
+        oldLines = structuredDiff.oldText ? structuredDiff.oldText.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+        newLines = structuredDiff.newText ? structuredDiff.newText.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+      }
+    }
     const hunk: DiffLine[] = [{ kind: 'hunk', text: `@@ ${stats.path} @@` }]
     for (const line of oldLines) hunk.push({ kind: 'del', text: line })
     for (const line of newLines) hunk.push({ kind: 'add', text: line })
+    const combinedHunks = [...(previous?.hunks ?? []), ...hunk]
+    const boundedHunks = combinedHunks.length > MAX_DIFF_LINES_PER_FILE
+      ? [
+          ...combinedHunks.slice(0, MAX_DIFF_LINES_PER_FILE - 1),
+          { kind: 'hunk' as const, text: `@@ … (${combinedHunks.length - MAX_DIFF_LINES_PER_FILE + 1} lines truncated) @@` },
+        ]
+      : combinedHunks
     const merged: DiffFile = {
       path: stats.path,
       adds: (previous?.adds ?? 0) + stats.adds,
       dels: (previous?.dels ?? 0) + stats.dels,
-      isNew: previous?.isNew ?? (stats.isNew || name.toLowerCase().endsWith('writefile')),
-      hunks: [...(previous?.hunks ?? []), ...hunk],
+      isNew: previous?.isNew ?? (stats.isNew || normalizeToolName(name) === 'writefile'),
+      hunks: boundedHunks,
       turn: this.turnCount,
     }
     this.changes.set(stats.path, merged)
@@ -4673,7 +6995,11 @@ export class Store {
   }
 
   private pushLog(type: string, payload: Readonly<Record<string, unknown>>): void {
-    this.logRing = [...this.logRing, { id: this.seq++, turn: this.turnCount, type, summary: summarize(type, payload) }].slice(-LOG_CAP)
+    this.logRing.push({ id: this.seq++, turn: this.turnCount, type, summary: summarize(type, payload) })
+    if (this.logRing.length > LOG_CAP) {
+      this.logRing.splice(0, this.logRing.length - LOG_CAP)
+    }
+    this.logDirty = true
   }
 
   /**
@@ -4699,8 +7025,16 @@ export class Store {
     this.resetInFlightRequests()
     this.queue = []
     this.changes.clear()
+    this.foldedToolIds.clear()
     this.turnStartTotals = { adds: 0, dels: 0 }
     this.logRing = []
+    this.logView = []
+    this.logDirty = false
+    if (this.swarmInspectTimer) {
+      clearTimeout(this.swarmInspectTimer)
+      this.swarmInspectTimer = null
+    }
+    this.lastSwarmInspectAt = 0
     this.planState = null
     this.failure = null
     this.turnCount = 0
@@ -4710,6 +7044,13 @@ export class Store {
     this.ttftTotalMs = 0
     this.ttftSamples = 0
     this.activeMetricTools.clear()
+    // Bound cross-session preview snippet cache so long desktop lifetimes stay lean.
+    const snippetKeys = Object.keys(this.snippets)
+    if (snippetKeys.length > SNIPPET_MAP_CAP) {
+      const keep: Record<string, string> = {}
+      for (const key of snippetKeys.slice(-SNIPPET_MAP_CAP)) keep[key] = this.snippets[key]!
+      this.snippets = keep
+    }
     // Agent bookkeeping belongs to the session that spawned it. Only turn_begin
     // used to clear these, so a session left with a still-working subagent
     // carried its members into the next session: the fleet poll kept running
@@ -4735,12 +7076,14 @@ export class Store {
       queue: this.queue,
       changes: [],
       changesKept: false,
-      log: this.logRing,
+      log: this.logView,
       plan: null,
       todos: null,
       failed: null,
       turnCount: 0,
       turnFailed: false,
+      turnSeconds: 0,
+      turnStartedAt: null,
       ttftMs: null,
       tokensPerSecond: null,
       llmDurationMs: 0,
@@ -4756,29 +7099,44 @@ export class Store {
       cacheWriteTokens: null,
       skillSuggestions: [],
       creatorTrace: [],
+      swarm: null,
+      swarmMessages: [],
+      swarmInspect: null,
+      swarmInspectTarget: '',
+      swarmLoading: false,
+      swarmError: null,
+      swarmOpen: false,
+      sideQuestionTurns: [],
+      sideQuestionStreaming: false,
+      sideQuestionError: null,
+      sideQuestionOpen: false,
+      acpBinding: null,
+      acpConnecting: false,
+      acpError: null,
       tab: 'activity',
     })
   }
 
-  private setMetricPhase(phase: 'llm' | 'tool'): void {
-    if (this.frame.metricPhase === phase) return
-    this.patch({ metricPhase: phase, metricPhaseStartedAt: Date.now() })
+  private setMetricPhase(phase: 'llm' | 'tool', soft = false): void {
+    const current = this.getSnapshot()
+    if (current.metricPhase === phase) return
+    const update = { metricPhase: phase, metricPhaseStartedAt: Date.now() }
+    if (soft) this.patchSoft(update)
+    else this.patch(update)
   }
 
   private startTurn(): void {
     this.activeMetricTools.clear()
+    this.stopTick()
+    const now = Date.now()
     this.patch({
       turnActive: true, networkRetrying: false,
       turnFailed: false,
       turnSeconds: 0,
+      turnStartedAt: now,
       metricPhase: 'llm',
-      metricPhaseStartedAt: Date.now(),
+      metricPhaseStartedAt: now,
     })
-    if (!this.tick) {
-      this.tick = setInterval(() => {
-        this.patch({ turnSeconds: this.frame.turnSeconds + 1 })
-      }, 1000)
-    }
   }
 
   private stopTick(): void {
@@ -4794,20 +7152,27 @@ export class Store {
       this.wentOffline(error)
       return
     }
-    this.patch({ error: message })
     this.builder.push('notification', { severity: 'error', message })
-    this.notify()
+    this.patch({ error: message })
   }
 
   // ── Snapshot plumbing ────────────────────────────────────────────────
 
-  private patch(merge: Partial<Snapshot> | Record<string, unknown>): void {
+  private materializeFrame(): Snapshot {
     const before = this.frame
+    const merge = this.pendingPatch
+    this.pendingPatch = null
+    this.frameDirty = false
+    if (this.logDirty) {
+      this.logView = this.logRing.slice()
+      this.logDirty = false
+    }
+    const nextTurnActive = merge && typeof merge.turnActive === 'boolean' ? merge.turnActive : before.turnActive
     this.frame = this.frozen({
-      ...this.frame,
-      ...merge,
-      blocks: this.builder.snapshot(this.frame.turnActive),
-      log: this.logRing,
+      ...before,
+      ...(merge ?? {}),
+      blocks: this.builder.snapshot(nextTurnActive),
+      log: this.logView,
       turnCount: this.turnCount,
       snippets: this.snippets,
     })
@@ -4822,21 +7187,31 @@ export class Store {
         }, Math.max(0, pending.autoAcceptAt - Date.now()))
       }
     }
-    if ('currentId' in merge || 'cwd' in merge) rememberSession((this.frame.storageScope ?? '') + this.frame.cwd, this.frame.currentId)
-    // Structural change (connection, approval, tab, session): render now.
-    // Only the per-token streaming path below is allowed to wait a frame.
+    if (merge && ('currentId' in merge || 'cwd' in merge)) {
+      rememberSession((this.frame.storageScope ?? '') + this.frame.cwd, this.frame.currentId)
+    }
+    return this.frame
+  }
+
+  private patch(merge: Partial<Snapshot> | Record<string, unknown>): void {
+    this.pendingPatch = this.pendingPatch ? { ...this.pendingPatch, ...merge } : { ...merge }
+    this.frameDirty = true
+    this.materializeFrame()
+    // Structural change (connection, approval, tab, session, terminal events): render now.
+    // Only the per-token / high-frequency streaming path below waits for the next frame.
     this.emit(true)
   }
 
+  /** Coalesced state update for high-frequency streaming deltas (`btw_event`, `member_activity`, `subagent_event`, metrics). */
+  private patchSoft(merge: Partial<Snapshot> | Record<string, unknown>): void {
+    this.pendingPatch = this.pendingPatch ? { ...this.pendingPatch, ...merge } : { ...merge }
+    this.frameDirty = true
+    this.emit(false)
+  }
+
   private notify(): void {
-    this.frame = this.frozen({
-      ...this.frame,
-      blocks: this.builder.snapshot(this.frame.turnActive),
-      log: this.logRing,
-      turnCount: this.turnCount,
-      snippets: this.snippets,
-    })
-    this.emit()
+    this.frameDirty = true
+    this.emit(false)
   }
 
   private frozen(value: Snapshot | Record<string, unknown>): Snapshot {
@@ -4844,42 +7219,71 @@ export class Store {
   }
 
   /**
-   * Coalesce notifications to one per frame.
+   * Coalesce streaming notifications onto frame boundaries (max ~20/s when
+   * visible, ~4/s when hidden/occluded) with lazy snapshot materialization.
    *
-   * `text_part` and `think_part` arrive per token and each one used to run
-   * a full snapshot rebuild and a synchronous re-render of the whole Shell,
-   * because the snapshot is one object read through `useSyncExternalStore`.
-   * A fast model made the window spend its time re-rendering the sidebar
-   * and the rail to add a word to the transcript.
-   *
-   * The snapshot itself is still rebuilt eagerly, so `getSnapshot()` is
-   * always current for anything that reads it synchronously; only the
-   * listener fan-out waits for the next frame. A pending frame is flushed
-   * immediately on any event that changes more than the streaming tail.
+   * `getSnapshot()` materializes lazily on demand so synchronous readers always
+   * see current state, while bursts of 50–200 incoming tokens execute only one
+   * `BlockBuilder.snapshot()` + `Object.freeze()` + React render per frame.
+   * Terminal/structural events (`turn_end`, `turn_begin`, `error`, `user_send`,
+   * approvals) call `emit(true)` to flush immediately.
    */
   private emitScheduled: ReturnType<typeof setTimeout> | null = null
+  private emitRafId: number | null = null
+  private emitToken = 0
   private lastEmitAt = 0
+
+  private cancelScheduledEmit(): void {
+    this.emitToken += 1
+    if (this.emitScheduled !== null) {
+      clearTimeout(this.emitScheduled)
+      this.emitScheduled = null
+    }
+    if (this.emitRafId !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.emitRafId)
+      this.emitRafId = null
+    }
+  }
 
   private emit(immediate = false): void {
     if (immediate) {
-      if (this.emitScheduled !== null) { clearTimeout(this.emitScheduled); this.emitScheduled = null }
+      this.cancelScheduledEmit()
+      if (this.frameDirty) this.materializeFrame()
       this.lastEmitAt = Date.now()
       for (const listener of this.listeners) listener()
       return
     }
-    if (this.emitScheduled !== null) return
-    // No frames outside a page (tests, SSR): nothing to pace against.
-    if (typeof requestAnimationFrame !== 'function') { for (const listener of this.listeners) listener(); return }
-    // At most one routine update per STREAM_FRAME_MS. Once per animation
-    // frame was 120 full re-renders a second on a ProMotion display while a
-    // reply streamed (each re-parsing the growing Markdown) — the renderer
-    // and GPU spikes behind "Using Significant Energy". Text still reads as
-    // live at 20 updates a second; anything urgent emits immediately.
-    const wait = Math.max(0, STREAM_FRAME_MS - (Date.now() - this.lastEmitAt))
-    this.emitScheduled = setTimeout(() => {
-      this.emitScheduled = null
+    if (this.emitScheduled !== null || this.emitRafId !== null) return
+    // No frames outside a page (headless tests, SSR): stay synchronous and deterministic.
+    if (typeof requestAnimationFrame !== 'function') {
+      if (this.frameDirty) this.materializeFrame()
       this.lastEmitAt = Date.now()
       for (const listener of this.listeners) listener()
+      return
+    }
+    const frameMs = pageIsBackground() ? BACKGROUND_STREAM_FRAME_MS : STREAM_FRAME_MS
+    const wait = Math.max(0, frameMs - (Date.now() - this.lastEmitAt))
+    const token = ++this.emitToken
+    const dispatch = (): void => {
+      if (token !== this.emitToken) return
+      this.emitScheduled = null
+      this.emitRafId = null
+      if (this.frameDirty) this.materializeFrame()
+      this.lastEmitAt = Date.now()
+      for (const listener of this.listeners) listener()
+    }
+    if (wait === 0 && !pageIsBackground()) {
+      this.emitRafId = requestAnimationFrame(dispatch)
+      return
+    }
+    this.emitScheduled = setTimeout(() => {
+      if (token !== this.emitToken) return
+      this.emitScheduled = null
+      if (!pageIsBackground() && typeof requestAnimationFrame === 'function') {
+        this.emitRafId = requestAnimationFrame(dispatch)
+      } else {
+        dispatch()
+      }
     }, wait)
   }
 }
@@ -4897,6 +7301,9 @@ export interface XerxesLike {
   /** Present on the real preload bridge; test bridges may omit it. */
   chooseWorkspace?(): Promise<unknown>
   getWorkspaceDirectories?(): Promise<string[]>
+  removeWorkspace?(dir: string): Promise<string[]>
+  restoreWorkspace?(dir: string): Promise<string[]>
+  remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
   openWorkspaceWindow?(dir?: string, resumeSessionId?: string, options?: { fresh?: boolean; existingOnly?: boolean; agentPreset?: string }): Promise<unknown>
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   getWorkspace?(): Promise<string | null>

@@ -53,11 +53,10 @@ const REMOTE_GOAL_ROUND_RECHECK_MS = 20_000
 
 interface Waiter {
   method: string
+  startedAt: number
   resolve: (value: Record<string, unknown>) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
-  /** Restart the deadline: the runtime just showed it is alive and working. */
-  rearm: () => void
 }
 
 export interface DaemonRpcOptions {
@@ -67,6 +66,8 @@ export interface DaemonRpcOptions {
   socketPath?: string
   /** Injectable startup boundary for deterministic desktop transport tests. */
   launch?: typeof launchDaemon
+  /** Injectable process-liveness port for deterministic legacy-daemon migration tests. */
+  isProcessAlive?: (pid: number) => boolean
   startupTimeoutMs?: number
   /** `force` is the person's confirmed "restart now": running work on the host stops. */
   remoteUpdate?: (force: boolean) => Promise<Record<string, unknown>>
@@ -87,6 +88,8 @@ export class DaemonRpc extends EventEmitter {
   private buffer = ''
   private seq = 1
   private readonly waiters = new Map<number, Waiter>()
+  private initializeWaiters = 0
+  private lastActivityAt = 0
   private connecting: Promise<void> | null = null
   private retryTimer: NodeJS.Timeout | null = null
   private retries = 0
@@ -102,12 +105,14 @@ export class DaemonRpc extends EventEmitter {
   private writeTail: Promise<void> = Promise.resolve()
   private launchedProcess: ChildProcess | null = null
   private readonly launch: typeof launchDaemon
+  private readonly isProcessAlive: ((pid: number) => boolean) | undefined
   private readonly startupTimeoutMs: number
   private readonly remoteUpdate: DaemonRpcOptions['remoteUpdate']
   private readonly expectedRemoteBuildId: DaemonRpcOptions['expectedRemoteBuildId']
   private readonly providerRelay: DaemonRpcOptions['providerRelay']
   private privateRelayCalls = 0
   private remoteBusy: { result: Record<string, unknown>; until: number } | undefined
+  private readonly silentSockets = new WeakSet<Socket>()
 
   constructor(options: DaemonRpcOptions = {}) {
     super()
@@ -120,6 +125,7 @@ export class DaemonRpc extends EventEmitter {
     this.env = options.env ?? process.env
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS
     this.launch = options.launch ?? launchDaemon
+    this.isProcessAlive = options.isProcessAlive
     this.startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS)
   }
 
@@ -284,7 +290,10 @@ export class DaemonRpc extends EventEmitter {
     const socket = this.socket
     this.socket = null
     socket?.destroy()
+    this.buffer = ''
+    this.stderrRing = []
     this.failWaiters(new Error('connection disposed'))
+    this.removeAllListeners()
   }
 
   // ── Connection ───────────────────────────────────────────────────────
@@ -317,18 +326,29 @@ export class DaemonRpc extends EventEmitter {
         this.silentCloses = 0
         if (!await this.tryAttach(replacement)) throw new Error('SSH reconnected but the remote runtime is unavailable. Retry the connection.')
       }
+      this.lifecycle.signal.throwIfAborted()
       this.announce(true); return
     }
     // Keep existing project work attached until its old runtime exits.
     const legacy = legacyProjectDaemonPaths(this.projectDir, this.env).socketPath
     if (!this.env.XERXES_DAEMON_SOCKET && (process.platform === 'win32' || existsSync(legacy)) && await this.tryAttach(legacy)) {
-      if (!await releaseIdleProjectDaemon((method, params) => this.send(method, params ?? {}))) {
+      let released = false
+      try {
+        released = await releaseIdleProjectDaemon((method, params) => this.send(method, params ?? {}), this.isProcessAlive)
+      } catch (error) {
+        this.detachSilently()
+        throw error
+      }
+      if (!released) {
+        if (this.stopped) { this.detachSilently(); throw new Error('daemon rpc disposed') }
         this.announce(true)
         return
       }
+      this.detachSilently()
     }
     const { socketPath, pidPath } = daemonAddress(this.projectDir, this.env)
     if (await this.tryAttach(socketPath)) {
+      if (this.stopped) { this.detachSilently(); throw new Error('daemon rpc disposed') }
       this.announce(true)
       return
     }
@@ -367,21 +387,34 @@ export class DaemonRpc extends EventEmitter {
     )
   }
 
+  private detachSilently(): void {
+    const sock = this.socket
+    if (!sock) return
+    this.silentSockets.add(sock)
+    this.socket = null
+    sock.destroy()
+  }
+
   private tryAttach(socketPath: string): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(false)
     return new Promise<boolean>(resolveAttach => {
       const sock = new Socket()
       let done = false
+      const onAbort = (): void => settle(false)
       const settle = (outcome: boolean): void => {
         if (done) return
         done = true
         clearTimeout(guard)
-        if (outcome) this.attach(sock)
+        this.lifecycle.signal.removeEventListener('abort', onAbort)
+        const accepted = outcome && !this.stopped
+        if (accepted) this.attach(sock)
         else sock.destroy()
         // Resolve on EVERY path; an unresolved promise once parked startup
         // forever when a socket file existed but never answered.
-        resolveAttach(outcome)
+        resolveAttach(accepted)
       }
       const guard = setTimeout(() => settle(false), CONNECT_TIMEOUT_MS)
+      this.lifecycle.signal.addEventListener('abort', onAbort, { once: true })
       sock.on('error', () => settle(false))
       sock.once('connect', () => settle(true))
       try { sock.connect({ path: socketPath }) } catch { settle(false) }
@@ -394,6 +427,8 @@ export class DaemonRpc extends EventEmitter {
     this.buffer = ''
     this.attachedAt = Date.now()
     this.heardSinceAttach = false
+    // Up to 16 concurrent provider.remote.request streams register once('close') alongside attach().
+    sock.setMaxListeners(32)
     sock.setEncoding('utf8')
     sock.on('data', (chunk: string) => this.onData(chunk))
     sock.on('error', error => this.emit('protocol_error', { message: String((error as Error).message ?? error) }))
@@ -401,7 +436,7 @@ export class DaemonRpc extends EventEmitter {
       if (this.socket !== sock) return
       this.socket = null
       this.failWaiters(new Error('connection closed'))
-      if (this.stopped) return
+      if (this.stopped || this.silentSockets.has(sock)) return
       // A remote update restarts the host's daemon, so the tunnel goes silent
       // on purpose; rebuilding it then would race the update's own bootstrap
       // and, by replacing the connection, cancel that update mid-flight.
@@ -434,25 +469,47 @@ export class DaemonRpc extends EventEmitter {
 
   // ── Framing ──────────────────────────────────────────────────────────
 
+  private exceedsFrameLimit(text: string): boolean {
+    if (text.length > MAX_FRAME_BYTES) return true
+    if (text.length * 3 <= MAX_FRAME_BYTES) return false
+    return Buffer.byteLength(text, 'utf8') > MAX_FRAME_BYTES
+  }
+
   private onData(chunk: string): void {
     if (!this.heardSinceAttach) {
       this.heardSinceAttach = true
       this.retries = 0
       this.silentCloses = 0
     }
-    this.buffer += chunk
-    let nl = this.buffer.indexOf('\n')
+    this.buffer = this.buffer.length === 0 ? chunk : this.buffer + chunk
+    let start = 0
+    let nl = this.buffer.indexOf('\n', start)
     while (nl !== -1) {
-      const line = this.buffer.slice(0, nl)
-      this.buffer = this.buffer.slice(nl + 1)
-      if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
+      const line = this.buffer.slice(start, nl)
+      start = nl + 1
+      if (this.exceedsFrameLimit(line)) {
         this.breakOversized()
         return
       }
       if (line.trim()) this.onFrame(line)
-      nl = this.buffer.indexOf('\n')
+      if (this.stopped) {
+        this.buffer = ''
+        return
+      }
+      nl = this.buffer.indexOf('\n', start)
     }
-    if (Buffer.byteLength(this.buffer, 'utf8') > MAX_FRAME_BYTES) this.breakOversized()
+    if (start > 0) {
+      if (start >= this.buffer.length) {
+        this.buffer = ''
+      } else {
+        const remainder = this.buffer.slice(start)
+        // Detach small trailing fragments from large multi-KB/MB chunks so V8 does not pin the parent buffer.
+        this.buffer = this.buffer.length > 65_536 && remainder.length < 4_096
+          ? Buffer.from(remainder, 'utf8').toString('utf8')
+          : remainder
+      }
+    }
+    if (this.exceedsFrameLimit(this.buffer)) this.breakOversized()
   }
 
   private breakOversized(): void {
@@ -487,6 +544,7 @@ export class DaemonRpc extends EventEmitter {
       const waiter = this.waiters.get(Number(frame.id))
       if (!waiter) return
       this.waiters.delete(Number(frame.id))
+      if (waiter.method === 'initialize') this.initializeWaiters = Math.max(0, this.initializeWaiters - 1)
       clearTimeout(waiter.timer)
       if (frame.error && typeof frame.error === 'object') {
         const err = frame.error as Record<string, unknown>
@@ -544,13 +602,11 @@ export class DaemonRpc extends EventEmitter {
       // history notifications travel over a separate Electron IPC channel and
       // can arrive after that response, duplicating already hydrated messages.
       // Slash-command replay outside initialization remains available.
-      if (type === 'notification' && payload.category === 'history'
-        && [...this.waiters.values()].some(waiter => waiter.method === 'initialize')) return
-      // The deadline is for a runtime that went quiet. One still sending
-      // events — a compaction reporting "summary request 2…" — is working
-      // on the call; a multi-minute /compact used to fail at 120 s and drop
-      // the connection, which cancelled the compaction it was waiting for.
-      for (const waiter of this.waiters.values()) waiter.rearm()
+      if (type === 'notification' && payload.category === 'history' && this.initializeWaiters > 0) return
+      // The deadline is for a runtime that went quiet. Record activity in O(1)
+      // without recreating timers on every streaming frame; expire() extends the
+      // deadline lazily if the runtime was active within deadlineMs.
+      this.lastActivityAt = Date.now()
       this.emit('event', type, payload)
       return
     }
@@ -565,21 +621,32 @@ export class DaemonRpc extends EventEmitter {
     const id = this.seq++
     const frame = `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`
     return new Promise<T>((resolveCall, rejectCall) => {
+      const startedAt = Date.now()
       const expire = () => {
-        this.waiters.delete(id)
+        const lastAlive = Math.max(waiter.startedAt, this.lastActivityAt)
+        const remaining = this.deadlineMs - (Date.now() - lastAlive)
+        if (remaining > 0) {
+          waiter.timer = setTimeout(expire, remaining)
+          return
+        }
+        if (this.waiters.delete(id) && waiter.method === 'initialize') {
+          this.initializeWaiters = Math.max(0, this.initializeWaiters - 1)
+        }
         rejectCall(new Error(`rpc timeout: ${method} (${this.deadlineMs}ms)`))
       }
       const waiter: Waiter = {
         method,
+        startedAt,
         resolve: resolveCall as (value: Record<string, unknown>) => void,
         reject: rejectCall,
         timer: setTimeout(expire, this.deadlineMs),
-        rearm: () => { clearTimeout(waiter.timer); waiter.timer = setTimeout(expire, this.deadlineMs) },
       }
       this.waiters.set(id, waiter)
+      if (method === 'initialize') this.initializeWaiters += 1
       this.write(sock, frame).catch(error => {
         clearTimeout(waiter.timer)
         if (this.waiters.delete(id)) {
+          if (method === 'initialize') this.initializeWaiters = Math.max(0, this.initializeWaiters - 1)
           rejectCall(error instanceof Error ? error : new Error(String(error)))
         }
       })
@@ -603,6 +670,7 @@ export class DaemonRpc extends EventEmitter {
   }
 
   private failWaiters(error: Error): void {
+    this.initializeWaiters = 0
     for (const [, waiter] of this.waiters) {
       clearTimeout(waiter.timer)
       waiter.reject(error)

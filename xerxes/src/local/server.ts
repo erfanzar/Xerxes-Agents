@@ -15,7 +15,7 @@
  */
 import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
-import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { basename, dirname, join } from 'node:path'
 
@@ -228,7 +228,11 @@ export async function readLogTail(path: string, bytes = LOG_TAIL_BYTES): Promise
     const length = Math.min(size, bytes)
     const buffer = Buffer.alloc(length)
     await handle.read(buffer, 0, length, size - length)
-    return buffer.toString('utf8').trim()
+    let start = 0
+    if (size > length) {
+      while (start < length && (buffer[start]! & 0xc0) === 0x80) start += 1
+    }
+    return buffer.subarray(start).toString('utf8').trim()
   } finally {
     await handle.close()
   }
@@ -281,7 +285,14 @@ export function createLocalServer(ports: ServerPorts, options: LocalServerOption
 
   async function writeState(state: LocalServerState): Promise<void> {
     await mkdir(stateDir, { recursive: true, mode: 0o700 })
-    await writeFile(statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
+    const temporary = `${statePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
+      await rename(temporary, statePath)
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   const removeState = (): Promise<void> => rm(statePath, { force: true })

@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { HubHttp } from './api.js'
+
 /**
  * Pairing flow. The QR code carries the one-time secret in the URL fragment,
  * which browsers never send to a server. `takePairingFragment` reads it and
@@ -67,7 +69,7 @@ export function pairingAwait(storage: PairStorage | undefined, now: number): { r
     const value = JSON.parse(text) as unknown
     if (typeof value !== 'object' || value === null) return undefined
     const record = value as Record<string, unknown>
-    if (typeof record.until !== 'number' || record.until <= now) {
+    if (typeof record.until !== 'number' || !Number.isFinite(record.until) || record.until <= now) {
       forgetPairingAwait(storage)
       return undefined
     }
@@ -186,5 +188,88 @@ export function reducePair(state: PairState, action: PairAction): PairState {
     case 'confirmed': return state.phase === 'waiting' ? { phase: 'paired' } : state
     case 'expired': return state.phase === 'waiting' ? { phase: 'timeout', ...comparisonOf(state) } : state
     case 'retry': return state.phase === 'unavailable' ? { phase: 'submitting', ...comparisonOf(state) } : state
+  }
+}
+
+export interface PairingSessionOptions {
+  readonly read: PairingRead
+  readonly consumed: { current: boolean }
+  readonly http: Pick<HubHttp, 'consumePairing' | 'refresh'>
+  readonly deviceLabel: string
+  readonly storage: PairStorage | undefined
+  readonly dispatch: (action: PairAction) => void
+  readonly onPaired: () => void
+  readonly pollMs?: number | undefined
+  readonly maxWaitMs?: number | undefined
+  readonly now?: (() => number) | undefined
+}
+
+const DEFAULT_PAIR_POLL_MS = 2_000
+const DEFAULT_PAIR_MAX_WAIT_MS = 5 * 60_000
+
+/**
+ * Drive one pairing attempt: consume a fresh one-time secret at most once across
+ * remounts/retries, then poll `refresh()` until confirmed, rejected, expired, or
+ * cancelled. Returns an idempotent cancel function that also clears any active timer.
+ */
+export function startPairingSession(options: PairingSessionOptions): () => void {
+  const { read, consumed, http, deviceLabel, storage, dispatch, onPaired } = options
+  if (read.kind !== 'found' && read.kind !== 'resume') return () => undefined
+  const now = options.now ?? Date.now
+  const pollMs = options.pollMs ?? DEFAULT_PAIR_POLL_MS
+  const maxWait = options.maxWaitMs ?? DEFAULT_PAIR_MAX_WAIT_MS
+  let cancelled = false
+  let pollTimer: ReturnType<typeof setTimeout> | undefined
+  let wakePoll: (() => void) | undefined
+
+  const paired = (): void => {
+    forgetPairingAwait(storage)
+    dispatch({ type: 'confirmed' })
+    onPaired()
+  }
+
+  void (async () => {
+    if (read.kind === 'found' && !consumed.current) {
+      const fragment = read.fragment
+      const outcome = await http.consumePairing({ pairing_id: fragment.pairingId, code: fragment.code, device_label: deviceLabel })
+      if (cancelled) return
+      if (outcome.status === 'rejected') { dispatch({ type: 'rejected', message: outcome.message }); return }
+      if (outcome.status === 'unavailable') { dispatch({ type: 'unavailable', message: outcome.message }); return }
+      consumed.current = true
+      dispatch(outcome.comparisonCode === undefined ? { type: 'accepted' } : { type: 'accepted', comparison: outcome.comparisonCode })
+      if (outcome.active) {
+        paired()
+        return
+      }
+      rememberPairingAwait(storage, now(), outcome.comparisonCode ?? fragment.comparison)
+    }
+    const started = now()
+    while (!cancelled) {
+      const refreshed = await http.refresh()
+      if (cancelled) return
+      if (refreshed.status === 'ok') { paired(); return }
+      if (refreshed.status === 'denied') {
+        forgetPairingAwait(storage)
+        dispatch({ type: 'rejected', message: 'The desktop did not accept this phone, or the pairing expired. Create a new pairing code and scan it again.' })
+        return
+      }
+      if (now() - started > maxWait) { forgetPairingAwait(storage); dispatch({ type: 'expired' }); return }
+      await new Promise<void>(resolve => {
+        wakePoll = resolve
+        pollTimer = setTimeout(() => {
+          pollTimer = undefined
+          wakePoll = undefined
+          resolve()
+        }, pollMs)
+      })
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    if (pollTimer !== undefined) clearTimeout(pollTimer)
+    pollTimer = undefined
+    wakePoll?.()
+    wakePoll = undefined
   }
 }

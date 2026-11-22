@@ -146,6 +146,7 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
   })
   expect(definitions.get('reviewer')?.allowedTools).toEqual([
     'ReadFile',
+    'FileOutlineTool',
     'GlobTool',
     'GrepTool',
     'ListDir',

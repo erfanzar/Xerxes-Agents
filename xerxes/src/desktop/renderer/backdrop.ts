@@ -384,23 +384,27 @@ export function dominantVivid(pixels: readonly Rgb[]): Rgb {
  */
 export async function backdropFromImage(file: Blob): Promise<Extract<Backdrop, { kind: 'image' }>> {
   const bitmap = await createImageBitmap(file)
-  const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height))
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale))
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale))
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('This window cannot read images.')
-  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-  const src = canvas.toDataURL('image/jpeg', 0.82)
-  const sample = document.createElement('canvas')
-  sample.width = 24
-  sample.height = 24
-  const sampleContext = sample.getContext('2d')!
-  sampleContext.drawImage(bitmap, 0, 0, 24, 24)
-  const data = sampleContext.getImageData(0, 0, 24, 24).data
-  const pixels: Rgb[] = []
-  for (let i = 0; i < data.length; i += 4) pixels.push([data[i]!, data[i + 1]!, data[i + 2]!])
-  const average = (list: Rgb[]): Rgb => list.reduce<Rgb>((sum, p) => [sum[0] + p[0] / list.length, sum[1] + p[1] / list.length, sum[2] + p[2] / list.length], [0, 0, 0])
-  const half = pixels.length / 2
-  return { kind: 'image', src, from: toHex(average(pixels.slice(0, half))), to: toHex(average(pixels.slice(half))), accent: toHex(dominantVivid(pixels)) }
+  try {
+    const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('This window cannot read images.')
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    const src = canvas.toDataURL('image/jpeg', 0.82)
+    const sample = document.createElement('canvas')
+    sample.width = 24
+    sample.height = 24
+    const sampleContext = sample.getContext('2d')!
+    sampleContext.drawImage(bitmap, 0, 0, 24, 24)
+    const data = sampleContext.getImageData(0, 0, 24, 24).data
+    const pixels: Rgb[] = []
+    for (let i = 0; i < data.length; i += 4) pixels.push([data[i]!, data[i + 1]!, data[i + 2]!])
+    const average = (list: Rgb[]): Rgb => list.reduce<Rgb>((sum, p) => [sum[0] + p[0] / list.length, sum[1] + p[1] / list.length, sum[2] + p[2] / list.length], [0, 0, 0])
+    const half = pixels.length / 2
+    return { kind: 'image', src, from: toHex(average(pixels.slice(0, half))), to: toHex(average(pixels.slice(half))), accent: toHex(dominantVivid(pixels)) }
+  } finally {
+    bitmap.close?.()
+  }
 }

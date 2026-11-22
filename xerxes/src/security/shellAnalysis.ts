@@ -67,8 +67,14 @@ const UNRESOLVABLE_BUILTINS: ReadonlySet<string> = new Set(['eval', 'source', '.
 
 /** Binaries whose every invocation is read-only regardless of arguments. */
 const ALWAYS_READ_ONLY: ReadonlySet<string> = new Set([
-  'echo', 'printf', 'pwd', 'whoami', 'hostname', 'id', 'groups', 'locale', 'uptime', 'uname', 'wc', 'which', 'type',
-  'df', 'du', 'free', 'basename', 'dirname', 'nproc', 'arch', 'sw_vers', 'true', 'false',
+  'echo', 'pwd', 'whoami', 'id', 'groups', 'locale', 'uptime', 'uname', 'wc', 'which', 'type',
+  'df', 'du', 'free', 'basename', 'dirname', 'nproc', 'sw_vers', 'true', 'false',
+])
+
+/** Read-only query flags for `hostname`; any positional operand or `-F`/`-b` mutates the host name. */
+const HOSTNAME_READ_ONLY_FLAGS: ReadonlySet<string> = new Set([
+  '-a', '--alias', '-d', '--domain', '-f', '--fqdn', '--long', '-i', '--ip-address', '-I', '--all-ip-addresses',
+  '-s', '--short',
 ])
 
 /** `--version`-only binaries: their real modes compile, install, or execute code. */
@@ -179,7 +185,8 @@ const FLAG_GUARDED_BINARIES: ReadonlySet<string> = new Set([
 /** Binaries this module knows how to reason about; anything else is unsafe by default. */
 const KNOWN_BINARIES: ReadonlySet<string> = new Set([
   ...ALWAYS_READ_ONLY, ...VERSION_ONLY, ...FLAG_GUARDED_BINARIES,
-  'cd', 'top', 'git', 'gh', 'docker', 'python', 'python3', 'pip', 'pip3', 'cargo', 'npm', 'pnpm', 'yarn', 'bun', 'go',
+  'printf', 'hostname', 'arch', 'cd', 'top', 'git', 'gh', 'docker', 'python', 'python3', 'pip', 'pip3', 'cargo',
+  'npm', 'pnpm', 'yarn', 'bun', 'go',
 ])
 
 interface Token {
@@ -236,12 +243,17 @@ export function isReadOnlyShellCommand(command: string): boolean {
 export function isReadOnlyInvocation(executable: string, args: readonly string[]): boolean {
   const binary = executable.toLowerCase()
   if (ALWAYS_READ_ONLY.has(binary)) return true
+  // On macOS `/usr/bin/arch` with operands is an execution wrapper (`arch -arm64 cmd ...`
+  // or `arch version`), so only a bare architecture query is read-only.
+  if (binary === 'arch') return args.length === 0 || (args.length === 1 && args[0] === '--version')
+  if (binary === 'printf') return !hasPrintfVariableTarget(args)
   if (isVersionProbe(args)) return VERSION_ONLY.has(binary) || KNOWN_BINARIES.has(binary)
   if (VERSION_ONLY.has(binary)) return false
+  if (binary === 'hostname') return args.every(argument => HOSTNAME_READ_ONLY_FLAGS.has(argument))
 
   if (FLAG_GUARDED_BINARIES.has(binary)) {
     const forbidden = FORBIDDEN_ARG_PREFIXES.get(binary) ?? []
-    return !args.some(argument => forbidden.some(prefix => argument === prefix || argument.startsWith(`${prefix}=`)))
+    return !args.some(argument => forbidden.some(prefix => matchesForbiddenPrefix(binary, argument, prefix)))
   }
   if (binary === 'cd') return args.filter(argument => argument !== '--').length <= 1
   if (binary === 'top') return args.every(argument => ['-l', '-n', '-b'].includes(argument) || /^\d+$/.test(argument))
@@ -258,6 +270,23 @@ export function isReadOnlyInvocation(executable: string, args: readonly string[]
   return false
 }
 
+function hasPrintfVariableTarget(args: readonly string[]): boolean {
+  for (const argument of args) {
+    if (argument === '--') return false
+    // `printf -v VAR ...` mutates shell variables in place without `=` or `$`.
+    if (argument === '-v' || argument.startsWith('-v')) return true
+    if (!argument.startsWith('-')) return false
+  }
+  return false
+}
+
+function matchesForbiddenPrefix(binary: string, argument: string, prefix: string): boolean {
+  if (argument === prefix || argument.startsWith(`${prefix}=`)) return true
+  // Short getopt/clap options (`fd -xrm`, `tree -oout.txt`, `date -s...`, `file -C...`)
+  // accept attached values with no `=`; `find` uses full single-dash predicates instead.
+  return binary !== 'find' && prefix.length === 2 && prefix.startsWith('-') && prefix[1] !== '-' && argument.startsWith(prefix)
+}
+
 function isPackageQuery(args: readonly string[]): boolean {
   return PACKAGE_MANAGER_READ_ONLY.has(args[0] ?? '')
 }
@@ -268,7 +297,7 @@ function isVersionProbe(args: readonly string[]): boolean {
 
 function isReadOnlyGit(args: readonly string[]): boolean {
   if (args.length === 0) return true
-  if (args.some(argument => GIT_FORBIDDEN_FLAGS.some(flag => argument === flag || argument.startsWith(`${flag}=`)))) {
+  if (args.some(isForbiddenGitFlag)) {
     return false
   }
   const subcommand = args[0] ?? ''
@@ -282,10 +311,28 @@ function isReadOnlyGit(args: readonly string[]): boolean {
     return args.slice(1).every(argument => argument === '-v' || argument === '--verbose')
   }
   if (subcommand === 'branch') {
-    // A bare operand is a branch name to create; a write flag renames or deletes.
-    return args.slice(1).every(argument => argument.startsWith('-') && !GIT_WRITE_FLAGS.has(argument))
+    // A bare operand is a branch name to create; a write flag renames, deletes, or rewrites upstream config.
+    return args.slice(1).every(argument => argument.startsWith('-') && !isGitBranchWriteFlag(argument))
   }
   return true
+}
+
+function isForbiddenGitFlag(argument: string): boolean {
+  return GIT_FORBIDDEN_FLAGS.some(flag => (
+    argument === flag
+    || argument.startsWith(`${flag}=`)
+    // Git accepts attached operands on `-c<key>=<val>` and `-f` without `=`.
+    || (flag.length === 2 && flag.startsWith('-') && flag[1] !== '-' && argument.startsWith(flag))
+  ))
+}
+
+function isGitBranchWriteFlag(argument: string): boolean {
+  if (GIT_WRITE_FLAGS.has(argument)) return true
+  if (argument.startsWith('--')) {
+    return [...GIT_WRITE_FLAGS].some(flag => flag.startsWith('--') && argument.startsWith(`${flag}=`))
+  }
+  // Glued (`-Dtopic`, `-mnew`, `-uorigin/main`) or bundled (`-aD`, `-rd`) short write flags.
+  return /^-[dDmMcCu]/.test(argument) || /^-[arvl]+[dDmMcCu]/.test(argument)
 }
 
 function isReadOnlyGh(args: readonly string[]): boolean {

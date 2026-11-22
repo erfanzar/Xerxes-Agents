@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+
 import { type OAuthFetch } from '../mcp/oauth.js'
-// Licensed under the Apache License, Version 2.0.
 
 /**
  * Anthropic OAuth (Claude Pro/Max subscription), mirroring pi-ai
@@ -20,15 +20,17 @@ import { timingSafeEqual } from 'node:crypto'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { xerxesHome as defaultXerxesHome } from '../daemon/paths.js'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { openInBrowser } from './codexLogin.js'
 import {
   generatePkceS256,
   oauthCallbackHtml,
   type OAuthFlowCredential,
   readJsonObject,
+  removeOAuthCredentialFile,
   sharedCredentialFlight,
+  writeOAuthCredentialFile,
 } from './oauthFlows.js'
 
 export const ANTHROPIC_OAUTH_PROVIDER = 'anthropic'
@@ -352,10 +354,14 @@ function requestDeadline(timeoutMs: number, signal?: AbortSignal): {
     () => controller.abort(new Error(`Anthropic request timed out after ${timeoutMs}ms`)),
     timeoutMs,
   )
-  const dispose = (): void => clearTimeout(timer)
+  const onAbort = (): void => controller.abort(signal?.reason)
+  const dispose = (): void => {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
   if (!signal) return { dispose, signal: controller.signal }
   if (signal.aborted) controller.abort(signal.reason)
-  else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  else signal.addEventListener('abort', onAbort, { once: true })
   return { dispose, signal: controller.signal }
 }
 
@@ -489,12 +495,7 @@ export class AnthropicOAuthSession {
 
   /** Remove the stored credential. Returns whether one existed. */
   async logout(): Promise<boolean> {
-    try {
-      await rm(this.credentialPath())
-      return true
-    } catch {
-      return false
-    }
+    return removeOAuthCredentialFile(this.credentialPath())
   }
 
   /** Where the credential persists, for status/logout surfaces. */
@@ -559,8 +560,6 @@ export class AnthropicOAuthSession {
   }
 
   private async persist(credential: OAuthFlowCredential): Promise<void> {
-    const path = this.credentialPath()
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(credential, null, 2)}\n`, 'utf8')
+    await writeOAuthCredentialFile(this.credentialPath(), credential)
   }
 }

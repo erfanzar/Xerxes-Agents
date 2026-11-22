@@ -155,6 +155,8 @@
    .btn is Claude Code's grey button, .btn--solid the primary. */
 :root:not(#layout) .atelier .btn{border:1px solid transparent;font-weight:400}
 :root:not(#layout) .atelier :is(.field input,.field select,.field textarea,input[type='text'],input[type='search']){border:1px solid var(--sh-input)}
+/* Embedded inputs inside composite search wrappers and popovers remain borderless; the wrapper owns the hairline. */
+:root:not(#layout) .atelier :is(.acp-optpop__filter,.modelpop .palette__in,.palette>.palette__in,.rsec__search input,.settings-search input,.sections-menu__search input,.file-browser__search input,.swarm-search input,.swarm-model-picker__filter,.swarm-model-picker__input,.btw-model-pop__filter,.findbar__in,.side-question__input,.acp-catalog__search input){border:0;border-radius:0;background:transparent;outline:none;box-shadow:none}
 /* ── Conversation ─────────────────────────────────────────────────── */
 :root:not(#layout) .atelier :is(.msg,.agent-msg){font:var(--t-prose)}
 /* Tool activity is a muted line ("Ran 2 commands ▸"); it opens into a hairline box. */
@@ -237,8 +239,14 @@
   :root:not(#layout) .atelier .app__body:has(>.floatrail) .conversation-surface{padding-right:48px;box-sizing:border-box}
 }
 :root:not(#layout) .atelier .stream__col{margin-inline:auto}
-:root:not(#layout) .atelier .msg-turn--user{align-self:stretch;align-items:stretch;margin-left:0;width:100%;max-width:100%}
+:root:not(#layout) .atelier .msg-turn--user{position:relative;align-self:stretch;align-items:stretch;margin-left:0;width:100%;max-width:100%}
 :root:not(#layout) .atelier .msg-turn--user>.msg--user{align-self:stretch;width:auto;max-width:100%;margin:0}
+/* Keep hover-only user message actions out of vertical flow so they never reserve dead air below every user bubble. */
+:root:not(#layout) .atelier .msg-turn--user>.msg__actions{position:absolute;top:6px;right:6px;z-index:2;margin-top:0;pointer-events:none}
+:root:not(#layout) .atelier .msg-turn--user:is(:hover,:focus-within)>.msg__actions{pointer-events:auto}
+@media (hover:none){
+  :root:not(#layout) .atelier .msg-turn--user>.msg__actions{pointer-events:auto}
+}
 /* The strips above the composer (goal, folder) are quiet hairline rows, not filled bars. */
 :root:not(#layout) .atelier .composer-task-summary{border:1px solid var(--x-hairline)!important}
 /* ── Inspector: flat sections split by hairlines, as in Claude Code ── */
@@ -288,7 +296,8 @@
 :root:not(#layout) .atelier .activity-group__body .execution-row__label{font:400 12.5px/1.5 var(--sans)}
 :root:not(#layout) .atelier .activity-group__body .execution-row__target{font:400 12px/1.5 var(--mono)}
 :root:not(#layout) .atelier .activity-group__body .execution-row[open]>.execution{margin:2px 0 8px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--x-hairline)}
-:root:not(#layout) .atelier .activity-group__body .execution__command{margin:0 0 6px;padding:0;border:0;font:400 12px/1.6 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .execution__command{margin:0 0 6px;padding:0 0 0 16px;border:0;font:400 12px/1.6 var(--mono)}
+:root:not(#layout) .atelier .activity-group__body .execution__command::before{left:0}
 :root:not(#layout) .atelier .activity-group__body :is(.execution__viewer,.output-viewer){margin:4px 0;padding:0;border:0;max-height:none;height:auto}
 /* Fields are divided from each other, not from what follows: the last field's divider
    doubled the separator under every structured tool result. */
@@ -573,41 +582,131 @@
 :root:not(#layout) .atelier .activity-panel .rail-drawer{margin-top:8px;padding:6px 0 0;border:0;border-top:1px solid var(--x-hairline);border-radius:0;background:transparent}
 :root:not(#layout) .atelier .activity-panel .rail-drawer>summary{min-height:28px;padding:0 8px}
 :root:not(#layout) .atelier .activity-panel .activity-history__rows{max-height:360px}
-:root:not(#layout) .atelier .rsec__source{margin:0;padding:14px 16px;border:0;border-radius:8px;background:var(--x-sunken);white-space:pre-wrap;overflow-wrap:anywhere;font:400 12px/1.65 var(--mono)}
-:root:not(#layout) .atelier .rsec__source>code{padding:0;border:0;background:none;font:inherit;color:inherit}
-/* The Markdown source is highlighted with the editor palette: headings, emphasis, code and links stand out. */
-:root:not(#layout) .atelier .rsec__source :is(.hljs-section,.hljs-strong){color:var(--syn-keyword);font-weight:600}
-:root:not(#layout) .atelier .rsec__source :is(.hljs-code,.hljs-string){color:var(--syn-string)}
-:root:not(#layout) .atelier .rsec__source :is(.hljs-link,.hljs-symbol){color:var(--syn-builtin)}
-:root:not(#layout) .atelier .rsec__source :is(.hljs-bullet,.hljs-quote){color:var(--syn-meta)}
-:root:not(#layout) .atelier .rsec__source .hljs-emphasis{font-style:italic}
+/* The Markdown, HTML, and code source is highlighted with the editor palette. */
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source{margin:0;padding:14px 16px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,8px),8px);background:var(--x-sunken);white-space:pre-wrap;overflow-wrap:anywhere;font:400 12px/1.65 var(--mono);color:var(--x-prose)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source>code{padding:0;border:0;background:none;font:inherit;color:inherit}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-section,.hljs-strong,.hljs-keyword,.hljs-selector-tag,.hljs-name,.hljs-tag){color:var(--syn-keyword)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-section,.hljs-strong){font-weight:600}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-code,.hljs-string,.hljs-regexp){color:var(--syn-string)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-link,.hljs-symbol,.hljs-built_in){color:var(--syn-builtin)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-attr,.hljs-attribute,.hljs-property,.hljs-variable,.hljs-params){color:var(--syn-variable)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-number,.hljs-literal){color:var(--syn-number)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-title,.hljs-title.function_){color:var(--syn-function)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-comment,.hljs-quote){color:var(--syn-comment);font-style:italic}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source :is(.hljs-bullet,.hljs-meta){color:var(--syn-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__source .hljs-emphasis{font-style:italic}
 /* Edit mode: one quiet field filling the panel; text actions in the header. */
-:root:not(#layout) .atelier .rsec__editor{display:block;box-sizing:border-box;width:100%;min-height:60vh;margin:0;padding:14px 16px;border:1px solid var(--x-hairline);border-radius:8px;outline:none;resize:vertical;background:var(--x-sunken);color:var(--x-prose);font:400 12.5px/1.65 var(--mono);tab-size:2}
-:root:not(#layout) .atelier .rsec__editor:focus{border-color:color-mix(in srgb,var(--x-title) 35%,transparent)}
-:root:not(#layout) .atelier .rsec__text{flex:none;height:24px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:500 12px/24px var(--sans);cursor:pointer;white-space:nowrap}
-:root:not(#layout) .atelier .rsec__text:hover:not(:disabled),:root:not(#layout) .atelier .rsec__text[aria-pressed='true']{background:var(--x-chip);color:var(--x-title)}
-:root:not(#layout) .atelier .rsec__text--primary{background:var(--x-title);color:var(--x-screen)}
-:root:not(#layout) .atelier .rsec__text--primary:hover:not(:disabled){background:var(--x-title);color:var(--x-screen);opacity:.88}
-:root:not(#layout) .atelier .rsec__text:disabled{opacity:.45;cursor:default}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__editor{display:block;box-sizing:border-box;width:100%;min-height:60vh;margin:0;padding:14px 16px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,8px),8px);outline:none;resize:vertical;background:var(--x-sunken);color:var(--x-prose);font:400 12.5px/1.65 var(--mono);tab-size:2}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__editor:focus{border-color:var(--tx-accent-edge)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__text{flex:none;height:24px;padding:0 9px;border:0;border-radius:min(var(--r-sm,6px),6px);background:transparent;color:var(--x-meta);font:500 12px/24px var(--sans);cursor:pointer;white-space:nowrap}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__text:hover:not(:disabled),:root:not(#layout):not(#artifact-ux) .atelier .rsec__text[aria-pressed='true']{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__text--primary{background:var(--x-title);color:var(--x-screen)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__text--primary:hover:not(:disabled){background:var(--x-title);color:var(--x-screen);opacity:.88}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__text:disabled{opacity:.45;cursor:default}
 /* Copy feedback: the tick shows in the "done" colour for a moment. */
 /* Doubled class: each style's own .rsec__icon colour rule has equal weight and loads later. */
-:root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='copied']{color:var(--x-done);background:var(--x-chip)}
-:root:not(#layout) .atelier .rsec__icon.rsec__icon[data-copied='failed']{color:var(--x-failed)}
-/* An artifact saved in the conversation: one quiet card with an Open button. */
-:root:not(#layout) .atelier .artifact-card{display:flex;align-items:center;gap:12px;max-width:520px;margin:6px 0;padding:10px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card)}
-:root:not(#layout) .atelier .artifact-card__icon{display:inline-grid;place-items:center;flex:none;width:32px;height:32px;border-radius:8px;background:var(--x-chip);color:var(--x-title)}
-:root:not(#layout) .atelier .artifact-card__main{display:flex;flex-direction:column;align-items:flex-start;gap:2px;flex:1 1 auto;min-width:0;padding:0;border:0;background:none;text-align:left;cursor:pointer}
-:root:not(#layout) .atelier .artifact-card__title{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px/1.35 var(--sans);color:var(--x-title)}
-:root:not(#layout) .atelier .artifact-card__meta{font:400 12px/1.35 var(--sans);color:var(--x-meta)}
-:root:not(#layout) .atelier .artifact-card__open{flex:none;height:28px;padding:0 12px;border:1px solid var(--x-hairline);border-radius:7px;background:transparent;color:var(--x-title);font:500 12px/26px var(--sans);cursor:pointer;white-space:nowrap}
-:root:not(#layout) .atelier .artifact-card__open:hover{background:var(--x-chip)}
-/* The new-artifact toast: bottom-right, above the composer, never over the rail's header. */
-:root:not(#layout) .atelier .artifact-toast{position:fixed;right:20px;bottom:96px;z-index:60;display:flex;align-items:center;gap:10px;max-width:min(420px,calc(100vw - 40px));padding:10px 10px 10px 12px;border:1px solid var(--x-hairline);border-radius:12px;background:var(--x-popover,var(--x-card));box-shadow:0 8px 28px rgba(0,0,0,.28)}
-:root:not(#layout) .atelier .artifact-toast__text{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;font:400 12px/1.35 var(--sans);color:var(--x-meta)}
-:root:not(#layout) .atelier .artifact-toast__text strong{font:500 12.5px/1.35 var(--sans);color:var(--x-title)}
-:root:not(#layout) .atelier .artifact-toast__text span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-:root:not(#layout) .atelier .artifact-toast__close{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--x-meta);cursor:pointer}
-:root:not(#layout) .atelier .artifact-toast__close:hover{background:var(--x-chip);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__icon.rsec__icon[data-copied='copied']{color:var(--x-done);background:var(--x-chip)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__icon.rsec__icon[data-copied='failed']{color:var(--x-failed)}
+/* ── Upgraded Artifact Review Panel & Editorial .artdoc Surface ──────── */
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__row--artifact{min-height:30px;border-radius:min(var(--r-sm,6px),6px)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__row--artifact>.rsec__open{height:30px;gap:7px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__row-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__row-icon[data-kind='html']{color:var(--tx-accent)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__row-icon[data-kind='code']{color:var(--tx-cyan)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__kind-pill{display:inline-flex;align-items:center;flex:none;height:18px;padding:0 6px;border:1px solid var(--x-hairline);border-radius:min(var(--r-sm,5px),5px);background:var(--x-chip);font:500 10.5px/1 var(--sans);color:var(--x-meta);white-space:nowrap}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__kind-pill[data-kind='html']{color:var(--tx-accent);background:var(--tx-accent-bg);border-color:var(--tx-accent-edge)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__kind-pill[data-kind='code']{color:var(--tx-cyan);background:var(--tx-cyan-bg);border-color:transparent}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__ver-pill{display:inline-flex;align-items:center;flex:none;height:18px;padding:0 5px;border:1px solid var(--x-hairline);border-radius:min(var(--r-sm,5px),5px);background:color-mix(in srgb,var(--x-sunken) 82%,transparent);font:500 10.5px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--x-secondary);white-space:nowrap}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__bar{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:6px;height:auto;min-height:38px;padding:5px 10px;border-bottom:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-card) 92%,var(--x-screen))}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__back-arrow{display:inline-grid;place-items:center;transform:scaleX(-1)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__bar>.rsec__title{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 12.5px/1.25 var(--sans);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__actions{display:inline-flex;align-items:center;gap:3px;flex:none;margin-left:auto}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__seg{display:inline-flex;align-items:center;gap:1px;padding:2px;margin-right:4px;border:1px solid var(--x-hairline);border-radius:min(var(--r-sm,7px),7px);background:var(--x-sunken)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__seg-btn{height:20px;padding:0 8px;border:0;border-radius:min(var(--r-sm,5px),5px);background:transparent;color:var(--x-meta);font:500 11px/1 var(--sans);cursor:pointer;white-space:nowrap;transition:background-color 120ms ease,color 120ms ease}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__seg-btn:hover{color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__seg-btn[aria-pressed='true']{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>p.rsec__meta{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin:0;padding:6px 14px;border-bottom:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-sunken) 52%,transparent);font:400 11px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__meta-dot{opacity:.5}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__meta-ver{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__meta-editing{color:var(--tx-amber);font-weight:500}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__body:has(>.rsec__widget-stage){display:flex;flex-direction:column;overflow:hidden;padding:0}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__widget-stage{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__widget-frame{flex:1 1 auto;min-height:0;height:100%}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__body:has(>.artdoc){padding:20px 24px 40px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc{max-width:720px;margin:0 auto}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__head{margin:0 0 22px;padding-bottom:16px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__title{margin:0 0 10px;font-family:var(--sans);font-size:24px;line-height:1.25;font-weight:600;letter-spacing:-.02em;color:var(--x-title);overflow-wrap:anywhere}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0;padding:0;border:0;background:none}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__chip{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border:1px solid var(--x-hairline);border-radius:min(var(--r-sm,5px),5px);background:var(--x-chip);font:400 11.5px/1 var(--sans);color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__chip--kind{color:var(--x-title);font-weight:500}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__chip--ver{font:500 11px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body{padding:0;max-height:none;background:none;border:0;font-size:14px;line-height:1.68;color:var(--x-prose)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body h1{margin:26px 0 10px;font-family:var(--sans);font-size:19px;line-height:1.3;font-weight:600;letter-spacing:-.015em;color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body h2{margin:24px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline);font-family:var(--sans);font-size:16.5px;line-height:1.35;font-weight:600;letter-spacing:-.01em;color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body h3{margin:18px 0 7px;font-family:var(--sans);font-size:14.5px;line-height:1.4;font-weight:600;color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body p{margin:0 0 12px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body :is(ul,ol){margin:0 0 12px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body strong{color:var(--x-title);font-weight:600}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body blockquote{margin:12px 0;padding:8px 14px;border-left:2px solid var(--tx-accent-edge);border-radius:0 min(var(--r-sm,6px),6px) min(var(--r-sm,6px),6px) 0;background:color-mix(in srgb,var(--x-sunken) 60%,transparent);color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body hr{margin:20px 0;border:0;border-top:1px solid var(--x-hairline)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:14px 0;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,8px),8px);font-size:12.5px;line-height:1.5}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body :is(th,td){padding:7px 11px;border-bottom:1px solid var(--x-hairline);border-right:1px solid var(--x-hairline);text-align:left;vertical-align:top}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body :is(th,td):last-child{border-right:0}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body tr:last-child td{border-bottom:0}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__body th{background:color-mix(in srgb,var(--x-sunken) 82%,var(--x-card));color:var(--x-title);font-weight:600;white-space:nowrap}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__outline{display:flex;flex-direction:column;gap:1px;max-height:min(38%,260px);overflow-y:auto;padding:6px 8px;border-bottom:1px solid var(--x-hairline);background:color-mix(in srgb,var(--x-sunken) 74%,var(--x-card))}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__outline>button{display:block;width:100%;padding:5px 8px;border:0;border-radius:min(var(--r-sm,6px),6px);background:transparent;text-align:left;font:400 12.5px/1.35 var(--sans);color:var(--x-prose);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__outline>button:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__outline>button[data-level='2']{padding-left:20px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__outline>button[data-level='3']{padding-left:32px;color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec--detail>.rsec__bar{flex-wrap:wrap;row-gap:4px;padding:6px 10px}
+:root:not(#layout):not(#artifact-ux) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec--detail>.rsec__bar>.rsec__title{flex:1 1 120px}
+:root:not(#layout):not(#artifact-ux) .atelier .desktop-rail:is([data-fit='compact'],[data-fit='narrow']) .rsec--detail>.rsec__bar>.rsec__spacer{display:none}
+@media (prefers-reduced-motion:reduce){
+  :root:not(#layout):not(#artifact-ux) .atelier .artifact-card,
+  :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__preview,
+  :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open,
+  :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__arrow,
+  :root:not(#layout):not(#artifact-ux) .atelier .rsec__seg-btn{transition:none}
+}
+/* An artifact saved in the conversation: single clean hairline frame with quiet inline metadata. */
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card{display:flex;flex-direction:column;width:100%;max-width:none;box-sizing:border-box;margin:4px 0;padding:0;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);overflow:hidden;transition:border-color 140ms ease,background-color 140ms ease}
+:root:not(#layout):not(#artifact-ux) .atelier .tool-timeline__outside>.artifact-card{margin:0}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card:hover{border-color:color-mix(in srgb,var(--x-title) 18%,var(--x-hairline));background:color-mix(in srgb,var(--x-card) 94%,var(--x-selected))}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card[data-interactive]{border-color:var(--x-hairline);background:var(--x-card)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card[data-interactive]:hover{border-color:var(--tx-accent-edge)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__row{display:flex;align-items:center;gap:8px;min-height:36px;padding:6px 12px;min-width:0;box-sizing:border-box}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__icon{display:inline-flex;align-items:center;justify-content:center;flex:none;width:16px;height:16px;padding:0;border-radius:0;background:transparent;color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__icon[data-kind='html']{color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__icon[data-kind='code']{color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__main{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;padding:0;border:0;background:none;text-align:left;cursor:pointer;overflow:hidden}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__title{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px/1.3 var(--sans);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__meta{display:inline-flex;align-items:center;gap:6px;flex:none}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__pill{display:inline-flex;align-items:center;height:auto;padding:0;border:0;border-radius:0;background:transparent;font:400 11.5px/1 var(--sans);color:var(--x-meta);white-space:nowrap}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__pill--kind[data-kind='html']{color:var(--x-meta);background:transparent;border:0}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__pill--kind[data-kind='code']{color:var(--x-meta);background:transparent;border:0}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__pill--ver{font:400 11.5px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--x-meta);background:transparent}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__pill--new{font:400 11.5px/1 var(--mono);color:var(--x-meta);background:transparent;border:0}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__actions{display:inline-flex;align-items:center;gap:6px;flex:none;margin-left:auto}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__preview{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--x-meta);font:400 12px/1 var(--sans);cursor:pointer;white-space:nowrap;transition:background-color 120ms ease,color 120ms ease}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__preview:hover,
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__preview[aria-expanded='true']{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open{display:inline-flex;align-items:center;gap:4px;flex:none;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--x-secondary);font:400 12px/1 var(--sans);cursor:pointer;white-space:nowrap;transition:background-color 120ms ease,color 120ms ease}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open[data-interactive]{border:0;background:transparent;color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open[data-interactive]:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__arrow{font-size:11px;line-height:1;opacity:.78;transition:transform 120ms ease,opacity 120ms ease}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open:hover .artifact-card__arrow{transform:translateX(1.5px);opacity:1}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__embed{border-top:1px solid var(--x-hairline);padding:8px 10px 10px;background:color-mix(in srgb,var(--x-sunken) 66%,transparent)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__embed>*{margin:0}
+/* The new-artifact toast: compact single-row hairline strip matching ArtifactCard, above the composer. */
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast{position:fixed;right:20px;bottom:96px;z-index:60;display:flex;align-items:center;gap:8px;max-width:min(420px,calc(100vw - 40px));min-height:38px;padding:6px 8px 6px 11px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,10px),10px);background:var(--x-popover,var(--x-card));box-shadow:0 8px 24px rgba(0,0,0,.26)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__icon{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--x-secondary)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__text{display:flex;flex-direction:column;gap:1px;flex:1 1 auto;min-width:0;font:400 11px/1.25 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__eyebrow{font:500 10.5px/1.2 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 12.5px/1.3 var(--sans);color:var(--x-title)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__close{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;padding:0;border:0;border-radius:min(var(--r-sm,6px),6px);background:transparent;color:var(--x-meta);cursor:pointer}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-toast__close:hover{background:var(--x-chip);color:var(--x-title)}
 /* ── Files tree: type-coloured icons, change colours on names, M/A badges, dots on folders ── */
 :root:not(#layout) .atelier .file-tree__icon{display:inline-grid;place-items:center;flex:none}
 :root:not(#layout) .atelier .file-tree__icon svg{width:14px;height:14px}
@@ -804,13 +903,14 @@
 :root:not(#layout) .atelier .backdrop>.modal:not(.modal--single)>.modal__main{padding:44px 40px 40px}
 /* The close control reads as the "← Back": first in the nav, left-aligned. */
 :root:not(#layout) .atelier .backdrop>.modal:not(.modal--single) .modal__side .cap{flex-direction:row-reverse;justify-content:flex-end;gap:6px;padding:4px 6px 12px}
-/* ── Model/effort menu: the compact popover (~176px, 24px rows, 12px labels) ── */
-:root:not(#layout) .atelier .modelpop{border:0;padding:4px}
-:root:not(#layout) .atelier .modelpop--menu{width:208px}
-:root:not(#layout) .atelier .modelpop--menu .mmenu__row{display:flex;align-items:center;gap:8px;min-height:24px;padding:0 8px;font:400 12px/1 var(--sans)}
-:root:not(#layout) .atelier .modelpop--menu .mmenu__value{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-:root:not(#layout) .atelier .modelpop--effort{width:240px}
-:root:not(#layout) .atelier .modelpop :is(.modelpop__foot){border-top:1px solid var(--x-hairline);font:400 11px/1.4 var(--sans)}
+/* ── Model/effort menu: Claude Code proportions (flush search, 6px list padding, 34px rows) ── */
+:root:not(#layout) .atelier .modelpop{border:1px solid var(--x-hairline);padding:0}
+:root:not(#layout) .atelier .modelpop--menu{width:220px;padding:6px}
+:root:not(#layout) .atelier .modelpop--menu .mmenu__row{display:flex;align-items:center;gap:8px;min-height:32px;padding:0 10px;font:400 13px/1.3 var(--sans)}
+:root:not(#layout) .atelier .modelpop--menu .mmenu__value{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-meta)}
+:root:not(#layout) .atelier .modelpop--effort{width:260px}
+:root:not(#layout) .atelier .modelpop .palette__list{padding:6px}
+:root:not(#layout) .atelier .modelpop :is(.modelpop__foot){border-top:1px solid var(--x-hairline);font:400 11.5px/1.4 var(--sans)}
 /* Cards of rows: one #1f1f1f surface, hairlines between rows. */
 :root:not(#layout) .atelier .modal__main :is(.pcard,.provcard,.acard){padding:12px 14px}
 /* ── Shading is greys only: live state reads as muted text, not teal or red ── */
@@ -1028,3 +1128,297 @@
 :root[data-theme='light']:not(#layout) .atelier :is(.file-tree__name,.file-tree__badge)[data-change='added'],
 :root[data-theme='light']:not(#layout) .atelier .file-browser__changed-row[data-change='added']>span{color:#1f8a4c}
 :root[data-theme='light']:not(#layout) .atelier .file-tree__dot{background:#2f6fd6}
+
+/* ══ Tool Timeline, Swarm Tool Cards & Semantic Tool Rows ═══════════════
+   Scoped with :not(#layout):not(#tool-ux) so the redesigned tool grammar
+   wins cleanly across Atelier, Vibes, Neo, dark/light themes, all Settings
+   palettes, and VS Code while deriving 100% of colours from live tokens. */
+:root:not(#layout):not(#tool-ux){
+  --tx-accent:var(--x-accent);
+  --tx-accent-bg:color-mix(in srgb,var(--x-accent) 9%,transparent);
+  --tx-accent-edge:color-mix(in srgb,var(--x-accent) 24%,var(--x-hairline));
+  --tx-violet:var(--tx-accent);
+  --tx-violet-bg:var(--tx-accent-bg);
+  --tx-violet-edge:var(--tx-accent-edge);
+  --tx-emerald:var(--x-done);
+  --tx-emerald-bg:color-mix(in srgb,var(--x-done) 10%,transparent);
+  --tx-emerald-edge:color-mix(in srgb,var(--x-done) 26%,var(--x-hairline));
+  --tx-green:var(--tx-emerald);
+  --tx-rose:var(--x-failed);
+  --tx-rose-bg:color-mix(in srgb,var(--x-failed) 10%,transparent);
+  --tx-rose-edge:color-mix(in srgb,var(--x-failed) 26%,var(--x-hairline));
+  --tx-red:var(--tx-rose);
+  --tx-cyan:var(--x-activity);
+  --tx-cyan-bg:color-mix(in srgb,var(--x-activity) 10%,transparent);
+  --tx-amber:var(--x-needs);
+  --tx-amber-bg:color-mix(in srgb,var(--x-needs) 11%,transparent);
+}
+:root[data-theme='light']:not(#layout):not(#tool-ux){
+  --tx-accent-bg:color-mix(in srgb,var(--x-accent) 7%,transparent);
+  --tx-accent-edge:color-mix(in srgb,var(--x-accent) 20%,var(--x-hairline));
+  --tx-emerald-bg:color-mix(in srgb,var(--x-done) 8%,transparent);
+  --tx-emerald-edge:color-mix(in srgb,var(--x-done) 22%,var(--x-hairline));
+  --tx-rose-bg:color-mix(in srgb,var(--x-failed) 8%,transparent);
+  --tx-rose-edge:color-mix(in srgb,var(--x-failed) 22%,var(--x-hairline));
+  --tx-cyan-bg:color-mix(in srgb,var(--x-activity) 8%,transparent);
+  --tx-amber-bg:color-mix(in srgb,var(--x-needs) 9%,transparent);
+}
+
+/* ── Tool Timeline Group Container & Borderless Claude Code Header ──── */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap{display:flex;flex-direction:column;gap:0;margin:4px 0 6px;min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;overflow:visible}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group:hover,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group.is-running,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group.is-running:hover,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap.has-failures:not(.is-running)>.activity-group{border:0;border-radius:0;background:transparent;box-shadow:none}
+
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;min-height:24px;max-width:100%;padding:3px 0;margin:0;border:0;border-radius:0;background:transparent;list-style:none;cursor:pointer;user-select:none;font:400 13.5px/1.4 var(--sans);color:var(--x-meta);transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header::-webkit-details-marker{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header:hover{background:transparent;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header:focus-visible{outline:1px solid var(--x-focus);outline-offset:2px;border-radius:4px}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__mark-wrap{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;height:14px}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:inherit;font:400 13.5px/1.4 var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline--live{display:inline-flex;align-items:center;gap:6px;max-width:100%}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__working{flex:none;font-weight:500;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__sep{flex:none;color:var(--x-meta);opacity:.65}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__phrase{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-meta);font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__pending{color:var(--x-meta);font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__failed{display:inline-flex;align-items:center;gap:6px;flex:none;color:var(--x-failed-text);font:400 13px/1.4 var(--sans);white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__chev{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;height:14px;color:var(--x-meta);opacity:.75;transition:transform 160ms ease,color 120ms ease,opacity 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header:hover .tool-timeline__chev{color:var(--x-prose);opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group[open]>summary.tool-timeline__header .tool-timeline__chev{transform:rotate(90deg);color:var(--x-prose);opacity:.95}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group[open]>summary.tool-timeline__header>.app-icon{transform:none}
+
+/* ── Direct Inline Error Notices (zero box, zero triangle, zero pill) ─ */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline--inline-error{display:flex;flex-direction:column;gap:4px;margin:4px 0 6px}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error{margin:0;padding:2px 0;border:0;background:transparent;font:400 13.5px/1.5 var(--sans);color:var(--x-failed-text);overflow-wrap:anywhere}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-fold{margin:0;padding:0;border:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-summary{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;min-height:24px;max-width:100%;padding:2px 0;border:0;background:transparent;list-style:none;cursor:pointer;font:400 13.5px/1.45 var(--sans);color:var(--x-failed-text)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-summary::-webkit-details-marker{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-line{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-fold[open] .tool-timeline__chev{transform:rotate(90deg)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__inline-error-body{margin:4px 0 6px 4px;padding:2px 0 2px 14px;border:0;border-left:1px solid var(--x-hairline);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .frow--sys.frow--err{padding:2px 0;border:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .frow--sys.frow--err>.frow__icon{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .frow--sys.frow--err>.frow__excerpt{color:var(--x-failed-text)}
+
+/* ── Live Rolling Active-Step Strip (whisper-thin hairline, zero box) ─ */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-strip{display:flex;flex-direction:column;gap:2px;margin:2px 0 4px 4px;padding:2px 0 2px 14px;border:0;border-left:1px solid var(--x-hairline);border-radius:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-strip--compact{margin:2px 0 4px 4px;padding:2px 0 2px 14px;border:0;border-left:1px solid var(--x-hairline);border-radius:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-row{display:flex;align-items:center;gap:6px;min-height:20px;min-width:0;font:400 12px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-row[data-state='done']{opacity:.72}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-row[data-state='failed']{color:var(--x-failed-text)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-dot{display:none;flex:none;width:4px;height:4px;border-radius:50%;background:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-row[data-state='working'] .tool-timeline__live-dot{display:inline-block;background:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-row[data-state='failed'] .tool-timeline__live-dot{display:inline-block;background:var(--x-failed-text)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-icon{flex:none;display:inline-flex;color:var(--x-meta);opacity:.8}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-badge{flex:none;font-weight:400;color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-target{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;border:0;background:none;font:400 11.5px/1.35 var(--mono);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-meta{flex:none;padding:0;border:0;border-radius:0;background:transparent;font:400 11px/1.2 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-meta[data-tone='ok']{color:var(--tx-emerald);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-meta[data-tone='failed']{color:var(--x-failed-text);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__live-dur{margin-left:auto;flex:none;font:400 11px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+
+/* ── Outside-the-fold Artifacts & Swarm Spawns ──────────────────────── */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__outside{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+
+/* ── Expanded Body, Quiet Stats Toolbar & Whisper-Thin Vertical Rail ── */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>.tool-timeline__body{margin:4px 0 8px 4px;padding:2px 0 2px 14px;border:0;border-left:1px solid var(--x-hairline);border-radius:0;background:transparent;overflow:visible}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 10px;padding:0 0 6px;margin:0;border:0;font:400 11.5px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__toolbar-meta{display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px;font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__meta{display:inline-flex;align-items:center;gap:5px;padding:0;border:0;background:transparent;font:400 11.5px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--x-meta);white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__meta--failed{color:var(--x-failed-text);font-family:var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__meta-sep{color:var(--x-meta);opacity:.55;font:400 11px/1 var(--sans);user-select:none}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__meta--diff .add,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__toolbar-meta .add,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__checkpoint .add{color:var(--tx-emerald);font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__meta--diff .del,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__toolbar-meta .del,
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__checkpoint .del{color:var(--tx-rose);font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__toolbar-actions{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline-wrap,.toolcalls-wrap) button.tool-timeline__action{height:20px;padding:0 4px;border:0;border-radius:4px;background:transparent;color:var(--x-meta);font:400 11.5px/1 var(--sans);cursor:pointer;transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline-wrap,.toolcalls-wrap) button.tool-timeline__action:hover{background:transparent;color:var(--x-title)}
+
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__rail{position:relative;display:flex;flex-direction:column;gap:4px;margin:0;padding:0;border-left:0}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__step{position:relative;min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__node{display:none;position:absolute;left:-16.5px;top:10px;width:4px;height:4px;border-radius:50%;border:0;box-shadow:none;background:var(--x-meta);box-sizing:border-box}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__step[data-state='working']>.tool-timeline__node{display:block;background:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__step[data-state='failed']>.tool-timeline__node{display:block;background:var(--x-failed-text)}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__content{min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__think>summary{padding:2px 0;border:0;border-radius:0;background:transparent;font:400 12.5px/1.4 var(--sans);color:var(--x-meta);transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__think>summary:hover{background:transparent;color:var(--x-prose)}
+
+/* ── Flat Swarm Tool Rows & Framed Expanded Details / Spawn Summary ─── */
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool{display:flex;flex-direction:column;gap:4px;padding:2px 0;border:0;border-radius:0;background:transparent;min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__head{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;min-height:22px}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__icon{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:0;border-radius:0;background:transparent;color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__headline{display:flex;align-items:center;gap:6px;flex:1 1 160px;min-width:0;flex-wrap:wrap}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__title{font:400 12.5px/1.4 var(--sans);color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__entity{font-weight:500;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pills{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill{display:inline-flex;align-items:center;height:auto;padding:0;border:0;border-radius:0;background:transparent;font:400 11.5px/1.3 var(--mono);color:var(--x-meta);white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--model{color:var(--x-secondary);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--ws[data-ws='share'],
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--ws[data-ws='branch'],
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--ws[data-ws='inherit'],
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--seq,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--channel,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--ok,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--sleep,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--muted{color:var(--x-meta);background:transparent;border:0}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--working{color:var(--x-prose);background:transparent;border:0}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__pill--failed{color:var(--x-failed-text);background:transparent;border:0}
+
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__controls{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex:none}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__dur{font:400 11px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier :is(.swarm-tool,.swarm-spawn-summary) button.swarm-tool__open{display:inline-flex;align-items:center;height:22px;padding:0 4px;border:0;border-radius:4px;background:transparent;color:var(--x-meta);font:400 11.5px/1 var(--sans);cursor:pointer;white-space:nowrap;transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.swarm-tool,.swarm-spawn-summary) button.swarm-tool__open:hover{background:transparent;color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool button.swarm-tool__toggle{display:inline-grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--x-meta);cursor:pointer;transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool button.swarm-tool__toggle:hover{background:transparent;color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool button.swarm-tool__toggle[aria-expanded='true'] svg{transform:rotate(90deg)}
+
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__snippet{margin:0;padding-left:22px;font:400 12px/1.45 var(--sans);color:var(--x-meta);overflow-wrap:anywhere}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__mention{font:500 11.5px/1.2 var(--mono);color:var(--x-prose);background:transparent;padding:0}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__mention[data-all]{color:var(--x-title);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__mention--muted{color:var(--x-meta);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__done-tag{font:500 11px/1.2 var(--mono);color:var(--x-meta);background:transparent;padding:0}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__seq-ref{font:500 11.5px/1.2 var(--mono);color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__channel-ref{font:500 11.5px/1.2 var(--mono);color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__error{margin:2px 0 0;padding:0 0 0 22px;border:0;background:transparent;color:var(--x-failed-text);font:400 12px/1.45 var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__details{display:flex;flex-direction:column;gap:8px;margin:4px 0;padding:10px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__roster,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__messages{display:flex;flex-direction:column;gap:4px}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__roster-row,
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__msg-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font:400 12px/1.4 var(--sans);color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__msg-text{min-width:0;flex:1 1 180px;color:var(--x-secondary);overflow-wrap:anywhere}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__fulltext strong{display:block;margin-bottom:4px;font:500 11px/1.2 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__fulltext pre{margin:0;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:6px;background:var(--x-sunken);font:400 11.5px/1.5 var(--mono);color:var(--x-prose);white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__actions{display:flex;align-items:center;gap:10px}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__raw{font:400 11.5px/1.4 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__raw summary{cursor:pointer;user-select:none}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-tool__raw pre{margin:4px 0 6px;padding:6px 8px;border:1px solid var(--x-hairline);border-radius:6px;background:var(--x-sunken);font:400 11px/1.45 var(--mono);max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* Compact Spawn Summary Row outside collapsed settled group */
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:8px 12px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);min-width:0;transition:border-color 140ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary:hover{border-color:color-mix(in srgb,var(--x-title) 18%,var(--x-hairline))}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary__sprite{flex:none;display:inline-flex;align-items:center}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary__main{display:flex;align-items:center;gap:5px 8px;flex:1 1 140px;min-width:0;overflow:hidden;flex-wrap:wrap}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary__title{font:500 12.5px/1.3 var(--sans);color:var(--x-title);white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary__brief{min-width:0;flex:1 1 140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 12px/1.3 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .swarm-spawn-summary button.swarm-tool__open{margin-left:auto;flex:none}
+
+/* ── Flat FileToolRow (Read, Edit, Write, Patch, Outline) ───────────── */
+:root:not(#layout):not(#tool-ux) .atelier .filetool{display:flex;flex-direction:column;gap:5px;padding:2px 0;border:0;border-radius:0;background:transparent;min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__head{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;min-height:22px;font:400 12.5px/1.4 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__icon{flex:none;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:0;border-radius:0;background:transparent;color:var(--x-meta);opacity:.8}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__verb{flex:none;font-weight:400;color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__path{display:inline-flex;align-items:baseline;max-width:100%;min-width:0;overflow:hidden;padding:0;border:0;border-radius:0;background:transparent;font:400 12.5px/1.4 var(--mono);color:var(--x-prose);cursor:pointer;direction:ltr;text-align:left;transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__path:hover{background:transparent;color:var(--x-title);text-decoration:underline;text-underline-offset:3px}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__dir{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__base{flex:none;font-weight:400;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__path:hover .filetool__base{color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__badge{flex:none;padding:0;border:0;border-radius:0;background:transparent;font:400 11.5px/1.3 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__stats{display:inline-flex;align-items:center;gap:5px;flex:none;height:auto;padding:0;border:0;border-radius:0;background:transparent;font:400 12px/1 var(--mono);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__stats .add{color:var(--tx-emerald)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__stats .del{color:var(--tx-rose)}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__toggle{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 4px;border:0;border-radius:4px;background:transparent;font:400 12px/1 var(--sans);color:var(--x-meta);cursor:pointer;transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__toggle:hover{background:transparent;color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__toggle[aria-expanded='true'] svg{transform:rotate(90deg)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__state{margin-left:auto;flex:none;font:400 11.5px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .filetool[data-state='failed'] .filetool__state{color:var(--x-failed-text);font-weight:500}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__error{margin:2px 0 2px 20px;padding:0;border:0;background:transparent;color:var(--x-failed-text);font:400 12px/1.45 var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__code{margin:2px 0 4px;border:1px solid var(--x-hairline);border-radius:10px;overflow:hidden;background:var(--x-card)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__code pre{margin:0;padding:6px 0;border:0;border-radius:0;background:transparent;font:400 11.5px/1.55 var(--mono);overflow-x:auto;max-height:none}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__line{display:grid;grid-template-columns:46px minmax(0,1fr);min-width:max-content}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__gutter{display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;padding-right:8px;color:var(--x-meta);opacity:.72;user-select:none;font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__line--add{background:color-mix(in srgb,var(--tx-emerald) 13%,transparent)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__line--add .filetool__gutter{color:var(--tx-emerald);opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__line--del{background:color-mix(in srgb,var(--tx-rose) 13%,transparent)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__line--del .filetool__gutter{color:var(--tx-rose);opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__more{display:block;width:100%;padding:5px 12px;border:0;border-top:1px solid var(--x-hairline);background:transparent;color:var(--x-meta);text-align:left;font:500 11.5px/1.3 var(--sans);cursor:pointer}
+:root:not(#layout):not(#tool-ux) .atelier button.filetool__more:hover{background:var(--x-selected);color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__actions{display:flex;justify-content:flex-end;margin-top:-2px;opacity:.75;transition:opacity 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .filetool:is(:hover,:focus-within) .filetool__actions{opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-files{display:flex;flex-direction:column;gap:8px}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-head{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-op{padding:0;border:0;background:transparent;font:500 10.5px/1.3 var(--mono);text-transform:uppercase;color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-op[data-op='add']{color:var(--tx-emerald)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-op[data-op='delete']{color:var(--tx-rose)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__patch-move{font:400 11.5px/1 var(--mono);color:var(--x-meta)}
+
+/* FileOutlineTool structured symbol list */
+:root:not(#layout):not(#tool-ux) .atelier .filetool__outline{margin:2px 0 4px;border:1px solid var(--x-hairline);border-radius:10px;background:var(--x-card);overflow:hidden}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__outline-imports{padding:5px 10px;border-bottom:1px solid var(--x-hairline);font:400 11px/1.4 var(--mono);color:var(--x-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__outline-empty{padding:8px 10px;font:400 12px/1.4 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbols{list-style:none;margin:0;padding:4px 0;max-height:240px;overflow-y:auto}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol{display:flex;align-items:center;gap:6px;padding:3px 10px;font:400 12px/1.4 var(--mono);min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol:hover{background:color-mix(in srgb,var(--x-selected) 60%,transparent)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol-kind{flex:none;min-width:34px;text-align:center;padding:0;border:0;background:transparent;color:var(--x-meta);font:500 10.5px/1.2 var(--mono)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol-exp{flex:none;font:400 10.5px/1 var(--mono);color:var(--tx-emerald)}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol-sig{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;background:none;border:0;color:var(--x-prose);font:inherit}
+:root:not(#layout):not(#tool-ux) .atelier .filetool__symbol-range{flex:none;margin-left:auto;font:400 10.5px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+
+/* ── Flat GenericToolRow (Shell, Search, Web, Skill, MCP, etc.) ─────── */
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__body .execution-row,
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__list .execution-row{padding:0;margin:0;border:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row>summary{display:flex;flex-direction:column;align-items:stretch;gap:3px;min-height:22px;padding:2px 0;border:0;border-radius:0;background:transparent;list-style:none;cursor:pointer;color:var(--x-meta);transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row>summary::-webkit-details-marker{display:none}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row>summary:hover{background:transparent;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__main{display:flex;align-items:center;flex-wrap:nowrap;gap:6px;min-width:0;width:100%}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__trail{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex:none}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__disclosure{display:inline-flex;align-items:center;flex:none;color:var(--x-meta);opacity:.75;transition:transform 140ms ease,color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[open]>summary .execution-row__disclosure{transform:rotate(90deg);color:var(--x-prose);opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__label{display:inline-flex;align-items:center;gap:5px;flex:none;font:400 12.5px/1.4 var(--sans);color:var(--x-secondary)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:0;border-radius:0;background:transparent;color:var(--x-meta);opacity:.8}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__target{display:inline-block;flex:0 1 auto;min-width:0;max-width:100%;padding:0;border:0;border-radius:0;background:transparent;font:400 12px/1.4 var(--mono);color:var(--x-prose);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__target--cmd{background:transparent;color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[open][data-command] .execution-row__target,
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[open] .execution-row__error{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .execution-row__prompt{color:var(--x-meta);font-weight:400;user-select:none}
+:root:not(#layout):not(#tool-ux) .atelier .execution-row__scope{flex:0 1 auto;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;border:0;border-radius:0;background:transparent;font:400 11.5px/1.35 var(--mono);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier .execution-row__meta{flex:none;padding:0;border:0;border-radius:0;background:transparent;font:400 11.5px/1.3 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .execution-row__meta[data-tone='failed']{color:var(--x-failed-text)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__state{flex:none;font:400 11.5px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[data-state='working'] .execution-row__state{color:var(--x-prose);font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[data-state='failed'] .execution-row__state{color:var(--x-failed-text);font-weight:500}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[data-state='done'] .execution-row__state{display:inline}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row__error{padding:2px 0 2px 20px;border:0;border-radius:0;background:transparent;color:var(--x-failed-text);font:400 12px/1.45 var(--mono)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__body,.toolcalls__list) .execution-row[open]>.execution{display:grid;gap:6px;margin:4px 0 6px;padding:8px 12px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,10px),10px);background:var(--x-card)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution :is(.output-viewer,.execution__viewer){margin:0;padding:0;border:0;border-radius:0;background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution :is(.output-viewer--compact .output-viewer__text,.execution__error pre){margin:0;padding:0;border:0;border-radius:0;background:transparent;font:400 12px/1.6 var(--mono)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__command{position:relative;margin:0;padding:0 0 0 16px;border:0;border-radius:0;background:transparent;font:400 12px/1.55 var(--mono);color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__command::before{content:'$';position:absolute;left:0;color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__viewer-actions{margin:0;font:400 11.5px/1.35 var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:4px 12px;margin-top:2px;padding-top:6px;border-top:1px solid var(--x-hairline);font:400 11.5px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__raw{display:block;flex:0 1 auto;min-width:0;margin:0;padding:0;opacity:.78;color:var(--x-meta);font:400 11.5px/1.35 var(--sans);transition:opacity 120ms ease,color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__raw[open]{flex:1 0 100%;max-width:100%;opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__raw>summary{padding:0;line-height:1.35;cursor:pointer;user-select:none}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__raw>summary:hover{color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__raw pre{margin:4px 0 2px;padding:6px 8px;border:1px solid var(--x-hairline);border-radius:min(var(--r-sm,6px),6px);background:var(--x-sunken);font:400 11.5px/1.5 var(--mono);color:var(--x-prose);max-height:220px;overflow:auto}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__actions{position:static;display:inline-flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:10px;margin:0 0 0 auto;padding:0;opacity:.78;pointer-events:auto;transition:opacity 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__actions button{padding:0;font:400 11.5px/1.35 var(--sans);color:var(--x-meta)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution__footer .execution__actions button:hover{color:var(--x-title)}
+:root:not(#layout):not(#tool-ux) .atelier :is(.activity-group__body,.tool-timeline__body,.toolcalls__list) .execution:is(:hover,:focus-within) .execution__footer :is(.execution__raw,.execution__actions){opacity:1}
+
+/* ── Subagents / Roster ToolCallsSection (borderless inline) ────────── */
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls-wrap{display:flex;flex-direction:column;gap:0;min-width:0}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls{border:0;border-radius:0;background:transparent;overflow:visible}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls>summary{display:inline-flex;align-items:center;gap:6px;padding:3px 0;list-style:none;cursor:pointer;font:400 13px/1.4 var(--sans);color:var(--x-meta);transition:color 120ms ease}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls>summary:hover{color:var(--x-prose)}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls>summary::-webkit-details-marker{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__count{padding:0;border:0;border-radius:0;background:transparent;font:400 12px/1 var(--mono);color:var(--x-meta);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__diff{display:inline-flex;gap:4px;font:400 12px/1 var(--mono);font-variant-numeric:tabular-nums}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__diff .add{color:var(--tx-emerald)}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__diff .del{color:var(--tx-rose)}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__tone{padding:0;border:0;border-radius:0;background:transparent;font:400 12px/1 var(--sans)}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__tone[data-tone='working']{color:var(--x-prose);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__tone[data-tone='failed']{color:var(--x-failed-text);background:transparent}
+:root:not(#layout):not(#tool-ux) .atelier .toolcalls__list{margin:4px 0 6px 4px;padding:2px 0 2px 14px;border:0;border-left:1px solid var(--x-hairline)}
+
+@media (prefers-reduced-motion:reduce){
+  :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__chev,
+  :root:not(#layout):not(#tool-ux) .atelier .execution-row__disclosure,
+  :root:not(#layout):not(#tool-ux) .atelier .execution__footer .execution__raw,
+  :root:not(#layout):not(#tool-ux) .atelier .execution__footer .execution__actions{transition:none}
+}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__step{content-visibility:auto;contain-intrinsic-size:auto 44px}

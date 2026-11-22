@@ -4,6 +4,7 @@
 import { createPublicKey, verify as ed25519Verify, type KeyObject } from 'node:crypto'
 
 import { postJson, providerUrl, type ChannelFetch } from './http.js'
+import { chunkText as chunkChannelText } from './textChunking.js'
 import { scanContextContent } from '../security/promptScanner.js'
 import {
   type DiscordApplicationCommand,
@@ -550,26 +551,7 @@ export function chunkText(text: string, limit = DISCORD_MESSAGE_LIMIT): string[]
   if (!Number.isInteger(limit) || limit < 1 || limit > DISCORD_MESSAGE_LIMIT) {
     throw new RangeError(`Discord message limit must be between 1 and ${DISCORD_MESSAGE_LIMIT}`)
   }
-  if (text.length <= limit) {
-    return [text]
-  }
-  const chunks: string[] = []
-  let remaining = text
-  while (remaining.length > limit) {
-    let splitAt = remaining.lastIndexOf('\n', limit)
-    if (splitAt < Math.max(1, Math.floor(limit / 2))) {
-      splitAt = limit
-    }
-    const chunk = remaining.slice(0, splitAt).trimEnd()
-    if (chunk) {
-      chunks.push(chunk)
-    }
-    remaining = remaining.slice(splitAt).trimStart()
-  }
-  if (remaining) {
-    chunks.push(remaining)
-  }
-  return chunks.length ? chunks : ['']
+  return chunkChannelText(text, limit)
 }
 
 /** Built-in application commands registered by the native Discord Gateway adapter. */

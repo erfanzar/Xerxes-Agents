@@ -12,19 +12,22 @@
 
 import { existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { isAbsolute, join, relative } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 
 import * as vscode from 'vscode'
 
 import { DaemonRpc } from '../desktop/main/daemon.js'
 import type { PushFrame, ResultFrame } from './messages.js'
 import { otherCopies } from './otherCopies.js'
-import { PanelHost, type PanelOptions, type PanelPorts } from './panelHost.js'
+import { PanelHost, isAllowedRevealPath, type PanelOptions, type PanelPorts } from './panelHost.js'
 
 const VIEW = 'xerxes.chat'
 const PANEL = 'xerxes.panel'
+const MENU_FOCUS_MAX_RETRIES = 6
 let context: vscode.ExtensionContext
 const hosts = new Set<{ host: PanelHost; webview: vscode.Webview }>()
+const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
 /** Overflow-menu surfaces; keep in step with SHEETS in scripts/buildVscode.ts. */
 const SHEETS = ['activity', 'usage'] as const
 
@@ -72,6 +75,8 @@ async function setStyle(style: VscodeStyle): Promise<boolean> {
 }
 
 export function deactivate(): void {
+  for (const timer of pendingTimers) clearTimeout(timer)
+  pendingTimers.clear()
   for (const entry of hosts) entry.host.dispose()
   hosts.clear()
 }
@@ -105,11 +110,22 @@ function openPanel(options: PanelOptions): void {
   mount(panel.webview, () => panel.visible, panel.onDidDispose, options, 'panel')
 }
 
+function currentFolder(): string | null {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null
+}
+
+function scheduleExtensionTimer(callback: () => void, delayMs: number): void {
+  const timer = setTimeout(() => {
+    pendingTimers.delete(timer)
+    callback()
+  }, delayMs)
+  pendingTimers.add(timer)
+}
+
 function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscode.Event<void>, options: PanelOptions = {}, surface: 'view' | 'panel' = 'view'): void {
   webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')] }
-  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null
   const ports: PanelPorts = {
-    workspace: folder,
+    get workspace() { return currentFolder() },
     workspaceFolders: () => (vscode.workspace.workspaceFolders ?? []).map(entry => entry.uri.fsPath),
     remoteName: vscode.env.remoteName,
     async chooseFolder() {
@@ -120,8 +136,9 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
     openPanel,
     async revealPath(path) {
       // Only paths inside this workspace or ~/.xerxes, which the runtime resolves.
-      const roots = [folder, process.env.XERXES_HOME, join(process.env.HOME ?? '', '.xerxes')].filter((root): root is string => Boolean(root))
-      if (!roots.some(root => { const rel = relative(root, path); return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/')) })) return false
+      const home = homedir()
+      const roots = [currentFolder(), process.env.XERXES_HOME, home ? join(home, '.xerxes') : undefined]
+      if (!isAllowedRevealPath(path, roots)) return false
       await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(path)).then(undefined, () => vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(path)))
       return true
     },
@@ -136,12 +153,14 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
     notify: message => { void vscode.window.showInformationMessage(message, 'Show').then(choice => { if (choice) void vscode.commands.executeCommand('xerxes.chat.focus') }) },
     visible,
     async openFile(path, line) {
+      const folder = currentFolder()
       const uri = vscode.Uri.file(isAbsolute(path) || !folder ? path : join(folder, path))
-      const at = line ? new vscode.Position(line - 1, 0) : undefined
+      const at = typeof line === 'number' && Number.isSafeInteger(line) && line >= 1 ? new vscode.Position(line - 1, 0) : undefined
       await vscode.window.showTextDocument(uri, { preview: true, ...(at ? { selection: new vscode.Range(at, at) } : {}) })
       return true
     },
     async openDiff(path) {
+      const folder = currentFolder()
       const uri = vscode.Uri.file(isAbsolute(path) || !folder ? path : join(folder, path))
       // VS Code's own working-tree diff, as in Source Control; a file outside git just opens.
       try { await vscode.commands.executeCommand('git.openChange', uri) }
@@ -192,7 +211,7 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${source}; style-src ${source} 'unsafe-inline'; font-src ${source}; img-src ${source} data:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${source} data:; style-src ${source} 'unsafe-inline'; font-src ${source}; img-src ${source} data:; frame-src blob:;" />
     <base href="${base}" />
     <title>Xerxes</title>
     <link rel="stylesheet" href="${asset('renderer/theme.css')}" />
@@ -218,8 +237,15 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
 }
 
 /** Push a menu command to every open Xerxes panel (the desktop's menu bar equivalent). */
-function menu(command: string): void {
-  if (!hosts.size) { void vscode.commands.executeCommand(`${VIEW}.focus`).then(() => setTimeout(() => menu(command), 500)); return }
+function menu(command: string, attempt = 0): void {
+  if (!hosts.size) {
+    if (attempt >= MENU_FOCUS_MAX_RETRIES) return
+    void vscode.commands.executeCommand(`${VIEW}.focus`).then(
+      () => scheduleExtensionTimer(() => menu(command, attempt + 1), 500),
+      () => undefined,
+    )
+    return
+  }
   for (const entry of hosts) void entry.webview.postMessage({ kind: 'push', channel: 'desktop:menu', value: command } satisfies PushFrame)
 }
 
@@ -234,5 +260,5 @@ async function sendSelection(): Promise<void> {
   const text = `\n${file}${lines}\n\`\`\`${editor.document.languageId}\n${code}\n\`\`\`\n`
   await vscode.commands.executeCommand(`${VIEW}.focus`)
   const deliver = () => { for (const entry of hosts) void entry.webview.postMessage({ kind: 'push', channel: 'desktop:compose', value: text } satisfies PushFrame) }
-  if (hosts.size) deliver(); else setTimeout(deliver, 800)
+  if (hosts.size) deliver(); else scheduleExtensionTimer(deliver, 800)
 }

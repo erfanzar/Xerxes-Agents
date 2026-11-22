@@ -8,7 +8,7 @@
  */
 
 /** Views that open in the task-context rail beside the conversation. */
-export type RailPanel = 'subagents' | 'docs' | 'files' | 'outputs' | 'review' | 'terminal' | 'background' | 'browser' | 'activity' | 'usage'
+export type RailPanel = 'subagents' | 'swarm' | 'btw' | 'docs' | 'files' | 'outputs' | 'review' | 'terminal' | 'background' | 'browser' | 'activity' | 'usage'
 
 export interface RailTab {
   readonly panel: RailPanel

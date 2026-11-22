@@ -295,7 +295,7 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   }, ['todos']),
   definition(
     'ArtifactTool',
-    'Save a document for the user (a plan before non-trivial work, an explanation, analysis, review, report or spec) '
+    'Save a document or interactive HTML/3D widget for the user (a plan before non-trivial work, explanation, analysis, review, report, spec, or self-contained HTML visualization) '
     + 'as a titled artifact kept with this session and shown in the Artifacts panel. Not for one-line answers or files '
     + 'that belong in the repository (use the file tools for those). To revise, call action "update" with the same id '
     + 'instead of creating a duplicate.',
@@ -303,8 +303,9 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       action: { type: 'string', enum: ['create', 'update'], description: 'create a new artifact, or update (replace) an existing one by id.' },
       id: stringSchema('Artifact id returned by create. Required for update.'),
       title: stringSchema('Short descriptive title. Required for create; on update it renames the artifact.'),
-      kind: { type: 'string', enum: [...ARTIFACT_KINDS], description: 'Content format. Default markdown.' },
+      kind: { type: 'string', enum: [...ARTIFACT_KINDS], description: 'Content format (markdown, html, code, text). Default markdown.' },
       language: stringSchema('Programming language when kind is code (e.g. typescript).'),
+      embed: booleanSchema('When kind is "html", true hints the chat UI to expand an inline interactive preview immediately.'),
       content: stringSchema('The complete document. Update replaces the whole content, so send all of it.'),
     },
     ['action', 'content'],
@@ -556,6 +557,7 @@ export class ClaudeWorkflowTools {
       kind = kindInput
     }
     const language = optionalString(inputs, 'language')
+    const embed = optionalBoolean(inputs, 'embed', false)
     const title = optionalString(inputs, 'title')
     const content = requiredString(inputs, 'content')
     const store = this.artifactStore ??= new ArtifactStore()
@@ -567,8 +569,11 @@ export class ClaudeWorkflowTools {
       const created = await store.create(sessionId, {
         title, content, ...(kind === undefined ? {} : { kind }), ...(language === undefined ? {} : { language }),
       })
+      const embedHint = created.kind === 'html' && embed
+        ? ` Include <xerxes-embed artifact="${created.id}"></xerxes-embed> on its own line in your reply to render it inline.`
+        : ''
       return `Created artifact "${created.title}" (id ${created.id}, version ${created.version}). `
-        + `It is in the Artifacts panel; mention it briefly instead of repeating its content. Use action "update" with id ${created.id} to revise it.`
+        + `It is in the Artifacts panel; mention it briefly instead of repeating its content.${embedHint} Use action "update" with id ${created.id} to revise it.`
     }
     if (action === 'update') {
       const id = optionalString(inputs, 'id')?.trim()

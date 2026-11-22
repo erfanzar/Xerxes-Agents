@@ -2,18 +2,35 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { resolveProjectDirectory as resolve } from './paths.js'
-import type { DaemonSession, TurnRunner, TurnRunControls } from './runtime.js'
+import type { LlmClient } from '../llms/client.js'
+import type { DaemonSession, RuntimeSwarmHooks, TurnRunner, TurnRunControls } from './runtime.js'
 import type { DaemonWorkspaces, WorkspaceResources } from './workspaceResources.js'
 
 /** Pin a runner to its workspace for the whole turn, including concurrent turns. */
 export class WorkspaceTurnRunner implements TurnRunner {
   readonly managesSessionState = true
   private readonly runners = new Map<string, TurnRunner>()
+  private swarmHooks: RuntimeSwarmHooks | undefined
 
   constructor(
     private readonly workspaces: Pick<DaemonWorkspaces, 'get' | 'peek'>,
     private readonly create: (cwd: string, resources: WorkspaceResources) => TurnRunner | undefined,
   ) {}
+
+  attachSwarmHooks(hooks: RuntimeSwarmHooks): void {
+    this.swarmHooks = hooks
+    for (const runner of this.runners.values()) {
+      runner.attachSwarmHooks?.(hooks)
+    }
+  }
+
+  defaultLlmClient(): LlmClient | undefined {
+    for (const runner of this.runners.values()) {
+      const client = runner.defaultLlmClient?.()
+      if (client) return client
+    }
+    return undefined
+  }
 
   private runner(cwd: string, resources: WorkspaceResources): TurnRunner {
     const root = resolve(cwd)
@@ -21,6 +38,9 @@ export class WorkspaceTurnRunner implements TurnRunner {
     if (cached) return cached
     const runner = this.create(root, resources)
     if (!runner) throw new Error('Configure a supported provider before starting a turn')
+    if (this.swarmHooks) {
+      runner.attachSwarmHooks?.(this.swarmHooks)
+    }
     this.runners.set(root, runner)
     return runner
   }

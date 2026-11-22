@@ -18,7 +18,7 @@ type Catalog = { ok: boolean; skills: Entry[]; tools: Entry[]; total_skills?: nu
 export function toolGroup(name: string): string {
   if (/mcp/i.test(name)) return 'MCP integrations'
   if (/skill|memory/i.test(name)) return 'Skills & memory'
-  if (/agent|spawn|delegate|taskget|tasklist|await/i.test(name)) return 'Agents & delegation'
+  if (/agent|spawn|delegate|taskget|tasklist|await|swarm|read_board|post_message/i.test(name)) return 'Agents & delegation'
   if (/shell|exec|terminal|process|command/i.test(name)) return 'Terminal & processes'
   if (/file|read|write|edit|patch|grep|glob|dir/i.test(name)) return 'Files & code'
   if (/browser|web|search|fetch/i.test(name)) return 'Web & browser'
@@ -31,6 +31,8 @@ const destinations = [
   { name: 'MCP connections', detail: 'Inspect connected servers, tools and configuration. /mcp', key: 'mcpSettings' },
   { name: 'Schedules & templates', detail: 'Start from a task example, preview timing and choose delivery. /schedules', key: 'schedules' },
   { name: 'Custom agents', detail: 'Inspect, edit or generate a specialist from a description. /custom-agents', key: 'customAgentEditor' },
+  { name: 'Side question', detail: 'Ask an ephemeral read-only question without interrupting or polluting chat. /btw', key: 'sideQuestion' },
+  { name: 'Immortals board', detail: 'Inspect live Immortals members, channels and shared board messages. /immortals', key: 'swarm' },
   { name: 'Remote workspaces', detail: 'Browse SSH hosts and remote project folders. /machine', key: 'machinePicker' },
 ] as const
 

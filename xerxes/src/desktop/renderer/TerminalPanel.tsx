@@ -23,7 +23,7 @@ import { desktopCall, desktopError, text, type RpcRecord } from './desktopRpc.js
 import { Icon } from './Icon.js'
 import { userShells, type ShellRow } from './terminalShells.js'
 import { openTerminalLink } from './terminalLinks.js'
-import type { Snapshot } from './store.js'
+import { store, type Snapshot } from './store.js'
 
 const DARK_ANSI = {
   black: '#1b1f27', red: '#f28b82', green: '#81c995', yellow: '#fdd663', blue: '#6ea8fe', magenta: '#c58af9', cyan: '#78d9ec', white: '#d6dce8',
@@ -279,7 +279,15 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
     }
     void attach().catch(failure => { if (alive) xterm.write(`\r\n\x1b[31m${failure instanceof Error ? failure.message : String(failure)}\x1b[0m\r\n`) })
 
-    const input = xterm.onData(data => { if (!exited) void call('terminal.control', { action: 'write', chars: data }).catch(() => {}) })
+    let branchTimer: ReturnType<typeof setTimeout> | undefined
+    const input = xterm.onData(data => {
+      if (exited) return
+      void call('terminal.control', { action: 'write', chars: data }).catch(() => {})
+      if (data.includes('\r') || data.includes('\n')) {
+        clearTimeout(branchTimer)
+        branchTimer = setTimeout(() => { if (alive) void store.refreshBranch() }, 500)
+      }
+    })
 
     let resizeTimer: ReturnType<typeof setTimeout> | undefined
     const syncSize = (): void => {
@@ -303,6 +311,7 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
     return () => {
       alive = false
       clearTimeout(resizeTimer)
+      clearTimeout(branchTimer)
       observer.disconnect()
       themeWatch.disconnect()
       input.dispose()

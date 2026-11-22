@@ -300,26 +300,31 @@ export class CompactionProvisioner {
     let summaryCalled = false
     let summaryFailure: unknown
     let summaryWasEmpty = false
-    const compressor = this.compressor(protectedTail, options.force === true, (compactableMessages, _budgetTokens) => {
-      summaryCalled = true
-      try {
-        const summary = options.previousSummary === undefined
-          ? this.summaryAgent!(compactableMessages)
-          : this.summaryAgent!(compactableMessages, options.previousSummary)
-        if (typeof summary !== 'string') {
-          throw new TypeError('summaryAgent must return a string')
-        }
-        const trimmed = stripCompactionAnalysis(summary)
-        if (!trimmed) {
-          summaryWasEmpty = true
+    const compressor = this.compressor(
+      protectedTail,
+      options.force === true,
+      (compactableMessages, _budgetTokens) => {
+        summaryCalled = true
+        try {
+          const summary = options.previousSummary === undefined
+            ? this.summaryAgent!(compactableMessages)
+            : this.summaryAgent!(compactableMessages, options.previousSummary)
+          if (typeof summary !== 'string') {
+            throw new TypeError('summaryAgent must return a string')
+          }
+          const trimmed = stripCompactionAnalysis(summary)
+          if (!trimmed) {
+            summaryWasEmpty = true
+            return ''
+          }
+          return trimmed
+        } catch (error) {
+          summaryFailure = error
           return ''
         }
-        return trimmed
-      } catch (error) {
-        summaryFailure = error
-        return ''
-      }
-    })
+      },
+      options.previousSummary,
+    )
     const compressed = compressor.compress(conversationMessages)
     if (summaryFailure !== undefined) {
       return failure(original, tokensBefore, 'summary_agent_failed', summaryFailure)
@@ -351,11 +356,17 @@ export class CompactionProvisioner {
     }
   }
 
-  private compressor(protectLast: number, forceSummarize: boolean, summarizer: Summarizer): ContextCompressor {
+  private compressor(
+    protectLast: number,
+    forceSummarize: boolean,
+    summarizer: Summarizer,
+    priorSummary?: string,
+  ): ContextCompressor {
     return new ContextCompressor({
       contextWindow: this.maxContextTokens,
       forceSummarize,
       model: this.model,
+      ...(priorSummary === undefined ? {} : { priorSummary }),
       protectFirst: 0,
       protectLast,
       summarizer,

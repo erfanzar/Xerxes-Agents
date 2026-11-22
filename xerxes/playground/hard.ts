@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { diagnoseEvaluationFailure } from "./harness.js";
 import type {
   EvaluationAgent,
@@ -275,6 +275,7 @@ function safeChild(parent: string, child: string): string {
   if (
     !fromParent ||
     fromParent === ".." ||
+    fromParent.startsWith(`..${sep}`) ||
     fromParent.startsWith("../") ||
     isAbsolute(fromParent)
   ) {

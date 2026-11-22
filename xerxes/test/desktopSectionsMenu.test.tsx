@@ -10,10 +10,10 @@ const change = (path: string, isNew = false): DiffFile => ({ path, adds: 3, dels
 const changes = [change('xerxes/src/a.ts'), change('docs/new.md', true), change('xerxes/src/b.tsx')]
 const base = { hoverTop: 0, needle: '', setNeedle: () => {}, agents: [], artifacts: null, changes, onHover: () => {}, onPick: () => {} }
 
-test('the Sections menu lists the five sections in order, with a preview chevron on all but Terminal', () => {
-  expect(MENU_SECTIONS.map(section => section.label)).toEqual(['Subagents', 'Artifacts', 'Changes', 'Files', 'Terminal'])
+test('the Sections menu lists the six sections in order, with a preview chevron on all but Side question and Terminal', () => {
+  expect(MENU_SECTIONS.map(section => section.label)).toEqual(['Subagents', 'Side question', 'Artifacts', 'Changes', 'Files', 'Terminal'])
   const html = renderToStaticMarkup(<SectionsMenuPanel {...base} hover={null} />)
-  for (const label of ['Subagents', 'Artifacts', 'Changes', 'Files', 'Terminal']) expect(html).toContain(label)
+  for (const label of ['Subagents', 'Side question', 'Artifacts', 'Changes', 'Files', 'Terminal']) expect(html).toContain(label)
   expect(html.match(/aria-haspopup="menu"/g)?.length).toBe(4)
   expect(html).not.toContain('sections-menu__preview')
 })

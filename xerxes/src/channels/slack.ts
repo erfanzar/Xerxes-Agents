@@ -59,7 +59,11 @@ export function verifySlackSignature(
   }
   const timestamp = header(headers, 'x-slack-request-timestamp')
   const supplied = header(headers, 'x-slack-signature')
-  if (!timestamp || !supplied || !/^\d+$/.test(timestamp)) {
+  if (!timestamp || !supplied || !/^\d{1,16}$/.test(timestamp)) {
+    return false
+  }
+  const timestampSeconds = Number(timestamp)
+  if (!Number.isSafeInteger(timestampSeconds)) {
     return false
   }
   const now = options.now ?? (() => Date.now() / 1000)
@@ -67,7 +71,7 @@ export function verifySlackSignature(
   if (!Number.isFinite(maxSkewSeconds) || maxSkewSeconds < 0) {
     throw new RangeError('Slack signature maxSkewSeconds must be non-negative')
   }
-  if (Math.abs(now() - Number(timestamp)) > maxSkewSeconds) {
+  if (Math.abs(now() - timestampSeconds) > maxSkewSeconds) {
     return false
   }
   const signed = Buffer.concat([

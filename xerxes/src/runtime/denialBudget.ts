@@ -14,12 +14,24 @@ import { renderIntervention } from './interventions.js'
  */
 export const DEFAULT_MAX_CONSECUTIVE_DENIALS = 25
 
+/**
+ * Consecutive static `policy_denied` refusals on the exact same tool tolerated
+ * before exhausting early. Unlike user permission rejections or cross-tool
+ * route search, a static policy denial depends only on tool identity, so
+ * repeating the identical blocked tool cannot succeed.
+ */
+export const DEFAULT_MAX_SAME_TOOL_POLICY_DENIALS = 5
+
 /** Why a tool call never ran. Kept separate from tool failures, which are real work. */
 export type DenialKind = 'cancelled' | 'permission_rejected' | 'policy_denied'
 
 export interface DenialRecord {
   readonly kind: DenialKind
   readonly toolName: string
+}
+
+export interface DenialBudgetOptions {
+  readonly maxSameToolPolicyDenials?: number | null
 }
 
 /**
@@ -31,7 +43,9 @@ export interface DenialRecord {
  */
 export class DenialBudget {
   readonly maxDenials: number | undefined
+  readonly maxSameToolPolicyDenials: number | undefined
   private consecutiveDenials = 0
+  private consecutiveSameToolPolicyDenials = 0
   private lastDenialRecord: DenialRecord | undefined
 
   /**
@@ -40,24 +54,37 @@ export class DenialBudget {
    * would leave the loop exactly as unprotected as it was before this class
    * existed.
    */
-  constructor(maxDenials?: number | null) {
+  constructor(maxDenials?: number | null, options: DenialBudgetOptions = {}) {
     this.maxDenials = maxDenials === undefined
       ? DEFAULT_MAX_CONSECUTIVE_DENIALS
       : normalizeMaximum(maxDenials)
+    if (this.maxDenials === undefined) {
+      this.maxSameToolPolicyDenials = undefined
+    } else if (options.maxSameToolPolicyDenials === undefined) {
+      this.maxSameToolPolicyDenials = Math.min(this.maxDenials, DEFAULT_MAX_SAME_TOOL_POLICY_DENIALS)
+    } else {
+      const normalized = normalizeMaximum(options.maxSameToolPolicyDenials)
+      this.maxSameToolPolicyDenials = normalized === undefined ? undefined : Math.min(this.maxDenials, normalized)
+    }
   }
 
   get used(): number {
     return this.consecutiveDenials
   }
 
+  get sameToolPolicyStreak(): number {
+    return this.consecutiveSameToolPolicyDenials
+  }
+
   get remaining(): number | undefined {
-    return this.maxDenials === undefined
-      ? undefined
-      : Math.max(0, this.maxDenials - this.consecutiveDenials)
+    if (this.maxDenials === undefined) return undefined
+    if (this.exhausted) return 0
+    return Math.max(0, this.maxDenials - this.consecutiveDenials)
   }
 
   get exhausted(): boolean {
-    return this.maxDenials !== undefined && this.consecutiveDenials >= this.maxDenials
+    return (this.maxDenials !== undefined && this.consecutiveDenials >= this.maxDenials)
+      || (this.maxSameToolPolicyDenials !== undefined && this.consecutiveSameToolPolicyDenials >= this.maxSameToolPolicyDenials)
   }
 
   get lastDenial(): DenialRecord | undefined {
@@ -66,6 +93,14 @@ export class DenialBudget {
 
   /** Charge one refusal and return the new consecutive total. */
   record(kind: DenialKind, toolName: string): number {
+    if (kind === 'policy_denied') {
+      this.consecutiveSameToolPolicyDenials =
+        this.lastDenialRecord?.kind === 'policy_denied' && this.lastDenialRecord.toolName === toolName
+          ? this.consecutiveSameToolPolicyDenials + 1
+          : 1
+    } else {
+      this.consecutiveSameToolPolicyDenials = 0
+    }
     this.consecutiveDenials += 1
     this.lastDenialRecord = { kind, toolName }
     return this.consecutiveDenials
@@ -77,6 +112,7 @@ export class DenialBudget {
    */
   reset(): void {
     this.consecutiveDenials = 0
+    this.consecutiveSameToolPolicyDenials = 0
     this.lastDenialRecord = undefined
   }
 }
@@ -106,6 +142,12 @@ export interface DenialBudgetConfigOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>
   readonly envVar?: string
   readonly key?: string
+  readonly sameToolEnvVar?: string
+  readonly sameToolKey?: string
+}
+
+function isUnsetBudgetValue(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
 }
 
 /** Build a budget from config first, then an injectable environment fallback. */
@@ -115,13 +157,18 @@ export function denialBudgetFromConfig(
 ): DenialBudget {
   const key = options.key ?? 'max_consecutive_denials'
   const envVar = options.envVar ?? 'XERXES_MAX_CONSECUTIVE_DENIALS'
+  const sameToolKey = options.sameToolKey ?? 'max_same_tool_policy_denials'
+  const sameToolEnvVar = options.sameToolEnvVar ?? 'XERXES_MAX_SAME_TOOL_POLICY_DENIALS'
   const environment = options.environment ?? process.env
   const configured = config[key]
-  const raw = configured === undefined || configured === null || configured === ''
-    ? environment[envVar]
-    : configured
-  if (raw === undefined || raw === null || raw === '') return new DenialBudget()
-  return new DenialBudget(parseMaximum(raw))
+  const raw = isUnsetBudgetValue(configured) ? environment[envVar] : configured
+  const sameToolConfigured = config[sameToolKey]
+  const sameToolRaw = isUnsetBudgetValue(sameToolConfigured) ? environment[sameToolEnvVar] : sameToolConfigured
+  const budgetOptions: DenialBudgetOptions = isUnsetBudgetValue(sameToolRaw)
+    ? {}
+    : { maxSameToolPolicyDenials: parseMaximum(sameToolRaw) }
+  if (isUnsetBudgetValue(raw)) return new DenialBudget(undefined, budgetOptions)
+  return new DenialBudget(parseMaximum(raw), budgetOptions)
 }
 
 /** Non-positive is an explicit opt-out; anything else must be a real integer. */

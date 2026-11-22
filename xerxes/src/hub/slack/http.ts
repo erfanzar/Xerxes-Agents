@@ -7,6 +7,8 @@ import { record } from './wire.js'
 export type SlackFetch = (url: string, init: RequestInit) => Promise<Response>
 /** The invented authorization code used only to check a client ID and secret. */
 export const SLACK_CLIENT_CHECK_CODE = 'xerxes-credential-check'
+/** apps.manifest.create errors that mean the configuration token itself is unusable. */
+const TOKEN_ERRORS = new Set(['invalid_auth', 'not_authed', 'token_expired', 'token_revoked', 'not_allowed_token_type', 'missing_scope', 'account_inactive'])
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const methods = {
   'oauth.v2.access': 'POST', 'auth.test': 'POST', 'users.info': 'GET', 'users.lookupByEmail': 'GET',
@@ -15,35 +17,62 @@ const methods = {
 
 type SlackMethod = keyof typeof methods
 
+function abortError(signal: AbortSignal): SlackTransportError {
+  const reason: unknown = signal.reason
+  if (reason instanceof SlackTransportError) return reason
+  if (typeof reason === 'object' && reason !== null && 'name' in reason && reason.name === 'TimeoutError') {
+    return new SlackTransportError('timeout')
+  }
+  return new SlackTransportError('aborted')
+}
+
 export function checkAbort(signal?: AbortSignal): void {
   if (signal?.aborted) throw new SlackTransportError('aborted')
 }
 
 export async function parseSlackJson(response: Response, signal: AbortSignal | null | undefined, maxBytes = MAX_RESPONSE_BYTES): Promise<Record<string, unknown>> {
+  if (signal?.aborted) {
+    void response.body?.cancel().catch(() => {})
+    throw abortError(signal)
+  }
   if (!response.body) throw new SlackTransportError('invalid_response')
   const reader = response.body.getReader()
   const cancel = (): void => { void reader.cancel().catch(() => {}) }
-  signal?.addEventListener('abort', cancel, { once: true })
+  let onAbort: (() => void) | undefined
+  const aborted = signal
+    ? new Promise<never>((_, reject) => {
+        onAbort = (): void => {
+          cancel()
+          reject(abortError(signal))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+    : undefined
+  aborted?.catch(() => {})
   const decoder = new TextDecoder('utf-8', { fatal: true })
   let bytes = 0
   let text = ''
   try {
     while (true) {
-      const next = await reader.read()
+      const next = aborted ? await Promise.race([reader.read(), aborted]) : await reader.read()
+      if (signal?.aborted) throw abortError(signal)
       if (next.done) break
       bytes += next.value.byteLength
       if (bytes > maxBytes) throw new SlackTransportError('invalid_response')
       text += decoder.decode(next.value, { stream: true })
     }
+    if (signal?.aborted) throw abortError(signal)
     const parsed = record(JSON.parse(text + decoder.decode()))
     if (!parsed) throw new SlackTransportError('invalid_response')
     return parsed
-  } catch {
+  } catch (error) {
     cancel()
+    if (signal?.aborted) throw abortError(signal)
+    if (error instanceof SlackTransportError) throw error
     throw new SlackTransportError('invalid_response')
   } finally {
-    signal?.removeEventListener('abort', cancel)
-    reader.releaseLock()
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
+    try { reader.releaseLock() } catch { /* reader still cancelling */ }
   }
 }
 
@@ -76,11 +105,59 @@ export class SlackHttp {
       void response.body?.cancel().catch(() => {})
       throw new SlackTransportError(response.status === 429 ? 'rate_limited' : 'slack_rejected')
     }
-    const data = await parseSlackJson(response, combined)
+    let data: Record<string, unknown>
+    try {
+      data = await parseSlackJson(response, combined)
+    } catch (error) {
+      checkAbort(signal)
+      if (deadline.aborted) throw new SlackTransportError('timeout')
+      throw error
+    }
     if (data.ok === true) return 'ok'
     if (data.error === 'invalid_client_id' || data.error === 'bad_client_secret' || data.error === 'invalid_client') return 'bad_client'
     if (data.error === 'ratelimited') throw new SlackTransportError('rate_limited')
     return 'ok'
+  }
+
+  /**
+   * Create the owner's Slack app from a manifest (apps.manifest.create) with a one-time app
+   * configuration token. Returns the new app's credentials as Slack reported them (unvalidated).
+   */
+  async createAppFromManifest(configToken: string, manifest: string, signal?: AbortSignal): Promise<
+    { readonly kind: 'created'; readonly clientId: unknown; readonly clientSecret: unknown } | { readonly kind: 'bad_token' | 'refused' }> {
+    checkAbort(signal)
+    const deadline = AbortSignal.timeout(this.timeoutMs)
+    const combined = AbortSignal.any([deadline, ...(signal === undefined ? [] : [signal])])
+    let response: Response
+    try {
+      response = await this.fetchPort('https://slack.com/api/apps.manifest.create', {
+        method: 'POST', redirect: 'error', signal: combined,
+        headers: new Headers({ accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' }),
+        body: new URLSearchParams({ token: configToken, manifest }).toString(),
+      })
+    } catch {
+      checkAbort(signal)
+      throw new SlackTransportError(deadline.aborted ? 'timeout' : 'network_error')
+    }
+    if (response.redirected || !response.ok) {
+      void response.body?.cancel().catch(() => {})
+      throw new SlackTransportError(response.status === 429 ? 'rate_limited' : 'slack_rejected')
+    }
+    let data: Record<string, unknown>
+    try {
+      data = await parseSlackJson(response, combined)
+    } catch (error) {
+      checkAbort(signal)
+      if (deadline.aborted) throw new SlackTransportError('timeout')
+      throw error
+    }
+    if (data.ok === true) {
+      const credentials = record(data.credentials)
+      return { kind: 'created', clientId: credentials?.client_id, clientSecret: credentials?.client_secret }
+    }
+    if (data.error === 'ratelimited') throw new SlackTransportError('rate_limited')
+    if (typeof data.error === 'string' && TOKEN_ERRORS.has(data.error)) return { kind: 'bad_token' }
+    return { kind: 'refused' }
   }
 
   async request(method: SlackMethod, authorization: string, input: URLSearchParams | Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {

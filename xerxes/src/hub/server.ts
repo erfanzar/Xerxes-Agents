@@ -176,7 +176,14 @@ interface AgentStep {
 }
 
 function clipText(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`
+  if (value.length <= max) return value
+  let cut = Math.max(0, max - 1)
+  if (cut > 0 && cut < value.length) {
+    const high = value.charCodeAt(cut - 1)
+    const low = value.charCodeAt(cut)
+    if (high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) cut -= 1
+  }
+  return `${value.slice(0, cut)}…`
 }
 function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
@@ -828,7 +835,7 @@ export class HubServer {
       }
       return frames
     }
-    const build = (cap: number): { workspaces: unknown[]; truncated: boolean } => {
+    const build = (cap: number, includePending = true): { workspaces: unknown[]; truncated: boolean } => {
       let truncated = false
       const workspaces = visible.map(row => {
         const projection = this.options.workspaces.projection(row.id)
@@ -839,6 +846,10 @@ export class HubServer {
         const health = this.options.workspaces.health(row.id)
         const sessions = all.slice(0, cap).map(session => {
           if (session.status !== 'needs_you' && session.pending_interaction_count === 0) return session
+          if (!includePending) {
+            truncated = true
+            return session
+          }
           const frames = pendingOf(row.id, session.id)
           return frames.length === 0 ? session : { ...session, pending_interactions: frames }
         })
@@ -852,6 +863,13 @@ export class HubServer {
     while (utf8ByteLength(JSON.stringify(built)) > HUB_LIMITS.normalFrameBytes && cap > 1) {
       cap = Math.max(1, Math.floor(cap / 2))
       built = build(cap)
+    }
+    if (utf8ByteLength(JSON.stringify(built)) > HUB_LIMITS.normalFrameBytes) {
+      built = build(1, false)
+    }
+    if (utf8ByteLength(JSON.stringify(built)) > HUB_LIMITS.normalFrameBytes) {
+      cap = 0
+      built = build(0, false)
     }
     return { workspaces: built.workspaces, truncated: built.truncated || cap < limit, generated_at: new Date(this.clock()).toISOString(), watermark: encodeCursor({ streamId: this.options.store.streamId, sequence: this.options.store.watermark(), scopeKey: 'snapshot' }) }
   }

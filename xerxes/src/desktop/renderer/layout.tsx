@@ -23,6 +23,8 @@ const defaults: PanelLayout = { sidebarWidth: 272, inspectorWidth: 340, sidebarH
 export const PANEL_SIZES: Readonly<Record<RailPanel, { readonly width: number; readonly min: number }>> = {
   activity: { width: 366, min: 300 },
   subagents: { width: 366, min: 300 },
+  swarm: { width: 520, min: 360 },
+  btw: { width: 420, min: 320 },
   background: { width: 366, min: 300 },
   outputs: { width: 366, min: 300 },
   usage: { width: 366, min: 300 },

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Xerxes Agents Brand Emblem">
+  <rect x="1" y="1" width="254" height="254" rx="20" fill="#101010" stroke="#262626" stroke-width="1" />
+  <g transform="translate(56.0,56.0) scale(3.0000)">
+    <path d="M 31.5 8 L 41.5 8 L 30.8 21.7 L 25.8 15.3 Z" fill="#ededed" fill-opacity="0.42" />
+    <path d="M 16.5 40 L 6.5 40 L 17.2 26.3 L 22.2 32.7 Z" fill="#ededed" fill-opacity="0.42" />
+    <path d="M 6.5 8 L 16.5 8 L 25.6 19.65 L 20.6 26.05 Z" fill="#ededed" />
+    <path d="M 41.5 40 L 31.5 40 L 22.4 28.35 L 27.4 21.95 Z" fill="#ededed" />
+  </g>
+</svg>

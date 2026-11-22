@@ -17,6 +17,7 @@ import { Fragment, createContext, useContext, useId, type ReactNode, useLayoutEf
 import { saveAppearance, loadAppearance, isStyleChoice, DEFAULT_FONT_SIZE, DEFAULT_STYLE, FONT_SIZES, FONT_LABELS, STYLES, STYLE_LABELS, styleFromSaved, type StyleChoice } from './appearance.js'
 import { chooseStyle } from './appearanceSync.js'
 import { applySessionDensity, applyTerminalFont, applyUiScale, loadSessionDensity, loadTerminalFont, loadUiScale, parseTerminalFont, SESSION_DENSITIES, UI_SCALES, type SessionDensity } from './displayPrefs.js'
+import { setSidebarViewMode, useThreadInbox, type SidebarViewMode } from './threadInbox.js'
 import { loadPalette, PALETTES, paletteVariant, savePalette, type Palette } from './palettes.js'
 import { applyBackdrop, backdropFromImage, BACKDROP_PRESETS, BUNDLED_BACKGROUNDS, DEFAULT_BLUR, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY, loadBackdrop, saveBackdrop, transparencySupported, type Backdrop } from './backdrop.js'
 import { desktopError } from './desktopRpc.js'
@@ -368,7 +369,7 @@ function BackdropField(): ReactElement {
 }
 
 const STYLE_NOTES: Record<StyleChoice, string> = {
-  vibes: "Claude Code's layout: neutral greys, a sans font, a blue accent",
+  vibes: 'T3 Code layout: pure obsidian & paper surfaces, Inbox sidebar, frosted glass composer, and cobalt blue accents',
   neo: 'The same layout as a terminal console: one mono font, square corners, a purple accent',
 }
 
@@ -453,10 +454,11 @@ function PaletteField(): ReactElement {
   )
 }
 
-/** UI scale, terminal font and sidebar density (per machine). */
+/** UI scale, terminal font, sidebar view and sidebar density (per machine). */
 function DisplayFields(): ReactElement {
   const [scale, setScale] = useState(() => typeof document === 'undefined' ? 100 : loadUiScale())
   const [density, setDensity] = useState<SessionDensity>(() => typeof document === 'undefined' ? 'comfortable' : loadSessionDensity())
+  const { state: inboxState } = useThreadInbox()
   const [font, setFont] = useState(() => typeof document === 'undefined' ? '' : loadTerminalFont() ?? '')
   const [fontError, setFontError] = useState('')
   const saveFont = (value: string): void => {
@@ -467,6 +469,22 @@ function DisplayFields(): ReactElement {
   }
   return (
     <>
+      <div className="field">
+        <label id="sidebar-layout">Sidebar layout</label>
+        <p className="field__note">Projects groups threads by machine and project folder. Inbox shows a flat chronological feed with Pinned, Active, Snoozed and Settled shelves.</p>
+        <div className="seg" role="group" aria-labelledby="sidebar-layout">
+          {(['folders', 'inbox'] as const satisfies readonly SidebarViewMode[]).map(mode => (
+            <button
+              key={mode}
+              aria-pressed={inboxState.viewMode === mode}
+              className={inboxState.viewMode === mode ? 'is-on' : ''}
+              onClick={() => setSidebarViewMode(mode)}
+            >
+              {mode === 'folders' ? 'Projects' : 'Inbox'}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="field">
         <label id="ui-scale">UI scale</label>
         <p className="field__note">Zooms the whole window. Cmd with +, − and 0 also works. Current: {scale}%.</p>
@@ -1280,7 +1298,7 @@ const PickerAnchor = createContext<RefObject<HTMLSpanElement | null> | null>(nul
 export function PickerLayer({ children }: { children: ReactNode }): ReactElement {
   const anchor = useRef<HTMLSpanElement>(null)
   return <><span hidden ref={anchor} /><PickerAnchor.Provider value={anchor}>
-    {typeof document === 'undefined' ? children : createPortal(<div className="atelier picker-layer">{children}</div>, document.body)}
+    {typeof document === 'undefined' || !document.body ? children : createPortal(<div className="atelier picker-layer">{children}</div>, document.body)}
   </PickerAnchor.Provider></>
 }
 
@@ -1808,6 +1826,10 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       { id: 'permissions', icon: 'shield', label: 'Permissions settings…', run: () => store.openSettings('permissions') },
       { id: 'channels', icon: 'cloud', label: 'Channels settings…', run: () => store.openSettings('channels') },
       { id: 'terminals', icon: 'terminal', label: 'Terminals…', run: () => store.openSettings('terminals') },
+      { id: 't3-terminal-drawer', icon: 'terminal', label: 'Toggle bottom terminal drawer', hint: '⌘J', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-terminal-drawer' })) },
+      { id: 't3-thread-details', icon: 'info', label: 'Toggle thread details card', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-thread-details' })) },
+      { id: 't3-right-panel', icon: 'sidebar', label: 'Toggle right panel', hint: '⌘\\', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-right-panel' })) },
+      { id: 't3-sidebar-mode', icon: 'folder', label: 'Toggle sidebar view (Inbox / Folders)', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-sidebar-view' })) },
       { id: 'session-search', icon: 'search', label: 'Search sessions & messages…', run: () => store.openSessionSearch() },
     ]
     for (const provider of snap.providers) {

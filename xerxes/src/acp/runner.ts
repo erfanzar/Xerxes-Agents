@@ -100,6 +100,7 @@ export class AcpAgentRunner {
     }
     active.session.cancelled = true
     active.controller.abort(new Error('ACP prompt cancelled'))
+    this.permissionBoard?.dropSession(sessionId)
     this.resolveQuestionsForSession(sessionId, '')
     return true
   }
@@ -122,6 +123,7 @@ export class AcpAgentRunner {
 
   resetSession(sessionId: string): void {
     this.states.delete(sessionId)
+    this.permissionBoard?.dropSession(sessionId)
     this.resolveQuestionsForSession(sessionId, '')
   }
 
@@ -181,7 +183,12 @@ export class AcpAgentRunner {
 
     try {
       const permissionBroker: PermissionBroker = {
-        request: (permission, signal) => this.resolvePermission(session, permission, emit, signal),
+        request: (permission, signal) => this.resolvePermission(
+          session,
+          permission,
+          emit,
+          signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+        ),
       }
       let runSafety: RunSafety | undefined
       let runSafetyNote: string | undefined
@@ -189,6 +196,9 @@ export class AcpAgentRunner {
         runSafety = await this.options.runSafetyFor?.(session.sessionId, session.cwd)
       } catch (error) {
         runSafetyNote = `The safety floor did not start, so writes and commands ask: ${errorMessage(error)}`
+      }
+      if (controller.signal.aborted || session.cancelled) {
+        return { ok: true, cancelled: true }
       }
       const configured = this.options.cascadeFor?.(session.sessionId, session.cwd)
       // Under accept-all the user chose to let the run change anything.

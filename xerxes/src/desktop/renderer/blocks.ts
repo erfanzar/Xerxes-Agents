@@ -70,34 +70,53 @@ function verbOf(name: unknown): string {
 }
 
 /** Keys whose value summarizes a call best, in preference order. */
-const ARG_KEYS = ['file_path', 'path', 'cmd', 'command', 'pattern', 'query', 'url', 'skill', 'name']
+const ARG_KEYS = [
+  'file_path', 'path', 'Path',
+  'cmd', 'command', 'CommandLine', 'toolSummary',
+  'pattern', 'Pattern', 'query', 'Query',
+  'url', 'skill', 'name',
+]
+
+/** Maximum inline display characters retained per tool input/output string (64 KB). */
+export const MAX_TOOL_DETAIL_CHARS = 65_536
+
+/** Bound giant tool input/output payloads so multi-MB reads cannot bloat React state & DOM. */
+export function capToolDetail(value: string, limit = MAX_TOOL_DETAIL_CHARS): string {
+  if (value.length <= limit) return value
+  const kb = Math.max(1, Math.round(value.length / 1024))
+  return `${value.slice(0, limit)}\n… (truncated, ${kb} KB total)`
+}
 
 function detailOf(value: unknown): string {
   if (typeof value === 'string') {
     const trimmed = value.trim()
     if (!trimmed) return ''
+    if (value.length > MAX_TOOL_DETAIL_CHARS) return capToolDetail(value)
     try {
-      return JSON.stringify(JSON.parse(trimmed) as unknown, null, 2)
+      return capToolDetail(JSON.stringify(JSON.parse(trimmed) as unknown, null, 2))
     } catch {
-      return value
+      return capToolDetail(value)
     }
   }
   if (value === undefined || value === null) return ''
   try {
-    return JSON.stringify(value, null, 2)
+    return capToolDetail(JSON.stringify(value, null, 2))
   } catch {
-    return String(value)
+    return capToolDetail(String(value))
   }
 }
 
-/** First-argument-ish summary of a tool call's arguments. */
-function argOf(args: unknown): string {
+/** First-argument-ish summary of a tool call's arguments (or structured diff/locations fallback). */
+function argOf(args: unknown, structuredDiff?: StructuredDiffPayload | null, locations?: unknown): string {
   const clip = (value: string): string => (value.length > 72 ? `${value.slice(0, 69)}…` : value)
   const parsed = parseArgs(args)
   for (const key of ARG_KEYS) {
     const value = parsed[key]
     if (typeof value === 'string' && value.trim()) return clip(value)
   }
+  if (structuredDiff?.path) return clip(structuredDiff.path)
+  const locPath = firstLocationPath(locations)
+  if (locPath) return clip(locPath)
   const first = Object.values(parsed)[0]
   if (typeof first === 'string' && first.trim()) return clip(first)
   if (typeof args === 'string' && args.trim()) return clip(args)
@@ -110,11 +129,113 @@ export function userTextOf(payload: Readonly<Record<string, unknown>>): string {
   return payload.user_input
 }
 
+const SWARM_WAKE_PATTERN = /^(?:Immortals|Swarm) (?:board #\d+|worker error)\b/
+const SWARM_BOARD_WAKE_DETAIL = /^(?:Immortals|Swarm) board #(\d+)\s*\((@[^)]+)\)\s*$/
+const SWARM_ERROR_WAKE_DETAIL = /^(?:Immortals|Swarm) worker error\s*\((@[^)]+)\)\s*$/
+const LEGACY_BOARD_WAKE_PATTERN = /^\[board\] the latest message is #\d+/
+const LEGACY_BOARD_WAKE_DETAIL = /^\[board\] the latest message is #\d+[^\n]*New board message #(\d+) from (@[^\s]+)/
+
+/** True when text is an internal Immortals/Swarm wake prompt rather than human chat. */
+export function isInternalSwarmWakeText(text: string): boolean {
+  const trimmed = text.trim()
+  return SWARM_WAKE_PATTERN.test(trimmed) || LEGACY_BOARD_WAKE_PATTERN.test(trimmed)
+}
+
+/** Format an internal coordinator wake into a quiet, compact notice line. */
+export function formatInternalWakeNotice(text: string): string {
+  const trimmed = text.trim()
+  const boardMatch = SWARM_BOARD_WAKE_DETAIL.exec(trimmed)
+  if (boardMatch) return `Immortals · #${boardMatch[1]} from ${boardMatch[2]}`
+  const errMatch = SWARM_ERROR_WAKE_DETAIL.exec(trimmed)
+  if (errMatch) return `Immortals · worker error from ${errMatch[1]}`
+  const legacyMatch = LEGACY_BOARD_WAKE_DETAIL.exec(trimmed)
+  if (legacyMatch) return `Immortals · #${legacyMatch[1]} from ${legacyMatch[2]}`
+  return trimmed
+}
+
+/** Normalize tool names across Xerxes CamelCase and ACP snake_case (`edit_file` → `editfile`). */
+export function normalizeToolName(name: unknown): string {
+  if (typeof name !== 'string') return ''
+  return (name.split(/[.:/]/).pop() ?? name).trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+/** Structured file diff metadata attached by ACP `tool_call`, `tool_result`, or `approval_request`. */
+export interface StructuredDiffPayload {
+  readonly path: string
+  readonly oldText?: string
+  readonly newText?: string
+}
+
+/** Parse a wire structured diff (`{ path, old_text?, new_text? }` or camelCase equivalents). */
+export function parseStructuredDiff(value: unknown): StructuredDiffPayload | null {
+  if (!isRecord(value)) return null
+  const path = typeof value.path === 'string' && value.path.trim() ? value.path.trim() : ''
+  const oldText = typeof value.old_text === 'string'
+    ? value.old_text
+    : typeof value.oldText === 'string'
+      ? value.oldText
+      : undefined
+  const newText = typeof value.new_text === 'string'
+    ? value.new_text
+    : typeof value.newText === 'string'
+      ? value.newText
+      : undefined
+  if (!path && oldText === undefined && newText === undefined) return null
+  return {
+    path,
+    ...(oldText !== undefined ? { oldText } : {}),
+    ...(newText !== undefined ? { newText } : {}),
+  }
+}
+
+/** Extract the first file path from an ACP `locations` array (`[{ path, line? }]`). */
+export function firstLocationPath(locations: unknown): string {
+  if (!Array.isArray(locations)) return ''
+  for (const entry of locations) {
+    if (isRecord(entry) && typeof entry.path === 'string' && entry.path.trim()) {
+      return entry.path.trim()
+    }
+  }
+  return ''
+}
+
+function splitDiffLines(text: string): string[] {
+  return text ? text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+}
+
+/**
+ * Strip identical leading and trailing lines between two full-file snapshots,
+ * retaining up to `contextLines` of surrounding context on each side.
+ */
+export function trimmedChangedLines(
+  before: string,
+  after: string,
+  contextLines = 0,
+): { readonly before: readonly string[]; readonly after: readonly string[] } {
+  const a = splitDiffLines(before)
+  const b = splitDiffLines(after)
+  let prefix = 0
+  const maxPrefix = Math.min(a.length, b.length)
+  while (prefix < maxPrefix && a[prefix] === b[prefix]) prefix += 1
+  if (prefix === a.length && prefix === b.length) return { before: [], after: [] }
+  let suffix = 0
+  const maxSuffix = Math.min(a.length - prefix, b.length - prefix)
+  while (suffix < maxSuffix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix += 1
+  const ctx = Math.max(0, Math.floor(contextLines))
+  const start = Math.max(0, prefix - ctx)
+  const endA = Math.min(a.length, a.length - suffix + ctx)
+  const endB = Math.min(b.length, b.length - suffix + ctx)
+  return {
+    before: a.slice(start, endA),
+    after: b.slice(start, endB),
+  }
+}
+
 /** Edit-family tool names whose arguments carry real diff material. */
-const EDIT_TOOLS = new Set(['fileedittool', 'writefile', 'appendfile'])
+const EDIT_TOOLS = new Set(['fileedittool', 'editfile', 'writefile', 'appendfile'])
 
 export function isEditTool(name: unknown): boolean {
-  return typeof name === 'string' && EDIT_TOOLS.has(name.split(/[.:]/).pop()?.toLowerCase() ?? '')
+  return EDIT_TOOLS.has(normalizeToolName(name))
 }
 
 /**
@@ -136,26 +257,60 @@ export function parseArgs(args: unknown): Record<string, unknown> {
   return {}
 }
 
+function firstStringField(record: Readonly<Record<string, unknown>>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string') return value
+  }
+  return undefined
+}
+
 /**
  * File + line delta an edit call will produce, or null for other tools.
- * `WriteFile`/`AppendFile` have no old text: everything they land is an add.
+ * Supports both Xerxes snake_case (`file_path`, `old_string`, `new_string`, `content`),
+ * Antigravity ACP PascalCase (`Path`, `Target`, `Replacement`, `Content`), and
+ * structured ACP `diff` / `locations` payloads.
  */
 export function editStatsOf(
   name: unknown,
   args: unknown,
+  structuredDiff?: unknown,
+  locations?: unknown,
 ): { path: string; adds: number; dels: number; isNew: boolean } | null {
-  if (!isEditTool(name)) return null
+  const parsedDiff = parseStructuredDiff(structuredDiff)
+  if (!isEditTool(name) && !parsedDiff) return null
   const parsed = parseArgs(args)
-  const path = typeof parsed.file_path === 'string' ? parsed.file_path : typeof parsed.path === 'string' ? parsed.path : ''
+  const path =
+    (typeof parsed.file_path === 'string' && parsed.file_path.trim())
+    || (typeof parsed.path === 'string' && parsed.path.trim())
+    || (typeof parsed.Path === 'string' && parsed.Path.trim())
+    || parsedDiff?.path
+    || firstLocationPath(locations)
+    || ''
   if (!path) return null
+  const argOld = firstStringField(parsed, ['old_string', 'Target', 'old_text', 'oldText'])
+  const argNew = firstStringField(parsed, ['new_string', 'Replacement', 'new_text', 'newText', 'content', 'Content'])
+  const hasArgText = argOld !== undefined || argNew !== undefined
+  const norm = normalizeToolName(name)
   const mode = typeof parsed.edit_mode === 'string' ? parsed.edit_mode : 'search_replace'
-  const isNew = String(name).toLowerCase().endsWith('writefile') && mode !== 'search_replace' ? true : !parsed.old_string
+  const oldText = hasArgText ? argOld : parsedDiff?.oldText
+  const newText = hasArgText ? argNew : parsedDiff?.newText
+  const isNew = norm === 'writefile' && mode !== 'search_replace' ? true : !oldText
+  if (!hasArgText && parsedDiff && !isNew && typeof oldText === 'string' && typeof newText === 'string') {
+    const span = trimmedChangedLines(oldText, newText, 0)
+    return {
+      path,
+      adds: span.after.length,
+      dels: span.before.length,
+      isNew: false,
+    }
+  }
   const count = (value: unknown): number =>
-    typeof value === 'string' && value.length ? value.replace(/\n$/, '').split('\n').length : 0
+    typeof value === 'string' && value.length ? splitDiffLines(value).length : 0
   return {
     path,
-    adds: count(parsed.new_string ?? parsed.content),
-    dels: isNew ? 0 : count(parsed.old_string),
+    adds: count(newText),
+    dels: isNew ? 0 : count(oldText),
     isNew,
   }
 }
@@ -165,12 +320,45 @@ export function isAgentRunNotice(payload: Readonly<Record<string, unknown>>): bo
   return payload.title === 'Run finished' && typeof payload.body === 'string' && /^agent (succeeded|failed|cancelled|interrupted):/.test(payload.body)
 }
 
+const CONTROL_STATE_NOTICE_PATTERNS: readonly RegExp[] = [
+  /^Model set to .+$/i,
+  /^Agents:\s*`?(?:off|auto|eager)`?\.?$/i,
+  /^Thinking(?:\s+effort\s+set\s+to)?:\s*`?[^`\n]+`?\.?$/i,
+  /^Permission mode:\s*`?(?:accept-all|auto|manual|plan)`?\.?$/i,
+  /^YOLO mode (?:ON|OFF)\.?$/i,
+  /^Switched to provider profile\s+`?[^`\n]+`?\.?$/i,
+  /^provider\s+`?[^`\n]+`?\s+(?:saved and activated|deleted)\.?$/i,
+]
+
+/**
+ * Routine composer/picker state-change confirmations (`Model set to …`,
+ * `Agents: \`eager\`.`, `Thinking: \`high\`.`, `Permission mode: \`auto\`.`).
+ * The composer trigger and picker already reflect these changes inline, so
+ * repeating them as `(i)` rows clutters the conversation and welcome screen.
+ * Warnings, errors, and multi-line command output are never suppressed.
+ */
+export function isControlStateNotice(payload: Readonly<Record<string, unknown>>): boolean {
+  const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
+  if (severity.includes('error') || severity.includes('fatal') || severity.includes('warn')) return false
+  const raw =
+    (typeof payload.body === 'string' && payload.body) ||
+    (typeof payload.message === 'string' && payload.message) ||
+    ''
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed.includes('\n')) return false
+  return CONTROL_STATE_NOTICE_PATTERNS.some(pattern => pattern.test(trimmed))
+}
+
 export class BlockBuilder {
   private blocks: Block[] = []
   private seq = 1
   /** Contiguous same-kind event runs, in stream order. */
   private runs: Run[] = []
   private runIds = new WeakMap<Run, number>()
+  /** Structural-sharing cache for settled (non-trailing) live runs in the current turn. */
+  private settledRunBlocks = new WeakMap<Run, Block>()
+  private cachedSnapshot: readonly Block[] | null = null
+  private cachedSnapshotActive: boolean | null = null
   /** Every tool call/result of the turn by id, regardless of which run holds the row. */
   private tools = new Map<string, ToolItem>()
   /**
@@ -182,6 +370,11 @@ export class BlockBuilder {
   private agentsCard: { readonly id: number; readonly members: readonly AgentMember[] } | null = null
   /** The run that was trailing when the card opened — normally the spawn call's tools run. */
   private agentsAnchor: Run | null = null
+
+  private invalidateSnapshot(): void {
+    this.cachedSnapshot = null
+    this.cachedSnapshotActive = null
+  }
 
   private nextId(): number {
     return this.seq++
@@ -195,10 +388,15 @@ export class BlockBuilder {
    */
   pushAgents(members: readonly AgentMember[]): void {
     if (members.length === 0 && !this.agentsCard) return
+    this.invalidateSnapshot()
     if (this.agentsCard) {
       this.agentsCard = { id: this.agentsCard.id, members }
       const committed = this.blocks.findIndex(block => block.id === this.agentsCard!.id)
-      if (committed >= 0) this.blocks[committed] = { kind: 'agents', id: this.agentsCard.id, members }
+      if (committed >= 0) {
+        const next = this.blocks.slice()
+        next[committed] = { kind: 'agents', id: this.agentsCard.id, members }
+        this.blocks = next
+      }
       return
     }
     this.agentsCard = { id: this.nextId(), members }
@@ -238,10 +436,28 @@ export class BlockBuilder {
   /** Consume one wire event. Unknown types are ignored, not errors. */
   push(type: string, payload: Readonly<Record<string, unknown>>): void {
     switch (type) {
+      case 'turn_begin': {
+        const raw =
+          typeof payload.user_input === 'string'
+            ? payload.user_input
+            : typeof payload.text === 'string'
+              ? payload.text
+              : ''
+        const text = raw.trim()
+        const origin = payload.origin
+        if (text && (origin === 'agent' || origin === 'monitor' || isInternalSwarmWakeText(text))) {
+          this.pushNotice(formatInternalWakeNotice(text))
+        }
+        break
+      }
       case 'text_part': {
         if (typeof payload.text === 'string' && payload.text) {
           const run = this.openRun('text')
-          if (run.kind === 'text') run.text += payload.text
+          if (run.kind === 'text') {
+            run.text += payload.text
+            this.settledRunBlocks.delete(run)
+            this.invalidateSnapshot()
+          }
         }
         break
       }
@@ -249,7 +465,11 @@ export class BlockBuilder {
         const delta = typeof payload.think === 'string' ? payload.think : typeof payload.text === 'string' ? payload.text : ''
         if (delta) {
           const run = this.openRun('thinking')
-          if (run.kind === 'thinking') run.text += delta
+          if (run.kind === 'thinking') {
+            run.text += delta
+            this.settledRunBlocks.delete(run)
+            this.invalidateSnapshot()
+          }
         }
         break
       }
@@ -257,24 +477,57 @@ export class BlockBuilder {
         const id = typeof payload.id === 'string' ? payload.id : typeof payload.tool_call_id === 'string' ? payload.tool_call_id : `t${this.seq++}`
         const run = this.openRun('tools')
         if (run.kind === 'tools' && !run.order.includes(id)) run.order.push(id)
-        const stats = editStatsOf(payload.name, payload.arguments)
+        const structuredDiff = parseStructuredDiff(payload.diff)
+        const stats = editStatsOf(payload.name, payload.arguments, structuredDiff, payload.locations)
+        const toolDiff = stats
+          ? {
+              adds: stats.adds,
+              dels: stats.dels,
+              ...(structuredDiff ? {
+                ...(structuredDiff.path ? { path: structuredDiff.path } : {}),
+                ...(structuredDiff.oldText !== undefined ? { old_text: structuredDiff.oldText } : {}),
+                ...(structuredDiff.newText !== undefined ? { new_text: structuredDiff.newText } : {}),
+              } : {}),
+            }
+          : undefined
         this.tools.set(id, {
           id,
           verb: verbOf(payload.name),
-          arg: argOf(payload.arguments),
+          arg: argOf(payload.arguments, structuredDiff, payload.locations),
           dur: '',
           state: 'working',
           name: typeof payload.name === 'string' ? payload.name : '',
           input: detailOf(payload.arguments),
           output: '',
-          ...(stats ? { path: stats.path, diff: { adds: stats.adds, dels: stats.dels } } : {}),
+          ...(stats ? { path: stats.path } : {}),
+          ...(toolDiff ? { diff: toolDiff } : {}),
         })
+        this.settledRunBlocks.delete(run)
+        this.invalidateSnapshot()
         break
       }
       case 'tool_result': {
         const id = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : typeof payload.id === 'string' ? payload.id : ''
         const existing = this.tools.get(id)
-        const stats = editStatsOf(payload.name, existing ? undefined : payload.arguments)
+        const structuredDiff = parseStructuredDiff(payload.diff)
+        const toolName = existing?.name || (typeof payload.name === 'string' ? payload.name : '')
+        const stats = (structuredDiff || !existing?.diff)
+          ? editStatsOf(toolName, payload.arguments ?? (existing?.input ? parseArgs(existing.input) : undefined), structuredDiff, payload.locations)
+          : null
+        const mergedDiff = structuredDiff
+          ? {
+              adds: existing?.diff?.adds ?? stats?.adds ?? 0,
+              dels: existing?.diff?.dels ?? stats?.dels ?? 0,
+              ...(structuredDiff.path ? { path: structuredDiff.path } : {}),
+              ...(structuredDiff.oldText !== undefined ? { old_text: structuredDiff.oldText } : {}),
+              ...(structuredDiff.newText !== undefined ? { new_text: structuredDiff.newText } : {}),
+            }
+          : existing?.diff
+            ? existing.diff
+            : stats
+              ? { adds: stats.adds, dels: stats.dels }
+              : undefined
+        const resolvedPath = existing?.path || stats?.path || structuredDiff?.path || firstLocationPath(payload.locations) || ''
         const output = detailOf(payload.return_value ?? payload.result ?? payload.output)
         // Saved native tool results predate an explicit error field. Permission
         // to execute is independent of whether execution succeeded.
@@ -282,31 +535,39 @@ export class BlockBuilder {
         const item: ToolItem = {
           id,
           verb: existing?.verb ?? verbOf(payload.name),
-          arg: existing?.arg ?? '',
+          arg: existing?.arg || argOf(payload.arguments, structuredDiff, payload.locations),
           dur: dur(payload.duration_ms),
           state: error ? 'failed' : 'done',
-          name: existing?.name ?? (typeof payload.name === 'string' ? payload.name : ''),
-          input: existing?.input ?? detailOf(payload.arguments),
+          name: toolName,
+          input: existing?.input || detailOf(payload.arguments),
           output,
           ...(error ? { error } : {}),
-          ...(existing?.path ? { path: existing.path } : stats ? { path: stats.path } : {}),
-          ...(existing?.diff ? { diff: existing.diff } : stats ? { diff: { adds: stats.adds, dels: stats.dels } } : {}),
+          ...(resolvedPath ? { path: resolvedPath } : {}),
+          ...(mergedDiff ? { diff: mergedDiff } : {}),
         }
-        if (existing) this.tools.set(id, item)
-        else {
+        if (existing) {
+          this.tools.set(id, item)
+          const owner = this.runHolding(id)
+          if (owner) this.settledRunBlocks.delete(owner)
+        } else {
           // A result with no matching call (replay quirks): the row lands on
           // the trailing tools run, opening one if the stream just switched.
           const run = this.openRun('tools')
           if (run.kind === 'tools' && !run.order.includes(id)) run.order.push(id)
           this.tools.set(id, item)
+          this.settledRunBlocks.delete(run)
         }
         // Steering can place a user bubble after a still-running tool group.
         // Its eventual result updates that original group, not a duplicate.
-        this.blocks = this.blocks.map(block => {
-          if (block.kind !== 'tools' || !block.items.some(tool => tool.id === id)) return block
-          const items = block.items.map(tool => tool.id === id ? item : tool)
-          return { ...block, items, running: items.some(tool => tool.state === 'working') }
-        })
+        // Avoid O(N) array cloning when no committed block holds this tool id.
+        if (this.blocks.some(block => block.kind === 'tools' && block.items.some(tool => tool.id === id))) {
+          this.blocks = this.blocks.map(block => {
+            if (block.kind !== 'tools' || !block.items.some(tool => tool.id === id)) return block
+            const items = block.items.map(tool => tool.id === id ? item : tool)
+            return { ...block, items, running: items.some(tool => tool.state === 'working') }
+          })
+        }
+        this.invalidateSnapshot()
         break
       }
       case 'notification': {
@@ -316,7 +577,8 @@ export class BlockBuilder {
             if (this.blocks.some(block => block.kind === 'reflection' && block.reflection.id === reflection.id) || this.runs.some(run => run.kind === 'reflection' && run.reflection.id === reflection.id)) break
             const run: ReflectionRun = { kind: 'reflection', reflection }, id = this.nextId()
             if (this.runs.length) { this.runIds.set(run, id); this.runs.push(run) }
-            else this.blocks.push({ ...run, id })
+            else this.blocks = [...this.blocks, { ...run, id }]
+            this.invalidateSnapshot()
             break
           }
         }
@@ -357,11 +619,15 @@ export class BlockBuilder {
         // A subagent's run closing ("agent succeeded: … · attempt 2", once per
         // revision) is already on its Subagents card; as rows it repeated.
         if (isAgentRunNotice(payload)) break
+        // Composer/picker state echoes ("Model set to …", "Agents: `eager`.")
+        // are already reflected directly in the picker trigger and controls.
+        if (isControlStateNotice(payload)) break
         const severity = String(payload.severity ?? payload.level ?? 'info').toLowerCase()
         const notice: NoticeRun = { kind: 'notice', error: severity.includes('error') || severity.includes('fatal'), text: noticeText(message) }
         const id = this.nextId()
         if (this.runs.length) { this.runIds.set(notice, id); this.runs.push(notice) }
-        else this.blocks.push({ ...notice, id })
+        else this.blocks = [...this.blocks, { ...notice, id }]
+        this.invalidateSnapshot()
         break
       }
       default:
@@ -369,11 +635,31 @@ export class BlockBuilder {
     }
   }
 
+  /** A quiet system/wake notice row landing at the fold's end. */
+  pushNotice(text: string, error = false): number {
+    this.commitRuns(false)
+    const clean = noticeText(text)
+    const last = this.blocks.at(-1)
+    if (last && last.kind === 'notice' && last.text === clean && last.error === error) {
+      return last.id
+    }
+    const id = this.nextId()
+    this.blocks = [...this.blocks, { kind: 'notice', id, error, text: clean }]
+    this.invalidateSnapshot()
+    return id
+  }
+
   /** A user line lands at the fold's end (submit ordering, replays). */
   pushUser(text: string, contextSummary = false, images: readonly string[] = []): number {
+    // Internal Immortals/Swarm coordinator wakes must render as quiet notices,
+    // never as right-aligned human chat bubbles.
+    if (!contextSummary && images.length === 0 && isInternalSwarmWakeText(text)) {
+      return this.pushNotice(formatInternalWakeNotice(text))
+    }
     this.commitRuns(false)
     const id = this.nextId()
-    this.blocks.push({ kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}), ...(images.length ? { images } : {}) })
+    this.blocks = [...this.blocks, { kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}), ...(images.length ? { images } : {}) }]
+    this.invalidateSnapshot()
     return id
   }
 
@@ -385,7 +671,10 @@ export class BlockBuilder {
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const block = this.blocks[i]!
       if (block.kind === 'user') {
-        if (block.text === text) this.blocks.splice(i, 1)
+        if (block.text === text) {
+          this.blocks = [...this.blocks.slice(0, i), ...this.blocks.slice(i + 1)]
+          this.invalidateSnapshot()
+        }
         return
       }
     }
@@ -396,22 +685,41 @@ export class BlockBuilder {
     // Only turns that changed something earn a marker; a conversational
     // exchange should not sprinkle dashed rows through the transcript.
     if (totals.adds === 0 && totals.dels === 0) return
-    this.blocks.push({ kind: 'checkpoint', id: this.nextId(), turn, adds: totals.adds, dels: totals.dels })
+    this.blocks = [...this.blocks, { kind: 'checkpoint', id: this.nextId(), turn, adds: totals.adds, dels: totals.dels }]
+    this.invalidateSnapshot()
   }
 
   /**
    * Current fold. While a turn is active, trailing runs render as
    * streaming-tailed blocks in stream order; `finalize` commits them as
-   * finished blocks.
+   * finished blocks. Preserves `===` identity for completed blocks and
+   * settled earlier runs so `React.memo` bails out cleanly during streaming.
    */
   snapshot(turnActive: boolean): readonly Block[] {
-    if (!turnActive) return this.blocks
+    if (this.cachedSnapshot !== null && this.cachedSnapshotActive === turnActive) {
+      return this.cachedSnapshot
+    }
+    if (!turnActive) {
+      this.cachedSnapshot = this.blocks
+      this.cachedSnapshotActive = false
+      return this.blocks
+    }
     // Only the TRAILING run can still receive deltas — an earlier run closed
     // the moment a different kind opened after it. Marking every run
     // streaming kept a blinking caret on text the model had already finished
     // (the "caret sticks around after the agent is done talking" bug).
     const tail = this.runs.length - 1
-    const live = this.runs.map((run, index) => this.runBlock(run, index, index === tail))
+    const live = this.runs.map((run, index) => {
+      if (index < tail) {
+        let settled = this.settledRunBlocks.get(run)
+        if (!settled) {
+          settled = this.runBlock(run, index, false)
+          this.settledRunBlocks.set(run, settled)
+        }
+        return settled
+      }
+      return this.runBlock(run, index, true)
+    })
     // The card sits right behind the run that spawned it, not behind whatever
     // streamed last — otherwise it trails the final answer.
     const card = this.agentsBlock()
@@ -419,7 +727,10 @@ export class BlockBuilder {
       const at = this.agentsAnchor ? this.runs.indexOf(this.agentsAnchor) : -1
       live.splice(at >= 0 ? at + 1 : live.length, 0, card)
     }
-    return [...this.blocks, ...live]
+    const result = live.length === 0 ? this.blocks : [...this.blocks, ...live]
+    this.cachedSnapshot = result
+    this.cachedSnapshotActive = true
+    return result
   }
 
   /** Render one run as a display block. `streaming` tails the live one. */
@@ -443,34 +754,61 @@ export class BlockBuilder {
   }
 
   private commitRuns(ended: boolean): void {
+    let mutated = false
     // Close any tool still marked working: the turn ended, so nothing can
     // land a result anymore. Closing before rendering keeps the trail honest.
-    for (const [id, tool] of this.tools) {
-      if (ended && tool.state === 'working') this.tools.set(id, { ...tool, state: 'failed', error: 'Turn ended before a tool result was received' })
-    }
-    this.blocks = this.blocks.map(block => {
-      if (block.kind !== 'tools') return block
-      const items = block.items.map(item => this.tools.get(item.id) ?? item)
-      return { ...block, items, running: items.some(item => item.state === 'working') }
-    })
-    for (const [index, run] of this.runs.entries()) {
-      const block = this.runBlock(run, index, false)
-      if (block.kind === 'tools') this.blocks.push(block)
-      else if (block.kind === 'thinking') this.blocks.push({ ...block, streaming: false })
-      else if (block.kind === 'agent') this.blocks.push({ ...block, streaming: false })
-      else if (block.kind === 'notice' || block.kind === 'reflection') this.blocks.push(block)
-      if (run === this.agentsAnchor) {
-        const card = this.agentsBlock()
-        if (card) this.blocks.push(card)
+    if (ended) {
+      for (const [id, tool] of this.tools) {
+        if (tool.state === 'working') {
+          this.tools.set(id, { ...tool, state: 'failed', error: 'Turn ended before a tool result was received' })
+          mutated = true
+        }
       }
     }
-    this.runs = []
-    if (ended) this.tools.clear()
+    if (this.tools.size > 0 && this.blocks.some(block => block.kind === 'tools' && block.items.some(item => this.tools.has(item.id)))) {
+      this.blocks = this.blocks.map(block => {
+        if (block.kind !== 'tools') return block
+        let blockChanged = false
+        const items = block.items.map(item => {
+          const updated = this.tools.get(item.id)
+          if (updated && updated !== item) { blockChanged = true; return updated }
+          return item
+        })
+        if (!blockChanged) return block
+        mutated = true
+        return { ...block, items, running: items.some(item => item.state === 'working') }
+      })
+    }
+    if (this.runs.length > 0) {
+      const appended: Block[] = []
+      for (const [index, run] of this.runs.entries()) {
+        const block = !ended && this.settledRunBlocks.get(run) ? this.settledRunBlocks.get(run)! : this.runBlock(run, index, false)
+        if (block.kind === 'tools') appended.push(block)
+        else if (block.kind === 'thinking') appended.push(block.streaming ? { ...block, streaming: false } : block)
+        else if (block.kind === 'agent') appended.push(block.streaming ? { ...block, streaming: false } : block)
+        else if (block.kind === 'notice' || block.kind === 'reflection') appended.push(block)
+        if (run === this.agentsAnchor) {
+          const card = this.agentsBlock()
+          if (card) appended.push(card)
+        }
+      }
+      this.blocks = [...this.blocks, ...appended]
+      this.runs = []
+      mutated = true
+    }
+    if (ended && this.tools.size > 0) {
+      this.tools.clear()
+      mutated = true
+    }
     // Commit the agents card behind the drained runs, keeping the reference:
     // terminal statuses still land on it while background children settle.
     // Idempotent — all() finalizes again and must not double-commit.
     const card = ended ? this.agentsBlock() : null
-    if (card) this.blocks.push(card)
+    if (card) {
+      this.blocks = [...this.blocks, card]
+      mutated = true
+    }
+    if (mutated) this.invalidateSnapshot()
   }
 
   /**
@@ -493,11 +831,13 @@ export class BlockBuilder {
     this.tools.clear()
     this.agentsCard = null
     this.agentsAnchor = null
+    this.invalidateSnapshot()
   }
 
   /** Older pages must not finalize or replace the active streaming buffers. */
   prepend(blocks: Block[]): void {
     this.blocks = [...blocks, ...this.blocks]
+    this.invalidateSnapshot()
   }
 
   /** Finalizes, then returns the fold — a turn end, never a read mid-turn. */
@@ -541,11 +881,19 @@ export function toolFailureText(payload: Readonly<Record<string, unknown>>, outp
 function pushStoredExecution(builder: BlockBuilder, exec: unknown, index: number, content?: unknown): void {
   if (!isRecord(exec)) return // no fabricated rows for missing records
   const id = typeof exec.toolCallId === 'string' && exec.toolCallId ? exec.toolCallId : `stored-${index}`
-  builder.push('tool_call', { id, name: exec.name, arguments: exec.inputs ?? exec.arguments })
+  builder.push('tool_call', {
+    id,
+    name: exec.name,
+    arguments: exec.inputs ?? exec.arguments,
+    ...(exec.diff !== undefined ? { diff: exec.diff } : {}),
+    ...(exec.locations !== undefined ? { locations: exec.locations } : {}),
+  })
   builder.push('tool_result', {
     tool_call_id: id,
     name: exec.name,
     result: content ?? exec.result,
+    ...(exec.diff !== undefined ? { diff: exec.diff } : {}),
+    ...(exec.locations !== undefined ? { locations: exec.locations } : {}),
     ...(exec.permitted === false ? { error: typeof exec.result === 'string' ? exec.result : 'Tool permission denied' } : {}),
     ...(typeof exec.durationMs === 'number' ? { duration_ms: exec.durationMs } : {}),
     ...(typeof exec.error === 'string' && exec.error ? { error: exec.error } : {}),
@@ -610,6 +958,12 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
     const content = transcriptContent(record)
     if (typeof content === 'string') {
       if (!content.trim()) { emitCalls(); continue }
+      // Internal coordinator/agent wakes become quiet notices, never user chat bubbles.
+      if (role === 'user' && (record.origin === 'agent' || isInternalSwarmWakeText(content))) {
+        builder.pushNotice(formatInternalWakeNotice(content))
+        emitCalls()
+        continue
+      }
       // The harness wrote it (goal round, monitor, reminder): not shown.
       if (role === 'user' && (harnessOriginOf(record.origin) || isLegacyHarnessPrompt(content))) { emitCalls(); continue }
       if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true)
@@ -655,7 +1009,14 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         else builder.push('text_part', { text })
       }
     }
-    if ((userParts.length || userImages.length) && !harnessOriginOf(record.origin)) builder.pushUser(userParts.join('\n'), record.xerxes_compaction_summary === true, userImages)
+    if (userParts.length || userImages.length) {
+      const joined = userParts.join('\n')
+      if (record.origin === 'agent' || isInternalSwarmWakeText(joined)) {
+        if (joined.trim()) builder.pushNotice(formatInternalWakeNotice(joined))
+      } else if (!harnessOriginOf(record.origin)) {
+        builder.pushUser(joined, record.xerxes_compaction_summary === true, userImages)
+      }
+    }
     emitCalls()
   }
   return [...builder.all()]

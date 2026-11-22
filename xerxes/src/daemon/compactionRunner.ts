@@ -128,28 +128,24 @@ export function compactionCompletionPort(
       ? { effort: 'low' } : undefined;
     const completionSignal = combinedCompletionSignal(timeoutMs, signal)
     const complete = async (maxTokens: number) => {
+      const requestPayload = {
+        model,
+        messages: [{ role: "user" as const, content: request.prompt }],
+        maxTokens,
+        temperature: request.temperature,
+        querySource: "compaction" as const,
+        ...(thinking ? { thinking } : {}),
+      };
       const completion = isFiniteDeadline(timeoutMs)
         ? completeLlm(
           client,
-          {
-            model,
-            messages: [{ role: "user", content: request.prompt }],
-            maxTokens,
-            temperature: request.temperature,
-            ...(thinking ? { thinking } : {}),
-          },
+          requestPayload,
           completionSignal,
           { timeoutMs, preferStream: true },
         )
         : completeLlm(
           client,
-          {
-            model,
-            messages: [{ role: "user", content: request.prompt }],
-            maxTokens,
-            temperature: request.temperature,
-            ...(thinking ? { thinking } : {}),
-          },
+          requestPayload,
           completionSignal,
           { preferStream: true },
         )
@@ -287,6 +283,8 @@ export function lazyCompactionCompletionPort(
   timeoutMs: number = COMPACTION_COMPLETION_TIMEOUT_MS,
   /** External cancellation owned by the command or turn invoking compaction. */
   signal?: AbortSignal,
+  /** Routed profile provider hint forwarded when building the completion port. */
+  provider?: string,
 ): LazyCompactionPort {
   type Resolved =
     | { readonly error: unknown; readonly ok: false }
@@ -304,7 +302,7 @@ export function lazyCompactionCompletionPort(
       }
       if (!resolved.ok) throw resolved.error;
       throwIfCancelled(signal)
-      return compactionCompletionPort(resolved.client, model, timeoutMs, signal)(request);
+      return compactionCompletionPort(resolved.client, model, timeoutMs, signal, provider)(request);
     },
     // Closing has to be the port's job rather than the caller's, because the
     // caller can no longer see whether a client was ever built. A port that was

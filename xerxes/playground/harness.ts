@@ -5,7 +5,9 @@ import type {
   EvaluationAgent,
   EvaluationDiagnosisRequest,
   EvaluationEvent,
+  EvaluationFailureCategory,
   EvaluationJudgePort,
+  EvaluationScoreRow,
   EvaluationSessionPort,
   EvaluationStartRequest,
   EvaluationTurnOptions,
@@ -81,13 +83,17 @@ export class NativeEvaluationAgent implements EvaluationAgent {
   async turn(prompt: string, options: EvaluationTurnOptions = {}): Promise<EvaluationTurnResult> {
     const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 'timeoutMs')
     const retries = nonNegativeInteger(options.retries ?? DEFAULT_RETRIES, 'retries')
+    const normalizedPrompt = requiredText(prompt, 'prompt')
     let attempt = 0
-    let result = await this.oneTurn(requiredText(prompt, 'prompt'), timeoutMs)
+    let result = await this.oneTurn(normalizedPrompt, timeoutMs, options.signal)
 
-    while (attempt < retries && isTransientEvaluationFailure(result)) {
+    while (attempt < retries && !options.signal?.aborted && isTransientEvaluationFailure(result)) {
       attempt += 1
-      await this.sleep(this.retryDelayMs(attempt))
-      result = await this.oneTurn(prompt, timeoutMs)
+      const aborted = await abortableSleep(this.sleep, this.retryDelayMs(attempt), options.signal)
+      if (aborted) {
+        return { ...result, error: 'cancelled', retries: attempt }
+      }
+      result = await this.oneTurn(normalizedPrompt, timeoutMs, options.signal)
     }
 
     return { ...result, retries: attempt }
@@ -97,52 +103,107 @@ export class NativeEvaluationAgent implements EvaluationAgent {
     await this.transport.close()
   }
 
-  private async oneTurn(prompt: string, timeoutMs: number): Promise<EvaluationTurnResult> {
+  private async oneTurn(prompt: string, timeoutMs: number, callerSignal?: AbortSignal): Promise<EvaluationTurnResult> {
     const startedAt = this.clock()
+    if (callerSignal?.aborted) {
+      return {
+        contextTokens: 0,
+        error: 'cancelled',
+        latencyMs: 0,
+        retries: 0,
+        text: '',
+        tools: [],
+      }
+    }
     const deadline = startedAt + timeoutMs
     const controller = new AbortController()
+    const onCallerAbort = (): void => controller.abort(callerSignal?.reason)
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true })
+    if (callerSignal?.aborted) onCallerAbort()
     const text: string[] = []
     const tools: string[] = []
     let contextTokens = 0
     let error: string | undefined
+    let iteratorDone = false
     let iterator: AsyncIterator<EvaluationEvent> | undefined
 
     try {
-      const events = await this.transport.submit({ prompt, signal: controller.signal, timeoutMs })
-      iterator = events[Symbol.asyncIterator]()
-      while (true) {
-        const remaining = deadline - this.clock()
-        if (remaining <= 0) {
-          error = 'timeout'
-          break
-        }
-        const next = await nextBeforeDeadline(iterator, remaining)
-        if (next === TIMED_OUT) {
-          error = 'timeout'
-          break
-        }
-        if (next.done) break
+      const submitted = await raceWithDeadlineAndAbort(
+        Promise.resolve(this.transport.submit({ prompt, signal: controller.signal, timeoutMs })),
+        deadline - this.clock(),
+        callerSignal,
+      )
+      if (submitted === TIMED_OUT) {
+        error = 'timeout'
+      } else if (submitted === CANCELLED) {
+        error = 'cancelled'
+      } else {
+        iterator = submitted[Symbol.asyncIterator]()
+        while (true) {
+          if (callerSignal?.aborted) {
+            error = 'cancelled'
+            break
+          }
+          const remaining = deadline - this.clock()
+          if (remaining <= 0) {
+            error = 'timeout'
+            break
+          }
+          const next = await raceWithDeadlineAndAbort(iterator.next(), remaining, callerSignal)
+          if (next === TIMED_OUT) {
+            error = 'timeout'
+            break
+          }
+          if (next === CANCELLED) {
+            error = 'cancelled'
+            break
+          }
+          if (next.done) {
+            iteratorDone = true
+            break
+          }
 
-        const event = next.value
-        if (event.type === 'text') {
-          text.push(event.text)
-        } else if (event.type === 'tool_call') {
-          tools.push(event.name)
-        } else if (event.type === 'approval_request') {
-          await this.transport.approve(event.id)
-        } else if (event.type === 'status') {
-          if (event.contextTokens !== undefined && event.contextTokens > 0) contextTokens = event.contextTokens
-        } else if (event.type === 'notification' && event.severity === 'error') {
-          error = truncate(event.body ?? event.title ?? 'error', 160)
-        } else if (event.type === 'turn_end') {
-          break
+          const event = next.value
+          if (event.type === 'text') {
+            text.push(event.text)
+          } else if (event.type === 'tool_call') {
+            tools.push(event.name)
+          } else if (event.type === 'approval_request') {
+            const approveRemaining = deadline - this.clock()
+            if (approveRemaining <= 0) {
+              error = 'timeout'
+              break
+            }
+            const approved = await raceWithDeadlineAndAbort(
+              this.transport.approve(event.id),
+              approveRemaining,
+              callerSignal,
+            )
+            if (approved === TIMED_OUT) {
+              error = 'timeout'
+              break
+            }
+            if (approved === CANCELLED) {
+              error = 'cancelled'
+              break
+            }
+          } else if (event.type === 'status') {
+            if (event.contextTokens !== undefined && event.contextTokens > 0) contextTokens = event.contextTokens
+          } else if (event.type === 'notification' && event.severity === 'error') {
+            error = truncate(event.body ?? event.title ?? 'error', 160)
+          } else if (event.type === 'turn_end') {
+            break
+          }
         }
       }
     } catch (caught) {
-      error = truncate(errorMessage(caught), 160)
+      error = callerSignal?.aborted ? 'cancelled' : truncate(errorMessage(caught), 160)
     } finally {
+      callerSignal?.removeEventListener('abort', onCallerAbort)
       controller.abort()
-      if (error !== undefined && iterator?.return !== undefined) await iterator.return()
+      if (!iteratorDone && iterator?.return !== undefined) {
+        await closeIteratorBounded(iterator, 250)
+      }
     }
 
     return {
@@ -156,13 +217,43 @@ export class NativeEvaluationAgent implements EvaluationAgent {
   }
 }
 
-/** True only for error envelopes that warrant a retry. Turn timeouts never retry. */
+/** True only for error envelopes that warrant a retry. Turn timeouts and cancellations never retry. */
 export function isTransientEvaluationFailure(result: Pick<EvaluationTurnResult, 'error' | 'text'>): boolean {
   const error = result.error?.toLowerCase() ?? ''
-  if (error === 'timeout') return false
+  if (error === 'timeout' || error === 'cancelled') return false
   const text = result.text.trim().toLowerCase()
   const envelope = error || (text.startsWith('[error:') ? text : '')
   return envelope.length > 0 && TRANSIENT_MARKERS.some(marker => envelope.includes(marker))
+}
+
+/**
+ * Classify a failed evaluation score row or turn into a deterministic failure category
+ * without regex-scraping human prose, separating harness/provider faults from model misses.
+ */
+export function classifyEvaluationFailure(
+  input: Pick<EvaluationScoreRow, 'detail' | 'ok'> & { readonly turnError?: string; readonly reply?: string },
+): EvaluationFailureCategory | undefined {
+  if (input.ok) return undefined
+  const error = input.turnError?.trim().toLowerCase()
+  const detail = input.detail.trim().toLowerCase()
+  if (error === 'cancelled' || detail === 'error: cancelled') return 'cancelled'
+  if (
+    error === 'timeout'
+    || detail === 'error: timeout'
+    || detail.startsWith('grader timed out')
+    || detail.startsWith('behavioral probe timed out')
+  ) {
+    return 'timeout'
+  }
+  if (detail.startsWith('grader raised:')) return 'grader_exception'
+  if (
+    (error !== undefined && error.length > 0)
+    || detail.startsWith('error:')
+    || (input.reply?.trim().toLowerCase().startsWith('[error:') ?? false)
+  ) {
+    return 'transport_error'
+  }
+  return 'assertion_failed'
 }
 
 /**
@@ -195,21 +286,74 @@ export async function diagnoseEvaluationFailure(
 }
 
 const TIMED_OUT = Symbol('timed out')
+const CANCELLED = Symbol('cancelled')
 
-async function nextBeforeDeadline<T>(
-  iterator: AsyncIterator<T>,
+async function raceWithDeadlineAndAbort<T>(
+  operation: Promise<T>,
   timeoutMs: number,
-): Promise<IteratorResult<T> | typeof TIMED_OUT> {
+  signal?: AbortSignal,
+): Promise<T | typeof TIMED_OUT | typeof CANCELLED> {
+  if (signal?.aborted) return CANCELLED
+  if (timeoutMs <= 0) return TIMED_OUT
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
   try {
     return await Promise.race([
-      iterator.next(),
+      operation,
       new Promise<typeof TIMED_OUT>(resolve => {
         timeout = setTimeout(() => resolve(TIMED_OUT), timeoutMs)
+      }),
+      ...(signal === undefined ? [] : [
+        new Promise<typeof CANCELLED>(resolve => {
+          onAbort = () => resolve(CANCELLED)
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        }),
+      ]),
+    ])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+    if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+async function closeIteratorBounded(iterator: AsyncIterator<unknown>, graceMs: number): Promise<void> {
+  if (iterator.return === undefined) return
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.resolve(iterator.return()).catch(() => undefined),
+      new Promise<void>(resolve => {
+        timeout = setTimeout(resolve, graceMs)
       }),
     ])
   } finally {
     if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
+async function abortableSleep(
+  sleepFn: (milliseconds: number) => Promise<void>,
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return true
+  if (signal === undefined) {
+    await sleepFn(delayMs)
+    return false
+  }
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      sleepFn(delayMs).then(() => false),
+      new Promise<boolean>(resolve => {
+        onAbort = () => resolve(true)
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      }),
+    ])
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
   }
 }
 

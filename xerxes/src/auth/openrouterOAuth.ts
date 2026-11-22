@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+
 import { type OAuthFetch } from '../mcp/oauth.js'
-// Licensed under the Apache License, Version 2.0.
 
 /**
  * OpenRouter OAuth PKCE flow, mirroring pi-ai `auth/oauth/openrouter.ts`.
@@ -17,14 +17,16 @@ import { timingSafeEqual } from 'node:crypto'
 
 import { ConfigurationError, ProviderError } from '../core/errors.js'
 import { xerxesHome as defaultXerxesHome } from '../daemon/paths.js'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { openInBrowser } from './codexLogin.js'
 import {
   generatePkceS256,
   oauthCallbackHtml,
   type OAuthFlowCredential,
   readJsonObject,
+  removeOAuthCredentialFile,
+  writeOAuthCredentialFile,
 } from './oauthFlows.js'
 
 export const OPENROUTER_OAUTH_PROVIDER = 'openrouter'
@@ -364,12 +366,7 @@ export class OpenRouterOAuthSession {
 
   /** Remove the stored credential. Returns whether one existed. */
   async logout(): Promise<boolean> {
-    try {
-      await rm(this.credentialPath())
-      return true
-    } catch {
-      return false
-    }
+    return removeOAuthCredentialFile(this.credentialPath())
   }
 
   /** Where the credential persists, for status/logout surfaces. */
@@ -405,8 +402,6 @@ export class OpenRouterOAuthSession {
   }
 
   private async persist(credential: OAuthFlowCredential): Promise<void> {
-    const path = this.credentialPath()
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(credential, null, 2)}\n`, 'utf8')
+    await writeOAuthCredentialFile(this.credentialPath(), credential)
   }
 }

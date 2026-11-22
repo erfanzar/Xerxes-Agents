@@ -42,9 +42,52 @@ const MUTATION_HOOKS = new Set<HookPoint>(['before_tool_call', 'after_tool_call'
  */
 const FAIL_CLOSED_HOOKS = new Set<HookPoint>([TOOL_PERMISSION_HOOK])
 
+/** Optional per-hook execution guards when registering a callback. */
+export interface HookRegistrationOptions {
+  /** Unregister automatically right before its first invocation. */
+  readonly once?: boolean
+  /** Maximum milliseconds this callback may run before failing with a timeout error. */
+  readonly timeoutMs?: number
+}
+
+/** Diagnostic event emitted when a hook callback throws or exceeds its timeout. */
+export interface HookFailureEvent {
+  readonly error: unknown
+  readonly message: string
+  readonly point: HookPoint
+  readonly timedOut: boolean
+}
+
+export interface HookRunnerOptions {
+  /** Default execution timeout (ms) applied to callbacks without an explicit per-hook `timeoutMs`. */
+  readonly defaultTimeoutMs?: number
+  /** Optional observer notified whenever a hook callback throws or times out. */
+  readonly onFailure?: (event: HookFailureEvent) => void
+}
+
+interface RegisteredHook {
+  readonly callback: HookCallback
+  readonly once: boolean
+  readonly timeoutMs: number | undefined
+}
+
+class HookTimeoutError extends Error {
+  constructor(point: HookPoint, timeoutMs: number) {
+    super(`hook '${point}' timed out after ${timeoutMs}ms`)
+    this.name = 'HookTimeoutError'
+  }
+}
+
 /** Safe hook dispatcher: observer failures are isolated from agent execution. */
 export class HookRunner {
-  private readonly hooks = new Map<HookPoint, HookCallback[]>(HOOK_POINTS.map(point => [point, []]))
+  private readonly defaultTimeoutMs: number | undefined
+  private readonly hooks = new Map<HookPoint, RegisteredHook[]>(HOOK_POINTS.map(point => [point, []]))
+  private readonly onFailure: ((event: HookFailureEvent) => void) | undefined
+
+  constructor(options: HookRunnerOptions = {}) {
+    this.defaultTimeoutMs = validateOptionalTimeout(options.defaultTimeoutMs, 'defaultTimeoutMs')
+    this.onFailure = options.onFailure
+  }
 
   clear(point?: HookPoint): void {
     if (point) {
@@ -58,10 +101,14 @@ export class HookRunner {
     return (this.hooks.get(point)?.length ?? 0) > 0
   }
 
-  register(point: HookPoint, callback: HookCallback): void {
+  register(point: HookPoint, callback: HookCallback, options: HookRegistrationOptions = {}): void {
     const callbacks = this.hooks.get(point)
     if (!callbacks) throw new Error(`Unknown hook point '${point}'. Valid: ${HOOK_POINTS.join(', ')}`)
-    callbacks.push(callback)
+    callbacks.push({
+      callback,
+      once: options.once === true,
+      timeoutMs: validateOptionalTimeout(options.timeoutMs, 'timeoutMs'),
+    })
   }
 
   /**
@@ -70,34 +117,39 @@ export class HookRunner {
    * resolve to the complete ordered list of non-empty results.
    */
   async run(point: HookPoint, payload: HookPayload = {}): Promise<unknown> {
-    const callbacks = this.hooks.get(point) ?? []
+    const live = this.hooks.get(point)
+    const snapshot = live ? [...live] : []
     if (MUTATION_HOOKS.has(point)) {
       const key = point === 'before_tool_call' ? 'arguments' : 'result'
       let value = payload[key]
-      for (const callback of callbacks) {
+      for (const entry of snapshot) {
+        if (live && !live.includes(entry)) continue
+        if (entry.once && live) removeEntry(live, entry)
         try {
-          const result = await callback(payload)
+          const result = await this.invokeEntry(point, entry, payload)
           if (result !== undefined && result !== null) {
             value = result
             payload[key] = value
           }
         } catch (error) {
-          reportHookFailure(point, error)
+          this.handleFailure(point, error)
         }
       }
       return value
     }
     const results: unknown[] = []
-    for (const callback of callbacks) {
+    for (const entry of snapshot) {
+      if (live && !live.includes(entry)) continue
+      if (entry.once && live) removeEntry(live, entry)
       try {
-        const result = await callback(payload)
+        const result = await this.invokeEntry(point, entry, payload)
         if (result !== undefined && result !== null) {
           results.push(result)
         } else if (FAIL_CLOSED_HOOKS.has(point)) {
           results.push(undefined)
         }
       } catch (error) {
-        reportHookFailure(point, error)
+        this.handleFailure(point, error)
         if (FAIL_CLOSED_HOOKS.has(point)) results.push(denialFromFailure(point, error))
       }
     }
@@ -112,11 +164,61 @@ export class HookRunner {
   unregister(point: HookPoint, callback: HookCallback): boolean {
     const callbacks = this.hooks.get(point)
     if (!callbacks) return false
-    const index = callbacks.indexOf(callback)
+    const index = callbacks.findIndex(entry => entry.callback === callback)
     if (index < 0) return false
     callbacks.splice(index, 1)
     return true
   }
+
+  private async invokeEntry(point: HookPoint, entry: RegisteredHook, payload: HookPayload): Promise<unknown> {
+    const timeoutMs = entry.timeoutMs ?? this.defaultTimeoutMs
+    if (timeoutMs === undefined) {
+      return entry.callback(payload)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const pending = Promise.resolve().then(() => entry.callback(payload))
+    // Suppress late unhandled rejections if a timed-out callback rejects after the deadline settles.
+    void pending.catch(() => undefined)
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new HookTimeoutError(point, timeoutMs)), timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  private handleFailure(point: HookPoint, error: unknown): void {
+    reportHookFailure(point, error)
+    if (!this.onFailure) return
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      this.onFailure({
+        point,
+        error,
+        message,
+        timedOut: error instanceof HookTimeoutError,
+      })
+    } catch {
+      // Diagnostic failure observers must never disrupt hook execution.
+    }
+  }
+}
+
+function removeEntry(entries: RegisteredHook[], target: RegisteredHook): void {
+  const index = entries.indexOf(target)
+  if (index >= 0) entries.splice(index, 1)
+}
+
+function validateOptionalTimeout(value: number | undefined, field: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`HookRunner ${field} must be a positive finite number`)
+  }
+  return value
 }
 
 /** One extension's opinion on whether a tool call may proceed. */

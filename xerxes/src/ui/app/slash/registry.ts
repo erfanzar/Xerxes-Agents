@@ -13,14 +13,18 @@ import { fileCommands } from './commands/files.js'
 import { daemonCommands } from './commands/daemon.js'
 import { sessionCommands } from './commands/session.js'
 import { setupCommands } from './commands/setup.js'
+import { sideQuestionCommands } from './commands/sideQuestion.js'
+import { swarmCommands } from './commands/swarm.js'
 import type { SlashCommand } from './types.js'
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   ...coreCommands,
   ...creditsCommands,
   ...sessionCommands,
+  ...sideQuestionCommands,
   ...maintenanceCommands,
   ...opsCommands,
+  ...swarmCommands,
   ...presetCommands,
   ...fileCommands,
   ...daemonCommands,

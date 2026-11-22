@@ -47,11 +47,15 @@ export class JsonChannelSessionIndex implements ChannelSessionIndex {
   }
 
   set(sessionKey: string, sessionId: string): Promise<void> {
+    if (!sessionKey.trim()) throw new TypeError('channel session key must not be empty')
+    if (!sessionId.trim()) throw new TypeError('channel session id must not be empty')
     const write = this.writes.then(async () => {
       const entries = await this.load()
       if (entries.get(sessionKey) === sessionId) return
+      const next = new Map(entries)
+      next.set(sessionKey, sessionId)
+      await this.persist(next)
       entries.set(sessionKey, sessionId)
-      await this.persist(entries)
     })
     this.writes = write.catch(() => undefined)
     return write
@@ -71,8 +75,12 @@ export class JsonChannelSessionIndex implements ChannelSessionIndex {
   private async persist(entries: ReadonlyMap<string, string>): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true })
     const temporary = `${this.path}.${randomUUID()}.tmp`
+    const sessions = Object.create(null) as Record<string, string>
+    for (const [key, value] of entries) {
+      sessions[key] = value
+    }
     try {
-      await Bun.write(temporary, JSON.stringify({ sessions: Object.fromEntries(entries) }, null, 2) + '\n')
+      await Bun.write(temporary, JSON.stringify({ sessions }, null, 2) + '\n')
       await rename(temporary, this.path)
     } catch (error) {
       await rm(temporary, { force: true })

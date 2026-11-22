@@ -133,6 +133,7 @@ export class AcpServer {
   cancel(sessionId: string): Record<string, boolean> {
     const cancelled = this.sessions.cancel(sessionId)
     if (cancelled) {
+      this.permissions.dropSession(sessionId)
       this.runner?.cancel(sessionId)
       // Cancellation does not close the session: it stays in the store and
       // remains promptable, so onSessionClose must not fire here.
@@ -144,6 +145,7 @@ export class AcpServer {
     const closed = this.sessions.drop(sessionId)
     if (closed) {
       this.promptChains.delete(sessionId)
+      this.permissions.dropSession(sessionId)
       this.runner?.cancel(sessionId)
       this.runner?.resetSession?.(sessionId)
       this.releaseSession(sessionId)
@@ -225,6 +227,7 @@ export class AcpServer {
   /** Abort every active prompt so transport shutdown cannot wait forever. */
   shutdown(): number {
     let cancelled = 0
+    this.permissions.clear()
     for (const session of this.sessions.list()) {
       this.sessions.cancel(session.sessionId)
       if (this.runner?.cancel(session.sessionId)) cancelled += 1

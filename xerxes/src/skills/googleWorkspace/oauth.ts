@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { requireSkillText, skillJsonObject, type SkillFetch } from '../http.js'
 
@@ -159,7 +159,17 @@ export class GoogleWorkspaceOAuthClient {
     const pending = await this.storage.loadPendingAuthorization()
     if (!pending) throw new GoogleWorkspaceAuthorizationError('no pending Google OAuth authorization exists; start authorization again')
     const callback = parseAuthorizationCallback(callbackOrCode)
-    if (callback.state !== undefined && callback.state !== pending.state) {
+    const isCallbackUrl = /^https?:\/\//i.test(callbackOrCode.trim())
+    if (isCallbackUrl) {
+      const callbackUrl = new URL(callbackOrCode.trim())
+      const expectedRedirect = new URL(pending.redirectUri)
+      if (callbackUrl.origin !== expectedRedirect.origin || callbackUrl.pathname !== expectedRedirect.pathname) {
+        throw new GoogleWorkspaceAuthorizationError('Google OAuth callback redirect URI did not match the pending authorization')
+      }
+      if (callback.state === undefined || !constantTimeEquals(callback.state, pending.state)) {
+        throw new GoogleWorkspaceAuthorizationError('Google OAuth callback state did not match the pending authorization')
+      }
+    } else if (callback.state !== undefined && !constantTimeEquals(callback.state, pending.state)) {
       throw new GoogleWorkspaceAuthorizationError('Google OAuth callback state did not match the pending authorization')
     }
     const token = await this.requestToken({
@@ -297,6 +307,9 @@ export function parseAuthorizationCallback(callbackOrCode: string): { readonly c
   } catch (error) {
     throw new GoogleWorkspaceAuthorizationError('Google OAuth callback URL is invalid', { cause: error })
   }
+  if (url.username || url.password) {
+    throw new GoogleWorkspaceAuthorizationError('Google OAuth callback URL must not contain embedded credentials')
+  }
   const errorName = url.searchParams.get('error')
   if (errorName) throw new GoogleWorkspaceAuthorizationError(`Google OAuth authorization was denied (${errorName})`)
   const code = url.searchParams.get('code')
@@ -374,6 +387,12 @@ function parseToken(value: unknown, now: number, fallbackScopes: readonly string
 
 function base64Url(value: Uint8Array): string {
   return Buffer.from(value).toString('base64url')
+}
+
+function constantTimeEquals(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, 'utf8')
+  const rightBytes = Buffer.from(right, 'utf8')
+  return leftBytes.byteLength === rightBytes.byteLength && timingSafeEqual(leftBytes, rightBytes)
 }
 
 function isExpired(token: GoogleWorkspaceToken, now: number): boolean {

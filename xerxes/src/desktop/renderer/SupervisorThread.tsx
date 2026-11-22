@@ -11,6 +11,7 @@ import { AgentOrb } from './AgentOrb.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
+import { XerxesBrandEmblem, XerxesStatusMark } from './XerxesSprites.js'
 
 /**
  * The XERXES conversation, shared by Chat and Activity. People and XERXES get
@@ -106,6 +107,7 @@ function MessageRow({ message, now, pending = false }: { readonly message: Super
     return (
       <li className="supervisor__message supervisor__message--xerxes">
         <div className="xmsg__head">
+          <XerxesBrandEmblem size={18} animate={false} className="xmsg__crest" />
           <span className="xmsg__who">XERXES</span>
           <span>{voice}</span>
           {time}
@@ -133,7 +135,9 @@ export function StepList({ steps }: { readonly steps: readonly SupervisorStep[] 
         ? <li key={step.id} className="xstep xstep--say">{step.text}</li>
         : (
           <li key={step.id} className="xstep" data-state={step.state}>
-            <Icon name={STEP_ICON[step.state]} size={13} />
+            {step.state === 'running'
+              ? <XerxesStatusMark state="working" size={14} live />
+              : <Icon name={STEP_ICON[step.state]} size={13} />}
             <span>{step.text}</span>
           </li>
         ))}

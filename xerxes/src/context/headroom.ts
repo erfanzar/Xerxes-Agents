@@ -1,6 +1,15 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import {
+  compressFailureSalientText,
+  fitSurrogateSafeText,
+  hasSalientFailureLines,
+  isCommandOrDiagnosticTool,
+  safeSlicePrefix,
+  safeSliceSuffix,
+} from './failureSalientPreview.js'
+
 export const DEFAULT_HEADROOM_PREVIEW_CHARS = 4_000
 
 const IMPORTANT_RE = /\b(error|failed?|failure|fatal|exception|traceback|warning|warn|panic|timeout|denied|segmentation|assert)\b/i
@@ -59,25 +68,25 @@ export function compressToolResult(
   content: unknown,
   options: CompressToolResultOptions = {},
 ): HeadroomResult {
+  const maxChars = normalizedMaxChars(options.maxChars)
   const text = stringify(content)
   if (!text) return result('empty', text, '', ['empty tool result'])
   if (looksBinary(text)) {
     return result(
       'binary',
       text,
-      '[Binary-like tool result omitted. Read the stored project-memory artifact for bytes.]',
+      safeSlicePrefix('[Binary-like tool result omitted. Read the stored project-memory artifact for bytes.]', maxChars),
       ['binary-like content'],
     )
   }
-  const maxChars = normalizedMaxChars(options.maxChars)
   const stripped = text.trimStart()
   if (stripped.startsWith('{') || stripped.startsWith('[')) {
-    const compressed = compressJson(text, maxChars)
+    const compressed = compressJson(text, maxChars, toolName)
     if (compressed !== undefined) return result('json', text, compressed)
   }
   if (looksLikeDiff(text)) return result('diff', text, compressDiff(text, maxChars))
   if (looksLikeSearch(text)) return result('search', text, compressSearch(text, maxChars))
-  if (looksLikeLog(text, toolName)) return result('log', text, compressLog(text, maxChars))
+  if (looksLikeLog(text, toolName, maxChars)) return result('log', text, compressLog(text, maxChars, toolName))
   return result('text', text, compressText(text, maxChars))
 }
 
@@ -108,16 +117,14 @@ function looksBinary(text: string): boolean {
 }
 
 function fitText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text.trimEnd()
-  const marker = '\n\n[... ' + formatInteger(text.length - maxChars) + ' chars omitted by Xerxes headroom ...]\n\n'
-  const remaining = Math.max(2, maxChars - marker.length)
-  const head = Math.floor(remaining / 2)
-  const tail = remaining - head
-  const output = text.slice(0, head).trimEnd() + marker + text.slice(-tail).trimStart()
-  return output.length <= maxChars ? output.trimEnd() : output.slice(0, maxChars).trimEnd()
+  return fitSurrogateSafeText(
+    text,
+    maxChars,
+    omitted => '\n\n[... ' + formatInteger(omitted) + ' chars omitted by Xerxes headroom ...]\n\n',
+  )
 }
 
-function compressJson(text: string, maxChars: number): string | undefined {
+function compressJson(text: string, maxChars: number, toolName: string): string | undefined {
   let value: unknown
   try {
     value = JSON.parse(text)
@@ -126,7 +133,69 @@ function compressJson(text: string, maxChars: number): string | undefined {
   }
   const minified = stableJson(value)
   if (minified.length <= maxChars) return minified
+
+  if (isCommandStreamObject(value, toolName)) {
+    const commandPreview = compressCommandJsonObject(value, maxChars)
+    if (commandPreview !== undefined) return commandPreview
+  }
+
   const rendered = JSON.stringify(shrinkJson(value), null, 2)
+  return fitText(rendered, maxChars)
+}
+
+function isCommandStreamObject(
+  value: unknown,
+  toolName: string,
+): value is Record<string, unknown> & { readonly stdout?: unknown; readonly stderr?: unknown } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  const hasStream = typeof record.stdout === 'string' || typeof record.stderr === 'string'
+  if (!hasStream) return false
+  return isCommandOrDiagnosticTool(toolName) || typeof record.exitCode === 'number' || Array.isArray(record.command)
+}
+
+function compressCommandJsonObject(record: Record<string, unknown>, maxChars: number): string | undefined {
+  const stdout = typeof record.stdout === 'string' ? record.stdout : ''
+  const stderr = typeof record.stderr === 'string' ? record.stderr : ''
+  if (stdout.length + stderr.length < 240) return undefined
+
+  const shellObject: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(record)) {
+    if (key === 'stdout' || key === 'stderr') {
+      shellObject[key] = ''
+    } else {
+      shellObject[key] = shrinkJson(item, 1)
+    }
+  }
+  const shellSerialized = JSON.stringify(shellObject, null, 2)
+  const rawBudget = Math.max(120, Math.floor((maxChars - shellSerialized.length - 48) / 1.15))
+  const bothNonEmpty = stdout.length > 0 && stderr.length > 0
+  const stderrShare = bothNonEmpty
+    ? Math.max(80, Math.min(stderr.length, Math.floor(rawBudget * 0.55)))
+    : stderr.length > 0 ? rawBudget : 0
+  const stdoutShare = bothNonEmpty
+    ? Math.max(80, rawBudget - stderrShare)
+    : stdout.length > 0 ? rawBudget : 0
+
+  if (typeof record.stdout === 'string' && stdout.length > 0) {
+    shellObject.stdout = compressFailureSalientText(stdout, {
+      maxChars: stdoutShare,
+      headLines: 8,
+      tailLines: 12,
+      omissionLabel: 'log lines omitted',
+      annotateHeadAndTailRanges: true,
+    })
+  }
+  if (typeof record.stderr === 'string' && stderr.length > 0) {
+    shellObject.stderr = compressFailureSalientText(stderr, {
+      maxChars: stderrShare,
+      headLines: 8,
+      tailLines: 12,
+      omissionLabel: 'log lines omitted',
+      annotateHeadAndTailRanges: true,
+    })
+  }
+  const rendered = JSON.stringify(shellObject, null, 2)
   return fitText(rendered, maxChars)
 }
 
@@ -169,7 +238,10 @@ function jsonValueImportant(value: unknown): boolean {
 
 function jsonAtomPreview(value: unknown): unknown {
   if (typeof value === 'string' && value.length > 240) {
-    return value.slice(0, 160) + ' ... [' + (value.length - 220) + ' chars omitted] ... ' + value.slice(-60)
+    const head = safeSlicePrefix(value, 160)
+    const tail = safeSliceSuffix(value, 60)
+    const omitted = Math.max(1, value.length - head.length - tail.length)
+    return head + ' ... [' + omitted + ' chars omitted] ... ' + tail
   }
   return value
 }
@@ -279,6 +351,8 @@ interface SearchLine {
 function looksLikeSearch(text: string): boolean {
   const lines = splitLines(text).slice(0, 80).filter(line => Boolean(line.trim()))
   if (lines.length < 6) return false
+  // Stack traces and compiler diagnostics have error/frame syntax rather than GrepTool matches.
+  if (hasSalientFailureLines(lines)) return false
   const parsed = lines.filter(line => parseSearchLine(line) !== undefined).length
   return parsed >= Math.max(4, Math.floor(lines.length / 3))
 }
@@ -324,35 +398,61 @@ function compressSearch(text: string, maxChars: number): string {
   return fitText(output.join('\n'), maxChars)
 }
 
-function looksLikeLog(text: string, toolName: string): boolean {
-  const name = toolName.toLowerCase()
-  if (['exec', 'shell', 'test', 'pytest', 'build', 'npm', 'cargo'].some(hint => name.includes(hint))) return true
+const SOURCE_FILE_TOOLS = new Set([
+  'readfile',
+  'fileedittool',
+  'writefile',
+  'appendfile',
+  'fileoutlinetool',
+])
+
+const SOURCE_DECLARATION_RE =
+  /\b(?:throw\s+new|instanceof|extends|catch\s*\(|import\s+.*?\bfrom|export\s+(?:class|interface|type|function|const))\b/
+
+function looksLikeLog(text: string, toolName: string, maxChars: number): boolean {
+  if (isCommandOrDiagnosticTool(toolName)) return true
+  if (SOURCE_FILE_TOOLS.has(toolName.trim().toLowerCase())) return false
   const lines = splitLines(text)
+  if (lines.length >= 20 || text.length > maxChars) {
+    if (hasSalientFailureLines(lines, { strictSourceCodeGuard: true })) return true
+  }
   if (lines.length < 40) return false
-  return lines.slice(0, 200).some(line => IMPORTANT_RE.test(line) || SUMMARY_RE.test(line))
+  return lines.some(line => SUMMARY_RE.test(line))
+    || lines.slice(0, 200).some(line => IMPORTANT_RE.test(line) && !SOURCE_DECLARATION_RE.test(line))
 }
 
-function compressLog(text: string, maxChars: number): string {
-  const lines = splitLines(text)
-  const keep = new Set<number>()
-  for (let index = 0; index < Math.min(8, lines.length); index += 1) keep.add(index)
-  for (let index = Math.max(0, lines.length - 10); index < lines.length; index += 1) keep.add(index)
-  lines.forEach((line, index) => {
-    if (!IMPORTANT_RE.test(line) && !SUMMARY_RE.test(line) && !line.startsWith('FAILED ') && !line.startsWith('ERROR ')) return
-    for (let current = Math.max(0, index - 2); current < Math.min(lines.length, index + 3); current += 1) keep.add(current)
+function compressLog(text: string, maxChars: number, toolName: string): string {
+  if (text.length <= maxChars) return text.trimEnd()
+  const strictGuard = !isCommandOrDiagnosticTool(toolName)
+  return compressFailureSalientText(text, {
+    maxChars,
+    headLines: 10,
+    tailLines: 14,
+    contextLines: 2,
+    omissionLabel: 'log lines omitted',
+    annotateHeadAndTailRanges: true,
+    ...(strictGuard ? { strictSourceCodeGuard: true } : {}),
+    headerBanner: ({ totalLines, keptLines }) =>
+      `[Xerxes headroom log preview: kept ${keptLines} of ${totalLines} lines]`,
   })
-  const output = ['[Xerxes headroom log preview: kept ' + keep.size + ' of ' + lines.length + ' lines]']
-  let previous = -1
-  for (const index of [...keep].sort((left, right) => left - right)) {
-    if (previous !== -1 && index > previous + 1) output.push('[... ' + (index - previous - 1) + ' log lines omitted ...]')
-    output.push('L' + (index + 1) + ': ' + (lines[index] ?? ''))
-    previous = index
-  }
-  return fitText(output.join('\n'), maxChars)
 }
 
 function compressText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text.trimEnd()
   const lines = splitLines(text)
+  if (hasSalientFailureLines(lines, { strictSourceCodeGuard: true })) {
+    return compressFailureSalientText(text, {
+      maxChars,
+      headLines: 12,
+      tailLines: 14,
+      contextLines: 2,
+      omissionLabel: 'middle lines omitted',
+      annotateHeadAndTailRanges: true,
+      strictSourceCodeGuard: true,
+      headerBanner: ({ totalLines, omittedLines }) =>
+        `[Xerxes headroom text preview: ${totalLines} lines, ${omittedLines} omitted]`,
+    })
+  }
   if (lines.length <= 60) return fitText(text, maxChars)
   const selected = selectFirstLast(lines, 40)
   const omitted = lines.length - selected.length
@@ -391,7 +491,9 @@ function sortValue(value: unknown): unknown {
 function normalizedMaxChars(value: number | undefined): number {
   if (value === undefined) return DEFAULT_HEADROOM_PREVIEW_CHARS
   if (!Number.isFinite(value)) throw new RangeError('maxChars must be finite')
-  return Math.max(512, Math.trunc(value))
+  const truncated = Math.trunc(value)
+  if (truncated < 1) throw new RangeError('maxChars must be a positive integer')
+  return truncated
 }
 
 function lineCount(value: string): number {
