@@ -11,13 +11,15 @@ import {
   resolveHubExposure, type HubExposure, type HubExposureConfig, type HubTunnelHandle, type HubTunnelRequest,
 } from './exposure.js'
 import { canSeeWorkspace, grantedSessionIds, hasScope, type HubGrant } from '../security/principal.js'
+import type { HubIdentityAdmin } from './identity/index.js'
 import type { AuthenticatedContext, HubIdentityPort } from './identityPort.js'
 import type { HubHandle, HubWorkspaceHealth } from './lifecycle.js'
 import { HubLessonSync } from './lessonSync.js'
 import type { HubPaths } from './paths.js'
 import type { HubEventSink, UpstreamEvent } from './ports.js'
+import { HubProtocolError, type HubMethod } from './protocol.js'
 import { HubRuntimePool, type PoolWorkspace, type HubRuntimePoolOptions, type PoolHealth } from './runtimePool.js'
-import { HubServer, type HubServerOptions } from './server.js'
+import { HubServer, type HubMethodHandler, type HubServerOptions } from './server.js'
 import type { HubSigner } from './signer.js'
 import { createHubSlackIntegration, type HubSlackIntegration, type HubSlackOptions } from './slack/integration.js'
 import { SubscriptionManager, type SubscriptionManagerOptions } from './subscriptions.js'
@@ -499,13 +501,58 @@ export function createHubService(options: HubServiceOptions): HubService {
             onError: report,
           })
         }
+        const identityAdmin: HubIdentityAdmin | undefined = identity !== undefined && 'admin' in identity
+          ? (identity as { readonly admin?: HubIdentityAdmin }).admin
+          : undefined
+        const identityHandlers: Partial<Record<HubMethod, HubMethodHandler>> = identityAdmin === undefined ? {} : {
+          'hub.devices.list': ({ context }, params) => {
+            const principal = context.principal
+            if (principal.kind !== 'user') throw new HubProtocolError('forbidden', 'only human users can list devices')
+            const includeRevoked = params.include_revoked === true
+            const list = identityAdmin.listDevices({
+              ...(principal.hubOwner ? {} : { userId: principal.id }),
+              includeRevoked,
+            })
+            return {
+              can_revoke_all: principal.hubOwner,
+              devices: list.map(device => ({
+                id: device.id,
+                user_id: device.userId,
+                display_name: device.displayName,
+                label: device.label,
+                status: device.status,
+                created_at: new Date(device.createdAt).toISOString(),
+                activated_at: device.activatedAt === null ? null : new Date(device.activatedAt).toISOString(),
+                last_seen_at: device.lastSeenAt === null ? null : new Date(device.lastSeenAt).toISOString(),
+                expires_at: new Date(device.expiresAt).toISOString(),
+                revoked_at: device.revokedAt === null ? null : new Date(device.revokedAt).toISOString(),
+                revoked_reason: device.revokedReason,
+                current: device.id === principal.deviceId,
+              })),
+            }
+          },
+          'hub.devices.revoke': ({ context }, params) => {
+            const principal = context.principal
+            if (principal.kind !== 'user') throw new HubProtocolError('forbidden', 'only human users can revoke devices')
+            const deviceId = typeof params.device_id === 'string' ? params.device_id.trim() : ''
+            if (!deviceId || deviceId.length > 100) throw new HubProtocolError('invalid_request', 'device_id is required')
+            const targetDevice = identityAdmin.listDevices({ includeRevoked: true }).find(item => item.id === deviceId)
+            if (!targetDevice) throw new HubProtocolError('not_found', 'device does not exist')
+            if (!principal.hubOwner && targetDevice.userId !== principal.id) {
+              throw new HubProtocolError('forbidden', 'not permitted to revoke another user’s device')
+            }
+            const reason = typeof params.reason === 'string' && params.reason.trim() ? params.reason.trim().slice(0, 120) : 'revoked_by_user'
+            identityAdmin.revokeDevice(deviceId, reason)
+            return { ok: true, device_id: deviceId }
+          },
+        }
         const staticRoot = options.staticRoot ?? defaultStaticRoot()
         server = new HubServer({
           ...options.server,
           ...(voiceRoute === undefined ? {} : { voice: voiceRoute }),
           ...(slack === undefined ? {} : { slack }),
           voiceModels,
-          methodHandlers: { ...options.server?.methodHandlers, ...supervisorHandlers },
+          methodHandlers: { ...identityHandlers, ...options.server?.methodHandlers, ...supervisorHandlers },
           hubId: options.signer.hubId,
           exposure,
           store,

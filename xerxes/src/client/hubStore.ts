@@ -6,7 +6,7 @@ import type { HubEvent, WorkspaceHealth } from '../hub/protocol.js'
 import type { ConnectionStatus } from './bridge.js'
 import { foldSummaryEvent, presenceChips, type HistoryPage, type PresenceEntry, type SupervisorConfirmation, type SupervisorMessage, type SupervisorStep } from './hubParsers.js'
 import {
-  AUTOPILOT_ALL_ID, taskKey, type AutopilotRow, type AutopilotView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
+  AUTOPILOT_ALL_ID, taskKey, type AutopilotRow, type AutopilotView, type DeviceView, type MachineView, type PresenceChip, type SupervisorChoice, type SupervisorConfigStatus, type SupervisorConfigView, type SupervisorOptions,
   type TaskSummary, type WatchRow, type WatchView, type WorkspaceView,
 } from './hubTypes.js'
 import { EMPTY_TAIL, foldAll, foldSessionEvent, type Block, type PendingInteraction, type SessionTail } from './sessionFold.js'
@@ -158,6 +158,16 @@ export interface MachinesState {
   readonly phase: LoadPhase
   readonly list: readonly MachineView[]
   readonly error?: string
+}
+
+/** Paired client devices (`hub.devices.list`). */
+export interface DevicesState {
+  readonly phase: LoadPhase
+  readonly list: readonly DeviceView[]
+  readonly canRevokeAll: boolean
+  readonly revokingId?: string
+  readonly error?: string
+  readonly unsupported?: boolean
 }
 
 /** The chooser's option lists for one machine (`supervisor.config.options`). */
@@ -328,6 +338,7 @@ export interface HubState {
   readonly usage: UsageState
   readonly supervisor: SupervisorState
   readonly machines: MachinesState
+  readonly devices: DevicesState
   readonly supervisorConfig: SupervisorConfigState
   readonly autopilot: AutopilotState
   readonly autopilotThread: AutopilotThreadState
@@ -351,6 +362,7 @@ export function initialHubState(): HubState {
     usage: { phase: 'idle' },
     supervisor: { phase: 'idle', messages: [], confirmations: [], busy: false },
     machines: { phase: 'idle', list: [] },
+    devices: { phase: 'idle', list: [], canRevokeAll: false },
     supervisorConfig: initialSupervisorConfig(),
     autopilot: initialAutopilot(),
     autopilotThread: initialAutopilotThread(),
@@ -411,6 +423,7 @@ export type HubAction =
     readonly messages: readonly SupervisorMessage[]; readonly confirmations: readonly SupervisorConfirmation[]; readonly working: boolean
   }
   | { readonly type: 'machines'; readonly state: MachinesState }
+  | { readonly type: 'devices'; readonly state: DevicesState }
   /** A fresh answer from `supervisor.config.get`/`.set` or a `supervisor.config_changed` event. */
   | { readonly type: 'supervisorConfigView'; readonly view: SupervisorConfigView }
   /** Everything but the Hub's answer: loading, errors, saving. */
@@ -789,6 +802,7 @@ export function reduceHub(state: HubState, action: HubAction): HubState {
       }
     }
     case 'machines': return { ...state, machines: action.state }
+    case 'devices': return { ...state, devices: action.state }
     case 'supervisorConfigView': {
       const { config: _config, message: _message, error: _error, saveError: _saveError, ...rest } = state.supervisorConfig
       const view = action.view

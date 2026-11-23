@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { readFile, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 import {
@@ -46,7 +47,20 @@ import {
   type DiscoverExternalAcpAgentsOptions,
 } from '../acp/externalAgents.js'
 import { isAcpRecord } from '../acp/types.js'
+import { buildAgySubprocessEnv, hasSshSessionEnv, loadAgyRuntimeEnv } from '../auth/agyRuntimeEnv.js'
 import { errorMessage } from '../executors/toolRegistry.js'
+import {
+  companionCliSearchDirectories,
+  ensureAgyCli,
+  ensureClaudeCode,
+  ensureCodexCli,
+  type EnsureAgyCliHost,
+  type EnsureAgyCliResult,
+  type EnsureClaudeCodeHost,
+  type EnsureClaudeCodeResult,
+  type EnsureCodexCliHost,
+  type EnsureCodexCliResult,
+} from '../runtime/companionInstall.js'
 
 export interface DaemonAcpBridgeHostOptions {
   /** Test seam to override external ACP client construction. */
@@ -55,10 +69,18 @@ export interface DaemonAcpBridgeHostOptions {
   readonly createClaudeRunner?: (options: ClaudeStreamJsonRunnerOptions) => ClaudeStreamJsonRunner
   /** Test seam to override agent discovery. */
   readonly discoverAgents?: (options?: DiscoverExternalAcpAgentsOptions) => readonly AcpExternalAgentInfo[]
+  /** Test seam to override automatic `agy` installation when Antigravity is selected. */
+  readonly ensureAgy?: (host: EnsureAgyCliHost) => Promise<EnsureAgyCliResult>
+  /** Test seam to override automatic `claude` installation when Claude Code is selected. */
+  readonly ensureClaudeCode?: (host: EnsureClaudeCodeHost) => Promise<EnsureClaudeCodeResult>
+  /** Test seam to override automatic `codex` installation when Codex is selected. */
+  readonly ensureCodex?: (host: EnsureCodexCliHost) => Promise<EnsureCodexCliResult>
   /** Environment variables forwarded during discovery/resolution. */
   readonly env?: Readonly<Record<string, string | undefined>>
-  /** Override home directory used for external runtime skill discovery (deterministic tests). */
+  /** Override home directory used for external runtime skill discovery and agy env lookup (deterministic tests). */
   readonly homeDir?: string
+  /** Override host platform for deterministic tests. */
+  readonly platform?: NodeJS.Platform
   /** Test seam for custom binary validation. */
   readonly resolveBinary?: (command: string) => string | undefined
 }
@@ -191,6 +213,11 @@ export class DaemonAcpBridgeHost {
     this.options = options
   }
 
+  /** Resolved home directory for external ACP workspace & credential discovery. */
+  getHomeDir(): string {
+    return this.options.homeDir ?? (this.options.env?.HOME?.trim() || homedir())
+  }
+
   /** Subscribe to asynchronous binding updates (e.g., out-of-turn ACP `session/update` frames or unexpected exits). */
   onBindingChange(listener: (sessionId: string, binding: AcpSessionBinding) => void): () => void {
     this.bindingListeners.add(listener)
@@ -321,28 +348,66 @@ export class DaemonAcpBridgeHost {
       }
     }
 
-    if (!discovered.available) {
-      return {
-        ok: false,
-        error: `${discovered.name} is not installed or unavailable on PATH.`,
-        ...(discovered.installHint ? { install_hint: discovered.installHint } : {}),
+    let resolvedDiscovered = discovered
+    if (!resolvedDiscovered.available) {
+      const envOpt = this.options.env ? { environment: this.options.env } : {}
+      const autoInstallTask =
+        resolvedDiscovered.provider === 'antigravity' && (!this.options.discoverAgents || this.options.ensureAgy)
+          ? () => (this.options.ensureAgy ?? ensureAgyCli)({
+              ...envOpt,
+              find: () => this.resolveCommandBinary('agy'),
+            })
+          : resolvedDiscovered.provider === 'claude-code' && (!this.options.discoverAgents || this.options.ensureClaudeCode)
+            ? () => (this.options.ensureClaudeCode ?? ensureClaudeCode)({
+                ...envOpt,
+                find: () => this.resolveCommandBinary('claude'),
+              })
+            : resolvedDiscovered.provider === 'codex' && (!this.options.discoverAgents || this.options.ensureCodex)
+              ? () => (this.options.ensureCodex ?? ensureCodexCli)({
+                  ...envOpt,
+                  find: () => this.resolveCommandBinary('codex'),
+                })
+              : undefined
+
+      if (autoInstallTask) {
+        try {
+          await autoInstallTask()
+          const refreshed = this.listAgents(sessionId).agents.find(item => item.id === agentId)
+          if (refreshed) {
+            resolvedDiscovered = refreshed
+          }
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : `${resolvedDiscovered.name} is not installed or unavailable on PATH.`,
+            ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
+          }
+        }
       }
     }
 
-    if (discovered.transport === 'claude-stream-json') {
-      const binaryPath = discovered.binaryPath ?? discovered.command ?? ''
+    if (!resolvedDiscovered.available) {
+      return {
+        ok: false,
+        error: `${resolvedDiscovered.name} is not installed or unavailable on PATH.`,
+        ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
+      }
+    }
+
+    if (resolvedDiscovered.transport === 'claude-stream-json') {
+      const binaryPath = resolvedDiscovered.binaryPath ?? resolvedDiscovered.command ?? ''
       if (!binaryPath) {
         return {
           ok: false,
-          error: `${discovered.name} binary path could not be resolved.`,
-          ...(discovered.installHint ? { install_hint: discovered.installHint } : {}),
+          error: `${resolvedDiscovered.name} binary path could not be resolved.`,
+          ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
         }
       }
       if (!this.options.createClaudeRunner && !this.resolveCommandBinary(binaryPath)) {
         return {
           ok: false,
-          error: `${discovered.name} binary is no longer executable at "${binaryPath}".`,
-          ...(discovered.installHint ? { install_hint: discovered.installHint } : {}),
+          error: `${resolvedDiscovered.name} binary is no longer executable at "${binaryPath}".`,
+          ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
         }
       }
       await this.disconnect(sessionId)
@@ -361,8 +426,8 @@ export class DaemonAcpBridgeHost {
         ? (DEFAULT_CLAUDE_CODE_MODELS.find(m => m.id === initialModel)?.name ?? initialModel)
         : undefined
       const claudeFeatures = classifyAcpRuntimeFeatures({
-        provider: discovered.provider,
-        agentName: discovered.name,
+        provider: resolvedDiscovered.provider,
+        agentName: resolvedDiscovered.name,
         cwd,
         includeFilesystemUnlisted: true,
         ...(this.options.env ? { env: this.options.env } : {}),
@@ -389,16 +454,16 @@ export class DaemonAcpBridgeHost {
       }
       const binding: AcpSessionBinding = {
         session_id: sessionId,
-        agent_id: discovered.id,
-        name: discovered.name,
-        provider: discovered.provider,
+        agent_id: resolvedDiscovered.id,
+        name: resolvedDiscovered.name,
+        provider: resolvedDiscovered.provider,
         transport: 'claude-stream-json',
         cwd,
         ...(request.resumeSessionId ? { external_session_id: request.resumeSessionId } : {}),
         connected: true,
         command: binaryPath,
-        agent_title: discovered.name,
-        ...(discovered.version ? { agent_version: discovered.version } : {}),
+        agent_title: resolvedDiscovered.name,
+        ...(resolvedDiscovered.version ? { agent_version: resolvedDiscovered.version } : {}),
         capabilities: claudeCapabilities,
         models: DEFAULT_CLAUDE_CODE_MODELS,
         ...(initialModel ? { current_model: initialModel } : {}),
@@ -420,25 +485,25 @@ export class DaemonAcpBridgeHost {
     }
 
     // Standard ACP stdio agent (claude-agent-acp, agy acp, antigravity-acp, custom config).
-    const command = discovered.binaryPath ?? discovered.command ?? ''
+    const command = resolvedDiscovered.binaryPath ?? resolvedDiscovered.command ?? ''
     if (!command) {
       return {
         ok: false,
-        error: `${discovered.name} has no configured ACP command.`,
-        ...(discovered.installHint ? { install_hint: discovered.installHint } : {}),
+        error: `${resolvedDiscovered.name} has no configured ACP command.`,
+        ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
       }
     }
     return this.connectStdioAcp({
       sessionId,
-      agentId: discovered.id,
-      name: discovered.name,
-      provider: discovered.provider,
+      agentId: resolvedDiscovered.id,
+      name: resolvedDiscovered.name,
+      provider: resolvedDiscovered.provider,
       cwd,
       command,
-      args: discovered.args ?? [],
+      args: resolvedDiscovered.args ?? [],
       ...(request.initialModeId ? { initialModeId: request.initialModeId } : {}),
       ...(request.resumeSessionId ? { resumeSessionId: request.resumeSessionId } : {}),
-      ...(discovered.installHint ? { installHint: discovered.installHint } : {}),
+      ...(resolvedDiscovered.installHint ? { installHint: resolvedDiscovered.installHint } : {}),
     })
   }
 
@@ -911,23 +976,29 @@ export class DaemonAcpBridgeHost {
     if (this.options.resolveBinary) {
       return this.options.resolveBinary(command)
     }
+    const env = this.options.env ?? process.env
+    const home = this.options.homeDir ?? (env.HOME?.trim() || homedir())
     return resolveExecutablePath(command, {
       ...(this.options.env ? { env: this.options.env } : {}),
+      extraDirs: companionCliSearchDirectories(env, home),
     })
   }
 
-  private async connectStdioAcp(params: {
-    readonly agentId: string
-    readonly args: readonly string[]
-    readonly command: string
-    readonly cwd: string
-    readonly initialModeId?: string
-    readonly installHint?: string
-    readonly name: string
-    readonly provider: AcpExternalAgentProvider
-    readonly resumeSessionId?: string
-    readonly sessionId: string
-  }): Promise<AcpConnectResult> {
+  private async connectStdioAcp(
+    params: {
+      readonly agentId: string
+      readonly args: readonly string[]
+      readonly command: string
+      readonly cwd: string
+      readonly initialModeId?: string
+      readonly installHint?: string
+      readonly name: string
+      readonly provider: AcpExternalAgentProvider
+      readonly resumeSessionId?: string
+      readonly sessionId: string
+    },
+    attemptOptions?: { readonly stripSshSession?: boolean },
+  ): Promise<AcpConnectResult> {
     await this.disconnect(params.sessionId)
 
     let entryRef: ActiveAcpSession | undefined
@@ -936,11 +1007,24 @@ export class DaemonAcpBridgeHost {
     let initialUsageEvent: AcpClientEvent | undefined
     let initialSessionInfoEvent: AcpClientEvent | undefined
 
+    const isAntigravity = params.provider === 'antigravity' || params.agentId === 'antigravity'
+    const transferredAgyEnv = isAntigravity
+      ? await loadAgyRuntimeEnv(this.options.homeDir ?? homedir())
+      : {}
+    const mergedEnv = isAntigravity
+      ? buildAgySubprocessEnv(
+          this.options.env
+            ? { ...transferredAgyEnv, ...this.options.env }
+            : { ...process.env, ...transferredAgyEnv },
+          { ...(attemptOptions?.stripSshSession ? { stripSshSession: true } : {}) },
+        )
+      : this.options.env
+
     const clientOptions: AcpStdioClientOptions = {
       command: params.command,
       args: params.args,
       cwd: params.cwd,
-      ...(this.options.env ? { env: this.options.env } : {}),
+      ...(mergedEnv ? { env: mergedEnv } : {}),
       handlers: {
         createElicitation: async elicitReq => {
           const activeHandler = entryRef?.activeElicitationHandler
@@ -1172,12 +1256,17 @@ export class DaemonAcpBridgeHost {
       entryRef = entry
       this.active.set(params.sessionId, entry)
 
-      const desiredMode = params.initialModeId?.trim()
+      const desiredMode =
+        params.initialModeId?.trim() ||
+        (isAntigravity && entry.binding.modes?.some(m => m.id === ACP_TURBO_MODE_ID)
+          ? ACP_TURBO_MODE_ID
+          : undefined)
       if (
         desiredMode &&
         desiredMode.toLowerCase() !== (entry.binding.current_mode ?? '').trim().toLowerCase()
       ) {
-        // Restore persisted mode (e.g. `auto`, `turbo`, `accept-edits`, `plan`) after
+        // Default Antigravity (`agy acp`) to Turbo on fresh connect, or restore a
+        // persisted/explicit mode (e.g. `auto`, `turbo`, `accept-edits`, `plan`) after
         // `session/resume` / reconnect because agents like `agy acp` reset mode to `default`.
         await this.setMode(params.sessionId, desiredMode).catch(() => undefined)
       }
@@ -1198,11 +1287,19 @@ export class DaemonAcpBridgeHost {
     } catch (error) {
       await client.dispose().catch(() => undefined)
       if (isAcpAuthRequiredError(error)) {
-        if (params.provider === 'antigravity' || params.agentId === 'antigravity') {
+        if (isAntigravity) {
+          const hostPlatform = this.options.platform ?? process.platform
+          if (
+            hostPlatform === 'darwin' &&
+            !attemptOptions?.stripSshSession &&
+            mergedEnv &&
+            hasSshSessionEnv(mergedEnv)
+          ) {
+            return this.connectStdioAcp(params, { stripSshSession: true })
+          }
           return {
             ok: false,
             error: ANTIGRAVITY_AUTH_ERROR,
-            install_hint: 'Run `agy acp --login` in your terminal to sign in with Google.',
           }
         }
         const authNames = (initResult?.authMethods ?? []).map(method => method.name).filter(Boolean)

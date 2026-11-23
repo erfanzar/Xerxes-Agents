@@ -39,7 +39,7 @@ export interface XerxesBridge {
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
   /** create-gemini accepts user-entered label/apiKey/model only; replies never contain a key. */
-  accounts?(action: 'list' | 'login' | 'relogin' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove', params?: Record<string, unknown>): Promise<unknown>
+  accounts?(action: 'list' | 'login' | 'relogin' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove' | 'agy-status' | 'agy-sync-review' | 'agy-sync' | 'agy-login-start' | 'agy-login-complete' | 'agy-login-cancel', params?: Record<string, unknown>): Promise<unknown>
   onAccountLogin?(handler: (event: { type: 'authorization_url'; login_id: string; url: string }) => void): () => void
   /** Browser tab (sandboxed native view; on SSH workspaces its traffic leaves from the host) and port forwards. */
   browser?(action: 'state' | 'open' | 'back' | 'forward' | 'reload' | 'stop' | 'bounds' | 'external' | 'reset' | 'ports' | 'port-forward' | 'unforward', params?: Record<string, unknown>): Promise<unknown>
@@ -359,6 +359,12 @@ export interface PlanState {
 export interface QueueItem {
   readonly id: number
   readonly text: string
+  readonly images?: ReadonlyArray<{
+    readonly id: string
+    readonly mediaType: string
+    readonly data: string
+    readonly name: string
+  }>
 }
 
 /** One raw daemon event, kept in a bounded ring for the Log tab. */

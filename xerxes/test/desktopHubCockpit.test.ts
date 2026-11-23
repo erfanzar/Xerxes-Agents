@@ -18,7 +18,7 @@ import { createCockpitSockets, type CockpitApi } from '../src/desktop/renderer/h
 import type { SocketHandlers } from '../src/client/hubConnection.js'
 
 const ORIGIN = 'https://hub.example.ts.net'
-const TARGET = 'xerxes@209.38.102.184'
+const TARGET = 'xerxes@203.0.113.10'
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="1" height="1"/></svg>'
 
 function done(stdout: unknown, extra: Partial<CliOutcome> = {}): CliOutcome {
@@ -28,7 +28,7 @@ function done(stdout: unknown, extra: Partial<CliOutcome> = {}): CliOutcome {
 // ── target and input validation ─────────────────────────────────────────
 
 test('Hub SSH addresses: user@host and aliases pass; dashes, spaces and shell syntax are refused', () => {
-  for (const good of ['xerxes@209.38.102.184', 'hub-alias', 'me@hub.example.com', ' padded@host ']) {
+  for (const good of ['xerxes@203.0.113.10', 'hub-alias', 'me@hub.example.com', ' padded@host ']) {
     expect(checkHubTarget(good).ok).toBe(true)
   }
   for (const bad of ['', '   ', '-oProxyCommand=evil', '-v', 'a b', 'user@host name', 'x;rm -rf /', 'a|b', '$(id)', '`id`', 'a&b', 'user@', '@host', 'a@b@c', 'host/../x', 'a\nb', 'u ser@host', 42, null, undefined, {}]) {

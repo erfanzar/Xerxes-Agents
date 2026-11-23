@@ -122,6 +122,7 @@ import {
   registerBrowserManagerTools,
 } from "./operators/browser.js";
 import {
+  ensureDaemonCompanionClis,
   INSTALL_HELP,
   InstallCommandError,
   runInstallCommand,
@@ -1449,7 +1450,21 @@ async function runDaemonOwned(
     // Model capabilities come from providers and models.dev at runtime
     // (nothing is bundled); warm the shared catalog in the background.
     void modelsDev.load();
-    // Keep the Claude Code CLI current (or installed) when a profile uses it.
+    // Ensure Claude Code, Codex, and Antigravity (agy) CLIs are always installed
+    // wherever the Xerxes daemon runs (non-blocking, single-flight).
+    void ensureDaemonCompanionClis({
+      environment: process.env,
+      bunExecutable: process.execPath,
+    }).then(outcomes => {
+      for (const [name, outcome] of Object.entries(outcomes)) {
+        if (outcome.status === 'installed') {
+          console.error(`Companion CLI installed (${name}): ${outcome.path}`);
+        } else if (outcome.status === 'failed') {
+          console.error(`Companion CLI auto-install failed (${name}): ${outcome.error}`);
+        }
+      }
+    });
+    // Keep the Claude Code CLI current when a profile uses it.
     void maintainClaudeCode({ inUse: profileStore.list().some(profile => profile.provider === 'claude-code') }).then(outcome => {
       if (outcome.action === 'failed') console.error(`Claude Code update failed: ${outcome.error}`);
       else if (outcome.action === 'updated' || outcome.action === 'installed') console.error(`Claude Code ${outcome.action}: ${outcome.output}`);

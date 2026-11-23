@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { AUTOPILOT_COMPOSER_HINT, AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
+import { AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { newCommandId } from '../../client/bridge.js'
 import { relativeTime } from '../../client/format.js'
 import { watchChipText } from '../../client/watch.js'
@@ -27,6 +27,12 @@ import { CallPill, ComposerVoiceButton } from './CallControls.js'
 
 export const SUPERVISOR_UNAVAILABLE = 'Supervisor not available on this hub'
 
+const QUICK_PROMPTS = [
+  'What needs me right now?',
+  'Summarize active tasks',
+  'Check failed runs',
+] as const
+
 const SETTLED: Readonly<Record<ConfirmationState, string | undefined>> = {
   pending: undefined,
   confirming: undefined,
@@ -47,15 +53,30 @@ function blockClass(message: SupervisorMessage): string {
   return message.role === 'user' ? 'block block-user' : message.role === 'system' ? 'block block-system' : 'block block-assistant'
 }
 
-/** One thread message; system notices get their own muted row. */
+/** One thread message; system notices get their own muted row and XERXES replies offer quick copy. */
 function ThreadMessage({ message, now }: { message: SupervisorMessage; now: number }): ReactElement {
+  const [copied, setCopied] = useState(false)
+  const copy = (): void => {
+    void navigator.clipboard?.writeText(message.text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1800)
+    }).catch(() => undefined)
+  }
   return (
     <li data-block-id={message.id} className={blockClass(message)}>
-      <p className="block-who">
-        {supervisorAuthor(message)}
-        {message.source === 'voice' ? ' · voice' : ''}
-        <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
-      </p>
+      <div className="msg-head">
+        <p className="block-who">
+          {message.role === 'xerxes' ? <span className="msg-avatar" aria-hidden="true" /> : null}
+          <span>{supervisorAuthor(message)}</span>
+          {message.source === 'voice' ? ' · voice' : ''}
+          <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
+        </p>
+        {message.role === 'xerxes' ? (
+          <button type="button" className="btn btn-quiet msg-copy" onClick={copy}>
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        ) : null}
+      </div>
       {message.role === 'user' ? <p className="block-text">{message.text}</p> : <Markdown text={message.text} className="block-md" />}
     </li>
   )
@@ -64,7 +85,6 @@ function ThreadMessage({ message, now }: { message: SupervisorMessage; now: numb
 export function ConfirmationCard({ item, canAct, onRespond }: { item: SupervisorConfirmation; canAct: boolean; onRespond: (decision: 'confirm' | 'cancel') => void }): ReactElement {
   const settled = SETTLED[item.state]
   if (item.auto === true) {
-    // Autopilot ran this without a Confirm tap: it is a record, never a question.
     const running = item.state === 'pending' || item.state === 'confirming'
     return (
       <li className="card" data-auto="true">
@@ -83,6 +103,7 @@ export function ConfirmationCard({ item, canAct, onRespond }: { item: Supervisor
   }
   return (
     <li className="card card-attention">
+      <span className="badge badge-attention">Proposal</span>
       <h3 className="card-title">XERXES proposes: {item.tool}</h3>
       <p>{item.summary}</p>
       {item.targets.length === 0 ? null : <ul className="notes">{item.targets.map(target => <li key={target}>{target}</li>)}</ul>}
@@ -98,7 +119,6 @@ export function ConfirmationCard({ item, canAct, onRespond }: { item: Supervisor
       {item.state === 'failed' ? (
         <>
           <p role="alert" className="field-error">{item.message ?? 'That did not go through.'}</p>
-          {/* The Hub only acts on a pending card, so asking again never runs it twice. */}
           <div className="approval-actions" role="group" aria-label="Try this action again">
             <button type="button" className="btn" disabled={!canAct} onClick={() => onRespond('confirm')}>Try again</button>
           </div>
@@ -138,7 +158,6 @@ export function AutopilotThreadBody(): ReactElement {
   const live = state.connection.state === 'live'
   const list = useRef<HTMLDivElement>(null)
   const follow = useFollowScroll(list, thread.phase === 'ready', [thread.messages, thread.confirmations, thread.working, thread.steps])
-  // Cards waiting for the owner stay cards; settled ones are event lines at their own time.
   const threadCards = splitCards(thread.confirmations)
   return (
     <div ref={list} aria-label="Autopilot thread" role="region">
@@ -181,6 +200,7 @@ export function XerxesTab(): ReactElement {
   const [threadView, setThreadView] = useState(false)
   const [watchSheet, setWatchSheet] = useState(false)
   const [safetySheet, setSafetySheet] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const autopilotChip = autopilotChipText(activeAutopilotRows(state), state.autopilot.all)
   const watchChip = state.watch.unsupported ? undefined : watchChipText(state.watch.rows)
   const threadAvailable = autopilotThreadAvailable(state)
@@ -193,8 +213,6 @@ export function XerxesTab(): ReactElement {
     if (state.connection.state === 'live') void controller.supervisorOpen()
   }, [controller, state.connection.state])
 
-  // Open on the newest message and keep following it while the reader is at the bottom,
-  // exactly like the task transcript; reading older messages is never yanked away.
   const conversation = useRef<HTMLDivElement>(null)
   const follow = useFollowScroll(conversation, supervisor.phase === 'ready' && !showThread, [supervisor.messages, supervisor.confirmations, supervisor.working, supervisor.steps, showThread])
   const sharedCards = splitCards(supervisor.confirmations)
@@ -202,9 +220,7 @@ export function XerxesTab(): ReactElement {
   const live = state.connection.state === 'live'
   const latest = useRef(text)
   const sending = useRef(false)
-  // One message id per draft text: retrying after an uncertain failure resends the same id, so the Hub dedupes it.
   const pending = useRef<{ readonly text: string; readonly id: string } | undefined>(undefined)
-  // An error the person has moved past (edited the draft or sent again) is not shown again.
   const [dismissedError, setDismissedError] = useState<string | undefined>(undefined)
   const update = (value: string): void => {
     latest.current = value
@@ -213,37 +229,58 @@ export function XerxesTab(): ReactElement {
     if (pending.current !== undefined && pending.current.text !== value.trim()) pending.current = undefined
     if (supervisor.error !== undefined) setDismissedError(supervisor.error)
   }
-  const send = async (): Promise<void> => {
-    const raw = latest.current
+  const send = async (overrideText?: string): Promise<void> => {
+    const raw = overrideText ?? latest.current
     const sent = raw.trim()
     if (sending.current || sent === '' || supervisor.busy || !live) return
     sending.current = true
     setDismissedError(undefined)
     try {
-      // Ask the Hub to speak the reply on this device before sending, so it is listening when the reply lands.
-      if (fromVoice) await voice?.armReply?.(true)
+      const voiceSend = overrideText === undefined && fromVoice
+      if (voiceSend) await voice?.armReply?.(true)
       if (pending.current === undefined || pending.current.text !== sent) pending.current = { text: sent, id: newCommandId() }
-      const ok = await controller.supervisorSend(sent, fromVoice ? 'voice' : 'text', pending.current.id)
+      const ok = await controller.supervisorSend(sent, voiceSend ? 'voice' : 'text', pending.current.id)
       if (ok) {
         pending.current = undefined
-        const rest = remainingAfterSend(latest.current, raw)
-        latest.current = rest
-        setText(rest)
-        if (rest === '') drafts.clear('supervisor')
-        else drafts.set('supervisor', rest)
-        setFromVoice(false)
-      } else if (fromVoice) void voice?.armReply?.(false)
+        if (overrideText === undefined) {
+          const rest = remainingAfterSend(latest.current, raw)
+          latest.current = rest
+          setText(rest)
+          if (rest === '') drafts.clear('supervisor')
+          else drafts.set('supervisor', rest)
+          setFromVoice(false)
+        }
+      } else if (voiceSend) void voice?.armReply?.(false)
     } finally {
       sending.current = false
     }
+  }
+  const stopSupervisor = async (): Promise<void> => {
+    if (stopping || !live) return
+    setStopping(true)
+    try { await controller.supervisorCancel() }
+    finally { setStopping(false) }
   }
   const shownError = supervisor.error !== undefined && supervisor.error !== dismissedError && !supervisor.busy ? supervisor.error : undefined
 
   return (
     <section aria-labelledby="xerxes-title">
       <CallPill />
-      <h1 id="xerxes-title" className="page-title">{supervisorHeading(config.config)}</h1>
-      {isHubOwner(state) ? <div className="config-row"><button type="button" className="btn" aria-haspopup="dialog" aria-expanded={safetySheet} onClick={() => setSafetySheet(true)}>Safety</button></div> : null}
+      <div className="page-head">
+        <h1 id="xerxes-title" className="page-title page-title-compact">{supervisorHeading(config.config)}</h1>
+        <div className="page-actions">
+          {supervisor.working === true ? (
+            <span className="chip xerxes-live-badge" role="status">
+              <span className="live-pulse" aria-hidden="true" />
+              <span>Working</span>
+            </span>
+          ) : null}
+          {isHubOwner(state) ? (
+            <button type="button" className="btn" aria-haspopup="dialog" aria-expanded={safetySheet} onClick={() => setSafetySheet(true)}>Safety</button>
+          ) : null}
+        </div>
+      </div>
+      <p className="xerxes-safety-note">Permissions stay human-only; risky actions always need the owner’s Confirm.</p>
       {safetySheet && isHubOwner(state) ? <Sheet title="Superagent safety" onClose={() => setSafetySheet(false)}>
         <SuperagentControlPanel client={controller.superagentControl} online={live} />
       </Sheet> : null}
@@ -260,7 +297,7 @@ export function XerxesTab(): ReactElement {
         </div>
       ) : (
         <>
-          <div className="config-row">
+          <div className="config-row task-pills">
             <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setSheet(true)}>{config.canEdit ? 'Model' : 'Model (view)'}</button>
             {state.autopilot.unsupported ? null : (
               <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setAutopilotSheet(true)}>{state.autopilot.canEdit || state.autopilot.phase !== 'ready' ? 'Autopilot' : 'Autopilot (view)'}</button>
@@ -268,8 +305,6 @@ export function XerxesTab(): ReactElement {
             {state.watch.unsupported ? null : (
               <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setWatchSheet(true)}>{state.watch.canEdit || state.watch.phase !== 'ready' ? 'Watch' : 'Watch (view)'}</button>
             )}
-            {autopilotChip === undefined ? null : <span className="chip" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
-            {watchChip === undefined ? null : <span className="chip" role="status" aria-label="Watch status">{watchChip}</span>}
             {threadAvailable ? (
               <button
                 type="button"
@@ -281,6 +316,8 @@ export function XerxesTab(): ReactElement {
                 {threadPending > 0 ? <span className="chip" aria-label={pendingBadgeLabel(threadPending)}> {threadPending}</span> : null}
               </button>
             ) : null}
+            {autopilotChip === undefined ? null : <span className="chip" role="status" aria-label="Autopilot status">{autopilotChip}</span>}
+            {watchChip === undefined ? null : <span className="chip" role="status" aria-label="Watch status">{watchChip}</span>}
           </div>
           {sheet ? <ModelSheet onClose={() => setSheet(false)} /> : null}
           {autopilotSheet ? <AutopilotSheet onClose={() => setAutopilotSheet(false)} /> : null}
@@ -293,40 +330,68 @@ export function XerxesTab(): ReactElement {
               <ModelChooser />
             </div>
           ) : null}
-          <p className="summary">Ask XERXES about your tasks. It looks across authorized workspaces, starts, steers and stops tasks, and answers their questions. Permissions stay human-only; risky actions always need the owner’s Confirm. With anyone else in the thread, actions wait for your Confirm.</p>
           {showThread ? <AutopilotThreadBody /> : null}
           {showThread ? null : <>
-          {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
-          {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? <p className="empty">No messages yet. Try “What needs me right now?”</p> : null}
-          <div ref={conversation}>
-            <ol className="blocks" aria-label="Conversation">
-              {withRecords(supervisor.messages, sharedCards.records).map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
-            </ol>
-            {sharedCards.open.length === 0 ? null : (
-              <ul className="pending" aria-label="Waiting for your confirmation">
-                {sharedCards.open.map(item => (
-                  <ConfirmationCard key={item.id} item={item} canAct={live} onRespond={decision => { void controller.supervisorRespond(item.id, decision) }} />
-                ))}
-              </ul>
-            )}
-            {(supervisor.working === true || liveSteps(supervisor.steps, supervisor.messages).length > 0) && supervisor.phase === 'ready'
-              ? <LiveStepLines steps={liveSteps(supervisor.steps, supervisor.messages)} idle="XERXES is thinking…" />
-              : null}
-            <JumpToLatest visible={follow.away} onJump={follow.toBottom} />
-          </div>
-          {shownError !== undefined && supervisor.phase === 'ready' ? <p role="alert" className="field-error">{shownError}</p> : null}
-          <VoiceStatus voice={voice} />
-          <form className="composer" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void send() }}>
-            <label className="field">
-              <span className="visually-hidden">Message to XERXES</span>
-              <textarea rows={2} value={text} placeholder="Ask XERXES…" disabled={supervisor.phase !== 'ready'} onChange={event => { update(event.target.value); setFromVoice(false) }} />
-            </label>
-            <div className="composer-row">
-              <TalkButton voice={voice} onTranscript={spoken => { update(withTranscript(latest.current, spoken)); setFromVoice(true) }} />
-              <ComposerVoiceButton />
-              <button type="submit" className="btn btn-primary" disabled={supervisor.phase !== 'ready' || !live || supervisor.busy || text.trim() === ''}>{supervisor.busy ? 'Sending…' : 'Send'}</button>
+            {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
+            {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? (
+              <div className="xerxes-hero">
+                <span className="xerxes-hero-logo" aria-hidden="true" />
+                <h2>Ask XERXES across every workspace</h2>
+                <p>Monitor, steer, or start tasks across connected machines. Risky actions always wait for your Confirm.</p>
+                <div className="prompt-chips" role="group" aria-label="Suggested prompts">
+                  {QUICK_PROMPTS.map(prompt => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="btn prompt-chip"
+                      disabled={!live || supervisor.busy || unconfigured}
+                      onClick={() => { void send(prompt) }}
+                    >
+                      <span>{prompt}</span>
+                      <span className="prompt-arrow" aria-hidden="true">↗</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div ref={conversation}>
+              <ol className="blocks" aria-label="Conversation">
+                {withRecords(supervisor.messages, sharedCards.records).map(message => <ThreadMessage key={message.id} message={message} now={now} />)}
+              </ol>
+              {sharedCards.open.length === 0 ? null : (
+                <ul className="pending" aria-label="Waiting for your confirmation">
+                  {sharedCards.open.map(item => (
+                    <ConfirmationCard key={item.id} item={item} canAct={live} onRespond={decision => { void controller.supervisorRespond(item.id, decision) }} />
+                  ))}
+                </ul>
+              )}
+              {(supervisor.working === true || liveSteps(supervisor.steps, supervisor.messages).length > 0) && supervisor.phase === 'ready'
+                ? <LiveStepLines steps={liveSteps(supervisor.steps, supervisor.messages)} idle="XERXES is thinking…" />
+                : null}
+              <JumpToLatest visible={follow.away} onJump={follow.toBottom} />
             </div>
-          </form>
+            {shownError !== undefined && supervisor.phase === 'ready' ? <p role="alert" className="field-error">{shownError}</p> : null}
+            <VoiceStatus voice={voice} />
+            <form className="composer" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void send() }}>
+              <label className="field">
+                <span className="visually-hidden">Message to XERXES</span>
+                <textarea rows={2} value={text} placeholder="Ask XERXES…" disabled={supervisor.phase !== 'ready'} onChange={event => { update(event.target.value); setFromVoice(false) }} />
+              </label>
+              <div className="composer-row">
+                <div className="composer-tools">
+                  <TalkButton voice={voice} onTranscript={spoken => { update(withTranscript(latest.current, spoken)); setFromVoice(true) }} />
+                  <ComposerVoiceButton />
+                </div>
+                <div className="composer-submit">
+                  {supervisor.working === true ? (
+                    <button type="button" className="btn btn-danger" disabled={!live || stopping} onClick={() => { void stopSupervisor() }}>
+                      {stopping ? 'Stopping…' : 'Stop'}
+                    </button>
+                  ) : null}
+                  <button type="submit" className="btn btn-primary" disabled={supervisor.phase !== 'ready' || !live || supervisor.busy || text.trim() === ''}>{supervisor.busy ? 'Sending…' : 'Send'}</button>
+                </div>
+              </div>
+            </form>
           </>}
         </>
       )}

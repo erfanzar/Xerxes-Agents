@@ -105,15 +105,17 @@ export function TaskTab({ workspaceId, sessionId }: { workspaceId?: string | und
   return (
     <section aria-labelledby="task-title">
       <header className="task-head">
-        <p className="card-workspace">{workspaceLabel(state, selected.workspaceId)}</p>
-        <h1 id="task-title" className="page-title">{title}</h1>
-        <div role="status" aria-live="polite"><StatusBadge view={view} size={32} /></div>
+        <div className="task-eyebrow">
+          <p className="card-workspace">{workspaceLabel(state, selected.workspaceId)}</p>
+          <div role="status" aria-live="polite"><StatusBadge view={view} size={20} /></div>
+        </div>
+        <h1 id="task-title" className="page-title task-title">{title}</h1>
         {chips.length === 0 ? null : (
           <ul className="chips" aria-label="People on this task">
             {chips.map(chip => <li key={chip.userId} className="chip">{chip.name}{chip.state === 'typing' ? ' · typing' : ''}</li>)}
           </ul>
         )}
-        <div className="config-row">
+        <div className="config-row task-pills">
           <button type="button" className="btn" aria-haspopup="dialog" onClick={openAgents}>{agentsLabel ?? 'Agents'}</button>
           <button type="button" className="btn" onClick={() => setSheet({ kind: 'model' })}>Model: {selected.model.effective ?? 'not reported'}</button>
           <button type="button" className="btn" onClick={() => setSheet({ kind: 'effort' })}>Effort: {selected.effort.effective ?? 'not reported'}</button>

@@ -19,11 +19,11 @@
 
 import {
   COCKPIT_ACTIONS, COCKPIT_MAX_FRAME_BYTES, COCKPIT_PROGRESS_EVENT, COCKPIT_SOCKET_EVENT,
-  checkComparisonCode, checkDeviceLabel, checkHubTarget, checkPairingId, hubWebSocketUrlFor, parseHubOrigin, parsePairingTicket, socketIdOk,
+  checkComparisonCode, checkDeviceId, checkDeviceLabel, checkHubTarget, checkPairingId, hubWebSocketUrlFor, parseHubOrigin, parsePairingTicket, socketIdOk,
   type CockpitAction, type CockpitFailure, type CockpitFailureCode, type CockpitMachine, type CockpitResult, type CockpitStatus, type HubSocketEvent,
 } from '../hubShared.js'
 import {
-  isFailure, jsonOf, parseConfirm, parseHubInfo, parseLink, parseMachines, parsePairing,
+  isFailure, jsonOf, parseConfirm, parseDevices, parseHubInfo, parseLink, parseMachines, parsePairing, parseRevokeDevice,
   type CliRunner,
 } from './hubCli.js'
 import { CookieJar, HUB_REFRESH_COOKIE, HUB_SESSION_COOKIE } from './hubCookies.js'
@@ -341,6 +341,38 @@ export function createHubCockpit(deps: HubCockpitDeps): HubCockpit {
     return isFailure(listed) ? listed : { ok: true, machines: listed.machines }
   }
 
+  async function devices(raw: unknown): Promise<CockpitResult> {
+    const params = paramsOf(raw, ['includeRevoked'])
+    if (isFailure(params)) return params
+    if (params.includeRevoked !== undefined && typeof params.includeRevoked !== 'boolean') {
+      return fail('invalid_input', 'includeRevoked must be true or false.')
+    }
+    const current = needTarget()
+    if (isFailure(current)) return current
+    const args = ['remote', current.target, 'devices', 'list', ...(params.includeRevoked === true ? ['--all'] : []), '--json']
+    const outcome = await deps.runner.run(args, { timeoutMs: INFO_TIMEOUT_MS })
+    const json = jsonOf(outcome, 'list paired devices')
+    if (!json.ok) return json
+    const parsed = parseDevices(json.json)
+    return isFailure(parsed) ? parsed : { ok: true, devices: parsed }
+  }
+
+  async function revokeDevice(raw: unknown): Promise<CockpitResult> {
+    const params = paramsOf(raw, ['deviceId'])
+    if (isFailure(params)) return params
+    const id = checkDeviceId(params.deviceId)
+    if (!id.ok) return fail('invalid_input', id.message)
+    const current = needTarget()
+    if (isFailure(current)) return current
+    return exclusive(`revoke:${id.value}`, async () => {
+      const outcome = await deps.runner.run(['remote', current.target, 'devices', 'revoke', id.value, '--json'], { timeoutMs: PAIR_TIMEOUT_MS })
+      const json = jsonOf(outcome, 'revoke the device')
+      if (!json.ok) return json
+      const parsed = parseRevokeDevice(json.json)
+      return isFailure(parsed) ? parsed : { ok: true as const, deviceId: parsed.deviceId }
+    })
+  }
+
   // ── sign-in ───────────────────────────────────────────────────────
 
   async function refresh(origin: string): Promise<'ok' | 'denied' | CockpitFailure> {
@@ -539,6 +571,8 @@ export function createHubCockpit(deps: HubCockpitDeps): HubCockpit {
         case 'pair': return pair(params)
         case 'confirm': return confirm(params)
         case 'machines': return machines(params)
+        case 'devices': return devices(params)
+        case 'revokeDevice': return revokeDevice(params)
         case 'signin': return signin(params)
         case 'socket.open': return socketOpen(params, senderId)
         case 'socket.send': return socketSend(params, senderId)

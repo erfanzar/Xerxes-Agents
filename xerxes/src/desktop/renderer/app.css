@@ -912,6 +912,27 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 
 .workspace { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px 20px; }
 .workspace--log { padding: 0 0; display: flex; flex-direction: column; }
+.workspace-shell { display: flex; flex-direction: column; gap: 14px; min-height: 100%; }
+.workspace-shell--log { flex: 1 1 auto; min-height: 0; gap: 0; }
+.workspace-return {
+  display: flex; align-items: center; gap: 10px; max-width: 84ch; width: 100%; margin: 0 auto;
+  padding-bottom: 10px; border-bottom: 1px solid var(--x-divider);
+}
+.workspace-shell--log .workspace-return { max-width: none; padding: 10px 16px; }
+.workspace-return__btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
+  background: var(--x-card); color: var(--x-title); font: 500 12.5px/1 var(--sans);
+  cursor: pointer; white-space: nowrap; transition: background-color 110ms ease, border-color 110ms ease;
+}
+.workspace-return__btn:hover { background: var(--x-selected); border-color: var(--x-separator); }
+.workspace-return__arrow { font-size: 13px; line-height: 1; }
+.workspace-return__title { font: 500 13px/1 var(--sans); color: var(--x-prose); }
+.workspace-return__meta { font: 400 11.5px/1 var(--mono); color: var(--x-meta); }
+.workspace-return__hint {
+  margin-left: auto; padding: 2px 6px; border: 1px solid var(--x-hairline); border-radius: 4px;
+  font: 500 10.5px/1.2 var(--mono); color: var(--x-meta); background: transparent;
+}
 
 /* Empty states (Changes / Plan / Log) */
 .tabempty {

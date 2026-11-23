@@ -479,6 +479,7 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
       expect(authFail.error).toBe(
         'Antigravity is not signed in. Run `agy acp --login` (or `agy`) in your terminal to sign in with Google, then click Retry.',
       )
+      expect(authFail.install_hint).toBeUndefined()
     }
 
     // 2. Honest clientCapabilities, clean cancel grace settling with stopReason: "cancelled", and session/close on disconnect
@@ -925,6 +926,7 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
       const sessionId = String(init.session_id)
 
       // 1. Connect Antigravity -> populates config_options, thought_level, thought_levels, available_commands
+      //    and defaults mode to Turbo on fresh connect.
       const conn = await client.call('acp.connect', {
         session_id: sessionId,
         agent_id: 'antigravity',
@@ -934,6 +936,8 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
         agent_id: 'antigravity',
         external_session_id: 'agy-ext-1',
         current_model: 'gemini-4-carbon',
+        current_mode: 'turbo',
+        current_mode_name: 'Turbo',
         thought_level: 'medium',
         thought_level_config_id: 'thought_level',
         thought_levels: [
@@ -1017,6 +1021,15 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
       expect((acpConfigValComplete.completions as Array<{ label: string }>).map(c => c.label)).toEqual(['plan'])
 
       // 4. Providerless turn with image + @notes.ts + rich approval (NOT auto-approved despite Xerxes accept-all!)
+      // Switch from default Turbo to Default mode first so AGY asks for edit permission.
+      const switchToDefault = await client.call('acp.set_mode', {
+        session_id: sessionId,
+        mode_id: 'default',
+      })
+      expect(switchToDefault).toMatchObject({
+        ok: true,
+        binding: { current_mode: 'default', current_mode_name: 'Default' },
+      })
       const submitRes = await client.call('turn.submit', {
         session_key: 'agy-s1',
         text: 'Inspect @notes.ts and image',
@@ -1464,6 +1477,30 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
                 sessionId: 'agy-iso-1',
                 configOptions: [
                   ...makeAgyConfigOptions('gemini-4-carbon', 'medium', 'default'),
+                  {
+                    id: 'grounding',
+                    name: 'Web Grounding',
+                    type: 'boolean',
+                    currentValue: true,
+                    options: [
+                      { value: 'true', name: 'On' },
+                      { value: 'false', name: 'Off' },
+                    ],
+                  },
+                ],
+              },
+            })
+            return
+          }
+          if (frame.method === 'session/set_config_option') {
+            const p = frame.params as Record<string, unknown>
+            const nextMode = p.configId === 'mode' && typeof p.value === 'string' ? p.value : 'default'
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: {
+                configOptions: [
+                  ...makeAgyConfigOptions('gemini-4-carbon', 'medium', nextMode),
                   {
                     id: 'grounding',
                     name: 'Web Grounding',
@@ -2622,9 +2659,16 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
       const sessionId = String(init.session_id)
 
       // 1. Connect AGY -> Turbo appears right after Auto and before Plan in both modes & config_options
+      //    AND is selected by default on a fresh Antigravity connect (sending native 'auto' to AGY)!
+      setConfigCalls.length = 0
       const conn = await client.call('acp.connect', { session_id: sessionId, agent_id: 'antigravity', cwd: root })
       expect(conn.ok).toBe(true)
       const initialBinding = conn.binding as Record<string, unknown>
+      expect(initialBinding).toMatchObject({
+        current_mode: 'turbo',
+        current_mode_name: 'Turbo',
+      })
+      expect(setConfigCalls).toEqual([{ configId: 'mode', value: 'auto' }])
       expect((initialBinding.modes as Array<{ id: string }>).map(m => m.id)).toEqual([
         'default',
         'accept-edits',
@@ -2632,15 +2676,17 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
         'turbo',
         'plan',
       ])
-      const modeConfig = (initialBinding.config_options as Array<{ id: string; options: Array<{ value: string }> }>)
+      const modeConfig = (initialBinding.config_options as Array<{ id: string; current_value: string; options: Array<{ value: string }> }>)
         .find(opt => opt.id === 'mode')
+      expect(modeConfig?.current_value).toBe('turbo')
       expect(modeConfig?.options.map(o => o.value)).toEqual(['default', 'accept-edits', 'auto', 'turbo', 'plan'])
 
       // Tab completion exposes turbo
       const modeComplete = await client.call('complete', { text: '/acp mode tu', session_key: 'turbo-s1' })
       expect((modeComplete.completions as Array<{ label: string }>).map(c => c.label)).toEqual(['turbo'])
 
-      // 2. Select Turbo via acp.set_mode -> sends native 'auto' to AGY, keeps binding in 'turbo'
+      // 2. Switching to Default then back to Turbo via acp.set_mode -> sends native 'auto' to AGY, keeps binding in 'turbo'
+      await client.call('acp.set_mode', { session_id: sessionId, mode_id: 'default' })
       setConfigCalls.length = 0
       const setTurbo = await client.call('acp.set_mode', { session_id: sessionId, mode_id: 'turbo' })
       expect(setTurbo).toMatchObject({
@@ -2788,6 +2834,121 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
     } finally {
       client.close()
       await server.stop()
+    }
+  })
+
+  test('Antigravity subprocess env strips outer host sandbox vars and retries without SSH_CONNECTION on darwin keyring fallback', async () => {
+    // 1. Outer Antigravity / T3 host sandbox env is stripped on the first attempt while preserving SSH_AUTH_SOCK & GEMINI_API_KEY.
+    const seenOuterEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
+    const outerHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENT_ROSTER,
+      platform: 'darwin',
+      env: {
+        PATH: '/usr/bin:/bin',
+        SSH_CONNECTION: '127.0.0.1 12345 127.0.0.1 22',
+        SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+        AGY_ACP_FORCE_FILE_STORAGE: '1',
+        ANTIGRAVITY_APP_DATA_DIR: '/tmp/outer-host/antigravity-acp',
+        ANTIGRAVITY_CSRF_TOKEN: 'outer-csrf',
+        GEMINI_HOME: '/tmp/outer-host',
+        GEMINI_API_KEY: 'test-gemini-key',
+      },
+      createAcpClient: opts => {
+        seenOuterEnvs.push(opts.env)
+        const h = createInMemoryAcpTransport((frame, harness) => {
+          if (frame.method === 'initialize') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } })
+          } else if (frame.method === 'session/new') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'agy-outer-1' } })
+          }
+        })
+        return new AcpStdioClient({ ...opts, transport: h.transport })
+      },
+    })
+    const outerRes = await outerHost.connect({ sessionId: 'outer-1', agentId: 'antigravity', cwd: '/tmp' })
+    expect(outerRes.ok).toBe(true)
+    expect(seenOuterEnvs).toHaveLength(1)
+    expect(seenOuterEnvs[0]?.AGY_ACP_FORCE_FILE_STORAGE).toBeUndefined()
+    expect(seenOuterEnvs[0]?.ANTIGRAVITY_APP_DATA_DIR).toBeUndefined()
+    expect(seenOuterEnvs[0]?.ANTIGRAVITY_CSRF_TOKEN).toBeUndefined()
+    expect(seenOuterEnvs[0]?.GEMINI_HOME).toBeUndefined()
+    expect(seenOuterEnvs[0]?.SSH_CONNECTION).toBeUndefined()
+    expect(seenOuterEnvs[0]?.SSH_AUTH_SOCK).toBe('/tmp/ssh-agent.sock')
+    expect(seenOuterEnvs[0]?.GEMINI_API_KEY).toBe('test-gemini-key')
+    await outerHost.disposeAll()
+
+    // 2. Plain SSH_CONNECTION on darwin: first attempt keeps SSH_CONNECTION, fails auth_required -> retries once without SSH_CONNECTION and succeeds.
+    const darwinEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
+    const darwinHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENT_ROSTER,
+      platform: 'darwin',
+      env: {
+        PATH: '/usr/bin:/bin',
+        SSH_CONNECTION: '127.0.0.1 12345 127.0.0.1 22',
+        SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+      },
+      createAcpClient: opts => {
+        darwinEnvs.push(opts.env)
+        const h = createInMemoryAcpTransport((frame, harness) => {
+          if (frame.method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: { protocolVersion: 1, authMethods: [{ id: 'oauth-personal', name: 'Log in with Google' }] },
+            })
+          } else if (frame.method === 'session/new') {
+            if (opts.env?.SSH_CONNECTION) {
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id: frame.id,
+                error: { code: -32000, message: 'Authentication required' },
+              })
+            } else {
+              harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'agy-darwin-keychain-1' } })
+            }
+          }
+        })
+        return new AcpStdioClient({ ...opts, transport: h.transport })
+      },
+    })
+    const darwinRes = await darwinHost.connect({ sessionId: 'darwin-retry-1', agentId: 'antigravity', cwd: '/tmp' })
+    expect(darwinRes.ok).toBe(true)
+    expect(darwinEnvs).toHaveLength(2)
+    expect(darwinEnvs[0]?.SSH_CONNECTION).toBe('127.0.0.1 12345 127.0.0.1 22')
+    expect(darwinEnvs[1]?.SSH_CONNECTION).toBeUndefined()
+    expect(darwinEnvs[1]?.SSH_AUTH_SOCK).toBe('/tmp/ssh-agent.sock')
+    await darwinHost.disposeAll()
+
+    // 3. Plain SSH_CONNECTION on linux: does NOT retry without SSH_CONNECTION and returns clean non-duplicated auth error.
+    const linuxEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
+    const linuxHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENT_ROSTER,
+      platform: 'linux',
+      env: {
+        PATH: '/usr/bin:/bin',
+        SSH_CONNECTION: '10.0.0.1 54321 10.0.0.2 22',
+      },
+      createAcpClient: opts => {
+        linuxEnvs.push(opts.env)
+        const h = createInMemoryAcpTransport((frame, harness) => {
+          if (frame.method === 'initialize') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } })
+          } else if (frame.method === 'session/new') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              error: { code: -32000, message: 'Authentication required' },
+            })
+          }
+        })
+        return new AcpStdioClient({ ...opts, transport: h.transport })
+      },
+    })
+    const linuxRes = await linuxHost.connect({ sessionId: 'linux-no-retry-1', agentId: 'antigravity', cwd: '/tmp' })
+    expect(linuxRes.ok).toBe(false)
+    expect(linuxEnvs).toHaveLength(1)
+    if (!linuxRes.ok) {
+      expect(linuxRes.install_hint).toBeUndefined()
     }
   })
 })

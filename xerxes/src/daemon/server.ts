@@ -30,11 +30,21 @@ import {
   SWARM_USAGE,
 } from './swarmCommand.js';
 import {
+  AGY_TASK_ID_PREFIX,
   AgyBrainBridge,
   artifactIdForAgyPath,
+  extractAgyLogFileNameFromText,
+  extractAgyTaskIdFromText,
+  inferAgyTaskLogFilename,
   isValidAgyArtifactFilename,
+  parseAgyExitCodeFromText,
+  type AgyBackgroundTaskSnapshot,
   type AgyBrainLocation,
 } from './agyBrainBridge.js';
+import {
+  expandXerxesAcpSlashCommand,
+  loadXerxesWorkspaceBridgeForAcp,
+} from '../acp/xerxesWorkspaceBridge.js';
 import { pathToFileURL } from 'node:url';
 import { DaemonSwarmHost, transcriptMessagesToChatMessages } from './swarmHost.js';
 import { DaemonAcpBridgeHost, type AcpPromptResourceInput } from './acpBridgeHost.js';
@@ -413,6 +423,7 @@ import {
   BUN_DAEMON_BUILD_ID,
   DAEMON_PROTOCOL_VERSION,
   XERXES_VERSION,
+  inflightToolContext,
   type DaemonEvent,
   type DaemonRuntime,
   type DaemonSession,
@@ -1449,6 +1460,7 @@ export class DaemonServer {
   private readonly swarmHost: DaemonSwarmHost;
   private readonly acpBridgeHost: DaemonAcpBridgeHost;
   private readonly agyBrainBridge: AgyBrainBridge;
+  private readonly acpBackgroundTasks = new Map<string, Map<string, AgyBackgroundTaskSnapshot>>();
   private readonly acpWakeupIdleMs: number;
   private readonly acpOutOfTurnWakeups = new Map<string, AcpOutOfTurnWakeupState>();
   private readonly acpApprovalOptionChoices = new Map<string, string>();
@@ -3716,10 +3728,16 @@ export class DaemonServer {
     if (method === "background.activity") return this.backgroundActivity(connection, params);
     if (method === "background.status") {
       const owner = this.terminalOwnerSessionId(connection, params);
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const agyTasks = session ? this.listAgyBackgroundTasksForSession(session) : [];
+      const agyShells = agyTasks.filter(task => task.kind === "shell" && task.state === "running").length;
+      const agySchedules = agyTasks.filter(task => task.kind === "schedule" && (task.state === "scheduled" || task.state === "running")).length;
+      const agyOther = agyTasks.filter(task => task.kind === "task" && task.state === "running").length;
       return {
         ok: true,
-        shells: (this.terminalRegistry?.list(owner) ?? []).filter(terminal => terminal.running && terminal.label !== USER_SHELL_LABEL).length,
-        watchers: (this.monitors?.list(owner) ?? []).filter(watch => watch.state === 'watching').length,
+        shells: (this.terminalRegistry?.list(owner) ?? []).filter(terminal => terminal.running && terminal.label !== USER_SHELL_LABEL).length + agyShells,
+        watchers: (this.monitors?.list(owner) ?? []).filter(watch => watch.state === 'watching').length + agyOther,
+        ...(agySchedules > 0 ? { schedules: agySchedules } : {}),
       };
     }
     if (method === "terminal.list") {
@@ -4918,7 +4936,11 @@ export class DaemonServer {
         return {
           ok: true,
           kind: "slash",
-          completions: this.completeAcpSlashAndSkills(stripped, activeAcpBinding),
+          completions: await this.completeAcpSlashAndSkills(
+            stripped,
+            activeAcpBinding,
+            activeAcpSession?.cwd ?? activeAcpBinding.cwd,
+          ),
         };
       }
       if (stripped.startsWith("/")) {
@@ -5048,10 +5070,11 @@ export class DaemonServer {
    * bridge command set (`/acp`, and `/new`, `/clear`, `/export` when not
    * shadowed by an ACP command). Never leaks Xerxes native commands or skills.
    */
-  private completeAcpSlashAndSkills(
+  private async completeAcpSlashAndSkills(
     stripped: string,
     binding: AcpSessionBinding,
-  ): JsonRpcPayload[] {
+    cwd?: string,
+  ): Promise<JsonRpcPayload[]> {
     const wanted = slashCompletionPrefix(stripped);
     const acpNames = new Set<string>();
     const seen = new Set<string>();
@@ -5133,6 +5156,55 @@ export class DaemonServer {
           ...(cmd.input_hint ? { input_hint: cmd.input_hint } : {}),
         },
       });
+    }
+
+    // 2b. Workspace-local & user-global `.xerxes/commands` & `.xerxes/skills` bridged into Antigravity.
+    //     Never leaks Xerxes built-in bundled skills (`immortals-*`) or duplicates `.agents/skills`.
+    if (binding.provider === "antigravity" && cwd) {
+      const xerxesBridge = await this.loadAgyXerxesBridge(cwd);
+      if (xerxesBridge) {
+        for (const cmd of xerxesBridge.commands) {
+          const lower = cmd.name.toLowerCase();
+          if (!cmd.name || seen.has(lower)) continue;
+          seen.add(lower);
+          const source = cmd.scope === "global" ? "~/.xerxes/commands" : ".xerxes/commands";
+          const description = cmd.description || `${source} command`;
+          entries.push({
+            labelLower: lower,
+            metaLower: description.toLowerCase(),
+            tierOrder: 1,
+            payload: {
+              value: `/${cmd.name}`,
+              label: cmd.name,
+              meta: description,
+              category: "acp",
+              kind: "command",
+              source,
+              path: cmd.path,
+            },
+          });
+        }
+        for (const skill of xerxesBridge.skills) {
+          const lower = skill.name.toLowerCase();
+          if (!skill.name || seen.has(lower)) continue;
+          seen.add(lower);
+          const source = skill.scope === "global" ? "~/.xerxes/skills" : ".xerxes/skills";
+          const description = skill.description || `${source} skill`;
+          entries.push({
+            labelLower: lower,
+            metaLower: description.toLowerCase(),
+            tierOrder: 1,
+            payload: {
+              value: `/${skill.name}`,
+              label: skill.name,
+              meta: description,
+              kind: "skill",
+              source,
+              path: skill.path,
+            },
+          });
+        }
+      }
     }
 
     // 3. Minimal host-bridge command set (`/acp` always; `/new`, `/clear`, `/export`
@@ -7034,6 +7106,13 @@ export class DaemonServer {
       if (isAcpAdvertisedSlashToken(acpBinding, token)) {
         return this.forwardSlashToExternalAcp(connection, key, command, acpBinding);
       }
+      if (acpBinding.provider === "antigravity" && session?.cwd) {
+        const xerxesBridge = await this.loadAgyXerxesBridge(session.cwd);
+        const acpOwned = new Set((acpBinding.available_commands ?? []).map(item => item.name.trim().toLowerCase()));
+        if (xerxesBridge && await expandXerxesAcpSlashCommand(command, xerxesBridge, acpOwned)) {
+          return this.forwardSlashToExternalAcp(connection, key, command, acpBinding);
+        }
+      }
       if (token === "skill") {
         const [skillTarget = "", ...skillRest] = args.split(/\s+/).filter(Boolean);
         const matchedSkill = findAcpDiscoveredSkill(acpBinding, skillTarget);
@@ -8630,6 +8709,28 @@ export class DaemonServer {
         action: execution === 'running' ? 'cancel' : execution === 'idle' && !job.paused ? 'pause' : null,
         scope: job.targetSessionId ? 'session' : 'workspace' });
     }
+    if (session) {
+      for (const task of this.listAgyBackgroundTasksForSession(session)) {
+        rows.push({
+          id: task.id,
+          rawTaskId: task.rawTaskId,
+          kind: task.kind,
+          source: 'antigravity',
+          title: task.title,
+          label: task.label,
+          detail: task.detail,
+          state: task.state,
+          startedAt: task.startedAt,
+          endedAt: task.endedAt,
+          exitCode: task.exitCode,
+          nextRunAt: task.nextRunAt,
+          ...(task.durationSeconds !== undefined ? { durationSeconds: task.durationSeconds } : {}),
+          ...(task.cronExpression ? { cronExpression: task.cronExpression } : {}),
+          action: task.state === 'running' || task.state === 'scheduled' ? (task.kind === 'schedule' ? 'cancel' : 'stop') : null,
+          scope: 'session',
+        });
+      }
+    }
     const live = new Set(['running', 'watching', 'cancelling', 'scheduled']);
     rows.sort((a,b) => Number(live.has(String(b.state))) - Number(live.has(String(a.state))) || Number(b.endedAt ?? b.startedAt ?? 0) - Number(a.endedAt ?? a.startedAt ?? 0));
     return { ok: true, session_id: owner, rows: rows.slice(0, 200), omitted: Math.max(0, rows.length - 200) };
@@ -8740,6 +8841,13 @@ export class DaemonServer {
     const requested = integerOption(params.max_output_chars);
     const maxChars =
       requested === undefined ? undefined : Math.min(requested, 200_000);
+    if (id.startsWith(AGY_TASK_ID_PREFIX)) {
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const agyTerminal = session ? this.inspectAgyBackgroundTask(session, id, maxChars ?? 24_000) : undefined;
+      return agyTerminal
+        ? { ok: true, terminal: agyTerminal }
+        : { ok: false, error: "unknown terminal" };
+    }
     const terminal = this.terminalRegistry?.inspect(
       this.terminalOwnerSessionId(connection, params),
       id,
@@ -8761,13 +8869,21 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
+    const id = optionalString(params.terminal_id) ?? optionalString(params.id);
+    if (!id) return { ok: false, error: "terminal_id is required" };
+    const action = (optionalString(params.action) ?? "").toLowerCase();
+    if (id.startsWith(AGY_TASK_ID_PREFIX)) {
+      if (action !== "interrupt" && action !== "kill") {
+        return { ok: false, error: "Antigravity background tasks support interrupt or kill only" };
+      }
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      if (!session) return { ok: false, error: "Open a session before controlling background tasks" };
+      return this.dispatchAgyBackgroundTaskKill(session, id);
+    }
     const registry = this.terminalRegistry;
     if (!registry) {
       return { ok: false, error: "this daemon tracks no terminals" };
     }
-    const id = optionalString(params.terminal_id) ?? optionalString(params.id);
-    if (!id) return { ok: false, error: "terminal_id is required" };
-    const action = (optionalString(params.action) ?? "").toLowerCase();
     const ownerSessionId = this.terminalOwnerSessionId(connection, params);
     try {
       if (action === "write") {
@@ -10996,13 +11112,38 @@ export class DaemonServer {
       const revision = (job: CronJob) => Bun.hash(JSON.stringify(job.toRecord())).toString(16);
       const payload = (job: CronJob) => ({ ...cronJobPayload(job), revision: revision(job), project_root: job.projectRoot, execution_state: this.cronScheduler.state(job.id), metadata: job.metadata,
         ...(params.scope === 'session' && activeSession ? { latest_attempt: this.runHistory?.latestOutcome(activeSession.id, job.id, 'schedule') ?? null } : {}) });
-      if (method === "schedule.list") return { ok: true, ...(params.scope === 'session' ? { owner_session_id: activeSession!.id } : {}), jobs: this.cronStore.listJobs().filter(visible).map(job => {
-        const value = payload(job);
-        return params.summary === true ? { ...value, prompt: job.prompt.slice(0, 500), metadata: {
-          execution_recovery_required: job.metadata.execution_recovery_required === true,
-          ...(job.metadata.followup_completion != null ? { followup_completion: { source: 'model_reported' } } : {}),
-        } } : value;
-      }) };
+      if (method === "schedule.list") {
+        const nativeJobs = this.cronStore.listJobs().filter(visible).map(job => {
+          const value = payload(job);
+          return params.summary === true ? { ...value, prompt: job.prompt.slice(0, 500), metadata: {
+            execution_recovery_required: job.metadata.execution_recovery_required === true,
+            ...(job.metadata.followup_completion != null ? { followup_completion: { source: 'model_reported' } } : {}),
+          } } : value;
+        });
+        const agyScheduleJobs = activeSession
+          ? this.listAgyBackgroundTasksForSession(activeSession)
+              .filter(task => task.kind === "schedule" && (task.state === "scheduled" || task.state === "running"))
+              .map(task => ({
+                id: task.id,
+                schedule: task.cronExpression ?? (task.durationSeconds ? `in ${task.durationSeconds}s` : "timer"),
+                prompt: params.summary === true ? task.title.slice(0, 500) : task.title,
+                paused: false,
+                oneshot: !task.cronExpression,
+                timezone: "UTC",
+                next_run_at: task.nextRunAt,
+                project_root: activeSession.cwd,
+                target_session_id: activeSession.id,
+                execution_state: task.state === "running" ? "running" : "idle",
+                source: "antigravity",
+                metadata: { source: "antigravity", raw_task_id: task.rawTaskId },
+              }))
+          : [];
+        return {
+          ok: true,
+          ...(params.scope === 'session' ? { owner_session_id: activeSession!.id } : {}),
+          jobs: [...nativeJobs, ...agyScheduleJobs],
+        };
+      }
       const timing = (defaultTimezone = "UTC") => {
         const timezone = params.timezone === undefined ? defaultTimezone : cronTimezone(params.timezone as string);
         const schedule = optionalString(params.schedule)?.trim() ?? "";
@@ -11068,8 +11209,12 @@ export class DaemonServer {
         const job = this.cronStore.add(new CronJob({ id: this.cronStore.newId(), projectRoot: project, ...jobValues, ...(maxTotalTokens === null ? {} : { maxTotalTokens }), ...(stopCondition === null ? {} : { stopCondition }), ...(targetSessionId == null ? {} : { targetSessionId }), ...(expiresAt === null ? {} : { expiresAt }), ...(maxRuns === null ? {} : { maxRuns }), ...(maxModelCalls === null ? {} : { maxModelCalls }) }));
         return { ok: true, job: payload(job) };
       }
-      const id = optionalString(params.schedule_id);
+      const id = optionalString(params.schedule_id) ?? optionalString(params.id) ?? optionalString(params.job_id);
       if (!id) return { ok: false, error: "schedule_id is required" };
+      if (method === "schedule.cancel" && id.startsWith(AGY_TASK_ID_PREFIX)) {
+        if (!activeSession) return { ok: false, error: "An active session is required" };
+        return this.dispatchAgyBackgroundTaskKill(activeSession, id);
+      }
       const job = this.cronStore.get(id);
       if (!job || !visible(job)) return { ok: false, error: "Schedule not found in this workspace" };
       if (method === "schedule.remove") {
@@ -11926,7 +12071,7 @@ export class DaemonServer {
       const agent = entries.some(entry => entry.actor?.principal_kind === "agent");
       await this.submitTrackedTurn(key,
         entries.map(entry => `[steer from ${steerLabel(entry.display_name)}]\n${entry.text}`).join("\n\n"), emit, owner, {
-        displayText: entries.map(entry => `${steerLabel(entry.display_name)}: ${entry.text}`).join("\n"),
+        displayText: entries.map(entry => (entry.display_name && entry.display_name.trim().toLowerCase() !== "user" ? `${steerLabel(entry.display_name)}: ${entry.text}` : entry.text)).join("\n"),
         ...(images.length ? { images } : {}),
         ...(agent ? { origin: "agent" as const } : {}),
         ...(first.actor ? { actor: { ...first.actor, action_kind: "continuation" as const } } : {}),
@@ -14512,7 +14657,42 @@ export class DaemonServer {
       const commands = (binding.available_commands ?? []).filter(
         (item) => item.kind !== "skill",
       );
-      const skills = binding.discovered_skills ?? [];
+      const skills = [...(binding.discovered_skills ?? [])];
+      if (binding.provider === "antigravity") {
+        const bridgeCwd = target?.cwd ?? binding.cwd;
+        const xerxesBridge = bridgeCwd
+          ? await this.loadAgyXerxesBridge(bridgeCwd)
+          : null;
+        if (xerxesBridge) {
+          const seenCmds = new Set(commands.map((item) => item.name.toLowerCase()));
+          const seenSkills = new Set(skills.map((item) => item.name.toLowerCase()));
+          for (const cmd of xerxesBridge.commands) {
+            const lower = cmd.name.toLowerCase();
+            if (seenCmds.has(lower) || seenSkills.has(lower)) continue;
+            seenCmds.add(lower);
+            const source = cmd.scope === "global" ? "~/.xerxes/commands" : ".xerxes/commands";
+            commands.push({
+              name: cmd.name,
+              description: cmd.description || `${source} command`,
+              kind: "command",
+              source,
+            });
+          }
+          for (const skill of xerxesBridge.skills) {
+            const lower = skill.name.toLowerCase();
+            if (seenSkills.has(lower) || seenCmds.has(lower)) continue;
+            seenSkills.add(lower);
+            const source = skill.scope === "global" ? "~/.xerxes/skills" : ".xerxes/skills";
+            skills.push({
+              name: skill.name,
+              description: skill.description || `${source} skill`,
+              source,
+              path: skill.path,
+              slash_command: `/${skill.name}`,
+            });
+          }
+        }
+      }
       const configOptions = binding.config_options ?? [];
       return {
         ok: true,
@@ -14533,6 +14713,7 @@ export class DaemonServer {
       }
       await this.settleAcpOutOfTurnWakeup(target.id, "end_turn");
       this.agyBrainBridge.unwatchSession(target.id);
+      this.acpBackgroundTasks.delete(target.id);
       const disconnected = await this.acpBridgeHost.disconnect(target.id);
       if (target.session) {
         if (Object.hasOwn(target.session.metadata, "acp_binding")) {
@@ -15052,6 +15233,13 @@ export class DaemonServer {
     }
   }
 
+  private async loadAgyXerxesBridge(cwd: string) {
+    return loadXerxesWorkspaceBridgeForAcp(cwd, {
+      includeGlobal: true,
+      homeDir: this.acpBridgeHost.getHomeDir(),
+    }).catch(() => null);
+  }
+
   private async runExternalAcpTurn(
     session: DaemonSession,
     text: string,
@@ -15099,10 +15287,42 @@ export class DaemonServer {
         ? String(this.runtime.status().permission_mode)
         : "auto");
 
-    const processedMentions = await processAtMentions(text, session.cwd);
-    const acpResources = processedMentions.mentionedFiles.length > 0
+    const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+    let effectiveText = text;
+    let xerxesContextResource: AcpPromptResourceInput | undefined;
+    if (liveAcpBinding && isAntigravityBinding(liveAcpBinding)) {
+      const xerxesBridge = await this.loadAgyXerxesBridge(session.cwd);
+      if (xerxesBridge) {
+        const acpOwned = new Set((liveAcpBinding.available_commands ?? []).map(item => item.name.trim().toLowerCase()));
+        const expanded = await expandXerxesAcpSlashCommand(text, xerxesBridge, acpOwned).catch(() => null);
+        if (expanded) {
+          effectiveText = expanded.expandedPrompt;
+        }
+        const extSid = liveAcpBinding.external_session_id?.trim() || "live";
+        const contextKey = `${extSid}:${xerxesBridge.contextHash}`;
+        if (xerxesBridge.firstTurnContextBlock && session.extra.acp_xerxes_context_key !== contextKey) {
+          xerxesContextResource = {
+            uri: "xerxes://workspace-context",
+            mimeType: "text/markdown",
+            text: xerxesBridge.firstTurnContextBlock,
+          };
+          session.extra.acp_xerxes_context_key = contextKey;
+          session.extra.acp_xerxes_context_sid = extSid;
+        }
+      }
+    }
+
+    const processedMentions = await processAtMentions(effectiveText, session.cwd);
+    const mentionResources = processedMentions.mentionedFiles.length > 0
       ? extractResourcesFromProcessedMentions(processedMentions.enhancedMessage)
       : [];
+    const acpResources: AcpPromptResourceInput[] = [
+      ...(xerxesContextResource ? [xerxesContextResource] : []),
+      ...mentionResources,
+    ];
+    const fallbackInlineText = xerxesContextResource
+      ? `${xerxesContextResource.text}\n\n${processedMentions.enhancedMessage}`
+      : processedMentions.enhancedMessage;
 
     emit({
       type: "turn_begin",
@@ -15118,11 +15338,11 @@ export class DaemonServer {
     try {
       const result = await this.acpBridgeHost.runPrompt({
         sessionId: session.id,
-        text,
+        text: effectiveText,
         ...(acpResources.length > 0
           ? {
               resources: acpResources,
-              fallbackInlineText: processedMentions.enhancedMessage,
+              fallbackInlineText,
             }
           : {}),
         ...(options.images?.length ? { images: options.images } : {}),
@@ -15362,14 +15582,17 @@ export class DaemonServer {
                   arguments: event.argumentsText,
                 },
               });
+              const toolCtx = inflightToolContext(event.name, event.rawInput ?? event.argumentsText);
               session.inflightTools = [
                 ...(session.inflightTools ?? []),
                 {
                   id: event.toolCallId,
                   name: event.name,
                   ...(event.argumentsText ? { arguments: event.argumentsText.slice(0, 200) } : {}),
+                  ...(toolCtx ? { context: toolCtx } : {}),
                 },
               ];
+              this.recordAcpBackgroundToolCall(session, event.toolCallId, event.name, parsedInputs);
               emit({
                 type: "tool_call",
                 payload: {
@@ -15429,6 +15652,8 @@ export class DaemonServer {
                   }
                 }
               }
+              this.recordAcpToolTelemetry(session, durationMs);
+              this.recordAcpBackgroundToolResult(session, event.toolCallId, event.name, inputs, output, isError || !permitted);
               const displayBlocks: JsonRpcPayload[] = [];
               if (event.diff) {
                 const unified = formatCompactUnifiedDiff(
@@ -15707,10 +15932,276 @@ export class DaemonServer {
       externalSessionId: ctx.location.externalSessionId,
       ...(ctx.binding.command ? { bindingCommand: ctx.binding.command } : {}),
       modelDisplayMap: ctx.modelDisplayMap,
+      onBackgroundChange: () => {
+        if (!this.stoppingGoalWakes) {
+          this.broadcast("background_changed", { session_id: session.id });
+        }
+      },
       onSwarmEvent: (event, workspaceDir) => {
         this.emitSwarmEvent(event, workspaceDir);
       },
     });
+  }
+
+  private listAgyBackgroundTasksForSession(session: DaemonSession): AgyBackgroundTaskSnapshot[] {
+    const merged = new Map<string, AgyBackgroundTaskSnapshot>();
+    const loc = this.resolveAgyBrainLocationForSession(session);
+    if (loc) {
+      for (const diskTask of this.agyBrainBridge.listBackgroundTasksSync(loc, session.cwd)) {
+        merged.set(diskTask.rawTaskId, diskTask);
+      }
+    }
+    const liveMap = this.acpBackgroundTasks.get(session.id);
+    if (liveMap) {
+      for (const [rawId, liveTask] of liveMap.entries()) {
+        const disk = merged.get(rawId);
+        if (!disk) {
+          merged.set(rawId, liveTask);
+        } else {
+          // Prefer disk terminal status/exit code once settled, while keeping richer live fields.
+          const diskSettled = disk.state === "completed" || disk.state === "failed" || disk.state === "cancelled";
+          const liveSettled = liveTask.state === "completed" || liveTask.state === "failed" || liveTask.state === "cancelled";
+          merged.set(rawId, {
+            ...disk,
+            title: liveTask.title || disk.title,
+            label: liveTask.label || disk.label,
+            nextRunAt: disk.nextRunAt ?? liveTask.nextRunAt,
+            ...(disk.logFileName ? { logFileName: disk.logFileName } : liveTask.logFileName ? { logFileName: liveTask.logFileName } : {}),
+            ...(liveSettled && !diskSettled ? { state: liveTask.state, endedAt: liveTask.endedAt, exitCode: liveTask.exitCode } : {}),
+          });
+        }
+      }
+    }
+    return [...merged.values()];
+  }
+
+  private inspectAgyBackgroundTask(
+    session: DaemonSession,
+    taskId: string,
+    maxOutputChars = 24_000,
+  ): JsonRpcPayload | undefined {
+    const cleanId = taskId.trim();
+    const rawTarget = cleanId.startsWith(AGY_TASK_ID_PREFIX)
+      ? cleanId.slice(AGY_TASK_ID_PREFIX.length)
+      : cleanId;
+    const liveTask = this.acpBackgroundTasks.get(session.id)?.get(rawTarget);
+    const loc = this.resolveAgyBrainLocationForSession(session);
+    if (loc) {
+      const inspected = this.agyBrainBridge.inspectBackgroundTask(loc, cleanId, maxOutputChars, session.cwd, liveTask);
+      if (inspected) return inspected;
+    }
+    if (!liveTask) return undefined;
+    const running = liveTask.state === "running" || liveTask.state === "scheduled";
+    const output = liveTask.outputPreview ?? "";
+    return {
+      id: liveTask.id,
+      kind: liveTask.isDaemon ? "daemon" : liveTask.kind === "schedule" ? "schedule" : "background",
+      label: liveTask.label,
+      command: liveTask.title,
+      cwd: session.cwd,
+      running,
+      startedAt: liveTask.startedAt ?? Date.now(),
+      ...(liveTask.endedAt ? { endedAt: liveTask.endedAt } : {}),
+      exitCode: liveTask.exitCode,
+      outputChars: output.length,
+      output,
+      outputTruncated: false,
+      canWrite: false,
+      canInterrupt: running,
+      canKill: running,
+      source: "antigravity",
+      rawTaskId: liveTask.rawTaskId,
+    };
+  }
+
+  private async dispatchAgyBackgroundTaskKill(
+    session: DaemonSession,
+    taskId: string,
+  ): Promise<JsonRpcPayload> {
+    const resolved = this.resolveAgyBindingForSession(session);
+    if (!resolved?.liveConnected) {
+      return {
+        ok: false,
+        error: "Reconnect Antigravity to stop or cancel its background tasks.",
+      };
+    }
+    const cleanId = taskId.trim();
+    const rawTaskId = cleanId.startsWith(AGY_TASK_ID_PREFIX)
+      ? cleanId.slice(AGY_TASK_ID_PREFIX.length)
+      : cleanId;
+    if (!rawTaskId) {
+      return { ok: false, error: "task_id is required" };
+    }
+    const liveMap = this.acpBackgroundTasks.get(session.id);
+    const existing = liveMap?.get(rawTaskId);
+    if (existing) {
+      liveMap!.set(rawTaskId, { ...existing, state: "cancelled", endedAt: Date.now() });
+      this.broadcast("background_changed", { session_id: session.id });
+    }
+    const instruction = [
+      `[Xerxes Background Control] The user requested cancelling/stopping Antigravity background task \`${rawTaskId}\`.`,
+      `Call \`manage_task(Action: "kill", TaskId: "${rawTaskId}")\` immediately.`,
+    ].join("\n");
+    await this.dispatchAgyCoordinatorAction(
+      session,
+      instruction,
+      `Cancel background task (${rawTaskId})`,
+    );
+    return { ok: true, requested: true, dispatched: true, task_id: rawTaskId };
+  }
+
+  private recordAcpToolTelemetry(session: DaemonSession, durationMs: number): void {
+    const prev = isRecord(session.extra.runtime_telemetry)
+      ? (session.extra.runtime_telemetry as Record<string, unknown>)
+      : {};
+    const prevToolSteps = typeof prev.toolSteps === "number" && Number.isFinite(prev.toolSteps) ? prev.toolSteps : 0;
+    const prevToolDuration = typeof prev.toolDurationMs === "number" && Number.isFinite(prev.toolDurationMs) ? prev.toolDurationMs : 0;
+    const prevLlmSteps = typeof prev.llmSteps === "number" && Number.isFinite(prev.llmSteps) ? prev.llmSteps : 0;
+    session.extra.runtime_telemetry = {
+      ...prev,
+      toolSteps: prevToolSteps + 1,
+      toolDurationMs: prevToolDuration + Math.max(0, durationMs),
+      llmSteps: Math.max(prevLlmSteps, prevToolSteps + 1),
+    };
+  }
+
+  private recordAcpBackgroundToolCall(
+    session: DaemonSession,
+    toolCallId: string,
+    toolName: string,
+    inputs: JsonObject,
+  ): void {
+    const norm = (toolName.split(/[.:/]/).pop() ?? toolName).trim().toLowerCase();
+    let map = this.acpBackgroundTasks.get(session.id);
+    if (!map) {
+      map = new Map<string, AgyBackgroundTaskSnapshot>();
+      this.acpBackgroundTasks.set(session.id, map);
+    }
+    if (norm === "manage_task") {
+      const action = optionalString(inputs.Action)?.toLowerCase() ?? optionalString(inputs.action)?.toLowerCase() ?? "";
+      const targetId = optionalString(inputs.TaskId) ?? optionalString(inputs.task_id) ?? "";
+      if (action === "kill" && targetId) {
+        const hit = map.get(targetId);
+        if (hit) {
+          map.set(targetId, { ...hit, state: "cancelled", endedAt: Date.now() });
+          this.broadcast("background_changed", { session_id: session.id });
+        }
+      }
+      return;
+    }
+    if (norm === "schedule") {
+      const startedAt = Date.now();
+      const durSec = typeof inputs.DurationSeconds === "number" && Number.isFinite(inputs.DurationSeconds)
+        ? inputs.DurationSeconds
+        : typeof inputs.duration_seconds === "number" && Number.isFinite(inputs.duration_seconds)
+          ? inputs.duration_seconds
+          : undefined;
+      const cronExpr = optionalString(inputs.CronExpression) ?? optionalString(inputs.cron_expression);
+      const prompt = optionalString(inputs.Prompt) ?? optionalString(inputs.prompt) ?? "Scheduled task";
+      const isDaemon = inputs.IsDaemon === true || inputs.is_daemon === true;
+      const rawTaskId = `tool:${toolCallId}`;
+      map.set(rawTaskId, {
+        id: `${AGY_TASK_ID_PREFIX}${rawTaskId}`,
+        rawTaskId,
+        kind: "schedule",
+        title: prompt.slice(0, 2000),
+        label: cronExpr ? `Cron · ${cronExpr}` : durSec !== undefined ? `Timer · in ${durSec}s` : "Schedule",
+        detail: cronExpr
+          ? `Antigravity cron · ${cronExpr}${isDaemon ? " · daemon" : ""}`
+          : durSec !== undefined
+            ? `Antigravity timer · ${durSec}s`
+            : "Antigravity schedule",
+        state: "scheduled",
+        startedAt,
+        endedAt: null,
+        exitCode: null,
+        nextRunAt: durSec !== undefined && durSec > 0 ? new Date(startedAt + durSec * 1000).toISOString() : null,
+        ...(durSec !== undefined ? { durationSeconds: durSec } : {}),
+        ...(cronExpr ? { cronExpression: cronExpr } : {}),
+        ...(isDaemon ? { isDaemon: true } : {}),
+      });
+      this.broadcast("background_changed", { session_id: session.id });
+    }
+  }
+
+  private recordAcpBackgroundToolResult(
+    session: DaemonSession,
+    toolCallId: string,
+    toolName: string,
+    inputs: JsonObject,
+    output: string,
+    failed: boolean,
+  ): void {
+    const norm = (toolName.split(/[.:/]/).pop() ?? toolName).trim().toLowerCase();
+    let map = this.acpBackgroundTasks.get(session.id);
+    if (!map) {
+      map = new Map<string, AgyBackgroundTaskSnapshot>();
+      this.acpBackgroundTasks.set(session.id, map);
+    }
+
+    const extractedTaskId = extractAgyTaskIdFromText(output);
+    const extractedLog = extractAgyLogFileNameFromText(output) ?? (extractedTaskId ? inferAgyTaskLogFilename(extractedTaskId) : undefined);
+
+    if (norm === "schedule") {
+      const placeholderKey = `tool:${toolCallId}`;
+      const existing = map.get(placeholderKey);
+      const rawTaskId = extractedTaskId ?? placeholderKey;
+      if (extractedTaskId && existing) {
+        map.delete(placeholderKey);
+      }
+      const startedAt = existing?.startedAt ?? Date.now();
+      const durSec = existing?.durationSeconds ?? (typeof inputs.DurationSeconds === "number" ? inputs.DurationSeconds : undefined);
+      const cronExpr = existing?.cronExpression ?? optionalString(inputs.CronExpression);
+      const prompt = existing?.title ?? optionalString(inputs.Prompt) ?? "Scheduled task";
+      map.set(rawTaskId, {
+        id: `${AGY_TASK_ID_PREFIX}${rawTaskId}`,
+        rawTaskId,
+        kind: "schedule",
+        title: prompt.slice(0, 2000),
+        label: existing?.label ?? (cronExpr ? `Cron · ${cronExpr}` : durSec !== undefined ? `Timer · in ${durSec}s` : "Schedule"),
+        detail: existing?.detail ?? "Antigravity schedule",
+        state: failed ? "failed" : "scheduled",
+        startedAt,
+        endedAt: failed ? Date.now() : null,
+        exitCode: null,
+        nextRunAt: existing?.nextRunAt ?? (durSec !== undefined && durSec > 0 ? new Date(startedAt + durSec * 1000).toISOString() : null),
+        ...(durSec !== undefined ? { durationSeconds: durSec } : {}),
+        ...(cronExpr ? { cronExpression: cronExpr } : {}),
+        ...(existing?.isDaemon ? { isDaemon: true } : {}),
+        ...(extractedLog ? { logFileName: extractedLog } : {}),
+        ...(output ? { outputPreview: output.slice(0, 4000) } : {}),
+      });
+      this.broadcast("background_changed", { session_id: session.id });
+      return;
+    }
+
+    if (norm === "run_command" || norm === "run_workflow") {
+      const isDaemon = inputs.IsDaemon === true || inputs.is_daemon === true;
+      const isBackgrounded = Boolean(extractedTaskId) || /Tool is running as a background task/i.test(output) || isDaemon;
+      if (!isBackgrounded) return;
+      const rawTaskId = extractedTaskId ?? `tool:${toolCallId}`;
+      const cmd = optionalString(inputs.CommandLine) ?? optionalString(inputs.command) ?? optionalString(inputs.Description) ?? rawTaskId;
+      const label = optionalString(inputs.toolSummary) ?? optionalString(inputs.Description) ?? cmd.slice(0, 120);
+      const exitCode = parseAgyExitCodeFromText(output);
+      const settled = failed || exitCode !== null;
+      map.set(rawTaskId, {
+        id: `${AGY_TASK_ID_PREFIX}${rawTaskId}`,
+        rawTaskId,
+        kind: norm === "run_workflow" ? "task" : "shell",
+        title: cmd.slice(0, 2000),
+        label: label.slice(0, 200),
+        detail: session.cwd,
+        state: failed ? "failed" : exitCode !== null ? (exitCode === 0 ? "completed" : "failed") : "running",
+        startedAt: Date.now(),
+        endedAt: settled ? Date.now() : null,
+        exitCode,
+        nextRunAt: null,
+        ...(isDaemon ? { isDaemon: true } : {}),
+        ...(extractedLog ? { logFileName: extractedLog } : {}),
+        ...(output ? { outputPreview: output.slice(0, 8000) } : {}),
+      });
+      this.broadcast("background_changed", { session_id: session.id });
+    }
   }
 
   private async dispatchAgySwarmKill(
@@ -16073,14 +16564,17 @@ export class DaemonServer {
             arguments: event.argumentsText,
           },
         });
+        const wakeToolCtx = inflightToolContext(event.name, event.rawInput ?? event.argumentsText);
         session.inflightTools = [
           ...(session.inflightTools ?? []),
           {
             id: event.toolCallId,
             name: event.name,
             ...(event.argumentsText ? { arguments: event.argumentsText.slice(0, 200) } : {}),
+            ...(wakeToolCtx ? { context: wakeToolCtx } : {}),
           },
         ];
+        this.recordAcpBackgroundToolCall(session, event.toolCallId, event.name, parsedInputs);
         broadcastWake("tool_call", {
           session_id: session.id,
           id: event.toolCallId,
@@ -16138,6 +16632,8 @@ export class DaemonServer {
             }
           }
         }
+        this.recordAcpToolTelemetry(session, durationMs);
+        this.recordAcpBackgroundToolResult(session, event.toolCallId, event.name, inputs, output, isError || !permitted);
         const displayBlocks: JsonRpcPayload[] = [];
         if (event.diff) {
           const unified = formatCompactUnifiedDiff(

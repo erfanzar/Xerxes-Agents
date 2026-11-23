@@ -917,8 +917,9 @@
 :root:not(#layout) .atelier .activity-group>summary strong{font-weight:400}
 /* Header: the agent count and run-kind chip step back to muted text. */
 :root:not(#layout) .atelier .chat__head :is(.agent-menu,.chat__kind){font:400 12px/1 var(--sans);border:0}
-/* The chat header is the title and ⋯ only: agents live in Subagents, edits in Changes. */
-:root:not(#layout) .atelier .chat__head>:is(.agent-menu,.chat__kind,.chat__view){display:none}
+/* The chat header is the title and ⋯ only: agents live in Subagents, edits in Changes.
+   Keep `.chat__back` visible whenever a non-conversation tab (Plan & to-dos, Edits, Log) is open. */
+:root:not(#layout) .atelier .chat__head>:is(.agent-menu,.chat__kind,.chat__view:not(.chat__back)){display:none}
 /* The Settings lists are cards of rows: #1f1f1f (dark) / hairline (light), radius 10, hairlines between rows. */
 :root:not(#layout) .atelier .modal__main .rowlist{border:0;padding:0 12px;margin-bottom:16px}
 :root[data-theme='light']:not(#layout) .atelier .modal__main .rowlist{border:1px solid var(--x-hairline)}
@@ -929,9 +930,9 @@
 :root:not(#layout) .atelier .chat__head{gap:8px;min-width:0}
 :root:not(#layout) .atelier .chat__head>*{flex:none}
 :root:not(#layout) .atelier .chat__head .chat__title{flex:0 1 auto;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* Narrow: the title wins; the view switcher and agent count step aside. */
+/* Narrow: the title wins; the view switcher and agent count step aside, except Back to conversation. */
 @media (max-width:1100px){
-  :root:not(#layout) .atelier .chat__head .chat__view{display:none}
+  :root:not(#layout) .atelier .chat__head .chat__view:not(.chat__back){display:none}
   :root:not(#layout) .atelier .chat__head .chat__title{flex:1 1 auto}
 }
 /* Activity summary rows stay on one line: the "· 1 failed" count never wraps. */
@@ -1176,12 +1177,49 @@
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header::-webkit-details-marker{display:none}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header:hover{background:transparent;color:var(--x-prose)}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline-wrap>.activity-group>summary.tool-timeline__header:focus-visible{outline:1px solid var(--x-focus);outline-offset:2px;border-radius:4px}
-:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__mark-wrap{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;height:14px}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__mark-wrap{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .composer-status>.agent-orb{display:none}
+:root:not(#layout):not(#tool-ux) .atelier .railstatus[data-tone='working'] .railstatus__orb{display:none}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:inherit;font:400 13.5px/1.4 var(--sans)}
-:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline--live{display:inline-flex;align-items:center;gap:6px;max-width:100%}
-:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__working{flex:none;font-weight:500;color:var(--x-prose)}
-:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__sep{flex:none;color:var(--x-meta);opacity:.65}
-:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__phrase{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--x-meta);font-weight:400}
+@keyframes live-text-shine{
+  0%{background-position:100% 0}
+  78%,100%{background-position:0% 0}
+}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline--live{
+  display:block;
+  max-width:100%;
+  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 44%,transparent) 0%,color-mix(in srgb,var(--x-title) 44%,transparent) 38%,color-mix(in srgb,var(--x-title) 82%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 82%,transparent) 54%,color-mix(in srgb,var(--x-title) 44%,transparent) 62%,color-mix(in srgb,var(--x-title) 44%,transparent) 100%);
+  background-size:260% 100%;
+  -webkit-background-clip:text;
+  background-clip:text;
+  color:transparent;
+  animation:live-text-shine 2.1s cubic-bezier(.4,0,.2,1) infinite;
+}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__working{display:inline;font-weight:500;color:inherit}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__sep{display:inline;margin:0 6px;color:inherit;opacity:1}
+:root:not(#layout):not(#tool-ux) .atelier .tool-timeline__phrase{display:inline;color:inherit;font-weight:400}
+:root:not(#layout):not(#tool-ux) .atelier .composer-status:not(.streamstatus--armed) .streamstatus__phrase,
+:root:not(#layout):not(#tool-ux) .atelier .xsteps.is-live .streamstatus__phrase,
+:root:not(#layout):not(#tool-ux) .atelier .railstatus[data-tone='working'] .railstatus__head>strong{
+  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 44%,transparent) 0%,color-mix(in srgb,var(--x-title) 44%,transparent) 38%,color-mix(in srgb,var(--x-title) 82%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 82%,transparent) 54%,color-mix(in srgb,var(--x-title) 44%,transparent) 62%,color-mix(in srgb,var(--x-title) 44%,transparent) 100%);
+  background-size:260% 100%;
+  -webkit-background-clip:text;
+  background-clip:text;
+  color:transparent;
+  animation:live-text-shine 2.1s cubic-bezier(.4,0,.2,1) infinite;
+}
+:root:is([data-perf-paused='true'],[data-window-unfocused],[data-occluded]):not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__headline--live,.composer-status .streamstatus__phrase,.xsteps.is-live .streamstatus__phrase,.railstatus[data-tone='working'] .railstatus__head>strong){
+  animation-play-state:paused;
+}
+@media (prefers-reduced-motion:reduce){
+  :root:not(#layout):not(#tool-ux) .atelier :is(.tool-timeline__headline--live,.composer-status:not(.streamstatus--armed) .streamstatus__phrase,.xsteps.is-live .streamstatus__phrase,.railstatus[data-tone='working'] .railstatus__head>strong){
+    animation:none;
+    background:none;
+    -webkit-background-clip:border-box;
+    background-clip:border-box;
+    color:var(--x-prose);
+  }
+}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__pending{color:var(--x-meta);font-weight:400}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__failed{display:inline-flex;align-items:center;gap:6px;flex:none;color:var(--x-failed-text);font:400 13px/1.4 var(--sans);white-space:nowrap}
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__chev{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;height:14px;color:var(--x-meta);opacity:.75;transition:transform 160ms ease,color 120ms ease,opacity 120ms ease}

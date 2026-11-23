@@ -12,7 +12,7 @@ const noop = (): void => {}
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="1" height="1"/></svg>'
 
 const saved: CockpitStatus = {
-  target: 'xerxes@209.38.102.184',
+  target: 'xerxes@203.0.113.10',
   origin: 'https://hub.example.ts.net',
   wsUrl: 'wss://hub.example.ts.net/api/hub/v1/ws',
   fingerprint: 'SHA256:abc',
@@ -44,7 +44,7 @@ test('no address: one SSH field with the example, a save button, and no link or 
   const html = render()
   expect(html).toContain('Hub &amp; phone')
   expect(html).toContain('Hub SSH address')
-  expect(html).toContain('placeholder="xerxes@209.38.102.184"')
+  expect(html).toContain('placeholder="xerxes@203.0.113.10"')
   expect(html).toContain('No Hub is saved on this Mac yet')
   expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save and connect</)
   expect(html).not.toContain('Link this Mac')
@@ -163,4 +163,30 @@ test('health labels are plain words', () => {
   expect(healthText('needs_operator')).toBe('Needs attention')
   expect(healthText('stale')).toBe('Not responding')
   expect(healthText('weird')).toBe('Unknown')
+})
+
+test('paired devices list, custom device label, and open web app action render without inline svg', () => {
+  const html = render({
+    status: { ...saved, linkedMachineId: 'm1' },
+    deviceLabel: 'Work iPhone',
+    onDeviceLabel: noop,
+    onOpenWeb: noop,
+    onRefreshDevices: noop,
+    onRevokeDevice: noop,
+    devices: {
+      phase: 'ready',
+      devices: [
+        { id: 'dev_1', userId: 'usr_1', displayName: 'Erfan', label: 'Work iPhone', status: 'active', createdAt: '2026-10-20T00:00:00Z', lastSeenAt: '2026-10-21T11:55:00Z', revokedAt: null },
+        { id: 'dev_2', userId: 'usr_1', displayName: 'Erfan', label: 'Old Phone', status: 'revoked', createdAt: '2026-10-10T00:00:00Z', lastSeenAt: null, revokedAt: '2026-10-12T00:00:00Z' },
+      ],
+    },
+  })
+  expect(html).toContain('Paired devices')
+  expect(html).toContain('1 active')
+  expect(html).toContain('Work iPhone')
+  expect(html).not.toContain('Old Phone')
+  expect(html).toContain('Open Hub web app')
+  expect(html).toContain('>Revoke<')
+  expect(html).not.toContain('<svg')
+  expect(html).not.toContain('https://hub.example.ts.net"')
 })

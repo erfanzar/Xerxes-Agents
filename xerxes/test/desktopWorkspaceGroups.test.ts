@@ -144,4 +144,26 @@ describe('sidebar sections', () => {
     const sections = sidebarSections(here, [local], 'This Mac')
     expect(sections.flatMap(section => section.rows.map(row => row.id)).sort()).toEqual(['x1', 'x2', 'y1'])
   })
+
+  test('saved local folders keep This Mac visible on an SSH view even with no open local view', () => {
+    const here = groupByWorkspace([{ id: 'r1', cwd: '/home/e/prismcore' }], '')
+    const savedLocal: WorkspaceContext[] = [
+      { id: -1_000_000, label: 'This Mac · EasyDeL', workspace: '/p/EasyDeL', remote: false, saved: true, sessions: [] },
+      { id: -1_000_001, label: 'This Mac · Xerxes-Agents', workspace: '/p/Xerxes-Agents', remote: false, saved: true, sessions: [] },
+    ]
+    const sections = sidebarSections(here, [...savedLocal, tpu], 'v5p')
+    expect(sections.map(section => section.label)).toEqual([
+      'This Mac · EasyDeL',
+      'This Mac · Xerxes-Agents',
+      'v5p · prismcore',
+    ])
+    // When an open local view already has Xerxes-Agents sessions, the saved fallback deduplicates cleanly.
+    const withOpenLocal = sidebarSections(here, [local, ...savedLocal], 'v5p')
+    expect(withOpenLocal.map(section => section.label)).toEqual([
+      'This Mac · EasyDeL',
+      'This Mac · eyvan',
+      'This Mac · Xerxes-Agents',
+      'v5p · prismcore',
+    ])
+  })
 })

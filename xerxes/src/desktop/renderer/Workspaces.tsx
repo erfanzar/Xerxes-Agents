@@ -18,6 +18,28 @@ import { isPlanReview, store, type Snapshot } from './store.js'
 import type { DiffFile, LogEntry, PlanState } from './types.js'
 import { Icon } from './Icon.js'
 
+// ── Shared return bar ───────────────────────────────────────────────────
+
+function WorkspaceReturnBar({ title, detail }: { readonly title: string; readonly detail?: string }): ReactElement {
+  return (
+    <div className="workspace-return">
+      <button
+        type="button"
+        className="workspace-return__btn"
+        aria-label="Back to conversation"
+        title="Back to conversation (Esc)"
+        onClick={() => store.setTab('activity')}
+      >
+        <span className="workspace-return__arrow" aria-hidden="true">←</span>
+        <span>Back to conversation</span>
+      </button>
+      <span className="workspace-return__title">{title}</span>
+      {detail && <span className="workspace-return__meta">{detail}</span>}
+      <kbd className="workspace-return__hint" aria-hidden="true">Esc</kbd>
+    </div>
+  )
+}
+
 // ── Changes ─────────────────────────────────────────────────────────────
 
 export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
@@ -32,37 +54,43 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
 
   if (files.length === 0) {
     return (
-      <div className="tabempty">
-        <div className="tabempty__mark">⎇</div>
-        <h1>No recorded edits yet</h1>
-        {allChanges}
-        <p>File edits the agents make land here as reviewable diffs — per-file +/− and the exact hunks, folded from the edit calls as they stream.</p>
+      <div className="workspace-shell">
+        <WorkspaceReturnBar title="Session edits" />
+        <div className="tabempty">
+          <div className="tabempty__mark">⎇</div>
+          <h1>No recorded edits yet</h1>
+          {allChanges}
+          <p>File edits the agents make land here as reviewable diffs — per-file +/− and the exact hunks, folded from the edit calls as they stream.</p>
+        </div>
       </div>
     )
   }
   return (
-    <div className="changes">
-      {allChanges}
-      <div className="changes__bar">
-        <span className="changes__stat">
-          {files.length} file{files.length === 1 ? '' : 's'} · <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>
-        </span>
-        <span style={{ flex: '1 1 auto' }} />
-        {kept
-          ? <span className="changes__stat">kept — tracking continues</span>
-          : <button className="btn" onClick={() => store.ackChanges()}>Keep all</button>}
-        <button
-          className="btn btn--ghost"
-          title="Reverse this session's recorded edits across every file"
-          onClick={() => { void store.undoChanges(null) }}
-        >
-          Undo all
-        </button>
+    <div className="workspace-shell">
+      <WorkspaceReturnBar title="Session edits" detail={`${files.length} file${files.length === 1 ? '' : 's'}`} />
+      <div className="changes">
+        {allChanges}
+        <div className="changes__bar">
+          <span className="changes__stat">
+            {files.length} file{files.length === 1 ? '' : 's'} · <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>
+          </span>
+          <span style={{ flex: '1 1 auto' }} />
+          {kept
+            ? <span className="changes__stat">kept — tracking continues</span>
+            : <button className="btn" onClick={() => store.ackChanges()}>Keep all</button>}
+          <button
+            className="btn btn--ghost"
+            title="Reverse this session's recorded edits across every file"
+            onClick={() => { void store.undoChanges(null) }}
+          >
+            Undo all
+          </button>
+        </div>
+        {files.map(file => <DiffFileCard key={file.path} file={file} focusAt={snap.changesFocus?.path === file.path ? snap.changesFocus.at : undefined} />)}
+        <p className="changes__note">
+          Built from the file edits this task made. Your working tree is the source of truth — undo here asks the runtime to put a file back.
+        </p>
       </div>
-      {files.map(file => <DiffFileCard key={file.path} file={file} focusAt={snap.changesFocus?.path === file.path ? snap.changesFocus.at : undefined} />)}
-      <p className="changes__note">
-        Built from the file edits this task made. Your working tree is the source of truth — undo here asks the runtime to put a file back.
-      </p>
     </div>
   )
 }
@@ -122,49 +150,65 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
   const review = snap.question && isPlanReview(snap.question) ? snap.question : null
   const items = plan?.items ?? []
   const done = items.filter(item => item.done).length
+  const todos = snap.todos ?? []
+  const doneTodos = todos.filter(item => item.status === 'completed').length
+  const todoDetail = todos.length > 0 ? `${doneTodos}/${todos.length} done` : items.length > 0 ? `${done}/${items.length} done` : undefined
 
   if (!plan) {
-    if (snap.todos != null) return <div className="plan plan--tab"><TodoList items={snap.todos} /></div>
+    if (snap.todos != null) {
+      return (
+        <div className="workspace-shell">
+          <WorkspaceReturnBar title="Plan & to-dos" {...(todoDetail ? { detail: todoDetail } : {})} />
+          <div className="plan plan--tab"><TodoList items={snap.todos} /></div>
+        </div>
+      )
+    }
     return (
-      <div className="tabempty">
-        <div className="tabempty__mark"><Icon name="pause" size={22} /></div>
-        <h1>{snap.planMode ? 'Planning in progress' : 'No plan yet'}</h1>
-        <p>
-          {snap.planMode
-            ? 'Plan mode is on — the agent explores and proposes a checklist here before touching anything. Steer it from the composer.'
-            : 'Switch the composer’s “Work directly” button to plan first (or ⌘K → plan mode), and the checklist the agent proposes is captured here for review.'}
-        </p>
+      <div className="workspace-shell">
+        <WorkspaceReturnBar title="Plan & to-dos" />
+        <div className="tabempty">
+          <div className="tabempty__mark"><Icon name="pause" size={22} /></div>
+          <h1>{snap.planMode ? 'Planning in progress' : 'No plan yet'}</h1>
+          <p>
+            {snap.planMode
+              ? 'Plan mode is on — the agent explores and proposes a checklist here before touching anything. Steer it from the composer.'
+              : 'Switch the composer’s “Work directly” button to plan first (or ⌘K → plan mode), and the checklist the agent proposes is captured here for review.'}
+          </p>
+        </div>
       </div>
     )
   }
   return (
-    <div className="plan plan--tab">
-      {snap.todos != null && <TodoList items={snap.todos} />}
-      <div className="plan__head">
-        <span className="plan__title">Working plan</span>
-        <span className="plan__meta">
-          {snap.planMode ? <><Icon name="pause" size={11} /> plan mode</> : 'approved / executing'} · turn {plan.turn}
-          {items.length ? ` · ${done}/${items.length} done` : ''}
-        </span>
-      </div>
-      {items.length > 0 && (
-        <div className="pl-list">
-          {items.map((item, index) => (
-            <div key={index} className={`pl-item${item.done ? ' done' : ''}`}>
-              <span className="pl-box" />
-              <span className="pl-txt">{item.text}</span>
-            </div>
-          ))}
+    <div className="workspace-shell">
+      <WorkspaceReturnBar title="Plan & to-dos" {...(todoDetail ? { detail: todoDetail } : {})} />
+      <div className="plan plan--tab">
+        {snap.todos != null && <TodoList items={snap.todos} />}
+        <div className="plan__head">
+          <span className="plan__title">Working plan</span>
+          <span className="plan__meta">
+            {snap.planMode ? <><Icon name="pause" size={11} /> plan mode</> : 'approved / executing'} · turn {plan.turn}
+            {items.length ? ` · ${done}/${items.length} done` : ''}
+          </span>
         </div>
-      )}
-      <div className="plan__doc">
-        <Markdown text={plan.markdown} />
-      </div>
-      {review && (
-        <div className="plan__actions">
-          <span className="appr-policy">a plan review is pending in Activity — answer it there</span>
+        {items.length > 0 && (
+          <div className="pl-list">
+            {items.map((item, index) => (
+              <div key={index} className={`pl-item${item.done ? ' done' : ''}`}>
+                <span className="pl-box" />
+                <span className="pl-txt">{item.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="plan__doc">
+          <Markdown text={plan.markdown} />
         </div>
-      )}
+        {review && (
+          <div className="plan__actions">
+            <span className="appr-policy">a plan review is pending in Activity — answer it there</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -188,22 +232,28 @@ export function LogTab({ snap }: { snap: Snapshot }): ReactElement {
   const entries: readonly LogEntry[] = snap.log
   if (entries.length === 0) {
     return (
-      <div className="tabempty">
-        <div className="tabempty__mark">≡</div>
-        <h1>Event log</h1>
-        <p>A diagnostic trace of what the runtime reported, newest last, one line per event. It fills while a task runs and keeps the most recent 400.</p>
+      <div className="workspace-shell workspace-shell--log">
+        <WorkspaceReturnBar title="Event log" />
+        <div className="tabempty">
+          <div className="tabempty__mark">≡</div>
+          <h1>Event log</h1>
+          <p>A diagnostic trace of what the runtime reported, newest last, one line per event. It fills while a task runs and keeps the most recent 400.</p>
+        </div>
       </div>
     )
   }
   return (
-    <div className="loglist" ref={ref} onScroll={onScroll}>
-      {entries.map(entry => (
-        <div key={entry.id} className="logrow">
-          <span className="logrow__turn">t{entry.turn}</span>
-          <span className="logrow__type">{entry.type}</span>
-          <span className="logrow__sum">{entry.summary}</span>
-        </div>
-      ))}
+    <div className="workspace-shell workspace-shell--log">
+      <WorkspaceReturnBar title="Event log" detail={`${entries.length}`} />
+      <div className="loglist" ref={ref} onScroll={onScroll}>
+        {entries.map(entry => (
+          <div key={entry.id} className="logrow">
+            <span className="logrow__turn">t{entry.turn}</span>
+            <span className="logrow__type">{entry.type}</span>
+            <span className="logrow__sum">{entry.summary}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

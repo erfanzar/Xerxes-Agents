@@ -28,14 +28,14 @@ export type InputCheck<T> = { readonly ok: true; readonly value: T } | { readonl
 export function checkHubTarget(value: unknown): InputCheck<string> {
   if (typeof value !== 'string') return { ok: false, message: 'The Hub SSH address must be text.' }
   const target = value.trim()
-  if (target === '') return { ok: false, message: 'Enter the Hub SSH address, for example xerxes@209.38.102.184.' }
+  if (target === '') return { ok: false, message: 'Enter the Hub SSH address, for example xerxes@203.0.113.10.' }
   if (target.length > 320) return { ok: false, message: 'That address is too long.' }
   if (target.startsWith('-')) return { ok: false, message: 'An address cannot start with a dash.' }
   const at = target.indexOf('@')
   const user = at < 0 ? undefined : target.slice(0, at)
   const host = at < 0 ? target : target.slice(at + 1)
   if (user !== undefined && !USER.test(user)) return { ok: false, message: 'The user name in that address is not valid.' }
-  if (!HOST.test(host) || host.includes('..')) return { ok: false, message: 'Use a host name, an IP address or an SSH alias, like xerxes@209.38.102.184. No spaces or special characters.' }
+  if (!HOST.test(host) || host.includes('..')) return { ok: false, message: 'Use a host name, an IP address or an SSH alias, like xerxes@203.0.113.10. No spaces or special characters.' }
   return { ok: true, value: target }
 }
 
@@ -58,6 +58,12 @@ export function checkComparisonCode(value: unknown): InputCheck<string> {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,19}$/.test(value.trim())
     ? { ok: true, value: value.trim() }
     : { ok: false, message: 'That code is not valid.' }
+}
+
+export function checkDeviceId(value: unknown): InputCheck<string> {
+  return typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}$/.test(value.trim())
+    ? { ok: true, value: value.trim() }
+    : { ok: false, message: 'That device id is not valid.' }
 }
 
 // ── Hub address ─────────────────────────────────────────────────────────
@@ -232,6 +238,17 @@ export interface CockpitPairing {
   readonly qrDataUrl: string | null
 }
 
+export interface CockpitDevice {
+  readonly id: string
+  readonly userId: string
+  readonly displayName: string
+  readonly label: string
+  readonly status: string
+  readonly createdAt: string | null
+  readonly lastSeenAt: string | null
+  readonly revokedAt: string | null
+}
+
 /** The reply body of each action (besides `ok`). */
 export interface CockpitReplyMap {
   readonly status: { readonly status: CockpitStatus }
@@ -241,6 +258,8 @@ export interface CockpitReplyMap {
   readonly pair: { readonly pairing: CockpitPairing }
   readonly confirm: { readonly deviceId: string }
   readonly machines: { readonly machines: readonly CockpitMachine[] }
+  readonly devices: { readonly devices: readonly CockpitDevice[] }
+  readonly revokeDevice: { readonly deviceId: string }
   readonly signin: { readonly origin: string; readonly wsUrl: string }
   readonly 'socket.open': object
   readonly 'socket.send': object
@@ -265,7 +284,7 @@ export const COCKPIT_SOCKET_EVENT = 'hub.cockpit.socket'
 export const COCKPIT_PROGRESS_EVENT = 'hub.cockpit.progress'
 
 export const COCKPIT_ACTIONS = [
-  'status', 'save', 'forget', 'link', 'pair', 'confirm', 'machines', 'signin',
+  'status', 'save', 'forget', 'link', 'pair', 'confirm', 'machines', 'devices', 'revokeDevice', 'signin',
   'socket.open', 'socket.send', 'socket.close',
 ] as const
 export type CockpitAction = (typeof COCKPIT_ACTIONS)[number]

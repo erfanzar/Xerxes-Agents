@@ -50,9 +50,14 @@ import { localDesktopWorkspaces, rememberDesktopWorkspace, removeDesktopWorkspac
 import {
   openRemote,
   remoteTarget,
+  runCaptured,
+  sshOptions,
   type RemoteConnection,
   type RemoteTarget,
 } from './main/remote.js'
+import { verifyRemoteHost } from './main/remoteHostTrust.js'
+import { isSshTarget, sshDestination } from '../daemon/sshTarget.js'
+import { sshFailure } from '../security/sshDiagnostics.js'
 import { shouldNotify } from './main/notify.js'
 import { createCliRunner } from './main/hubCli.js'
 import { createHubCockpit } from './main/hubCockpit.js'
@@ -71,6 +76,13 @@ import { readLocalChatImage, readRemoteChatImage } from './main/chatMedia.js'
 import { resolveProjectIconDataUrl } from './main/projectFavicon.js'
 import { FILE_ACTION_CHANNEL, fileActionRequestOf } from './fileActionShared.js'
 import { performFileAction } from './main/fileActions.js'
+import { sanitizeDesktopInheritedEnv, sanitizeTmpdirEnv } from './main/safeTmp.js'
+
+// Drop stale TMPDIR/TEMP/TMP and outer SSH/agent-sandbox vars inherited from
+// ephemeral launcher shells so local daemons and `agy acp` never fail with
+// ENOENT or mistakenly skip the desktop OS keyring.
+sanitizeTmpdirEnv()
+sanitizeDesktopInheritedEnv()
 
 /** Keep an SSH conversation on this computer's sign-in provider; a failure is logged, never thrown. */
 async function followLocalProviders(forwarding: DesktopProviderForwarding): Promise<void> {
@@ -270,6 +282,32 @@ const workspaceSurfaces = new Map<number, WorkspaceSurface>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
 const savedHostContexts = new SavedHostContexts({ list: () => desktopMachineCommand(join(xerxesHome(), 'machines.json'), 'list') })
+/**
+ * Stable negative context IDs reserved for remembered local ("This Mac") folders
+ * so remote SSH views ALWAYS list This Mac in the sidebar — even when the local
+ * view was evicted or the app launched directly onto an SSH workspace.
+ */
+const savedLocalContextIds = new Map<string, number>()
+const savedLocalContextPaths = new Map<number, string>()
+let nextSavedLocalContextId = -1_000_000
+function savedLocalContexts(): WorkspaceContext[] {
+  return localDesktopWorkspaces(workspaceFile()).map(folder => {
+    let id = savedLocalContextIds.get(folder)
+    if (id === undefined) {
+      id = nextSavedLocalContextId--
+      savedLocalContextIds.set(folder, id)
+      savedLocalContextPaths.set(id, folder)
+    }
+    return {
+      id,
+      label: contextLabel('This Mac', folder),
+      workspace: folder,
+      remote: false,
+      saved: true,
+      sessions: [],
+    }
+  })
+}
 function openContextRemotes(host?: BrowserWindow): RemoteTarget[] {
   const remotes: RemoteTarget[] = []
   for (const [id, surface] of workspaceSurfaces) {
@@ -787,10 +825,19 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     const open = openContextRemotes(window)
     void savedHostContexts.refresh(open)
-    return [...await Promise.all(readers), ...savedHostContexts.contexts(open)]
+    const openContexts = await Promise.all(readers)
+    // Remote SSH views get `desktop:workspaces` = []; include remembered local
+    // folders so "This Mac" is always one click away even if no local view is open.
+    const localSaved = currentScope === 'local' ? [] : savedLocalContexts()
+    return [...openContexts, ...localSaved, ...savedHostContexts.contexts(open)]
   })
   handle('desktop:activate-context', async (_event, contextId: unknown, sessionId?: unknown) => {
     if (typeof contextId !== 'number' || !Number.isSafeInteger(contextId) || sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId))) throw new Error('Invalid workspace context')
+    const savedLocalDir = savedLocalContextPaths.get(contextId)
+    if (savedLocalDir !== undefined) {
+      openWorkspaceView(window, savedLocalDir, typeof sessionId === 'string' ? sessionId : undefined)
+      return
+    }
     if (contextId < 0) {
       const selection = savedHostContexts.selection(contextId, sessionId)
       openRemoteView(window, selection.machine, selection.sessionId)
@@ -861,6 +908,22 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (voiceRequest === controller) voiceRequest = null
     }
   })
+  const confirmSshHostKey = async (target: string, prompt: string, signal: AbortSignal): Promise<boolean> => {
+    if (window.isDestroyed() || contents.isDestroyed() || signal.aborted) return false
+    const result = await dialog.showMessageBox(window, {
+      type: 'warning',
+      title: 'Verify SSH server',
+      message: `Trust the SSH host key for ${target}?`,
+      detail: `${prompt}\n\nCompare this fingerprint with one from the server administrator or another trusted connection. Trusting it saves the key in your SSH known_hosts file. A changed key is never accepted here.`,
+      buttons: ['Cancel', 'Trust and connect'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      signal,
+    })
+    return result.response === 1 && !signal.aborted && !window.isDestroyed() && !contents.isDestroyed()
+  }
+
   async function connectRemote(params: Record<string, unknown>) {
     if (remoteAttempt) throw new Error('A connection is already being prepared')
     const machine = remoteTarget(params.machine),
@@ -871,17 +934,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       let next = await openRemote(machine, controller.signal, (error) => {
         remoteError = error.message
       }, undefined, {
-        confirmHostKey: async (target, prompt, signal) => {
-          if (window.isDestroyed() || contents.isDestroyed() || signal.aborted) return false
-          const result = await dialog.showMessageBox(window, {
-            type: 'warning', title: 'Verify SSH server',
-            message: `Trust the SSH host key for ${target}?`,
-            detail: `${prompt}\n\nCompare this fingerprint with one from the server administrator or another trusted connection. Trusting it saves the key in your SSH known_hosts file. A changed key is never accepted here.`,
-            buttons: ['Cancel', 'Trust and connect'], defaultId: 0, cancelId: 0,
-            noLink: true, signal,
-          })
-          return result.response === 1 && !signal.aborted && !window.isDestroyed() && !contents.isDestroyed()
-        },
+        confirmHostKey: confirmSshHostKey,
       })
       const localProviders = new DaemonRpc({projectDir:homedir()})
       let forwarding: DesktopProviderForwarding
@@ -994,6 +1047,14 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         remoteAttempt?.abort()
         return { ok: true }
       }
+      if (action === 'provider-setup') {
+        if (remoteMachine) {
+          const status = await ensureRemoteProviderClis(remoteMachine, new AbortController().signal)
+          return { ok: true, scope: 'remote', ...status }
+        }
+        const status = await ensureLocalProviderClis()
+        return { ok: true, scope: 'local', ...status }
+      }
       if (action === 'provider-use-local') {
         if (!remote || !daemon?.online || !providerForwarding) throw new Error('Reconnect the SSH workspace before choosing a provider on this computer.')
         return providerForwarding.useLocal(params.profile)
@@ -1037,7 +1098,29 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       }
       let command: string
       if (action === 'hosts' || action === 'list') command = action
-      else if (action === 'browse')
+      else if (action === 'browse') {
+        if (!isSshTarget(params.target)) throw new Error('Choose an SSH alias, user@hostname or user@hostname:port')
+        // Verify and prompt for first-time SSH host keys before running batch-mode browse.
+        const browseController = new AbortController()
+        let rejectedByUser = false
+        try {
+          await verifyRemoteHost(
+            sshDestination(params.target),
+            browseController.signal,
+            async (host, prompt, signal) => {
+              const accepted = await confirmSshHostKey(host, prompt, signal)
+              if (!accepted) rejectedByUser = true
+              return accepted
+            },
+            runCaptured,
+            sshOptions,
+          )
+        } catch (error) {
+          if (rejectedByUser) {
+            throw new Error('SSH host key was not trusted. Accept the fingerprint prompt to browse this host.')
+          }
+          throw sshFailure('browse', error instanceof Error ? error.message : String(error))
+        }
         command =
           'browse ' +
           argument(params.target) +
@@ -1045,7 +1128,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
           argument(
             Buffer.from(typeof params.path === 'string' ? params.path : '').toString('base64url'),
           )
-      else if (action === 'save') {
+      } else if (action === 'save') {
         const m = remoteTarget(params.machine)
         command = 'add ' + [m.alias, m.target, m.workspacePath].map(argument).join(' ')
       } else if (action === 'remove') {
@@ -1093,6 +1176,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (action === 'sync-review') return accounts.reviewSync(String(params.accountId ?? ''))
     if (action === 'sync') return accounts.confirmSync(String(params.review ?? ''), params.confirm === true)
     if (action === 'remove') return accounts.remove(String(params.accountId ?? ''))
+    if (action === 'agy-status') return accounts.agyStatus()
+    if (action === 'agy-sync-review') return accounts.reviewAgySync(params.mode, typeof params.accountId === 'string' ? params.accountId : undefined)
+    if (action === 'agy-sync') return accounts.confirmAgySync(String(params.review ?? ''), params.confirm === true)
+    if (action === 'agy-login-start') {
+      const started = await accounts.startAgyLogin()
+      void shell.openExternal(started.url).catch(() => undefined)
+      return started
+    }
+    if (action === 'agy-login-complete') return accounts.completeAgyLogin(String(params.loginId ?? ''), String(params.code ?? ''))
+    if (action === 'agy-login-cancel') return accounts.cancelAgyLogin(typeof params.loginId === 'string' ? params.loginId : undefined)
     throw new Error('Unknown provider account action')
   })
 
@@ -1297,11 +1390,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
 
 void app.whenReady().then(async () => {
   app.setAboutPanelOptions({ applicationName: APP_NAME })
-  // A Claude Code / Codex profile cannot run on this computer without its CLI,
-  // and the desktop never inherited ~/.bun/bin. Install only what is missing,
-  // in the background: a failure here must not stop the app from opening.
+  // Claude Code, Codex, and Antigravity (`agy`) CLIs cannot run without their
+  // binaries, and the desktop rarely inherits ~/.bun/bin or ~/.local/bin.
+  // Install only what is missing, in the background: a failure here must not
+  // stop the app from opening.
   void ensureLocalProviderClis({ onProgress: message => console.log(message) })
-    .then(status => console.log(`Provider CLIs ready: claude=${status.claude} codex=${status.codex}`))
+    .then(status => console.log(`Provider CLIs ready: claude=${status.claude} codex=${status.codex} agy=${status.agy}`))
     .catch(error => console.warn('Provider CLI setup failed:', error instanceof Error ? error.message : error))
   // Offers new releases from GitHub; installs only when the person says so.
   const appUpdates = startAppUpdates({

@@ -79,7 +79,14 @@ export function remoteFolderCommand(path: string): string {
 export async function browseSshFolders(target: string, path: string, options: { signal?: AbortSignal; spawnProcess?: (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess; timeoutMs?: number } = {}): Promise<RemoteFolders> {
   if (!isSshTarget(target)) return Promise.reject(new Error('Choose an SSH alias, user@hostname or user@hostname:port'))
   const command = remoteFolderCommand(path)
-  const directory = await mkdtemp(join(tmpdir(), 'xr-browse-'))
+  const primaryTmp = tmpdir()
+  let directory: string
+  try {
+    directory = await mkdtemp(join(primaryTmp, 'xr-browse-'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT' || process.platform === 'win32' || primaryTmp === '/tmp') throw error
+    directory = await mkdtemp(join('/tmp', 'xr-browse-'))
+  }
   try {
     const config = await writeSshConnectionConfig(directory)
     return await new Promise<RemoteFolders>((accept, reject) => {

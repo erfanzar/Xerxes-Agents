@@ -27,12 +27,18 @@ import {
 } from '../src/desktop/renderer/sideQuestionState.js'
 import {
   Store,
+  applyInflightTurn,
+  inflightStartedAtMs,
   parseAcpSessionBinding,
   type AcpExternalAgentInfo,
   type AcpSessionBinding,
   type Snapshot,
   type XerxesLike,
 } from '../src/desktop/renderer/store.js'
+import { ThreadDetailsCard } from '../src/desktop/renderer/ThreadDetailsCard.js'
+import { rectOverlapsAny } from '../src/desktop/renderer/BrowserPanel.js'
+import { extractAcpBackgroundRowsFromBlocks, ScheduleActivity } from '../src/desktop/renderer/DesktopPanels.js'
+import { ChangesTab, LogTab, PlanTab } from '../src/desktop/renderer/Workspaces.js'
 import { ToolTimelineGroup, summarizeToolTimeline } from '../src/desktop/renderer/ToolTimeline.js'
 import type { Block, DaemonEvent, ToolItem } from '../src/desktop/renderer/types.js'
 import {
@@ -1447,5 +1453,410 @@ describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & C
 
     detach()
     expect(listeners.size).toBe(0)
+  })
+
+  test('mid-turn reattach hydrates session.inflight prompt/tools/elapsed time and fresh reconnect_events preserve live transcript', async () => {
+    // 1. Direct unit test of applyInflightTurn + deduplication
+    const builder = new BlockBuilder()
+    const startedSec = Math.floor((Date.now() - 870_000) / 1000) // ~14m 30s ago
+    const hydrated = applyInflightTurn(builder, {
+      user: 'Generate Qwen 3.8-27B eSurge performance report on v5p',
+      thinking: 'Understanding DP replica management...',
+      assistant: 'Measuring throughput across replicas.',
+      started_at: startedSec,
+      tools: [
+        { id: 't1', name: 'ReadFile', arguments: '{"path":"esurge.py"}', context: 'esurge.py', ok: true, duration_ms: 120 },
+        { id: 't2', name: 'BashTool', arguments: '{"command":"pytest…', context: 'pytest tests/dp' },
+      ],
+    })
+    expect(hydrated).toEqual({
+      user: 'Generate Qwen 3.8-27B eSurge performance report on v5p',
+      startedAtMs: startedSec * 1000,
+    })
+    expect(inflightStartedAtMs({ started_at: startedSec })).toBe(startedSec * 1000)
+    const blocks = builder.snapshot(true)
+    expect(blocks[0]).toMatchObject({ kind: 'user', text: 'Generate Qwen 3.8-27B eSurge performance report on v5p' })
+    expect(blocks.some(b => b.kind === 'thinking' && b.text.includes('Understanding DP replica management'))).toBe(true)
+    const toolsBlock = blocks.find(b => b.kind === 'tools')
+    expect(toolsBlock && toolsBlock.kind === 'tools' ? toolsBlock.items.map(item => ({ id: item.id, state: item.state, arg: item.arg })) : []).toEqual([
+      { id: 't1', state: 'done', arg: 'esurge.py' },
+      { id: 't2', state: 'working', arg: 'pytest tests/dp' },
+    ])
+    expect(blocks.at(-1)).toMatchObject({ kind: 'agent', text: 'Measuring throughput across replicas.' })
+
+    // Re-applying same user prompt does not duplicate the trailing user block
+    const dedupBuilder = new BlockBuilder()
+    dedupBuilder.pushUser('Keep single prompt')
+    applyInflightTurn(dedupBuilder, { user: 'Keep single prompt' })
+    expect(dedupBuilder.snapshot(true).filter(b => b.kind === 'user')).toHaveLength(1)
+
+    // 2. Store attach/reconnect to an in-flight Turn 1 (empty history.actions, non-empty session.inflight)
+    const inflightStartedSec = Math.floor((Date.now() - 900_000) / 1000)
+    let initCalls = 0
+    const { store, bridge } = await setupConnectedStore({
+      initialize: params => {
+        initCalls += 1
+        const isResumeOrReconnect = initCalls > 1
+        return {
+          ok: true,
+          session_id: 'sess-inflight-1',
+          cwd: '/repo',
+          model: 'gemini-4-neon',
+          session: {
+            id: 'sess-inflight-1',
+            key: String(params.session_key ?? 'desktop-inflight'),
+            cwd: '/repo',
+            active_turn_id: 'turn-live-1',
+            history: { actions: [], before: null, has_more: false },
+            inflight: {
+              user: 'Benchmark Qwen 3.8-27B on TPU v5p',
+              thinking: 'Inspecting DP replicas',
+              started_at: inflightStartedSec,
+              tools: [
+                { id: 'tc-live', name: 'ReadFile', context: 'dp_manager.py' },
+              ],
+            },
+          },
+          ...(isResumeOrReconnect
+            ? {
+                reconnect_events: [
+                  {
+                    method: 'event',
+                    params: {
+                      type: 'tool_result',
+                      payload: { session_id: 'sess-inflight-1', tool_call_id: 'tc-live', name: 'ReadFile', return_value: 'ok', duration_ms: 85 },
+                    },
+                  },
+                ],
+              }
+            : {}),
+        }
+      },
+    })
+    const afterAttach = store.getSnapshot()
+    expect(afterAttach.turnActive).toBe(true)
+    expect(afterAttach.turnStartedAt).toBe(inflightStartedSec * 1000)
+    expect(afterAttach.turnSeconds).toBeGreaterThanOrEqual(890)
+    expect(afterAttach.blocks[0]).toMatchObject({ kind: 'user', text: 'Benchmark Qwen 3.8-27B on TPU v5p' })
+    expect(afterAttach.blocks.some(b => b.kind === 'tools' && b.items.some(i => i.id === 'tc-live' && i.state === 'working'))).toBe(true)
+
+    // 3. Reconnect WITH reconnect_events on a non-resume initialize (!resume_session_id) MUST NOT wipe the live user prompt!
+    await (store as unknown as { initialize: (extra: Record<string, unknown>) => Promise<unknown> }).initialize({})
+    const afterReconnect = store.getSnapshot()
+    expect(afterReconnect.blocks[0]).toMatchObject({ kind: 'user', text: 'Benchmark Qwen 3.8-27B on TPU v5p' })
+    expect(afterReconnect.blocks.some(b => b.kind === 'tools' && b.items.some(i => i.id === 'tc-live' && i.state === 'done'))).toBe(true)
+    expect(bridge.calls.filter(c => c.method === 'initialize')).toHaveLength(2)
+  })
+
+  test('Plan & to-dos, Session edits, and Log tabs expose a Back to conversation control, ThreadDetailsCard toggles plan, and CSS keeps .chat__back visible', async () => {
+    const planSnap = sampleSnapshot({
+      tab: 'plan',
+      todos: [
+        { id: '1', content: 'Audit DP replicas', status: 'completed' },
+        { id: '2', content: 'Write performance report', status: 'in_progress' },
+      ],
+    })
+    const emptyPlanHtml = renderToStaticMarkup(createElement(PlanTab, { snap: sampleSnapshot({ tab: 'plan', plan: null, todos: null }) }))
+    const todoPlanHtml = renderToStaticMarkup(createElement(PlanTab, { snap: planSnap }))
+    const changesHtml = renderToStaticMarkup(createElement(ChangesTab, { snap: sampleSnapshot({ tab: 'changes' }) }))
+    const logHtml = renderToStaticMarkup(createElement(LogTab, { snap: sampleSnapshot({ tab: 'log' }) }))
+
+    for (const html of [emptyPlanHtml, todoPlanHtml, changesHtml, logHtml]) {
+      expect(html).toContain('Back to conversation')
+      expect(html).toContain('workspace-return__btn')
+    }
+    expect(todoPlanHtml).toContain('1/2 done')
+
+    const detailsHtml = renderToStaticMarkup(
+      createElement(ThreadDetailsCard, { snap: planSnap, onNavigate: () => {} }),
+    )
+    expect(detailsHtml).toContain('Plan &amp; to-dos')
+    expect(detailsHtml).toContain('aria-pressed="true"')
+    expect(detailsHtml).toContain('is-selected')
+
+    // layout.css must NOT hide .chat__back when hiding generic .chat__view buttons
+    const layoutCss = await Bun.file(new URL('../src/desktop/renderer/layout.css', import.meta.url)).text()
+    expect(layoutCss).toContain('.chat__view:not(.chat__back)')
+    expect(layoutCss).not.toContain(':is(.agent-menu,.chat__kind,.chat__view){display:none}')
+  })
+
+  test('Store.connectAcpAgent defaults Antigravity to Turbo mode while honoring explicit or saved modes', async () => {
+    const { store, bridge } = await setupConnectedStore({
+      'acp.connect': params => ({
+        ok: true,
+        binding: {
+          ...sampleAntigravityBinding,
+          current_mode: String(params.mode_id ?? 'turbo'),
+          current_mode_name: String(params.mode_id ?? 'turbo') === 'plan' ? 'Plan' : 'Turbo',
+        },
+      }),
+    })
+
+    // Fresh Antigravity connect passes mode_id: 'turbo'
+    expect(await store.connectAcpAgent('antigravity')).toBe(true)
+    expect(bridge.calls.at(-1)?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'turbo' })
+
+    // Explicit modeId overrides default Turbo
+    bridge.calls.length = 0
+    expect(await store.connectAcpAgent('antigravity', undefined, { modeId: 'plan' })).toBe(true)
+    expect(bridge.calls.at(-1)?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'plan' })
+
+    // Non-Antigravity agent does NOT force mode_id: 'turbo'
+    bridge.calls.length = 0
+    expect(await store.connectAcpAgent('claude-code')).toBe(true)
+    expect(bridge.calls.at(-1)?.params.mode_id).toBeUndefined()
+  })
+
+  test('Activity metrics hydrate from session.inflight.tools during Turn 1 and fallback extracts AGY background jobs & schedules', async () => {
+    const startedSec = Math.floor((Date.now() - 420_000) / 1000)
+    const { store } = await setupConnectedStore({
+      initialize: params => ({
+        ok: true,
+        session_id: 'sess-activity-1',
+        cwd: '/repo',
+        model: 'gemini-4-neon',
+        session: {
+          id: 'sess-activity-1',
+          key: String(params.session_key ?? 'desktop-activity'),
+          cwd: '/repo',
+          turn_count: 0,
+          active_turn_id: 'turn-1',
+          history: { actions: [], before: null, has_more: false },
+          inflight: {
+            user: 'Serve Qwen 3.8-27B on TPU v5p',
+            started_at: startedSec,
+            tools: [
+              { id: 'tc-1', name: 'run_command', context: 'eray tpu job status', result: 'ok', duration_ms: 1800 },
+              { id: 'tc-2', name: 'schedule', context: 'in 720s · Check compilation progress' },
+            ],
+          },
+        },
+      }),
+    })
+
+    const snap = store.getSnapshot()
+    expect(snap.turnActive).toBe(true)
+    expect(snap.turnCount).toBe(1)
+    expect(snap.toolSteps).toBe(2)
+    expect(snap.toolDurationMs).toBe(1800)
+    expect(snap.llmSteps).toBeGreaterThanOrEqual(1)
+    expect(snap.metricPhase).toBe('tool')
+
+    // Fallback extractor recovers live AGY schedules & background shells from blocks when remote daemon omits them
+    const blocks: readonly Block[] = [
+      {
+        kind: 'tools',
+        id: 'tg-1',
+        items: [
+          {
+            id: 'tc-cmd',
+            name: 'run_command',
+            verb: 'Run command',
+            arg: 'pytest tests/dp',
+            input: JSON.stringify({ CommandLine: 'pytest tests/dp', toolSummary: 'DP benchmark' }),
+            output: 'Tool is running as a background task with task id: conv-1/task-7\nTask logs are available at: /tmp/task-7.log',
+            state: 'done',
+          },
+          {
+            id: 'tc-sched',
+            name: 'schedule',
+            verb: 'Schedule',
+            arg: 'in 720s · Check esurge compilation progress',
+            input: JSON.stringify({ DurationSeconds: 720, Prompt: 'Check esurge compilation progress' }),
+            output: 'Tool is running as a background task with task id: conv-1/task-8',
+            state: 'done',
+          },
+          {
+            id: 'tc-killed-sched',
+            name: 'schedule',
+            verb: 'Schedule',
+            arg: 'in 60s · Old check',
+            input: JSON.stringify({ DurationSeconds: 60, Prompt: 'Old check' }),
+            output: 'Tool is running as a background task with task id: conv-1/task-9',
+            state: 'done',
+          },
+          {
+            id: 'tc-kill',
+            name: 'manage_task',
+            verb: 'Manage task',
+            arg: 'kill',
+            input: JSON.stringify({ Action: 'kill', TaskId: 'conv-1/task-9' }),
+            output: 'Killed conv-1/task-9',
+            state: 'done',
+          },
+        ],
+      },
+    ]
+
+    const extracted = extractAcpBackgroundRowsFromBlocks(blocks, [], true, startedSec * 1000)
+    expect(extracted).toHaveLength(3)
+    expect(extracted.find(r => r.id === 'agy-task:conv-1/task-7')).toMatchObject({
+      kind: 'shell',
+      state: 'running',
+      label: 'DP benchmark',
+      source: 'antigravity',
+      synthetic: true,
+    })
+    expect(extracted.find(r => r.id === 'agy-task:conv-1/task-8')).toMatchObject({
+      kind: 'schedule',
+      state: 'scheduled',
+      title: 'Check esurge compilation progress',
+      durationSeconds: 720,
+      source: 'antigravity',
+    })
+    expect(extracted.find(r => r.id === 'agy-task:conv-1/task-9')?.state).toBe('cancelled')
+
+    // Never duplicates when daemon already reported Antigravity rows
+    const deduped = extractAcpBackgroundRowsFromBlocks(
+      blocks,
+      [{ id: 'agy-task:conv-1/task-8', source: 'antigravity', kind: 'schedule', state: 'scheduled' }],
+      true,
+      startedSec * 1000,
+    )
+    expect(deduped).toEqual([])
+
+    // ScheduleActivity renders live countdown/badge & Antigravity label cleanly
+    const schedHtml = renderToStaticMarkup(
+      createElement(ScheduleActivity, {
+        row: {
+          id: 'agy-task:conv-1/task-8',
+          kind: 'schedule',
+          source: 'antigravity',
+          title: 'Check esurge compilation progress',
+          label: 'in 12m',
+          detail: 'Antigravity timer · 12m',
+          state: 'scheduled',
+          durationSeconds: 720,
+          nextRunAt: new Date(Date.now() + 300_000).toISOString(),
+        },
+        online: true,
+        busy: false,
+        onCancel: () => {},
+      }),
+    )
+    expect(schedHtml).toContain('schedule-activity')
+    expect(schedHtml).toContain('Check esurge compilation progress')
+    expect(schedHtml).toContain('in ')
+  })
+
+  test('vibes.css removes the composer middle shadow seam and uses refined crimson for the stop button', async () => {
+    const vibesCss = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
+    expect(vibesCss).toContain('.composer__input{')
+    expect(vibesCss).toContain('z-index:1')
+    expect(vibesCss).toContain('box-shadow:0 16px 16px -10px rgb(0 0 0 / 32%)')
+    expect(vibesCss).not.toContain('>.composer__toolbar{grid-row:3;grid-column:1 / -1;padding:0 14px 10px 14px;border-radius:0 0 var(--v-r-card) var(--v-r-card);box-shadow:0 12px 28px')
+    expect(vibesCss).toContain('--x-stop-bg:#b82937')
+    expect(vibesCss).toContain('.composer__send--stop{background:var(--x-stop-bg)')
+    expect(vibesCss).not.toContain('.composer__send--stop{background:var(--x-failed)')
+  })
+
+  test('truncated JSON tool arguments from older remote daemons never leak raw JSON into status phrases or fall back to Run command command', () => {
+    // 1. Truncated mid-CommandLine with env prefix + python command
+    const truncatedCmd = '{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu python3 scripts/bench_esurge.py --max-len 131072 --cc 32…'
+    const builder = new BlockBuilder()
+    applyInflightTurn(builder, {
+      user: 'Benchmark Qwen 3.8-27B',
+      tools: [
+        { id: 'tc-trunc-1', name: 'run_command', arguments: truncatedCmd },
+        { id: 'tc-trunc-2', name: 'run_command', arguments: '{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu","toolSummary":"Benchmark Qwen 3.8…' },
+        { id: 'tc-trunc-3', name: 'run_command', arguments: '{"WaitMsBeforeAsync":10000' },
+      ],
+    })
+    const blocks = builder.snapshot(true)
+    const toolBlock = blocks.find(b => b.kind === 'tools')
+    expect(toolBlock?.kind).toBe('tools')
+    if (toolBlock?.kind === 'tools') {
+      const [first, second, third] = toolBlock.items
+      expect(first!.arg).not.toContain('{"CommandLine"')
+      expect(first!.arg).toContain('ENABLE_DISTRIBUTED_INIT=0')
+      const summary1 = classifyToolItem(first!)
+      expect(summary1.category).toBe('shell')
+      expect(summary1.command).toContain('python3 scripts/bench_esurge.py')
+      expect(summary1.target).not.toBe('command')
+
+      const summary2 = classifyToolItem(second!)
+      expect(summary2.badge).toBe('Benchmark Qwen 3.8')
+      expect(summary2.command).toBe('ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu')
+
+      // Partial JSON with no string command never leaks raw JSON into arg
+      expect(third!.arg).toBe('')
+    }
+  })
+
+  test('live status replaces spinners with traveling-light text shimmer and Vibes/Neo right-panel fullscreen hides .chat and expands .desktop-rail', async () => {
+    const layoutCss = await Bun.file(new URL('../src/desktop/renderer/layout.css', import.meta.url)).text()
+    const vibesCss = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
+
+    // Spinners removed on live activity header, composer status, and working rail head
+    expect(layoutCss).toContain('.tool-timeline__mark-wrap{display:none}')
+    expect(layoutCss).toContain('.composer-status>.agent-orb{display:none}')
+    expect(layoutCss).toContain(".railstatus[data-tone='working'] .railstatus__orb{display:none}")
+    expect(layoutCss).toContain('@keyframes live-text-shine')
+    expect(layoutCss).toContain('prefers-reduced-motion:reduce')
+
+    // Vibes/Neo right-panel fullscreen overrides .chat display:flex so the right panel fills the workspace
+    expect(vibesCss).toContain('.app__body:is([data-context-full],[data-review])>.chat{display:none}')
+    expect(vibesCss).toContain('.app__body[data-context-full]>.desktop-rail{flex:1 1 auto;width:auto;max-width:none;min-width:0}')
+    expect(vibesCss).toContain('.app__body[data-context-full]>.panel-divider:last-of-type{display:none}')
+  })
+
+  test('store.promoteQueued interrupts active turn to steer immediately and turn_begin dedupes legacy "user: " steer continuations', async () => {
+    let submittedTexts: string[] = []
+    let steerCalls = 0
+    const { store, bridge } = await setupConnectedStore({
+      'turn.steer': () => {
+        steerCalls += 1
+        return { ok: true, disposition: 'queued_steer' }
+      },
+      'turn.cancel': () => {
+        setTimeout(() => bridge.emit('turn_end', { session_id: 'sess-acp-1' }), 5)
+        return { ok: true }
+      },
+      'turn.submit': params => {
+        submittedTexts.push(String(params.text ?? ''))
+        setTimeout(() => bridge.emit('turn_begin', { session_id: 'sess-acp-1', user_input: String(params.text ?? '') }), 5)
+        return { ok: true }
+      },
+    })
+
+    // Start an active turn and queue two follow-up messages
+    bridge.emit('turn_begin', { session_id: 'sess-acp-1', user_input: 'Benchmark Qwen 3.8-27B' })
+    expect(store.getSnapshot().turnActive).toBe(true)
+
+    expect(await store.steer('Optimize GDN inference')).toBe(true)
+    expect(await store.steer('Also log KV usage')).toBe(true)
+    expect(store.getSnapshot().queue).toHaveLength(2)
+
+    // Queued messages card exposes a "Steer now" button while turnActive
+    ;(globalThis as Record<string, unknown>).window = { xerxes: bridge.xerxes }
+    const shellHtml = renderToStaticMarkup(createElement(Shell, { snap: store.getSnapshot() }))
+    expect(shellHtml).toContain('composer-queue__steer')
+    expect(shellHtml).toContain('Steer now')
+
+    // Promote first queued message: cancels current turn, submits promoted message once (no duplicate bubble), and re-queues second item
+    const firstId = store.getSnapshot().queue[0]!.id
+    expect(await store.promoteQueued(firstId)).toBe(true)
+    expect(submittedTexts).toEqual(['Optimize GDN inference'])
+    expect(bridge.calls.some(c => c.method === 'turn.cancel')).toBe(true)
+    const userBubbles = store.getSnapshot().blocks.filter(b => b.kind === 'user' && b.text === 'Optimize GDN inference')
+    expect(userBubbles).toHaveLength(1)
+    expect(steerCalls).toBe(3) // 2 initial + 1 re-queued remaining item
+
+    // Legacy remote daemon continuation sending `user: <same text>` MUST NOT add a duplicate `user: ` bubble!
+    bridge.emit('turn_end', { session_id: 'sess-acp-1' })
+    bridge.emit('turn_begin', { session_id: 'sess-acp-1', user_input: 'user: Also log KV usage' })
+    const gdnOrKvBubbles = store.getSnapshot().blocks.filter(b => b.kind === 'user' && b.text.includes('Also log KV usage'))
+    expect(gdnOrKvBubbles).toHaveLength(1)
+    expect(gdnOrKvBubbles[0]!.text).toBe('Also log KV usage')
+  })
+
+  test('BrowserPanel rectOverlapsAny detects overlapping dropdown menus and ignores disjoint elements', () => {
+    const browserRect = { x: 700, y: 120, width: 600, height: 700 }
+    // + menu opening from right-panel header overlapping top of WebContentsView
+    expect(rectOverlapsAny(browserRect, [{ x: 1020, y: 52, width: 200, height: 260 }])).toBe(true)
+    // Left sidebar menu far from browser rect
+    expect(rectOverlapsAny(browserRect, [{ x: 12, y: 60, width: 220, height: 300 }])).toBe(false)
+    // Zero-size hidden element
+    expect(rectOverlapsAny(browserRect, [{ x: 800, y: 200, width: 0, height: 0 }])).toBe(false)
   })
 })

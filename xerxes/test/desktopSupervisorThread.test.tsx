@@ -56,6 +56,9 @@ test('rendered: events are one-line rows, repeats show ×N, an error row is mark
   expect(html).toContain('class="supervisor__message supervisor__message--user"')
   expect(html).toContain('Erfan · ')
   expect(html).toContain('<strong>All good</strong>')
+  expect(html).toContain('src="./logo-128.png"')
+  expect(html).not.toContain('data-emblem="xerxes-mark"')
+  expect(html).toContain('aria-label="Copy reply"')
   // No more "Notice" headings or yellow notice boxes.
   expect(html).not.toContain('supervisor__notice')
   expect(html).not.toContain('>Notice')

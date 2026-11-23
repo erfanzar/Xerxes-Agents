@@ -37,7 +37,8 @@ import {
   type SwarmReplaySpeed,
 } from './swarmGraphModel.js'
 import type { SwarmBoardMessage, SwarmStatusSnapshot } from './swarmState.js'
-import { SimurghSprite, XerxesBrandEmblem } from './XerxesSprites.js'
+import { XerxesLogoMark } from './BrandMark.js'
+import { SimurghSprite } from './XerxesSprites.js'
 
 export interface SwarmGraphProps {
   readonly status: SwarmStatusSnapshot | null
@@ -985,7 +986,7 @@ export const SwarmGraph = memo(function SwarmGraph({
       >
         {!hasContent ? (
           <div className="swarm-graph__empty">
-            <XerxesBrandEmblem size={48} animate={false} />
+            <XerxesLogoMark size={48} className="swarm-graph__logo" decorative />
             <p className="swarm-graph__empty-title">Immortals Graph ready</p>
             <p className="swarm-graph__empty-sub">
               Start an Immortals run with <code>/immortals &lt;task&gt;</code> to see members, progress and mentions here.

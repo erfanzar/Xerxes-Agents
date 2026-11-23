@@ -110,6 +110,25 @@ function detailOf(value: unknown): string {
 function argOf(args: unknown, structuredDiff?: StructuredDiffPayload | null, locations?: unknown): string {
   const clip = (value: string): string => (value.length > 72 ? `${value.slice(0, 69)}…` : value)
   const parsed = parseArgs(args)
+  const cronExpr = typeof parsed.CronExpression === 'string'
+    ? parsed.CronExpression.trim()
+    : typeof parsed.cron_expression === 'string'
+      ? parsed.cron_expression.trim()
+      : ''
+  const durSec = typeof parsed.DurationSeconds === 'number' && Number.isFinite(parsed.DurationSeconds)
+    ? parsed.DurationSeconds
+    : typeof parsed.duration_seconds === 'number' && Number.isFinite(parsed.duration_seconds)
+      ? parsed.duration_seconds
+      : null
+  const schedPrompt = typeof parsed.Prompt === 'string'
+    ? parsed.Prompt.trim()
+    : typeof parsed.prompt === 'string'
+      ? parsed.prompt.trim()
+      : ''
+  if (cronExpr || durSec !== null) {
+    const timing = cronExpr || `in ${durSec}s`
+    return clip(schedPrompt ? `${timing} · ${schedPrompt}` : timing)
+  }
   for (const key of ARG_KEYS) {
     const value = parsed[key]
     if (typeof value === 'string' && value.trim()) return clip(value)
@@ -119,7 +138,11 @@ function argOf(args: unknown, structuredDiff?: StructuredDiffPayload | null, loc
   if (locPath) return clip(locPath)
   const first = Object.values(parsed)[0]
   if (typeof first === 'string' && first.trim()) return clip(first)
-  if (typeof args === 'string' && args.trim()) return clip(args)
+  if (typeof args === 'string') {
+    const trimmed = args.trim()
+    // Never leak raw or truncated JSON objects/arrays as a human-readable argument.
+    if (trimmed && !trimmed.startsWith('{') && !trimmed.startsWith('[')) return clip(trimmed)
+  }
   return ''
 }
 
@@ -239,17 +262,147 @@ export function isEditTool(name: unknown): boolean {
 }
 
 /**
+ * Best-effort single-pass extractor for truncated JSON object previews
+ * (e.g. `{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 ...` cut off at 200 chars).
+ * Recovers all complete top-level primitive fields plus any partially-written
+ * trailing string field without ever throwing.
+ */
+function parseTruncatedJsonObject(raw: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  const len = raw.length
+  let i = 0
+  while (i < len && /\s/.test(raw[i]!)) i += 1
+  if (raw[i] !== '{') return out
+  i += 1
+
+  const skipWs = (): void => {
+    while (i < len && /\s/.test(raw[i]!)) i += 1
+  }
+
+  const readString = (allowUnterminated: boolean): string | null => {
+    if (raw[i] !== '"') return null
+    i += 1
+    let acc = ''
+    while (i < len) {
+      const ch = raw[i]!
+      if (ch === '"') {
+        i += 1
+        return acc
+      }
+      if (ch === '\\') {
+        if (i + 1 >= len) {
+          i = len
+          return allowUnterminated ? acc : null
+        }
+        const esc = raw[i + 1]!
+        if (esc === 'u' && i + 5 < len) {
+          const hex = raw.slice(i + 2, i + 6)
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            acc += String.fromCharCode(parseInt(hex, 16))
+            i += 6
+            continue
+          }
+        }
+        if (esc === '"') acc += '"'
+        else if (esc === '\\') acc += '\\'
+        else if (esc === '/') acc += '/'
+        else if (esc === 'n') acc += '\n'
+        else if (esc === 'r') acc += '\r'
+        else if (esc === 't') acc += '\t'
+        else if (esc === 'b') acc += '\b'
+        else if (esc === 'f') acc += '\f'
+        else acc += esc
+        i += 2
+        continue
+      }
+      acc += ch
+      i += 1
+    }
+    return allowUnterminated ? acc.replace(/…$/, '').trimEnd() : null
+  }
+
+  const skipNested = (): boolean => {
+    const open = raw[i]
+    if (open !== '{' && open !== '[') return false
+    let depth = 0
+    let inStr = false
+    while (i < len) {
+      const ch = raw[i]!
+      if (inStr) {
+        if (ch === '\\') i += 2
+        else {
+          if (ch === '"') inStr = false
+          i += 1
+        }
+        continue
+      }
+      if (ch === '"') { inStr = true; i += 1; continue }
+      if (ch === '{' || ch === '[') depth += 1
+      else if (ch === '}' || ch === ']') {
+        depth -= 1
+        if (depth === 0) { i += 1; return true }
+      }
+      i += 1
+    }
+    return false
+  }
+
+  while (i < len) {
+    skipWs()
+    if (i >= len || raw[i] === '}') break
+    if (raw[i] === ',') { i += 1; continue }
+    const key = readString(false)
+    if (key === null) break
+    skipWs()
+    if (raw[i] !== ':') break
+    i += 1
+    skipWs()
+    if (i >= len) break
+    const ch = raw[i]!
+    if (ch === '"') {
+      const val = readString(true)
+      if (val !== null && val !== '') out[key] = val
+    } else if (raw.startsWith('true', i)) {
+      out[key] = true
+      i += 4
+    } else if (raw.startsWith('false', i)) {
+      out[key] = false
+      i += 5
+    } else if (raw.startsWith('null', i)) {
+      out[key] = null
+      i += 4
+    } else if (ch === '-' || (ch >= '0' && ch <= '9')) {
+      const start = i
+      while (i < len && /[0-9eE.+\-]/.test(raw[i]!)) i += 1
+      const num = Number(raw.slice(start, i))
+      if (Number.isFinite(num)) out[key] = num
+    } else if (ch === '{' || ch === '[') {
+      if (!skipNested()) break
+    } else {
+      break
+    }
+  }
+  return out
+}
+
+/**
  * Parse tool-call arguments (JSON string or object) without throwing.
- * Malformed arguments still render as a trail row; they just carry no diff.
+ * Recovers fields from truncated JSON previews (e.g. older remote daemons that
+ * clip `inflight.tools[i].arguments` at 200 chars) so tool rows and status
+ * phrases never leak raw JSON or fall back to empty placeholders.
  */
 export function parseArgs(args: unknown): Record<string, unknown> {
   if (typeof args === 'string' && args.trim()) {
+    const trimmed = args.trim()
     try {
-      const parsed = JSON.parse(args) as unknown
+      const parsed = JSON.parse(trimmed) as unknown
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return parsed as Record<string, unknown>
       }
     } catch {
+      if (trimmed.startsWith('{')) {
+        return parseTruncatedJsonObject(trimmed)
+      }
       return {}
     }
   }
@@ -665,16 +818,21 @@ export class BlockBuilder {
 
   /**
    * Undo the most recent pushUser matching `text` — a submit the daemon
-   * rejected must not linger as a delivered-looking ghost bubble.
+   * rejected must not linger as a delivered-looking ghost bubble. When
+   * `withinTrailingUsers` is true, scans across contiguous trailing user
+   * bubbles (e.g. multiple queued follow-ups before a promoted steer).
    */
-  rollbackUser(text: string): void {
+  rollbackUser(text: string, withinTrailingUsers = false): void {
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const block = this.blocks[i]!
       if (block.kind === 'user') {
         if (block.text === text) {
           this.blocks = [...this.blocks.slice(0, i), ...this.blocks.slice(i + 1)]
           this.invalidateSnapshot()
+          return
         }
+        if (!withinTrailingUsers) return
+      } else if (withinTrailingUsers) {
         return
       }
     }

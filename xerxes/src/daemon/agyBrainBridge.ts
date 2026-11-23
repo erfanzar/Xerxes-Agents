@@ -52,7 +52,11 @@ import type { DaemonSession } from './runtime.js'
 
 const EXTERNAL_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const AGY_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:md|markdown|html|htm)$/i
+const AGY_TASK_LOG_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.log$/
 const AGY_ARTIFACT_PREFIX = 'agy:'
+export const AGY_TASK_ID_PREFIX = 'agy-task:'
+const MAX_BG_TRANSCRIPT_BYTES = 2 * 1024 * 1024
+const MAX_BG_LOG_INSPECT_CHARS = 200_000
 const CHANNEL_MENTION_REGEX = /(?:^|(?<=[\s([{"',;:]))@#([a-z0-9][a-z0-9_-]{0,31})(?=$|[^a-z0-9_-])/gi
 const MEMBER_MENTION_REGEX = /(?:^|(?<=[\s([{"',;:]))@([a-z0-9][a-z0-9_-]{0,23})(?=$|[^a-z0-9_-])/gi
 const MONITOR_ROLE_PATTERN = /^monitor(?:-\d+)?$/i
@@ -77,9 +81,38 @@ const MAX_SUBAGENT_HISTORY_TEXT_CHARS = 32_000
 export interface AgyBrainLocation {
   readonly brainRoot: string
   readonly externalSessionId: string
+  readonly logsDir: string
+  readonly messagesDir: string
   readonly sessionDir: string
   readonly subagentsDir: string
   readonly swarmDir: string
+  readonly tasksDir: string
+}
+
+export interface AgyBackgroundTaskSnapshot {
+  readonly id: string
+  readonly rawTaskId: string
+  readonly kind: 'shell' | 'schedule' | 'task'
+  readonly title: string
+  readonly label: string
+  readonly detail: string
+  readonly state: 'running' | 'scheduled' | 'completed' | 'failed' | 'cancelled'
+  readonly startedAt: number | null
+  readonly endedAt: number | null
+  readonly exitCode: number | null
+  readonly nextRunAt: string | null
+  readonly durationSeconds?: number
+  readonly cronExpression?: string
+  readonly isDaemon?: boolean
+  readonly logFileName?: string
+  readonly outputPreview?: string
+}
+
+interface CachedBackgroundTasksEntry {
+  readonly mtimeMs: number
+  readonly size: number
+  readonly taskFilesSig: string
+  readonly tasks: readonly AgyBackgroundTaskSnapshot[]
 }
 
 export interface ResolveAgyBrainOptions {
@@ -100,6 +133,7 @@ export interface AgyWatchSessionParams {
   readonly bindingCommand?: string
   readonly externalSessionId: string
   readonly modelDisplayMap?: ReadonlyMap<string, string>
+  readonly onBackgroundChange?: () => void
   readonly onSwarmEvent: (event: SwarmLifecycleEvent, workspaceDir: string) => void
   readonly sessionId: string
   readonly workspaceDir: string
@@ -203,12 +237,16 @@ interface ParsedSwarmDiskState {
 interface WatchedSessionState {
   debounceTimer: ReturnType<typeof setTimeout> | undefined
   lastActivities: ReadonlyMap<string, string>
+  lastBackgroundSig: string
   lastBoardSeq: number
   lastSnapshot: SwarmStatusSnapshot | undefined
   readonly location: AgyBrainLocation
+  logsWatchDir: string | undefined
+  logsWatcher: FSWatcher | undefined
   modelDisplayMap: ReadonlyMap<string, string> | undefined
   narratorWatchDir: string | undefined
   narratorWatcher: FSWatcher | undefined
+  onBackgroundChange: (() => void) | undefined
   readonly onSwarmEvent: (event: SwarmLifecycleEvent, workspaceDir: string) => void
   pollTimer: ReturnType<typeof setInterval> | undefined
   refreshing: boolean
@@ -216,6 +254,8 @@ interface WatchedSessionState {
   readonly sessionId: string
   swarmWatchDir: string | undefined
   swarmWatcher: FSWatcher | undefined
+  tasksWatchDir: string | undefined
+  tasksWatcher: FSWatcher | undefined
   readonly workspaceDir: string
 }
 
@@ -309,6 +349,9 @@ export function resolveAgyBrainLocation(options: ResolveAgyBrainOptions): AgyBra
       sessionDir,
       swarmDir: join(sessionDir, '.system_generated', 'swarm'),
       subagentsDir: join(sessionDir, '.system_generated', 'subagents'),
+      logsDir: join(sessionDir, '.system_generated', 'logs'),
+      messagesDir: join(sessionDir, '.system_generated', 'messages'),
+      tasksDir: join(sessionDir, '.system_generated', 'tasks'),
     }
   }
 
@@ -339,6 +382,9 @@ export function resolveAgyBrainLocation(options: ResolveAgyBrainOptions): AgyBra
     sessionDir,
     swarmDir: join(sessionDir, '.system_generated', 'swarm'),
     subagentsDir: join(sessionDir, '.system_generated', 'subagents'),
+    logsDir: join(sessionDir, '.system_generated', 'logs'),
+    messagesDir: join(sessionDir, '.system_generated', 'messages'),
+    tasksDir: join(sessionDir, '.system_generated', 'tasks'),
   }
 }
 
@@ -1195,6 +1241,7 @@ function emptySwarmStatus(sessionId: string): SwarmStatusSnapshot {
 export class AgyBrainBridge {
   private readonly options: AgyBrainBridgeOptions
   private readonly transcriptCache = new Map<string, CachedTranscriptEntry>()
+  private readonly backgroundTasksCache = new Map<string, CachedBackgroundTasksEntry>()
   private readonly watches = new Map<string, WatchedSessionState>()
   private readonly pinnedArtifactsBySession = new Map<string, Set<string>>()
   private readonly artifactVersions = new Map<string, number>()
@@ -1406,6 +1453,7 @@ export class AgyBrainBridge {
       existing.workspaceDir === params.workspaceDir
     ) {
       existing.modelDisplayMap = params.modelDisplayMap
+      if (params.onBackgroundChange) existing.onBackgroundChange = params.onBackgroundChange
       this.ensureDirectoryWatchers(existing)
       return
     }
@@ -1418,14 +1466,20 @@ export class AgyBrainBridge {
       workspaceDir: params.workspaceDir,
       location,
       modelDisplayMap: params.modelDisplayMap,
+      onBackgroundChange: params.onBackgroundChange,
       onSwarmEvent: params.onSwarmEvent,
       lastSnapshot: undefined,
+      lastBackgroundSig: '',
       lastBoardSeq: 0,
       lastActivities: new Map<string, string>(),
       swarmWatcher: undefined,
       swarmWatchDir: undefined,
       narratorWatcher: undefined,
       narratorWatchDir: undefined,
+      tasksWatcher: undefined,
+      tasksWatchDir: undefined,
+      logsWatcher: undefined,
+      logsWatchDir: undefined,
       debounceTimer: undefined,
       pollTimer: undefined,
       refreshing: false,
@@ -1471,6 +1525,20 @@ export class AgyBrainBridge {
     }
     state.narratorWatcher = undefined
     state.narratorWatchDir = undefined
+    try {
+      state.tasksWatcher?.close()
+    } catch {
+      // Ignore already-closed watcher.
+    }
+    state.tasksWatcher = undefined
+    state.tasksWatchDir = undefined
+    try {
+      state.logsWatcher?.close()
+    } catch {
+      // Ignore already-closed watcher.
+    }
+    state.logsWatcher = undefined
+    state.logsWatchDir = undefined
   }
 
   /** Dispose all active watchers, timers, and caches on daemon shutdown. */
@@ -1479,6 +1547,7 @@ export class AgyBrainBridge {
       this.unwatchSession(sessionId)
     }
     this.transcriptCache.clear()
+    this.backgroundTasksCache.clear()
   }
 
   // ── Artifacts ─────────────────────────────────────────────────────────────
@@ -1631,6 +1700,134 @@ export class AgyBrainBridge {
       content: revision.content,
       updated_at: nowIso,
       version: nextVersion,
+    }
+  }
+
+  // ── Background Tasks, Schedules & Live Logs ──────────────────────────────
+
+  /**
+   * Synchronously project background commands, schedules/timers, and workflows
+   * from an Antigravity session's `.system_generated/logs/transcript.jsonl`,
+   * `.system_generated/messages/`, and `.system_generated/tasks/*.log`.
+   */
+  listBackgroundTasksSync(
+    location: AgyBrainLocation,
+    cwd = '',
+  ): readonly AgyBackgroundTaskSnapshot[] {
+    const transcriptPath = join(location.logsDir, 'transcript.jsonl')
+    let mtimeMs = 0
+    let size = 0
+    try {
+      const st = statSync(transcriptPath)
+      mtimeMs = st.mtimeMs
+      size = st.size
+    } catch {
+      // Transcript may not exist yet; still check tasksDir for live logs.
+    }
+
+    let taskFileNames: string[] = []
+    const taskFileStats = new Map<string, { readonly mtimeMs: number; readonly size: number }>()
+    try {
+      taskFileNames = readdirSync(location.tasksDir)
+        .filter(name => isValidAgyTaskLogFilename(name))
+        .sort()
+      for (const name of taskFileNames) {
+        try {
+          const st = statSync(join(location.tasksDir, name))
+          taskFileStats.set(name, { mtimeMs: st.mtimeMs, size: st.size })
+        } catch {
+          // Ignore disappeared log file.
+        }
+      }
+    } catch {
+      taskFileNames = []
+    }
+
+    const taskFilesSig = taskFileNames
+      .map(name => `${name}:${taskFileStats.get(name)?.size ?? 0}:${Math.trunc(taskFileStats.get(name)?.mtimeMs ?? 0)}`)
+      .join(',')
+    const cacheKey = location.sessionDir
+    const cached = this.backgroundTasksCache.get(cacheKey)
+    if (cached && cached.mtimeMs === mtimeMs && cached.size === size && cached.taskFilesSig === taskFilesSig) {
+      return cached.tasks
+    }
+
+    const rawTranscript = mtimeMs > 0 ? readTailBoundedUtf8Sync(transcriptPath, MAX_BG_TRANSCRIPT_BYTES) : undefined
+    const steps = rawTranscript ? parseTranscriptSteps(rawTranscript) : []
+    const tasks = projectAgyBackgroundTasksFromSteps(steps, location, taskFileStats, cwd)
+
+    if (this.backgroundTasksCache.size >= 64 && !this.backgroundTasksCache.has(cacheKey)) {
+      const oldest = this.backgroundTasksCache.keys().next().value
+      if (oldest !== undefined) this.backgroundTasksCache.delete(oldest)
+    }
+    this.backgroundTasksCache.set(cacheKey, { mtimeMs, size, taskFilesSig, tasks })
+    return tasks
+  }
+
+  /**
+   * Inspect one Antigravity background task (e.g. `agy-task:<convId>/task-2558`)
+   * with the retained tail of its `.system_generated/tasks/task-<N>.log` output.
+   */
+  inspectBackgroundTask(
+    location: AgyBrainLocation,
+    taskId: string,
+    maxOutputChars = 24_000,
+    cwd = '',
+    fallbackTask?: AgyBackgroundTaskSnapshot,
+  ): JsonRpcPayload | undefined {
+    const cleanId = taskId.trim()
+    const rawTarget = cleanId.startsWith(AGY_TASK_ID_PREFIX)
+      ? cleanId.slice(AGY_TASK_ID_PREFIX.length)
+      : cleanId
+    if (!rawTarget) return undefined
+
+    const diskTasks = this.listBackgroundTasksSync(location, cwd)
+    const matched =
+      diskTasks.find(t => t.id === cleanId || t.rawTaskId === rawTarget) ??
+      fallbackTask
+
+    const inferredLog = matched?.logFileName ?? inferAgyTaskLogFilename(rawTarget)
+    let output = ''
+    let truncated = false
+    if (inferredLog && isValidAgyTaskLogFilename(inferredLog)) {
+      const logPath = join(location.tasksDir, inferredLog)
+      const cap = Math.max(1024, Math.min(maxOutputChars, MAX_BG_LOG_INSPECT_CHARS))
+      const raw = readTailBoundedUtf8Sync(logPath, cap * 2)
+      if (raw !== undefined) {
+        if (raw.length > cap) {
+          output = raw.slice(raw.length - cap)
+          truncated = true
+        } else {
+          output = raw
+        }
+      }
+    }
+    if (!output && matched?.outputPreview) {
+      output = matched.outputPreview
+    }
+    if (!matched && !output) return undefined
+
+    const title = matched?.title || rawTarget
+    const label = matched?.label || title.slice(0, 120)
+    const running = matched ? matched.state === 'running' || matched.state === 'scheduled' : false
+    return {
+      id: matched?.id ?? `${AGY_TASK_ID_PREFIX}${rawTarget}`,
+      kind: matched?.isDaemon ? 'daemon' : matched?.kind === 'schedule' ? 'schedule' : 'background',
+      label,
+      command: title,
+      cwd: cwd || matched?.detail || '',
+      running,
+      startedAt: matched?.startedAt ?? Date.now(),
+      ...(matched?.endedAt ? { endedAt: matched.endedAt } : {}),
+      exitCode: matched?.exitCode ?? null,
+      outputChars: output.length,
+      output,
+      outputTruncated: truncated,
+      canWrite: false,
+      canInterrupt: running,
+      canKill: running,
+      source: 'antigravity',
+      rawTaskId: matched?.rawTaskId ?? rawTarget,
     }
   }
 
@@ -2216,6 +2413,73 @@ export class AgyBrainBridge {
         }
       }
     }
+    // Also watch `.system_generated/tasks` and `.system_generated/logs` so
+    // background shell commands, schedules, and task completions push live updates.
+    const desiredTasksDir = existsSync(state.location.tasksDir)
+      ? state.location.tasksDir
+      : undefined
+    if (desiredTasksDir && desiredTasksDir !== state.tasksWatchDir) {
+      try {
+        state.tasksWatcher?.close()
+      } catch {
+        // Ignore.
+      }
+      state.tasksWatcher = undefined
+      state.tasksWatchDir = undefined
+      try {
+        const watcher = watch(desiredTasksDir, () => {
+          this.scheduleWatchedRefresh(state)
+        })
+        watcher.on('error', () => {
+          if (state.tasksWatcher === watcher) {
+            try {
+              watcher.close()
+            } catch {
+              // Ignore.
+            }
+            state.tasksWatcher = undefined
+            state.tasksWatchDir = undefined
+          }
+        })
+        state.tasksWatcher = watcher
+        state.tasksWatchDir = desiredTasksDir
+      } catch {
+        // Ignore unavailable fs.watch on tasks dir.
+      }
+    }
+
+    const desiredLogsDir = existsSync(state.location.logsDir)
+      ? state.location.logsDir
+      : undefined
+    if (desiredLogsDir && desiredLogsDir !== state.logsWatchDir) {
+      try {
+        state.logsWatcher?.close()
+      } catch {
+        // Ignore.
+      }
+      state.logsWatcher = undefined
+      state.logsWatchDir = undefined
+      try {
+        const watcher = watch(desiredLogsDir, () => {
+          this.scheduleWatchedRefresh(state)
+        })
+        watcher.on('error', () => {
+          if (state.logsWatcher === watcher) {
+            try {
+              watcher.close()
+            } catch {
+              // Ignore.
+            }
+            state.logsWatcher = undefined
+            state.logsWatchDir = undefined
+          }
+        })
+        state.logsWatcher = watcher
+        state.logsWatchDir = desiredLogsDir
+      } catch {
+        // Ignore unavailable fs.watch on logs dir.
+      }
+    }
   }
 
   private scheduleWatchedRefresh(state: WatchedSessionState): void {
@@ -2267,7 +2531,17 @@ export class AgyBrainBridge {
       this.ensureDirectoryWatchers(state, parsed.narratorConvId)
 
       const nextStatus = parsed.status
-      const hasWorking = nextStatus.active && nextStatus.members.some(m => m.state === 'working')
+      const bgTasks = this.listBackgroundTasksSync(state.location)
+      const bgSig = bgTasks.map(task => `${task.id}:${task.state}:${task.endedAt ?? ''}:${task.exitCode ?? ''}`).join('|')
+      if (bgSig !== state.lastBackgroundSig) {
+        const hadPrev = state.lastBackgroundSig !== '' || bgTasks.length > 0
+        state.lastBackgroundSig = bgSig
+        if (hadPrev) {
+          state.onBackgroundChange?.()
+        }
+      }
+      const hasLiveBg = bgTasks.some(task => task.state === 'running' || task.state === 'scheduled')
+      const hasWorking = (nextStatus.active && nextStatus.members.some(m => m.state === 'working')) || hasLiveBg
       this.syncWorkingPollTimer(state, hasWorking)
 
       const nextActivitySigs = new Map<string, string>()
@@ -2410,4 +2684,259 @@ function compareArtifactSummaries(left: ArtifactSummary, right: ArtifactSummary)
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1
   if (left.updated_at !== right.updated_at) return left.updated_at < right.updated_at ? 1 : -1
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+}
+
+/** Validate a safe task log basename (e.g. `task-2558.log`) inside `.system_generated/tasks/`. */
+export function isValidAgyTaskLogFilename(filename: string): boolean {
+  if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('\0') || filename.includes('..')) {
+    return false
+  }
+  return AGY_TASK_LOG_FILENAME_PATTERN.test(filename)
+}
+
+/** Infer `task-<N>.log` from a raw AGY task id like `<convId>/task-2558` or `task-2558`. */
+export function inferAgyTaskLogFilename(rawTaskId: string): string | undefined {
+  const match = /(?:^|\/)(task-[A-Za-z0-9._-]+)$/i.exec(rawTaskId.trim())
+  if (!match) return undefined
+  const candidate = `${match[1]!}.log`
+  return isValidAgyTaskLogFilename(candidate) ? candidate : undefined
+}
+
+/** Extract an Antigravity background task id from tool output text. */
+export function extractAgyTaskIdFromText(text: string): string | undefined {
+  const match =
+    /background task with task id:\s*([^\s"'<>]+)/i.exec(text) ??
+    /TaskId["']?\s*[:=]\s*["']?([^\s"'<>]+)/i.exec(text) ??
+    /task[_\s-]*id["']?\s*[:=]\s*["']?([A-Za-z0-9._-]+\/task-[A-Za-z0-9._-]+|task-[A-Za-z0-9._-]+)/i.exec(text)
+  const raw = match?.[1]?.replace(/[.,;:]+$/, '').trim()
+  return raw || undefined
+}
+
+/** Extract the `.system_generated/tasks/<file>.log` basename from tool output text. */
+export function extractAgyLogFileNameFromText(text: string): string | undefined {
+  const match = /\/\.system_generated\/tasks\/([A-Za-z0-9._-]+\.log)\b/i.exec(text)
+  const candidate = match?.[1]?.trim()
+  return candidate && isValidAgyTaskLogFilename(candidate) ? candidate : undefined
+}
+
+/** Parse a command exit code from Antigravity background task completion text. */
+export function parseAgyExitCodeFromText(text: string): number | null {
+  const match = /Command exited with code\s+(-?\d+)/i.exec(text) ?? /exit[_\s]+code\s*[:=]\s*(-?\d+)/i.exec(text)
+  if (!match) return null
+  const code = Number(match[1])
+  return Number.isFinite(code) ? code : null
+}
+
+function parseIsoEpochMs(raw: string | undefined): number | null {
+  if (!raw) return null
+  const parsed = Date.parse(raw)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function projectAgyBackgroundTasksFromSteps(
+  steps: readonly ParsedTranscriptStep[],
+  location: AgyBrainLocation,
+  taskFileStats: ReadonlyMap<string, { readonly mtimeMs: number; readonly size: number }>,
+  cwd: string,
+): AgyBackgroundTaskSnapshot[] {
+  interface MutableTask {
+    id: string
+    rawTaskId: string
+    kind: 'shell' | 'schedule' | 'task'
+    title: string
+    label: string
+    detail: string
+    state: 'running' | 'scheduled' | 'completed' | 'failed' | 'cancelled'
+    startedAt: number | null
+    endedAt: number | null
+    exitCode: number | null
+    nextRunAt: string | null
+    durationSeconds?: number
+    cronExpression?: string
+    isDaemon?: boolean
+    logFileName?: string
+    outputPreview?: string
+  }
+
+  const byRawId = new Map<string, MutableTask>()
+  const pendingToolCalls: Array<{ readonly name: string; readonly args: Record<string, unknown>; readonly createdAt: number | null }> = []
+
+  const normalizeName = (name: string): string =>
+    (name.split(/[.:/]/).pop() ?? name).trim().toLowerCase()
+
+  for (const step of steps) {
+    const stepMs = parseIsoEpochMs(step.createdAt)
+
+    if (step.type === 'PLANNER_RESPONSE' && step.toolCalls.length > 0) {
+      for (const tc of step.toolCalls) {
+        const norm = normalizeName(tc.name)
+        const args = isRecord(tc.args) ? tc.args : {}
+        if (norm === 'manage_task') {
+          const action = readString(args.Action)?.toLowerCase() ?? readString(args.action)?.toLowerCase() ?? ''
+          const targetId = readString(args.TaskId) ?? readString(args.task_id) ?? ''
+          if (action === 'kill' && targetId) {
+            const existing = byRawId.get(targetId)
+            if (existing) {
+              existing.state = 'cancelled'
+              existing.endedAt = stepMs ?? Date.now()
+            }
+          }
+          continue
+        }
+        if (norm === 'run_command' || norm === 'schedule' || norm === 'run_workflow') {
+          pendingToolCalls.push({ name: norm, args, createdAt: stepMs })
+        }
+      }
+      continue
+    }
+
+    if (step.type === 'GENERIC' && step.content) {
+      const taskId = extractAgyTaskIdFromText(step.content)
+      const logFileName = extractAgyLogFileNameFromText(step.content) ?? (taskId ? inferAgyTaskLogFilename(taskId) : undefined)
+      const hasBgMarker = /Tool is running as a background task|Scheduled (?:timer|cron|task)/i.test(step.content)
+      if (!taskId && !hasBgMarker) {
+        // Consume matching synchronous tool call if present
+        if (pendingToolCalls.length > 0 && /Command exited with code/i.test(step.content)) {
+          pendingToolCalls.shift()
+        }
+        continue
+      }
+
+      // Match the most relevant preceding tool call
+      const callIdx = pendingToolCalls.findIndex(item =>
+        item.name === 'schedule'
+          ? /schedule|timer|cron/i.test(step.content) || Boolean(item.args.DurationSeconds ?? item.args.CronExpression)
+          : item.name === 'run_command' || item.name === 'run_workflow',
+      )
+      const matchedCall = callIdx >= 0 ? pendingToolCalls.splice(callIdx, 1)[0] : undefined
+      const rawTaskId = taskId ?? `step-${step.stepIndex}`
+      const startedAt = matchedCall?.createdAt ?? stepMs ?? Date.now()
+
+      if (matchedCall?.name === 'schedule' || /\b(?:DurationSeconds|CronExpression|timer|cron)\b/i.test(step.content)) {
+        const args = matchedCall?.args ?? {}
+        const durSec = readFiniteNumber(args.DurationSeconds ?? args.duration_seconds)
+        const cronExpr = readString(args.CronExpression ?? args.cron_expression)
+        const prompt = readString(args.Prompt ?? args.prompt) ??
+          /Task Description:\s*(.+)/i.exec(step.content)?.[1]?.trim() ??
+          'Scheduled task'
+        const isDaemon = args.IsDaemon === true || args.is_daemon === true
+        const nextRunAt = durSec !== undefined && durSec > 0
+          ? new Date(startedAt + durSec * 1000).toISOString()
+          : null
+        const label = cronExpr
+          ? `Cron · ${cronExpr}`
+          : durSec !== undefined
+            ? `Timer · in ${durSec}s`
+            : 'Schedule'
+        const statusUpper = step.status.toUpperCase()
+        const state: MutableTask['state'] =
+          statusUpper === 'ERROR' ? 'failed' : statusUpper === 'CANCELLED' ? 'cancelled' : 'scheduled'
+        byRawId.set(rawTaskId, {
+          id: `${AGY_TASK_ID_PREFIX}${rawTaskId}`,
+          rawTaskId,
+          kind: 'schedule',
+          title: prompt.slice(0, 2000),
+          label,
+          detail: cronExpr
+            ? `Antigravity cron · ${cronExpr}${isDaemon ? ' · daemon' : ''}`
+            : durSec !== undefined
+              ? `Antigravity timer · ${durSec}s`
+              : 'Antigravity schedule',
+          state,
+          startedAt,
+          endedAt: null,
+          exitCode: null,
+          nextRunAt,
+          ...(durSec !== undefined ? { durationSeconds: durSec } : {}),
+          ...(cronExpr ? { cronExpression: cronExpr } : {}),
+          ...(isDaemon ? { isDaemon: true } : {}),
+          ...(logFileName ? { logFileName } : {}),
+        })
+      } else {
+        const args = matchedCall?.args ?? {}
+        const cmd = readString(args.CommandLine ?? args.command ?? args.cmd) ??
+          /Task Description:\s*(.+)/i.exec(step.content)?.[1]?.trim() ??
+          rawTaskId
+        const summary = readString(args.toolSummary ?? args.Description ?? args.description) ?? cmd.slice(0, 120)
+        const isDaemon = args.IsDaemon === true || args.is_daemon === true
+        const kind: 'shell' | 'task' = matchedCall?.name === 'run_workflow' ? 'task' : 'shell'
+        const statusUpper = step.status.toUpperCase()
+        const state: MutableTask['state'] =
+          statusUpper === 'ERROR' ? 'failed' : statusUpper === 'CANCELLED' ? 'cancelled' : 'running'
+        const logOutMatch = /Log output:\s*\n([\s\S]*)$/i.exec(step.content)
+        byRawId.set(rawTaskId, {
+          id: `${AGY_TASK_ID_PREFIX}${rawTaskId}`,
+          rawTaskId,
+          kind,
+          title: cmd.slice(0, 2000),
+          label: summary.slice(0, 200),
+          detail: cwd || location.sessionDir,
+          state,
+          startedAt,
+          endedAt: null,
+          exitCode: null,
+          nextRunAt: null,
+          ...(isDaemon ? { isDaemon: true } : {}),
+          ...(logFileName ? { logFileName } : {}),
+          ...(logOutMatch?.[1]?.trim() ? { outputPreview: logOutMatch[1].trim().slice(0, 8000) } : {}),
+        })
+      }
+      continue
+    }
+
+    if (step.type === 'SYSTEM_MESSAGE' && step.content) {
+      // Example: [Message] timestamp=2026-11-23T16:45:52Z sender=<convId>/task-2558 priority=... content=...
+      const senderMatch = /\bsender=([^\s\]]+)/.exec(step.content)
+      const sender = senderMatch?.[1]?.trim()
+      if (!sender) continue
+      const existing = byRawId.get(sender)
+      if (!existing) continue
+      const tsMatch = /\btimestamp=([^\s\]]+)/.exec(step.content)
+      const msgMs = parseIsoEpochMs(tsMatch?.[1]) ?? stepMs ?? Date.now()
+      const exitCode = parseAgyExitCodeFromText(step.content)
+      if (existing.kind === 'schedule' && existing.cronExpression) {
+        // Recurring cron keeps running until cancelled or max iterations reached.
+        if (/stopped|completed|cancelled|finished/i.test(step.content)) {
+          existing.state = /cancelled/i.test(step.content) ? 'cancelled' : 'completed'
+          existing.endedAt = msgMs
+        }
+      } else {
+        existing.endedAt = msgMs
+        existing.exitCode = exitCode
+        if (/cancelled|killed/i.test(step.content)) {
+          existing.state = 'cancelled'
+        } else if (exitCode !== null && exitCode !== 0) {
+          existing.state = 'failed'
+        } else if (/\bfailed\b|\berror\b/i.test(step.content) && exitCode === null && existing.kind !== 'schedule') {
+          existing.state = 'failed'
+        } else {
+          existing.state = 'completed'
+        }
+      }
+    }
+  }
+
+  // Also include any `.system_generated/tasks/task-*.log` files not yet captured in the transcript tail.
+  for (const [fileName, fileStat] of taskFileStats.entries()) {
+    const stem = fileName.replace(/\.log$/i, '')
+    const fullRawId = `${location.externalSessionId}/${stem}`
+    if (byRawId.has(fullRawId) || byRawId.has(stem)) continue
+    const recentlyModified = Date.now() - fileStat.mtimeMs < 15_000
+    byRawId.set(fullRawId, {
+      id: `${AGY_TASK_ID_PREFIX}${fullRawId}`,
+      rawTaskId: fullRawId,
+      kind: 'shell',
+      title: stem,
+      label: `Background task · ${stem}`,
+      detail: cwd || location.tasksDir,
+      state: recentlyModified ? 'running' : 'completed',
+      startedAt: Math.trunc(fileStat.mtimeMs),
+      endedAt: recentlyModified ? null : Math.trunc(fileStat.mtimeMs),
+      exitCode: null,
+      nextRunAt: null,
+      logFileName: fileName,
+    })
+  }
+
+  return [...byRawId.values()]
 }

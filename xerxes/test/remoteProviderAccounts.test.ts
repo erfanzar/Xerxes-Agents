@@ -16,20 +16,24 @@ import { ensureRemoteProviderClis, parseProviderCliProbe } from '../src/desktop/
 
 const target = { alias: 'host', target: 'user@example.com', workspacePath: '/work/repo' }
 
-test('missing Claude and Codex are installed and verified on the SSH host', async () => {
+test('missing Claude, Codex, and Antigravity (agy) are installed and verified on the SSH host', async () => {
   const calls: string[][] = []
   const outputs = [
-    'XERXES_PROVIDER_CLIS {"claude":false,"codex":false}',
-    'XERXES_PROVIDER_CLIS {"claude":true,"codex":true}',
+    'XERXES_PROVIDER_CLIS {"claude":false,"codex":false,"agy":false}',
+    'XERXES_PROVIDER_CLIS {"claude":true,"codex":true,"agy":true}',
   ]
   const status = await ensureRemoteProviderClis(target, new AbortController().signal, async (_binary, args) => {
     calls.push(args)
     return calls.length === 1 ? outputs[0]! : outputs[1]!
   })
-  expect(status).toEqual({ claude: true, codex: true })
-  expect(calls).toHaveLength(4)
+  expect(status).toEqual({ claude: true, codex: true, agy: true })
+  expect(calls).toHaveLength(5)
   expect(calls[1]!.join(' ')).toContain('@anthropic-ai/claude-code')
   expect(calls[2]!.join(' ')).toContain('@openai/codex')
+  expect(calls[3]!.join(' ')).toContain('https://antigravity.google/cli/install.sh')
+  expect(calls[3]!.join(' ')).toContain('bash "$tmp"')
+  expect(calls[3]!.join(' ')).not.toContain('--skip-aliases')
+  expect(calls[3]!.join(' ')).not.toContain('--skip-path')
   expect(parseProviderCliProbe(outputs[1]!)).toEqual(status)
 })
 

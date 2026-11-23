@@ -73,7 +73,8 @@ function shellArgument(value: string): string {
 }
 
 export function executionView(item: ToolItem) {
-  const input = record(item.input)
+  const parsedInput = parseArgs(item.input)
+  const input = Object.keys(parsedInput).length > 0 ? parsedInput : null
   const output = record(item.output)
   const commandParts = Array.isArray(output?.command)
     ? output.command

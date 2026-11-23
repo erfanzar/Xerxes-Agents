@@ -11,6 +11,9 @@ import { SimurghMark } from './SimurghMark.js'
 import { DiffPreview } from './DiffPreview.js'
 import { WorkspaceReview } from "./WorkspaceReview.js"
 import { CommandActivity } from './CommandActivity.js'
+import { parseArgs } from './blocks.js'
+import { elapsedOf } from './duration.js'
+import type { Block } from './types.js'
 import { Deliveries } from "./Deliveries.js"
 import { MonitorsDisclosure } from "./Monitors.js"
 import { UnifiedRuns } from "./UnifiedRuns.js"
@@ -57,7 +60,7 @@ import {
   isExternalAcpBinding,
   transportBadgeLabel,
 } from './AcpRuntimePicker.js'
-import { AgentBrandGlyph } from './XerxesSprites.js'
+import { RuntimeBrandIcon } from './BrandMark.js'
 import { Markdown } from './markdown.js'
 import { CodeEditor } from './CodeEditor.js'
 import { BrowserPanel } from './BrowserPanel.js'
@@ -300,7 +303,7 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
         }}>{vibes ? <T3Icon name={railT3IconOf(tab.panel)} size={15} /> : <Icon name={railIconOf(tab.panel, vibes)} size={14} />}<span>{name}</span></button>
         <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}>{vibes ? <T3Icon name="close" size={9} /> : <Icon name="close" size={10} />}</button>
       </div>
-    })}</nav><RailAddMenu onPick={value => open(value)} hideSwarm={!showsImmortalsForSession(snap)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}>{vibes ? <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} /> : <Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} />}</button>}<button aria-label="Close task context" onClick={close}>{vibes ? <T3Icon name="close" size={14} /> : <Icon name="close" size={13} />}</button></header>
+    })}</nav><RailAddMenu onPick={value => open(value)} hideSwarm={!showsImmortalsForSession(snap)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}>{vibes ? <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} /> : <Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} />}</button>}<button aria-label="Close task context" onClick={close}>{vibes ? <T3Icon name="close" size={14} /> : <Icon name="close" size={13} />}</button></header>
     <div className="studio-sheet-content" key={`${currentKey}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} swarm={snap.swarm ?? null} onOpenSwarm={() => { store.openSwarmBoard(); open('swarm') }} onInspect={id => open('activity', id)} />}
       {panel === 'swarm' && <SwarmBoard snap={snap} />}
@@ -752,7 +755,7 @@ export function AcpCustomizePanel({
         <div className="acp-customize__heading">
           <h1>Customize</h1>
           <span className="acp-customize__runtime-pill" data-provider={effectiveBinding.provider}>
-            <AgentBrandGlyph provider={effectiveBinding.provider} size={14} />
+            <RuntimeBrandIcon provider={effectiveBinding.provider} size={14} />
             <span>
               {effectiveBinding.name} {transportBadgeLabel(effectiveBinding.transport)}
               {versionText ? ` · ${versionText}` : ''}
@@ -1585,6 +1588,181 @@ export function BackgroundActivity({ rows, renderRow }: {
   </>
 }
 
+/**
+ * Fallback background-task projection from live transcript blocks when attached
+ * to an Antigravity (`agy acp`) session on an older remote daemon that does not
+ * yet project AGY `schedule` timers or backgrounded `run_command` tasks into
+ * `background.activity`. Never duplicates rows already reported by the daemon.
+ */
+export function extractAcpBackgroundRowsFromBlocks(
+  blocks: readonly Block[],
+  existingRows: readonly RpcRecord[],
+  turnActive: boolean,
+  turnStartedAt?: number | null,
+): RpcRecord[] {
+  const hasDaemonAgyRows = existingRows.some(
+    row => text(row.source) === 'antigravity' || text(row.id).startsWith('agy-task:'),
+  )
+  if (hasDaemonAgyRows) return []
+
+  const byId = new Map<string, RpcRecord>()
+  for (const block of blocks) {
+    if (block.kind !== 'tools') continue
+    for (const item of block.items) {
+      const tail = (item.name || item.verb || '').split(/[.:/]/).pop()?.toLowerCase().trim() ?? ''
+      const args = parseArgs(item.input)
+      if (tail === 'manage_task') {
+        const action = typeof args.Action === 'string' ? args.Action.toLowerCase() : typeof args.action === 'string' ? args.action.toLowerCase() : ''
+        const taskId = typeof args.TaskId === 'string' ? args.TaskId.trim() : typeof args.task_id === 'string' ? args.task_id.trim() : ''
+        if (action === 'kill' && taskId) {
+          const hit = byId.get(`agy-task:${taskId}`)
+          if (hit) byId.set(`agy-task:${taskId}`, { ...hit, state: 'cancelled' })
+        }
+        continue
+      }
+      if (/^(schedule|manage_schedule|cron|timer)$/.test(tail)) {
+        const cronExpr = typeof args.CronExpression === 'string'
+          ? args.CronExpression.trim()
+          : typeof args.cron_expression === 'string'
+            ? args.cron_expression.trim()
+            : ''
+        const durSec = typeof args.DurationSeconds === 'number' && Number.isFinite(args.DurationSeconds)
+          ? args.DurationSeconds
+          : typeof args.duration_seconds === 'number' && Number.isFinite(args.duration_seconds)
+            ? args.duration_seconds
+            : (() => {
+                const m = /\bin\s+(\d+)s\b/i.exec(item.arg)
+                return m ? Number(m[1]) : null
+              })()
+        const prompt = (typeof args.Prompt === 'string' && args.Prompt.trim())
+          || (typeof args.prompt === 'string' && args.prompt.trim())
+          || item.arg.replace(/^in\s+\d+s\s*·\s*/i, '').trim()
+          || 'Scheduled timer'
+        const taskMatch = /background task with task id:\s*([^\s"'<>]+)/i.exec(item.output)
+        const rawTaskId = taskMatch?.[1]?.replace(/[.,;:]+$/, '') || item.id
+        const id = `agy-task:${rawTaskId}`
+        const isLive = item.state === 'working' || (turnActive && Boolean(cronExpr || durSec !== null))
+        const state = item.state === 'failed'
+          ? 'failed'
+          : isLive
+            ? 'scheduled'
+            : 'completed'
+        const detail = cronExpr
+          ? `Antigravity cron · ${cronExpr}`
+          : durSec !== null
+            ? `Antigravity timer · ${elapsedOf(durSec)}`
+            : 'Antigravity schedule'
+        byId.set(id, {
+          id,
+          rawTaskId,
+          kind: 'schedule',
+          source: 'antigravity',
+          synthetic: true,
+          title: prompt,
+          label: cronExpr || (durSec !== null ? `in ${elapsedOf(durSec)}` : 'Schedule'),
+          detail,
+          state,
+          startedAt: turnStartedAt ?? null,
+          endedAt: isLive ? null : Date.now(),
+          nextRunAt: null,
+          ...(durSec !== null ? { durationSeconds: durSec } : {}),
+          ...(cronExpr ? { cronExpression: cronExpr } : {}),
+          scope: 'session',
+        })
+        continue
+      }
+      if (/^(run_?command|bash|exec_?command)$/.test(tail)) {
+        const taskMatch = /background task with task id:\s*([^\s"'<>]+)/i.exec(item.output)
+        const isDaemon = args.IsDaemon === true || args.is_daemon === true
+        if (!taskMatch && !isDaemon) continue
+        const rawTaskId = taskMatch?.[1]?.replace(/[.,;:]+$/, '') || item.id
+        const id = `agy-task:${rawTaskId}`
+        const cmd = (typeof args.CommandLine === 'string' && args.CommandLine.trim())
+          || (typeof args.command === 'string' && args.command.trim())
+          || item.arg
+          || rawTaskId
+        const label = (typeof args.toolSummary === 'string' && args.toolSummary.trim()) || cmd.slice(0, 120)
+        byId.set(id, {
+          id,
+          rawTaskId,
+          kind: 'shell',
+          source: 'antigravity',
+          synthetic: true,
+          title: cmd,
+          label,
+          detail: isDaemon ? 'Antigravity daemon' : 'Antigravity background command',
+          state: item.state === 'failed' ? 'failed' : turnActive ? 'running' : 'completed',
+          startedAt: turnStartedAt ?? null,
+          endedAt: turnActive ? null : Date.now(),
+          exitCode: null,
+          scope: 'session',
+        })
+      }
+    }
+  }
+  return [...byId.values()]
+}
+
+export function ScheduleActivity({
+  row,
+  online,
+  busy,
+  onCancel,
+}: {
+  readonly row: RpcRecord
+  readonly online: boolean
+  readonly busy: boolean
+  readonly onCancel?: () => void
+}): ReactElement {
+  const [open, setOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+  const state = text(row.state) || 'scheduled'
+  const live = state === 'scheduled' || state === 'running'
+  const nextRunIso = text(row.nextRunAt)
+  const nextRunMs = nextRunIso ? Date.parse(nextRunIso) : NaN
+  const timezone = text(row.timezone) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  useEffect(() => {
+    if (!live || !Number.isFinite(nextRunMs)) return
+    const tick = setInterval(() => {
+      if (!pageIsInactive()) setNow(Date.now())
+    }, 1000)
+    return () => clearInterval(tick)
+  }, [live, nextRunMs])
+  const remainingSec = Number.isFinite(nextRunMs) ? Math.max(0, Math.ceil((nextRunMs - now) / 1000)) : null
+  const timingBadge =
+    text(row.cronExpression)
+    || (live && remainingSec !== null
+      ? (remainingSec > 0 ? `in ${elapsedOf(remainingSec)}` : 'firing…')
+      : text(row.label) || (typeof row.durationSeconds === 'number' ? `in ${elapsedOf(row.durationSeconds)}` : state))
+  const sourceLabel = text(row.source) === 'antigravity' ? 'Antigravity' : text(row.scope) === 'workspace' ? 'Workspace' : 'Session'
+  return (
+    <details className="command-activity schedule-activity" data-state={activityTone(state)} open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary title={`${text(row.title)}\n${text(row.detail)}`}>
+        <Icon name="chevron" size={12} />
+        <span className="command-activity__preview">{text(row.title) || 'Scheduled task'}</span>
+        <span className="command-activity__state">{live ? timingBadge : state}</span>
+      </summary>
+      {open && (
+        <div className="command-activity__body">
+          <div className="command-activity__command" tabIndex={0}>{text(row.title)}</div>
+          <div className="command-activity__foot">
+            <span>
+              {sourceLabel}
+              {text(row.detail) ? ` · ${text(row.detail)}` : ''}
+              {nextRunIso && Number.isFinite(nextRunMs) ? ` · next ${scheduleTime(nextRunIso, timezone)}` : ''}
+            </span>
+            {live && onCancel && (
+              <button type="button" disabled={!online || busy} onClick={onCancel}>
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </details>
+  )
+}
+
 /** `backgroundOnly`: the Background tab — every shell and watcher with live output, nothing else. */
 export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot; backgroundOnly?: boolean }): ReactElement {
   const request = useRequest(snap),
@@ -1604,7 +1782,7 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
       const fetchRows = async () => {
         const result = await request.call('background.activity')
         const next = records(result.rows)
-        hasRunning = next.some(row => row.state === 'running' || row.state === 'watching')
+        hasRunning = next.some(row => row.state === 'running' || row.state === 'watching' || row.state === 'scheduled')
         const nextJson = JSON.stringify(next)
         if (active && (nextJson !== lastRowsJson || !silent)) {
           lastRowsJson = nextJson
@@ -1636,46 +1814,80 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
       if (timer) clearTimeout(timer)
     }
   }, [snap.sessionKey, snap.currentId, snap.turnActive])
+
+  const isAgySession =
+    snap.acpBinding?.provider === 'antigravity' ||
+    snap.savedAcpBinding?.provider === 'antigravity'
+  const fallbackAgyRows = isAgySession
+    ? extractAcpBackgroundRowsFromBlocks(snap.blocks, rows, snap.turnActive, snap.turnStartedAt)
+    : []
+  const displayRows = fallbackAgyRows.length > 0 ? [...fallbackAgyRows, ...rows] : rows
+
   // Same row grammar as the agents above: dot, name, state. These used to
   // be two-line blocks whose second line was a whole sentence from the
   // daemon, so a finished watcher carried more visual weight than a
   // running agent.
-  const renderRow = (row: RpcRecord): ReactElement => (
-        row.kind === 'shell' ? <CommandActivity key={text(row.id)} row={row} sessionKey={snap.sessionKey} online={snap.connection === 'online'} /> :
-        <div className="railrow railrow--static" data-state={activityTone(text(row.state))} key={text(row.id)} title={[text(row.title), text(row.kind), text(row.detail)].filter(Boolean).join(' · ')}>
-          <span className="railrow__dot" aria-hidden="true" />
-          <span className="railrow__name">{text(row.title)}</span>
-          <span className="railrow__meta">{text(row.state) || text(row.kind)}</span>
-          {row.kind === 'watcher' && row.state === 'watching' && (
-            <button
-              disabled={request.busy}
-              onClick={() =>
-                void request.run(async () => {
-                  await request.call('monitor.stop', { monitor_id: row.id })
-                })
-              }
-            >
-              Stop watcher
-            </button>
-          )}
-        </div>
+  const renderRow = (row: RpcRecord): ReactElement => {
+    if (row.kind === 'shell') {
+      return <CommandActivity key={text(row.id)} row={row} sessionKey={snap.sessionKey} online={snap.connection === 'online'} />
+    }
+    if (row.kind === 'schedule') {
+      const canCancel = row.state === 'scheduled' || row.state === 'running'
+      const cancelSchedule = () => {
+        if (row.synthetic === true && text(row.rawTaskId)) {
+          void store.submit(`Cancel background task \`${text(row.rawTaskId)}\` using manage_task(Action: "kill", TaskId: "${text(row.rawTaskId)}").`)
+          return
+        }
+        void request.run(async () => {
+          await request.call('schedule.cancel', { schedule_id: row.id })
+        })
+      }
+      return (
+        <ScheduleActivity
+          key={text(row.id)}
+          row={row}
+          online={snap.connection === 'online'}
+          busy={request.busy}
+          {...(canCancel ? { onCancel: cancelSchedule } : {})}
+        />
       )
+    }
+    return (
+      <div className="railrow railrow--static" data-state={activityTone(text(row.state))} key={text(row.id)} title={[text(row.title), text(row.kind), text(row.detail)].filter(Boolean).join(' · ')}>
+        <span className="railrow__dot" aria-hidden="true" />
+        <span className="railrow__name">{text(row.title)}</span>
+        <span className="railrow__meta">{text(row.state) || text(row.kind)}</span>
+        {row.kind === 'watcher' && row.state === 'watching' && (
+          <button
+            disabled={request.busy}
+            onClick={() =>
+              void request.run(async () => {
+                await request.call('monitor.stop', { monitor_id: row.id })
+              })
+            }
+          >
+            Stop watcher
+          </button>
+        )}
+      </div>
+    )
+  }
 
   if (backgroundOnly) return <div className="studio-form activity-panel background-panel">
     <Feedback {...request} />
-    {rows.length > 0
-      ? <section className="railcard activity-tasks" aria-label="Background tasks"><BackgroundActivity rows={rows} renderRow={renderRow} /></section>
-      : loaded && <div className="activity-idle" role="status"><Icon name="hourglass" size={22} /><strong>No background work</strong><p>Shells and watchers the agent starts in the background appear here with their live output.</p></div>}
+    {displayRows.length > 0
+      ? <section className="railcard activity-tasks" aria-label="Background tasks"><BackgroundActivity rows={displayRows} renderRow={renderRow} /></section>
+      : loaded && <div className="activity-idle" role="status"><Icon name="hourglass" size={22} /><strong>No background work</strong><p>Shells, timers and watchers the agent starts in the background appear here with their live output.</p></div>}
   </div>
   return (
     <div className="studio-form activity-panel">
       <Feedback {...request} />
-      {rows.length > 0 && (
+      {displayRows.length > 0 && (
         <section className="railcard activity-tasks" aria-label="Background tasks">
-          <BackgroundActivity rows={rows} renderRow={renderRow} />
+          <BackgroundActivity rows={displayRows} renderRow={renderRow} />
         </section>
       )}
-      {loaded && !rows.length && !snap.fleet.length && (
+      {loaded && !displayRows.length && !snap.fleet.length && (
         <div className="activity-idle" role="status"><Icon name="activity" size={22} /><strong>{snap.turnActive ? "Working on your request" : "No active work"}</strong><p>{snap.turnActive ? "Tools and background jobs appear here as they start." : "Agents and background jobs appear here when they run."}</p></div>
       )}
       {/* Zone 3 — one drawer. These were six sibling sections, each
@@ -2031,23 +2243,62 @@ function FileDocument({ source, path = '' }: { source: string; path?: string }):
   </article>
 }
 
+const WORKSPACE_ADD_SSH_EVENT = 'xerxes:workspace-add-ssh'
+let pendingOpenWorkspaceSsh = false
+
+/**
+ * Signal `WorkspacePanel` to open with the SSH connection form expanded.
+ * Works both before the panel mounts and when it is already visible.
+ */
+export function requestWorkspaceSshForm(): void {
+  pendingOpenWorkspaceSsh = true
+  if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent(WORKSPACE_ADD_SSH_EVENT))
+  }
+}
+
+function consumeWorkspaceSshForm(): boolean {
+  if (!pendingOpenWorkspaceSsh) return false
+  pendingOpenWorkspaceSsh = false
+  return true
+}
+
 function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
-  const [managed,setManaged]=useState(false)
+  const [managed, setManaged] = useState(false)
   const open = useDesktopNavigation(),
     request = useRequest(snap)
+  const openedForSsh = useRef<boolean | null>(null)
+  if (openedForSsh.current === null) openedForSsh.current = consumeWorkspaceSshForm()
+  const isRemoteCurrent = Boolean(snap.storageScope?.startsWith('ssh:'))
+  const [tab, setTab] = useState<'ssh' | 'local'>(() => (openedForSsh.current || isRemoteCurrent ? 'ssh' : 'local'))
   const [machines, setMachines] = useState<RpcRecord[]>([]),
     [hosts, setHosts] = useState<string[]>([]),
     [hostsLoading, setHostsLoading] = useState(false),
     [hostsError, setHostsError] = useState(''),
     [remoteStatus, setRemoteStatus] = useState<RpcRecord | null>(null)
-  const [adding, setAdding] = useState(false),
+  const [adding, setAdding] = useState<boolean>(() => Boolean(openedForSsh.current)),
     [alias, setAlias] = useState(''),
     [target, setTarget] = useState(''),
     [port, setPort] = useState(''),
     [path, setPath] = useState(''),
     [folders, setFolders] = useState<string[]>([]),
     [browsing, setBrowsing] = useState(false),
-    [connecting, setConnecting] = useState(false)
+    [browsingBusy, setBrowsingBusy] = useState(false),
+    [connecting, setConnecting] = useState(false),
+    [sshError, setSshError] = useState('')
+  const sshSectionRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const onRequestSsh = () => {
+      pendingOpenWorkspaceSsh = false
+      setManaged(false)
+      setTab('ssh')
+      setAdding(true)
+      setSshError('')
+      requestAnimationFrame(() => sshSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    }
+    window.addEventListener(WORKSPACE_ADD_SSH_EVENT, onRequestSsh)
+    return () => window.removeEventListener(WORKSPACE_ADD_SSH_EVENT, onRequestSsh)
+  }, [])
   const native = async (action: string, params: RpcRecord = {}) => {
     if (!window.xerxes.remote)
       throw new Error('Remote workspaces require the current desktop build.')
@@ -2083,218 +2334,458 @@ function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
   // A port typed into its own field joins the host the way ssh targets carry it: user@host:port.
   const destination = port.trim() && !/:[0-9]+$/.test(target.trim()) ? `${target.trim()}:${port.trim()}` : target.trim()
   const browse = async (folder: string) => {
-    const result = await native('browse', { target: destination, path: folder })
-    if (request.alive.current) {
-      setPath(text(result.path))
-      setFolders(Array.isArray(result.directories) ? result.directories.map(text) : [])
-      setBrowsing(true)
+    setSshError('')
+    setBrowsingBusy(true)
+    try {
+      const result = await native('browse', { target: destination, path: folder })
+      if (request.alive.current) {
+        setPath(text(result.path))
+        setFolders(Array.isArray(result.directories) ? result.directories.map(text) : [])
+        setBrowsing(true)
+      }
+    } catch (error) {
+      if (request.alive.current) setSshError(desktopError(error))
+    } finally {
+      if (request.alive.current) setBrowsingBusy(false)
     }
   }
   const connect = (machine: RpcRecord) =>
     request.run(async () => {
+      setSshError('')
       setConnecting(true)
       try {
         await native('connect', { machine, resume_session_id: snap.currentId })
+      } catch (error) {
+        if (request.alive.current) setSshError(desktopError(error))
+        throw error
       } finally {
         if (request.alive.current) setConnecting(false)
       }
     })
+  const saveMachine = async (andConnect: boolean) => {
+    setSshError('')
+    const machine = { alias: alias.trim(), target: destination, workspacePath: path.trim() }
+    try {
+      await native('save', { machine })
+      if (!request.alive.current) return
+      await load()
+      if (andConnect) {
+        setAdding(false)
+        await connect(machine)
+      } else {
+        setAdding(false)
+        setAlias('')
+        setTarget('')
+        setPort('')
+        setPath('')
+        setFolders([])
+        setBrowsing(false)
+      }
+    } catch (error) {
+      if (request.alive.current) setSshError(desktopError(error))
+    }
+  }
+  const hostNeedle = target.trim().toLowerCase()
+  const suggestedHosts = hosts
+    .filter(host => !hostNeedle || host.toLowerCase().includes(hostNeedle))
+    .filter(host => host.toLowerCase() !== hostNeedle)
+    .slice(0, 6)
+
   return (
-    <div className="studio-form workspace-panel">
-      {managed ? <WorkspaceReview key={snap.sessionKey} snap={snap} close={()=>setManaged(false)} /> : <>
-      <Feedback {...request} />
-      <div className="workspace-current">
-        <div>
-          <span className="workspace-eyebrow">Current workspace</span><h3>{snap.cwd.split('/').at(-1) || 'Choose a workspace'}</h3>
-          <p>{snap.cwd}</p>
-          <small className="workspace-status" data-online={snap.connection === "online"}>
-            {remoteStatus?.machine ? 'SSH · local rendering' : 'Local workspace'} ·{' '}
-            {snap.connection}
-          </small>
-        </div>
-        <button
-          disabled={request.busy}
-          onClick={() => {
-            if (remoteStatus?.machine) void connect(record(remoteStatus.machine))
-            else store.retryConnection()
-          }}
-        >
-          Reconnect
-        </button>
-      </div>
-      {remoteStatus?.error ? (
-        <p role="alert" className="studio-error">
-          {text(remoteStatus.error)}
-        </p>
-      ) : null}
-      <div className="workspace-local-actions">
-        <button onClick={()=>setManaged(true)}>Review isolated work</button>
-        <button onClick={() => store.chooseWorkspace()}>Switch this window’s folder</button>
-        <button disabled={snap.workspaceBusy} onClick={() => void store.openWorkspaceWindow()}>Open workspace in new window…</button>
-        <button
-          onClick={() => {
-            open(null)
-            store.toggleWorkspaceMenu()
-          }}
-        >
-          Recent workspaces
-        </button>
-      </div>
-      {remoteStatus?.machine && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} accounts={window.xerxes.accounts} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
-      <h3 className="workspace-section-title">Saved connections</h3>
-      <p className="studio-muted">
-        Connect to a project on another machine over SSH.
-      </p>
-      {machines.map((machine) => (
-        <div className="workspace-remote" key={text(machine.alias)}>
-          <div>
-            <strong>{text(machine.alias)}</strong>
-            <p>
-              <span>{text(machine.target)}</span><span>{text(machine.workspacePath)}</span>
-            </p>
-          </div>
-          <button disabled={request.busy} onClick={() => void connect(machine)}>
-            Connect
+    <div className="studio-form workspace-panel ws-gemini">
+      {managed ? <WorkspaceReview key={snap.sessionKey} snap={snap} close={() => setManaged(false)} /> : <>
+        <div className="ws-tabs" role="tablist" aria-label="Workspace mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'ssh'}
+            className={`ws-tab${tab === 'ssh' ? ' is-active' : ''}`}
+            onClick={() => setTab('ssh')}
+          >
+            <T3Icon name="server" size={14} />
+            <span>SSH &amp; Remote</span>
+            {machines.length > 0 && <span className="ws-tab__count">{machines.length}</span>}
           </button>
           <button
-            disabled={request.busy}
-            onClick={() => {
-              if (window.confirm('Remove this saved workspace? Remote files are kept.'))
-                void request.run(async () => {
-                  await native('remove', { alias: machine.alias })
-                  await load()
-                })
-            }}
+            type="button"
+            role="tab"
+            aria-selected={tab === 'local'}
+            className={`ws-tab${tab === 'local' ? ' is-active' : ''}`}
+            onClick={() => setTab('local')}
           >
-            Remove
+            <T3Icon name="monitor" size={14} />
+            <span>This Mac</span>
           </button>
         </div>
-      ))}
-      {connecting && (
-        <div role="status">
-          <p>Preparing remote runtime and opening the tunnel…</p>
-          <button onClick={() => void native('cancel').catch(() => {})}>Cancel connection</button>
-        </div>
-      )}
-      {adding ? (
-        <>
-          <label>
-            Name
-            <input
-              value={alias}
-              onChange={(e) => setAlias(e.target.value)}
-              placeholder="training-server"
-            />
-          </label>
-          <label>
-            SSH host
-            <input
-              list="ssh-hosts"
-              value={target}
-              onChange={(e) => {
-                setTarget(e.target.value)
-                setPath('')
-                setFolders([])
-                setBrowsing(false)
-              }}
-              placeholder="SSH alias, user@host or user@host:port"
-            />
-            <datalist id="ssh-hosts">
-              {hosts.map((host) => (
-                <option key={host} value={host} />
-              ))}
-            </datalist>
-          </label>
-          <label>
-            Port
-            <input
-              inputMode="numeric"
-              value={port}
-              onChange={(e) => {
-                setPort(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))
-                setPath('')
-                setFolders([])
-                setBrowsing(false)
-              }}
-              placeholder="22, or the port from your SSH config"
-            />
-          </label>
-          {hostsLoading && <p className="studio-muted" role="status">Loading SSH aliases. You can also enter a host directly.</p>}
-          {hostsError && <p className="studio-error" role="alert">{hostsError} You can enter an SSH alias or user@host directly.</p>}
-          <label>
-            Project folder
-            <input
-              value={path}
-              onChange={(e) => {
-                setPath(e.target.value)
-                setBrowsing(false)
-              }}
-              placeholder="Choose a folder on the host"
-            />
-          </label>
-          <button
-            disabled={request.busy || !target}
-            onClick={() => void request.run(() => browse(path))}
-          >
-            Browse remote folders
-          </button>
-          {browsing && (
-            <div className="studio-folder-list">
+
+        {request.error && !sshError && <p className="ws-error" role="alert">{request.error}</p>}
+
+        {tab === 'local' ? (
+          <div className="ws-section" role="tabpanel" aria-label="Local workspace">
+            <div className="ws-card ws-current-card">
+              <div className="ws-current-card__main">
+                <span className="ws-eyebrow">Current workspace</span>
+                <h3 className="ws-current-card__title">{snap.cwd.split('/').at(-1) || 'Choose a workspace'}</h3>
+                <p className="ws-current-card__path">{snap.cwd}</p>
+                <small className="workspace-status" data-online={snap.connection === 'online'}>
+                  {remoteStatus?.machine ? 'SSH · local rendering' : 'Local workspace'} · {snap.connection}
+                </small>
+              </div>
               <button
+                type="button"
+                className="ws-btn ws-btn-tonal"
                 disabled={request.busy}
-                onClick={() =>
-                  void request.run(() => browse(path.split('/').slice(0, -1).join('/') || '/'))
-                }
+                onClick={() => {
+                  if (remoteStatus?.machine) void connect(record(remoteStatus.machine))
+                  else store.retryConnection()
+                }}
               >
-                <Icon name="arrowUp" size={12} /> Parent folder
+                Reconnect
               </button>
-              <strong>{path}</strong>
-              {folders.map((folder) => (
-                <button
-                  disabled={request.busy}
-                  key={folder}
-                  onClick={() =>
-                    void request.run(() => browse(path.replace(/\/$/, '') + '/' + folder))
-                  }
-                >
-                  <Icon name="chevron" size={12} /> {folder}
-                </button>
-              ))}
-              <button onClick={() => setBrowsing(false)}>Use this folder</button>
             </div>
-          )}
-          <div className="studio-actions">
-            <button disabled={request.busy} onClick={() => setAdding(false)}>
-              Cancel
-            </button>
-            <button
-              className="studio-primary"
-              disabled={request.busy || !alias || !target || !path}
-              onClick={() =>
-                void request.run(async () => {
-                  await native('save', { machine: { alias, target: destination, workspacePath: path } })
-                  if (request.alive.current) {
-                    setAdding(false)
-                    await load()
-                  }
-                })
-              }
-            >
-              Save workspace
-            </button>
+
+            <div className="ws-action-grid">
+              <button type="button" className="ws-action-tile" onClick={() => store.chooseWorkspace()}>
+                <span className="ws-action-tile__icon" aria-hidden="true"><T3Icon name="folderPlus" size={16} /></span>
+                <span className="ws-action-tile__text">
+                  <strong>Switch folder</strong>
+                  <small>Open another folder in this window</small>
+                </span>
+              </button>
+              <button type="button" className="ws-action-tile" disabled={snap.workspaceBusy} onClick={() => void store.openWorkspaceWindow()}>
+                <span className="ws-action-tile__icon" aria-hidden="true"><T3Icon name="folders" size={16} /></span>
+                <span className="ws-action-tile__text">
+                  <strong>Open in new window</strong>
+                  <small>Run a second workspace side by side</small>
+                </span>
+              </button>
+              <button type="button" className="ws-action-tile" onClick={() => setManaged(true)}>
+                <span className="ws-action-tile__icon" aria-hidden="true"><T3Icon name="gitBranch" size={16} /></span>
+                <span className="ws-action-tile__text">
+                  <strong>Review isolated work</strong>
+                  <small>Inspect worktrees and managed diffs</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="ws-action-tile"
+                onClick={() => {
+                  open(null)
+                  store.toggleWorkspaceMenu()
+                }}
+              >
+                <span className="ws-action-tile__icon" aria-hidden="true"><Icon name="clock" size={16} /></span>
+                <span className="ws-action-tile__text">
+                  <strong>Recent workspaces</strong>
+                  <small>Jump back to a recent project</small>
+                </span>
+              </button>
+            </div>
           </div>
-        </>
-      ) : (
-        <button
-          disabled={request.busy}
-          onClick={() => {
-            setAdding(true)
-          }}
-        >
-          Add remote workspace
-        </button>
-      )}
-    </>}
+        ) : (
+          <div className="ws-section" role="tabpanel" aria-label="SSH connections" ref={sshSectionRef}>
+            {remoteStatus?.machine ? (
+              <div className="ws-card ws-current-card">
+                <div className="ws-current-card__main">
+                  <span className="ws-eyebrow">Connected over SSH</span>
+                  <h3 className="ws-current-card__title">{text(record(remoteStatus.machine).alias) || snap.cwd.split('/').at(-1)}</h3>
+                  <p className="ws-current-card__path">{text(record(remoteStatus.machine).target)} · {snap.cwd}</p>
+                  <small className="workspace-status" data-online={snap.connection === 'online'}>
+                    SSH · local rendering · {snap.connection}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="ws-btn ws-btn-tonal"
+                  disabled={request.busy}
+                  onClick={() => void connect(record(remoteStatus.machine))}
+                >
+                  Reconnect
+                </button>
+              </div>
+            ) : null}
+
+            {remoteStatus?.error ? (
+              <p role="alert" className="ws-error">{text(remoteStatus.error)}</p>
+            ) : null}
+
+            {Boolean(remoteStatus?.machine) && (
+              <RemoteProviders
+                key={snap.sessionKey}
+                remote={window.xerxes.remote}
+                accounts={window.xerxes.accounts}
+                relay={snap.providerRelay}
+                changed={() => store.loadModels(true)}
+              />
+            )}
+
+            {connecting && (
+              <div className="ws-status-banner" role="status">
+                <span className="studio-spinner" aria-hidden="true" />
+                <span>Preparing remote runtime and opening the SSH tunnel…</span>
+                <button type="button" className="ws-btn ws-btn-ghost" onClick={() => void native('cancel').catch(() => {})}>Cancel</button>
+              </div>
+            )}
+
+            {adding ? (
+              <div className="ws-card ws-composer-card">
+                <div className="ws-composer-card__head">
+                  <div>
+                    <h3 className="ws-composer-card__title">Connect over SSH</h3>
+                    <p className="ws-composer-card__sub">First-time hosts will prompt you to verify and trust their SSH fingerprint.</p>
+                  </div>
+                </div>
+
+                <div className="ws-field-grid">
+                  <label className="ws-field">
+                    <span>Name</span>
+                    <input
+                      value={alias}
+                      onChange={(e) => setAlias(e.target.value)}
+                      placeholder="my-server"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="ws-field">
+                    <span>Port</span>
+                    <input
+                      inputMode="numeric"
+                      value={port}
+                      onChange={(e) => {
+                        setPort(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))
+                        setPath('')
+                        setFolders([])
+                        setBrowsing(false)
+                      }}
+                      placeholder="22"
+                    />
+                  </label>
+                </div>
+
+                <label className="ws-field">
+                  <span>SSH host</span>
+                  <input
+                    list="ssh-hosts"
+                    value={target}
+                    onChange={(e) => {
+                      setTarget(e.target.value)
+                      setPath('')
+                      setFolders([])
+                      setBrowsing(false)
+                      setSshError('')
+                    }}
+                    placeholder="SSH alias, user@host or user@host:port"
+                    spellCheck={false}
+                  />
+                  <datalist id="ssh-hosts">
+                    {hosts.map((host) => (
+                      <option key={host} value={host} />
+                    ))}
+                  </datalist>
+                </label>
+
+                {suggestedHosts.length > 0 && (
+                  <div className="ws-host-chips" aria-label="SSH config aliases">
+                    {suggestedHosts.map((host) => (
+                      <button
+                        type="button"
+                        key={host}
+                        className="ws-host-chip"
+                        onClick={() => {
+                          setTarget(host)
+                          if (!alias.trim()) setAlias(host)
+                          setPath('')
+                          setFolders([])
+                          setBrowsing(false)
+                          setSshError('')
+                        }}
+                      >
+                        {host}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {hostsLoading && <p className="ws-hint" role="status">Loading ~/.ssh/config aliases…</p>}
+                {hostsError && <p className="ws-error" role="alert">{hostsError} You can still enter a host directly.</p>}
+
+                <div className="ws-field">
+                  <span>Project folder</span>
+                  <div className="ws-input-row">
+                    <input
+                      aria-label="Project folder"
+                      value={path}
+                      onChange={(e) => {
+                        setPath(e.target.value)
+                        setBrowsing(false)
+                        setSshError('')
+                      }}
+                      placeholder="/home/user/project"
+                      spellCheck={false}
+                    />
+                    <button
+                      type="button"
+                      className="ws-btn ws-btn-tonal"
+                      disabled={request.busy || browsingBusy || !target.trim()}
+                      onClick={() => void browse(path)}
+                    >
+                      {browsingBusy ? 'Browsing…' : 'Browse'}
+                    </button>
+                  </div>
+                </div>
+
+                {browsingBusy && (
+                  <div className="ws-status-banner" role="status">
+                    <span className="studio-spinner" aria-hidden="true" />
+                    <span>Verifying SSH host key &amp; listing remote folders…</span>
+                  </div>
+                )}
+
+                {sshError && <p className="ws-error" role="alert">{sshError}</p>}
+
+                {browsing && (
+                  <div className="ws-folder-browser">
+                    <div className="ws-folder-browser__head">
+                      <button
+                        type="button"
+                        className="ws-btn ws-btn-ghost"
+                        disabled={browsingBusy}
+                        onClick={() => void browse(path.split('/').slice(0, -1).join('/') || '/')}
+                      >
+                        <Icon name="arrowUp" size={12} /> Up
+                      </button>
+                      <code className="ws-folder-browser__path" title={path}>{path}</code>
+                      <button type="button" className="ws-btn ws-btn-tonal" onClick={() => setBrowsing(false)}>
+                        Use folder
+                      </button>
+                    </div>
+                    <div className="ws-folder-browser__list">
+                      {folders.length === 0 ? (
+                        <p className="ws-hint">No subfolders here.</p>
+                      ) : (
+                        folders.map((folder) => (
+                          <button
+                            type="button"
+                            className="ws-folder-row"
+                            disabled={browsingBusy}
+                            key={folder}
+                            onClick={() => void browse(path.replace(/\/$/, '') + '/' + folder)}
+                          >
+                            <Icon name="folder" size={13} />
+                            <span>{folder}</span>
+                            <Icon name="chevron" size={12} />
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="ws-composer-card__foot">
+                  <button
+                    type="button"
+                    className="ws-btn ws-btn-ghost"
+                    disabled={request.busy || browsingBusy}
+                    onClick={() => {
+                      setAdding(false)
+                      setSshError('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <div className="ws-composer-card__actions">
+                    <button
+                      type="button"
+                      className="ws-btn ws-btn-tonal"
+                      disabled={request.busy || browsingBusy || !alias.trim() || !target.trim() || !path.trim()}
+                      onClick={() => void request.run(() => saveMachine(false))}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="ws-btn ws-btn-primary"
+                      disabled={request.busy || browsingBusy || !alias.trim() || !target.trim() || !path.trim()}
+                      onClick={() => void request.run(() => saveMachine(true))}
+                    >
+                      Save &amp; connect
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="ws-section-bar">
+                <div>
+                  <h4 className="ws-section-heading">Saved hosts</h4>
+                  <p className="ws-hint">Connect to any project over SSH with local rendering.</p>
+                </div>
+                <button
+                  type="button"
+                  className="ws-btn ws-btn-primary"
+                  disabled={request.busy}
+                  onClick={() => {
+                    setAdding(true)
+                    setSshError('')
+                  }}
+                >
+                  <Icon name="plus" size={13} /> New SSH host
+                </button>
+              </div>
+            )}
+
+            {sshError && !adding && <p className="ws-error" role="alert">{sshError}</p>}
+
+            {machines.length > 0 && (
+              <>
+                {adding && <h4 className="ws-section-heading">Saved hosts</h4>}
+                <div className="ws-host-list">
+                  {machines.map((machine) => (
+                    <div className="ws-host-row" key={text(machine.alias)}>
+                      <span className="ws-host-row__badge" aria-hidden="true">
+                        <T3Icon name="server" size={15} />
+                      </span>
+                      <div className="ws-host-row__main">
+                        <strong>{text(machine.alias)}</strong>
+                        <p>
+                          <span>{text(machine.target)}</span>
+                          <span className="ws-host-row__sep">·</span>
+                          <span>{text(machine.workspacePath)}</span>
+                        </p>
+                      </div>
+                      <div className="ws-host-row__actions">
+                        <button type="button" className="ws-btn ws-btn-tonal" disabled={request.busy} onClick={() => void connect(machine)}>
+                          Connect
+                        </button>
+                        <button
+                          type="button"
+                          className="ws-btn ws-btn-ghost"
+                          disabled={request.busy}
+                          onClick={() => {
+                            if (window.confirm('Remove this saved workspace? Remote files are kept.'))
+                              void request.run(async () => {
+                                await native('remove', { alias: machine.alias })
+                                await load()
+                              })
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {machines.length === 0 && !adding && (
+              <div className="ws-empty-card">
+                <p>No saved SSH hosts yet.</p>
+                <p className="ws-hint">Add a remote server to run agents there while keeping the UI local and responsive.</p>
+              </div>
+            )}
+          </div>
+        )}
+      </>}
     </div>
   )
 }
@@ -2351,7 +2842,7 @@ function pluginArgument(value: string): string {
 
 export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
-  const [counts, setCounts] = useState<{ shells: number; watchers: number } | null>(null)
+  const [counts, setCounts] = useState<{ shells: number; watchers: number; schedules: number } | null>(null)
   const [compacting, setCompacting] = useState('')
   useEffect(() => {
     let active = true,
@@ -2366,7 +2857,8 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
         if (active) {
           const shells = result.shells
           const watchers = result.watchers
-          setCounts(prev => (prev && prev.shells === shells && prev.watchers === watchers ? prev : { shells, watchers }))
+          const schedules = typeof result.schedules === 'number' ? result.schedules : 0
+          setCounts(prev => (prev && prev.shells === shells && prev.watchers === watchers && prev.schedules === schedules ? prev : { shells, watchers, schedules }))
         }
       } catch {
         if (active) setCounts(prev => (prev === null ? prev : null))
@@ -2395,8 +2887,25 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
   useEffect(() => {
     if (snap.connection !== 'online') setCompacting('')
   }, [snap.connection])
+  const isAgySession =
+    snap.acpBinding?.provider === 'antigravity' ||
+    snap.savedAcpBinding?.provider === 'antigravity'
+  const fallbackRows = isAgySession && (!counts || (counts.shells === 0 && counts.watchers === 0 && counts.schedules === 0))
+    ? extractAcpBackgroundRowsFromBlocks(snap.blocks, [], snap.turnActive, snap.turnStartedAt)
+    : []
+  const fallbackShells = fallbackRows.filter(row => row.kind === 'shell' && row.state === 'running').length
+  const fallbackSchedules = fallbackRows.filter(row => row.kind === 'schedule' && (row.state === 'scheduled' || row.state === 'running')).length
+  const effectiveCounts = counts
+    ? {
+        shells: counts.shells || fallbackShells,
+        watchers: counts.watchers,
+        schedules: counts.schedules || fallbackSchedules,
+      }
+    : (fallbackShells || fallbackSchedules)
+      ? { shells: fallbackShells, watchers: 0, schedules: fallbackSchedules }
+      : null
   // Idle, it only duplicated the rail's Activity button: show it only while something runs.
-  if (!compacting && !(counts && (counts.shells || counts.watchers))) return <></>
+  if (!compacting && !(effectiveCounts && (effectiveCounts.shells || effectiveCounts.watchers || effectiveCounts.schedules))) return <></>
   return (
     <button title="Background activity" aria-label="Activity" className="studio-background" onClick={() => open('activity')} aria-live="polite">
       <Icon name="activity" /><span>
@@ -2405,13 +2914,16 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
           <span className="studio-spinner" />
           {compacting}
         </>
-      ) : counts ? (
+      ) : effectiveCounts ? (
         [
-          counts.shells
-            ? counts.shells + (counts.shells === 1 ? ' shell running' : ' shells running')
+          effectiveCounts.shells
+            ? effectiveCounts.shells + (effectiveCounts.shells === 1 ? ' shell running' : ' shells running')
             : '',
-          counts.watchers
-            ? counts.watchers + (counts.watchers === 1 ? ' watcher' : ' watchers')
+          effectiveCounts.watchers
+            ? effectiveCounts.watchers + (effectiveCounts.watchers === 1 ? ' watcher' : ' watchers')
+            : '',
+          effectiveCounts.schedules
+            ? effectiveCounts.schedules + (effectiveCounts.schedules === 1 ? ' timer' : ' timers')
             : '',
         ]
           .filter(Boolean)

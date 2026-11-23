@@ -213,7 +213,7 @@ describe('hub link', () => {
     await expect(runHubLink(linkOptions(home), deps(argv => prepared(argv) ?? ((argv.at(-1) ?? '').includes('add-local') ? { code: 127 } : undefined)))).rejects.toThrow(/not installed/)
     await expect(runHubLink({ ...linkOptions(home), socketWaitMs: 0 }, deps(argv => prepared(argv) ?? ((argv.at(-1) ?? '').startsWith('test -S') ? { code: 1 } : undefined)))).rejects.toThrow(/never appeared/)
     expect(() => validateSshTarget('user@host name')).toThrow(HubLinkError)
-    expect(validateSshTarget('xerxes@209.38.102.184')).toBe('xerxes@209.38.102.184')
+    expect(validateSshTarget('xerxes@203.0.113.10')).toBe('xerxes@203.0.113.10')
   })
 
   test('the tunnel runner clears a stale forwarded socket, then forwards this daemon', async () => {
@@ -230,11 +230,11 @@ describe('hub link', () => {
     expect(attached[attached.indexOf('-R') + 1]).toBe('/home/x/.xerxes/tunnels/m.sock:/Users/me/d.sock')
   })
 
-  const sshDump = 'host 209.38.102.184\nhostname 209.38.102.184\nport 22\nuserknownhostsfile /u/.ssh/known_hosts /u/.ssh/known_hosts2\n'
-  const hubKey = '209.38.102.184 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHubKeyForTestsOnly'
+  const sshDump = 'host 203.0.113.10\nhostname 203.0.113.10\nport 22\nuserknownhostsfile /u/.ssh/known_hosts /u/.ssh/known_hosts2\n'
+  const hubKey = '203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHubKeyForTestsOnly'
 
   test('ssh -G output resolves the host-key name (port and HostKeyAlias aware) and the user known_hosts files', () => {
-    expect(parseSshConfigDump(sshDump)).toEqual({ name: '209.38.102.184', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
+    expect(parseSshConfigDump(sshDump)).toEqual({ name: '203.0.113.10', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
     expect(parseSshConfigDump('hostname h.example\nport 2222\nuserknownhostsfile ~/.ssh/known_hosts /abs/kh\n')).toEqual({ name: '[h.example]:2222', files: ['/abs/kh'] })
     expect(parseSshConfigDump('hostname h\nport 22\nhostkeyalias hub\nuserknownhostsfile /k\n')?.name).toBe('hub')
     expect(parseSshConfigDump('port 22\n')).toBeUndefined()
@@ -246,11 +246,11 @@ describe('hub link', () => {
     let userTrusts = true
     const fake = fakeRunner(argv => {
       if (argv[1] === '-G') return { stdout: sshDump }
-      if (argv[1] === '-F') return userTrusts && argv[4] === '/u/.ssh/known_hosts' ? { stdout: `# Host 209.38.102.184 found: line 3\n${hubKey}\n` } : { code: 1 }
+      if (argv[1] === '-F') return userTrusts && argv[4] === '/u/.ssh/known_hosts' ? { stdout: `# Host 203.0.113.10 found: line 3\n${hubKey}\n` } : { code: 1 }
       return undefined
     })
-    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@209.38.102.184', knownHostsPath: pinned }
-    expect(await pinHostKeys(input, fake.run)).toEqual({ name: '209.38.102.184', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
+    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@203.0.113.10', knownHostsPath: pinned }
+    expect(await pinHostKeys(input, fake.run)).toEqual({ name: '203.0.113.10', files: ['/u/.ssh/known_hosts', '/u/.ssh/known_hosts2'] })
     expect(await readFile(pinned, 'utf8')).toBe(`${hubKey}\n`)
     expect((await stat(pinned)).mode & 0o777).toBe(0o600)
     await pinHostKeys(input, fake.run)
@@ -275,7 +275,7 @@ describe('hub link', () => {
     const sleeps: number[] = [], logs: string[] = []
     let attached: readonly string[] = []
     const deps = { run: fake.run, runAttached: async (argv: readonly string[]) => { attached = argv; return 0 }, sleep: async (ms: number) => { sleeps.push(ms) }, log: (line: string) => { logs.push(line) }, now: () => new Date('2026-11-23T00:00:00Z') }
-    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@209.38.102.184', remoteSocket: '/home/x/.xerxes/tunnels/m.sock', localSocket: '/Users/me/d.sock', knownHostsPath: pinned, statePath }
+    const input = { ssh: '/usr/bin/ssh', sshKeygen: '/usr/bin/ssh-keygen', target: 'xerxes@203.0.113.10', remoteSocket: '/home/x/.xerxes/tunnels/m.sock', localSocket: '/Users/me/d.sock', knownHostsPath: pinned, statePath }
     expect(await runLinkTunnel(input, deps)).toBe(255)
     expect(await runLinkTunnel(input, deps)).toBe(255)
     expect(attached).toEqual([])

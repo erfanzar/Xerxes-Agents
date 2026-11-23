@@ -102,7 +102,7 @@ import type {
 } from './types.js'
 import { harnessOriginOf } from './types.js'
 import { localSetupJobView, localStatusView, runModeView } from './runModeView.js'
-import { withoutTurnContext } from './transcriptContent.js'
+import { isLegacyHarnessPrompt, withoutTurnContext } from './transcriptContent.js'
 
 export type Connection = 'connecting' | 'online' | 'offline'
 
@@ -1741,6 +1741,97 @@ export function isPlanReview(question: import('./types.js').TaskQuestion): boole
   return haystack.includes('plan') && (haystack.includes('approve') || haystack.includes('accept'))
 }
 
+/** Epoch ms when an in-flight daemon turn began, or null when unreported. */
+export function inflightStartedAtMs(inflight: unknown): number | null {
+  if (!inflight || typeof inflight !== 'object' || Array.isArray(inflight)) return null
+  const startedAtSec = num((inflight as Record<string, unknown>).started_at)
+  if (startedAtSec === null || startedAtSec <= 0) return null
+  return Math.round(startedAtSec * 1000)
+}
+
+/**
+ * Rehydrate an in-flight turn from `session.inflight` onto `builder` when a
+ * client attaches to or reconnects mid-turn. Both runner-managed native turns
+ * and external ACP turns only commit `session.messages` at `turn_end`, so
+ * `session.inflight` is the sole carrier of the prompt and work done so far.
+ */
+export function applyInflightTurn(
+  builder: BlockBuilder,
+  inflight: unknown,
+): { readonly user?: string; readonly startedAtMs?: number } | null {
+  if (!inflight || typeof inflight !== 'object' || Array.isArray(inflight)) return null
+  const record = inflight as Record<string, unknown>
+  const rawUser = str(record.user).trim()
+  const thinking = str(record.thinking)
+  const assistant = str(record.assistant)
+  const tools = Array.isArray(record.tools) ? record.tools : []
+  const startedAtMs = inflightStartedAtMs(record)
+
+  let hydratedUser: string | undefined
+  if (rawUser && !isLegacyHarnessPrompt(rawUser)) {
+    const cleanUser = withoutTurnContext(rawUser)
+    if (cleanUser) {
+      hydratedUser = cleanUser
+      const last = builder.snapshot(true).at(-1)
+      if (!(last && last.kind === 'user' && last.text === cleanUser)) {
+        builder.pushUser(cleanUser)
+      }
+    }
+  }
+  if (thinking) {
+    builder.push('think_part', { think: thinking })
+  }
+  for (const rawTool of tools) {
+    if (!rawTool || typeof rawTool !== 'object' || Array.isArray(rawTool)) continue
+    const tool = rawTool as Record<string, unknown>
+    const name = str(tool.name).trim()
+    if (!name) continue
+    const id = str(tool.id).trim() || undefined
+    const rawArgs = typeof tool.arguments === 'string' ? tool.arguments.trim() : ''
+    const context = str(tool.context).trim()
+    let toolArgs: unknown = tool.arguments
+    if (rawArgs && context) {
+      try {
+        const parsed = JSON.parse(rawArgs) as unknown
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          toolArgs = context
+        }
+      } catch {
+        // Truncated JSON previews end with `…`; fall back to the concise human context.
+        toolArgs = context
+      }
+    } else if (!rawArgs && context) {
+      toolArgs = context
+    }
+    builder.push('tool_call', {
+      ...(id ? { id, tool_call_id: id } : {}),
+      name,
+      ...(toolArgs !== undefined ? { arguments: toolArgs } : {}),
+    })
+    const settled =
+      typeof tool.ok === 'boolean' ||
+      typeof tool.duration_ms === 'number' ||
+      typeof tool.error === 'string'
+    if (settled) {
+      const errorText = str(tool.error) || (tool.ok === false ? 'Tool execution failed.' : '')
+      builder.push('tool_result', {
+        ...(id ? { id, tool_call_id: id } : {}),
+        name,
+        ...(typeof tool.duration_ms === 'number' ? { duration_ms: tool.duration_ms } : {}),
+        ...(typeof tool.output_preview === 'string' ? { return_value: tool.output_preview } : {}),
+        ...(errorText ? { error: errorText } : {}),
+      })
+    }
+  }
+  if (assistant) {
+    builder.push('text_part', { text: assistant })
+  }
+  return {
+    ...(hydratedUser ? { user: hydratedUser } : {}),
+    ...(startedAtMs !== null ? { startedAtMs } : {}),
+  }
+}
+
 export const LOG_CAP = 300
 const SNIPPET_CAP = 64
 const SNIPPET_MAP_CAP = 128
@@ -2169,7 +2260,7 @@ export class Store {
     return Boolean(this.lastAcpConnect || this.frame.savedAcpBinding || (this.frame.acpBinding && this.frame.acpBinding.transport !== 'native'))
   }
 
-  async refreshAcpAgents(options: { readonly silent?: boolean } = {}): Promise<void> {
+  async refreshAcpAgents(options: { readonly silent?: boolean; readonly preserveBinding?: boolean } = {}): Promise<void> {
     const { isCurrent } = this.captureSessionRequest()
     const version = ++this.acpLoadVersion
     const current = (): boolean => isCurrent() && version === this.acpLoadVersion
@@ -2183,6 +2274,10 @@ export class Store {
         return
       }
       const agents = parseAcpExternalAgents(raw.agents)
+      if (options.preserveBinding) {
+        this.patch({ acpAgents: agents })
+        return
+      }
       const active = parseAcpSessionBinding(raw.active)
       this.patch({
         acpAgents: agents,
@@ -2207,7 +2302,14 @@ export class Store {
     if (!cleanId) return false
     if (cleanId === 'xerxes') return this.disconnectAcpAgent()
     const resumeSessionId = options?.resumeSessionId?.trim() || undefined
-    const modeId = options?.modeId?.trim() || undefined
+    const savedMode =
+      !options?.modeId && this.frame.savedAcpBinding?.agent_id === cleanId
+        ? this.frame.savedAcpBinding.current_mode?.trim() || undefined
+        : undefined
+    const modeId =
+      options?.modeId?.trim() ||
+      savedMode ||
+      (cleanId === 'antigravity' ? 'turbo' : undefined)
     this.lastAcpConnect = {
       agentId: cleanId,
       ...(custom ? { custom } : {}),
@@ -2216,31 +2318,64 @@ export class Store {
     }
     const { isCurrent } = this.captureSessionRequest()
     this.patch({ acpConnecting: true, acpError: null })
+    const isAutoInstallableBuiltIn = !custom && (cleanId === 'antigravity' || cleanId === 'claude-code')
+    const cachedAgent = this.frame.acpAgents?.find(item => item.id === cleanId)
+    let ensuredProviderClis = false
+    const tryEnsureHostProviderClis = async (): Promise<void> => {
+      if (ensuredProviderClis || !isAutoInstallableBuiltIn || !this.bridge.remote) return
+      ensuredProviderClis = true
+      await this.bridge.remote('provider-setup', {}).catch(() => undefined)
+      await this.refreshAcpAgents({ silent: true, preserveBinding: true })
+    }
+    const callConnect = () => this.bridge.call(
+      'acp.connect',
+      this.swarmParams({
+        agent_id: cleanId,
+        ...(this.frame.cwd ? { cwd: this.frame.cwd } : {}),
+        ...(custom?.command?.trim() ? { command: custom.command.trim() } : {}),
+        ...(custom?.args && custom.args.length > 0 ? { args: [...custom.args] } : {}),
+        ...(modeId ? { mode_id: modeId } : {}),
+        ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {}),
+      }),
+    )
     try {
-      const result = await this.bridge.call(
-        'acp.connect',
-        this.swarmParams({
-          agent_id: cleanId,
-          ...(this.frame.cwd ? { cwd: this.frame.cwd } : {}),
-          ...(custom?.command?.trim() ? { command: custom.command.trim() } : {}),
-          ...(custom?.args && custom.args.length > 0 ? { args: [...custom.args] } : {}),
-          ...(modeId ? { mode_id: modeId } : {}),
-          ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {}),
-        }),
-      )
+      if (isAutoInstallableBuiltIn && cachedAgent && !cachedAgent.available) {
+        await tryEnsureHostProviderClis()
+        if (!isCurrent()) return false
+      }
+      let result = await callConnect()
       if (!isCurrent()) return result.ok === true
+      if (
+        (result.ok === false || result.kind === 'error')
+        && isAutoInstallableBuiltIn
+        && !ensuredProviderClis
+        && /not installed|unavailable on path|not found/i.test(str(result.error) || str(result.message))
+      ) {
+        await tryEnsureHostProviderClis()
+        if (!isCurrent()) return false
+        result = await callConnect()
+        if (!isCurrent()) return result.ok === true
+      }
       if (result.ok === false || result.kind === 'error') {
         const err = str(result.error) || str(result.message) || `Could not connect to ${cleanId}`
         const hint = str(result.install_hint) || str(result.installHint)
+        const redundantHint =
+          Boolean(hint)
+          && (err.includes(hint) || (/agy acp --login/i.test(err) && /agy acp --login/i.test(hint)))
         this.patch({
           acpConnecting: false,
-          acpError: hint && !err.includes(hint) ? `${err} — ${hint}` : err,
+          acpError: hint && !redundantHint ? `${err} — ${hint}` : err,
         })
         return false
       }
       const binding = parseAcpSessionBinding(result.binding)
+      const updatedAgents =
+        binding?.connected && cachedAgent && !cachedAgent.available && this.frame.acpAgents
+          ? this.frame.acpAgents.map(item => (item.id === cleanId ? { ...item, available: true } : item))
+          : undefined
       this.patch({
         acpBinding: binding,
+        ...(updatedAgents ? { acpAgents: updatedAgents } : {}),
         ...(binding?.connected ? { savedAcpBinding: null } : {}),
         acpConnecting: false,
         acpError: null,
@@ -3213,8 +3348,9 @@ export class Store {
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
           if (!pending.shown) { this.builder.pushUser(cleaned, false, shownImages); pending.shown = true }
+          if (cleaned) this.recentSteerTexts.add(cleaned)
           if (this.frame.turnActive) {
-            this.queue = [...this.queue, { id: this.seq++, text: cleaned }]
+            this.queue = [...this.queue, { id: this.seq++, text: cleaned, ...(images.length ? { images } : {}) }]
             this.patch({ queue: this.queue })
           } else {
             // The turn ended while this steer was in flight; turn_end came
@@ -3235,6 +3371,113 @@ export class Store {
       if (this.sessionKey === sessionKey) this.fail(error)
       return false
     }
+  }
+
+  private steeringNow = false
+  private readonly recentSteerTexts = new Set<string>()
+
+  private waitForTurnState(
+    sessionKey: string,
+    targetActive: boolean,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (this.sessionKey !== sessionKey) return Promise.resolve(false)
+    if (this.frame.turnActive === targetActive) return Promise.resolve(true)
+    return new Promise<boolean>(resolve => {
+      let done = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const finish = (ok: boolean) => {
+        if (done) return
+        done = true
+        if (timer !== undefined) clearTimeout(timer)
+        unsubscribe()
+        resolve(ok)
+      }
+      const unsubscribe = this.subscribe(() => {
+        if (this.sessionKey !== sessionKey) { finish(false); return }
+        if (this.frame.turnActive === targetActive) finish(true)
+      })
+      timer = setTimeout(() => finish(this.sessionKey === sessionKey && this.frame.turnActive === targetActive), timeoutMs)
+    })
+  }
+
+  /**
+   * Interrupt the active turn and immediately send `text` as the next turn.
+   * Works across both native Xerxes and external ACP runtimes (including older
+   * remote daemons) via `turn.cancel` → wait for settle → `turn.submit`.
+   */
+  async steerNow(
+    text: string,
+    images: readonly ComposerImage[] = [],
+    options?: { readonly preserveQueueIds?: ReadonlySet<number>; readonly promotedFromQueue?: boolean },
+  ): Promise<boolean> {
+    const cleaned = text.trim()
+    if (!cleaned && !images.length) return false
+    if (!this.frame.turnActive) {
+      return this.submit(cleaned, undefined, images)
+    }
+    if (this.steeringNow) return false
+    const sessionKey = this.sessionKey
+    const priorQueue = [...this.queue]
+    const remaining = options?.preserveQueueIds
+      ? priorQueue.filter(item => options.preserveQueueIds!.has(item.id))
+      : priorQueue
+    this.steeringNow = true
+    try {
+      if (this.stopArmTimer !== undefined) {
+        clearTimeout(this.stopArmTimer)
+        this.stopArmTimer = undefined
+      }
+      if (this.frame.stopArmed || this.frame.approval || this.frame.question) {
+        this.patch({ stopArmed: false, approval: null, question: null })
+      }
+      await this.bridge.call('turn.cancel', { session_key: sessionKey })
+      const settled = await this.waitForTurnState(sessionKey, false, 4500)
+      if (this.sessionKey !== sessionKey) return false
+      if (!settled) {
+        if (options?.promotedFromQueue) {
+          this.queue = priorQueue
+          this.patch({ queue: this.queue })
+        }
+        this.fail(new Error('Current step is still stopping — try Steer now again in a moment.'))
+        return false
+      }
+      if (options?.promotedFromQueue) {
+        // Avoid duplicating the queued user bubbles that `steer()` already appended.
+        this.builder.rollbackUser(cleaned, true)
+        for (const item of remaining) {
+          this.builder.rollbackUser(item.text, true)
+        }
+      }
+      const ok = await this.submit(cleaned, undefined, images)
+      if (ok && remaining.length > 0 && this.sessionKey === sessionKey) {
+        const started = await this.waitForTurnState(sessionKey, true, 1500)
+        if (started && this.sessionKey === sessionKey) {
+          for (const item of remaining) {
+            await this.steer(item.text, item.images ?? [])
+          }
+        }
+      }
+      return ok
+    } catch (error) {
+      if (this.sessionKey === sessionKey) this.fail(error)
+      return false
+    } finally {
+      this.steeringNow = false
+    }
+  }
+
+  /** Promote a queued follow-up message: interrupt the active step and run it now. */
+  async promoteQueued(id: number): Promise<boolean> {
+    const item = this.queue.find(entry => entry.id === id)
+    if (!item) return false
+    const otherIds = new Set(this.queue.filter(entry => entry.id !== id).map(entry => entry.id))
+    this.queue = this.queue.filter(entry => entry.id !== id)
+    this.patch({ queue: this.queue })
+    return this.steerNow(item.text, item.images ?? [], {
+      preserveQueueIds: otherIds,
+      promotedFromQueue: true,
+    })
   }
 
   dropQueued(id: number): void {
@@ -5534,23 +5777,48 @@ export class Store {
       ? session.tool_executions.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value))
       : []
     const storedToolDuration = executions.reduce((total, row) => total + Math.max(0, num(row.duration_ms) ?? 0), 0)
+    const activeTurn = str(session.active_turn_id) !== ''
+    const inflightRecord = activeTurn && session.inflight && typeof session.inflight === 'object' && !Array.isArray(session.inflight)
+      ? (session.inflight as Record<string, unknown>)
+      : null
+    const inflightTools = inflightRecord && Array.isArray(inflightRecord.tools)
+      ? inflightRecord.tools.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value))
+      : []
+    const inflightToolDuration = inflightTools.reduce((total, row) => total + Math.max(0, num(row.duration_ms) ?? 0), 0)
+    const inflightHasWorkingTool = inflightTools.some(row => typeof row.ok !== 'boolean' && typeof row.duration_ms !== 'number' && typeof row.error !== 'string')
+    const inflightStart = activeTurn ? inflightStartedAtMs(inflightRecord) : null
+    const storedLlmDuration = Math.max(0, num(session.llm_duration_ms) ?? 0)
     this.ttftSamples = Math.max(0, Math.trunc(num(session.ttft_samples) ?? 0))
     this.ttftTotalMs = Math.max(0, num(session.ttft_total_ms) ?? 0)
-    this.turnCount = Math.max(0, Math.trunc(num(session.turn_count) ?? 0))
+    const persistedTurns = Math.max(0, Math.trunc(num(session.turn_count) ?? 0))
+    this.turnCount = Math.max(persistedTurns, activeTurn ? 1 : 0)
     const ttftAverage = num(session.ttft_avg_ms)
       ?? (this.ttftSamples > 0 ? this.ttftTotalMs / this.ttftSamples : null)
     const tokensPerSecond = num(session.tokens_per_second)
     const cacheHitRate = num(session.cache_hit_rate)
+    const now = Date.now()
+    const totalToolDuration = Math.max(0, num(session.tool_duration_ms) ?? 0, storedToolDuration + inflightToolDuration)
+    const totalToolSteps = Math.max(0, Math.trunc(num(session.tool_steps) ?? 0), executions.length + inflightTools.length)
+    const inferredLlmSteps = Math.max(
+      0,
+      Math.trunc(num(session.llm_steps) ?? num(session.calls) ?? 0),
+      activeTurn ? Math.max(1, totalToolSteps > 0 ? totalToolSteps : 1) : 0,
+    )
+    const phaseAnchor = activeTurn
+      ? (inflightStart !== null && storedLlmDuration === 0
+          ? Math.min(now, inflightStart + inflightToolDuration)
+          : now)
+      : null
     return {
       turnCount: this.turnCount,
-      llmDurationMs: Math.max(0, num(session.llm_duration_ms) ?? 0),
-      llmSteps: Math.max(0, Math.trunc(num(session.llm_steps) ?? num(session.calls) ?? 0)),
-      toolDurationMs: Math.max(0, num(session.tool_duration_ms) ?? storedToolDuration),
-      toolSteps: Math.max(0, Math.trunc(num(session.tool_steps) ?? executions.length)),
+      llmDurationMs: storedLlmDuration,
+      llmSteps: inferredLlmSteps,
+      toolDurationMs: totalToolDuration,
+      toolSteps: totalToolSteps,
       inputTokens: Math.max(0, num(session.input_tokens) ?? 0),
       outputTokens: Math.max(0, num(session.output_tokens) ?? 0),
-      metricPhase: str(session.active_turn_id) ? 'llm' : null,
-      metricPhaseStartedAt: str(session.active_turn_id) ? Date.now() : null,
+      metricPhase: activeTurn ? (inflightHasWorkingTool ? 'tool' : 'llm') : null,
+      metricPhaseStartedAt: phaseAnchor,
       tokensPerSecond: tokensPerSecond === null ? null : Math.max(0, tokensPerSecond),
       cacheHitRate: cacheHitRate === null ? null : Math.max(0, Math.min(1, cacheHitRate)),
       cacheReadTokens: num(session.cache_read_tokens),
@@ -5581,6 +5849,10 @@ export class Store {
       this.historyActions = []
       this.historyBefore = null
       this.historySeen.clear()
+    }
+    if (str(session.active_turn_id) !== '' && session.inflight) {
+      const hydrated = applyInflightTurn(this.builder, session.inflight)
+      if (hydrated?.user) this.lastUser = hydrated.user
     }
     this.patch({ historyMore: Boolean(this.historyBefore || this.legacyHistory.length), historyLoading: false, historyError: null })
     if (!preserve) this.refoldChangesFromHistory(session)
@@ -5705,7 +5977,7 @@ export class Store {
         else this.resetWorkspaceFolds()
       }
     }
-    if (!extra.resume_session_id) this.adoptHistory(session)
+    if (!extra.resume_session_id && !preserveLiveTranscript) this.adoptHistory(session)
     const reportedContextLimit = num(result.context_limit)
     const contextLimit = reportedContextLimit !== null && reportedContextLimit > 0
       ? reportedContextLimit
@@ -5715,11 +5987,18 @@ export class Store {
     // would show ▶ act forever with blinking carets on finished messages —
     // reconcile to the daemon and close any stranded live runs.
     const daemonInTurn = str(session.active_turn_id) !== ''
-    if (daemonInTurn && !this.frame.turnActive) this.startTurn()
+    const inflightStartedAt = daemonInTurn ? inflightStartedAtMs(session.inflight) : null
+    if (daemonInTurn && !this.frame.turnActive) this.startTurn(inflightStartedAt ?? undefined)
     if (!daemonInTurn && this.frame.turnActive) {
       this.stopTick()
       this.builder.finalize()
     }
+    const resolvedTurnStartedAt = daemonInTurn
+      ? (inflightStartedAt ?? this.frame.turnStartedAt ?? Date.now())
+      : null
+    const resolvedTurnSeconds = resolvedTurnStartedAt !== null
+      ? Math.max(0, Math.floor((Date.now() - resolvedTurnStartedAt) / 1000))
+      : 0
     this.patch({
       connection: 'online',
       navigating: null,
@@ -5742,7 +6021,7 @@ export class Store {
       contextMax: contextLimit,
       approval: null,
       ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { question: null, goal: '' } : {}),
-      ...(daemonInTurn ? { turnStartedAt: this.frame.turnStartedAt ?? Date.now() } : { turnActive: false, turnSeconds: 0, turnStartedAt: null }),
+      ...(daemonInTurn ? { turnStartedAt: resolvedTurnStartedAt, turnSeconds: resolvedTurnSeconds } : { turnActive: false, turnSeconds: 0, turnStartedAt: null }),
       // initialize reports THIS session's policy — /permissions pins the
       // mode per session, so the daemon-wide runtime.status would lie about
       // what the next tool call will actually face.
@@ -6399,17 +6678,38 @@ export class Store {
             ? payload.text
             : ''
         if (user) {
-          this.lastUser = user
+          const cleanUser = withoutTurnContext(user).trim()
+          const unprefixed = /^user:\s+/i.test(cleanUser) ? cleanUser.replace(/^user:\s+/i, '').trim() : ''
+          const matchesRecentSteer = Boolean(
+            (cleanUser && this.recentSteerTexts.has(cleanUser))
+            || (unprefixed && this.recentSteerTexts.has(unprefixed)),
+          )
+          const displayUser = unprefixed && matchesRecentSteer ? unprefixed : cleanUser
+          this.lastUser = displayUser
           const last = this.frame.blocks.at(-1)
           const optimistic = this.optimisticSubmissions.get(this.sessionKey)
-          const alreadyShown = optimistic?.text === user && this.frame.blocks.some(block => block.kind === 'user' && block.id === optimistic.id && block.text === user)
-          if (optimistic?.text === user) {
+          const matchesOptimistic = Boolean(optimistic && (optimistic.text === user || optimistic.text === displayUser))
+          const alreadyShown = matchesOptimistic && this.frame.blocks.some(block => block.kind === 'user' && block.id === optimistic!.id && (block.text === user || block.text === displayUser))
+          if (matchesOptimistic && optimistic) {
             optimistic.acknowledged = true
             this.optimisticSubmissions.delete(this.sessionKey)
           }
+          const alreadyAtTail = Boolean(
+            last && last.kind === 'user' && (last.text === user || last.text === displayUser || (unprefixed && last.text === unprefixed)),
+          )
+          const alreadyQueuedNearTail = Boolean(
+            (matchesRecentSteer || Boolean(unprefixed))
+            && this.frame.blocks.slice(-4).some(block => block.kind === 'user' && (block.text === displayUser || (unprefixed && block.text === unprefixed))),
+          )
+          if (matchesRecentSteer) {
+            this.recentSteerTexts.delete(displayUser)
+            if (cleanUser) this.recentSteerTexts.delete(cleanUser)
+          }
           // A prompt the harness wrote (goal round, monitor, schedule) is not
           // something the user said, so it is not shown.
-          if (!alreadyShown && !harnessOriginOf(payload.origin) && !(last && last.kind === 'user' && last.text === user)) this.builder.pushUser(withoutTurnContext(user))
+          if (!alreadyShown && !harnessOriginOf(payload.origin) && !alreadyAtTail && !alreadyQueuedNearTail) {
+            this.builder.pushUser(displayUser)
+          }
         }
         this.preparingSubmissions.delete(this.sessionKey)
         // A late delta that landed after the previous turn_end sits in the
@@ -6592,6 +6892,8 @@ export class Store {
         let queue = this.queue
         let shownOther = false
         for (const content of contents) {
+          const trimmed = content.trim()
+          if (trimmed) this.recentSteerTexts.add(trimmed)
           const text = content.trim()
           let ours = false
           const index = queue.findIndex(item => item.text === text)
@@ -7024,6 +7326,7 @@ export class Store {
   private resetWorkspaceFolds(): void {
     this.resetInFlightRequests()
     this.queue = []
+    this.recentSteerTexts.clear()
     this.changes.clear()
     this.foldedToolIds.clear()
     this.turnStartTotals = { adds: 0, dels: 0 }
@@ -7125,15 +7428,18 @@ export class Store {
     else this.patch(update)
   }
 
-  private startTurn(): void {
+  private startTurn(startedAt?: number): void {
     this.activeMetricTools.clear()
     this.stopTick()
     const now = Date.now()
+    const anchor = typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0
+      ? Math.min(now, startedAt)
+      : now
     this.patch({
       turnActive: true, networkRetrying: false,
       turnFailed: false,
-      turnSeconds: 0,
-      turnStartedAt: now,
+      turnSeconds: Math.max(0, Math.floor((now - anchor) / 1000)),
+      turnStartedAt: anchor,
       metricPhase: 'llm',
       metricPhaseStartedAt: now,
     })

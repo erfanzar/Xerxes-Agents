@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.53 — 2026-11-23
+
+- **Antigravity (`agy acp`) workspace, credential & background integration.** Bridges project and global `XERXES.md` / `XERXES.local.md` and `.xerxes/{skills,agents,commands}` into `agy acp` (with dynamic content-hash refresh mid-session and `$ARGUMENTS` slash expansion); projects Antigravity background `run_command` jobs and `schedule` timers into Activity, Background, live `task-*.log` inspection, and `manage_task(kill)` cancellation; defaults Antigravity sessions to Turbo mode; and adds credential sync + SSH forwarding (`agyCredentials`, `agyRuntimeEnv`).
+- **Mid-turn steering, live shimmer & Desktop polish.** Adds immediate **Steer now** (`⌘⏎`) in the composer and on queued follow-up cards (deduplicating drained steer continuations); replaces working status spinners with a traveling-light text shimmer (`prefers-reduced-motion` aware); removes the composer shadow seam and refines the Stop button crimson; restores mid-turn reattach prompts/elapsed timers and Activity metrics from `session.inflight`; and adds `Back to conversation` (`Esc`) navigation on Plan, Changes, and Log views.
+- **Desktop Browser & layout reliability.** Fixes right-panel full-screen expansion in Vibes and Neo (`[data-context-full]`), hides the native Electron Browser `WebContentsView` whenever an overlapping menu/popover/dialog opens so menus are never clipped, recovers truncated JSON tool arguments without leaking raw JSON into status phrases, and hardens Hub/Mobile device and remote-provider flows.
+
 ## 0.8.52 — 2026-11-23
 
 - **Immortals multi-agent swarms.** Native shared message board, interactive Swarm Board & Graph, coordinator/worker/verifier/narrator/monitor roles, bundled Immortals skills, and synced surfaces across Desktop, TUI, VS Code, and Mobile.

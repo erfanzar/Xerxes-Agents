@@ -1,17 +1,18 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { Fragment, type ReactElement } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { relativeTime } from '../../client/format.js'
 import type { SupervisorConfirmation, SupervisorMessage, SupervisorStep } from '../../client/hubParsers.js'
 import { withRecords } from '../../client/supervisorRecords.js'
 import { endsTurn, stepPhrase, stepsFinished } from '../../client/supervisorSteps.js'
 import { AgentOrb } from './AgentOrb.js'
+import { XerxesLogoMark } from './BrandMark.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
-import { XerxesBrandEmblem, XerxesStatusMark } from './XerxesSprites.js'
+import { XerxesStatusMark } from './XerxesSprites.js'
 
 /**
  * The XERXES conversation, shared by Chat and Activity. People and XERXES get
@@ -100,6 +101,32 @@ function Events({ lines, now }: { readonly lines: readonly EventLine[]; readonly
   )
 }
 
+function CopyReplyButton({ text }: { readonly text: string }): ReactElement {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (timerRef.current !== null) clearTimeout(timerRef.current) }, [])
+  const onCopy = useCallback((): void => {
+    const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
+    if (!clipboard?.writeText) return
+    void clipboard.writeText(text).then(() => {
+      setCopied(true)
+      if (timerRef.current !== null) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => setCopied(false), 1600)
+    }).catch(() => undefined)
+  }, [text])
+  return (
+    <button
+      type="button"
+      className={`xmsg__copy${copied ? ' is-copied' : ''}`}
+      aria-label={copied ? 'Copied reply' : 'Copy reply'}
+      title={copied ? 'Copied' : 'Copy reply'}
+      onClick={onCopy}
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={13} />
+    </button>
+  )
+}
+
 function MessageRow({ message, now, pending = false }: { readonly message: SupervisorMessage; readonly now: number; readonly pending?: boolean }): ReactElement {
   const time = <time dateTime={message.at}>{pending ? 'just now' : relativeTime(message.at, now)}</time>
   const voice = message.source === 'voice' ? ' · voice' : ''
@@ -107,10 +134,11 @@ function MessageRow({ message, now, pending = false }: { readonly message: Super
     return (
       <li className="supervisor__message supervisor__message--xerxes">
         <div className="xmsg__head">
-          <XerxesBrandEmblem size={18} animate={false} className="xmsg__crest" />
+          <XerxesLogoMark size={18} className="xmsg__crest" decorative />
           <span className="xmsg__who">XERXES</span>
-          <span>{voice}</span>
-          {time}
+          {message.source === 'voice' ? <span className="xmsg__tag">voice</span> : null}
+          <span className="xmsg__time">{time}</span>
+          <CopyReplyButton text={message.text} />
         </div>
         <div className="msg msg--agent"><Markdown text={message.text} className="msg__text" /></div>
       </li>
@@ -118,8 +146,8 @@ function MessageRow({ message, now, pending = false }: { readonly message: Super
   }
   return (
     <li className={`supervisor__message supervisor__message--user${pending ? ' supervisor__message--pending' : ''}`}>
-      <p className="xmsg__meta">{pending ? 'You' : message.author ?? 'You'}{voice} · {time}</p>
       <div className="msg msg--user"><div className="msg__text">{message.text}</div></div>
+      <p className="xmsg__meta">{pending ? 'You' : message.author ?? 'You'}{voice} · {time}</p>
     </li>
   )
 }

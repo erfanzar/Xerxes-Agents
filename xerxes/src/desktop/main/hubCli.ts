@@ -14,8 +14,8 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 
 import {
-  checkComparisonCode, checkPairingId, qrDataUrl,
-  type CockpitFailure, type CockpitFailureCode, type CockpitLink, type CockpitMachine, type CockpitPairing, type CockpitProject,
+  checkComparisonCode, checkDeviceId, checkPairingId, qrDataUrl,
+  type CockpitDevice, type CockpitFailure, type CockpitFailureCode, type CockpitLink, type CockpitMachine, type CockpitPairing, type CockpitProject,
 } from '../hubShared.js'
 import { bunBinaryOf, daemonEntryOf, type Env } from './spawn.js'
 
@@ -252,6 +252,32 @@ export function parseLink(json: JsonObject): CockpitLink | CockpitFailure {
   if (machineId === undefined) return failure('bad_output', 'The Hub did not report which machine was linked.')
   if (json.enrolled !== true) return failure('cli_failed', 'The Hub was added, but this Mac did not accept it. Try linking again.')
   return { machineId, remoteSocket: text(json.remote_socket, 4096) ?? '', servicePath: text(json.service_path, 4096) ?? null }
+}
+
+export function parseDevices(json: JsonObject): readonly CockpitDevice[] | CockpitFailure {
+  if (!Array.isArray(json.devices)) return failure('bad_output', 'The Hub sent a device list this app cannot read.')
+  const devices: CockpitDevice[] = []
+  for (const raw of json.devices.slice(0, 200) as unknown[]) {
+    if (!isObject(raw)) continue
+    const id = checkDeviceId(raw.id)
+    if (!id.ok) continue
+    devices.push({
+      id: id.value,
+      userId: text(raw.user_id, 200) ?? '',
+      displayName: text(raw.display_name, 120) ?? '',
+      label: text(raw.label, 120) ?? id.value,
+      status: text(raw.status, 40) ?? 'unknown',
+      createdAt: text(raw.created_at, 64) ?? null,
+      lastSeenAt: text(raw.last_seen_at, 64) ?? null,
+      revokedAt: text(raw.revoked_at, 64) ?? null,
+    })
+  }
+  return devices
+}
+
+export function parseRevokeDevice(json: JsonObject): { readonly deviceId: string } | CockpitFailure {
+  const checked = checkDeviceId(json.device_id)
+  return checked.ok ? { deviceId: checked.value } : failure('bad_output', 'The Hub did not confirm which device was revoked.')
 }
 
 export function isFailure(value: object): value is CockpitFailure {

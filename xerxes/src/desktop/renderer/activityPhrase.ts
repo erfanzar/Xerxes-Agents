@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { parseArgs } from './blocks.js'
 import { commandGist } from './commandGist.js'
 import type { Block, ToolItem } from './types.js'
 
@@ -65,18 +66,54 @@ export function toolOrbState(item: Pick<ToolItem, 'name' | 'verb'>): 'working' |
   }
 }
 
+function readableArgOf(raw: string, preferredKeys: readonly string[]): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return trimmed
+  const parsed = parseArgs(trimmed)
+  for (const key of preferredKeys) {
+    const val = parsed[key]
+    if (typeof val === 'string' && val.trim()) return val.trim()
+  }
+  for (const val of Object.values(parsed)) {
+    if (typeof val === 'string' && val.trim()) return val.trim()
+  }
+  return ''
+}
+
+function commandLabelOf(item: Pick<ToolItem, 'arg'> & { readonly input?: string }): string {
+  const parsedInput = item.input ? parseArgs(item.input) : {}
+  const summary = typeof parsedInput.toolSummary === 'string' && parsedInput.toolSummary.trim()
+    ? parsedInput.toolSummary.trim()
+    : ''
+  const rawCmd =
+    (typeof parsedInput.CommandLine === 'string' && parsedInput.CommandLine.trim())
+    || (typeof parsedInput.command === 'string' && parsedInput.command.trim())
+    || (typeof parsedInput.cmd === 'string' && parsedInput.cmd.trim())
+    || readableArgOf(item.arg, ['CommandLine', 'command', 'cmd', 'toolSummary'])
+  const gist = rawCmd ? commandGist(rawCmd) : ''
+  // If a truncated command string contains only leading ENV=val assignments, prefer toolSummary when available.
+  const envOnly = Boolean(gist) && gist.split(/\s+/).every(tok => /^[A-Z_][A-Z0-9_]*=/.test(tok))
+  if (envOnly && summary) return summary
+  return gist || summary
+}
+
 /** Present-tense phrase for one running call: "Running pytest tests/". */
-export function toolPhrase(item: Pick<ToolItem, 'name' | 'verb' | 'arg' | 'path'>): string {
-  const target = item.path || item.arg
+export function toolPhrase(item: Pick<ToolItem, 'name' | 'verb' | 'arg' | 'path'> & { readonly input?: string }): string {
+  const cleanArg = readableArgOf(item.arg, ['file_path', 'path', 'Path', 'query', 'Query', 'pattern', 'Pattern', 'url', 'Prompt', 'prompt', 'toolSummary'])
+  const target = item.path || cleanArg
   switch (familyOf(item.name || item.verb)) {
-    case 'command': return target ? `Running ${clip(commandGist(item.arg))}` : 'Running a command'
+    case 'command': {
+      const label = commandLabelOf(item)
+      return label ? `Running ${clip(label)}` : 'Running a command'
+    }
     case 'edit': return target ? `Editing ${basename(target)}` : 'Editing a file'
     case 'read': return target ? `Reading ${basename(target)}` : 'Reading files'
-    case 'search': return item.arg ? `Searching for ${clip(item.arg, 40)}` : 'Searching the code'
-    case 'web': return item.arg ? `Looking up ${clip(item.arg, 44)}` : 'Searching the web'
+    case 'search': return cleanArg ? `Searching for ${clip(cleanArg, 40)}` : 'Searching the code'
+    case 'web': return cleanArg ? `Looking up ${clip(cleanArg, 44)}` : 'Searching the web'
     case 'workflow': return 'Running a workflow'
     case 'spawn': return 'Spawning agents'
-    case 'message': return item.arg ? `Messaging ${clip(item.arg, 32)}` : 'Messaging an agent'
+    case 'message': return cleanArg ? `Messaging ${clip(cleanArg, 32)}` : 'Messaging an agent'
     case 'wait': return 'Waiting on agents'
     case 'agents': return 'Checking on agents'
     case 'plan': return 'Updating the plan'

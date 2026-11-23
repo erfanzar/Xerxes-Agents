@@ -1,10 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 
 import { compactTokens, costLabel, modelUsageSummary, resetIn, usageSourceLabel, usd, windowLabel, windowNote, type UsageProfileView } from '../../auth/usageView.js'
 import { useHubState, useServices } from '../context.js'
+import { HubStatusSheet } from './HubStatusSheet.js'
 import { PushOptIn } from './PushOptIn.js'
 
 function ProfileCard({ profile, now }: { profile: UsageProfileView; now: number }): ReactElement {
@@ -44,10 +45,12 @@ export function UsageTab(): ReactElement {
   const state = useHubState()
   const { controller, now } = useServices()
   const usage = state.usage
+  const [hubSheet, setHubSheet] = useState(false)
+  const live = state.connection.state === 'live'
 
   useEffect(() => {
-    if (state.connection.state === 'live') void controller.loadUsage()
-  }, [controller, state.connection.state])
+    if (live) void controller.loadUsage()
+  }, [controller, live])
 
   const report = usage.phase === 'idle' ? undefined : usage.report
   const extras = usage.phase === 'idle' ? undefined : usage.extras
@@ -55,14 +58,23 @@ export function UsageTab(): ReactElement {
   const missing = unavailableNotice(extras?.unavailable ?? [], id => state.workspaces[id]?.label)
   const profileLabels = new Map((report?.profiles ?? []).map(profile => [profile.profile, profile.label] as const))
   const models = report?.models ?? []
-  // The same model under several provider profiles is otherwise three identical rows.
   const repeated = new Set(models.map(model => model.model).filter((name, index, all) => all.indexOf(name) !== index))
 
   return (
     <section aria-labelledby="usage-title">
-      <h1 id="usage-title" className="page-title">Usage</h1>
+      <div className="page-head">
+        <h1 id="usage-title" className="page-title">Usage</h1>
+        <div className="page-actions">
+          <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setHubSheet(true)}>Hub &amp; devices</button>
+          <button type="button" className="btn" disabled={!live || usage.phase === 'loading'} onClick={() => { void controller.loadUsage() }}>
+            {usage.phase === 'loading' ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+      </div>
+      {hubSheet ? <HubStatusSheet onClose={() => setHubSheet(false)} /> : null}
+
       {usage.phase === 'loading' && report === undefined ? <p aria-busy="true">Loading usage…</p> : null}
-      {usage.phase === 'idle' && state.connection.state !== 'live' ? <p>Usage loads once the connection is live.</p> : null}
+      {usage.phase === 'idle' && !live ? <p>Usage loads once the connection is live.</p> : null}
       {usage.phase === 'error' ? (
         <div role="alert" className="notice is-error">
           <p>Could not load usage{report === undefined ? '' : ' (showing the last result)'}: {usage.message}</p>
@@ -70,6 +82,25 @@ export function UsageTab(): ReactElement {
         </div>
       ) : null}
       {missing === undefined ? null : <p className="notice">{missing}</p>}
+
+      {extras !== undefined ? (
+        <dl className="usage-metrics" aria-label="Usage summary">
+          <div className="usage-metric">
+            <dt className="usage-metric-label">Input tokens</dt>
+            <dd className="usage-metric-val">{compactTokens(extras.inputTokens)}</dd>
+          </div>
+          <div className="usage-metric">
+            <dt className="usage-metric-label">Output tokens</dt>
+            <dd className="usage-metric-val">{compactTokens(extras.outputTokens)}</dd>
+          </div>
+          {extras.billableCostUsd !== undefined ? (
+            <div className="usage-metric">
+              <dt className="usage-metric-label">Billed</dt>
+              <dd className="usage-metric-val">{usd(extras.billableCostUsd)}</dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
 
       {report !== undefined && report.profiles.length > 0 ? (
         <>
@@ -85,11 +116,13 @@ export function UsageTab(): ReactElement {
           <ul className="cards">
             {models.map(model => (
               <li key={`${model.profile ?? ''}/${model.model}`} className="card card-plain">
-                <h3 className="card-title">{model.model}</h3>
+                <div className="usage-model-head">
+                  <h3 className="card-title">{model.model}</h3>
+                  <strong className="usage-model-cost">{costLabel(model.costUsd, model.costBasis)}</strong>
+                </div>
                 {model.profile !== undefined && (repeated.has(model.model) || profileLabels.has(model.profile))
                   ? <p className="block-meta">Profile: {profileLabels.get(model.profile) ?? model.profile}</p>
                   : null}
-                <p><strong>{costLabel(model.costUsd, model.costBasis)}</strong></p>
                 <p className="block-meta">{modelUsageSummary(model)}</p>
               </li>
             ))}

@@ -342,7 +342,7 @@ describe('App-wide Cosmic Simurgh cohesion across RailStatus, AgentsCard, and Su
     expect(settledHtml.match(HEX_COLOR_RE) ?? []).toEqual([])
   })
 
-  test('SupervisorPage and SupervisorThread carry the Cosmic Simurgh crest and animated status mark', () => {
+  test('SupervisorPage and SupervisorThread render Xerxes real phoenix logo (no split-X) and animated status mark', () => {
     const noop = (): void => {}
     const state: HubState = {
       ...initialHubState(),
@@ -374,11 +374,15 @@ describe('App-wide Cosmic Simurgh cohesion across RailStatus, AgentsCard, and Su
       }),
     )
     expect(emptyHtml).toContain('xerxes-brand-emblem')
+    expect(emptyHtml).toContain('src="./logo-128.png"')
+    expect(emptyHtml).not.toContain('data-emblem="xerxes-mark"')
     expect(emptyHtml).not.toContain('simurgh-mark')
     expect(emptyHtml.match(HEX_COLOR_RE) ?? []).toEqual([])
 
     const connectHtml = renderToStaticMarkup(createElement(ConnectHub, { onOpenSettings: noop }))
     expect(connectHtml).toContain('xerxes-brand-emblem')
+    expect(connectHtml).toContain('src="./logo-128.png"')
+    expect(connectHtml).not.toContain('data-emblem="xerxes-mark"')
     expect(connectHtml.match(HEX_COLOR_RE) ?? []).toEqual([])
 
     const failHtml = renderToStaticMarkup(
@@ -405,6 +409,9 @@ describe('App-wide Cosmic Simurgh cohesion across RailStatus, AgentsCard, and Su
     )
     expect(threadHtml).toContain('xmsg__crest')
     expect(threadHtml).toContain('xerxes-brand-emblem')
+    expect(threadHtml).toContain('src="./logo-128.png"')
+    expect(threadHtml).not.toContain('data-emblem="xerxes-mark"')
+    expect(threadHtml).toContain('aria-label="Copy reply"')
     expect(threadHtml.match(HEX_COLOR_RE) ?? []).toEqual([])
 
     const liveHtml = renderToStaticMarkup(

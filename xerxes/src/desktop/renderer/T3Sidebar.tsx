@@ -42,7 +42,7 @@ import {
   workspaceName,
   type SidebarSection,
 } from './workspaceGroups.js'
-import type { DesktopPageName, DesktopPanel } from './DesktopPanels.js'
+import { requestWorkspaceSshForm, type DesktopPageName, type DesktopPanel } from './DesktopPanels.js'
 
 export interface T3SidebarRow {
   readonly id: string
@@ -168,6 +168,7 @@ export function T3Sidebar({
   const online = snap.connection === 'online'
   const needle = filter.trim().toLowerCase()
   const [scopeOpen, setScopeOpen] = useState(false)
+  const [addProjectOpen, setAddProjectOpen] = useState(false)
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null)
   type FolderMenuState =
     | { readonly kind: 'local'; readonly key: string; readonly cwd: string; readonly label: string; readonly x: number; readonly y: number }
@@ -177,6 +178,7 @@ export function T3Sidebar({
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(loadCollapsedSections)
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(() => new Set())
   const scopeRef = useRef<HTMLDivElement>(null)
+  const addProjectRef = useRef<HTMLDivElement>(null)
   const snoozeRef = useRef<HTMLDivElement>(null)
   const folderMenuRef = useRef<HTMLDivElement>(null)
 
@@ -199,6 +201,22 @@ export function T3Sidebar({
       document.removeEventListener('keydown', onKey)
     }
   }, [scopeOpen])
+
+  useEffect(() => {
+    if (!addProjectOpen) return
+    const onDown = (event: MouseEvent): void => {
+      if (event.target instanceof Node && !addProjectRef.current?.contains(event.target)) setAddProjectOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') { event.preventDefault(); setAddProjectOpen(false) }
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [addProjectOpen])
 
   useEffect(() => {
     if (!snoozeMenuId) return
@@ -644,7 +662,10 @@ export function T3Sidebar({
             aria-label="Sidebar view and project filter"
             aria-haspopup="dialog"
             aria-expanded={scopeOpen}
-            onClick={() => setScopeOpen(value => !value)}
+            onClick={() => {
+              setAddProjectOpen(false)
+              setScopeOpen(value => !value)
+            }}
           >
             <T3Icon name="filterLines" size={14} />
             {activeScopeSet.size > 0 && <span className="t3-side__scope-dot" aria-hidden="true" />}
@@ -722,15 +743,63 @@ export function T3Sidebar({
           )}
         </div>
 
-        <button
-          type="button"
-          className="t3-icon-btn t3-side__toolbtn"
-          title="Add project folder…"
-          aria-label="Add project"
-          onClick={() => store.chooseWorkspace()}
-        >
-          <T3Icon name="folderPlus" size={14} />
-        </button>
+        <div className="t3-side__scope-anchor" ref={addProjectRef}>
+          <button
+            type="button"
+            className={`t3-icon-btn t3-side__toolbtn${addProjectOpen ? ' is-active' : ''}`}
+            title="Add project (Local or SSH)…"
+            aria-label="Add project"
+            aria-haspopup="menu"
+            aria-expanded={addProjectOpen}
+            onClick={() => {
+              setScopeOpen(false)
+              setAddProjectOpen(value => !value)
+            }}
+          >
+            <T3Icon name="folderPlus" size={14} />
+          </button>
+
+          {addProjectOpen && (
+            <div className="t3-add-pop" role="menu" aria-label="Add project source">
+              <div className="t3-scope-pop__label">Add project</div>
+              <button
+                type="button"
+                role="menuitem"
+                className="t3-add-pop__option"
+                onClick={() => {
+                  setAddProjectOpen(false)
+                  store.chooseWorkspace()
+                }}
+              >
+                <span className="t3-add-pop__icon" aria-hidden="true">
+                  <T3Icon name="monitor" size={14} />
+                </span>
+                <span className="t3-add-pop__text">
+                  <strong>Local folder</strong>
+                  <small>Open a project on This Mac</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="t3-add-pop__option"
+                onClick={() => {
+                  setAddProjectOpen(false)
+                  requestWorkspaceSshForm()
+                  onOpen('workspace')
+                }}
+              >
+                <span className="t3-add-pop__icon" aria-hidden="true">
+                  <T3Icon name="server" size={14} />
+                </span>
+                <span className="t3-add-pop__text">
+                  <strong>Connect via SSH</strong>
+                  <small>Open a project on a remote host</small>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
 
         <button
           type="button"

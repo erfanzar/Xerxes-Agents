@@ -137,6 +137,86 @@ ensure_bun() {
     note "Bun was added to PATH for this run; open a new terminal for other sessions to see it"
 }
 
+# Install Google Antigravity CLI (agy) alongside Xerxes when missing so
+# Antigravity sessions work out of the box. Decline with
+# XERXES_SKIP_AGY_INSTALL=1 or XERXES_SKIP_COMPANION_INSTALL=1.
+ensure_agy() {
+    if command -v agy >/dev/null 2>&1 || [ -x "$HOME/.local/bin/agy" ] || [ -x "$BIN_DIRECTORY/agy" ]; then
+        ok "agy present"
+        return 0
+    fi
+    if [ "${XERXES_SKIP_COMPANION_INSTALL:-0}" = "1" ] || [ "${XERXES_SKIP_AGY_INSTALL:-0}" = "1" ]; then
+        note "skipping Antigravity CLI (agy) install"
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1 || ! command -v bash >/dev/null 2>&1; then
+        warn "could not auto-install Antigravity CLI (agy): curl and bash are required"
+        return 0
+    fi
+
+    note "agy was not found; installing Antigravity CLI from https://antigravity.google"
+    agy_install_url="${XERXES_AGY_INSTALL_URL:-https://antigravity.google/cli/install.sh}"
+    agy_install_script="$(mktemp "${TMPDIR:-/tmp}/xerxes-agy-install.XXXXXX")" || {
+        warn "could not create a temporary file for the Antigravity CLI installer"
+        return 0
+    }
+    agy_install_log="$(mktemp "${TMPDIR:-/tmp}/xerxes-agy-install-log.XXXXXX")" || {
+        rm -f "$agy_install_script"
+        warn "could not create a temporary log for the Antigravity CLI installer"
+        return 0
+    }
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 "$agy_install_url" -o "$agy_install_script"; then
+        rm -f "$agy_install_script" "$agy_install_log"
+        warn "could not download Antigravity CLI (agy); install later with: curl -fsSL https://antigravity.google/cli/install.sh | bash"
+        return 0
+    fi
+    if bash "$agy_install_script" >"$agy_install_log" 2>&1; then
+        rm -f "$agy_install_script" "$agy_install_log"
+        ok "installed Antigravity CLI (agy)"
+    else
+        rm -f "$agy_install_script" "$agy_install_log"
+        warn "Antigravity CLI (agy) install did not finish; install later from https://antigravity.google/docs/install"
+    fi
+}
+
+# Install Claude Code and Codex CLIs globally with Bun when missing so every
+# machine running the Xerxes daemon has claude, codex, and agy ready.
+ensure_bun_companion() {
+    tool_bin="$1"
+    tool_label="$2"
+    tool_pkg="$3"
+    skip_flag="$4"
+    bun_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
+    if command -v "$tool_bin" >/dev/null 2>&1 || [ -x "$bun_bin/$tool_bin" ] || [ -x "$HOME/.local/bin/$tool_bin" ]; then
+        ok "$tool_bin present"
+        return 0
+    fi
+    if [ "${XERXES_SKIP_COMPANION_INSTALL:-0}" = "1" ] || [ "$skip_flag" = "1" ]; then
+        note "skipping $tool_label install"
+        return 0
+    fi
+    note "$tool_bin was not found; installing $tool_pkg via bun"
+    companion_log="$(mktemp "${TMPDIR:-/tmp}/xerxes-${tool_bin}-install.XXXXXX")" || {
+        warn "could not create a temporary log for $tool_label"
+        return 0
+    }
+    if bun add --global "$tool_pkg" >"$companion_log" 2>&1; then
+        rm -f "$companion_log"
+        ok "installed $tool_label ($tool_bin)"
+    else
+        rm -f "$companion_log"
+        warn "$tool_label install did not finish; install later with: bun add --global $tool_pkg"
+    fi
+}
+
+ensure_claude_code() {
+    ensure_bun_companion claude "Claude Code" "@anthropic-ai/claude-code" "${XERXES_SKIP_CLAUDE_CODE_INSTALL:-0}"
+}
+
+ensure_codex() {
+    ensure_bun_companion codex "Codex CLI" "@openai/codex" "${XERXES_SKIP_CODEX_INSTALL:-0}"
+}
+
 shell_single_quote() {
     escaped_value="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
     printf "'%s'" "$escaped_value"
@@ -416,6 +496,9 @@ main() {
     info "checking prerequisites"
     ensure_bun
     prepare_bin_directory
+    ensure_claude_code
+    ensure_codex
+    ensure_agy
     ok "launchers will be installed to $BIN_DIRECTORY"
 
     info "resolving source"

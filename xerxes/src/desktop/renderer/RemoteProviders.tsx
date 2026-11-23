@@ -7,10 +7,10 @@ import { desktopError } from './desktopRpc.js'
 import { relaySummary } from './RelayBadge.js'
 import type { ProviderRelayView } from './store.js'
 import { ActionDialog } from './ActionDialog.js'
-import type { AccountRow } from './ProviderAccountsCenter.js'
+import type { AccountRow, AgyStatusView } from './ProviderAccountsCenter.js'
 
-/** One account in a "Sync all" batch: its one-use transfer review, then its outcome. */
-interface SyncItem { readonly account: AccountRow; readonly review?: string; readonly error?: string; readonly done?: boolean }
+/** One account (or Antigravity `agy` credential) in a "Sync all" batch: its one-use transfer review, then its outcome. */
+interface SyncItem { readonly kind: 'account' | 'agy'; readonly account: AccountRow; readonly review?: string; readonly error?: string; readonly done?: boolean }
 interface SyncAll { readonly phase: 'reviewing' | 'ready' | 'working' | 'done'; readonly items: readonly SyncItem[]; readonly destination: string; readonly error: string }
 
 interface Review {
@@ -20,12 +20,15 @@ interface Review {
 }
 export function RemoteProviders({remote, relay, changed, accounts}: {remote?: XerxesBridge['remote']; relay?: ProviderRelayView | null; changed?: () => void; accounts?: XerxesBridge['accounts']}) {
   const [syncAll,setSyncAll] = useState<SyncAll | null>(null)
-  // Review every account first (one review each, nothing sent), then one confirmation sends them all.
+  // Review every account and available `agy` credential first (one review each, nothing sent), then one confirmation sends them all.
   const reviewAll = async () => {
     if (!accounts) return
     setSyncAll({phase:'reviewing',items:[],destination:'',error:''})
     try {
-      const list = await accounts('list',{}) as {ok?:boolean;error?:string;accounts?:AccountRow[];can_sync?:boolean;destination?:string|null}
+      const [list, agy] = await Promise.all([
+        accounts('list',{}) as Promise<{ok?:boolean;error?:string;accounts?:AccountRow[];can_sync?:boolean;destination?:string|null}>,
+        accounts('agy-status',{}).catch(()=>null) as Promise<(AgyStatusView & {ok?:boolean})|null>,
+      ])
       if (list.ok===false) throw new Error(list.error || 'Could not load provider accounts')
       if (!list.can_sync) throw new Error('This workspace cannot receive synced accounts.')
       const items: SyncItem[] = []
@@ -33,8 +36,25 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
         try {
           const result = await accounts('sync-review',{accountId:account.id}) as {ok?:boolean;error?:string;review?:string}
           if (result.ok===false || typeof result.review!=='string') throw new Error(result.error || 'Could not review sync')
-          items.push({account,review:result.review})
-        } catch (error) { items.push({account,error:desktopError(error)}) }
+          items.push({kind:'account',account,review:result.review})
+        } catch (error) { items.push({kind:'account',account,error:desktopError(error)}) }
+      }
+      if (agy && agy.canSync && agy.recommendedMode) {
+        const source = agy.sources.find(item => item.mode === agy.recommendedMode)
+        const agyRow: AccountRow = {
+          id: `agy:${agy.recommendedMode}`,
+          kind: 'agy',
+          label: 'Antigravity (agy)',
+          profileName: source?.label ?? agy.recommendedMode,
+          provider: 'antigravity',
+          model: '',
+          available: true,
+        }
+        try {
+          const result = await accounts('agy-sync-review',{mode:agy.recommendedMode,...(source?.accountId?{accountId:source.accountId}:{})}) as {ok?:boolean;error?:string;review?:string}
+          if (result.ok===false || typeof result.review!=='string') throw new Error(result.error || 'Could not review Antigravity sync')
+          items.push({kind:'agy',account:agyRow,review:result.review})
+        } catch (error) { items.push({kind:'agy',account:agyRow,error:desktopError(error)}) }
       }
       if (alive.current) setSyncAll({phase:'ready',items,destination:list.destination ?? '',error:items.length ? '' : 'There are no accounts to sync.'})
     } catch (error) { if (alive.current) setSyncAll({phase:'ready',items:[],destination:'',error:desktopError(error)}) }
@@ -49,10 +69,11 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
       if (!item.review) { items.push(item); continue }
       // Reviews are one-use: a failed transfer is reported, never replayed.
       try {
-        const result = await accounts('sync',{review:item.review,confirm:true}) as {ok?:boolean;error?:string}
+        const action = item.kind === 'agy' ? 'agy-sync' : 'sync'
+        const result = await accounts(action,{review:item.review,confirm:true}) as {ok?:boolean;error?:string}
         if (result.ok===false) throw new Error(result.error || 'Could not synchronize account')
-        items.push({account:item.account,done:true})
-      } catch (error) { items.push({account:item.account,error:desktopError(error)}) }
+        items.push({kind:item.kind,account:item.account,done:true})
+      } catch (error) { items.push({kind:item.kind,account:item.account,error:desktopError(error)}) }
     }
     if (alive.current) { setSyncAll({...syncAll,phase:'done',items}); changed?.() }
   }

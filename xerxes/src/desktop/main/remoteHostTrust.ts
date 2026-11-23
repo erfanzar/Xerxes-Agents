@@ -1,11 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { rm, writeFile } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { RemoteRunner } from './remote.js'
+import { mkdtempSafe } from './safeTmp.js'
 
 export type ConfirmRemoteHostKey = (target: string, prompt: string, signal: AbortSignal) => Promise<boolean>
 
@@ -29,7 +29,7 @@ export async function verifyRemoteHost(
   }
   const promptController = new AbortController()
   const promptSignal = AbortSignal.any([signal, promptController.signal])
-  const directory = await mkdtemp(join(tmpdir(), 'xt-'))
+  const directory = await mkdtempSafe('xt-')
   const socketPath = join(directory, 'trust.sock')
   const helper = join(directory, 'askpass.cjs')
   const executable = join(directory, 'askpass')

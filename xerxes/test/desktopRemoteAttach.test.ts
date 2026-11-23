@@ -182,9 +182,9 @@ test.skipIf(process.platform === 'win32')('openRemote installs missing provider 
     run: async (_binary, args) => {
       commands.push(args)
       const text = args.join(' ')
-      if (text.includes('XERXES_PROVIDER_CLIS') && !text.includes('@anthropic') && !text.includes('@openai')) {
+      if (text.includes('XERXES_PROVIDER_CLIS') && !text.includes('@anthropic') && !text.includes('@openai') && !text.includes('antigravity.google')) {
         probes++
-        return probes === 1 ? 'XERXES_PROVIDER_CLIS {"claude":false,"codex":false}' : 'XERXES_PROVIDER_CLIS {"claude":true,"codex":true}'
+        return probes === 1 ? 'XERXES_PROVIDER_CLIS {"claude":false,"codex":false,"agy":false}' : 'XERXES_PROVIDER_CLIS {"claude":true,"codex":true,"agy":true}'
       }
       return attached
     },
@@ -194,6 +194,7 @@ test.skipIf(process.platform === 'win32')('openRemote installs missing provider 
   try {
     expect(commands.some(args => args.join(' ').includes('@anthropic-ai/claude-code'))).toBe(true)
     expect(commands.some(args => args.join(' ').includes('@openai/codex'))).toBe(true)
+    expect(commands.some(args => args.join(' ').includes('antigravity.google/cli/install.sh'))).toBe(true)
     expect(setupError).toBe('')
   } finally { await connection.close() }
 })

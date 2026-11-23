@@ -21,8 +21,11 @@ import {
   type RefObject,
 } from 'react'
 
+import { ActionDialog } from './ActionDialog.js'
+import { desktopError } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { PickerLayer } from './Overlays.js'
+import type { AgyCredentialMode, AgyStatusView } from './ProviderAccountsCenter.js'
 import {
   store,
   type AcpConfigOption,
@@ -33,7 +36,8 @@ import {
   type AcpSessionBinding,
   type Snapshot,
 } from './store.js'
-import { AgentBrandGlyph, type AgentBrandProvider } from './XerxesSprites.js'
+import { RuntimeBrandIcon } from './BrandMark.js'
+import type { AgentBrandProvider } from './XerxesSprites.js'
 
 export const DEFAULT_ACP_AGENTS: readonly AcpExternalAgentInfo[] = [
   {
@@ -401,7 +405,7 @@ export function AcpRuntimePicker({
       if (ok) close()
       return
     }
-    if (!agent.available) {
+    if (!agent.available && agent.id !== 'antigravity' && agent.id !== 'claude-code') {
       openCustomFor(agent)
       return
     }
@@ -468,10 +472,9 @@ export function AcpRuntimePicker({
         }
         onClick={toggle}
       >
-        <AgentBrandGlyph
+        <RuntimeBrandIcon
           provider={activeProvider}
           size={14}
-          animate={false}
           className="acp-chip__glyph"
         />
         <span className="acp-chip__label">{connecting ? 'Connecting…' : activeLabel}</span>
@@ -522,7 +525,7 @@ export function AcpRuntimePicker({
                         onClick={() => void selectAgent(agent)}
                       >
                         <span className="acp-row__glyph" data-provider={agent.provider}>
-                          <AgentBrandGlyph provider={agent.provider} size={16} animate={false} />
+                          <RuntimeBrandIcon provider={agent.provider} size={16} />
                         </span>
                         <span className="acp-row__body">
                           <span className="acp-row__name">{agent.name}</span>
@@ -546,14 +549,14 @@ export function AcpRuntimePicker({
                     onClick={() => openCustomFor()}
                   >
                     <span className="acp-row__glyph" data-provider="acp">
-                      <AgentBrandGlyph provider="acp" size={16} animate={false} />
+                      <RuntimeBrandIcon provider="acp" size={16} />
                     </span>
                     <span>Custom ACP…</span>
                   </button>
                 ) : (
                   <form className="acp-custom__form" onSubmit={event => void submitCustom(event)}>
                     <div className="acp-custom__head">
-                      <AgentBrandGlyph provider="acp" size={14} animate={false} />
+                      <RuntimeBrandIcon provider="acp" size={14} />
                       <strong>Connect custom ACP</strong>
                     </div>
                     <input
@@ -1392,6 +1395,15 @@ export function isAcpAuthError(message: string): boolean {
   return /\b(auth(?:entication|orization)?\s+required|unauthenticated|not signed in|sign\s*in|login\s+required|-32000)\b/i.test(message)
 }
 
+interface AgyQuickTransferState {
+  readonly mode: AgyCredentialMode
+  readonly label: string
+  readonly destination: string
+  readonly phase: 'reviewing' | 'ready' | 'working' | 'done'
+  readonly review?: string
+  readonly error: string
+}
+
 /**
  * Quiet Claude Code-style composer notice bar for ACP errors/auth recovery
  * and saved-session reconnects. Returns null during normal connected operation
@@ -1409,6 +1421,30 @@ export function AcpActiveBanner({
     ? snap.savedAcpBinding
     : null
   const acpError = snap.acpError?.trim() || ''
+  const isAntigravityAuthError =
+    Boolean(acpError) && isAcpAuthError(acpError) && /\b(antigravity|agy)\b/i.test(acpError)
+  const [agyStatus, setAgyStatus] = useState<AgyStatusView | null>(null)
+  const [transfer, setTransfer] = useState<AgyQuickTransferState | null>(null)
+  const transferReq = useRef(0)
+
+  useEffect(() => {
+    if (!isAntigravityAuthError || typeof window === 'undefined' || !window.xerxes?.accounts) {
+      setAgyStatus(null)
+      return
+    }
+    let cancelled = false
+    void window.xerxes.accounts('agy-status', {})
+      .then(raw => {
+        if (cancelled || !raw || typeof raw !== 'object') return
+        const view = raw as AgyStatusView
+        if (Array.isArray(view.sources)) setAgyStatus(view)
+      })
+      .catch(() => {
+        if (!cancelled) setAgyStatus(null)
+      })
+    return () => { cancelled = true }
+  }, [isAntigravityAuthError])
+
   if (!acpError && !savedBinding) return null
 
   const connecting = Boolean(snap.acpConnecting)
@@ -1422,60 +1458,160 @@ export function AcpActiveBanner({
     || isAcpAuthError(acpError)
     || /\b(antigravity|agy|claude)\b/i.test(acpError),
   )
+  const transferMode = agyStatus?.canSync ? agyStatus.recommendedMode : null
+  const transferSource = transferMode ? agyStatus?.sources.find(s => s.mode === transferMode) : undefined
+
+  const startTransferReview = async (): Promise<void> => {
+    if (!transferMode || typeof window === 'undefined' || !window.xerxes?.accounts) return
+    const req = ++transferReq.current
+    const label = transferSource?.label ?? 'Gemini Subscription (Antigravity)'
+    const destination = agyStatus?.destination ?? 'this SSH host'
+    setTransfer({ mode: transferMode, label, destination, phase: 'reviewing', error: '' })
+    try {
+      const reviewed = await window.xerxes.accounts('agy-sync-review', {
+        mode: transferMode,
+        ...(transferSource?.accountId ? { accountId: transferSource.accountId } : {}),
+      }) as { ok?: boolean; review?: string; label?: string; destination?: string; error?: string }
+      if (transferReq.current !== req) return
+      if (reviewed.ok === false || typeof reviewed.review !== 'string') {
+        throw new Error(reviewed.error || 'Could not review Antigravity credential transfer')
+      }
+      setTransfer({
+        mode: transferMode,
+        label: reviewed.label || label,
+        destination: reviewed.destination || destination,
+        phase: 'ready',
+        review: reviewed.review,
+        error: '',
+      })
+    } catch (error) {
+      if (transferReq.current === req) {
+        setTransfer({ mode: transferMode, label, destination, phase: 'ready', error: desktopError(error) })
+      }
+    }
+  }
+
+  const confirmTransfer = async (): Promise<void> => {
+    if (!transfer || typeof window === 'undefined' || !window.xerxes?.accounts) return
+    if (transfer.phase === 'done') {
+      setTransfer(null)
+      return
+    }
+    if (transfer.phase !== 'ready') return
+    if (!transfer.review) {
+      void startTransferReview()
+      return
+    }
+    const req = transferReq.current
+    setTransfer({ ...transfer, phase: 'working', error: '' })
+    try {
+      const res = await window.xerxes.accounts('agy-sync', { review: transfer.review, confirm: true }) as { ok?: boolean; error?: string }
+      if (transferReq.current !== req) return
+      if (res.ok === false) throw new Error(res.error || 'Could not transfer Antigravity credentials')
+      setTransfer(null)
+      await (onRetry ? onRetry() : store.retryAcpConnect())
+    } catch (error) {
+      if (transferReq.current === req) {
+        setTransfer({
+          mode: transfer.mode,
+          label: transfer.label,
+          destination: transfer.destination,
+          phase: 'ready',
+          error: desktopError(error),
+        })
+      }
+    }
+  }
 
   if (acpError) {
     return (
-      <div className="acp-banner acp-banner--error" role="alert">
-        <span className="acp-banner__icon" aria-hidden="true">
-          <Icon name="warning" size={14} />
-        </span>
-        <span className="acp-banner__text acp-banner__text--wrap">
-          <span>{acpError}</span>
-          {showAuthHint && (
-            <span className="acp-banner__hint">
-              {' '}Run <code>agy acp --login</code> in your terminal, then click Retry.
-            </span>
-          )}
-        </span>
-        <div className="acp-banner__actions">
-          {canRetry && (
+      <>
+        <div className="acp-banner acp-banner--error" role="alert">
+          <span className="acp-banner__icon" aria-hidden="true">
+            <Icon name="warning" size={14} />
+          </span>
+          <span className="acp-banner__text acp-banner__text--wrap">
+            <span>{acpError}</span>
+            {showAuthHint && (
+              <span className="acp-banner__hint">
+                {' '}Run <code>agy acp --login</code> in your terminal, then click Retry.
+              </span>
+            )}
+          </span>
+          <div className="acp-banner__actions">
+            {transferMode && (
+              <button
+                type="button"
+                className="acp-banner__switch acp-banner__switch--primary"
+                disabled={connecting || !online || transfer?.phase === 'working'}
+                onClick={() => void startTransferReview()}
+              >
+                Transfer from this Mac
+              </button>
+            )}
+            {canRetry && (
+              <button
+                type="button"
+                className={`acp-banner__switch${transferMode ? '' : ' acp-banner__switch--primary'}`}
+                disabled={connecting || !online}
+                onClick={() => void (onRetry ? onRetry() : store.retryAcpConnect())}
+              >
+                {connecting ? 'Retrying…' : 'Retry'}
+              </button>
+            )}
+            {binding && (
+              <button
+                type="button"
+                className="acp-banner__switch"
+                disabled={connecting}
+                onClick={() => void (onDisconnect ? onDisconnect() : store.disconnectAcpAgent())}
+              >
+                Switch to Xerxes
+              </button>
+            )}
             <button
               type="button"
-              className="acp-banner__switch acp-banner__switch--primary"
-              disabled={connecting || !online}
-              onClick={() => void (onRetry ? onRetry() : store.retryAcpConnect())}
+              className="acp-banner__dismiss"
+              aria-label="Dismiss runtime error"
+              title="Dismiss error"
+              onClick={() => (onDismissError ? onDismissError() : store.clearAcpError())}
             >
-              {connecting ? 'Retrying…' : 'Retry'}
+              <Icon name="close" size={12} />
             </button>
-          )}
-          {binding && (
-            <button
-              type="button"
-              className="acp-banner__switch"
-              disabled={connecting}
-              onClick={() => void (onDisconnect ? onDisconnect() : store.disconnectAcpAgent())}
-            >
-              Switch to Xerxes
-            </button>
-          )}
-          <button
-            type="button"
-            className="acp-banner__dismiss"
-            aria-label="Dismiss runtime error"
-            title="Dismiss error"
-            onClick={() => (onDismissError ? onDismissError() : store.clearAcpError())}
-          >
-            <Icon name="close" size={12} />
-          </button>
+          </div>
         </div>
-      </div>
+        {transfer && (
+          <ActionDialog
+            title={`Transfer ${transfer.label} to SSH`}
+            confirmLabel={!transfer.review && transfer.phase === 'ready' ? 'Review transfer again' : 'Transfer & connect'}
+            busyLabel="Transferring credentials…"
+            busy={transfer.phase === 'working'}
+            disabled={transfer.phase === 'reviewing'}
+            done={transfer.phase === 'done'}
+            error={transfer.error}
+            onConfirm={() => void confirmTransfer()}
+            onCancel={() => { transferReq.current += 1; setTransfer(null) }}
+          >
+            {transfer.phase === 'reviewing' ? (
+              <p role="status">Preparing credential transfer review for <strong>{transfer.destination}</strong>…</p>
+            ) : (
+              <>
+                <p>Transfer your local <strong>{transfer.label}</strong> credentials to <strong>{transfer.destination}</strong> and connect Antigravity?</p>
+                <p className="studio-muted">
+                  Credentials are sent over SSH stdin only and saved with owner-only permissions (mode 0600) in ~/.gemini/antigravity-cli/antigravity-oauth-token.
+                </p>
+              </>
+            )}
+          </ActionDialog>
+        )}
+      </>
     )
   }
 
   if (savedBinding) {
     return (
       <div className="acp-banner acp-banner--reconnect" role="status" data-provider={savedBinding.provider}>
-        <AgentBrandGlyph provider={savedBinding.provider} size={14} className="acp-banner__glyph" />
+        <RuntimeBrandIcon provider={savedBinding.provider} size={14} className="acp-banner__glyph" />
         <span className="acp-banner__text">
           Previous runtime: <strong>{savedBinding.name}</strong>
           {savedBinding.external_session_id ? (

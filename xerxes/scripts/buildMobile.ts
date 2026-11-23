@@ -86,6 +86,7 @@ async function buildMobile(): Promise<void> {
     target: 'browser',
     format: 'esm',
     minify: true,
+    external: ['/icons/*'],
     naming: { entry: '[name]-[hash].[ext]', chunk: '[name]-[hash].[ext]', asset: '[name]-[hash].[ext]' },
     define: { 'process.env.NODE_ENV': JSON.stringify('production') },
   })

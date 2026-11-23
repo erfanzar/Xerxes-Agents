@@ -89,3 +89,20 @@ test('a file read over and over says how many times, not just "read 1 file"', ()
   // Ordinary re-reading stays quiet.
   expect(activitySummary([tools(tool('ReadFile', 'a.py', 'done', 'a.py'), tool('ReadFile', 'a.py', 'done', 'a.py'), tool('ReadFile', 'b.py', 'done', 'b.py'))])).toBe('Read 2 files')
 })
+
+test('truncated or raw JSON tool arguments never leak into Running status phrases', () => {
+  expect(
+    toolPhrase(
+      tool('run_command', '{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu python3 bench.py --cc 32…', 'working'),
+    ),
+  ).toBe('Running python3 bench.py --cc 32')
+
+  expect(
+    toolPhrase({
+      ...tool('run_command', '{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu', 'working'),
+      input: '{"CommandLine":"ENABLE_DISTRIBUTED_INIT=0 JAX_PLATFORMS=cpu","toolSummary":"Benchmark Qwen 3.8-27B"}',
+    }),
+  ).toBe('Running Benchmark Qwen 3.8-27B')
+
+  expect(toolPhrase(tool('run_command', '{"WaitMsBeforeAsync":10000', 'working'))).toBe('Running a command')
+})

@@ -2733,23 +2733,60 @@ function inflightPreviewText(value: unknown, limit: number): string {
  * exceed that in its first prompt and become invalid JSON; the reattached TUI
  * then has neither readable tool context nor names for its status cubes.
  */
-function inflightToolContext(name: string, value: unknown): string {
-  const raw = typeof value === "string" ? value : "";
+export function inflightToolContext(name: string, value: unknown): string {
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return "";
+    }
+  } else if (isRecord(value)) {
+    parsed = value;
+  } else {
     return "";
   }
   if (isRecord(parsed) && name.replace(/[^a-z0-9]+/gi, "").toLowerCase() !== "spawnagents") {
-    const command = parsed.cmd ?? parsed.command;
+    const command = parsed.cmd ?? parsed.command ?? parsed.CommandLine;
     if (typeof command === 'string' || Array.isArray(command)) {
       const argv = Array.isArray(command) ? command.filter(item => typeof item === 'string') : [command];
       const args = parsed.args ?? parsed.arguments;
       return inflightPreviewText([...argv, ...(Array.isArray(args) ? args.filter(item => typeof item === 'string') : [])].join(' '), 200);
     }
-    for (const key of ['file_path', 'path', 'task_id', 'query', 'pattern']) {
-      if (typeof parsed[key] === 'string') return inflightPreviewText(parsed[key], 200);
+    const cronExpr = typeof parsed.CronExpression === 'string'
+      ? parsed.CronExpression.trim()
+      : typeof parsed.cron_expression === 'string'
+        ? parsed.cron_expression.trim()
+        : '';
+    const durSec = typeof parsed.DurationSeconds === 'number' && Number.isFinite(parsed.DurationSeconds)
+      ? parsed.DurationSeconds
+      : typeof parsed.duration_seconds === 'number' && Number.isFinite(parsed.duration_seconds)
+        ? parsed.duration_seconds
+        : null;
+    const prompt = typeof parsed.Prompt === 'string'
+      ? parsed.Prompt.trim()
+      : typeof parsed.prompt === 'string'
+        ? parsed.prompt.trim()
+        : '';
+    if (cronExpr || durSec !== null) {
+      const timing = cronExpr || `in ${durSec}s`;
+      return inflightPreviewText(prompt ? `${timing} · ${prompt}` : timing, 200);
+    }
+    const actionVal = typeof parsed.Action === 'string'
+      ? parsed.Action.trim()
+      : typeof parsed.action === 'string'
+        ? parsed.action.trim()
+        : '';
+    const taskIdVal = typeof parsed.TaskId === 'string'
+      ? parsed.TaskId.trim()
+      : typeof parsed.task_id === 'string'
+        ? parsed.task_id.trim()
+        : '';
+    if (actionVal && taskIdVal) {
+      return inflightPreviewText(`${actionVal} · ${taskIdVal}`, 200);
+    }
+    for (const key of ['toolSummary', 'file_path', 'path', 'Path', 'task_id', 'TaskId', 'query', 'Query', 'pattern', 'Pattern', 'Action', 'action', 'Prompt', 'prompt']) {
+      if (typeof parsed[key] === 'string' && parsed[key].trim()) return inflightPreviewText(parsed[key], 200);
     }
     return '';
   }

@@ -182,17 +182,30 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage, onEdit
         />
       </label>
       <div className="composer-row">
-        <label className="btn btn-quiet">
-          Camera
-          <input type="file" accept="image/*" capture="environment" className="visually-hidden" disabled={!canSend || images.length + preparing.length >= IMAGE_LIMITS.maxImages} onChange={event => { void addFiles(event) }} />
-        </label>
-        <label className="btn btn-quiet">
-          Photos
-          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="visually-hidden" disabled={!canSend || images.length + preparing.length >= IMAGE_LIMITS.maxImages} onChange={event => { void addFiles(event) }} />
-        </label>
-        <TalkButton voice={services.voice} onTranscript={spoken => update(withTranscript(latest.current, spoken))} />
-        {running ? <button type="button" className="btn btn-danger" disabled={!canSend || busy} onClick={() => { void stop() }}>Stop</button> : null}
-        <button type="submit" className="btn btn-primary" disabled={!canSend || busy || empty || preparing.length > 0}>{busy ? 'Sending…' : verb}</button>
+        <div className="composer-tools">
+          <label className="btn btn-quiet">
+            <svg className="btn-icon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h1.3l1-1.3h3.4l1 1.3H12a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5v-6Z" />
+              <circle cx="8" cy="8.5" r="2.2" />
+            </svg>
+            <span>Camera</span>
+            <input type="file" accept="image/*" capture="environment" className="visually-hidden" disabled={!canSend || images.length + preparing.length >= IMAGE_LIMITS.maxImages} onChange={event => { void addFiles(event) }} />
+          </label>
+          <label className="btn btn-quiet">
+            <svg className="btn-icon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="2.2" y="3" width="11.6" height="10" rx="1.8" />
+              <circle cx="5.8" cy="6.4" r="1" />
+              <path d="M2.6 11.2l3.1-2.8 2.4 2.1 2-1.8 3.3 2.8" />
+            </svg>
+            <span>Photos</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="visually-hidden" disabled={!canSend || images.length + preparing.length >= IMAGE_LIMITS.maxImages} onChange={event => { void addFiles(event) }} />
+          </label>
+          <TalkButton voice={services.voice} onTranscript={spoken => update(withTranscript(latest.current, spoken))} />
+        </div>
+        <div className="composer-submit">
+          {running ? <button type="button" className="btn btn-danger" disabled={!canSend || busy} onClick={() => { void stop() }}>Stop</button> : null}
+          <button type="submit" className="btn btn-primary" disabled={!canSend || busy || empty || preparing.length > 0}>{busy ? 'Sending…' : verb}</button>
+        </div>
       </div>
     </form>
   )

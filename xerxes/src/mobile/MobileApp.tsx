@@ -3,9 +3,10 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
-import { connectionBanner, inboxCounts } from '../client/hubStore.js'
+import { connectionBanner, inboxCounts, workspaceAvailable } from '../client/hubStore.js'
 import { AppLink } from './components/AppLink.js'
 import { AppCallHost } from './components/CallControls.js'
+import { HubStatusSheet } from './components/HubStatusSheet.js'
 import { browserVoiceCallService } from './voice/call/browser.js'
 import { InboxTab } from './components/Inbox.js'
 import { PairPage } from './components/PairPage.js'
@@ -31,9 +32,6 @@ function useScreenMemory(key: string, main: React.RefObject<HTMLElement | null>)
   const { scroll } = useServices()
   const first = useRef(true)
   useEffect(() => {
-    // TaskTranscript owns bottom-following and history prepend anchors. A
-    // shell-level restore would override its initial bottom scroll.
-    // The XERXES chat follows its newest message the same way, so neither is restored here.
     const restores = !key.startsWith('task:') && key !== 'xerxes'
     if (restores) window.scrollTo(0, scroll.get(key) ?? 0)
     if (!first.current) main.current?.focus({ preventScroll: true })
@@ -54,7 +52,6 @@ export function reconnectOf(controller: object): (() => void) | undefined {
     const method = controller.reconnectNow
     return () => { method.call(controller) }
   }
-  // resync() probes the link and reconnects at once when it is down (HubConnection.resume).
   if ('resync' in controller && typeof controller.resync === 'function') {
     const method = controller.resync
     return () => { void Promise.resolve(method.call(controller)).catch(() => undefined) }
@@ -67,11 +64,43 @@ function useKeyboardInset(): void {
   useEffect(() => trackKeyboardInset(window, document.documentElement), [])
 }
 
+function TabIcon({ name }: { readonly name: Route['name'] }): ReactElement {
+  switch (name) {
+    case 'inbox':
+      return (
+        <svg className="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M3 11.5L5.2 4.5h9.6L17 11.5v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 15.5v-4Z" />
+          <path d="M3 11.5h4.2l1.2 2h3.2l1.2-2H17" />
+        </svg>
+      )
+    case 'task':
+      return (
+        <svg className="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="3.5" width="14" height="13" rx="2.5" />
+          <path d="M6.5 8.2l2 1.8-2 1.8M10.5 12h3" />
+        </svg>
+      )
+    case 'xerxes':
+      return (
+        <svg className="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M10 2.5c.6 4.1 3.4 6.9 7.5 7.5-4.1.6-6.9 3.4-7.5 7.5-.6-4.1-3.4-6.9-7.5-7.5 4.1-.6 6.9-3.4 7.5-7.5Z" />
+        </svg>
+      )
+    default:
+      return (
+        <svg className="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4.5 15.5V10.5M8.2 15.5V6M11.8 15.5V8.8M15.5 15.5V4.5" />
+        </svg>
+      )
+  }
+}
+
 function Shell(): ReactElement {
   const route = useRoute()
   const state = useHubState()
   const services = useServices()
   const main = useRef<HTMLElement>(null)
+  const [hubSheet, setHubSheet] = useState(false)
   useScreenMemory(routeKey(route), main)
   useKeyboardInset()
 
@@ -83,10 +112,12 @@ function Shell(): ReactElement {
 
   const banner = connectionBanner(state.connection)
   const revoked = state.connection.state === 'revoked'
-  // A dropped link offers Retry: it reconnects at once instead of waiting out the backoff.
+  const live = state.connection.state === 'live'
   const retryable = state.connection.state === 'reconnecting' || state.connection.state === 'closed'
   const reconnect = reconnectOf(services.controller)
   const counts = inboxCounts(state)
+  const onlineWorkspaces = state.workspaceOrder.filter(id => workspaceAvailable(state.workspaces[id])).length
+  const totalWorkspaces = state.workspaceOrder.length
   const taskTarget: Route = state.selected === undefined ? { name: 'task' } : taskRoute(state.selected.workspaceId, state.selected.sessionId)
   const tabs: readonly { readonly name: Route['name']; readonly label: string; readonly route: Route }[] = [
     { name: 'inbox', label: 'Inbox', route: { name: 'inbox' } },
@@ -98,12 +129,29 @@ function Shell(): ReactElement {
   return (
     <div className="app">
       <header className="app-head" role="banner">
-        <span className="app-name">Xerxes</span>
+        <span className="app-brand">
+          <span className="app-logo" aria-hidden="true" />
+          <span className="app-name">Xerxes</span>
+        </span>
         {/* Status changes are announced here; streamed content never is. */}
         <div role="status" aria-live="polite" className={banner === undefined ? 'banner is-empty' : `banner banner-${banner.tone}`}>
           {banner?.text ?? ''}
         </div>
-        {retryable && reconnect !== undefined ? <button type="button" className="btn banner-retry" onClick={reconnect}>Retry</button> : null}
+        {retryable && reconnect !== undefined ? (
+          <button type="button" className="btn banner-retry" onClick={reconnect}>Retry</button>
+        ) : !revoked ? (
+          <button
+            type="button"
+            className="btn head-hub-btn"
+            aria-haspopup="dialog"
+            aria-expanded={hubSheet}
+            aria-label="Hub and paired devices"
+            onClick={() => setHubSheet(true)}
+          >
+            <span className={live ? 'head-dot is-active' : 'head-dot'} aria-hidden="true" />
+            <span>{totalWorkspaces > 0 ? `${onlineWorkspaces}/${totalWorkspaces} online` : 'Hub'}</span>
+          </button>
+        ) : null}
       </header>
       <main id="main" ref={main} tabIndex={-1} className="app-main">
         <InstallHint env={services.install} />
@@ -114,13 +162,16 @@ function Shell(): ReactElement {
             : route.name === 'xerxes' ? <XerxesTab />
               : <UsageTab />}
       </main>
+      {hubSheet && !revoked ? <HubStatusSheet onClose={() => setHubSheet(false)} /> : null}
       <nav aria-label="Main" className="tabs">
         <ul>
           {tabs.map(tab => (
             <li key={tab.name}>
               <AppLink route={tab.route} className="tab" current={route.name === tab.name}>
-                {tab.label}
+                <TabIcon name={tab.name} />
+                <span className="tab-label">{tab.label}</span>
                 {tab.name === 'inbox' && counts.needsYou > 0 ? <span className="badge badge-attention">{counts.needsYou}<span className="visually-hidden"> need you</span></span> : null}
+                {tab.name === 'xerxes' && state.supervisor.working === true ? <span className="tab-dot" aria-hidden="true" /> : null}
               </AppLink>
             </li>
           ))}

@@ -111,6 +111,8 @@
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock>.composer-dock>.composer::before{padding-left:14px}
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock .composer__input{padding-left:32px}
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock>.composer__toolbar{justify-content:flex-start}
+:root[data-style='neo']:not(#neo) .atelier .composer-wrap.supervisor__dock>.composer__toolbar>.composer__flex{display:block;flex:1}
+:root[data-style='neo']:not(#neo) .atelier .xempty__logo{box-shadow:0 0 0 1px var(--x-separator)}
 /* The subagent box is a flex row: the glyph sits on the input's first line, not below it. */
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock>.composer::before{flex:none;align-self:flex-start;padding:5px 0}
 /* The subagent box keeps its dock (display:block there): frame it directly. */

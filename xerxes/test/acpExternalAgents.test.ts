@@ -1720,6 +1720,7 @@ describe('External ACP model & mode discovery, fallback switching, Claude --mode
       expect(notConnected.ok).toBe(false)
 
       // Connect Antigravity ACP -> binding immediately carries models, modes, and config IDs
+      // and defaults to Turbo mode on fresh connect.
       const connected = await client.call('acp.connect', {
         session_id: sessionId,
         agent_id: 'antigravity',
@@ -1732,8 +1733,8 @@ describe('External ACP model & mode discovery, fallback switching, Claude --mode
           current_model: 'gemini-4-carbon-high',
           current_model_name: 'Gemini 4 Carbon (High)',
           model_config_id: 'agy_model',
-          current_mode: 'agent',
-          current_mode_name: 'Agent',
+          current_mode: 'turbo',
+          current_mode_name: 'Turbo',
           mode_config_id: 'agy_mode',
         },
       })

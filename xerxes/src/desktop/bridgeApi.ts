@@ -151,13 +151,13 @@ export function createBridge(transport: BridgeTransport) {
   },
   remote(action: string, params: unknown = {}): Promise<unknown> {
     if (
-      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-activity', 'provider-use-local', 'provider-use-host', 'provider-review', 'provider-share', 'provider-revoke', 'provider-accounts', 'provider-bind-review', 'provider-bind', 'provider-activate', 'provider-quota'].includes(action)
+      !['list', 'hosts', 'browse', 'save', 'remove', 'connect', 'cancel', 'status', 'provider-setup', 'provider-activity', 'provider-use-local', 'provider-use-host', 'provider-review', 'provider-share', 'provider-revoke', 'provider-accounts', 'provider-bind-review', 'provider-bind', 'provider-activate', 'provider-quota'].includes(action)
     )
       return Promise.reject(new Error('Unknown remote action'))
     return transport.invoke('desktop:remote', action, cleanParams(params))
   },
   accounts(action: unknown, params: unknown = {}): Promise<unknown> {
-    if (typeof action !== 'string' || !['list', 'login', 'relogin', 'create-gemini', 'copy-login-link', 'activate', 'usage', 'sync-review', 'sync', 'remove'].includes(action)) {
+    if (typeof action !== 'string' || !['list', 'login', 'relogin', 'create-gemini', 'copy-login-link', 'activate', 'usage', 'sync-review', 'sync', 'remove', 'agy-status', 'agy-sync-review', 'agy-sync', 'agy-login-start', 'agy-login-complete', 'agy-login-cancel'].includes(action)) {
       return Promise.reject(new Error('Unknown provider account action'))
     }
     return transport.invoke('desktop:accounts', action, cleanParams(params))

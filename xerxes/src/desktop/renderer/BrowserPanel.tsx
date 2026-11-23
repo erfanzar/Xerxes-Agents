@@ -41,6 +41,65 @@ export function displayUrl(url: string): string {
   return url.replace(/^http:\/\//, '').replace(/\/$/, '')
 }
 
+export interface BrowserBoundsRect {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+/** True when a native WebContentsView rect intersects any overlapping DOM overlay/menu/dialog. */
+export function rectOverlapsAny(
+  target: BrowserBoundsRect,
+  obstacles: readonly BrowserBoundsRect[],
+): boolean {
+  if (target.width <= 0 || target.height <= 0) return false
+  const tRight = target.x + target.width
+  const tBottom = target.y + target.height
+  for (const obs of obstacles) {
+    if (obs.width <= 0 || obs.height <= 0) continue
+    if (
+      obs.x < tRight
+      && obs.x + obs.width > target.x
+      && obs.y < tBottom
+      && obs.y + obs.height > target.y
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+const BROWSER_OVERLAY_SELECTOR = [
+  '[role="menu"]',
+  '[role="dialog"]',
+  '[role="listbox"]',
+  '.rail-add__menu',
+  '.palette',
+  '.modelpop',
+  '.hints',
+  '.t3-popover',
+  '.acp-picker__pop',
+  '.btw-model-pop',
+  '.decision-dock',
+  '.modal',
+].join(',')
+
+function overlayCoversBox(box: HTMLElement, rect: DOMRect): boolean {
+  if (typeof document === 'undefined' || rect.width <= 0 || rect.height <= 0) return false
+  const target: BrowserBoundsRect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+  const obstacles: BrowserBoundsRect[] = []
+  for (const el of document.querySelectorAll(BROWSER_OVERLAY_SELECTOR)) {
+    if (el === box || box.contains(el)) continue
+    if (el instanceof HTMLElement && el.hidden) continue
+    const r = el.getBoundingClientRect()
+    if (r.width > 0 && r.height > 0) {
+      obstacles.push({ x: r.left, y: r.top, width: r.width, height: r.height })
+    }
+  }
+  return rectOverlapsAny(target, obstacles)
+}
+
 export function BrowserPanel(): ReactElement {
   const bridge = window.xerxes
   const page = useRef<HTMLDivElement>(null)
@@ -68,24 +127,62 @@ export function BrowserPanel(): ReactElement {
     return () => { alive = false; off?.() }
   }, [])
 
-  // Keep the native page exactly over our box; hide it when the tab goes away.
+  // Keep the native page exactly over our box; hide it when occluded by another
+  // window view OR any overlapping in-page menu/popover/dialog (Electron's native
+  // WebContentsView paints above all DOM layers and would otherwise clip menus).
   useLayoutEffect(() => {
     const box = page.current
     if (!box || !bridge.browser) return
-    const send = () => {
+    let occluded = false
+    let lastSent = ''
+    let raf = 0
+    const sync = () => {
+      raf = 0
       const rect = box.getBoundingClientRect()
-      void bridge.browser!('bounds', { rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } }).catch(() => {})
+      const hidden = occluded || rect.width <= 0 || rect.height <= 0 || overlayCoversBox(box, rect)
+      const payload: BrowserBoundsRect | null = hidden
+        ? null
+        : {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+      const key = payload ? `${payload.x},${payload.y},${payload.width},${payload.height}` : 'null'
+      if (key === lastSent) return
+      lastSent = key
+      void bridge.browser!('bounds', { rect: payload }).catch(() => {})
     }
-    send()
-    const observer = new ResizeObserver(send)
+    const schedule = () => {
+      if (raf) return
+      raf = requestAnimationFrame(sync)
+    }
+    sync()
+    const observer = new ResizeObserver(schedule)
     observer.observe(box)
-    window.addEventListener('resize', send)
-    // Covered by a dialog or another window view: hide the page so it cannot paint over them.
-    const offOccluded = bridge.onOccluded?.(occluded => { if (occluded) void bridge.browser!('bounds', { rect: null }).catch(() => {}); else send() })
+    const mutationObserver = typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(schedule)
+      : null
+    if (mutationObserver && document.body) {
+      mutationObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['open', 'hidden', 'data-context-full', 'data-review'],
+      })
+    }
+    window.addEventListener('resize', schedule)
+    const offOccluded = bridge.onOccluded?.(next => {
+      occluded = next
+      sync()
+    })
     return () => {
+      if (raf) cancelAnimationFrame(raf)
       observer.disconnect()
-      window.removeEventListener('resize', send)
+      mutationObserver?.disconnect()
+      window.removeEventListener('resize', schedule)
       offOccluded?.()
+      lastSent = 'null'
       void bridge.browser!('bounds', { rect: null }).catch(() => {})
     }
   }, [])

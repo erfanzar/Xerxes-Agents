@@ -2,8 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { remoteBootstrapScript } from '../../ui/lib/remoteBootstrap.js'
@@ -13,6 +12,7 @@ import { remoteAttachAddress, remoteAttachProgram } from './remoteAttach.js'
 import { isSshTarget, sshDestination } from '../../daemon/sshTarget.js'
 import { ensureRemoteProviderClis } from './remoteProviderSetup.js'
 import { freshSshOptions, verifyRemoteHost, type ConfirmRemoteHostKey } from './remoteHostTrust.js'
+import { mkdtempSafe } from './safeTmp.js'
 
 export interface RemoteTarget {
   alias: string
@@ -190,7 +190,7 @@ export async function openRemote(
     }
   }
   signal.throwIfAborted()
-  const directory = await mkdtemp(join(tmpdir(), 'xd-')),
+  const directory = await mkdtempSafe('xd-'),
     socketPath = join(directory, 'rpc.sock')
   let tunnel: ChildProcess | undefined,
     closing = false,
@@ -255,6 +255,13 @@ export async function openRemote(
         if (updated.socketPath !== address.socketPath || updated.projectDir !== address.projectDir) throw new Error('Remote daemon address changed; reconnect this workspace.')
         reconnectAddress = updated
         connection.expectedBuildId = updated.expectedBuildId
+        if (ports.providerSetup !== false) {
+          try { await ensureRemoteProviderClis(machine, updateController.signal, run) }
+          catch (error) {
+            const report = ports.onProviderSetupError ?? (failure => console.warn(`Provider CLI setup failed: ${failure.message}`))
+            report(error instanceof Error ? error : new Error(String(error)))
+          }
+        }
         return updated.busy
           ? { ok: false, busy: true, blockers: updated.blockers ?? [], ...(updated.waitingForGoalRound ? { waiting_for_goal_round: true } : {}) }
           : { ok: true }

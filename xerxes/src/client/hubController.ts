@@ -10,7 +10,7 @@ import {
   parseSupervisorOptions, parseWatchRow, parseWatchView, parseWorkspaces, snapshotSessions, type SupervisorConfirmation,
 } from './hubParsers.js'
 import { IDLE_AGENT_DETAIL, canMutate, isHubOwner, watchKey, type DecisionKind, type HubStore } from './hubStore.js'
-import { taskKey, type WorkspaceView } from './hubTypes.js'
+import { taskKey, type DeviceView, type WorkspaceView } from './hubTypes.js'
 import type { PreparedImage } from './imagePrep.js'
 import { arr, rec, str } from './parse.js'
 import { usageExtrasFromResult, usageFromResult } from './usageMerge.js'
@@ -85,6 +85,12 @@ export interface HubController {
   autopilotThreadOpen(): Promise<void>
   /** Confirm or cancel a card held in the Autopilot thread. */
   autopilotThreadRespond(confirmationId: string, decision: 'confirm' | 'cancel'): Promise<void>
+  /** Opens a new task session on an online workspace and optionally submits the opening prompt. */
+  createTask?(workspaceId: string, prompt?: string): Promise<{ readonly ok: true; readonly workspaceId: string; readonly sessionId: string } | { readonly ok: false; readonly message: string }>
+  /** Loads paired devices (`hub.devices.list`) into `state.devices`. */
+  loadDevices?(includeRevoked?: boolean): Promise<void>
+  /** Revokes one paired device (`hub.devices.revoke`). */
+  revokeDevice?(deviceId: string): Promise<boolean>
   /** Loads `supervisor.watch.list` into `state.watch`. */
   loadWatches(): Promise<void>
   /** Resolves true only when the Hub saved the row. A refusal is left in `watch.saveError`. Never retried. */
@@ -786,6 +792,85 @@ export function createHubController(options: HubControllerOptions): HubControlle
 
   // ── usage, presence ────────────────────────────────────────────────
 
+  async function createTask(workspaceId: string, prompt?: string): Promise<{ readonly ok: true; readonly workspaceId: string; readonly sessionId: string } | { readonly ok: false; readonly message: string }> {
+    if (!canMutate(store.getSnapshot(), workspaceId)) {
+      return { ok: false, message: 'This workspace is offline or view-only.' }
+    }
+    const opened = await connection.command({ workspaceId, action: 'session.open', args: {} })
+    if (opened.state !== 'accepted') {
+      return { ok: false, message: opened.error?.message ?? 'Could not create a new task.' }
+    }
+    const sessionId = str(rec(opened.result).session_id)
+    if (!sessionId) {
+      return { ok: false, message: 'The workspace opened a task without returning its id.' }
+    }
+    const cleanPrompt = prompt?.trim()
+    if (cleanPrompt) {
+      const submitted = await connection.command({
+        workspaceId,
+        sessionId,
+        action: 'turn.submit',
+        args: { text: cleanPrompt },
+      })
+      if (submitted.state !== 'accepted') {
+        void refreshInbox()
+        return { ok: true, workspaceId, sessionId }
+      }
+    }
+    void refreshInbox()
+    return { ok: true, workspaceId, sessionId }
+  }
+
+  async function loadDevices(includeRevoked = false): Promise<void> {
+    if (!live()) return
+    const previous = store.getSnapshot().devices
+    store.dispatch({ type: 'devices', state: { ...previous, phase: 'loading' } })
+    try {
+      const result = await connection.request('hub.devices.list', includeRevoked ? { include_revoked: true } : {})
+      const rawList = arr(result.devices)
+      const devices: DeviceView[] = []
+      for (const item of rawList) {
+        const row = rec(item)
+        const id = str(row.id)
+        if (!id) continue
+        devices.push({
+          id,
+          userId: str(row.user_id) ?? '',
+          displayName: str(row.display_name) ?? '',
+          label: str(row.label) ?? id,
+          status: str(row.status) ?? 'unknown',
+          createdAt: str(row.created_at) ?? null,
+          lastSeenAt: str(row.last_seen_at) ?? null,
+          revokedAt: str(row.revoked_at) ?? null,
+          current: row.current === true,
+        })
+      }
+      store.dispatch({
+        type: 'devices',
+        state: { phase: 'ready', list: devices, canRevokeAll: result.can_revoke_all === true },
+      })
+    } catch (error) {
+      if (error instanceof HubRequestError && (error.code === 'unsupported' || error.code === 'unknown_method')) {
+        store.dispatch({ type: 'devices', state: { phase: 'ready', list: [], canRevokeAll: false, unsupported: true } })
+        return
+      }
+      store.dispatch({ type: 'devices', state: { ...previous, phase: 'error', error: failureMessage(error) } })
+    }
+  }
+
+  async function revokeDevice(deviceId: string): Promise<boolean> {
+    const previous = store.getSnapshot().devices
+    store.dispatch({ type: 'devices', state: { ...previous, revokingId: deviceId } })
+    try {
+      await connection.request('hub.devices.revoke', { device_id: deviceId })
+      await loadDevices()
+      return true
+    } catch (error) {
+      store.dispatch({ type: 'devices', state: { ...previous, phase: 'error', error: failureMessage(error) } })
+      return false
+    }
+  }
+
   async function loadUsage(): Promise<void> {
     const previous = store.getSnapshot().usage
     const report = previous.phase === 'idle' ? undefined : previous.report
@@ -1422,7 +1507,7 @@ export function createHubController(options: HubControllerOptions): HubControlle
     start, dispose, refreshInbox, openSession, closeSession, loadOlder, loadAgents, inspectAgent, closeAgent, resync,
     reconnectNow: () => { connection.reconnectNow() },
     submit, steer, stopTurn, decide, answerQuestion,
-    setModel, setGoal, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond, supervisorCancel,
+    setModel, setGoal, createTask, loadDevices, revokeDevice, loadUsage, setPresence, supervisorOpen, supervisorSend, supervisorRespond, supervisorCancel,
     machinesList, supervisorConfigGet, supervisorConfigOptions, supervisorConfigSet, loadAutopilot, setAutopilot,
     autopilotThreadOpen, autopilotThreadRespond, loadWatches, setWatch,
   }

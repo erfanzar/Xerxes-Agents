@@ -37,50 +37,17 @@ import {
   resolveRuntimeList,
   runtimeSubtitle,
 } from './AcpRuntimePicker.js'
+import { ActionDialog } from './ActionDialog.js'
+import { RuntimeBrandIcon } from './BrandMark.js'
+import { desktopError } from './desktopRpc.js'
 import { PickerLayer, bareModelName, DELEGATION_CHOICES } from './Overlays.js'
+import type { AgyCredentialMode, AgyStatusView } from './ProviderAccountsCenter.js'
 import { T3Icon } from './T3Icons.js'
-import { AgentBrandGlyph, type AgentBrandProvider } from './XerxesSprites.js'
-import { isVscodeHost } from './host.js'
+import type { AgentBrandProvider } from './XerxesSprites.js'
 import { store, type AcpExternalAgentInfo, type Snapshot } from './store.js'
 import type { PermissionMode } from './types.js'
 
-/**
- * Renders Xerxes's real bundled phoenix emblem (`./logo-128.png`) on Desktop for
- * the built-in `xerxes` runtime, and crisp provider glyphs for Claude Code,
- * Antigravity, Codex, and custom ACP runtimes.
- */
-export function RuntimeBrandIcon({
-  provider,
-  size = 16,
-  className,
-}: {
-  readonly provider: AgentBrandProvider
-  readonly size?: number
-  readonly className?: string
-}): ReactElement {
-  if (provider === 'xerxes' && !isVscodeHost()) {
-    const classes = ['xerxes-logo-mark', className ?? ''].filter(Boolean).join(' ')
-    return (
-      <img
-        src="./logo-128.png"
-        alt="Xerxes"
-        width={size}
-        height={size}
-        className={classes}
-        data-brand-provider="xerxes"
-        draggable={false}
-      />
-    )
-  }
-  return (
-    <AgentBrandGlyph
-      provider={provider}
-      size={size}
-      animate={false}
-      {...(className ? { className } : {})}
-    />
-  )
-}
+export { RuntimeBrandIcon }
 
 const FAVORITES_KEY = 'xerxes.desktop.favoriteModels.v1'
 
@@ -180,6 +147,16 @@ export function T3ModelPicker({
   const [customOpen, setCustomOpen] = useState(false)
   const [customCommand, setCustomCommand] = useState('')
   const [customArgs, setCustomArgs] = useState('')
+  const [agyStatus, setAgyStatus] = useState<AgyStatusView | null>(null)
+  const [agyTransfer, setAgyTransfer] = useState<{
+    readonly mode: AgyCredentialMode
+    readonly label: string
+    readonly destination: string
+    readonly phase: 'reviewing' | 'ready' | 'working' | 'done'
+    readonly review?: string
+    readonly error: string
+  } | null>(null)
+  const agyTransferReq = useRef(0)
 
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popupRef = useRef<HTMLDivElement>(null)
@@ -200,6 +177,82 @@ export function T3ModelPicker({
     if (!online || externalBinding) return
     store.loadReasoningLevels({ silent: true })
   }, [online, Boolean(externalBinding), snap.currentId, snap.model])
+
+  // Load local Antigravity credential sync availability when browsing Antigravity on SSH.
+  useEffect(() => {
+    if (!open || effectiveRail !== 'antigravity' || typeof window === 'undefined' || !window.xerxes?.accounts) {
+      return
+    }
+    let cancelled = false
+    void window.xerxes.accounts('agy-status', {})
+      .then(raw => {
+        if (cancelled || !raw || typeof raw !== 'object') return
+        const view = raw as AgyStatusView
+        if (Array.isArray(view.sources)) setAgyStatus(view)
+      })
+      .catch(() => {
+        if (!cancelled) setAgyStatus(null)
+      })
+    return () => { cancelled = true }
+  }, [open, effectiveRail])
+
+  const startAgyTransfer = async (): Promise<void> => {
+    const mode = agyStatus?.canSync ? agyStatus.recommendedMode : null
+    if (!mode || typeof window === 'undefined' || !window.xerxes?.accounts) return
+    const source = agyStatus?.sources.find(item => item.mode === mode)
+    const label = source?.label ?? 'Gemini Subscription (Antigravity)'
+    const destination = agyStatus?.destination ?? 'this SSH host'
+    const req = ++agyTransferReq.current
+    setAgyTransfer({ mode, label, destination, phase: 'reviewing', error: '' })
+    try {
+      const reviewed = await window.xerxes.accounts('agy-sync-review', {
+        mode,
+        ...(source?.accountId ? { accountId: source.accountId } : {}),
+      }) as { ok?: boolean; review?: string; label?: string; destination?: string; error?: string }
+      if (agyTransferReq.current !== req) return
+      if (reviewed.ok === false || typeof reviewed.review !== 'string') {
+        throw new Error(reviewed.error || 'Could not review Antigravity transfer')
+      }
+      setAgyTransfer({
+        mode,
+        label: reviewed.label || label,
+        destination: reviewed.destination || destination,
+        phase: 'ready',
+        review: reviewed.review,
+        error: '',
+      })
+    } catch (error) {
+      if (agyTransferReq.current === req) {
+        setAgyTransfer({ mode, label, destination, phase: 'ready', error: desktopError(error) })
+      }
+    }
+  }
+
+  const confirmAgyTransfer = async (): Promise<void> => {
+    if (!agyTransfer || typeof window === 'undefined' || !window.xerxes?.accounts) return
+    if (agyTransfer.phase === 'done') { setAgyTransfer(null); return }
+    if (agyTransfer.phase !== 'ready') return
+    if (!agyTransfer.review) { void startAgyTransfer(); return }
+    const req = agyTransferReq.current
+    setAgyTransfer({ ...agyTransfer, phase: 'working', error: '' })
+    try {
+      const res = await window.xerxes.accounts('agy-sync', { review: agyTransfer.review, confirm: true }) as { ok?: boolean; error?: string }
+      if (agyTransferReq.current !== req) return
+      if (res.ok === false) throw new Error(res.error || 'Could not transfer Antigravity credentials')
+      setAgyTransfer(null)
+      await store.connectAcpAgent('antigravity')
+    } catch (error) {
+      if (agyTransferReq.current === req) {
+        setAgyTransfer({
+          mode: agyTransfer.mode,
+          label: agyTransfer.label,
+          destination: agyTransfer.destination,
+          phase: 'ready',
+          error: desktopError(error),
+        })
+      }
+    }
+  }
 
   const toggle = (): void => {
     if (open) {
@@ -398,7 +451,8 @@ export function T3ModelPicker({
     }
     const agent = agents.find(item => item.id === railId)
     if (!agent) return
-    if (agent.available && externalBinding?.agent_id !== agent.id && !snap.turnActive) {
+    const autoInstallable = agent.id === 'antigravity' || agent.id === 'claude-code'
+    if ((agent.available || autoInstallable) && externalBinding?.agent_id !== agent.id && !snap.turnActive) {
       await store.connectAcpAgent(agent.id)
     }
   }
@@ -630,21 +684,65 @@ export function T3ModelPicker({
 
                       <div className="t3-mpop__list" role="listbox" aria-label="Models">
                         {connecting ? (
-                          <div className="t3-mpop__empty">Connecting to {selectedRailAgent?.name ?? 'runtime'}…</div>
+                          <div className="t3-mpop__empty">
+                            {selectedRailAgent && !selectedRailAgent.available
+                              ? `Installing & connecting to ${selectedRailAgent.name}…`
+                              : `Connecting to ${selectedRailAgent?.name ?? 'runtime'}…`}
+                          </div>
                         ) : isBrowsingDisconnectedExternal && selectedRailAgent ? (
                           <div className="t3-mpop__connect-box">
                             <RuntimeBrandIcon provider={selectedRailAgent.provider} size={24} />
                             <strong>{selectedRailAgent.name}</strong>
-                            <p>{selectedRailAgent.available ? runtimeSubtitle(selectedRailAgent) : selectedRailAgent.installHint || 'Not installed on PATH'}</p>
+                            <p>
+                              {selectedRailAgent.available
+                                ? runtimeSubtitle(selectedRailAgent)
+                                : selectedRailAgent.id === 'antigravity' || selectedRailAgent.id === 'claude-code'
+                                  ? `${selectedRailAgent.name} CLI is not installed yet on this host. Xerxes will install it automatically when you switch.`
+                                  : selectedRailAgent.installHint || 'Not installed on PATH'}
+                            </p>
                             {selectedRailAgent.available ? (
-                              <button
-                                type="button"
-                                className="t3-mpop__primary"
-                                disabled={snap.turnActive}
-                                onClick={() => void store.connectAcpAgent(selectedRailAgent.id)}
-                              >
-                                Switch to {selectedRailAgent.name}
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  className="t3-mpop__primary"
+                                  disabled={snap.turnActive}
+                                  onClick={() => void store.connectAcpAgent(selectedRailAgent.id)}
+                                >
+                                  Switch to {selectedRailAgent.name}
+                                </button>
+                                {selectedRailAgent.id === 'antigravity' && agyStatus?.canSync && agyStatus.recommendedMode && (
+                                  <button
+                                    type="button"
+                                    className="t3-mpop__secondary"
+                                    disabled={snap.turnActive || agyTransfer?.phase === 'working'}
+                                    onClick={() => void startAgyTransfer()}
+                                  >
+                                    Transfer credentials from this Mac
+                                  </button>
+                                )}
+                              </>
+                            ) : selectedRailAgent.id === 'antigravity' || selectedRailAgent.id === 'claude-code' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="t3-mpop__primary"
+                                  disabled={snap.turnActive}
+                                  onClick={() => void store.connectAcpAgent(selectedRailAgent.id)}
+                                >
+                                  Install &amp; switch to {selectedRailAgent.name}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="t3-mpop__secondary"
+                                  onClick={() => {
+                                    setCustomCommand(selectedRailAgent.command ?? '')
+                                    setCustomArgs(selectedRailAgent.args?.join(' ') ?? '')
+                                    setCustomOpen(true)
+                                  }}
+                                >
+                                  Configure command…
+                                </button>
+                              </>
                             ) : (
                               <button
                                 type="button"
@@ -860,6 +958,30 @@ export function T3ModelPicker({
           </>
         )}
       </PickerLayer>
+      {agyTransfer && (
+        <ActionDialog
+          title={`Transfer ${agyTransfer.label} to SSH`}
+          confirmLabel={!agyTransfer.review && agyTransfer.phase === 'ready' ? 'Review transfer again' : 'Transfer & connect'}
+          busyLabel="Transferring credentials…"
+          busy={agyTransfer.phase === 'working'}
+          disabled={agyTransfer.phase === 'reviewing'}
+          done={agyTransfer.phase === 'done'}
+          error={agyTransfer.error}
+          onConfirm={() => void confirmAgyTransfer()}
+          onCancel={() => { agyTransferReq.current += 1; setAgyTransfer(null) }}
+        >
+          {agyTransfer.phase === 'reviewing' ? (
+            <p role="status">Preparing credential transfer review for <strong>{agyTransfer.destination}</strong>…</p>
+          ) : (
+            <>
+              <p>Transfer your local <strong>{agyTransfer.label}</strong> credentials to <strong>{agyTransfer.destination}</strong> and switch to Antigravity?</p>
+              <p className="studio-muted">
+                Sent over SSH stdin only and written with mode 0600 to ~/.gemini/antigravity-cli/antigravity-oauth-token.
+              </p>
+            </>
+          )}
+        </ActionDialog>
+      )}
     </div>
   )
 }

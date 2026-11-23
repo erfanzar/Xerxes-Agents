@@ -18,13 +18,13 @@ import { ActionConfirmationCard } from './ActionConfirmationCard.js'
 import { AgentOrb } from './AgentOrb.js'
 import { AutopilotPanel } from './AutopilotPanel.js'
 import { AutopilotThreadView } from './AutopilotThreadView.js'
+import { XerxesLogoMark } from './BrandMark.js'
 import { WatchPanel, WatchStrip } from './WatchPanel.js'
 import { elapsedOf } from './duration.js'
 import { Icon } from './Icon.js'
 import { ModelChooser } from './ModelChooser.js'
 import { SupervisorControls, type ControlsTab, type ControlsTabEntry } from './SupervisorControls.js'
 import { LiveSteps, ThreadMessages } from './SupervisorThread.js'
-import { XerxesBrandEmblem } from './XerxesSprites.js'
 import { isOpenCard } from '../../client/supervisorRecords.js'
 import { useTranscriptScroll } from './transcriptScroll.js'
 import { liveSteps } from '../../client/supervisorSteps.js'
@@ -117,7 +117,7 @@ export function ConnectHub({ unavailable = false, onOpenSettings }: {
 }): ReactElement {
   return (
     <section className="supervisor supervisor--connect" aria-labelledby="supervisor-connect-title">
-      <span className="xempty__mark" aria-hidden="true"><XerxesBrandEmblem size={44} animate={false} /></span>
+      <span className="xempty__mark" aria-hidden="true"><XerxesLogoMark size={52} className="xempty__logo" decorative /></span>
       <h3 id="supervisor-connect-title">{CONNECT_HUB_TITLE}</h3>
       {unavailable ? (
         <p className="studio-muted">XERXES is only available in the Xerxes desktop app.</p>
@@ -391,54 +391,72 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           ) : null}
         </div>
       ) : null}
-      <div key={showSlack ? 'slack' : 'thread'} className="supervisor__stream" ref={showSlack ? undefined : scroll.ref}>
-        <div className="supervisor__col">
-          {showSlack ? (live
-            ? <SupervisorSlack key={state.selfUserId} client={slack.client} openOAuth={slack.openOAuth} />
-            : <p role="status" className="notice">{note ?? 'Reconnect to the Hub to open Slack.'}</p>
-          ) : showThread ? (
-            <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
-          ) : supervisor.phase === 'unsupported' ? (
-            <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
-          ) : supervisor.phase === 'error' ? (
-            <div role="alert" className="notice is-error">
-              <p>Could not open the supervisor: {supervisor.error ?? 'unknown error'}</p>
-              <button type="button" className="btn" onClick={onReopen}>Try again</button>
-            </div>
-          ) : (
-            <>
-              {!ready ? (
-                <p className="xempty xempty--wait" aria-busy="true">
-                  <AgentOrb size={36} state="connecting" live />
-                  <span>{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</span>
-                </p>
-              ) : null}
-              {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
-                <div className="xempty">
-                  <span className="xempty__mark" aria-hidden="true"><XerxesBrandEmblem size={44} animate motion="css" /></span>
-                  <strong>Ask XERXES about your work</strong>
-                  <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
-                  <div className="xempty__try" role="group" aria-label="Try asking">
-                    {SUGGESTIONS.map(suggestion => (
-                      <button key={suggestion} type="button" className="xsuggest" disabled={!canType}
-                        onClick={() => { setText(suggestion); inputRef.current?.focus(); requestAnimationFrame(grow) }}>{suggestion}</button>
-                    ))}
+      <div className="supervisor__stage">
+        <div className="t3-topbar-fade" aria-hidden="true" />
+        <div key={showSlack ? 'slack' : 'thread'} className="supervisor__stream" ref={showSlack ? undefined : scroll.ref}>
+          <div className="supervisor__col">
+            {showSlack ? (live
+              ? <SupervisorSlack key={state.selfUserId} client={slack.client} openOAuth={slack.openOAuth} />
+              : <p role="status" className="notice">{note ?? 'Reconnect to the Hub to open Slack.'}</p>
+            ) : showThread ? (
+              <AutopilotThreadView thread={state.autopilotThread} live={live} now={now} onRespond={props.onRespondAutopilot ?? (() => undefined)} />
+            ) : supervisor.phase === 'unsupported' ? (
+              <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
+            ) : supervisor.phase === 'error' ? (
+              <div role="alert" className="notice is-error">
+                <p>Could not open the supervisor: {supervisor.error ?? 'unknown error'}</p>
+                <button type="button" className="btn" onClick={onReopen}>Try again</button>
+              </div>
+            ) : (
+              <>
+                {!ready ? (
+                  <p className="xempty xempty--wait" aria-busy="true">
+                    <AgentOrb size={36} state="connecting" live />
+                    <span>{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</span>
+                  </p>
+                ) : null}
+                {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
+                  <div className="xempty">
+                    <span className="xempty__mark" aria-hidden="true"><XerxesLogoMark size={52} className="xempty__logo" decorative /></span>
+                    <strong>Ask XERXES about your work</strong>
+                    <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
+                    <div className="xempty__try" role="group" aria-label="Try asking">
+                      {SUGGESTIONS.map(suggestion => (
+                        <button key={suggestion} type="button" className="xsuggest" disabled={!canType}
+                          onClick={() => { setText(suggestion); inputRef.current?.focus(); requestAnimationFrame(grow) }}>
+                          <span>{suggestion}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : null}
-              <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" records={records} {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
-              {openCards.length === 0 ? null : (
-                <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
-                  {openCards.map(item => (
-                    <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
-                  ))}
-                </ul>
-              )}
-              {thinking || runningSteps.length > 0 ? <LiveSteps steps={runningSteps} seconds={thinkingSeconds} /> : null}
-              {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="xevent" data-tone="error"><Icon name="error" size={13} /><span className="xevent__text">{supervisor.error}</span></p> : null}
-            </>
-          )}
+                ) : null}
+                <ThreadMessages messages={supervisor.messages} {...(showPending && pending ? { pending } : {})} now={now} label="Conversation" records={records} {...(supervisor.steps ? { steps: supervisor.steps } : {})} />
+                {openCards.length === 0 ? null : (
+                  <ul className="supervisor__cards" aria-label="Actions XERXES proposes">
+                    {openCards.map(item => (
+                      <li key={item.id}><ActionConfirmationCard item={item} canAct={live} onRespond={decision => onRespond(item.id, decision)} /></li>
+                    ))}
+                  </ul>
+                )}
+                {thinking || runningSteps.length > 0 ? <LiveSteps steps={runningSteps} seconds={thinkingSeconds} /> : null}
+                {supervisor.error !== undefined && ready && !unconfigured ? <p role="alert" className="xevent" data-tone="error"><Icon name="error" size={13} /><span className="xevent__text">{supervisor.error}</span></p> : null}
+              </>
+            )}
+          </div>
         </div>
+        {!showSlack && !scroll.following ? (
+          <button
+            type="button"
+            className="jump-latest"
+            data-working={thinking ? '' : undefined}
+            aria-label="Jump to latest"
+            title="Jump to latest"
+            onClick={scroll.scrollToLatest}
+          >
+            <Icon name="arrowDown" size={14} />
+            <span className="jump-latest__label">Jump to latest</span>
+          </button>
+        ) : null}
       </div>
       {conversing && !showThread && !showSlack ? (
         <form className="supervisor__dock composer-wrap" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void submit() }}>
@@ -467,12 +485,15 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             </div>
           </div>
           <div className="composer__toolbar">
-            {canSteer ? <button type="button" className="cchip composer__text" title="Stop the running turn and answer this message now (⌘⏎)" onClick={() => { void submit('steer') }}>Steer now</button> : null}
-            <span className="cchip composer__text supervisor__hint" title={autopilotChip === undefined ? DEFAULT_COMPOSER_HINT : AUTOPILOT_COMPOSER_HINT}>
-              {autopilotChip === undefined ? 'Asks first when others are in the thread' : 'Autopilot on: acts at once'}
+            {canSteer ? <button type="button" className="cchip composer__text supervisor__steer" title="Stop the running turn and answer this message now (⌘⏎)" onClick={() => { void submit('steer') }}>Steer now</button> : null}
+            <span className="supervisor__hint" title={autopilotChip === undefined ? DEFAULT_COMPOSER_HINT : AUTOPILOT_COMPOSER_HINT}>
+              {autopilotChip === undefined ? 'Asks first when others are in the thread' : 'Autopilot on · acts at once'}
             </span>
             <span className="composer__flex" />
-            <button type="button" className={`cchip composer__text${unconfigured ? ' is-custom' : ''}`} title="XERXES's model — click to change" onClick={() => props.onChooserChange(true)}>{modelChipText(config)}</button>
+            <button type="button" className={`cchip composer__text supervisor__model-btn${unconfigured ? ' is-custom' : ''}`} title="XERXES's model — click to change" onClick={() => props.onChooserChange(true)}>
+              <span>{modelChipText(config)}</span>
+              <Icon name="caretDown" size={10} />
+            </button>
           </div>
         </form>
       ) : null}

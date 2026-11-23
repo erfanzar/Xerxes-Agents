@@ -8,8 +8,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createBridge } from '../src/desktop/bridgeApi.js'
 import { AccountRecordedUsage, GeminiAccountForm, ProviderAccountsCenter } from '../src/desktop/renderer/ProviderAccountsCenter.js'
 
-test('the account center offers Gemini API keys, not Gemini OAuth', () => {
+test('the account center offers Gemini Subscription (Antigravity) and Gemini API keys, not native Gemini OAuth', () => {
   const html = renderToStaticMarkup(createElement(ProviderAccountsCenter, { accounts: async () => ({ accounts: [] }), sessionKey: 's1', turnActive: false, changed: () => {} }))
+  expect(html).toContain('<option value="gemini_subscription">Gemini Subscription (Antigravity)</option>')
   expect(html).toContain('<option value="gemini">Gemini (API key)</option>')
   expect(html).toContain('Gemini is API-key only')
   expect(html).toContain('no Gemini OAuth')

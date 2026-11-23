@@ -219,6 +219,19 @@ export interface WatchView {
   readonly watches: readonly WatchRow[]
 }
 
+/** One paired client device reported by `hub.devices.list`. */
+export interface DeviceView {
+  readonly id: string
+  readonly userId: string
+  readonly displayName: string
+  readonly label: string
+  readonly status: string
+  readonly createdAt: string | null
+  readonly lastSeenAt: string | null
+  readonly revokedAt: string | null
+  readonly current: boolean
+}
+
 export function taskKey(workspaceId: string, sessionId: string): string {
   return `${workspaceId}\u001f${sessionId}`
 }

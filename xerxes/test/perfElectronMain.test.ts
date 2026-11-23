@@ -82,10 +82,10 @@ describe('Startup surface planner (lazy multi-view restoration)', () => {
     const saved: SavedWindow[] = [
       savedLocal('/repo/xerxes', 's1'),
       savedLocal('/repo/eyvan', 's2'),
-      savedRemote('tpu', '34.34.5.117', '/home/erfan/src/', 'r1'),
+      savedRemote('tpu', '198.51.100.25', '/home/erfan/src/', 'r1'),
       savedLocal('/repo/xerxes', 's3'),
       savedLocal('/repo/xerxes', 's3'), // duplicate local session
-      savedRemote('tpu', '34.34.5.117', '/home/erfan/src', 'r1'), // duplicate remote session (trailing slash normalized)
+      savedRemote('tpu', '198.51.100.25', '/home/erfan/src', 'r1'), // duplicate remote session (trailing slash normalized)
       savedLocal('/repo/eyvan', 's-active', { active: true }),
     ]
     const plans = planStartupSurfaces(saved)

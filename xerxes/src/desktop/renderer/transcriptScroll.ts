@@ -75,8 +75,19 @@ export function useTranscriptScroll(sessionId: string | null, options: { more?: 
       setPinned(true)
     }
     const follow = (): void => {
-      if (following.current && element.clientHeight > 0) {
+      if (element.clientHeight <= 0) return
+      if (following.current) {
         element.scrollTop = element.scrollHeight
+        lastFollowTop.current = element.scrollTop
+        return
+      }
+      // If content shrank or reset (e.g., collapsing an activity group or
+      // re-hydrating a short transcript) so the tail is already inside the
+      // viewport, there is nothing below the fold to jump to — re-pin so the
+      // floating Jump-to-latest control does not linger over empty space.
+      if (!pending.current && element.scrollHeight - element.scrollTop - element.clientHeight < 64) {
+        following.current = true
+        setPinned(true)
         lastFollowTop.current = element.scrollTop
       }
     }

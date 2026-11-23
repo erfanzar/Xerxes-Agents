@@ -43,7 +43,8 @@ import {
   isExternalAcpBinding,
   transportBadgeLabel,
 } from './AcpRuntimePicker.js'
-import { AgentBrandGlyph, XerxesBrandEmblem } from './XerxesSprites.js'
+import { RuntimeBrandIcon } from './BrandMark.js'
+import { XerxesBrandEmblem } from './XerxesSprites.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
@@ -1635,7 +1636,7 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
               data-provider={snap.acpBinding.provider}
               title={`External runtime: ${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''}`}
             >
-              <AgentBrandGlyph provider={snap.acpBinding.provider} size={12} />
+              <RuntimeBrandIcon provider={snap.acpBinding.provider} size={12} />
               <span>{snap.acpBinding.name} · {transportBadgeLabel(snap.acpBinding.transport)}</span>
             </span>
           )
@@ -1645,7 +1646,17 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
         <span className="composer__flex" />
         {/* On Session edits or the plan, the approval card is off screen: this is the signal. */}
         {needsInput && <button className="badge badge--need" title={snap.interactionHidden ? 'Show the request waiting for you' : undefined} onClick={() => { store.showInteraction(); store.setTab('activity'); if (page) open(null); if (agent) openAgent('') }}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>}
-        {page === null && snap.tab !== 'activity' && <button className="chat__view" onClick={() => store.setTab('activity')}><Icon name="chat" size={13} /> Conversation</button>}
+        {page === null && snap.tab !== 'activity' && (
+          <button
+            type="button"
+            className="chat__view chat__back"
+            aria-label="Back to conversation"
+            title="Back to conversation (Esc)"
+            onClick={() => store.setTab('activity')}
+          >
+            <span aria-hidden="true">←</span> Conversation
+          </button>
+        )}
         {!onPage && !agent && snap.swarm?.active && (() => {
           const swarmCounts = swarmMemberCounts(snap.swarm.members)
           return (
@@ -3182,7 +3193,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     window.addEventListener('resize', grow)
     return () => { observer.disconnect(); window.removeEventListener('resize', grow) }
   }, [])
-  const send = async (): Promise<void> => {
+  const send = async (mode: 'default' | 'steer' = 'default'): Promise<void> => {
     if (wantsHints(draft)) {
       const seq = hintSeq.current
       const items = hints?.items ?? await store.completeText(draft).catch(() => [])
@@ -3200,7 +3211,11 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     writeDraft(origin.key, sent)
     sendingDraft.current = true
     try {
-      if (await store.submit(sent.trim() || IMAGE_ONLY_MESSAGE, undefined, attached)) {
+      const payload = sent.trim() || IMAGE_ONLY_MESSAGE
+      const delivered = mode === 'steer' && snap.turnActive
+        ? await store.steerNow(payload, attached)
+        : await store.submit(payload, undefined, attached)
+      if (delivered) {
         setImages(current => current.filter(image => !attached.includes(image)))
         const current = latestDraft.current
         const next = acceptedDraft(origin, current.identity, sent, current.text)
@@ -3258,7 +3273,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     snap.connection !== 'online'
       ? 'Connect to a daemon first…'
       : snap.turnActive
-        ? 'Steer now — queued until this step settles'
+        ? 'Queue follow-up (⏎) or steer now (⌘⏎)'
         : snap.compacting
           ? 'Compacting the conversation — you can send when it finishes'
           : inPlanMode
@@ -3353,7 +3368,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           onKeyDown={e => {
             // Shift+Tab switches between plan mode and normal mode, as in Claude Code.
             if ((!externalAcp || hasAcpPlanMode) && e.key === 'Tab' && e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); store.togglePlanMode(); return }
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && snap.turnActive) { e.preventDefault(); void send('steer') }
+            else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send('default') }
             else if (hints && hints.items.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
               // Hints own the arrows while open; the caret keeps them when closed.
               e.preventDefault()
@@ -3381,8 +3397,8 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           : <button
               className="composer__send"
               disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending}
-              title={snap.turnActive ? 'Queue — runs when this step settles (⏎)' : 'Send (⏎ · ⇧⏎ newline)'}
-              onClick={send}
+              title={snap.turnActive ? 'Queue — runs when this step settles (⏎ · ⌘⏎ to steer now)' : 'Send (⏎ · ⇧⏎ newline)'}
+              onClick={() => void send('default')}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
             >{vibes ? <T3Icon name="arrowUp" size={16} /> : <Icon name="arrowUp" size={16} />}</button>}
       </div>
@@ -3414,6 +3430,17 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             </button>
           )}
           <span className="composer__flex" />
+          {snap.turnActive && (draft.trim() || images.length > 0) && (
+            <button
+              type="button"
+              className="cchip composer__text composer__steer"
+              disabled={!ready || snap.submissionPending}
+              title="Stop the running step and send this message now (⌘⏎)"
+              onClick={() => void send('steer')}
+            >
+              Steer now
+            </button>
+          )}
           {!externalAcp && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
           <T3ModelPicker snap={snap} />
           <Dictation compact sessionKey={snap.sessionKey} onText={text => { setDraft(value => (value ? value + ' ' : '') + text) }} />
@@ -3431,6 +3458,17 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             aria-label="Add context"
             onClick={() => open('files')}
           ><Icon name="plus" size={16} /></button>
+          {snap.turnActive && (draft.trim() || images.length > 0) && (
+            <button
+              type="button"
+              className="cchip composer__text composer__steer"
+              disabled={!ready || snap.submissionPending}
+              title="Stop the running step and send this message now (⌘⏎)"
+              onClick={() => void send('steer')}
+            >
+              Steer now
+            </button>
+          )}
           {!vscode && <Dictation compact sessionKey={snap.sessionKey} onText={text=>{setDraft(value=>(value ? value+" " : "")+text)}} />}
           {!externalAcp && (
             <>
@@ -3807,7 +3845,7 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
         <span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span>
       </>}
     </button>}
-    {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><button aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div>)}</div></div>}
+    {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><div className="composer-queue__actions">{snap.turnActive && <button type="button" className="composer-queue__steer" title="Stop the running step and send this message now" onClick={() => void store.promoteQueued(item.id)}>Steer now</button>}<button type="button" className="composer-queue__drop" aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div></div>)}</div></div>}
   </section>
 }
 
@@ -3877,7 +3915,7 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
           </header>
           <div className="rail-env">
             <div className="rail-env__row">
-              <AgentBrandGlyph provider={externalBinding.provider} size={14} />
+              <RuntimeBrandIcon provider={externalBinding.provider} size={14} />
               <span className="rail-env__label">{externalBinding.name}</span>
               {externalBinding.external_session_id && (
                 <span className="rail-env__meta" title={externalBinding.external_session_id}>
@@ -4149,6 +4187,11 @@ function GlobalKeys({
           closeSurface()
           return
         }
+        if (snap.tab !== 'activity') {
+          event.preventDefault()
+          store.setTab('activity')
+          return
+        }
         if (snap.turnActive) {
           event.preventDefault()
           // Two presses: one stray Escape must not cancel the turn and every
@@ -4177,6 +4220,6 @@ function GlobalKeys({
     // Every overlay flag the handler branches on must be a dep — a stale
     // closure here swallowed Escape after the task modal closed (the old
     // snap still claimed taskModalOpen, so settings could never dismiss).
-  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.delegationMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.turnActive, closeSurface])
+  }, [snap.approval, snap.paletteOpen, snap.searchOpen, snap.taskModalOpen, snap.settingsOpen, snap.pickerOpen, snap.reasoningPickerOpen, snap.modelMenuOpen, snap.delegationMenuOpen, snap.contextMenuOpen, snap.wsMenuOpen, snap.sessionMenu, snap.tab, snap.turnActive, closeSurface])
   return null
 }

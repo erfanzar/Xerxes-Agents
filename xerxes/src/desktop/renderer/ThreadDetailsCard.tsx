@@ -339,7 +339,13 @@ export function ThreadDetailsCard({
             </button>
           )}
           {todos.length > 0 && (
-            <button type="button" className="t3-drow" onClick={() => store.setTab('plan')}>
+            <button
+              type="button"
+              className={`t3-drow${snap.tab === 'plan' ? ' is-selected' : ''}`}
+              aria-pressed={snap.tab === 'plan'}
+              title={snap.tab === 'plan' ? 'Back to conversation' : 'Open Plan & to-dos'}
+              onClick={() => store.setTab(snap.tab === 'plan' ? 'activity' : 'plan')}
+            >
               <span className="t3-drow__ico" aria-hidden="true"><Icon name="plan" size={14} /></span>
               <span className="t3-drow__label">Plan &amp; to-dos</span>
               <span className="t3-drow__meta">{doneTodos}/{todos.length}</span>

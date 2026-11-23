@@ -91,13 +91,16 @@ test('the agent message box stays centred under the agent conversation, not pinn
   expect(rule).toMatch(/margin:0 auto(;|$)/)
 })
 
-test('in Vibes and Neo the jump button is a small round button, the agent box spans the conversation column, and XERXES messages carry a signature', async () => {
+test('in Vibes and Neo the jump button is a small round button, the agent box spans the conversation column, and XERXES chat is clean and flush-aligned', async () => {
   const css = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()
   const rule = (selector: string): string => css.match(new RegExp(`${selector.replace(/[.[\]()]/g, '\\$&')}\\{([^}]*)\\}`))?.[1] ?? ''
   // A wide pill lay over the transcript text; the label is kept for the tooltip and screen readers only.
   expect(rule('.atelier .jump-latest')).toContain('width:32px')
   expect(rule('.atelier .jump-latest__label')).toContain('clip-path:inset(50%)')
   expect(rule('.atelier .composer-wrap.agent-dock')).toContain('max-width:calc(var(--conversation-width) + 48px)')
-  expect(rule('.atelier .xmsg__who')).toContain('background-clip:text')
-  expect(rule('.atelier .supervisor__message--xerxes::before')).toContain('linear-gradient')
+  // XERXES super-agent replies sit flush with the conversation column with calm neutral typography (no neon left bar or blue gradient title).
+  expect(rule('.atelier .supervisor__message--xerxes')).toContain('padding-left:0')
+  expect(rule('.atelier .xmsg__who')).toContain('color:var(--x-title)')
+  expect(rule('.atelier .xmsg__who')).not.toContain('background-clip:text')
+  expect(rule('.atelier .composer-wrap.supervisor__dock')).toContain('max-width:768px')
 })

@@ -19,10 +19,10 @@
  */
 
 import { createHash } from 'node:crypto'
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { mkdtempSafe } from './safeTmp.js'
 
 export const RELEASES_REPOSITORY = 'erfanzar/Xerxes-Agents'
 const MAX_NOTES_CHARS = 12_000
@@ -151,7 +151,7 @@ export async function installAppUpdate(options: InstallOptions): Promise<void> {
   const parent = dirname(appBundle)
   try { await access(parent, constants.W_OK) }
   catch { throw new Error(`${parent} is not writable by this user, so the app cannot replace itself. Download the update from the release page instead.`) }
-  const work = await mkdtemp(join(tmpdir(), 'xerxes-update-'))
+  const work = await mkdtempSafe('xerxes-update-')
   const dmg = join(work, asset.name)
   const mount = join(work, 'mount')
   let mounted = false

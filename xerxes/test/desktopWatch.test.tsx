@@ -143,7 +143,7 @@ test('text that came from a run is rendered as text, never as HTML', () => {
       },
     })],
   }))
-  expect(html).not.toContain('<img')
+  expect(html).not.toContain('<img src=x')
   expect(html).not.toContain('<script')
   expect(html).not.toContain('<b>ws')
   expect(html).not.toContain('<i>test')

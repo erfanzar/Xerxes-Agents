@@ -149,7 +149,26 @@ export async function runHubIdentityCli(args: readonly string[], options: HubIde
       return 0
     }
     if (group === 'devices' && action === 'list') {
-      for (const device of admin.listDevices({ includeRevoked: parsed.flags.has('all') })) {
+      const devices = admin.listDevices({ includeRevoked: parsed.flags.has('all') })
+      if (parsed.flags.has('json')) {
+        out(JSON.stringify({
+          devices: devices.map(device => ({
+            id: device.id,
+            user_id: device.userId,
+            display_name: device.displayName,
+            label: device.label,
+            status: device.status,
+            created_at: new Date(device.createdAt).toISOString(),
+            activated_at: device.activatedAt === null ? null : new Date(device.activatedAt).toISOString(),
+            last_seen_at: device.lastSeenAt === null ? null : new Date(device.lastSeenAt).toISOString(),
+            expires_at: new Date(device.expiresAt).toISOString(),
+            revoked_at: device.revokedAt === null ? null : new Date(device.revokedAt).toISOString(),
+            revoked_reason: device.revokedReason,
+          })),
+        }))
+        return 0
+      }
+      for (const device of devices) {
         out(`${device.id}\t${device.status}\t${device.displayName}\t${device.label}\tlast seen ${device.lastSeenAt === null ? 'never' : new Date(device.lastSeenAt).toISOString()}`)
       }
       return 0
@@ -158,7 +177,7 @@ export async function runHubIdentityCli(args: readonly string[], options: HubIde
       const [id] = rest
       if (id === undefined) throw new HubIdentityError('invalid_request', 'usage: devices revoke <device-id>')
       admin.revokeDevice(id, 'revoked_by_admin')
-      out(`device ${id} revoked`)
+      out(parsed.flags.has('json') ? JSON.stringify({ ok: true, device_id: id }) : `device ${id} revoked`)
       return 0
     }
     if (group === 'users' && action === 'list') {
