@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { store, showsImmortalsForSession, type Snapshot } from './store.js'
 import { desktopCall } from './desktopRpc.js'
+import { localMachineLabel } from './runModeView.js'
 import { T3Icon } from './T3Icons.js'
 import { activityFleetRows, agentState } from './AgentRoster.js'
 import { parseGoal } from './goalText.js'
@@ -43,9 +44,7 @@ function folderBase(cwd: string): string {
 }
 
 function localHostLabel(): string {
-  if (typeof navigator === 'undefined') return 'This Mac'
-  const platform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
-  return /mac/i.test(platform) ? 'This Mac' : 'This computer'
+  return localMachineLabel(true)
 }
 
 export function ThreadDetailsCard({

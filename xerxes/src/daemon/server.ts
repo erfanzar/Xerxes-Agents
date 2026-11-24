@@ -15227,7 +15227,8 @@ export class DaemonServer {
     const args = Array.isArray(params.args)
       ? params.args.filter((item): item is string => typeof item === "string")
       : undefined;
-    const additionalDirectories = Array.isArray(params.additional_directories)
+    const hasExplicitAdditionalDirs = "additional_directories" in params;
+    const explicitAdditionalDirs = Array.isArray(params.additional_directories)
       ? params.additional_directories
           .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
           .map((item) => item.trim())
@@ -15239,8 +15240,10 @@ export class DaemonServer {
       params.ide_mcp_port <= 65535
         ? params.ide_mcp_port
         : undefined;
-    const agentFlag = optionalString(params.agent)?.trim() || undefined;
-    const sandbox = params.sandbox === true;
+    const hasExplicitAgentFlag = "agent" in params;
+    const explicitAgentFlag = optionalString(params.agent)?.trim() || undefined;
+    const hasExplicitSandbox = "sandbox" in params;
+    const explicitSandbox = params.sandbox === true;
     const mcpServers = this.collectAcpMcpServers(cwd);
     const permissionMode = target.session?.permissionMode
       ?? (typeof this.runtime.status().permission_mode === "string"
@@ -15262,6 +15265,23 @@ export class DaemonServer {
       savedBinding !== undefined &&
       savedBinding.agent_id === agentId &&
       resolveProjectDirectory(savedBinding.cwd || cwd) === cwd;
+    const additionalDirectories = hasExplicitAdditionalDirs
+      ? explicitAdditionalDirs
+      : savedMatchesTarget && Array.isArray(savedBinding.additional_directories)
+        ? savedBinding.additional_directories
+            .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+            .map((item) => item.trim())
+        : undefined;
+    const agentFlag = hasExplicitAgentFlag
+      ? explicitAgentFlag
+      : savedMatchesTarget &&
+          typeof savedBinding.agent_override === "string" &&
+          savedBinding.agent_override.trim().length > 0
+        ? savedBinding.agent_override.trim()
+        : undefined;
+    const sandbox = hasExplicitSandbox
+      ? explicitSandbox
+      : savedMatchesTarget && savedBinding.sandbox === true;
     const resumeSessionId =
       explicitResumeId ??
       (savedMatchesTarget &&

@@ -7,12 +7,13 @@ import { expect, test } from 'bun:test'
 
 import { createBridge } from '../src/desktop/bridgeApi.js'
 import { AccountRecordedUsage, ProviderAccountsCenter, ProviderLoginLink, formatAccountUsageWindow } from '../src/desktop/renderer/ProviderAccountsCenter.js'
+import { localMachineLabel } from '../src/desktop/renderer/runModeView.js'
 import { providerAccountUsageWire } from '../src/desktop/main/globalProviderAccounts.js'
 import { ActionDialog } from '../src/desktop/renderer/ActionDialog.js'
 
 test('the global provider account center is available on Mac and SSH', () => {
   const html = renderToStaticMarkup(createElement(ProviderAccountsCenter, { accounts: async () => ({ accounts: [] }), sessionKey: 's1', turnActive: false, changed: () => {} }))
-  for (const text of ['Provider accounts', 'One account center for this Mac and every SSH workspace', 'Claude', 'Codex', 'Sign in']) expect(html).toContain(text)
+  for (const text of ['Provider accounts', `One account center for ${localMachineLabel()} and every SSH workspace`, 'Claude', 'Codex', 'Sign in']) expect(html).toContain(text)
 })
 
 test('recorded account usage identifies profile-name aggregation, not credential identity', () => {

@@ -249,7 +249,8 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     const stamp = existsSync(file.fsPath) ? Math.round(statSync(file.fsPath).mtimeMs).toString(36) : ''
     return webview.asWebviewUri(file).toString() + (stamp ? `?v=${stamp}` : '')
   }
-  const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'renderer/')).toString()
+  const rawBase = webview.asWebviewUri(vscode.Uri.joinPath(media, 'renderer')).toString()
+  const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`
   const source = webview.cspSource
   // Stamped before first paint so the view never flashes an unstyled page.
   const style = currentStyle()

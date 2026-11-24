@@ -18,6 +18,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path
 
 import { splitCommandString } from '../acp/externalAgents.js'
 import { ValidationError } from '../core/errors.js'
+import { sniffImageMediaType } from '../core/multimodal.js'
 import type { JsonRpcPayload } from '../protocol/jsonRpc.js'
 import {
   MAX_ARTIFACT_CONTENT_BYTES,
@@ -50,7 +51,10 @@ import { sessionHistoryPage } from './historyPage.js'
 import type { DaemonSession } from './runtime.js'
 
 const EXTERNAL_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-const AGY_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:md|markdown|html|htm)$/i
+const AGY_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:md|markdown|html|htm|png|jpe?g|gif|webp|svg)$/i
+const AGY_IMAGE_ARTIFACT_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg)$/i
+const MAX_AGY_IMAGE_ARTIFACT_BYTES = 4 * 1024 * 1024
+const AGY_SVG_ROOT_RE = /<svg[\s>]/i
 const AGY_TASK_LOG_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.log$/
 const AGY_ARTIFACT_PREFIX = 'agy:'
 export const AGY_TASK_ID_PREFIX = 'agy-task:'
@@ -1112,7 +1116,9 @@ function humanizeArtifactTitle(filename: string, content: string, kind: Artifact
 
 function artifactKindFromFilename(filename: string): ArtifactKind {
   const ext = extname(filename).toLowerCase()
-  return ext === '.html' || ext === '.htm' ? 'html' : 'markdown'
+  if (ext === '.html' || ext === '.htm') return 'html'
+  if (AGY_IMAGE_ARTIFACT_EXT_RE.test(ext)) return 'image'
+  return 'markdown'
 }
 
 function normalizeIsoTimestamp(value: unknown, fallback: string): string {
@@ -1935,17 +1941,45 @@ export class AgyBrainBridge {
     } catch {
       return undefined
     }
-    if (!stats.isFile() || stats.size > MAX_ARTIFACT_CONTENT_BYTES) return undefined
+    const kind = artifactKindFromFilename(filename)
     let content: string
-    try {
-      content = await readFile(realFilePath, 'utf8')
-    } catch {
-      return undefined
+    if (kind === 'image') {
+      // Symlinks named .png pointing to non-image targets are refused by target extension too.
+      if (!AGY_IMAGE_ARTIFACT_EXT_RE.test(realFilePath)) return undefined
+      if (!stats.isFile() || stats.size === 0 || stats.size > MAX_AGY_IMAGE_ARTIFACT_BYTES) return undefined
+      let bytes: Buffer
+      try {
+        bytes = await readFile(realFilePath)
+      } catch {
+        return undefined
+      }
+      if (bytes.length === 0 || bytes.length > MAX_AGY_IMAGE_ARTIFACT_BYTES) return undefined
+      const ext = extname(realFilePath).toLowerCase()
+      if (ext === '.svg') {
+        let svgText: string
+        try {
+          svgText = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        } catch {
+          return undefined
+        }
+        if (!AGY_SVG_ROOT_RE.test(svgText)) return undefined
+        content = `data:image/svg+xml;base64,${bytes.toString('base64')}`
+      } else {
+        const sniffed = sniffImageMediaType(bytes)
+        if (!sniffed) return undefined
+        content = `data:${sniffed};base64,${bytes.toString('base64')}`
+      }
+    } else {
+      if (!stats.isFile() || stats.size > MAX_ARTIFACT_CONTENT_BYTES) return undefined
+      try {
+        content = await readFile(realFilePath, 'utf8')
+      } catch {
+        return undefined
+      }
     }
 
     const meta = await readJsonFileSafe(`${filePath}.metadata.json`)
     const id = `${AGY_ARTIFACT_PREFIX}${filename}`
-    const kind = artifactKindFromFilename(filename)
     const metaTitle = readString(meta?.title)
     const title = metaTitle
       ? metaTitle.slice(0, MAX_ARTIFACT_TITLE_CHARS)

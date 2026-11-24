@@ -381,6 +381,15 @@ test('markdown renders <xerxes-embed>, <agent-embed>, ```widget, ```html-widget,
   const unclosed = renderToStaticMarkup(createElement(Markdown, { text: '```widget\n<div>partial' }))
   expect(unclosed).not.toContain('<iframe ')
   expect(unclosed).toContain('data-lang="widget"')
+
+  // Standalone <agent-embed> pointing at an Antigravity brain image renders inline via ChatImage.
+  const imgEmbed = renderToStaticMarkup(
+    createElement(Markdown, {
+      text: '<agent-embed src="file:///Users/demo/.gemini/antigravity-cli/brain/sess-1/render.png" title="3D Render"></agent-embed>',
+    }),
+  )
+  expect(imgEmbed).toContain('Loading image: 3D Render')
+  expect(imgEmbed).toContain('/Users/demo/.gemini/antigravity-cli/brain/sess-1/render.png')
 })
 
 test('ArtifactTool accepts optional embed boolean and returns inline embed hint for html artifacts', async () => {

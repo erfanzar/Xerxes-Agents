@@ -631,10 +631,10 @@ describe('Semantic Tool Formatting (Shell, Search, Web, Skill, MCP, Memory, Sche
     expect(compactWaiting).toContain('var(--x-needs')
     expect(compactWaiting.match(HEX_RE) ?? []).toEqual([])
 
-    // Hero Xerxes mark adapts to theme tokens across dark & light palettes
+    // Hero Xerxes mark renders the real Xerxes phoenix emblem with zero hex literals
     const heroEmblem = renderToStaticMarkup(createElement(XerxesBrandEmblem, { size: 48, animate: true }))
-    expect(heroEmblem).toContain('var(--x-title')
-    expect(heroEmblem).toContain('var(--x-hairline')
+    expect(heroEmblem).toContain('src="./logo-128.png"')
+    expect(heroEmblem).not.toContain('<svg')
     expect(heroEmblem.match(HEX_RE) ?? []).toEqual([])
 
     const regalMark = renderToStaticMarkup(createElement(XerxesStatusMark, { state: 'working', size: 48, live: true }))

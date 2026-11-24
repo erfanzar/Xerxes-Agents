@@ -632,6 +632,8 @@
 :root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__body:has(>.rsec__widget-stage){display:flex;flex-direction:column;overflow:hidden;padding:0}
 :root:not(#layout):not(#artifact-ux) .atelier .rsec__widget-stage{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 :root:not(#layout):not(#artifact-ux) .atelier .rsec__widget-frame{flex:1 1 auto;min-height:0;height:100%}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__image-stage{display:flex;align-items:center;justify-content:center;padding:20px;min-height:180px}
+:root:not(#layout):not(#artifact-ux) .atelier .rsec__image-stage .chatimg__img{max-width:100%;max-height:70vh;object-fit:contain;border-radius:8px}
 :root:not(#layout):not(#artifact-ux) .atelier .rsec--detail>.rsec__body:has(>.artdoc){padding:20px 24px 40px}
 :root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc{max-width:720px;margin:0 auto}
 :root:not(#layout):not(#artifact-ux) .atelier .rsec--detail .artdoc__head{margin:0 0 22px;padding-bottom:16px;border-bottom:1px solid var(--x-hairline)}

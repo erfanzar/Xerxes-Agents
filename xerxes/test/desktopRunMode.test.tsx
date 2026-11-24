@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { RunModeSection } from '../src/desktop/renderer/RunModeSection.js'
 import { setupTodo } from '../src/desktop/renderer/Setup.js'
-import { localSetupJobView, localStatusView, runModeView } from '../src/desktop/renderer/runModeView.js'
+import { localMachineLabel, localSetupJobView, localStatusView, runModeView } from '../src/desktop/renderer/runModeView.js'
 import { Store, type XerxesLike } from '../src/desktop/renderer/store.js'
 import type { DaemonEvent } from '../src/desktop/renderer/types.js'
 
@@ -108,13 +108,14 @@ test('setup progress events update the job, and a finished setup reloads the mod
 test('the Models page leads with the three modes and says what Hybrid needs: local model on this Mac and a cloud lead', async () => {
   const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status: localStatus, job: null } : method === 'provider_list' ? { ok: true, profiles } : { ok: true })
   await Promise.all([store.loadRunMode(), store.loadLocalSetup(), store.loadProviders()])
+  const machine = localMachineLabel()
   const html = renderToStaticMarkup(createElement(RunModeSection, { snap: store.getSnapshot() }))
-  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary local-model 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up local model', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
+  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', `On ${machine}`, 'does the file work', 'Ternary local-model 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up local model', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
     expect(html).toContain(words)
   }
   expect(html).not.toContain('Bonsai')
   expect(html).not.toContain('Prism')
-  expect(html).toContain('A local model on this Mac does all the work.')
+  expect(html).toContain(`A local model on ${machine} does all the work.`)
   expect(html).toContain('Light and balanced agents run on the local model and answer directly')
   expect(html).toContain('aria-checked="true"')
   expect(html.match(/In use/g)).toHaveLength(1)

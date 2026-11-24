@@ -41,7 +41,7 @@ const AGY_EDIT_TOOLS = new Set([
 const AGY_BRAIN_ARTIFACT_PATH_RE =
   /(?:^|[\\/])\.gemini[\\/]antigravity(?:-cli)?[\\/]brain[\\/][^\\/]+[\\/]([^\\/]+)$/i
 
-const AGY_BRAIN_ARTIFACT_EXT_RE = /\.(?:md|markdown|html|htm)$/i
+const AGY_BRAIN_ARTIFACT_EXT_RE = /\.(?:md|markdown|html|htm|png|jpe?g|gif|webp|svg)$/i
 
 function canonicalToolTail(name: string | undefined): string {
   const safe = typeof name === 'string' ? name : ''
@@ -76,6 +76,7 @@ function cleanStr(value: unknown): string {
 function kindOfArtifactFilename(filename: string): string {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html'
+  if (/\.(?:png|jpe?g|gif|webp|svg)$/i.test(lower)) return 'image'
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown'
   if (lower.endsWith('.txt')) return 'text'
   if (lower.includes('.')) return 'code'
@@ -87,7 +88,7 @@ function humanizeArtifactTitle(filename: string, content = ''): string {
     const heading = /^\s*#[ \t]+([^\n]+?)[ \t]*#*[ \t]*(?:\n|$)/.exec(content)
     if (heading?.[1]?.trim()) return heading[1].trim()
   }
-  const stem = filename.replace(/\.(?:md|markdown|html|htm|txt)$/i, '').trim()
+  const stem = filename.replace(/\.(?:md|markdown|html|htm|txt|png|jpe?g|gif|webp|svg)$/i, '').trim()
   if (!stem) return filename || 'Artifact'
   if (/[_-]/.test(stem) && stem === stem.toLowerCase()) {
     return stem
@@ -333,9 +334,9 @@ export function ArtifactToast({ sessionId, showingArtifacts }: { sessionId: stri
   </div>
 }
 
-const kindLabel = (kind: string): string => kind === 'markdown' ? 'Document' : kind === 'html' ? 'Interactive' : kind === 'code' ? 'Code' : 'Text'
+const kindLabel = (kind: string): string => kind === 'markdown' ? 'Document' : kind === 'html' ? 'Interactive' : kind === 'image' ? 'Image' : kind === 'code' ? 'Code' : 'Text'
 
-const kindIcon = (kind: string): IconName => kind === 'html' ? 'spark' : kind === 'code' ? 'code' : kind === 'markdown' ? 'file' : 'note'
+const kindIcon = (kind: string): IconName => kind === 'html' ? 'spark' : kind === 'image' ? 'eye' : kind === 'code' ? 'code' : kind === 'markdown' ? 'file' : 'note'
 
 export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact: ArtifactRef }): ReactElement {
   const open = useDesktopNavigation()

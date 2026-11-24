@@ -403,20 +403,9 @@ export const XERXES_PRISM_SECONDARY_PATHS: readonly string[] = [
   'M 16.5 40 L 6.5 40 L 17.2 26.3 L 22.2 32.7 Z',
 ]
 
-const XERXES_GLYPH_PRIMARY_PATHS: readonly string[] = [
-  'M 3.25 4 L 8.25 4 L 12.8 9.83 L 10.3 13.03 Z',
-  'M 20.75 20 L 15.75 20 L 11.2 14.18 L 13.7 10.98 Z',
-]
-
-const XERXES_GLYPH_SECONDARY_PATHS: readonly string[] = [
-  'M 15.75 4 L 20.75 4 L 15.4 10.85 L 12.9 7.65 Z',
-  'M 8.25 20 L 3.25 20 L 8.6 13.15 L 11.1 16.35 Z',
-]
-
 /**
- * Minimal architectural Xerxes X-Prism monogram for the Welcome screen,
- * empty states, and brand lockups (`viewBox="0 0 48 48"`, static, razor-sharp
- * from 14px to 64px across Dark & Light themes).
+ * Renders Xerxes's real bundled phoenix emblem (`./logo-128.png`) across both
+ * Desktop and VS Code (`XerxesBrandEmblem` never falls back to a split-X SVG).
  */
 export const XerxesBrandEmblem = memo(function XerxesBrandEmblem(props: {
   readonly size?: number
@@ -425,31 +414,24 @@ export const XerxesBrandEmblem = memo(function XerxesBrandEmblem(props: {
   readonly motion?: 'smil' | 'css'
 }): ReactElement {
   const { size = 40, className } = props
-  const classes = ['xerxes-brand-emblem', className ?? ''].filter(Boolean).join(' ')
-
+  const classes = ['xerxes-logo-mark', 'xerxes-brand-emblem', className ?? ''].filter(Boolean).join(' ')
   return (
-    <svg
-      viewBox="0 0 48 48"
+    <img
+      src="./logo-128.png"
+      alt="Xerxes Agents"
       width={size}
       height={size}
-      role="img"
-      aria-label="Xerxes"
       className={classes}
-      data-emblem="xerxes-mark"
-      style={{ display: 'inline-block', flexShrink: 0, color: 'var(--x-title, currentColor)' }}
-    >
-      {XERXES_PRISM_SECONDARY_PATHS.map((d, idx) => (
-        <path
-          key={`s-${idx}`}
-          d={d}
-          fill="var(--x-title, var(--x-hairline, currentColor))"
-          fillOpacity="0.42"
-        />
-      ))}
-      {XERXES_PRISM_PRIMARY_PATHS.map((d, idx) => (
-        <path key={`p-${idx}`} d={d} fill="currentColor" />
-      ))}
-    </svg>
+      data-brand-provider="xerxes"
+      decoding="async"
+      draggable={false}
+      style={{
+        display: 'inline-block',
+        flexShrink: 0,
+        objectFit: 'cover',
+        borderRadius: Math.max(4, Math.round(size * 0.22)),
+      }}
+    />
   )
 })
 
@@ -677,24 +659,22 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
 
   if (provider === 'xerxes') {
     return (
-      <svg
-        viewBox="0 0 24 24"
+      <img
+        src="./logo-128.png"
+        alt={PROVIDER_LABELS.xerxes}
         width={size}
         height={size}
-        role="img"
-        aria-label={PROVIDER_LABELS.xerxes}
         className={classes}
         data-brand-provider={provider}
-        data-emblem="xerxes-mark"
-        style={{ display: 'inline-block', flexShrink: 0, color: 'var(--x-title, currentColor)' }}
-      >
-        {XERXES_GLYPH_SECONDARY_PATHS.map((d, idx) => (
-          <path key={`gs-${idx}`} d={d} fill="currentColor" fillOpacity="0.42" />
-        ))}
-        {XERXES_GLYPH_PRIMARY_PATHS.map((d, idx) => (
-          <path key={`gp-${idx}`} d={d} fill="currentColor" />
-        ))}
-      </svg>
+        decoding="async"
+        draggable={false}
+        style={{
+          display: 'block',
+          flexShrink: 0,
+          objectFit: 'cover',
+          borderRadius: Math.max(3, Math.round(size * 0.22)),
+        }}
+      />
     )
   }
 
@@ -708,7 +688,7 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
         aria-label={PROVIDER_LABELS['claude-code']}
         className={classes}
         data-brand-provider={provider}
-        style={{ display: 'inline-block', flexShrink: 0 }}
+        style={{ display: 'block', flexShrink: 0 }}
       >
         <path d={CLAUDE_BRAND_PATH} fill="rgb(217, 119, 87)" />
       </svg>
@@ -723,14 +703,14 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
     const blueId = `agy-b-${svgUid}`
     return (
       <svg
-        viewBox="-0.8 0 25.6 24.5"
+        viewBox="-0.5 0.8 25 24.2"
         width={size}
         height={size}
         role="img"
         aria-label={PROVIDER_LABELS.antigravity}
         className={classes}
         data-brand-provider={provider}
-        style={{ display: 'inline-block', flexShrink: 0 }}
+        style={{ display: 'block', flexShrink: 0 }}
       >
         <defs>
           <clipPath id={clipId}>
@@ -754,11 +734,11 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
           </radialGradient>
         </defs>
         <g clipPath={`url(#${clipId})`}>
-          <rect x="-1" y="0" width="26" height="25" fill="rgb(49, 134, 255)" />
-          <rect x="-1" y="0" width="26" height="25" fill={`url(#${greenId})`} />
-          <rect x="-1" y="0" width="26" height="25" fill={`url(#${yellowId})`} />
-          <rect x="-1" y="0" width="26" height="25" fill={`url(#${redId})`} />
-          <rect x="-1" y="0" width="26" height="25" fill={`url(#${blueId})`} />
+          <rect x="-1" y="0" width="26" height="26" fill="rgb(49, 134, 255)" />
+          <rect x="-1" y="0" width="26" height="26" fill={`url(#${greenId})`} />
+          <rect x="-1" y="0" width="26" height="26" fill={`url(#${yellowId})`} />
+          <rect x="-1" y="0" width="26" height="26" fill={`url(#${redId})`} />
+          <rect x="-1" y="0" width="26" height="26" fill={`url(#${blueId})`} />
         </g>
       </svg>
     )
@@ -774,7 +754,7 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
         aria-label={PROVIDER_LABELS.codex}
         className={classes}
         data-brand-provider={provider}
-        style={{ display: 'inline-block', flexShrink: 0, color: 'var(--x-title, currentColor)' }}
+        style={{ display: 'block', flexShrink: 0, color: 'var(--x-title, currentColor)' }}
       >
         <path d={OPENAI_BRAND_PATH} fill="currentColor" />
       </svg>
@@ -791,7 +771,7 @@ export const AgentBrandGlyph = memo(function AgentBrandGlyph(
       aria-label={PROVIDER_LABELS.acp}
       className={classes}
       data-brand-provider={provider}
-      style={{ display: 'inline-block', flexShrink: 0 }}
+      style={{ display: 'block', flexShrink: 0 }}
     >
       <g fill="none" strokeLinecap="round" strokeLinejoin="round">
         <line

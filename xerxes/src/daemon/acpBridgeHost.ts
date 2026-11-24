@@ -2156,6 +2156,18 @@ export class DaemonAcpBridgeHost {
         ...(classified && classified.discovered_skills.length > 0
           ? { discovered_skills: classified.discovered_skills }
           : {}),
+        ...(normalizedAdditionalDirs.length > 0
+          ? { additional_directories: normalizedAdditionalDirs }
+          : {}),
+        ...(params.sandbox ? { sandbox: true } : {}),
+        ...(params.agent?.trim() ? { agent_override: params.agent.trim() } : {}),
+        ...(wireMcpServers.length > 0
+          ? {
+              mcp_server_names: wireMcpServers
+                .map(item => (typeof item.name === 'string' ? item.name.trim() : ''))
+                .filter(Boolean),
+            }
+          : {}),
       }
       const entry: ActiveAcpSession = {
         kind: 'acp',

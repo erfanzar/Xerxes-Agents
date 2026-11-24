@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { FilesChangedCard, Shell, Sidebar } from '../src/desktop/renderer/App.js'
 import { T3ModelPicker, compactModelTriggerName, reasoningLevelLabel } from '../src/desktop/renderer/T3ModelPicker.js'
 import { T3Sidebar, groupSectionsByMachine } from '../src/desktop/renderer/T3Sidebar.js'
+import { localMachineLabel } from '../src/desktop/renderer/runModeView.js'
 import { ThreadDetailsCard } from '../src/desktop/renderer/ThreadDetailsCard.js'
 import { RightPanelLauncher, XERXES_SURFACES } from '../src/desktop/renderer/RightPanelLauncher.js'
 import { DesktopPage, DesktopRail, RAIL_PANELS } from '../src/desktop/renderer/DesktopPanels.js'
@@ -474,7 +475,7 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     for (const needle of [
       'data-thread-details-card="true"',
       'data-thread-details-mode="inline"',
-      'This Mac',
+      localMachineLabel(true),
       'Open in Files',
       'New worktree',
       'main',

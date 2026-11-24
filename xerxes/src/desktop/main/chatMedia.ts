@@ -16,7 +16,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { sniffImageMediaType } from '../../core/multimodal.js'
 import {
-  CHAT_IMAGE_MAX_BYTES, UNSUPPORTED_IMAGE, chatImageTypeOf, checkChatImagePath, fileUrlPath,
+  CHAT_IMAGE_MAX_BYTES, UNSUPPORTED_IMAGE, chatImageDataUrl, chatImageTypeOf, checkChatImagePath, fileUrlPath,
   type ChatImageRequest, type ChatImageResult,
 } from '../chatMediaShared.js'
 
@@ -98,17 +98,48 @@ export async function readLocalChatImage(value: string, workspace: string | null
 /** One runtime RPC (DaemonRpc.call satisfies it). */
 export type RuntimeCall = (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>
 
+const AGY_BRAIN_IMAGE_PATH_RE =
+  /(?:^|[\\/])\.gemini[\\/]antigravity(?:-cli)?[\\/]brain[\\/][A-Za-z0-9][A-Za-z0-9._-]{0,127}[\\/]([A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:png|jpe?g|gif|webp|svg))$/i
+
+function agyBrainImageArtifactIdOf(path: string): string | undefined {
+  const match = AGY_BRAIN_IMAGE_PATH_RE.exec(path.trim())
+  const filename = match?.[1]?.trim()
+  if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) return undefined
+  return `agy:${filename}`
+}
+
 /**
  * An image from an SSH workspace, read by the runtime on that host through
  * `workspace.filePreview` (the Files panel's read, with its workspace
- * containment and 128 KB bound). That read returns UTF-8 text only, so SVG is
- * the one kind it can carry; raster images are refused with that reason.
+ * containment and 128 KB bound), or `artifacts.read` for read-only Antigravity
+ * brain images (`agy:<file>`). For general workspace files, `workspace.filePreview`
+ * returns UTF-8 text only, so SVG is the one kind it can carry; other raster
+ * workspace images are refused with that reason.
  */
 export async function readRemoteChatImage(request: ChatImageRequest, call: RuntimeCall): Promise<ChatImageResult> {
   const checked = checkChatImagePath(request.path)
   if ('error' in checked) return fail(checked.error)
   const path = requestedPath(request.path)
   if (path === undefined) return fail('only file URLs on the workspace host can be shown')
+  const agyArtifactId = agyBrainImageArtifactIdOf(path)
+  if (agyArtifactId) {
+    try {
+      const result = await call('artifacts.read', {
+        id: agyArtifactId,
+        ...(request.sessionKey ? { session_key: request.sessionKey } : {}),
+      })
+      const artifact =
+        result.ok === true && typeof result.artifact === 'object' && result.artifact !== null && !Array.isArray(result.artifact)
+          ? (result.artifact as Record<string, unknown>)
+          : null
+      if (artifact && artifact.kind === 'image' && typeof artifact.content === 'string') {
+        const checkedUrl = chatImageDataUrl(artifact.content)
+        if (checkedUrl.ok) return checkedUrl
+      }
+    } catch {
+      // Fall through to workspace.filePreview or standard unsupported raster message.
+    }
+  }
   if (chatImageTypeOf(path) !== 'image/svg+xml') {
     return fail('the SSH workspace runtime sends text files only, so only SVG images from it can be shown')
   }

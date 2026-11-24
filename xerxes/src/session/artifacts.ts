@@ -19,7 +19,9 @@ import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../core/paths.js'
 
 export const ARTIFACT_KINDS = ['markdown', 'html', 'code', 'text'] as const
-export type ArtifactKind = typeof ARTIFACT_KINDS[number]
+export const READONLY_ARTIFACT_KINDS = ['image'] as const
+export type WritableArtifactKind = typeof ARTIFACT_KINDS[number]
+export type ArtifactKind = WritableArtifactKind | typeof READONLY_ARTIFACT_KINDS[number]
 
 export const MAX_ARTIFACT_CONTENT_BYTES = 2 * 1024 * 1024
 export const MAX_ARTIFACT_TITLE_CHARS = 200
@@ -69,7 +71,7 @@ export interface ArtifactStoreOptions {
   readonly now?: () => Date
 }
 
-export function isArtifactKind(value: unknown): value is ArtifactKind {
+export function isArtifactKind(value: unknown): value is WritableArtifactKind {
   return typeof value === 'string' && (ARTIFACT_KINDS as readonly string[]).includes(value)
 }
 

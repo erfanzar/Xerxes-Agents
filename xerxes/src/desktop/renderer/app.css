@@ -2682,6 +2682,16 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
   color: var(--x-secondary);
   font: 400 12px/1 var(--sans);
 }
+.acp-customize__runtime-pill > span {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+.acp-customize__runtime-pill > svg,
+.acp-customize__runtime-pill > img {
+  display: block;
+  flex: none;
+}
 .acp-customize__switch {
   flex: none;
   height: 30px;
@@ -2952,6 +2962,88 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
   color: var(--x-title);
   font: 400 12px/1 var(--sans);
 }
+.acp-cap-row--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 2px;
+}
+.acp-cap-row__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.acp-launch-dirs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.acp-launch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 6px;
+  background: var(--x-chip);
+  color: var(--x-title);
+}
+.acp-launch-chip__rm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--x-meta);
+  cursor: pointer;
+}
+.acp-launch-chip__rm:hover:not(:disabled) {
+  background: var(--x-selected);
+  color: var(--x-title);
+}
+.acp-launch-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.acp-launch-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 6px;
+  background: var(--x-sunken);
+  color: var(--x-title);
+  font: 400 12px/1 var(--mono);
+}
+.acp-launch-input--compact {
+  flex: 0 1 180px;
+  width: 180px;
+}
+.acp-launch-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px 4px;
+}
+.acp-cap-hint {
+  margin: 6px 2px 0;
+  font: 400 12px/1.45 var(--sans);
+  color: var(--x-meta);
+}
+.acp-cap-hint code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--x-secondary);
+}
 .acp-optpop__group {
   padding: 6px 10px 2px;
   font: 600 10.5px/1.2 var(--sans);
@@ -3057,6 +3149,11 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
   font: 400 13px/1.3 var(--sans);
   text-align: left;
   box-sizing: border-box;
+}
+.rail-env__row > svg,
+.rail-env__row > img {
+  display: block;
+  flex: none;
 }
 .rail-env__row--btn {
   cursor: pointer;

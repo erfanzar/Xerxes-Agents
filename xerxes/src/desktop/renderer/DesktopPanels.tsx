@@ -223,7 +223,7 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
   const pageNote = panel === 'extensions' && externalBinding
     ? `Discovered skills, commands and capabilities from ${externalBinding.name}.`
     : PAGE_NOTES[panel]
-  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? " catalog-page" : "") + (panel === "extensions" && externalBinding ? " acp-customize-page" : "")} aria-label={pageTitle}>
+  return <section className={"desktop-page studio-sheet" + (panel === "extensions" ? (externalBinding ? " acp-customize-page" : " catalog-page") : "")} aria-label={pageTitle}>
     {/* A full-page destination had no way out of itself: no close button,
         and the tab bar is hidden while it is open, so Escape was the only
         thing left to try — and Escape cancelled the running turn. */}
@@ -661,6 +661,11 @@ export interface AcpCustomizePanelProps {
   readonly initialTab?: AcpCustomizeTab
   readonly onDisconnect?: () => Promise<boolean> | boolean
   readonly onInsertCommand?: (command: string) => void
+  readonly onApplyLaunchOptions?: (options: {
+    readonly additionalDirectories: readonly string[]
+    readonly agent: string
+    readonly sandbox: boolean
+  }) => Promise<boolean> | boolean
 }
 
 /**
@@ -675,6 +680,7 @@ export function AcpCustomizePanel({
   initialTab = 'skills',
   onDisconnect,
   onInsertCommand,
+  onApplyLaunchOptions,
 }: AcpCustomizePanelProps): ReactElement {
   const open = useDesktopNavigation()
   const [tab, setTab] = useState<AcpCustomizeTab>(initialTab)
@@ -682,6 +688,12 @@ export function AcpCustomizePanel({
   const [catalog, setCatalog] = useState<AcpCatalogResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+  const [sandboxDraft, setSandboxDraft] = useState<boolean>(binding.sandbox === true)
+  const [dirsDraft, setDirsDraft] = useState<string[]>([...(binding.additional_directories ?? [])])
+  const [dirInput, setDirInput] = useState('')
+  const [agentDraft, setAgentDraft] = useState<string>(binding.agent_override ?? '')
+  const [applyingLaunch, setApplyingLaunch] = useState(false)
+  const [launchError, setLaunchError] = useState('')
 
   useEffect(() => {
     if (snap.connection !== 'online') return
@@ -700,6 +712,15 @@ export function AcpCustomizePanel({
   const effectiveBinding: AcpSessionBinding = catalog?.binding && catalog.binding.agent_id === binding.agent_id
     ? { ...binding, ...catalog.binding }
     : binding
+  const bindingDirsKey = (effectiveBinding.additional_directories ?? []).join('\0')
+  const bindingSandbox = effectiveBinding.sandbox === true
+  const bindingAgentOverride = effectiveBinding.agent_override ?? ''
+  useEffect(() => {
+    setSandboxDraft(bindingSandbox)
+    setDirsDraft(bindingDirsKey ? bindingDirsKey.split('\0') : [])
+    setAgentDraft(bindingAgentOverride)
+    setLaunchError('')
+  }, [effectiveBinding.agent_id, effectiveBinding.external_session_id, bindingDirsKey, bindingSandbox, bindingAgentOverride])
   const resolved = resolveExternalAcpCatalog(effectiveBinding)
   const skills: readonly AcpDiscoveredSkill[] = catalog?.skills.length ? catalog.skills : resolved.skills
   const commands: readonly AcpAvailableCommand[] = catalog?.commands.length ? catalog.commands : resolved.commands
@@ -772,6 +793,55 @@ export function AcpCustomizePanel({
     return opt.type !== 'select' && opt.type !== 'boolean'
   })
   const controlsDisabled = snap.connection !== 'online' || snap.turnActive || Boolean(snap.acpConnecting)
+  const supportsLaunchOptions =
+    effectiveBinding.provider === 'antigravity' || capabilities?.session.additional_directories === true
+  const launchDirty =
+    sandboxDraft !== bindingSandbox
+    || agentDraft.trim() !== bindingAgentOverride
+    || dirsDraft.join('\0') !== bindingDirsKey
+  const mcpServerNames = effectiveBinding.mcp_server_names ?? []
+
+  const addExtraDir = (): void => {
+    const clean = dirInput.trim()
+    if (!clean) return
+    if (!dirsDraft.includes(clean)) {
+      setDirsDraft(prev => [...prev, clean])
+    }
+    setDirInput('')
+  }
+
+  const removeExtraDir = (targetDir: string): void => {
+    setDirsDraft(prev => prev.filter(dir => dir !== targetDir))
+  }
+
+  const applyLaunchOptions = async (): Promise<void> => {
+    if (applyingLaunch || controlsDisabled) return
+    setApplyingLaunch(true)
+    setLaunchError('')
+    try {
+      const nextAgent = agentDraft.trim()
+      const ok = onApplyLaunchOptions
+        ? await onApplyLaunchOptions({
+            additionalDirectories: dirsDraft,
+            sandbox: sandboxDraft,
+            agent: nextAgent,
+          })
+        : await store.connectAcpAgent(effectiveBinding.agent_id, undefined, {
+            ...(effectiveBinding.current_mode ? { modeId: effectiveBinding.current_mode } : {}),
+            ...(effectiveBinding.external_session_id ? { resumeSessionId: effectiveBinding.external_session_id } : {}),
+            additionalDirectories: dirsDraft,
+            sandbox: sandboxDraft,
+            agent: nextAgent,
+          })
+      if (!ok) {
+        setLaunchError(`Could not reconnect ${effectiveBinding.name} with the updated launch options.`)
+      }
+    } catch (error) {
+      setLaunchError(desktopError(error))
+    } finally {
+      setApplyingLaunch(false)
+    }
+  }
 
   const capabilityFlag = (label: string, supported: boolean): ReactElement => (
     <div className="acp-cap-row" key={label} data-supported={supported ? 'true' : 'false'}>
@@ -1068,6 +1138,123 @@ export function AcpCustomizePanel({
             </div>
           </section>
 
+          {supportsLaunchOptions && (
+            <section className="acp-cap-section" aria-label="Launch options">
+              <h3>Launch options</h3>
+              <div className="acp-cap-group">
+                <div className="acp-cap-row">
+                  <span className="acp-cap-row__label" title="Run Antigravity terminal commands inside a sandbox (--sandbox)">
+                    Terminal sandbox
+                  </span>
+                  <span className="acp-cap-row__value">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={sandboxDraft}
+                      aria-label="Terminal sandbox"
+                      className={`acp-cap-toggle${sandboxDraft ? ' is-on' : ''}`}
+                      disabled={controlsDisabled || applyingLaunch}
+                      onClick={() => setSandboxDraft(value => !value)}
+                    >
+                      <span className="acp-cap-toggle__track" aria-hidden="true">
+                        <span className="acp-cap-toggle__thumb" />
+                      </span>
+                      <span className="acp-cap-toggle__text">{sandboxDraft ? 'On' : 'Off'}</span>
+                    </button>
+                  </span>
+                </div>
+
+                <div className="acp-cap-row acp-cap-row--stack">
+                  <div className="acp-cap-row__head">
+                    <span className="acp-cap-row__label" title="Additional workspace folders passed via --add-dir">
+                      Additional directories
+                    </span>
+                    <span className="acp-cap-row__mono">--add-dir</span>
+                  </div>
+                  {dirsDraft.length > 0 && (
+                    <div className="acp-launch-dirs" role="list" aria-label="Additional directories">
+                      {dirsDraft.map(dir => (
+                        <span className="acp-launch-chip" role="listitem" key={dir}>
+                          <span className="acp-cap-row__mono" title={dir}>{dir}</span>
+                          <button
+                            type="button"
+                            className="acp-launch-chip__rm"
+                            aria-label={`Remove ${dir}`}
+                            disabled={controlsDisabled || applyingLaunch}
+                            onClick={() => removeExtraDir(dir)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="acp-launch-add">
+                    <input
+                      type="text"
+                      className="acp-launch-input"
+                      aria-label="Add additional directory"
+                      placeholder="/path/to/extra-directory"
+                      spellCheck={false}
+                      value={dirInput}
+                      disabled={controlsDisabled || applyingLaunch}
+                      onChange={event => setDirInput(event.target.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          addExtraDir()
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="acp-customize__use"
+                      disabled={controlsDisabled || applyingLaunch || !dirInput.trim()}
+                      onClick={addExtraDir}
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+
+                {effectiveBinding.provider === 'antigravity' && (
+                  <div className="acp-cap-row">
+                    <span className="acp-cap-row__label" title="Optional Antigravity agent profile passed via --agent">
+                      Agent override
+                    </span>
+                    <span className="acp-cap-row__value">
+                      <input
+                        type="text"
+                        className="acp-launch-input acp-launch-input--compact"
+                        aria-label="Agent override"
+                        placeholder="Default (--agent)"
+                        spellCheck={false}
+                        value={agentDraft}
+                        disabled={controlsDisabled || applyingLaunch}
+                        onChange={event => setAgentDraft(event.target.value)}
+                      />
+                    </span>
+                  </div>
+                )}
+
+                <div className="acp-launch-footer">
+                  <span className="acp-cap-hint">
+                    Changes restart the {effectiveBinding.name} process and resume this session.
+                  </span>
+                  <button
+                    type="button"
+                    className="btn acp-customize__switch"
+                    disabled={controlsDisabled || applyingLaunch || !launchDirty}
+                    onClick={() => void applyLaunchOptions()}
+                  >
+                    {applyingLaunch ? 'Reconnecting…' : 'Apply & reconnect'}
+                  </button>
+                </div>
+                {launchError && <p className="studio-error" role="alert">{launchError}</p>}
+              </div>
+            </section>
+          )}
+
           <section className="acp-cap-section">
             <h3>Prompt capabilities</h3>
             <div className="acp-cap-group">
@@ -1094,6 +1281,14 @@ export function AcpCustomizePanel({
             <div className="acp-cap-group">
               {capabilityFlag('MCP over HTTP', capabilities?.mcp.http === true)}
               {capabilityFlag('MCP over SSE', capabilities?.mcp.sse === true)}
+              <div className="acp-cap-row">
+                <span className="acp-cap-row__label">MCP servers</span>
+                <span className="acp-cap-row__value">
+                  {mcpServerNames.length > 0
+                    ? `${mcpServerNames.length} passed through (${mcpServerNames.join(', ')})`
+                    : 'None configured in Xerxes'}
+                </span>
+              </div>
               {capabilities?.auth_methods && capabilities.auth_methods.length > 0 && (
                 <div className="acp-cap-row">
                   <span className="acp-cap-row__label">Auth methods</span>
@@ -1101,6 +1296,11 @@ export function AcpCustomizePanel({
                     {capabilities.auth_methods.map(method => method.name).join(', ')}
                   </span>
                 </div>
+              )}
+              {effectiveBinding.provider === 'antigravity' && (
+                <p className="acp-cap-hint">
+                  Manage Antigravity plugins and external MCP servers with <code>agy plugin</code> or <code>agy mcp</code>.
+                </p>
               )}
             </div>
           </section>

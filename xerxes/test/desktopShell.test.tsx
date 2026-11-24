@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { Shell, ActivityDetails, AgentsCard, SessionDiagnostics, replyEnds } from '../src/desktop/renderer/App.js'
 import { RailStatus } from '../src/desktop/renderer/RailStatus.js'
 import { DesktopPage, DesktopRail, frontMatter, keepUnsavedFile, rendersAsDocument, unsavedFile } from '../src/desktop/renderer/DesktopPanels.js'
+import { isMacPlatform } from '../src/desktop/renderer/runModeView.js'
 import type { Snapshot } from '../src/desktop/renderer/store.js'
 import type { SessionRow } from '../src/desktop/renderer/types.js'
 import { BlockBuilder } from '../src/desktop/renderer/blocks.js'
@@ -395,7 +396,7 @@ test('SSH provider settings offer host sign-in before a Mac relay exists and kee
         const { ready: _ready, ...withoutReadiness } = provider
         const html = renderProviders({ providers: [{ ...withoutReadiness, ...readiness }] })
         expect(html).not.toContain('Run on the server')
-        expect(html).toContain('Use via Mac')
+        expect(html).toContain(isMacPlatform() ? 'Use via Mac' : 'Use via this computer')
       }
       expect(renderProviders({ turnActive: true })).not.toContain('Run on the server')
       expect(renderProviders({ providerSwitching: name })).toMatch(/<button class="btn" disabled=""[^>]*>Run on the server<\/button>/)

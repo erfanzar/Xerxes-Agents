@@ -337,6 +337,10 @@ export interface AcpSessionBinding {
   readonly thought_level_config_id?: string
   readonly available_commands?: readonly AcpAvailableCommand[]
   readonly discovered_skills?: readonly AcpDiscoveredSkill[]
+  readonly additional_directories?: readonly string[]
+  readonly sandbox?: boolean
+  readonly agent_override?: string
+  readonly mcp_server_names?: readonly string[]
 }
 
 function parseAcpProvider(value: unknown): AcpAgentProvider {
@@ -936,6 +940,21 @@ export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null
       : thoughtConfig?.id
   const availableCommands = parseAcpAvailableCommands(row.available_commands ?? row.availableCommands)
   const discoveredSkills = parseAcpDiscoveredSkills(row.discovered_skills ?? row.discoveredSkills)
+  const additionalDirectories = Array.isArray(row.additional_directories)
+    ? row.additional_directories
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map(item => item.trim())
+    : undefined
+  const sandbox = row.sandbox === true ? true : undefined
+  const agentOverride =
+    typeof row.agent_override === 'string' && row.agent_override.trim()
+      ? row.agent_override.trim()
+      : undefined
+  const mcpServerNames = Array.isArray(row.mcp_server_names)
+    ? row.mcp_server_names
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map(item => item.trim())
+    : undefined
   return {
     session_id: sessionId,
     agent_id: agentId,
@@ -964,6 +983,10 @@ export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null
     ...(thoughtLevelConfigId ? { thought_level_config_id: thoughtLevelConfigId } : {}),
     ...(availableCommands ? { available_commands: availableCommands } : {}),
     ...(discoveredSkills ? { discovered_skills: discoveredSkills } : {}),
+    ...(additionalDirectories && additionalDirectories.length > 0 ? { additional_directories: additionalDirectories } : {}),
+    ...(sandbox ? { sandbox: true } : {}),
+    ...(agentOverride ? { agent_override: agentOverride } : {}),
+    ...(mcpServerNames && mcpServerNames.length > 0 ? { mcp_server_names: mcpServerNames } : {}),
   }
 }
 
@@ -2027,10 +2050,13 @@ export class Store {
   private swarmLoadVersion = 0
   private acpLoadVersion = 0
   private lastAcpConnect: {
+    readonly additionalDirectories?: readonly string[]
+    readonly agent?: string
     readonly agentId: string
     readonly custom?: { readonly command: string; readonly args?: readonly string[] }
     readonly modeId?: string
     readonly resumeSessionId?: string
+    readonly sandbox?: boolean
   } | null = null
   private foldedToolIds = new Set<string>()
   private ttftTotalMs = 0
@@ -2428,12 +2454,23 @@ export class Store {
   async connectAcpAgent(
     agentId: string,
     custom?: { readonly command: string; readonly args?: readonly string[] },
-    options?: { readonly modeId?: string; readonly resumeSessionId?: string },
+    options?: {
+      readonly additionalDirectories?: readonly string[]
+      readonly agent?: string
+      readonly modeId?: string
+      readonly resumeSessionId?: string
+      readonly sandbox?: boolean
+    },
   ): Promise<boolean> {
     const cleanId = agentId.trim()
     if (!cleanId) return false
     if (cleanId === 'xerxes') return this.disconnectAcpAgent()
     const resumeSessionId = options?.resumeSessionId?.trim() || undefined
+    const additionalDirectories = options?.additionalDirectories !== undefined
+      ? options.additionalDirectories.map(dir => dir.trim()).filter(Boolean)
+      : undefined
+    const sandbox = options?.sandbox
+    const agentOverride = options?.agent !== undefined ? options.agent.trim() : undefined
     const savedMode =
       !options?.modeId && this.frame.savedAcpBinding?.agent_id === cleanId
         ? this.frame.savedAcpBinding.current_mode?.trim() || undefined
@@ -2447,6 +2484,9 @@ export class Store {
       ...(custom ? { custom } : {}),
       ...(modeId ? { modeId } : {}),
       ...(resumeSessionId ? { resumeSessionId } : {}),
+      ...(additionalDirectories !== undefined ? { additionalDirectories } : {}),
+      ...(sandbox !== undefined ? { sandbox } : {}),
+      ...(agentOverride !== undefined ? { agent: agentOverride } : {}),
     }
     const { isCurrent } = this.captureSessionRequest()
     this.patch({ acpConnecting: true, acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
@@ -2468,6 +2508,9 @@ export class Store {
         ...(custom?.args && custom.args.length > 0 ? { args: [...custom.args] } : {}),
         ...(modeId ? { mode_id: modeId } : {}),
         ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {}),
+        ...(additionalDirectories !== undefined ? { additional_directories: [...additionalDirectories] } : {}),
+        ...(sandbox !== undefined ? { sandbox } : {}),
+        ...(agentOverride !== undefined ? { agent: agentOverride } : {}),
       }),
     )
     try {
@@ -2551,6 +2594,9 @@ export class Store {
     const connectOpts = {
       ...(saved.external_session_id ? { resumeSessionId: saved.external_session_id } : {}),
       ...(saved.current_mode ? { modeId: saved.current_mode } : {}),
+      ...(saved.additional_directories?.length ? { additionalDirectories: saved.additional_directories } : {}),
+      ...(saved.sandbox ? { sandbox: true } : {}),
+      ...(saved.agent_override ? { agent: saved.agent_override } : {}),
     }
     return this.connectAcpAgent(
       saved.agent_id,
@@ -2561,7 +2607,7 @@ export class Store {
 
   async retryAcpConnect(): Promise<boolean> {
     if (this.lastAcpConnect) {
-      const { agentId, custom, modeId, resumeSessionId } = this.lastAcpConnect
+      const { agentId, custom, modeId, resumeSessionId, additionalDirectories, sandbox, agent } = this.lastAcpConnect
       const savedMode = this.frame.savedAcpBinding?.agent_id === agentId
         ? this.frame.savedAcpBinding.current_mode
         : undefined
@@ -2569,6 +2615,9 @@ export class Store {
       const connectOpts = {
         ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(effectiveModeId ? { modeId: effectiveModeId } : {}),
+        ...(additionalDirectories !== undefined ? { additionalDirectories } : {}),
+        ...(sandbox !== undefined ? { sandbox } : {}),
+        ...(agent !== undefined ? { agent } : {}),
       }
       return this.connectAcpAgent(
         agentId,

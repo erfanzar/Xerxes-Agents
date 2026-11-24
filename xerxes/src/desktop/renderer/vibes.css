@@ -317,6 +317,7 @@
 /* Real Xerxes Phoenix Brand Logo Mark */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .xerxes-logo-mark{display:inline-block;flex:none;border-radius:4px;object-fit:cover}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .welcome__logo{width:64px;height:64px;border-radius:14px;object-fit:cover;box-shadow:0 10px 30px rgb(0 0 0 / 45%)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .welcome__logo.welcome__logo--compact{width:44px;height:44px;border-radius:10px;margin:0 auto 10px;box-shadow:0 4px 16px rgb(0 0 0 / 32%)}
 
 /* Bottom Collapsible Shelves (`Settled       13 >`, T3 Code Image 2) */
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .t3-side__shelves{margin-top:auto;padding-top:6px;display:flex;flex-direction:column;gap:2px}
@@ -1087,7 +1088,24 @@
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .modelpop .mrow{padding:8px 10px;min-height:34px;font:400 var(--ui-large)/1.35 var(--sans)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acp-customize-page>header.desktop-page__bar>p{display:none}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acp-customize-page>header.desktop-page__bar{justify-content:flex-end;border-bottom:0;min-height:0;padding:10px 24px 0}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acp-customize-page>.studio-sheet-content{display:block;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .acp-customize-page>.studio-sheet-content>.acp-customize{padding:4px 28px 32px}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__heading h1{margin:0;font:500 22px/1.2 var(--sans);letter-spacing:-0.015em;color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__runtime-pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;line-height:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__runtime-pill>span{display:inline-flex;align-items:center;line-height:1}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__runtime-pill>:is(svg,img){display:block;flex:none}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__switch{display:inline-flex;align-items:center;justify-content:center;height:30px;padding:0 12px;border:1px solid var(--x-hairline);border-radius:7px;background:var(--x-chip);color:var(--x-title);font:400 12.5px/1 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__switch:hover:not(:disabled){background:var(--x-selected);border-color:var(--x-separator)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__tab{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:var(--x-secondary);font:400 13px/1 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__tab:hover{background:var(--mac-control);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__tab.is-selected{background:var(--x-selected);color:var(--x-title);font-weight:500}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__use{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 10px;border:1px solid var(--x-hairline);border-radius:7px;background:transparent;color:var(--x-secondary);font:400 12px/1 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__use:hover{background:var(--x-selected);border-color:var(--x-separator);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-customize__desc{margin:0;line-height:1.4}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-cap-toggle{padding:2px 6px;border:1px solid var(--x-hairline);border-radius:999px;background:transparent;color:var(--x-secondary);font:500 12px/1 var(--sans)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-cap-toggle.is-on{border-color:var(--x-accent);color:var(--x-title)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-launch-chip__rm{width:16px;height:16px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--x-meta)}
+:root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-sheet .acp-cap-hint{margin:6px 2px 0;color:var(--x-meta);font:400 12px/1.45 var(--sans)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .studio-form .acp-catalog__search{display:inline-flex;align-items:center;gap:7px;height:32px;margin:0 0 0 auto;padding:0 10px}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .swarm-jump-latest{background:var(--x-popover);border:1px solid var(--x-hairline);border-radius:999px;box-shadow:var(--mac-shadow);color:var(--x-title)}
 :root:is([data-style='vibes'],[data-style='neo']):not(#vibes) .atelier .swarm-jump-latest:hover{background:var(--x-selected);border-color:var(--x-separator)}

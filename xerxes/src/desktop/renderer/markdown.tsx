@@ -158,6 +158,7 @@ const XERXES_EMBED_RE = /^<xerxes-embed\s+([^>]+?)(?:\s*\/>|>\s*<\/xerxes-embed>
 const AGENT_EMBED_RE = /^<agent-embed\s+([^>]+?)(?:\s*\/>|>\s*<\/agent-embed>)$/i
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{2,64}$/
 const AGY_HTML_ARTIFACT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:html|htm)$/i
+const AGY_IMAGE_ARTIFACT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:png|jpe?g|gif|webp|svg)$/i
 const AGY_BRAIN_FILE_PATH_RE = /\/brain\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/([^/]+)$/i
 const HTML_TAG_HINT_RE = /<\s*(?:!doctype|html|head|body|div|canvas|svg|script|style|section|main|header|article|p|span|button|input)\b/i
 
@@ -205,6 +206,35 @@ function resolveAgyFileEmbedArtifactId(src: string): string | null {
     return null
   }
   return `agy:${filename}`
+}
+
+/** Parse a standalone `<agent-embed src="file:///.../brain/<session>/<file>.(png|jpg|...)" />` image embed. */
+function parseAgyImageEmbedLine(line: string): { readonly src: string; readonly alt: string } | null {
+  const agent = AGENT_EMBED_RE.exec(line.trim())
+  if (!agent) return null
+  const attrs = agent[1] ?? ''
+  const src = extractAttr(attrs, 'src')
+  if (!src || !/^file:\/\//i.test(src)) return null
+  const withoutQuery = src.replace(/[?#].*$/, '')
+  const normalized = withoutQuery.replace(/^file:\/\/(?:localhost)?/i, '').replaceAll('\\', '/')
+  const match = AGY_BRAIN_FILE_PATH_RE.exec(normalized)
+  if (!match?.[1]) return null
+  let filename: string
+  try {
+    filename = decodeURIComponent(match[1])
+  } catch {
+    return null
+  }
+  if (
+    filename.includes('/')
+    || filename.includes('\\')
+    || filename.includes('..')
+    || !AGY_IMAGE_ARTIFACT_FILE_RE.test(filename)
+  ) {
+    return null
+  }
+  const title = extractAttr(attrs, 'title')
+  return { src, alt: title || filename }
 }
 
 /** Parse a standalone `<xerxes-embed>` or `<agent-embed src="artifact://...|file:///.../brain/.../*.html">` line. */
@@ -425,6 +455,12 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
           {...(embed.title ? { title: embed.title } : {})}
         />,
       )
+      continue
+    }
+    const imageEmbed = parseAgyImageEmbedLine(line)
+    if (imageEmbed) {
+      flushAll()
+      out.push(<p key={`${prefix}-ie${key++}`}><ChatImage src={imageEmbed.src} alt={imageEmbed.alt} /></p>)
       continue
     }
 

@@ -36,7 +36,7 @@ import { swarmMemberCounts } from '../../desktop/renderer/swarmState.js'
 import type { SessionRow } from '../../desktop/renderer/types.js'
 import { sidebarOrder } from '../../desktop/renderer/workspaceGroups.js'
 import { ChangesTab, PlanTab } from '../../desktop/renderer/Workspaces.js'
-import { AgentBrandGlyph } from '../../desktop/renderer/XerxesSprites.js'
+import { RuntimeBrandIcon } from '../../desktop/renderer/BrandMark.js'
 import { SideQuestionCard } from './SideQuestionCard.js'
 
 type Sheet = Exclude<DesktopPanel, null>
@@ -230,7 +230,7 @@ function Header({
           aria-label={`External runtime: ${snap.acpBinding.name}${summary ? ` · ${summary}` : ''}`}
           onClick={openAcpSheet}
         >
-          <AgentBrandGlyph provider={snap.acpBinding.provider} size={11} />
+          <RuntimeBrandIcon provider={snap.acpBinding.provider} size={11} />
           <span className="xv-pill__label">{snap.acpBinding.name}{pillMeta ? ` · ${pillMeta}` : ''}</span>
         </button>
       )

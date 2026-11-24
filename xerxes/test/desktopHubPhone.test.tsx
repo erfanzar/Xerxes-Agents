@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { qrDataUrl, type CockpitPairing, type CockpitStatus } from '../src/desktop/hubShared.js'
 import { EMPTY_STATUS, HubPhoneView, healthText, type HubPhoneViewProps } from '../src/desktop/renderer/HubPhonePanel.js'
+import { localMachineLabel } from '../src/desktop/renderer/runModeView.js'
 
 const noop = (): void => {}
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="1" height="1"/></svg>'
@@ -41,13 +42,14 @@ const pairing = (patch: Partial<CockpitPairing> = {}): CockpitPairing => ({
 })
 
 test('no address: one SSH field with the example, a save button, and no link or pair controls', () => {
+  const machine = localMachineLabel()
   const html = render()
   expect(html).toContain('Hub &amp; phone')
   expect(html).toContain('Hub SSH address')
   expect(html).toContain('placeholder="xerxes@203.0.113.10"')
-  expect(html).toContain('No Hub is saved on this Mac yet')
+  expect(html).toContain(`No Hub is saved on ${machine} yet`)
   expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save and connect</)
-  expect(html).not.toContain('Link this Mac')
+  expect(html).not.toContain(`Link ${machine}`)
   expect(html).not.toContain('Pair a phone')
   expect(html).not.toContain('type="url"')
 })
@@ -78,7 +80,7 @@ test('saving shows progress and disables the field; a save error is announced', 
 
 test('saved but not linked: Link this Mac is offered; no machine list yet', () => {
   const html = render({ status: saved, address: saved.target! })
-  expect(html).toContain('>Link this Mac<')
+  expect(html).toContain(`>Link ${localMachineLabel()}<`)
   expect(html).toContain('Not linked yet')
   expect(html).not.toContain('Machines and projects')
 })
@@ -111,7 +113,7 @@ test('linked: the machine and its projects show with their health', () => {
     },
   })
   expect(html).toContain('Linked to the Hub as m1')
-  expect(html).toContain('Link this Mac again')
+  expect(html).toContain(`Link ${localMachineLabel()} again`)
   expect(html).toContain('Erfan Mac · all projects')
   expect(html).toContain('Erfan Mac · app')
   expect(html).toContain('>Online<')

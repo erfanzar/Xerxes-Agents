@@ -140,7 +140,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .studio-sheet button:hover{background:var(--x-selected)}
 .studio-sheet button:disabled{opacity:.45;cursor:default}
 .studio-sheet .studio-primary{background:var(--x-title);color:var(--x-inverse)}
-.studio-sheet-content{overflow:auto;min-height:0}
+.studio-sheet-content{flex:1 1 auto;overflow:auto;min-height:0}
 .studio-form{padding:24px}
 .studio-form label{display:block;margin:16px 0;color:var(--x-secondary);font-size:var(--ui-font)}
 .studio-form input,.studio-form textarea,.studio-form select{display:block;width:100%;margin-top:7px;border:1px solid var(--x-hairline);background:var(--x-screen);color:var(--x-title);border-radius:6px;padding:10px;font:var(--ui-large)/1.6 var(--prose)}
@@ -301,6 +301,7 @@ summary:focus-visible,a:focus-visible,[tabindex]:not([tabindex='-1']):focus-visi
 .atelier .modelpop .palette__list{max-height:min(260px,calc(100dvh - 270px))}
 .catalog-page>header{flex:none}
 .catalog-page>.studio-sheet-content{display:flex;flex:1;min-height:0;overflow:hidden}
+.acp-customize-page>.studio-sheet-content{display:block;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
 .catalog-page .catalog-form{display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;overflow:hidden;box-sizing:border-box}
 .catalog-form>.studio-tabs,.catalog-form>.catalog-actions,.catalog-form>.studio-progress,.catalog-form>.studio-error{flex:none}
 .catalog-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}

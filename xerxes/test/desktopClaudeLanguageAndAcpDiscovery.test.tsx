@@ -19,6 +19,7 @@ import {
 } from '../src/desktop/renderer/AcpRuntimePicker.js'
 import { Shell, formatQuestionAnswers, toggleQuestionOption } from '../src/desktop/renderer/App.js'
 import { AcpCustomizePanel, DesktopPage, RailAddMenu } from '../src/desktop/renderer/DesktopPanels.js'
+import { ArtifactsSection } from '../src/desktop/renderer/RailSections.js'
 import {
   LearnedBadge,
   ReflectionCard,
@@ -26,6 +27,7 @@ import {
 import {
   Store,
   parseAcpCatalogResult,
+  parseAcpSessionBinding,
   resolveExternalAcpCatalog,
   shouldForwardSlashToAcp,
   type AcpExternalAgentInfo,
@@ -670,6 +672,7 @@ describe('Part 2 — Automatic ACP Skill & Runtime Feature Discovery + Strict Is
       createElement(DesktopPage, { snap: agySnap, panel: 'extensions', onClose: () => {} }),
     )
     expect(acpPageHtml).toContain('acp-customize-page')
+    expect(acpPageHtml).not.toContain('catalog-page')
     expect(acpPageHtml).toContain('academic-cv-builder')
     expect(acpPageHtml).not.toContain('immortals-coordinator')
     expect(acpPageHtml).not.toContain('Trust all')
@@ -677,6 +680,7 @@ describe('Part 2 — Automatic ACP Skill & Runtime Feature Discovery + Strict Is
     const nativePageHtml = renderToStaticMarkup(
       createElement(DesktopPage, { snap: sampleSnapshot({ acpBinding: null }), panel: 'extensions', onClose: () => {} }),
     )
+    expect(nativePageHtml).toContain('catalog-page')
     expect(nativePageHtml).not.toContain('acp-customize-page')
     expect(nativePageHtml).toContain('>skills<')
     expect(nativePageHtml).toContain('>plugins<')
@@ -840,5 +844,85 @@ describe('Part 2 — Automatic ACP Skill & Runtime Feature Discovery + Strict Is
     expect(qHtml).toContain('role="checkbox"')
     expect(qHtml).toContain('Select all that apply')
     expect(qHtml).not.toMatch(HEX_COLOR_RE)
+  })
+
+  test('AcpCustomizePanel exposes official agy acp launch options, parses launch metadata, forwards flags on connect, and ArtifactsSection renders read-only brain images', async () => {
+    const parsed = parseAcpSessionBinding({
+      ...fullAgyBinding,
+      additional_directories: ['/workspace/shared', '/workspace/docs'],
+      sandbox: true,
+      agent_override: 'architect',
+      mcp_server_names: ['playwright', 'github'],
+    })
+    expect(parsed?.additional_directories).toEqual(['/workspace/shared', '/workspace/docs'])
+    expect(parsed?.sandbox).toBe(true)
+    expect(parsed?.agent_override).toBe('architect')
+    expect(parsed?.mcp_server_names).toEqual(['playwright', 'github'])
+
+    const capsHtml = renderToStaticMarkup(
+      createElement(AcpCustomizePanel, {
+        snap: sampleSnapshot({ acpBinding: parsed }),
+        binding: parsed!,
+        initialTab: 'capabilities',
+      }),
+    )
+    expect(capsHtml).toContain('Launch options')
+    expect(capsHtml).toContain('Terminal sandbox')
+    expect(capsHtml).toContain('aria-checked="true"')
+    expect(capsHtml).toContain('/workspace/shared')
+    expect(capsHtml).toContain('/workspace/docs')
+    expect(capsHtml).toContain('Agent override')
+    expect(capsHtml).toContain('value="architect"')
+    expect(capsHtml).toContain('Apply &amp; reconnect')
+    expect(capsHtml).toContain('2 passed through (playwright, github)')
+    expect(capsHtml).toContain('agy plugin')
+    expect(capsHtml).not.toMatch(HEX_COLOR_RE)
+
+    const { store, bridge } = await setupConnectedStore()
+    await store.connectAcpAgent('antigravity', undefined, {
+      modeId: 'turbo',
+      resumeSessionId: 'agy-ext-42',
+      additionalDirectories: ['/workspace/shared'],
+      sandbox: true,
+      agent: 'architect',
+    })
+    const connectCall = bridge.calls.find(c => c.method === 'acp.connect')
+    expect(connectCall?.params).toMatchObject({
+      agent_id: 'antigravity',
+      mode_id: 'turbo',
+      resume_session_id: 'agy-ext-42',
+      additional_directories: ['/workspace/shared'],
+      sandbox: true,
+      agent: 'architect',
+    })
+
+    // Read-only Antigravity image artifact renders inside ArtifactsSection without Edit or Copy raw base64 buttons.
+    const pngDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+    const artHtml = renderToStaticMarkup(
+      createElement(ArtifactsSection, {
+        sessionKey: 's1',
+        online: true,
+        initialDocument: {
+          row: {
+            id: 'agy:hero_render.png',
+            title: 'Hero Render',
+            kind: 'image',
+            size: 68,
+            createdAt: '2026-11-25T00:00:00Z',
+            updatedAt: '2026-11-25T00:00:00Z',
+            pinned: false,
+            version: 1,
+          },
+          content: pngDataUrl,
+        },
+      }),
+    )
+    expect(artHtml).toContain('rsec__image-stage')
+    expect(artHtml).toContain('Hero Render')
+    expect(artHtml).toContain('Image')
+    expect(artHtml).toContain(pngDataUrl)
+    expect(artHtml).not.toContain('aria-label="Edit artifact"')
+    expect(artHtml).not.toContain('aria-label="Copy artifact"')
   })
 })

@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.55 — 2026-11-25
+
+- **Read-only Antigravity (`agy`) brain image rendering.** Projects `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and `.svg` images stored inside the active Antigravity session's brain directory (`agy:<filename>`) into the Artifacts panel with strict `realpath` containment and magic-byte / SVG validation, renders `<agent-embed src="file:///.../brain/.../*.png">` inline via `ChatImage`, and supports remote SSH Antigravity brain image previews via read-only `artifacts.read`.
+- **Official `agy acp` launch options in Customize & scroll/layout fixes.** Exposes Google's documented `agy acp` CLI flags (`--sandbox`, `--add-dir`, `--agent`) and passed-through MCP server visibility directly inside the Antigravity **Customize → Capabilities** panel with session-preserving reconnect; fixes non-scrollable Antigravity Customize pages and aligns the `agy` glyph, heading, and pill chrome in Vibes, Neo, and VS Code.
+- **Unified Xerxes phoenix mark & Linux CI parity.** Removes the legacy split-X SVG glyph from the VS Code welcome screen, header pill, and sprite helpers so the real Xerxes phoenix mark renders everywhere; makes all Desktop platform-label tests (`this Mac` / `this computer`) pass cleanly on both macOS and Linux CI.
+
 ## 0.8.54 — 2026-11-25
 
 - **Strict Antigravity (`agy acp`) & external ACP isolation and protocol parity.** Upgrades ACP transport to protocol v2 with honest client capabilities (`fs.writeTextFile: false`, symlink/binary read guards, PDF `resource_link`, `client_view_file` repair, version-gated mid-turn steer, `authenticate`, `session/list` / `session/fork` / `session/load`, boolean & grouped `configOptions`, form/URL elicitations, and `interaction_*` questions in Turbo). Strictly isolates external ACP sessions: hides `.xerxes/skills`, `~/.xerxes/skills`, and bundled skills; prevents `swarm.status` / `/swarm` from spawning a phantom native coordinator; guards native compaction; and routes `/btw`, commit message generation, and project-agent generation strictly through active ACP sessions (`session/fork` or `session/new` → `session/prompt` → `session/close`) with read-only permissions and zero native provider fallback.

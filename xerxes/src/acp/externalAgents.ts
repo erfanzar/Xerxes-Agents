@@ -235,6 +235,10 @@ export interface AcpSessionBinding {
   readonly thought_level_config_id?: string
   readonly available_commands?: readonly AcpExternalCommandOption[]
   readonly discovered_skills?: readonly AcpDiscoveredSkill[]
+  readonly additional_directories?: readonly string[]
+  readonly sandbox?: boolean
+  readonly agent_override?: string
+  readonly mcp_server_names?: readonly string[]
 }
 
 /** Unified streaming event union shared by ACP stdio agents and Claude stream-json. */

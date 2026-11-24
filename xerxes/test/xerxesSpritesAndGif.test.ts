@@ -687,26 +687,18 @@ describe('XerxesSprites', () => {
     expect(ops.length).toBe(before)
   })
 
-  test('XerxesBrandEmblem, XerxesThinkingMark, and AgentBrandGlyph render clean minimal geometric dev-tool SVGs', () => {
+  test('XerxesBrandEmblem, XerxesThinkingMark, and AgentBrandGlyph render Xerxes phoenix icon and clean provider marks', () => {
     const emblem = renderToStaticMarkup(createElement(XerxesBrandEmblem, { size: 40, animate: true }))
-    expect(emblem).toContain('<svg')
-    expect(emblem).toContain('viewBox="0 0 48 48"')
-    expect(emblem).toContain('data-emblem="xerxes-mark"')
-    // Faceted Architectural X-Prism: 4 flat geometric polygons, zero gradients/circles/boxes/animations
-    expect(emblem.match(/<path\b/g)?.length).toBe(4)
-    expect(emblem).toContain('fill-opacity="0.42"')
-    expect(emblem).not.toContain('<defs>')
-    expect(emblem).not.toContain('<circle')
-    expect(emblem).not.toContain('<rect')
-    expect(emblem).not.toContain('<animate')
-    expect(emblem).toContain('var(--x-title')
-    expect(emblem).toContain('var(--x-hairline')
+    expect(emblem).toContain('<img')
+    expect(emblem).toContain('src="./logo-128.png"')
+    expect(emblem).toContain('data-brand-provider="xerxes"')
+    expect(emblem).not.toContain('<svg')
+    expect(emblem).not.toContain('data-emblem="xerxes-mark"')
     expect(emblem.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
 
     const staticEmblem = renderToStaticMarkup(createElement(XerxesBrandEmblem, { size: 32, animate: false }))
-    expect(staticEmblem).toContain('data-emblem="xerxes-mark"')
-    expect(staticEmblem).toContain('viewBox="0 0 48 48"')
-    expect(staticEmblem).not.toContain('<animateTransform')
+    expect(staticEmblem).toContain('src="./logo-128.png"')
+    expect(staticEmblem).not.toContain('<svg')
     expect(staticEmblem.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
 
     const activeMark = renderToStaticMarkup(createElement(XerxesThinkingMark, { size: 15, active: true }))
@@ -729,29 +721,29 @@ describe('XerxesSprites', () => {
     const glyphMarkups = new Set<string>()
     for (const provider of providers) {
       const markup = renderToStaticMarkup(createElement(AgentBrandGlyph, { provider, size: 16, animate: true }))
-      expect(markup).toContain('<svg')
       expect(markup).toContain(`data-brand-provider="${provider}"`)
       // Brand icons never spin or blink/breathe
       expect(markup).not.toContain('xerxes-glyph-spin')
       expect(markup).not.toContain('xerxes-emblem-breath')
       expect(markup).not.toContain('<animate')
       if (provider === 'xerxes') {
-        expect(markup).toContain('data-emblem="xerxes-mark"')
-        expect(markup).toContain('viewBox="0 0 24 24"')
-        expect(markup).toContain('var(--x-title')
-        expect(markup.match(/<path\b/g)?.length).toBe(4)
-        expect(markup).not.toContain('<circle')
-        expect(markup).not.toContain('<rect')
+        expect(markup).toContain('<img')
+        expect(markup).toContain('src="./logo-128.png"')
+        expect(markup).not.toContain('<svg')
+        expect(markup).not.toContain('data-emblem="xerxes-mark"')
       } else if (provider === 'claude-code') {
+        expect(markup).toContain('<svg')
         expect(markup).toContain('m4.714 15.956')
         expect(markup).toContain('rgb(217, 119, 87)')
       } else if (provider === 'antigravity') {
+        expect(markup).toContain('<svg')
         expect(markup).toContain('M21.751 22.607')
         expect(markup).toContain('rgb(49, 134, 255)')
         expect(markup).toContain('rgb(0, 185, 92)')
         expect(markup).toContain('rgb(251, 188, 4)')
         expect(markup).toContain('rgb(252, 65, 61)')
       } else if (provider === 'codex') {
+        expect(markup).toContain('<svg')
         expect(markup).toContain('M22.282 9.821')
       }
       expect(markup.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])

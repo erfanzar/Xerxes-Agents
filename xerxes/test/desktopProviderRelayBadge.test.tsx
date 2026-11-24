@@ -6,6 +6,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { RelayBadge, relaySummary } from '../src/desktop/renderer/RelayBadge.js'
+import { localMachineLabel, localMachineNoun } from '../src/desktop/renderer/runModeView.js'
 import { providerRelayView, Store } from '../src/desktop/renderer/store.js'
 
 afterEach(() => { delete (globalThis as { window?: unknown }).window })
@@ -25,20 +26,22 @@ test('a task on the host\'s own sign-in names the host, never "via this Mac"', (
   const markup = renderToStaticMarkup(createElement(RelayBadge, { relay: view }))
   expect(markup).toContain('data-state="host"')
   expect(markup).toContain('via tpu-host')
-  expect(markup).not.toContain('via this Mac')
+  expect(markup).not.toContain(`via ${localMachineLabel()}`)
   expect(relaySummary(view)).toContain('run on tpu-host with its own claude-code (claude-code/opus) sign-in, not through this computer')
   // An incomplete host route is not a badge.
   expect(providerRelayView({ ok: true, bound: false, onHost: { profile: 'claude-code' } })).toBeNull()
 })
 
 test('the badge says where prompts run, pulses while one is in flight, and warns when access ended', () => {
+  const machine = localMachineLabel()
+  const machineNoun = localMachineNoun(true)
   const live = providerRelayView(activity)!
   const summary = relaySummary(live, 1_791_000_000_000)
   expect(summary).toContain('run on this computer through codex (gpt-6.1-sol), not on softnu-local')
   expect(summary).toContain('3 requests carried by this window · 1 in flight')
   const busy = renderToStaticMarkup(createElement(RelayBadge, { relay: live }))
   expect(busy).toContain('data-state="busy"')
-  expect(busy).toContain('via this Mac')
+  expect(busy).toContain(`via ${machine}`)
   expect(busy).toContain('relaybadge__dot')
   const idle = renderToStaticMarkup(createElement(RelayBadge, { relay: { ...live, inFlight: 0 } }))
   expect(idle).toContain('data-state="live"')
@@ -46,13 +49,13 @@ test('the badge says where prompts run, pulses while one is in flight, and warns
   const ended = { ...live, live: false, inFlight: 0, lastError: 'grant_expired' }
   const markup = renderToStaticMarkup(createElement(RelayBadge, { relay: ended }))
   expect(markup).toContain('data-state="ended"')
-  expect(markup).toContain('Mac not connected')
+  expect(markup).toContain(`${machineNoun} not connected`)
   expect(relaySummary(ended)).toContain('which is not connected to it right now. It continues once this window reconnects.')
   // While this window is restoring the link, it says so instead of giving up.
   const restoring = { ...ended, reconnecting: true, lastFailure: 'The conversation changed or is working.' }
   const reconnecting = renderToStaticMarkup(createElement(RelayBadge, { relay: restoring }))
   expect(reconnecting).toContain('data-state="reconnecting"')
-  expect(reconnecting).toContain('Reconnecting to this Mac…')
+  expect(reconnecting).toContain(`Reconnecting to ${machine}…`)
   expect(reconnecting).toContain('relaybadge__dot')
   expect(relaySummary(restoring)).toContain('this window is restoring it and retries until it is back')
   expect(relaySummary({ ...restoring, profile: undefined })).toContain('runs through its provider on this computer')

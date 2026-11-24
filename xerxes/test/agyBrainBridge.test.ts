@@ -28,6 +28,7 @@ import {
 } from '../src/daemon/filePreview.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonServer } from '../src/daemon/server.js'
+import { readRemoteChatImage } from '../src/desktop/main/chatMedia.js'
 import type { JsonRpcPayload } from '../src/protocol/jsonRpc.js'
 import type { SwarmLifecycleEvent } from '../src/swarm/types.js'
 
@@ -1855,5 +1856,78 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       client.close()
       await server.stop()
     }
+  })
+
+  test('projects read-only brain images as validated data URLs, rejects spoofed/escaping files, and serves remote brain PNGs via artifacts.read', async () => {
+    const root = await makeTempDir('xrx-agy-img-')
+    const homeDir = join(root, 'home')
+    const extId = 'img-conv-001'
+    const sessionDir = join(homeDir, '.gemini', 'antigravity-cli', 'brain', extId)
+    await mkdir(sessionDir, { recursive: true })
+
+    // 1x1 transparent PNG
+    const pngBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+      'base64',
+    )
+    const svgText = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>'
+    await writeFile(join(sessionDir, 'hero_render.png'), pngBytes)
+    await writeFile(join(sessionDir, 'diagram.svg'), svgText, 'utf8')
+    await writeFile(join(sessionDir, 'spoofed.png'), '<html><body>not a png</body></html>', 'utf8')
+    await writeFile(join(sessionDir, 'notes.txt'), 'secret text', 'utf8')
+    const outsidePng = join(root, 'outside.png')
+    await writeFile(outsidePng, pngBytes)
+    await symlink(outsidePng, join(sessionDir, 'escape.png'))
+    await symlink(join(sessionDir, 'notes.txt'), join(sessionDir, 'text_alias.png'))
+
+    const bridge = new AgyBrainBridge({ homeDir })
+    const location = resolveAgyBrainLocation({ externalSessionId: extId, homeDir })!
+    expect(location).toBeDefined()
+
+    const listed = await bridge.listArtifacts('sess-img', location)
+    expect(listed.map(item => item.id).sort()).toEqual(['agy:diagram.svg', 'agy:hero_render.png'])
+    expect(listed.every(item => item.kind === 'image')).toBe(true)
+
+    const pngArtifact = await bridge.readArtifact('sess-img', location, 'agy:hero_render.png')
+    expect(pngArtifact?.kind).toBe('image')
+    expect(pngArtifact?.title).toBe('Hero Render')
+    expect(pngArtifact?.content).toBe(`data:image/png;base64,${pngBytes.toString('base64')}`)
+
+    const svgArtifact = await bridge.readArtifact('sess-img', location, 'agy:diagram.svg')
+    expect(svgArtifact?.kind).toBe('image')
+    expect(svgArtifact?.content).toStartWith('data:image/svg+xml;base64,')
+
+    // Spoofed bytes, symlink escaping brain dir, and symlink to non-image file MUST all be rejected.
+    expect(await bridge.readArtifact('sess-img', location, 'agy:spoofed.png')).toBeUndefined()
+    expect(await bridge.readArtifact('sess-img', location, 'agy:escape.png')).toBeUndefined()
+    expect(await bridge.readArtifact('sess-img', location, 'agy:text_alias.png')).toBeUndefined()
+
+    // Remote SSH chat image reader resolves Antigravity brain PNGs read-only via artifacts.read.
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const remoteResult = await readRemoteChatImage(
+      {
+        path: `file://${join(sessionDir, 'hero_render.png')}`,
+        sessionKey: 'sess-img',
+      },
+      async (method, params) => {
+        calls.push({ method, params })
+        if (method === 'artifacts.read' && params.id === 'agy:hero_render.png') {
+          return { ok: true, artifact: pngArtifact as unknown as Record<string, unknown> }
+        }
+        return { ok: false, error: 'not found' }
+      },
+    )
+    expect(remoteResult).toEqual({
+      ok: true,
+      url: `data:image/png;base64,${pngBytes.toString('base64')}`,
+    })
+    expect(calls).toEqual([{ method: 'artifacts.read', params: { id: 'agy:hero_render.png', session_key: 'sess-img' } }])
+
+    // Non-brain remote PNGs still stay blocked by workspace.filePreview text-only policy.
+    const workspacePng = await readRemoteChatImage(
+      { path: '/workspace/photo.png', sessionKey: 'sess-img' },
+      async () => ({ ok: false }),
+    )
+    expect(workspacePng.ok).toBe(false)
   })
 })

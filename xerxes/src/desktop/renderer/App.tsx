@@ -44,7 +44,6 @@ import {
   transportBadgeLabel,
 } from './AcpRuntimePicker.js'
 import { RuntimeBrandIcon, XerxesLogoMark } from './BrandMark.js'
-import { XerxesBrandEmblem } from './XerxesSprites.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
 import { RailAgents, RailFiles, RailWorkflows } from './RailLists.js'
@@ -2262,7 +2261,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
 
   // VS Code: a compact start, like its other chat views; no wordmark.
   if (isVscodeHost()) return <div className="welcome welcome--compact">
-    <XerxesBrandEmblem className="welcome__emblem welcome__emblem--compact" size={40} animate motion="css" />
+    <XerxesLogoMark size={44} className="welcome__logo welcome__logo--compact" alt="Xerxes Agents" />
     <h1 className="welcome__compact-title">What should Xerxes do{place ? <> in <b>{place}</b></> : ''}?</h1>
     {dirty > 0 && <p className="welcome__dirty">{dirty} uncommitted {dirty === 1 ? 'file' : 'files'} <b>+{adds}</b> <i>−{dels}</i></p>}
     {resumable.length > 0 && <section className="welcome__resume" aria-label="Recent tasks here">

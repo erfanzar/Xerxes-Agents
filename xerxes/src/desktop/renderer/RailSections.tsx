@@ -22,6 +22,7 @@ import { createListPoll, type ListPoll } from './listPoll.js'
 import { agentKindLabel, agentState } from './AgentRoster.js'
 import { AgentInspector } from './AgentInspector.js'
 import { artifactFromToolResultPayload } from './ArtifactCard.js'
+import { ChatImage } from './ImageView.js'
 import { store } from './store.js'
 import type { SwarmStatusSnapshot } from './swarmState.js'
 import { WidgetFrame } from './WidgetFrame.js'
@@ -100,6 +101,7 @@ const sizeLabel = (bytes: number): string => bytes >= 1024 * 1024 ? `${(bytes / 
 
 function kindBadgeLabel(row: ArtifactRow): string {
   if (row.kind === 'html') return 'Interactive'
+  if (row.kind === 'image') return 'Image'
   if (row.kind === 'markdown') return 'Doc'
   if (row.kind === 'code') return row.language || 'Code'
   return 'Text'
@@ -107,6 +109,7 @@ function kindBadgeLabel(row: ArtifactRow): string {
 
 function kindFullLabel(row: ArtifactRow): string {
   if (row.kind === 'html') return 'Interactive'
+  if (row.kind === 'image') return 'Image'
   if (row.kind === 'markdown') return 'Document'
   if (row.kind === 'code') return row.language ? `Code · ${row.language}` : 'Code'
   return 'Text'
@@ -114,6 +117,7 @@ function kindFullLabel(row: ArtifactRow): string {
 
 function artifactT3Icon(kind: string): T3IconName {
   if (kind === 'html') return 'sparkles'
+  if (kind === 'image') return 'image'
   if (kind === 'code') return 'codeEditor'
   if (kind === 'markdown') return 'fileText'
   return 'layers'
@@ -333,6 +337,7 @@ export function ArtifactsSection({
   if (open) {
     const { row } = open
     const isHtml = row.kind === 'html'
+    const isImage = row.kind === 'image'
     const isMarkdown = row.kind === 'markdown'
     const hasPreviewToggle = isMarkdown || isHtml
     const isMarkdownDoc = isMarkdown && !source && draft === null
@@ -405,8 +410,8 @@ export function ArtifactsSection({
             )}
             <button type="button" className="rsec__icon" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} title={row.pinned ? 'Unpin' : 'Pin'} onClick={() => pin(row)}><T3Icon name={row.pinned ? 'pinOff' : 'pin'} size={14} /></button>
             {/* Antigravity artifacts live in agy's own brain directory, which Xerxes never writes. */}
-            {!row.id.startsWith('agy:') && <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>}
-            <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>
+            {!isImage && !row.id.startsWith('agy:') && <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>}
+            {!isImage && <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>}
           </>}
         </span>
       </div>
@@ -448,6 +453,10 @@ export function ArtifactsSection({
                 if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save() }
                 if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); requestDiscard('cancel') }
               }} />
+          : isImage
+            ? <div className="rsec__image-stage">
+                <ChatImage src={open.content} alt={row.title} />
+              </div>
           : isHtmlPreview
             ? <div className="rsec__widget-stage">
                 <WidgetFrame

@@ -476,5 +476,20 @@ describe('Fix 10: ActionDialog, OutputViewer, FindBar, AppUpdatePrompt, SessionM
     const heroLogo = renderToStaticMarkup(createElement(XerxesLogoMark, { size: 64 }))
     expect(heroLogo).toContain('./logo-128.png')
     expect(heroLogo).toContain('decoding="async"')
+
+    // VS Code host also renders the real Xerxes phoenix icon everywhere (never the split-X SVG).
+    holder.document = {
+      documentElement: {
+        dataset: { host: 'vscode' },
+        getAttribute: (name: string) => (name === 'data-host' ? 'vscode' : name === 'data-style' ? 'vibes' : null),
+      },
+    }
+    const vscodeLogo = renderToStaticMarkup(createElement(XerxesLogoMark, { size: 44 }))
+    expect(vscodeLogo).toContain('./logo-128.png')
+    expect(vscodeLogo).not.toContain('<svg')
+    const vscodeWelcome = renderToStaticMarkup(createElement(Shell, { snap: makeSnapshot({ blocks: [] }) }))
+    expect(vscodeWelcome).toContain('What should Xerxes do')
+    expect(vscodeWelcome).toContain('./logo-128.png')
+    expect(vscodeWelcome).not.toContain('data-emblem="xerxes-mark"')
   })
 })

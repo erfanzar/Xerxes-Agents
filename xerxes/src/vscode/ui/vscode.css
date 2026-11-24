@@ -169,6 +169,7 @@
 
 /* Compact welcome: the panel is narrow and opens often. */
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .stream--welcome{padding:16px 14px}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .welcome__logo--compact{width:44px;height:44px;border-radius:var(--r-lg,8px);margin:0 auto 10px;object-fit:cover}
 
 /* ── Composer: compact 1-box holding input and toolbar (beats desktop grid/glass card) ── */
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .composer-wrap{display:flex;flex-direction:column;gap:6px;width:100%;max-width:none;padding:6px 14px 10px;background:var(--x-screen);box-sizing:border-box}
@@ -205,7 +206,12 @@
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv ~ .studio-backdrop,
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-backdrop{padding:0;align-items:stretch;background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none}
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet{width:100%;max-width:none;max-height:none;height:100%;border:0;border-radius:0;box-shadow:none;background:var(--x-screen);-webkit-backdrop-filter:none;backdrop-filter:none;animation:none}
-:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet>header{height:32px;padding:0 6px 0 12px;border-bottom:1px solid var(--x-divider)}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet>.studio-sheet-content{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet>header{flex:none;height:32px;padding:0 6px 0 12px;border-bottom:1px solid var(--x-divider)}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet .acp-customize{padding:16px 14px 32px}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet .acp-customize__heading h1{margin:0;line-height:1.2}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .xv-pill--acp>:is(svg,img){display:block;flex:none}
+:root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .xv-pill--acp>.xv-pill__label{line-height:1.15}
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet h2{font:600 var(--ui-large) var(--sans)}
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .atelier.xv .studio-sheet button{font-size:var(--ui-font)}
 :root[data-host='vscode']:not(#vscode-host):not(#vscode-layer) .xv :is(.modal,.palette){max-width:calc(100vw - 16px)}
