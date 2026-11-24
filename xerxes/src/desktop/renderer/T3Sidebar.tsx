@@ -3,7 +3,7 @@
 
 /**
  * T3 Code Sidebar V2 with Machine + Project Folder Grouping:
- * - 52px top chrome: sidebar toggle + `Xerxes Code` wordmark + adjacent Back/Forward arrows.
+ * - 52px top chrome: sidebar toggle + `Xerxes Agents` wordmark + adjacent Back/Forward arrows.
  * - Borderless inline `Search` + 3 right-aligned icons (Filter/View, Add Project, New Thread).
  * - Projects mode (default): Machine groups (`This Mac`, SSH hosts) → T3 Project Folders
  *   (monogram, name, collapsed status dot + count swapping on hover to New Thread, rotating
@@ -16,6 +16,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { store, type Snapshot } from './store.js'
+import { PickerLayer } from './Overlays.js'
 import { ProjectMonogram } from './ProjectMonogram.js'
 import { T3Icon } from './T3Icons.js'
 import { copyToClipboard } from './CopyButton.js'
@@ -91,6 +92,72 @@ export function groupSectionsByMachine<T>(
     sections: byHost.get(host)!,
   }))
 }
+
+export interface ClampedPopoverRect {
+  readonly left: number
+  readonly top: number
+}
+
+/**
+ * Compute viewport-clamped `position: fixed` coordinates for a sidebar popover
+ * portaled through `PickerLayer`, flipping upward when below-anchor space is
+ * insufficient so narrow sidebars and bottom thread rows never clip.
+ */
+export function clampSidebarPopoverPosition(params: {
+  readonly anchor: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number }
+  readonly popup: { readonly width: number; readonly height: number }
+  readonly viewport: { readonly width: number; readonly height: number }
+  readonly align?: 'left' | 'right'
+  readonly gap?: number
+  readonly margin?: number
+}): ClampedPopoverRect {
+  const gap = params.gap ?? 6
+  const margin = params.margin ?? 8
+  const align = params.align ?? 'right'
+  const preferredLeft = align === 'right' ? params.anchor.right - params.popup.width : params.anchor.left
+  const maxLeft = Math.max(margin, params.viewport.width - params.popup.width - margin)
+  const left = Math.max(margin, Math.min(preferredLeft, maxLeft))
+  const belowTop = params.anchor.bottom + gap
+  const fitsBelow = belowTop + params.popup.height <= params.viewport.height - margin
+  const aboveTop = params.anchor.top - params.popup.height - gap
+  const maxTop = Math.max(margin, params.viewport.height - params.popup.height - margin)
+  const top = fitsBelow
+    ? Math.max(margin, belowTop)
+    : aboveTop >= margin
+      ? aboveTop
+      : Math.max(margin, Math.min(belowTop, maxTop))
+  return { left, top }
+}
+
+function applyFixedPopoverPosition(
+  anchorEl: HTMLElement,
+  popupEl: HTMLElement,
+  align: 'left' | 'right' = 'right',
+): void {
+  const anchorRect = anchorEl.getBoundingClientRect()
+  const popupRect = popupEl.getBoundingClientRect()
+  const pos = clampSidebarPopoverPosition({
+    anchor: anchorRect,
+    popup: { width: popupRect.width || popupEl.offsetWidth, height: popupRect.height || popupEl.offsetHeight },
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    align,
+  })
+  popupEl.style.position = 'fixed'
+  popupEl.style.right = 'auto'
+  popupEl.style.bottom = 'auto'
+  popupEl.style.pointerEvents = 'auto'
+  popupEl.style.zIndex = '1'
+  popupEl.style.left = `${pos.left}px`
+  popupEl.style.top = `${pos.top}px`
+}
+
+const PORTALED_POPOVER_STYLE = {
+  position: 'fixed',
+  right: 'auto',
+  bottom: 'auto',
+  pointerEvents: 'auto',
+  zIndex: 1,
+} as const
 
 function statusDotTone(status: string): 'working' | 'failed' | 'waiting' | 'idle' {
   if (status === 'working' || status === 'running') return 'working'
@@ -171,14 +238,17 @@ export function T3Sidebar({
   const [addProjectOpen, setAddProjectOpen] = useState(false)
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null)
   type FolderMenuState =
-    | { readonly kind: 'local'; readonly key: string; readonly cwd: string; readonly label: string; readonly x: number; readonly y: number }
+    | { readonly kind: 'local'; readonly key: string; readonly cwd: string; readonly label: string; readonly contextId?: number; readonly x: number; readonly y: number }
     | { readonly kind: 'remote'; readonly key: string; readonly cwd: string; readonly label: string; readonly alias: string; readonly contextId?: number; readonly x: number; readonly y: number }
   const [folderMenu, setFolderMenu] = useState<FolderMenuState | null>(null)
   const [settledLimit, setSettledLimit] = useState(8)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(loadCollapsedSections)
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(() => new Set())
   const scopeRef = useRef<HTMLDivElement>(null)
+  const scopePopRef = useRef<HTMLDivElement>(null)
   const addProjectRef = useRef<HTMLDivElement>(null)
+  const addProjectPopRef = useRef<HTMLDivElement>(null)
+  const snoozeTriggerRef = useRef<HTMLButtonElement | null>(null)
   const snoozeRef = useRef<HTMLDivElement>(null)
   const folderMenuRef = useRef<HTMLDivElement>(null)
 
@@ -186,51 +256,105 @@ export function T3Sidebar({
     ? snap.acpBinding.provider
     : 'xerxes'
 
+  useLayoutEffect(() => {
+    if (!scopeOpen || typeof window === 'undefined') return
+    const anchor = scopeRef.current
+    const popup = scopePopRef.current
+    if (!anchor || !popup) return
+    const place = (): void => applyFixedPopoverPosition(anchor, popup, 'right')
+    place()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null
+    observer?.observe(popup)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [scopeOpen])
+
+  useLayoutEffect(() => {
+    if (!addProjectOpen || typeof window === 'undefined') return
+    const anchor = addProjectRef.current
+    const popup = addProjectPopRef.current
+    if (!anchor || !popup) return
+    const place = (): void => applyFixedPopoverPosition(anchor, popup, 'right')
+    place()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null
+    observer?.observe(popup)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [addProjectOpen])
+
+  useLayoutEffect(() => {
+    if (!snoozeMenuId || typeof window === 'undefined') return
+    const anchor = snoozeTriggerRef.current
+    const popup = snoozeRef.current
+    if (!anchor || !popup) return
+    const place = (): void => applyFixedPopoverPosition(anchor, popup, 'right')
+    place()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null
+    observer?.observe(popup)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [snoozeMenuId])
+
   useEffect(() => {
     if (!scopeOpen) return
     const onDown = (event: MouseEvent): void => {
-      if (event.target instanceof Node && !scopeRef.current?.contains(event.target)) setScopeOpen(false)
+      if (event.target instanceof Node && !scopeRef.current?.contains(event.target) && !scopePopRef.current?.contains(event.target)) setScopeOpen(false)
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { event.preventDefault(); setScopeOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setScopeOpen(false) }
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [scopeOpen])
 
   useEffect(() => {
     if (!addProjectOpen) return
     const onDown = (event: MouseEvent): void => {
-      if (event.target instanceof Node && !addProjectRef.current?.contains(event.target)) setAddProjectOpen(false)
+      if (event.target instanceof Node && !addProjectRef.current?.contains(event.target) && !addProjectPopRef.current?.contains(event.target)) setAddProjectOpen(false)
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { event.preventDefault(); setAddProjectOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setAddProjectOpen(false) }
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [addProjectOpen])
 
   useEffect(() => {
     if (!snoozeMenuId) return
     const onDown = (event: MouseEvent): void => {
-      if (event.target instanceof Node && !snoozeRef.current?.contains(event.target)) setSnoozeMenuId(null)
+      if (event.target instanceof Node && !snoozeRef.current?.contains(event.target) && !snoozeTriggerRef.current?.contains(event.target)) setSnoozeMenuId(null)
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { event.preventDefault(); setSnoozeMenuId(null) }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSnoozeMenuId(null) }
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [snoozeMenuId])
 
@@ -535,6 +659,7 @@ export function T3Sidebar({
                   aria-expanded={snoozeOpen}
                   onClick={event => {
                     event.stopPropagation()
+                    snoozeTriggerRef.current = event.currentTarget
                     setSnoozeMenuId(current => (current === row.id ? null : row.id))
                   }}
                 >
@@ -555,25 +680,27 @@ export function T3Sidebar({
         )}
 
         {snoozeOpen && (
-          <div ref={snoozeRef} className="t3-snooze-menu" role="menu" aria-label={`Snooze ${title}`}>
-            <div className="t3-snooze-menu__head">Snooze until</div>
-            {presets.map(preset => (
-              <button
-                key={preset.id}
-                type="button"
-                role="menuitem"
-                className="t3-snooze-menu__item"
-                onClick={event => {
-                  event.stopPropagation()
-                  setSnoozeMenuId(null)
-                  onSnooze(row.id, title, preset.wakeAt)
-                }}
-              >
-                <span>{preset.label}</span>
-                <span className="t3-snooze-menu__meta">{preset.detail}</span>
-              </button>
-            ))}
-          </div>
+          <PickerLayer>
+            <div ref={snoozeRef} className="t3-snooze-menu" role="menu" aria-label={`Snooze ${title}`} style={PORTALED_POPOVER_STYLE}>
+              <div className="t3-snooze-menu__head">Snooze until</div>
+              {presets.map(preset => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  role="menuitem"
+                  className="t3-snooze-menu__item"
+                  onClick={event => {
+                    event.stopPropagation()
+                    setSnoozeMenuId(null)
+                    onSnooze(row.id, title, preset.wakeAt)
+                  }}
+                >
+                  <span>{preset.label}</span>
+                  <span className="t3-snooze-menu__meta">{preset.detail}</span>
+                </button>
+              ))}
+            </div>
+          </PickerLayer>
         )}
       </div>
     )
@@ -584,7 +711,7 @@ export function T3Sidebar({
 
   return (
     <aside id="session-sidebar" className="side t3-side" data-app-sidebar="true" data-sidebar-view={inbox.viewMode} aria-label="Sessions">
-      {/* 52px T3 Sidebar Top Chrome: Toggle + Xerxes Code + adjacent Back/Forward */}
+      {/* 52px T3 Sidebar Top Chrome: Toggle + Xerxes Agents + adjacent Back/Forward */}
       <div className="side__head t3-side__head">
         {sidebarToggle}
         <button
@@ -594,7 +721,7 @@ export function T3Sidebar({
           onClick={() => onOpen(null)}
         >
           <span className="t3-wordmark__brand">Xerxes</span>
-          <span className="t3-wordmark__sub">Code</span>
+          <span className="t3-wordmark__sub">Agents</span>
         </button>
         <div className="t3-side__history" role="group" aria-label="Navigation history">
           <button
@@ -672,74 +799,76 @@ export function T3Sidebar({
           </button>
 
           {scopeOpen && (
-            <div className="t3-scope-pop" role="dialog" aria-label="Sidebar view and project filter">
-              <div className="t3-scope-pop__sec">
-                <div className="t3-scope-pop__label">View</div>
-                <div className="t3-scope-pop__seg" role="radiogroup" aria-label="Sidebar layout">
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={inbox.viewMode === 'folders'}
-                    className={inbox.viewMode === 'folders' ? 'is-on' : ''}
-                    onClick={() => onSetViewMode('folders')}
-                  >
-                    <T3Icon name="folders" size={13} />
-                    <span>Projects</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={inbox.viewMode === 'inbox'}
-                    className={inbox.viewMode === 'inbox' ? 'is-on' : ''}
-                    onClick={() => onSetViewMode('inbox')}
-                  >
-                    <T3Icon name="inbox" size={13} />
-                    <span>Inbox</span>
-                  </button>
-                </div>
-              </div>
-
-              {projects.length > 0 && (
+            <PickerLayer>
+              <div ref={scopePopRef} className="t3-scope-pop" role="dialog" aria-label="Sidebar view and project filter" style={PORTALED_POPOVER_STYLE}>
                 <div className="t3-scope-pop__sec">
-                  <div className="t3-scope-pop__head">
-                    <span className="t3-scope-pop__label">Projects</span>
-                    {activeScopeSet.size > 0 && (
-                      <button type="button" className="t3-scope-pop__clear" onClick={onClearProjectScope}>
-                        Reset
-                      </button>
-                    )}
-                  </div>
-                  <div className="t3-scope-pop__list">
+                  <div className="t3-scope-pop__label">View</div>
+                  <div className="t3-scope-pop__seg" role="radiogroup" aria-label="Sidebar layout">
                     <button
                       type="button"
-                      className={`t3-scope-pop__row${activeScopeSet.size === 0 ? ' is-selected' : ''}`}
-                      onClick={onClearProjectScope}
+                      role="radio"
+                      aria-checked={inbox.viewMode === 'folders'}
+                      className={inbox.viewMode === 'folders' ? 'is-on' : ''}
+                      onClick={() => onSetViewMode('folders')}
                     >
-                      <span>All projects</span>
-                      <span className="t3-scope-pop__count">{allRows.length}</span>
+                      <T3Icon name="folders" size={13} />
+                      <span>Projects</span>
                     </button>
-                    {projects.map(project => {
-                      const picked = activeScopeSet.has(project.cwd)
-                      return (
-                        <button
-                          key={`${project.host}:${project.cwd}`}
-                          type="button"
-                          className={`t3-scope-pop__row${picked ? ' is-selected' : ''}`}
-                          onClick={() => onToggleProjectScope(project.cwd)}
-                        >
-                          <ProjectMonogram name={project.name} seed={project.cwd} size={14} />
-                          <span className="t3-scope-pop__name">
-                            {project.name}
-                            {project.host !== THIS_MAC ? ` · ${project.host}` : ''}
-                          </span>
-                          <span className="t3-scope-pop__count">{project.count}</span>
-                        </button>
-                      )
-                    })}
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={inbox.viewMode === 'inbox'}
+                      className={inbox.viewMode === 'inbox' ? 'is-on' : ''}
+                      onClick={() => onSetViewMode('inbox')}
+                    >
+                      <T3Icon name="inbox" size={13} />
+                      <span>Inbox</span>
+                    </button>
                   </div>
                 </div>
-              )}
-            </div>
+
+                {projects.length > 0 && (
+                  <div className="t3-scope-pop__sec">
+                    <div className="t3-scope-pop__head">
+                      <span className="t3-scope-pop__label">Projects</span>
+                      {activeScopeSet.size > 0 && (
+                        <button type="button" className="t3-scope-pop__clear" onClick={onClearProjectScope}>
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                    <div className="t3-scope-pop__list">
+                      <button
+                        type="button"
+                        className={`t3-scope-pop__row${activeScopeSet.size === 0 ? ' is-selected' : ''}`}
+                        onClick={onClearProjectScope}
+                      >
+                        <span>All projects</span>
+                        <span className="t3-scope-pop__count">{allRows.length}</span>
+                      </button>
+                      {projects.map(project => {
+                        const picked = activeScopeSet.has(project.cwd)
+                        return (
+                          <button
+                            key={`${project.host}:${project.cwd}`}
+                            type="button"
+                            className={`t3-scope-pop__row${picked ? ' is-selected' : ''}`}
+                            onClick={() => onToggleProjectScope(project.cwd)}
+                          >
+                            <ProjectMonogram name={project.name} seed={project.cwd} size={14} />
+                            <span className="t3-scope-pop__name">
+                              {project.name}
+                              {project.host !== THIS_MAC ? ` · ${project.host}` : ''}
+                            </span>
+                            <span className="t3-scope-pop__count">{project.count}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </PickerLayer>
           )}
         </div>
 
@@ -760,44 +889,46 @@ export function T3Sidebar({
           </button>
 
           {addProjectOpen && (
-            <div className="t3-add-pop" role="menu" aria-label="Add project source">
-              <div className="t3-scope-pop__label">Add project</div>
-              <button
-                type="button"
-                role="menuitem"
-                className="t3-add-pop__option"
-                onClick={() => {
-                  setAddProjectOpen(false)
-                  store.chooseWorkspace()
-                }}
-              >
-                <span className="t3-add-pop__icon" aria-hidden="true">
-                  <T3Icon name="monitor" size={14} />
-                </span>
-                <span className="t3-add-pop__text">
-                  <strong>Local folder</strong>
-                  <small>Open a project on This Mac</small>
-                </span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="t3-add-pop__option"
-                onClick={() => {
-                  setAddProjectOpen(false)
-                  requestWorkspaceSshForm()
-                  onOpen('workspace')
-                }}
-              >
-                <span className="t3-add-pop__icon" aria-hidden="true">
-                  <T3Icon name="server" size={14} />
-                </span>
-                <span className="t3-add-pop__text">
-                  <strong>Connect via SSH</strong>
-                  <small>Open a project on a remote host</small>
-                </span>
-              </button>
-            </div>
+            <PickerLayer>
+              <div ref={addProjectPopRef} className="t3-add-pop" role="menu" aria-label="Add project source" style={PORTALED_POPOVER_STYLE}>
+                <div className="t3-scope-pop__label">Add project</div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="t3-add-pop__option"
+                  onClick={() => {
+                    setAddProjectOpen(false)
+                    store.chooseWorkspace()
+                  }}
+                >
+                  <span className="t3-add-pop__icon" aria-hidden="true">
+                    <T3Icon name="monitor" size={14} />
+                  </span>
+                  <span className="t3-add-pop__text">
+                    <strong>Local folder</strong>
+                    <small>Open a project on This Mac</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="t3-add-pop__option"
+                  onClick={() => {
+                    setAddProjectOpen(false)
+                    requestWorkspaceSshForm()
+                    onOpen('workspace')
+                  }}
+                >
+                  <span className="t3-add-pop__icon" aria-hidden="true">
+                    <T3Icon name="server" size={14} />
+                  </span>
+                  <span className="t3-add-pop__text">
+                    <strong>Connect via SSH</strong>
+                    <small>Open a project on a remote host</small>
+                  </span>
+                </button>
+              </div>
+            </PickerLayer>
           )}
         </div>
 
@@ -1006,6 +1137,7 @@ export function T3Sidebar({
                               key: section.key,
                               cwd: section.cwd,
                               label: section.folder,
+                              ...(section.kind === 'context' ? { contextId: section.context.id } : {}),
                               x,
                               y,
                             })
@@ -1023,10 +1155,20 @@ export function T3Sidebar({
                               <button
                                 type="button"
                                 className="t3-folder__cap"
-                                aria-expanded={!folded}
+                                aria-expanded={section.kind === 'context' && folderRows.length === 0 ? undefined : !folded}
                                 aria-haspopup="menu"
-                                title={`${section.cwd} — right-click for workspace actions`}
-                                onClick={() => toggleCollapsed(section.key)}
+                                title={
+                                  section.kind === 'context' && folderRows.length === 0
+                                    ? `Open ${section.label} (${section.cwd}) — right-click for workspace actions`
+                                    : `${section.cwd} — right-click for workspace actions`
+                                }
+                                onClick={() => {
+                                  if (section.kind === 'context' && folderRows.length === 0) {
+                                    void store.activateContext(section.context.id)
+                                    return
+                                  }
+                                  toggleCollapsed(section.key)
+                                }}
                                 onContextMenu={event => {
                                   event.preventDefault()
                                   openFolderContextMenu(event.clientX, event.clientY)
@@ -1045,11 +1187,13 @@ export function T3Sidebar({
                                 {folderRows.length > 0 && (
                                   <span className="t3-folder__count">{folderRows.length}</span>
                                 )}
-                                <T3Icon
-                                  name="chevronDown"
-                                  size={12}
-                                  className={`t3-folder__chev${folded ? ' is-collapsed' : ''}`}
-                                />
+                                {(section.kind !== 'context' || folderRows.length > 0) && (
+                                  <T3Icon
+                                    name="chevronDown"
+                                    size={12}
+                                    className={`t3-folder__chev${folded ? ' is-collapsed' : ''}`}
+                                  />
+                                )}
                               </button>
                               {section.kind === 'context' ? (
                                 <button
@@ -1197,21 +1341,37 @@ export function T3Sidebar({
           >
             {folderMenu.kind === 'local' ? (
               <>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="menu__item"
-                  disabled={!online}
-                  onClick={() => {
-                    const target = folderMenu.cwd
-                    setFolderMenu(null)
-                    if (!snap.turnActive) onOpen(null)
-                    store.newChatIn(target)
-                  }}
-                >
-                  <T3Icon name="squarePen" size={13} />
-                  <span>New thread</span>
-                </button>
+                {folderMenu.contextId !== undefined ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="menu__item"
+                    onClick={() => {
+                      const id = folderMenu.contextId!
+                      setFolderMenu(null)
+                      void store.activateContext(id)
+                    }}
+                  >
+                    <T3Icon name="arrowRight" size={13} />
+                    <span>Open workspace</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="menu__item"
+                    disabled={!online}
+                    onClick={() => {
+                      const target = folderMenu.cwd
+                      setFolderMenu(null)
+                      if (!snap.turnActive) onOpen(null)
+                      store.newChatIn(target)
+                    }}
+                  >
+                    <T3Icon name="squarePen" size={13} />
+                    <span>New thread</span>
+                  </button>
+                )}
                 {typeof window !== 'undefined' && typeof window.xerxes?.openPath === 'function' && (
                   <button
                     type="button"
@@ -1240,17 +1400,21 @@ export function T3Sidebar({
                   <T3Icon name="copy" size={13} />
                   <span>Copy path</span>
                 </button>
-                <div className="menu__sep" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="menu__item menu__item--danger"
-                  title="Remove from sidebar without deleting any files on disk"
-                  onClick={() => removeLocalWorkspace(folderMenu.cwd, folderMenu.label)}
-                >
-                  <T3Icon name="trash" size={13} />
-                  <span>Remove workspace</span>
-                </button>
+                {folderMenu.contextId === undefined && (
+                  <>
+                    <div className="menu__sep" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="menu__item menu__item--danger"
+                      title="Remove from sidebar without deleting any files on disk"
+                      onClick={() => removeLocalWorkspace(folderMenu.cwd, folderMenu.label)}
+                    >
+                      <T3Icon name="trash" size={13} />
+                      <span>Remove workspace</span>
+                    </button>
+                  </>
+                )}
               </>
             ) : (
               <>

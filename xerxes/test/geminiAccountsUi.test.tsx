@@ -6,12 +6,22 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { createBridge } from '../src/desktop/bridgeApi.js'
-import { AccountRecordedUsage, GeminiAccountForm, ProviderAccountsCenter } from '../src/desktop/renderer/ProviderAccountsCenter.js'
+import {
+  ACCOUNT_PROVIDER_OPTIONS,
+  AccountRecordedUsage,
+  agyQuickTransferSource,
+  GeminiAccountForm,
+  ProviderAccountsCenter,
+  type AgyStatusView,
+} from '../src/desktop/renderer/ProviderAccountsCenter.js'
 
 test('the account center offers Gemini Subscription (Antigravity) and Gemini API keys, not native Gemini OAuth', () => {
   const html = renderToStaticMarkup(createElement(ProviderAccountsCenter, { accounts: async () => ({ accounts: [] }), sessionKey: 's1', turnActive: false, changed: () => {} }))
-  expect(html).toContain('<option value="gemini_subscription">Gemini Subscription (Antigravity)</option>')
-  expect(html).toContain('<option value="gemini">Gemini (API key)</option>')
+  expect(html).toContain('aria-label="Account provider"')
+  expect(html).toContain('aria-haspopup="listbox"')
+  expect(ACCOUNT_PROVIDER_OPTIONS).toContainEqual({ value: 'gemini_subscription', label: 'Gemini Subscription (Antigravity)' })
+  expect(ACCOUNT_PROVIDER_OPTIONS).toContainEqual({ value: 'gemini', label: 'Gemini (API key)' })
+  expect(ACCOUNT_PROVIDER_OPTIONS.some(opt => opt.value.includes('oauth'))).toBe(false)
   expect(html).toContain('Gemini is API-key only')
   expect(html).toContain('no Gemini OAuth')
 })
@@ -51,4 +61,22 @@ test('desktop account IPC validates Gemini fields without coercion and dispatche
   expect(main).toContain("if (action === 'create-gemini')")
   expect(main).toContain("typeof params.apiKey !== 'string'")
   expect(main).toContain('accounts.createGemini(params.label, params.apiKey, params.model)')
+})
+
+test('one-click agy transfer never picks the Antigravity sign-in, even if a status still recommends it', () => {
+  const source = (mode: 'keyring' | 'adc' | 'gemini_api_key', available: boolean) =>
+    ({ mode, label: mode, available, detail: '', headlessSafe: mode !== 'keyring' })
+  const status = (sources: AgyStatusView['sources'], recommendedMode: unknown): AgyStatusView => ({
+    agyInstalled: true,
+    sources,
+    recommendedMode: recommendedMode as AgyStatusView['recommendedMode'],
+    canSync: true,
+    destination: 'user@host',
+    syncedDestination: null,
+    syncedMode: null,
+  })
+  expect(agyQuickTransferSource(status([source('keyring', true)], 'keyring'))).toBeNull()
+  expect(agyQuickTransferSource(status([source('keyring', true), source('gemini_api_key', true)], 'keyring'))?.mode).toBe('gemini_api_key')
+  expect(agyQuickTransferSource(status([source('adc', true), source('gemini_api_key', true)], 'gemini_api_key'))?.mode).toBe('gemini_api_key')
+  expect(agyQuickTransferSource({ ...status([source('adc', true)], 'adc'), canSync: false })).toBeNull()
 })

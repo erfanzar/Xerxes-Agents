@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import type { ToolDiff } from '../types.js'
 
 export type ApprovalChoice = 'always' | 'deny' | 'once' | 'session'
 
@@ -14,6 +15,66 @@ export type ApprovalAction =
   { choice: ApprovalChoice; kind: 'choose' } | { delta: -1 | 1; kind: 'move' } | { kind: 'noop' }
 
 const DEFAULT_APPROVAL_CHOICES: readonly ApprovalChoice[] = ['once', 'session', 'always', 'deny']
+
+export function approvalChoiceForOptionKind(kind: string): ApprovalChoice {
+  switch (kind) {
+    case 'reject_once':
+    case 'reject_always':
+    case 'reject':
+    case 'deny':
+      return 'deny'
+    case 'allow_always':
+      return 'always'
+    case 'allow_session':
+    case 'approve_for_session':
+      return 'session'
+    default:
+      return 'once'
+  }
+}
+
+export function approvalConsequenceForOptionKind(kind: string): string {
+  switch (kind) {
+    case 'allow_once':
+      return 'asks again next time'
+    case 'allow_always':
+      return 'remembers this permission'
+    case 'reject_once':
+      return 'denies this request'
+    case 'reject_always':
+      return 'always denies this action'
+    default:
+      return ''
+  }
+}
+
+export interface DiffPreviewLine {
+  kind: 'add' | 'del' | 'header' | 'meta'
+  text: string
+}
+
+/** Build a bounded line preview for one or more ACP file diffs. */
+export function formatApprovalDiffPreview(diffs: readonly ToolDiff[], maxLines = 10): DiffPreviewLine[] {
+  const all: DiffPreviewLine[] = []
+  for (const entry of diffs) {
+    const label = entry.path || '(file diff)'
+    all.push({ kind: 'header', text: label })
+    const oldLines = typeof entry.old_text === 'string' && entry.old_text.length > 0 ? entry.old_text.split('\n') : []
+    const newLines = typeof entry.new_text === 'string' && entry.new_text.length > 0 ? entry.new_text.split('\n') : []
+    for (const line of oldLines) {
+      all.push({ kind: 'del', text: `- ${line}` })
+    }
+    for (const line of newLines) {
+      all.push({ kind: 'add', text: `+ ${line}` })
+    }
+  }
+  if (all.length <= maxLines) {
+    return all
+  }
+  const visible = all.slice(0, Math.max(1, maxLines - 1))
+  const remaining = all.length - visible.length
+  return [...visible, { kind: 'meta', text: `… +${remaining} more diff line${remaining === 1 ? '' : 's'}` }]
+}
 
 /** Pure keyboard dispatch for approval prompts. */
 export function approvalAction(

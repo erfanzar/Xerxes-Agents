@@ -4,23 +4,24 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { Icon, type IconName } from './Icon.js'
-import { RUN_MODE_CHOICES, gigabytes, memoryGigabytes } from './runModeView.js'
+import { SelectField } from './SelectField.js'
+import { gigabytes, localMachineLabel, memoryGigabytes, runModeChoices } from './runModeView.js'
 import { store, type Snapshot } from './store.js'
 import type { RunModeName } from './types.js'
 
 const MODE_ICONS: Record<RunModeName, IconName> = { private: 'shield', hybrid: 'spark', cloud: 'cloud' }
 
 /**
- * How new tasks run: Private (local-model on this Mac, nothing leaves), Hybrid (a
- * cloud model leads and local-model does the file work here) or Cloud. Below the
- * choice, what the chosen mode needs: local-model set up on this Mac, and for Hybrid
- * and Cloud the cloud model that leads or does the work. The provider profiles
- * stay listed beneath.
+ * How new tasks run: Private (a local model on this computer, nothing leaves),
+ * Hybrid (a cloud model leads and a local model does the file work here) or
+ * Cloud. Below the choice, what the chosen mode needs: the local model set up
+ * on this computer, and for Hybrid and Cloud the cloud model that leads or
+ * does the work. The provider profiles stay listed beneath.
  */
 export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | null {
   /** A mode the person picked that still needs a step (setup, or a cloud provider) before it applies. */
   const [pending, setPending] = useState<RunModeName | null>(null)
-  /** The cloud lead picked for Hybrid before local-model was set up; setup applies it with the mode. */
+  /** The cloud lead picked for Hybrid before the local model was set up; setup applies it with the mode. */
   const [lead, setLead] = useState('')
   const view = snap.runMode
   // Once the mode it waited for is in use (setup finished, a provider chosen), nothing is pending.
@@ -33,6 +34,8 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
   const local = snap.localSetup ?? { status: null, job: null, error: '', loading: false }
   const job = local.job
   const settingUp = job?.state === 'running'
+  const machine = localMachineLabel()
+  const choices = runModeChoices(machine)
 
   const choose = async (mode: RunModeName): Promise<void> => {
     if (mode === view?.mode && !view.restartPending) { setPending(null); return }
@@ -45,7 +48,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
     <section className="runmode" aria-label="How Xerxes runs new tasks">
       <div className="row__t">How Xerxes runs new tasks</div>
       <div className="modecards" role="radiogroup" aria-label="Mode">
-        {RUN_MODE_CHOICES.map(choice => {
+        {choices.map(choice => {
           const current = view?.mode === choice.mode
           return (
             <button
@@ -84,13 +87,13 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
         <div className="localpanel">
           <div className="localpanel__head">
             <Icon name="laptop" size={15} />
-            <strong>On this Mac</strong>
+            <strong>On {machine}</strong>
             <span className="row__s">{shown === 'hybrid' ? 'does the file work' : 'does the work'}</span>
             {local.status?.server.running
               ? <span className="provcard__badge provcard__badge--accent">Running</span>
               : local.status ? <span className="provcard__badge provcard__badge--quiet">Stopped</span> : null}
           </div>
-          {local.status === null && !local.error && <p className="row__s" role="status">Checking this Mac…</p>}
+          {local.status === null && !local.error && <p className="row__s" role="status">Checking {machine}…</p>}
           {local.error && <p role="alert" className="studio-error">{local.error}</p>}
           {local.status && (
             <dl className="localpanel__facts">
@@ -119,10 +122,10 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
             <div className="localpanel__actions">
               <button className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown, shown === 'hybrid' ? lead : undefined)}>
                 {local.status.model.downloaded
-                  ? `Start local-model and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
-                  : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up local-model`}
+                  ? `Start local model and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
+                  : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up local model`}
               </button>
-              {!local.status.model.downloaded && <span className="row__s">From Prism's Hugging Face repository, checked by SHA-256. It runs on this Mac.</span>}
+              {!local.status.model.downloaded && <span className="row__s">Downloaded from Hugging Face and verified by SHA-256. Runs locally on {machine}.</span>}
             </div>
           )}
         </div>
@@ -134,22 +137,28 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           {cloudProfiles.length === 0
             ? <p className="row__s">Add a provider below: an API key or a sign-in.</p>
             : (
-              <label className="field">
-                <span>Lead</span>
-                <select value={view?.mode === 'hybrid' ? view.worker?.profile ?? '' : lead} disabled={busy}
-                  onChange={event => {
-                    const name = event.target.value
+              <div className="field">
+                <span id="runmode-hybrid-lead" className="tiercard__label">Lead</span>
+                <SelectField
+                  ariaLabelledBy="runmode-hybrid-lead"
+                  listLabel="Cloud lead provider"
+                  value={view?.mode === 'hybrid' ? view.worker?.profile ?? '' : lead}
+                  placeholder="Choose the cloud model that leads"
+                  disabled={busy}
+                  options={cloudProfiles.map(profile => ({
+                    value: profile.name,
+                    label: profile.label,
+                    ...(profile.model ? { detail: profile.model } : {}),
+                  }))}
+                  onChange={name => {
                     if (!name) return
-                    // Kept while local-model still needs setting up, so the setup button applies it.
                     setLead(name)
                     void store.setRunMode('hybrid', { workerProfile: name }).then(result => { if (result.ok) setPending(null) })
-                  }}>
-                  <option value="" disabled>Choose the cloud model that leads</option>
-                  {cloudProfiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.model ? ` · ${profile.model}` : ''}</option>)}
-                </select>
-              </label>
+                  }}
+                />
+              </div>
             )}
-          <p className="row__s">Light and balanced agents run on local-model and answer directly; smart agents run on the lead. Change this under Agent intelligence.</p>
+          <p className="row__s">Light and balanced agents run on the local model and answer directly; smart agents run on the lead. Change this under Agent intelligence.</p>
         </div>
       )}
 
@@ -159,14 +168,24 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           {cloudProfiles.length === 0
             ? <p className="row__s">Add a provider below: an API key or a sign-in.</p>
             : (
-              <label className="field">
-                <span>Provider</span>
-                <select value={view?.mode === 'cloud' ? view.worker?.profile ?? '' : ''} disabled={busy}
-                  onChange={event => { if (event.target.value) void store.setRunMode('cloud', { workerProfile: event.target.value }).then(result => { if (result.ok) setPending(null) }) }}>
-                  <option value="" disabled>Choose a provider</option>
-                  {cloudProfiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.model ? ` · ${profile.model}` : ''}</option>)}
-                </select>
-              </label>
+              <div className="field">
+                <span id="runmode-cloud-provider" className="tiercard__label">Provider</span>
+                <SelectField
+                  ariaLabelledBy="runmode-cloud-provider"
+                  listLabel="Cloud provider"
+                  value={view?.mode === 'cloud' ? view.worker?.profile ?? '' : ''}
+                  placeholder="Choose a provider"
+                  disabled={busy}
+                  options={cloudProfiles.map(profile => ({
+                    value: profile.name,
+                    label: profile.label,
+                    ...(profile.model ? { detail: profile.model } : {}),
+                  }))}
+                  onChange={name => {
+                    if (name) void store.setRunMode('cloud', { workerProfile: name }).then(result => { if (result.ok) setPending(null) })
+                  }}
+                />
+              </div>
             )}
         </div>
       )}

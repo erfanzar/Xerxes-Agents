@@ -4,8 +4,30 @@
 // Small prop-translation layer for controller-adjacent presentation code.
 // Most layout names map directly to OpenTUI; this file handles the few that
 // differ and enforces non-shrinking stacked rows.
-import { createTextAttributes } from '@opentui/core'
+import { createTextAttributes, RGBA } from '@opentui/core'
 import type { ReactNode } from 'react'
+
+const RGB_FUNCTION = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i
+const ANSI_INDEXED = /^ansi256\((\d+)\)$/i
+
+/**
+ * Normalize color strings for OpenTUI renderables. OpenTUI's parser only
+ * handles hex and CSS names directly — `ansi256(n)` and `rgb(...)` would
+ * fall back to neon magenta `#ff00ff` without explicit RGBA coercion.
+ */
+export function toRenderableColor(color: string | undefined): RGBA | string | undefined {
+  if (!color) return color
+  const trimmed = color.trim()
+  const rgb = RGB_FUNCTION.exec(trimmed)
+  if (rgb) {
+    return RGBA.fromInts(Number(rgb[1]), Number(rgb[2]), Number(rgb[3]))
+  }
+  const indexed = ANSI_INDEXED.exec(trimmed)
+  if (indexed) {
+    return RGBA.fromIndex(Number(indexed[1]))
+  }
+  return color
+}
 
 type TextWrap = 'truncate-end' | 'wrap' | 'wrap-trim'
 type BorderStyle = 'double' | 'round' | 'single'
@@ -76,6 +98,8 @@ export interface BoxProps {
 }
 
 export function Box({
+  backgroundColor,
+  borderColor,
   borderSides,
   borderStyle,
   flexDirection,
@@ -99,10 +123,12 @@ export function Box({
       // This controller-adjacent wrapper accepts a slightly wider set of
       // dimension strings than OpenTUI's public type surface.
       {...(rest as Record<string, unknown>)}
+      backgroundColor={toRenderableColor(backgroundColor)}
       // Xerxes' Box contract defaults to rows, while Yoga defaults to columns.
       // Keep the explicit row default so unmarked horizontal chrome remains
       // side-by-side.
       border={borderSides ? ([...borderSides] as never) : Boolean(border)}
+      borderColor={toRenderableColor(borderColor)}
       borderStyle={border}
       flexDirection={flexDirection ?? 'row'}
       flexGrow={flexGrow}
@@ -152,7 +178,7 @@ export function Text({ children, color, dimColor, bold, italic, underline, strik
   return (
     <text
       attributes={attributes}
-      fg={color}
+      fg={toRenderableColor(color)}
       flexShrink={0}
       truncate={wrap === 'truncate-end' ? true : undefined}
       wrapMode={wrap === 'truncate-end' ? 'none' : wrap === 'wrap' || wrap === 'wrap-trim' ? 'word' : undefined}
@@ -180,7 +206,7 @@ export function Span({
   const attributes = bold || dimColor ? createTextAttributes({ bold, dim: dimColor }) : undefined
 
   return (
-    <span attributes={attributes} fg={color}>
+    <span attributes={attributes} fg={toRenderableColor(color)}>
       {children}
     </span>
   )

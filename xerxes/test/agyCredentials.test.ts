@@ -13,10 +13,8 @@ import { loadAgyRuntimeEnv } from '../src/auth/agyRuntimeEnv.js'
 import { ProviderAccountRegistry } from '../src/auth/providerAccountRegistry.js'
 import {
   AgyCredentialTransfer,
-  AgyLoginManager,
   adcCredentialsPath,
   agyOauthTokenPath,
-  decodeAgyOauthToken,
   inspectLocalAgyCredentials,
   remoteAgyReceipt,
   remoteAgyReceiverSource,
@@ -34,7 +32,7 @@ import {
 
 const target = { alias: 'gpu', target: 'user@example.com', workspacePath: '/work/repo' }
 
-test('inspectLocalAgyCredentials reports available modes without ever exposing secrets', async () => {
+test('inspectLocalAgyCredentials reports available modes without ever exposing secrets or offering the agy sign-in for transfer', async () => {
   const home = await mkdtemp(join(tmpdir(), 'xerxes-agy-inspect-'))
   try {
     const adcSecret = 'super-secret-adc-refresh-token'
@@ -61,11 +59,12 @@ test('inspectLocalAgyCredentials reports available modes without ever exposing s
 
     expect(status.agyInstalled).toBe(true)
     expect(status.canSync).toBe(true)
-    expect(status.recommendedMode).toBe('keyring')
-    expect(status.sources.map(s => [s.mode, s.available, s.headlessSafe])).toEqual([
-      ['keyring', true, true],
-      ['adc', true, true],
-      ['gemini_api_key', true, true],
+    // Signed in to agy here, but its own sign-in is never the transfer recommendation.
+    expect(status.recommendedMode).toBe('adc')
+    expect(status.sources.map(s => [s.mode, s.available, s.headlessSafe, s.transferable])).toEqual([
+      ['keyring', true, false, false],
+      ['adc', true, true, true],
+      ['gemini_api_key', true, true, true],
     ])
     const serialized = JSON.stringify(status)
     expect(serialized).not.toContain(adcSecret)
@@ -76,74 +75,30 @@ test('inspectLocalAgyCredentials reports available modes without ever exposing s
   }
 })
 
-test('decodeAgyOauthToken decodes go-keyring-base64, hex, and raw JSON, and receiver writes mode 0600 headless token file', async () => {
-  const tokenObj = { token: { access_token: 'secret-access', refresh_token: 'secret-refresh' }, auth_method: 'gcp', id_token_email: 'user@example.com' }
-  const json = JSON.stringify(tokenObj)
-  const wrapped = 'go-keyring-base64:' + Buffer.from(json, 'utf8').toString('base64')
-  const hexWrapped = Buffer.from(wrapped, 'utf8').toString('hex')
-  expect(decodeAgyOauthToken(wrapped)).toEqual(tokenObj)
-  expect(decodeAgyOauthToken(hexWrapped)).toEqual(tokenObj)
-  expect(decodeAgyOauthToken(json)).toEqual(tokenObj)
-  expect(decodeAgyOauthToken('not-valid')).toBeUndefined()
-
+test('the remote receiver refuses an Antigravity sign-in payload and writes no token file', async () => {
   const remoteHome = await mkdtemp(join(tmpdir(), 'xerxes-agy-oauth-remote-'))
   try {
-    await mkdir(join(remoteHome, '.gemini', 'antigravity-cli'), { recursive: true })
-    await writeFile(join(remoteHome, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ modelProvider: 'gemini', model: 'Gemini 4 Neon (High)' }))
-    const payload: AgyRemoteSyncPayload = {
+    const payload = {
       kind: 'agy',
       mode: 'keyring',
-      secret: wrapped,
-      oauthToken: tokenObj,
+      secret: 'go-keyring-base64:secret',
+      oauthToken: { token: { access_token: 'secret-access' } },
     }
     const proc = Bun.spawn([process.execPath, '-e', remoteAgyReceiverSource()], {
       stdin: new TextEncoder().encode(JSON.stringify(payload)),
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env, HOME: remoteHome, DBUS_SESSION_BUS_ADDRESS: '', XERXES_SKIP_OS_KEYRING: '1' },
+      env: { ...process.env, HOME: remoteHome, DBUS_SESSION_BUS_ADDRESS: '' },
     })
     const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
-    expect(code).toBe(0)
-    expect(remoteAgyReceipt(stdout)).toBe('keyring')
-    expect(stdout).not.toContain('secret-access')
-    expect(stdout).not.toContain('secret-refresh')
-    const writtenPath = agyOauthTokenPath(remoteHome)
-    expect((await stat(writtenPath)).mode & 0o777).toBe(0o600)
-    expect(await Bun.file(writtenPath).json()).toEqual(tokenObj)
-    const settingsDoc = await Bun.file(join(remoteHome, '.gemini', 'antigravity-cli', 'settings.json')).json() as Record<string, unknown>
-    expect(settingsDoc).toEqual({ model: 'Gemini 4 Neon (High)' })
+    expect(code).not.toBe(0)
+    expect(() => remoteAgyReceipt(stdout)).toThrow('not acknowledged')
+    expect(await Bun.file(agyOauthTokenPath(remoteHome)).exists()).toBe(false)
+    expect(remoteAgyReceiverSource()).not.toContain('antigravity-oauth-token')
+    expect(remoteAgyReceiverSource()).not.toContain('add-generic-password')
   } finally {
     await rm(remoteHome, { recursive: true, force: true })
   }
-})
-
-test('AgyLoginManager extracts the Google OAuth URL and submits the authorization code on stdin', async () => {
-  let receivedStdin = ''
-  const child = new EventEmitter() as EventEmitter & { stdin: Writable; stdout: Readable; stderr: Readable; kill: () => void }
-  child.stdout = new Readable({ read() {} })
-  child.stderr = new Readable({ read() {} })
-  child.stdin = new Writable({
-    write(chunk, _enc, cb) {
-      receivedStdin += String(chunk)
-      cb()
-      queueMicrotask(() => child.emit('close', 0))
-    },
-  })
-  child.kill = () => {}
-
-  const manager = new AgyLoginManager({
-    findAgyPath: async () => '/usr/local/bin/agy',
-    spawnLogin: () => {
-      queueMicrotask(() => {
-        child.stdout.push('Open this link in a browser:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=test&state=abc\n\nPaste code:\n')
-      })
-      return child as never
-    },
-  })
-  const started = await manager.start()
-  expect(started.url).toBe('https://accounts.google.com/o/oauth2/auth?client_id=test&state=abc')
-  await manager.complete(started.loginId, '4/0test-auth-code')
-  expect(receivedStdin).toBe('4/0test-auth-code\n')
 })
 
 test('agy SSH writer sends credentials over stdin only and receiver writes mode 0600 files cleanly', async () => {
@@ -241,7 +196,7 @@ test('agy SSH writer sends credentials over stdin only and receiver writes mode 
   }
 })
 
-test('AgyCredentialTransfer enforces one-use unexpired reviews and refuses headless keyring failure clearly', async () => {
+test('AgyCredentialTransfer enforces one-use unexpired reviews and never transfers the Antigravity sign-in', async () => {
   const home = await mkdtemp(join(tmpdir(), 'xerxes-agy-manager-'))
   try {
     await mkdir(join(home, '.config', 'gcloud'), { recursive: true })
@@ -250,11 +205,10 @@ test('AgyCredentialTransfer enforces one-use unexpired reviews and refuses headl
     const sent: AgyRemoteSyncPayload[] = []
     const manager = new AgyCredentialTransfer(
       target,
-      { home, env: { PATH: '/nonexistent' }, hasKeyringEntry: async () => true, readKeyringSecret: async () => 'kr-secret' },
+      { home, env: { PATH: '/nonexistent' }, hasKeyringEntry: async () => true },
       () => now,
       async payload => {
         sent.push(payload)
-        if (payload.mode === 'keyring') throw new Error('keyring_unavailable')
         return JSON.stringify({ ok: true, provider: 'agy', mode: payload.mode })
       },
     )
@@ -271,9 +225,9 @@ test('AgyCredentialTransfer enforces one-use unexpired reviews and refuses headl
     now = expiring.expires_at + 1
     await expect(manager.confirmSync(expiring.review, true)).rejects.toThrow('expired')
 
-    // Keyring transfer onto a headless host returns a clear actionable error.
-    const keyringReview = await manager.reviewSync('keyring') as { review: string }
-    await expect(manager.confirmSync(keyringReview.review, true)).rejects.toThrow('Google Cloud ADC or a Gemini API key')
+    // The agy sign-in is signed in locally yet still refused, before anything is read or sent.
+    await expect(manager.reviewSync('keyring')).rejects.toThrow('agy acp --login')
+    expect(sent).toHaveLength(1)
   } finally {
     await rm(home, { recursive: true, force: true })
   }
@@ -372,7 +326,7 @@ test('ensureCodexCli and ensureDaemonCompanionClis auto-install missing claude, 
   expect(skipped.agy.status).toBe('skipped')
 })
 
-test('desktop bridge forwards agy credential transfer, login, and provider-setup actions', async () => {
+test('desktop bridge forwards agy credential transfer and provider-setup actions, and has no in-app agy sign-in', async () => {
   const calls: unknown[][] = []
   const bridge = createBridge({
     invoke: async (...args) => { calls.push(args); return { ok: true } },
@@ -380,19 +334,26 @@ test('desktop bridge forwards agy credential transfer, login, and provider-setup
     setZoomFactor: () => {},
   })
   await bridge.accounts('agy-status', {})
-  await bridge.accounts('agy-sync-review', { mode: 'keyring' })
+  await bridge.accounts('agy-sync-review', { mode: 'adc' })
   await bridge.accounts('agy-sync', { review: 'rev-1', confirm: true })
-  await bridge.accounts('agy-login-start', {})
-  await bridge.accounts('agy-login-complete', { loginId: 'id-1', code: 'code-1' })
-  await bridge.accounts('agy-login-cancel', { loginId: 'id-1' })
   await bridge.remote('provider-setup', {})
   expect(calls.map(c => [c[0], c[1]])).toEqual([
     ['desktop:accounts', 'agy-status'],
     ['desktop:accounts', 'agy-sync-review'],
     ['desktop:accounts', 'agy-sync'],
-    ['desktop:accounts', 'agy-login-start'],
-    ['desktop:accounts', 'agy-login-complete'],
-    ['desktop:accounts', 'agy-login-cancel'],
     ['desktop:remote', 'provider-setup'],
   ])
+  // Xerxes never relays an Antigravity sign-in: the user runs `agy acp --login` in a terminal.
+  for (const removed of ['agy-login-start', 'agy-login-complete', 'agy-login-cancel']) {
+    await expect(Promise.resolve().then(() => bridge.accounts(removed as never, {}))).rejects.toThrow()
+  }
+  expect(calls).toHaveLength(4)
+})
+
+test('agyCredentials never reads Antigravity keyring secrets on Linux via secret-tool lookup or search', async () => {
+  const source = await Bun.file(new URL('../src/desktop/main/agyCredentials.ts', import.meta.url)).text()
+  expect(source).not.toContain("'lookup'")
+  expect(source).not.toContain("'secret-tool'")
+  expect(source).not.toContain("'-w'")
+  expect(source).toContain('org.freedesktop.Secret.Service.SearchItems')
 })

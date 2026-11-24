@@ -22,6 +22,8 @@ import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.j
 import { summarizeToolStartDisplay } from '../lib/toolStartDisplay.js'
 import { fromSkin } from '../theme.js'
 import type {
+  ApprovalReq,
+  ClarifyQuestion,
   ClarifyReq,
   Msg,
   SessionInfo,
@@ -521,6 +523,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       return
     }
 
+    if (ev.type === 'acp_status') {
+      const targetSid = ev.payload?.session_id || ev.session_id
+      if (targetSid && sid && targetSid !== sid) {
+        return
+      }
+      patchUiState({ acpBinding: ev.payload?.binding ?? null })
+
+      return
+    }
+
     if (ev.session_id && sid && ev.session_id !== sid && !ev.type.startsWith('gateway.')) {
       return
     }
@@ -551,6 +563,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         patchUiState(state => ({
           ...state,
+          ...(info.acp_binding !== undefined ? { acpBinding: info.acp_binding ?? null } : {}),
           info: state.info
             ? compact<SessionInfo>({
                 ...state.info,
@@ -911,6 +924,24 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         }
 
         return
+      case 'tool.update': {
+        const p = ev.payload
+        turnController.recordToolUpdate({
+          ...(p.diff !== undefined ? { diff: p.diff } : {}),
+          ...(p.diffs !== undefined ? { diffs: p.diffs } : {}),
+          ...(p.inputs !== undefined ? { inputs: p.inputs } : {}),
+          ...(p.kind !== undefined ? { kind: p.kind } : {}),
+          ...(p.locations !== undefined ? { locations: p.locations } : {}),
+          ...(p.name !== undefined ? { name: p.name } : {}),
+          ...(p.output !== undefined ? { output: p.output } : {}),
+          ...(p.status !== undefined ? { status: p.status } : {}),
+          ...(p.title !== undefined ? { title: p.title } : {}),
+          toolId: p.tool_id
+        })
+
+        return
+      }
+
       case 'tool.complete': {
         // The clarify tool finishing with its overlay still live means it was
         // abandoned (backend _block timed out, empty answer). A real answer
@@ -951,29 +982,57 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
-      case 'clarify.request':
+      case 'clarify.request': {
+        const questions = Array.isArray(ev.payload.questions)
+          ? ev.payload.questions.map(q =>
+              compact<ClarifyQuestion>({
+                allowFreeform: q.allow_free_form,
+                choices: Array.isArray(q.options) ? q.options : null,
+                id: q.id,
+                multiSelect: q.multi_select,
+                placeholder: q.placeholder,
+                question: q.question
+              })
+            )
+          : undefined
         patchOverlayState({
           clarify: compact<ClarifyReq>({
             allowFreeform: ev.payload.allow_free_form,
             choices: ev.payload.choices,
+            elicitationId: ev.payload.elicitation_id,
+            message: ev.payload.message,
+            mode: ev.payload.mode,
+            multiSelect: ev.payload.multi_select,
             placeholder: ev.payload.placeholder,
             question: ev.payload.question,
             questionId: ev.payload.question_id,
+            questions,
             requestId: ev.payload.request_id,
             source: ev.payload.source,
-            toolId: ev.payload.tool_id
+            toolId: ev.payload.tool_id,
+            url: ev.payload.url
           })
         })
         setStatus('waiting for input…')
 
         return
+      }
       case 'clarify.resolved': {
-        // TUI prompt ids are `<daemon request id>:<question id>`.
+        // TUI prompt ids are `<daemon request id>:<question id>`; URL
+        // elicitations may also resolve by `elicitation_id`.
         const { clarify } = getOverlayState()
-        if (!clarify || !ev.payload.request_id || !clarify.requestId.startsWith(`${ev.payload.request_id}:`)) return
+        if (!clarify) return
+        const matchesRequest =
+          Boolean(ev.payload.request_id) &&
+          (clarify.requestId === ev.payload.request_id || clarify.requestId.startsWith(`${ev.payload.request_id}:`))
+        const matchesElicitation =
+          Boolean(ev.payload.elicitation_id) && clarify.elicitationId === ev.payload.elicitation_id
+        if (!matchesRequest && !matchesElicitation) return
         patchOverlayState({ clarify: null })
         if (ev.payload.auto) {
           appendMessage({ role: 'system', text: `No answer within a minute; continued with the recommended option: ${ev.payload.answer ?? ''}`.trim() })
+        } else if (ev.payload.reason === 'complete') {
+          appendMessage({ role: 'system', text: 'External elicitation completed.' })
         }
         // Same as a typed answer: the turn carries on.
         setStatus('running…')
@@ -986,12 +1045,18 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         const allowPermanent = ev.payload.allow_permanent !== false
 
         patchOverlayState({
-          approval: {
+          approval: compact<ApprovalReq>({
             allowPermanent,
             command: String(ev.payload.command ?? ''),
+            cwd: ev.payload.cwd,
             description,
+            diff: ev.payload.diff,
+            diffs: ev.payload.diffs,
+            inputs: ev.payload.inputs,
+            locations: ev.payload.locations,
+            options: ev.payload.options,
             requestId: ev.payload.request_id
-          }
+          })
         })
         setStatus('approval needed')
 

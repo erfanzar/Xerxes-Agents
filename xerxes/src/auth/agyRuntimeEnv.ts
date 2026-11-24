@@ -48,25 +48,23 @@ const AGY_OUTER_SANDBOX_MARKER_KEYS = [
 ] as const
 
 /**
- * SSH session indicator variables that cause `agy` to skip the OS keyring
- * (`Using file-based token storage because SSH session detected`).
- * `SSH_AUTH_SOCK` is intentionally excluded so SSH agent authentication keeps working.
+ * Daemon-internal `XERXES_*` environment variables that must not leak into a
+ * Xerxes-owned `agy acp` subprocess. Explicit `XERXES_TEST_*` variables are
+ * preserved so test harnesses can pass deterministic markers if needed.
  */
-export const SSH_SESSION_ENV_KEYS = [
-  'SSH_CONNECTION',
-  'SSH_CLIENT',
-  'SSH_TTY',
+export const AGY_STRIPPED_XERXES_ENV_KEYS = [
+  'XERXES_BUN_DAEMON',
+  'XERXES_CWD',
+  'XERXES_DAEMON_BUILD_ID',
+  'XERXES_HOME',
+  'XERXES_PROJECT_DIR',
+  'XERXES_SOCKET_PATH',
+  'CHROME_CRASHPAD_PIPE_NAME',
+  'ELECTRON_RUN_AS_NODE',
 ] as const
 
 export function hasOuterAgyHostEnv(env: Readonly<Record<string, string | undefined>>): boolean {
   return AGY_OUTER_SANDBOX_MARKER_KEYS.some(key => {
-    const value = env[key]
-    return typeof value === 'string' && value.trim().length > 0
-  })
-}
-
-export function hasSshSessionEnv(env: Readonly<Record<string, string | undefined>>): boolean {
-  return SSH_SESSION_ENV_KEYS.some(key => {
     const value = env[key]
     return typeof value === 'string' && value.trim().length > 0
   })
@@ -77,11 +75,11 @@ export function hasSshSessionEnv(env: Readonly<Record<string, string | undefined
  *
  * Explicitly assigns `undefined` for stripped keys so downstream merges with
  * `process.env` (such as `spawnBunAcpProcess`) omit them instead of inheriting
- * outer-host values.
+ * outer-host or daemon-internal values. SSH session variables are left alone:
+ * how `agy` stores its sign-in is agy's decision, not Xerxes's.
  */
 export function buildAgySubprocessEnv(
   baseEnv: Readonly<Record<string, string | undefined>>,
-  options: { readonly stripSshSession?: boolean } = {},
 ): Record<string, string | undefined> {
   const sanitized: Record<string, string | undefined> = { ...baseEnv }
   const outerHostDetected = hasOuterAgyHostEnv(baseEnv)
@@ -89,14 +87,18 @@ export function buildAgySubprocessEnv(
   for (const key of AGY_OUTER_HOST_ENV_KEYS) {
     sanitized[key] = undefined
   }
-  if (outerHostDetected) {
-    sanitized.GEMINI_HOME = undefined
+  for (const key of AGY_STRIPPED_XERXES_ENV_KEYS) {
+    sanitized[key] = undefined
   }
-  if (outerHostDetected || options.stripSshSession) {
-    for (const key of SSH_SESSION_ENV_KEYS) {
+  for (const key of Object.keys(baseEnv)) {
+    if (key.startsWith('XERXES_') && !key.startsWith('XERXES_TEST_')) {
       sanitized[key] = undefined
     }
   }
+  if (outerHostDetected) {
+    sanitized.GEMINI_HOME = undefined
+  }
+  sanitized.PYTHONUNBUFFERED = '1'
   return sanitized
 }
 

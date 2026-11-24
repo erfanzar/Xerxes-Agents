@@ -1,20 +1,23 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 import {
+  AcpRpcError,
   AcpStdioClient,
   isAcpAuthRequiredError,
   type AcpAvailableCommand,
   type AcpClientEvent,
+  type AcpClientHostHandlers,
   type AcpClientPermissionRequest,
   type AcpClientPermissionResponse,
   type AcpElicitationRequest,
   type AcpElicitationResponse,
   type AcpInitializeResult,
+  type AcpMcpCapabilities,
   type AcpPromptCapabilities,
   type AcpPromptContentBlock,
   type AcpPromptUsage,
@@ -40,6 +43,7 @@ import {
   type AcpExternalConfigOptionChoice,
   type AcpExternalModeOption,
   type AcpExternalModelOption,
+  type AcpRuntimeAuthMethod,
   type AcpRuntimeCapabilities,
   type AcpSessionBinding,
   type AcpToolMetaSnapshot,
@@ -47,7 +51,7 @@ import {
   type DiscoverExternalAcpAgentsOptions,
 } from '../acp/externalAgents.js'
 import { isAcpRecord } from '../acp/types.js'
-import { buildAgySubprocessEnv, hasSshSessionEnv, loadAgyRuntimeEnv } from '../auth/agyRuntimeEnv.js'
+import { buildAgySubprocessEnv, loadAgyRuntimeEnv } from '../auth/agyRuntimeEnv.js'
 import { errorMessage } from '../executors/toolRegistry.js'
 import {
   companionCliSearchDirectories,
@@ -62,11 +66,32 @@ import {
   type EnsureCodexCliResult,
 } from '../runtime/companionInstall.js'
 
+export type AcpDefaultCreateElicitationHandler = (
+  sessionId: string,
+  request: AcpElicitationRequest,
+  signal?: AbortSignal,
+) => Promise<AcpElicitationResponse> | AcpElicitationResponse
+
+export type AcpDefaultRequestPermissionHandler = (
+  sessionId: string,
+  request: AcpClientPermissionRequest,
+  signal?: AbortSignal,
+) => Promise<AcpClientPermissionResponse> | AcpClientPermissionResponse
+
+export type AcpTerminalClientHandlers = Pick<
+  AcpClientHostHandlers,
+  'createTerminal' | 'getTerminalOutput' | 'waitForTerminalExit' | 'killTerminal' | 'releaseTerminal'
+>
+
 export interface DaemonAcpBridgeHostOptions {
   /** Test seam to override external ACP client construction. */
   readonly createAcpClient?: (options: AcpStdioClientOptions) => AcpStdioClient
   /** Test seam to override Claude stream-json runner construction. */
   readonly createClaudeRunner?: (options: ClaudeStreamJsonRunnerOptions) => ClaudeStreamJsonRunner
+  /** Session-level fallback elicitation handler for out-of-turn ACP wakeups. */
+  readonly defaultCreateElicitation?: AcpDefaultCreateElicitationHandler
+  /** Session-level fallback permission handler for out-of-turn ACP wakeups. */
+  readonly defaultRequestPermission?: AcpDefaultRequestPermissionHandler
   /** Test seam to override agent discovery. */
   readonly discoverAgents?: (options?: DiscoverExternalAcpAgentsOptions) => readonly AcpExternalAgentInfo[]
   /** Test seam to override automatic `agy` installation when Antigravity is selected. */
@@ -79,29 +104,86 @@ export interface DaemonAcpBridgeHostOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
   /** Override home directory used for external runtime skill discovery and agy env lookup (deterministic tests). */
   readonly homeDir?: string
-  /** Override host platform for deterministic tests. */
-  readonly platform?: NodeJS.Platform
   /** Test seam for custom binary validation. */
   readonly resolveBinary?: (command: string) => string | undefined
+  /** Optional ACP `terminal/*` client handlers; `clientCapabilities.terminal` is true only when provided. */
+  readonly terminalHandlers?: AcpTerminalClientHandlers
+}
+
+export interface AcpConnectMcpServerInput {
+  readonly args?: readonly string[]
+  readonly command?: string
+  readonly enabled?: boolean
+  readonly env?: Readonly<Record<string, string>>
+  readonly headers?: Readonly<Record<string, string>>
+  readonly name: string
+  readonly transport?: 'stdio' | 'sse' | 'streamable_http'
+  readonly url?: string
 }
 
 export interface AcpConnectRequest {
+  readonly additionalDirectories?: readonly string[]
+  readonly agent?: string
   readonly agentId: string
   readonly args?: readonly string[]
   readonly command?: string
   readonly cwd: string
+  readonly ideMcpPort?: number
   readonly initialModeId?: string
+  readonly mcpServers?: readonly AcpConnectMcpServerInput[]
   readonly permissionMode?: string
   readonly resumeSessionId?: string
+  readonly sandbox?: boolean
   readonly sessionId: string
 }
 
 export type AcpConnectResult =
   | { readonly binding: AcpSessionBinding; readonly ok: true }
-  | { readonly error: string; readonly install_hint?: string; readonly ok: false }
+  | {
+      readonly auth_methods?: readonly AcpRuntimeAuthMethod[]
+      readonly auth_required?: boolean
+      readonly error: string
+      readonly install_hint?: string
+      readonly ok: false
+    }
 
 export type AcpBindingMutationResult =
   | { readonly binding: AcpSessionBinding; readonly ok: true }
+  | { readonly error: string; readonly ok: false }
+
+export interface AcpAuthenticateRequest {
+  readonly agentId?: string
+  readonly cwd?: string
+  readonly methodId: string
+  readonly sessionId: string
+}
+
+export type AcpAuthenticateResult =
+  | { readonly mode: 'agent'; readonly ok: true }
+  | {
+      readonly args: readonly string[]
+      readonly command: string
+      readonly env: Readonly<Record<string, string>>
+      readonly label: string
+      readonly mode: 'terminal'
+      readonly ok: true
+    }
+  | { readonly error: string; readonly ok: false }
+
+export interface AcpListedSessionWire {
+  readonly cwd?: string
+  readonly meta?: Readonly<Record<string, unknown>>
+  readonly session_id: string
+  readonly title?: string
+  readonly updated_at?: string
+}
+
+export type AcpListSessionsHostResult =
+  | {
+      readonly next_cursor?: string
+      readonly ok: true
+      readonly sessions: readonly AcpListedSessionWire[]
+    }
   | { readonly error: string; readonly ok: false }
 
 export interface ExtractedAcpModelAndModeState {
@@ -124,14 +206,26 @@ export interface AcpPromptImageInput {
   readonly mediaType: string
 }
 
+export interface AcpPromptAudioInput {
+  readonly data: string
+  readonly mediaType: string
+}
+
 export interface AcpPromptResourceInput {
+  readonly blob?: string
+  readonly description?: string
   readonly mimeType?: string
+  readonly name?: string
   readonly path?: string
-  readonly text: string
+  readonly size?: number
+  readonly text?: string
+  readonly title?: string
+  readonly type?: 'resource' | 'resource_link'
   readonly uri: string
 }
 
 export interface AcpRunPromptRequest {
+  readonly audio?: readonly AcpPromptAudioInput[]
   readonly createElicitation?: (
     request: AcpElicitationRequest,
     signal?: AbortSignal,
@@ -149,6 +243,21 @@ export interface AcpRunPromptRequest {
   readonly text: string
 }
 
+export interface AcpSteerPromptRequest {
+  readonly acceptProbeMs?: number
+  readonly audio?: readonly AcpPromptAudioInput[]
+  readonly images?: readonly AcpPromptImageInput[]
+  readonly onFallbackQueue?: () => Promise<void> | void
+  readonly resources?: readonly AcpPromptResourceInput[]
+  readonly sessionId: string
+  readonly signal?: AbortSignal
+  readonly text: string
+}
+
+export type AcpSteerPromptResult =
+  | { readonly ok: true; readonly settled: boolean; readonly stopReason?: string }
+  | { readonly error: string; readonly ok: false; readonly rejectedConcurrent: boolean }
+
 export interface AcpRunPromptResult {
   readonly assistantText: string
   readonly cancelled: boolean
@@ -157,6 +266,66 @@ export interface AcpRunPromptResult {
   readonly stopReason: string
   readonly thinkingText: string
   readonly usage?: AcpPromptUsage
+}
+
+export interface AcpSideQuestionToolEvent {
+  readonly name: string
+  readonly status: 'done' | 'error' | 'running'
+  readonly target: string
+}
+
+export interface AcpSideQuestionRequest {
+  /** Compact prompt used when `session/fork` succeeds and the forked session already holds native history. */
+  readonly forkedPrompt?: string
+  readonly model?: string
+  readonly onDelta?: (delta: string) => void
+  readonly onTool?: (tool: AcpSideQuestionToolEvent) => void
+  readonly prompt: string
+  readonly sessionId: string
+  readonly signal?: AbortSignal
+  /** Whether to prefer `session/fork` when advertised by the agent (defaults to true). */
+  readonly useFork?: boolean
+}
+
+export interface AcpSideQuestionResult {
+  readonly answer: string
+  readonly error?: string
+  readonly model: string
+  readonly ok: boolean
+}
+
+function isReadOnlySideQuestionPermission(request: AcpClientPermissionRequest): boolean {
+  const kind = (request.kind ?? '').trim().toLowerCase()
+  if (kind === 'edit' || kind === 'write' || kind === 'delete' || kind === 'execute' || kind === 'move') {
+    return false
+  }
+  const name = `${request.toolName} ${request.title}`.toLowerCase()
+  if (/\b(edit|write|delete|remove|rm|run_command|command|bash|shell|exec|patch|apply|create|mkdir|mv|cp|schedule|kill)\b/.test(name)) {
+    return false
+  }
+  if (kind === 'read' || kind === 'search' || kind === 'fetch' || kind === 'think') {
+    return true
+  }
+  return /\b(read|view|list|glob|grep|find|search|outline|ls|cat|head|tail|stat)\b/.test(name)
+}
+
+function acpSideQuestionToolTarget(name: string, input: Record<string, unknown>, cwd: string): string {
+  const rawPath =
+    (typeof input.Path === 'string' && input.Path) ||
+    (typeof input.path === 'string' && input.path) ||
+    (typeof input.file_path === 'string' && input.file_path) ||
+    (typeof input.SearchPath === 'string' && input.SearchPath) ||
+    (typeof input.DirectoryPath === 'string' && input.DirectoryPath) ||
+    (typeof input.query === 'string' && input.query) ||
+    (typeof input.Query === 'string' && input.Query) ||
+    (typeof input.pattern === 'string' && input.pattern) ||
+    ''
+  if (!rawPath) return name
+  if (isAbsolute(rawPath)) {
+    const rel = relative(cwd, rawPath)
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) return rel
+  }
+  return rawPath.slice(0, 120)
 }
 
 const MAX_ACP_TOOL_NAMES = 256
@@ -173,18 +342,26 @@ interface ActiveAcpSession {
   activePermissionHandler:
     | ((request: AcpClientPermissionRequest) => Promise<AcpClientPermissionResponse> | AcpClientPermissionResponse)
     | undefined
+  activeSyntheticUpdate?: ((event: AcpClientEvent) => void) | undefined
+  readonly additionalDirectories: readonly string[]
   binding: AcpSessionBinding
   readonly client: AcpStdioClient
-  readonly externalSessionId: string
+  externalSessionId: string
   hostTurboActive: boolean
   hostTurboUnderlyingMode: string | undefined
   readonly kind: 'acp'
+  readonly liveSteerTasks: Set<Promise<void>>
+  readonly mcpServers: readonly Readonly<Record<string, unknown>>[]
   nativeModes: readonly AcpExternalModeOption[]
+  outOfTurnInteractionAbort: AbortController
   readonly outOfTurnSettledToolCallIds: Set<string>
   readonly promptCapabilities: AcpPromptCapabilities
+  readonly readRepair?: ReturnType<typeof makeAntigravityReadRepair>
   readonly sessionCapabilities: AcpSessionCapabilities
+  readonly sideSessionIds: Set<string>
   readonly toolMetaById: Map<string, AcpToolMetaSnapshot>
   readonly toolNamesById: Map<string, string>
+  readonly updateStepsPlans?: ReturnType<typeof makeAntigravityUpdateStepsPlans>
 }
 
 interface ActiveClaudeSession {
@@ -192,6 +369,15 @@ interface ActiveClaudeSession {
   binding: AcpSessionBinding
   readonly kind: 'claude-stream-json'
   readonly runner: ClaudeStreamJsonRunner
+}
+
+interface LastAcpAuthChallenge {
+  readonly agentId: string
+  readonly args: readonly string[]
+  readonly authMethods: readonly AcpRuntimeAuthMethod[]
+  readonly command: string
+  readonly cwd: string
+  readonly provider: AcpExternalAgentProvider
 }
 
 type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession
@@ -205,12 +391,35 @@ type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession
  */
 export class DaemonAcpBridgeHost {
   private readonly active = new Map<string, ActiveExternalSession>()
+  private readonly lastAuthChallengeBySession = new Map<string, LastAcpAuthChallenge>()
   private readonly bindingListeners = new Set<(sessionId: string, binding: AcpSessionBinding) => void>()
   private readonly sessionEventListeners = new Set<(sessionId: string, event: AcpBridgeStreamEvent) => void>()
   private readonly options: DaemonAcpBridgeHostOptions
+  private defaultCreateElicitation: AcpDefaultCreateElicitationHandler | undefined
+  private defaultRequestPermission: AcpDefaultRequestPermissionHandler | undefined
 
   constructor(options: DaemonAcpBridgeHostOptions = {}) {
     this.options = options
+    this.defaultCreateElicitation = options.defaultCreateElicitation
+    this.defaultRequestPermission = options.defaultRequestPermission
+  }
+
+  /** Attach or replace persistent session-level fallback handlers for out-of-turn ACP requests. */
+  setDefaultHandlers(handlers: {
+    readonly createElicitation?: AcpDefaultCreateElicitationHandler
+    readonly requestPermission?: AcpDefaultRequestPermissionHandler
+  }): void {
+    this.defaultCreateElicitation = handlers.createElicitation
+    this.defaultRequestPermission = handlers.requestPermission
+  }
+
+  /** Last known auth methods for a session (active binding or most recent auth-required connect failure). */
+  getAuthMethods(sessionId: string): readonly AcpRuntimeAuthMethod[] {
+    const active = this.getBinding(sessionId)
+    if (active?.capabilities?.auth_methods && active.capabilities.auth_methods.length > 0) {
+      return active.capabilities.auth_methods
+    }
+    return this.lastAuthChallengeBySession.get(sessionId)?.authMethods ?? []
   }
 
   /** Resolved home directory for external ACP workspace & credential discovery. */
@@ -334,8 +543,13 @@ export class DaemonAcpBridgeHost {
         cwd,
         command: resolvedBinary ?? command,
         args,
+        ...(request.additionalDirectories?.length ? { additionalDirectories: request.additionalDirectories } : {}),
+        ...(request.agent ? { agent: request.agent } : {}),
+        ...(request.ideMcpPort !== undefined ? { ideMcpPort: request.ideMcpPort } : {}),
         ...(request.initialModeId ? { initialModeId: request.initialModeId } : {}),
+        ...(request.mcpServers?.length ? { mcpServers: request.mcpServers } : {}),
         ...(request.resumeSessionId ? { resumeSessionId: request.resumeSessionId } : {}),
+        ...(request.sandbox ? { sandbox: true } : {}),
         ...(discovered?.installHint ? { installHint: discovered.installHint } : {}),
       })
     }
@@ -442,6 +656,7 @@ export class DaemonAcpBridgeHost {
         session: {
           load: false,
           resume: true,
+          fork: false,
           list: false,
           close: false,
           additional_directories: false,
@@ -501,13 +716,19 @@ export class DaemonAcpBridgeHost {
       cwd,
       command,
       args: resolvedDiscovered.args ?? [],
+      ...(request.additionalDirectories?.length ? { additionalDirectories: request.additionalDirectories } : {}),
+      ...(request.agent ? { agent: request.agent } : {}),
+      ...(request.ideMcpPort !== undefined ? { ideMcpPort: request.ideMcpPort } : {}),
       ...(request.initialModeId ? { initialModeId: request.initialModeId } : {}),
+      ...(request.mcpServers?.length ? { mcpServers: request.mcpServers } : {}),
       ...(request.resumeSessionId ? { resumeSessionId: request.resumeSessionId } : {}),
+      ...(request.sandbox ? { sandbox: true } : {}),
       ...(resolvedDiscovered.installHint ? { installHint: resolvedDiscovered.installHint } : {}),
     })
   }
 
   async disconnect(sessionId: string): Promise<boolean> {
+    this.lastAuthChallengeBySession.delete(sessionId)
     const existing = this.active.get(sessionId)
     if (!existing) {
       return false
@@ -520,6 +741,10 @@ export class DaemonAcpBridgeHost {
       existing.activeElicitationAbort?.abort(new Error('External ACP agent disconnected'))
       existing.activeElicitationAbort = undefined
       existing.activeElicitationHandler = undefined
+      existing.outOfTurnInteractionAbort.abort(new Error('External ACP agent disconnected'))
+      // Yield a macrotask tick so aborted permission/elicitation handler chains finish
+      // flushing `{ outcome: 'cancelled' }` / `{ action: 'cancel' }` replies before stdin closes.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       if (
         existing.sessionCapabilities.close &&
         !existing.client.isDisposed &&
@@ -547,6 +772,10 @@ export class DaemonAcpBridgeHost {
       cancelled = true
     }
     if (existing.kind === 'acp') {
+      if (!existing.outOfTurnInteractionAbort.signal.aborted) {
+        existing.outOfTurnInteractionAbort.abort(new Error('External ACP interaction cancelled'))
+      }
+      existing.outOfTurnInteractionAbort = new AbortController()
       await existing.client.cancel(existing.externalSessionId).catch(() => undefined)
       return cancelled || true
     }
@@ -726,27 +955,55 @@ export class DaemonAcpBridgeHost {
   async setConfigOption(
     sessionId: string,
     configId: string,
-    value: string,
+    value: string | boolean,
+    explicitType?: string,
   ): Promise<AcpBindingMutationResult> {
     const sid = sessionId.trim()
     const targetConfigId = configId.trim()
-    const targetValue = value.trim()
     if (!sid) {
       return { ok: false, error: 'session_id is required to set an ACP config option.' }
     }
     if (!targetConfigId) {
       return { ok: false, error: 'config_id is required.' }
     }
-    if (!targetValue) {
-      return { ok: false, error: 'value is required.' }
-    }
     const existing = this.active.get(sid)
     if (!existing || !existing.binding.connected) {
       return { ok: false, error: `No external ACP agent is connected for session "${sid}".` }
     }
+
+    const existingOpt = existing.binding.config_options?.find(
+      item => item.id.toLowerCase() === targetConfigId.toLowerCase(),
+    )
+    const isBooleanOption =
+      typeof value === 'boolean' ||
+      explicitType?.trim().toLowerCase() === 'boolean' ||
+      existingOpt?.type === 'boolean'
+
+    let normalizedValue: string | boolean
+    if (isBooleanOption) {
+      if (typeof value === 'boolean') {
+        normalizedValue = value
+      } else {
+        const lower = value.trim().toLowerCase()
+        if (lower === 'true' || lower === '1' || lower === 'on') {
+          normalizedValue = true
+        } else if (lower === 'false' || lower === '0' || lower === 'off') {
+          normalizedValue = false
+        } else {
+          return { ok: false, error: `Boolean config option "${targetConfigId}" requires true or false.` }
+        }
+      }
+    } else {
+      const trimmed = String(value).trim()
+      if (!trimmed) {
+        return { ok: false, error: 'value is required.' }
+      }
+      normalizedValue = trimmed
+    }
+
     if (existing.kind === 'claude-stream-json') {
-      if (targetConfigId.toLowerCase() === 'model') {
-        return this.setModel(sid, targetValue)
+      if (targetConfigId.toLowerCase() === 'model' && typeof normalizedValue === 'string') {
+        return this.setModel(sid, normalizedValue)
       }
       return {
         ok: false,
@@ -754,15 +1011,16 @@ export class DaemonAcpBridgeHost {
       }
     }
 
-    if (isModeConfigOptionId(existing.binding, targetConfigId)) {
-      return this.setMode(sid, targetValue, targetConfigId)
+    if (typeof normalizedValue === 'string' && isModeConfigOptionId(existing.binding, targetConfigId)) {
+      return this.setMode(sid, normalizedValue, targetConfigId)
     }
 
     try {
       const rpcResult = await existing.client.setConfigOption({
         sessionId: existing.externalSessionId,
         configId: targetConfigId,
-        value: targetValue,
+        ...(isBooleanOption ? { type: 'boolean' as const } : {}),
+        value: normalizedValue,
       })
       const extracted = extractAcpSessionModelAndModeState({
         configOptions: rpcResult.configOptions ?? rpcResult.config_options,
@@ -776,13 +1034,504 @@ export class DaemonAcpBridgeHost {
       const nextBinding =
         extracted.config_options && extracted.config_options.length > 0
           ? mergeBindingModelAndModeState(existing.binding, extracted)
-          : applySingleConfigOptionPatch(existing.binding, targetConfigId, targetValue, extracted)
+          : applySingleConfigOptionPatch(existing.binding, targetConfigId, normalizedValue, extracted)
       existing.binding = projectAcpBindingWithHostTurbo(existing, nextBinding)
       return { ok: true, binding: existing.binding }
     } catch (error) {
       return {
         ok: false,
-        error: `Failed to set ${existing.binding.name} option "${targetConfigId}" to "${targetValue}": ${errorMessage(error)}`,
+        error: `Failed to set ${existing.binding.name} option "${targetConfigId}" to "${String(normalizedValue)}": ${errorMessage(error)}`,
+      }
+    }
+  }
+
+  /**
+   * Perform ACP authentication for an advertised `authMethod` (`agent` or `terminal`).
+   * Never extracts, reads, or transfers external OAuth tokens.
+   */
+  async authenticate(request: AcpAuthenticateRequest): Promise<AcpAuthenticateResult> {
+    const sid = request.sessionId.trim()
+    const methodId = request.methodId.trim()
+    if (!methodId) {
+      return { ok: false, error: 'method_id is required.' }
+    }
+    const existing = sid ? this.active.get(sid) : undefined
+    const activeAcp = existing && existing.kind === 'acp' && existing.binding.connected ? existing : undefined
+    const cached = sid ? this.lastAuthChallengeBySession.get(sid) : undefined
+
+    const knownMethods =
+      activeAcp?.binding.capabilities?.auth_methods ??
+      cached?.authMethods ??
+      []
+    const matchedMethod = knownMethods.find(item => item.id === methodId)
+
+    const resolveCommandAndArgs = (): {
+      readonly args: readonly string[]
+      readonly command: string
+      readonly cwd: string
+      readonly provider: AcpExternalAgentProvider
+    } | undefined => {
+      if (activeAcp) {
+        const discovered = this.listAgents(sid).agents.find(a => a.id === activeAcp.binding.agent_id)
+        const command = discovered?.binaryPath ?? discovered?.command ?? splitCommandString(activeAcp.binding.command ?? '')[0] ?? ''
+        const args = discovered?.args ?? splitCommandString(activeAcp.binding.command ?? '').slice(1)
+        if (command) {
+          return { command, args, cwd: activeAcp.binding.cwd, provider: activeAcp.binding.provider }
+        }
+      }
+      if (cached && (!request.agentId || request.agentId === cached.agentId)) {
+        return {
+          command: cached.command,
+          args: cached.args,
+          cwd: cached.cwd,
+          provider: cached.provider,
+        }
+      }
+      if (request.agentId) {
+        const discovered = this.listAgents(sid).agents.find(a => a.id === request.agentId)
+        if (discovered?.available && (discovered.binaryPath ?? discovered.command)) {
+          return {
+            command: discovered.binaryPath ?? discovered.command!,
+            args: discovered.args ?? [],
+            cwd: resolve(request.cwd ?? process.cwd()),
+            provider: discovered.provider,
+          }
+        }
+      }
+      return undefined
+    }
+
+    const terminalAuthMeta = isAcpRecord(matchedMethod?.meta?.['terminal-auth'])
+      ? matchedMethod.meta['terminal-auth']
+      : undefined
+    const isTerminalMethod =
+      matchedMethod?.type === 'terminal' || terminalAuthMeta !== undefined
+    if (isTerminalMethod && matchedMethod) {
+      const target = resolveCommandAndArgs()
+      const metaCommand =
+        typeof terminalAuthMeta?.command === 'string' && terminalAuthMeta.command.trim()
+          ? terminalAuthMeta.command.trim()
+          : undefined
+      const command = metaCommand ?? target?.command ?? (target?.provider === 'antigravity' ? 'agy' : '')
+      const defaultArgs =
+        matchedMethod.args && matchedMethod.args.length > 0
+          ? matchedMethod.args
+          : target?.provider === 'antigravity'
+            ? ['acp', '--login']
+            : [...(target?.args ?? [])]
+      const env = matchedMethod.env ?? {}
+      const label =
+        (typeof terminalAuthMeta?.label === 'string' && terminalAuthMeta.label.trim()) ||
+        matchedMethod.name
+      return {
+        ok: true,
+        mode: 'terminal',
+        command,
+        args: defaultArgs,
+        env,
+        label,
+      }
+    }
+
+    if (activeAcp) {
+      try {
+        await activeAcp.client.authenticate(methodId)
+        return { ok: true, mode: 'agent' }
+      } catch (error) {
+        return { ok: false, error: `ACP authentication failed: ${errorMessage(error)}` }
+      }
+    }
+
+    const target = resolveCommandAndArgs()
+    if (!target) {
+      return {
+        ok: false,
+        error: 'No connected ACP agent or pending auth challenge found for this session.',
+      }
+    }
+    const isAntigravity = target.provider === 'antigravity'
+    const transferredAgyEnv = isAntigravity
+      ? await loadAgyRuntimeEnv(this.options.homeDir ?? homedir())
+      : {}
+    const mergedEnv = isAntigravity
+      ? buildAgySubprocessEnv(
+          this.options.env
+            ? { ...transferredAgyEnv, ...this.options.env }
+            : { ...process.env, ...transferredAgyEnv },
+        )
+      : this.options.env
+    const clientOptions: AcpStdioClientOptions = {
+      command: target.command,
+      args: target.args,
+      cwd: target.cwd,
+      ...(mergedEnv ? { env: mergedEnv } : {}),
+    }
+    const ephemeralClient = this.options.createAcpClient
+      ? this.options.createAcpClient(clientOptions)
+      : new AcpStdioClient(clientOptions)
+    try {
+      const initResult = await ephemeralClient.initialize()
+      const discoveredMethod = initResult.authMethods.find(item => item.id === methodId)
+      const discoveredTermMeta = isAcpRecord(discoveredMethod?.meta?.['terminal-auth'])
+        ? discoveredMethod.meta['terminal-auth']
+        : undefined
+      if (discoveredMethod?.type === 'terminal' || discoveredTermMeta !== undefined) {
+        const metaCommand =
+          typeof discoveredTermMeta?.command === 'string' && discoveredTermMeta.command.trim()
+            ? discoveredTermMeta.command.trim()
+            : undefined
+        const label =
+          (typeof discoveredTermMeta?.label === 'string' && discoveredTermMeta.label.trim()) ||
+          discoveredMethod?.name ||
+          methodId
+        return {
+          ok: true,
+          mode: 'terminal',
+          command: metaCommand ?? target.command,
+          args: discoveredMethod?.args ?? [],
+          env: discoveredMethod?.env ?? {},
+          label,
+        }
+      }
+      await ephemeralClient.authenticate(methodId)
+      return { ok: true, mode: 'agent' }
+    } catch (error) {
+      return { ok: false, error: `ACP authentication failed: ${errorMessage(error)}` }
+    } finally {
+      await ephemeralClient.dispose().catch(() => undefined)
+    }
+  }
+
+  /** List sessions known to the connected external ACP agent (`session/list`). */
+  async listExternalSessions(
+    sessionId: string,
+    params: { readonly cursor?: string; readonly cwd?: string } = {},
+  ): Promise<AcpListSessionsHostResult> {
+    const sid = sessionId.trim()
+    const existing = this.active.get(sid)
+    if (!existing || !existing.binding.connected) {
+      return { ok: false, error: `No external ACP agent is connected for session "${sid}".` }
+    }
+    if (existing.kind !== 'acp') {
+      return {
+        ok: false,
+        error: `${existing.binding.name} (${existing.binding.transport}) does not support ACP session/list.`,
+      }
+    }
+    try {
+      const res = await existing.client.listSessions({
+        cwd: params.cwd ? resolve(params.cwd) : existing.binding.cwd,
+        ...(params.cursor ? { cursor: params.cursor } : {}),
+      })
+      const sessions: AcpListedSessionWire[] = res.sessions.map(item => ({
+        session_id: item.sessionId,
+        ...(item.cwd ? { cwd: item.cwd } : {}),
+        ...(item.title ? { title: item.title } : {}),
+        ...(item.updatedAt ? { updated_at: item.updatedAt } : {}),
+        ...(item.meta ? { meta: item.meta } : {}),
+      }))
+      return {
+        ok: true,
+        sessions,
+        ...(res.nextCursor ? { next_cursor: res.nextCursor } : {}),
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Failed to list ${existing.binding.name} sessions: ${errorMessage(error)}`,
+      }
+    }
+  }
+
+  /** Fork the active external ACP session (`session/fork`) and switch this session binding to the fork. */
+  async forkSession(
+    sessionId: string,
+    params: { readonly cwd?: string } = {},
+  ): Promise<AcpBindingMutationResult> {
+    const sid = sessionId.trim()
+    const existing = this.active.get(sid)
+    if (!existing || !existing.binding.connected) {
+      return { ok: false, error: `No external ACP agent is connected for session "${sid}".` }
+    }
+    if (existing.kind !== 'acp') {
+      return {
+        ok: false,
+        error: `${existing.binding.name} (${existing.binding.transport}) does not support ACP session/fork.`,
+      }
+    }
+    const cwd = params.cwd ? resolve(params.cwd) : existing.binding.cwd
+    try {
+      const forked = await existing.client.forkSession({
+        sessionId: existing.externalSessionId,
+        cwd,
+        mcpServers: existing.mcpServers,
+        ...(existing.sessionCapabilities.additionalDirectories && existing.additionalDirectories.length > 0
+          ? { additionalDirectories: existing.additionalDirectories }
+          : {}),
+      })
+      existing.externalSessionId = forked.sessionId
+      const extracted = extractAcpSessionModelAndModeState({
+        configOptions: forked.configOptions ?? forked.raw.configOptions ?? forked.raw.config_options,
+        models: forked.models,
+        modes: forked.modes,
+        raw: forked.raw,
+      })
+      if (extracted.modes && extracted.modes.length > 0) {
+        existing.nativeModes = extracted.modes
+      }
+      const merged = mergeBindingModelAndModeState(
+        {
+          ...existing.binding,
+          cwd,
+          external_session_id: forked.sessionId,
+        },
+        extracted,
+      )
+      existing.binding = projectAcpBindingWithHostTurbo(existing, merged)
+      return { ok: true, binding: existing.binding }
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Failed to fork ${existing.binding.name} session: ${errorMessage(error)}`,
+      }
+    }
+  }
+
+  /** True when the active ACP bridge can attempt native concurrent mid-turn steering. */
+  supportsLiveSteer(sessionId: string): boolean {
+    const existing = this.active.get(sessionId)
+    if (!existing || !existing.binding.connected || existing.kind !== 'acp' || !existing.activeAbort) {
+      return false
+    }
+    if (existing.binding.provider === 'antigravity') {
+      return isAtLeastSemver(existing.binding.agent_version, 1, 5, 0)
+    }
+    const meta = existing.binding.capabilities?.meta
+    return meta?.steering === true || meta?.midTurnSteering === true
+  }
+
+  /**
+   * Dispatch a concurrent mid-turn `session/prompt` steer on an active ACP turn
+   * (e.g. `agy acp 1.5.0+`). If the agent rejects concurrent prompts, returns
+   * `{ ok: false, rejectedConcurrent: true }` so callers cleanly fall back to
+   * queued steer continuation.
+   */
+  async steerPrompt(request: AcpSteerPromptRequest): Promise<AcpSteerPromptResult> {
+    const existing = this.active.get(request.sessionId)
+    if (!existing || !existing.binding.connected || existing.kind !== 'acp' || !existing.activeAbort) {
+      return {
+        ok: false,
+        rejectedConcurrent: true,
+        error: 'No active ACP turn available for live steering.',
+      }
+    }
+    if (
+      existing.binding.provider === 'antigravity' &&
+      !antigravitySteersWithPrompt(existing.binding.agent_version)
+    ) {
+      return {
+        ok: false,
+        rejectedConcurrent: true,
+        error: `Antigravity ${existing.binding.agent_version ?? ''} queues follow-ups instead of mid-turn prompt steering.`,
+      }
+    }
+    const promptBlocks = buildAcpPromptContentBlocks({
+      agentName: existing.binding.name,
+      capabilities: existing.promptCapabilities,
+      provider: existing.binding.provider,
+      text: request.text,
+      ...(request.audio?.length ? { audio: request.audio } : {}),
+      ...(request.images?.length ? { images: request.images } : {}),
+      ...(request.resources?.length ? { resources: request.resources } : {}),
+    })
+    const combinedSignal = request.signal
+      ? AbortSignal.any([request.signal, existing.activeAbort.signal])
+      : existing.activeAbort.signal
+
+    // Launch concurrent prompt without registering a duplicate onEvent listener:
+    // the active turn's `promptListeners` subscription already receives every
+    // `session/update` frame for `existing.externalSessionId`!
+    const steerRpc = existing.client.prompt({
+      sessionId: existing.externalSessionId,
+      text: request.text,
+      content: promptBlocks,
+      signal: combinedSignal,
+    })
+
+    const probeMs = Math.max(0, request.acceptProbeMs ?? 120)
+    let probeTimer: ReturnType<typeof setTimeout> | undefined
+    type ProbeOutcome =
+      | { readonly kind: 'settled'; readonly stopReason: string }
+      | { readonly kind: 'error'; readonly error: unknown }
+      | { readonly kind: 'accepted_inflight' }
+
+    const probeResult = await Promise.race<ProbeOutcome>([
+      steerRpc.then(
+        res => ({ kind: 'settled', stopReason: res.stopReason }),
+        error => ({ kind: 'error', error }),
+      ),
+      new Promise<ProbeOutcome>(resolveProbe => {
+        probeTimer = setTimeout(() => resolveProbe({ kind: 'accepted_inflight' }), probeMs)
+        probeTimer.unref?.()
+      }),
+    ])
+    if (probeTimer !== undefined) {
+      clearTimeout(probeTimer)
+    }
+
+    if (probeResult.kind === 'settled') {
+      return { ok: true, settled: true, stopReason: probeResult.stopReason }
+    }
+    if (probeResult.kind === 'error') {
+      return {
+        ok: false,
+        rejectedConcurrent: isConcurrentPromptRejection(probeResult.error),
+        error: errorMessage(probeResult.error),
+      }
+    }
+
+    // Accepted and still streaming alongside the active turn: track so `runPrompt`
+    // drains it before emitting `turn_end`, and invoke fallback if it rejects later.
+    const tracked = steerRpc.then(
+      () => undefined,
+      async error => {
+        if (!combinedSignal.aborted && isConcurrentPromptRejection(error) && request.onFallbackQueue) {
+          await request.onFallbackQueue()
+        }
+      },
+    )
+    existing.liveSteerTasks.add(tracked)
+    void tracked.finally(() => {
+      existing.liveSteerTasks.delete(tracked)
+    })
+    return { ok: true, settled: false }
+  }
+
+  /**
+   * Run an ephemeral, read-only side question (`/btw`) on a concurrent ACP
+   * session (`session/new` -> `session/prompt` -> `session/close`) without
+   * interrupting an active main turn on `existing.externalSessionId`.
+   */
+  async runSideQuestion(request: AcpSideQuestionRequest): Promise<AcpSideQuestionResult> {
+    const existing = this.active.get(request.sessionId)
+    if (!existing || !existing.binding.connected) {
+      return {
+        ok: false,
+        answer: '',
+        model: request.model?.trim() || 'default',
+        error: `No external ACP agent is connected for session "${request.sessionId}".`,
+      }
+    }
+    const desiredModel = request.model?.trim() || existing.binding.current_model?.trim() || ''
+    const effectiveModel = desiredModel || existing.binding.name
+    if (existing.kind !== 'acp') {
+      return {
+        ok: false,
+        answer: '',
+        model: effectiveModel,
+        error: `${existing.binding.name} (${existing.binding.transport}) does not support concurrent ACP side sessions.`,
+      }
+    }
+
+    let sideSessionId = ''
+    let answer = ''
+    let lastError: string | undefined
+    const toolNamesById = new Map<string, string>()
+    const toolMetaById = new Map<string, AcpToolMetaSnapshot>()
+    const settledToolCallIds = new Set<string>()
+    const toolTargetsById = new Map<string, { readonly name: string; readonly target: string }>()
+
+    try {
+      let usedFork = false
+      const created =
+        request.useFork !== false && existing.sessionCapabilities.fork
+          ? await existing.client
+              .forkSession({
+                sessionId: existing.externalSessionId,
+                cwd: existing.binding.cwd,
+                mcpServers: existing.mcpServers,
+                ...(existing.sessionCapabilities.additionalDirectories && existing.additionalDirectories.length > 0
+                  ? { additionalDirectories: existing.additionalDirectories }
+                  : {}),
+              })
+              .then(res => {
+                usedFork = true
+                return res
+              })
+              .catch(() => existing.client.newSession({ cwd: existing.binding.cwd }))
+          : await existing.client.newSession({ cwd: existing.binding.cwd })
+      sideSessionId = created.sessionId
+      existing.sideSessionIds.add(sideSessionId)
+
+      if (desiredModel) {
+        const setRes = await existing.client
+          .setModel({
+            sessionId: sideSessionId,
+            modelId: desiredModel,
+            ...(existing.binding.model_config_id ? { configId: existing.binding.model_config_id } : {}),
+          })
+          .catch(() => undefined)
+        void setRes
+      }
+
+      const promptText = usedFork && request.forkedPrompt ? request.forkedPrompt : request.prompt
+      const result = await existing.client.prompt({
+        sessionId: sideSessionId,
+        text: promptText,
+        ...(request.signal ? { signal: request.signal } : {}),
+        onEvent: acpEvent => {
+          const bridged = bridgeEventFromAcpClientEvent(
+            acpEvent,
+            toolNamesById,
+            toolMetaById,
+            settledToolCallIds,
+          )
+          if (!bridged) return
+          if (bridged.type === 'text_delta' && bridged.text) {
+            answer += bridged.text
+            request.onDelta?.(bridged.text)
+          } else if (bridged.type === 'tool_call') {
+            const rawInput = isAcpRecord(bridged.rawInput) ? bridged.rawInput : {}
+            const locationPath = bridged.locations?.[0]?.path
+            const target = acpSideQuestionToolTarget(
+              bridged.name,
+              locationPath ? { path: locationPath, ...rawInput } : rawInput,
+              existing.binding.cwd,
+            )
+            toolTargetsById.set(bridged.toolCallId, { name: bridged.name, target })
+            request.onTool?.({ name: bridged.name, target, status: 'running' })
+          } else if (bridged.type === 'tool_result') {
+            const meta = toolTargetsById.get(bridged.toolCallId)
+            request.onTool?.({
+              name: meta?.name ?? bridged.name,
+              target: meta?.target ?? bridged.name,
+              status: bridged.permissionDenied || bridged.isError ? 'error' : 'done',
+            })
+          } else if (bridged.type === 'error') {
+            lastError = bridged.message
+          }
+        },
+      })
+
+      const trimmedAnswer = answer.trim()
+      if (lastError && !trimmedAnswer) {
+        return { ok: false, answer: '', model: effectiveModel, error: lastError }
+      }
+      if (result.stopReason === 'cancelled' && !trimmedAnswer) {
+        return { ok: false, answer: '', model: effectiveModel, error: 'Side question was cancelled.' }
+      }
+      return { ok: true, answer: trimmedAnswer, model: effectiveModel }
+    } catch (error) {
+      return {
+        ok: false,
+        answer: answer.trim(),
+        model: effectiveModel,
+        error: errorMessage(error),
+      }
+    } finally {
+      if (sideSessionId) {
+        await existing.client.closeSession(sideSessionId, SESSION_CLOSE_TIMEOUT_MS).catch(() => undefined)
+        existing.sideSessionIds.delete(sideSessionId)
       }
     }
   }
@@ -836,10 +1585,33 @@ export class DaemonAcpBridgeHost {
           : undefined
         const settledToolCallIds = new Set<string>()
         existing.outOfTurnSettledToolCallIds.clear()
+        existing.readRepair?.reset()
+        const dispatchTurnEvent = (acpEvent: AcpClientEvent): void => {
+          const transformed = transformAntigravityClientEvent(existing, acpEvent)
+          if (!transformed) return
+          const bridged = bridgeEventFromAcpClientEvent(
+            transformed,
+            existing.toolNamesById,
+            existing.toolMetaById,
+            settledToolCallIds,
+          )
+          if (existing.toolNamesById.size > MAX_ACP_TOOL_NAMES) {
+            trimToolNamesMap(existing.toolNamesById, MAX_ACP_TOOL_NAMES)
+          }
+          if (existing.toolMetaById.size > MAX_ACP_TOOL_NAMES) {
+            trimToolNamesMap(existing.toolMetaById, MAX_ACP_TOOL_NAMES)
+          }
+          if (bridged) {
+            handleBridgeEvent(bridged)
+          }
+        }
+        existing.activeSyntheticUpdate = dispatchTurnEvent
         const promptBlocks = buildAcpPromptContentBlocks({
           agentName: existing.binding.name,
           capabilities: existing.promptCapabilities,
+          provider: existing.binding.provider,
           text: request.text,
+          ...(request.audio?.length ? { audio: request.audio } : {}),
           ...(request.fallbackInlineText ? { fallbackInlineText: request.fallbackInlineText } : {}),
           ...(request.images?.length ? { images: request.images } : {}),
           ...(request.resources?.length ? { resources: request.resources } : {}),
@@ -850,24 +1622,11 @@ export class DaemonAcpBridgeHost {
             text: request.text,
             content: promptBlocks,
             signal: combinedSignal,
-            onEvent: acpEvent => {
-              const bridged = bridgeEventFromAcpClientEvent(
-                acpEvent,
-                existing.toolNamesById,
-                existing.toolMetaById,
-                settledToolCallIds,
-              )
-              if (existing.toolNamesById.size > MAX_ACP_TOOL_NAMES) {
-                trimToolNamesMap(existing.toolNamesById, MAX_ACP_TOOL_NAMES)
-              }
-              if (existing.toolMetaById.size > MAX_ACP_TOOL_NAMES) {
-                trimToolNamesMap(existing.toolMetaById, MAX_ACP_TOOL_NAMES)
-              }
-              if (bridged) {
-                handleBridgeEvent(bridged)
-              }
-            },
+            onEvent: dispatchTurnEvent,
           })
+          if (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
+            await Promise.allSettled([...existing.liveSteerTasks])
+          }
           if (result.usage) {
             handleBridgeEvent({
               type: 'usage',
@@ -877,6 +1636,8 @@ export class DaemonAcpBridgeHost {
               ...(result.usage.cachedWriteTokens !== undefined ? { cachedWriteTokens: result.usage.cachedWriteTokens } : {}),
               ...(result.usage.thoughtTokens !== undefined ? { thoughtTokens: result.usage.thoughtTokens } : {}),
               ...(result.usage.totalTokens !== undefined ? { totalTokens: result.usage.totalTokens } : {}),
+              ...(result.usage.cost ? { cost: result.usage.cost } : {}),
+              ...(result.usage.costUsd !== undefined ? { costUsd: result.usage.costUsd } : {}),
             })
           }
           return {
@@ -910,6 +1671,7 @@ export class DaemonAcpBridgeHost {
           }
         } finally {
           existing.activePermissionHandler = undefined
+          existing.activeSyntheticUpdate = undefined
           existing.activeElicitationAbort?.abort(new Error('External ACP turn finished'))
           existing.activeElicitationAbort = undefined
           existing.activeElicitationHandler = undefined
@@ -986,18 +1748,22 @@ export class DaemonAcpBridgeHost {
 
   private async connectStdioAcp(
     params: {
+      readonly additionalDirectories?: readonly string[]
+      readonly agent?: string
       readonly agentId: string
       readonly args: readonly string[]
       readonly command: string
       readonly cwd: string
+      readonly ideMcpPort?: number
       readonly initialModeId?: string
       readonly installHint?: string
+      readonly mcpServers?: readonly AcpConnectMcpServerInput[]
       readonly name: string
       readonly provider: AcpExternalAgentProvider
       readonly resumeSessionId?: string
+      readonly sandbox?: boolean
       readonly sessionId: string
     },
-    attemptOptions?: { readonly stripSshSession?: boolean },
   ): Promise<AcpConnectResult> {
     await this.disconnect(params.sessionId)
 
@@ -1006,8 +1772,20 @@ export class DaemonAcpBridgeHost {
     let initialAvailableCommands: readonly AcpAvailableCommand[] | undefined
     let initialUsageEvent: AcpClientEvent | undefined
     let initialSessionInfoEvent: AcpClientEvent | undefined
+    const initialReplayEvents: AcpClientEvent[] = []
 
+    const normalizedAdditionalDirs = normalizeAdditionalDirectories(params.cwd, params.additionalDirectories)
     const isAntigravity = params.provider === 'antigravity' || params.agentId === 'antigravity'
+    const launchArgs = isAntigravity
+      ? buildAgyLaunchArgs(params.command, params.args, {
+          additionalDirectories: normalizedAdditionalDirs,
+          ...(params.agent ? { agent: params.agent } : {}),
+          ...(params.ideMcpPort !== undefined ? { ideMcpPort: params.ideMcpPort } : {}),
+          ...(params.mcpServers?.length ? { mcpServers: params.mcpServers } : {}),
+          ...(params.sandbox ? { sandbox: true } : {}),
+        })
+      : params.args
+
     const transferredAgyEnv = isAntigravity
       ? await loadAgyRuntimeEnv(this.options.homeDir ?? homedir())
       : {}
@@ -1016,29 +1794,63 @@ export class DaemonAcpBridgeHost {
           this.options.env
             ? { ...transferredAgyEnv, ...this.options.env }
             : { ...process.env, ...transferredAgyEnv },
-          { ...(attemptOptions?.stripSshSession ? { stripSshSession: true } : {}) },
         )
       : this.options.env
 
+    const readRepair = isAntigravity ? makeAntigravityReadRepair() : undefined
+    const updateStepsPlans = isAntigravity ? makeAntigravityUpdateStepsPlans() : undefined
+
     const clientOptions: AcpStdioClientOptions = {
       command: params.command,
-      args: params.args,
+      args: launchArgs,
       cwd: params.cwd,
       ...(mergedEnv ? { env: mergedEnv } : {}),
       handlers: {
         createElicitation: async elicitReq => {
-          const activeHandler = entryRef?.activeElicitationHandler
-          if (!activeHandler) {
+          if (entryRef && elicitReq.sessionId && elicitReq.sessionId !== entryRef.externalSessionId) {
             return { action: 'cancel' }
           }
-          return activeHandler(elicitReq)
+          const activeHandler = entryRef?.activeElicitationHandler
+          if (activeHandler) {
+            return activeHandler(elicitReq)
+          }
+          if (entryRef && this.defaultCreateElicitation) {
+            return this.defaultCreateElicitation(
+              params.sessionId,
+              elicitReq,
+              entryRef.outOfTurnInteractionAbort.signal,
+            )
+          }
+          return { action: 'cancel' }
         },
         requestPermission: async permReq => {
+          if (entryRef && permReq.sessionId && permReq.sessionId !== entryRef.externalSessionId) {
+            if (isReadOnlySideQuestionPermission(permReq)) {
+              const allowOption =
+                permReq.options.find(opt => opt.kind === 'allow_once') ??
+                permReq.options.find(opt => opt.kind === 'allow_always') ??
+                permReq.options[0]
+              if (allowOption) {
+                return { outcome: 'selected', optionId: allowOption.optionId }
+              }
+            }
+            const rejectOption =
+              permReq.options.find(opt => opt.kind === 'reject_once') ??
+              permReq.options.find(opt => opt.kind === 'reject_always')
+            return rejectOption
+              ? { outcome: 'selected', optionId: rejectOption.optionId }
+              : { outcome: 'cancelled' }
+          }
           const activeHandler = entryRef?.activePermissionHandler
           if (activeHandler) {
             return activeHandler(permReq)
           }
-          if (entryRef && (entryRef.hostTurboActive || isAcpTurboMode(entryRef.binding))) {
+          const isUserInputQuestion = isAntigravity && isAntigravityUserInputRequest(permReq)
+          if (
+            !isUserInputQuestion &&
+            entryRef &&
+            (entryRef.hostTurboActive || isAcpTurboMode(entryRef.binding))
+          ) {
             const allowOption =
               permReq.options.find(opt => opt.kind === 'allow_once') ??
               permReq.options.find(opt => opt.kind === 'allow_always') ??
@@ -1047,25 +1859,74 @@ export class DaemonAcpBridgeHost {
               return { outcome: 'selected', optionId: allowOption.optionId }
             }
           }
+          if (entryRef && this.defaultRequestPermission) {
+            return this.defaultRequestPermission(
+              params.sessionId,
+              permReq,
+              entryRef.outOfTurnInteractionAbort.signal,
+            )
+          }
           return { outcome: 'cancelled' }
         },
         readTextFile: async fileReq => {
-          const safePath = resolveWorkspaceScopedPath(params.cwd, fileReq.path)
-          const raw = await readFile(safePath, 'utf8')
-          if (fileReq.line !== undefined || fileReq.limit !== undefined) {
-            const lines = raw.split('\n')
-            const start = Math.max(0, (fileReq.line ?? 1) - 1)
-            const end = fileReq.limit !== undefined && fileReq.limit > 0
-              ? start + fileReq.limit
-              : lines.length
-            return { content: lines.slice(start, end).join('\n') }
+          try {
+            const result = await readWorkspaceScopedTextFile(
+              params.cwd,
+              fileReq,
+              normalizedAdditionalDirs,
+            )
+            if (readRepair) {
+              const completed = readRepair.attempted(fileReq.path, true)
+              if (completed && entryRef) {
+                const syntheticUpdate: AcpClientEvent = {
+                  type: 'tool_call_update',
+                  sessionId: completed.sessionId,
+                  toolCallId: completed.toolCallId,
+                  status: 'completed',
+                }
+                if (entryRef.activeSyntheticUpdate) {
+                  entryRef.activeSyntheticUpdate(syntheticUpdate)
+                } else if (!entryRef.activeAbort) {
+                  const bridged = bridgeEventFromAcpClientEvent(
+                    syntheticUpdate,
+                    entryRef.toolNamesById,
+                    entryRef.toolMetaById,
+                    entryRef.outOfTurnSettledToolCallIds,
+                  )
+                  if (bridged) {
+                    this.notifySessionEvent(params.sessionId, bridged)
+                  }
+                }
+              }
+            }
+            return result
+          } catch (error) {
+            readRepair?.attempted(fileReq.path, false)
+            throw error
           }
-          return { content: raw }
         },
-        writeTextFile: async fileReq => {
-          const safePath = resolveWorkspaceScopedPath(params.cwd, fileReq.path)
-          await writeFile(safePath, fileReq.content, 'utf8')
-        },
+        // Advertising `fs.writeTextFile` to `agy acp` swaps its native diff edits for whole-file
+        // `client_edit_file` (matching T3 Code's AntigravityAcpSupport). Omit it for Antigravity.
+        ...(!isAntigravity
+          ? {
+              writeTextFile: async (fileReq: {
+                readonly content: string
+                readonly path: string
+                readonly sessionId: string
+              }) => {
+                if (entryRef && fileReq.sessionId && fileReq.sessionId !== entryRef.externalSessionId) {
+                  throw new Error('File writes are not permitted in a read-only side question.')
+                }
+                const safePath = await resolveWorkspaceScopedPathReal(
+                  params.cwd,
+                  fileReq.path,
+                  normalizedAdditionalDirs,
+                )
+                await writeFile(safePath, fileReq.content, 'utf8')
+              },
+            }
+          : {}),
+        ...(this.options.terminalHandlers ? this.options.terminalHandlers : {}),
       },
     }
 
@@ -1074,8 +1935,8 @@ export class DaemonAcpBridgeHost {
       : new AcpStdioClient(clientOptions)
 
     // Subscribe BEFORE initialize/session startup so initial notifications
-    // (`available_commands_update`, `usage_update`, `session_info_update`) and
-    // unexpected subprocess exits are never missed.
+    // (`available_commands_update`, `usage_update`, `session_info_update`,
+    // `session/load` replay chunks) and unexpected subprocess exits are never missed.
     client.onEvent(acpEvent => {
       if (!entryRef) {
         if (acpEvent.type === 'available_commands') {
@@ -1084,6 +1945,15 @@ export class DaemonAcpBridgeHost {
           initialUsageEvent = acpEvent
         } else if (acpEvent.type === 'session_info') {
           initialSessionInfoEvent = acpEvent
+        } else if (
+          acpEvent.type === 'user_message_chunk' ||
+          acpEvent.type === 'text_delta' ||
+          acpEvent.type === 'thought_delta' ||
+          acpEvent.type === 'tool_call' ||
+          acpEvent.type === 'tool_call_update' ||
+          acpEvent.type === 'plan'
+        ) {
+          initialReplayEvents.push(acpEvent)
         }
         return
       }
@@ -1098,6 +1968,7 @@ export class DaemonAcpBridgeHost {
         entryRef.activeElicitationAbort?.abort(new Error('External ACP process exited unexpectedly'))
         entryRef.activeElicitationAbort = undefined
         entryRef.activeElicitationHandler = undefined
+        entryRef.outOfTurnInteractionAbort.abort(new Error('External ACP process exited unexpectedly'))
         const codeLabel =
           acpEvent.code !== null
             ? `code ${acpEvent.code}`
@@ -1126,6 +1997,7 @@ export class DaemonAcpBridgeHost {
           entryRef.activeElicitationAbort?.abort(new Error('External ACP process failed'))
           entryRef.activeElicitationAbort = undefined
           entryRef.activeElicitationHandler = undefined
+          entryRef.outOfTurnInteractionAbort.abort(new Error('External ACP process failed'))
           entryRef.binding = {
             ...entryRef.binding,
             connected: false,
@@ -1139,6 +2011,26 @@ export class DaemonAcpBridgeHost {
           }
           this.notifyBindingChange(params.sessionId, entryRef.binding)
         }
+        return
+      }
+
+      if (acpEvent.type === 'elicitation_complete') {
+        if (!acpEvent.sessionId || acpEvent.sessionId === entryRef.externalSessionId) {
+          this.notifySessionEvent(params.sessionId, {
+            type: 'elicitation_complete',
+            elicitationId: acpEvent.elicitationId,
+          })
+        }
+        return
+      }
+
+      if (
+        'sessionId' in acpEvent &&
+        acpEvent.sessionId &&
+        acpEvent.sessionId !== entryRef.externalSessionId
+      ) {
+        // Ephemeral side-question sessions (`session/new` / `session/fork`) run concurrently on the
+        // same ACP stdio client; never leak their updates into the main session.
         return
       }
 
@@ -1165,10 +2057,13 @@ export class DaemonAcpBridgeHost {
           acpEvent.type === 'tool_call' ||
           acpEvent.type === 'tool_call_update' ||
           acpEvent.type === 'plan' ||
+          acpEvent.type === 'notice' ||
           acpEvent.type === 'continuation')
       ) {
+        const transformed = transformAntigravityClientEvent(entryRef, acpEvent)
+        if (!transformed) return
         const bridged = bridgeEventFromAcpClientEvent(
-          acpEvent,
+          transformed,
           entryRef.toolNamesById,
           entryRef.toolMetaById,
           entryRef.outOfTurnSettledToolCallIds,
@@ -1190,9 +2085,37 @@ export class DaemonAcpBridgeHost {
 
     try {
       initResult = await client.initialize()
-      const sessionResult = await openOrResumeAcpSession(client, initResult, params.cwd, params.resumeSessionId)
-      const commandDisplay = params.args.length > 0
-        ? `${params.command} ${params.args.join(' ')}`
+      const wireMcpServers = buildAcpWireMcpServers(params.mcpServers, initResult.mcpCapabilities)
+      const sessionAdditionalDirs =
+        initResult.sessionCapabilities.additionalDirectories && normalizedAdditionalDirs.length > 0
+          ? normalizedAdditionalDirs
+          : undefined
+      const openSession = () =>
+        openOrResumeAcpSession(
+          client,
+          initResult!,
+          params.cwd,
+          params.resumeSessionId,
+          wireMcpServers,
+          sessionAdditionalDirs,
+        )
+      let opened: Awaited<ReturnType<typeof openOrResumeAcpSession>>
+      try {
+        opened = await openSession()
+      } catch (openError) {
+        const nonInteractiveAuthMethod =
+          isAntigravity && isAcpAuthRequiredError(openError)
+            ? selectNonInteractiveAgyAuthMethod(mergedEnv)
+            : undefined
+        if (!nonInteractiveAuthMethod) {
+          throw openError
+        }
+        await client.authenticate(nonInteractiveAuthMethod)
+        opened = await openSession()
+      }
+      const sessionResult = opened.result
+      const commandDisplay = launchArgs.length > 0
+        ? `${params.command} ${launchArgs.join(' ')}`
         : params.command
       const extracted = extractAcpSessionModelAndModeState({
         configOptions: sessionResult.configOptions ?? sessionResult.raw.configOptions ?? sessionResult.raw.config_options,
@@ -1238,23 +2161,31 @@ export class DaemonAcpBridgeHost {
         kind: 'acp',
         client,
         externalSessionId: sessionResult.sessionId,
+        additionalDirectories: normalizedAdditionalDirs,
+        mcpServers: wireMcpServers,
         binding: rawBinding,
         hostTurboActive: false,
         hostTurboUnderlyingMode: undefined,
+        liveSteerTasks: new Set<Promise<void>>(),
         nativeModes: extracted.modes ?? [],
+        outOfTurnInteractionAbort: new AbortController(),
         outOfTurnSettledToolCallIds: new Set<string>(),
         activeAbort: undefined,
         activeElicitationAbort: undefined,
         activeElicitationHandler: undefined,
         activePermissionHandler: undefined,
         promptCapabilities: initResult.promptCapabilities,
+        ...(readRepair ? { readRepair } : {}),
         sessionCapabilities: initResult.sessionCapabilities,
+        sideSessionIds: new Set<string>(),
         toolMetaById: new Map<string, AcpToolMetaSnapshot>(),
         toolNamesById: new Map<string, string>(),
+        ...(updateStepsPlans ? { updateStepsPlans } : {}),
       }
       entry.binding = projectAcpBindingWithHostTurbo(entry, rawBinding)
       entryRef = entry
       this.active.set(params.sessionId, entry)
+      this.lastAuthChallengeBySession.delete(params.sessionId)
 
       const desiredMode =
         params.initialModeId?.trim() ||
@@ -1271,6 +2202,36 @@ export class DaemonAcpBridgeHost {
         await this.setMode(params.sessionId, desiredMode).catch(() => undefined)
       }
 
+      if (opened.via === 'load' && initialReplayEvents.length > 0) {
+        const replayToolNames = new Map<string, string>()
+        const replayToolMeta = new Map<string, AcpToolMetaSnapshot>()
+        const replaySettled = new Set<string>()
+        const bridgedReplay: AcpBridgeStreamEvent[] = []
+        for (const replayEvent of initialReplayEvents) {
+          if (
+            'sessionId' in replayEvent &&
+            replayEvent.sessionId &&
+            replayEvent.sessionId !== entry.externalSessionId
+          ) {
+            continue
+          }
+          const bridged = bridgeEventFromAcpClientEvent(
+            replayEvent,
+            replayToolNames,
+            replayToolMeta,
+            replaySettled,
+          )
+          if (bridged) {
+            bridgedReplay.push(bridged)
+          }
+        }
+        if (bridgedReplay.length > 0) {
+          this.notifySessionEvent(params.sessionId, {
+            type: 'session_replay',
+            events: bridgedReplay,
+          })
+        }
+      }
       if (initialUsageEvent) {
         const bridged = bridgeEventFromAcpClientEvent(initialUsageEvent, entry.toolNamesById)
         if (bridged) {
@@ -1287,26 +2248,30 @@ export class DaemonAcpBridgeHost {
     } catch (error) {
       await client.dispose().catch(() => undefined)
       if (isAcpAuthRequiredError(error)) {
+        const authMethods = mapAuthMethodsToWire(initResult?.authMethods ?? [])
+        this.lastAuthChallengeBySession.set(params.sessionId, {
+          agentId: params.agentId,
+          command: params.command,
+          args: launchArgs,
+          cwd: params.cwd,
+          provider: params.provider,
+          authMethods,
+        })
         if (isAntigravity) {
-          const hostPlatform = this.options.platform ?? process.platform
-          if (
-            hostPlatform === 'darwin' &&
-            !attemptOptions?.stripSshSession &&
-            mergedEnv &&
-            hasSshSessionEnv(mergedEnv)
-          ) {
-            return this.connectStdioAcp(params, { stripSshSession: true })
-          }
           return {
             ok: false,
             error: ANTIGRAVITY_AUTH_ERROR,
+            auth_required: true,
+            ...(authMethods.length > 0 ? { auth_methods: authMethods } : {}),
           }
         }
-        const authNames = (initResult?.authMethods ?? []).map(method => method.name).filter(Boolean)
+        const authNames = authMethods.map(method => method.name).filter(Boolean)
         const authDetail = authNames.length > 0 ? ` (${authNames.join(', ')})` : ''
         return {
           ok: false,
           error: `${params.name} requires authentication${authDetail}. Sign in via the ${params.name} CLI, then click Retry.`,
+          auth_required: true,
+          ...(authMethods.length > 0 ? { auth_methods: authMethods } : {}),
           ...(params.installHint ? { install_hint: params.installHint } : {}),
         }
       }
@@ -1478,19 +2443,35 @@ async function openOrResumeAcpSession(
   initResult: AcpInitializeResult,
   cwd: string,
   resumeSessionId?: string,
-) {
+  mcpServers: readonly Readonly<Record<string, unknown>>[] = [],
+  additionalDirectories?: readonly string[],
+): Promise<{
+  readonly result: Awaited<ReturnType<AcpStdioClient['newSession']>>
+  readonly via: 'load' | 'new' | 'resume'
+}> {
+  const sharedOpts = {
+    cwd,
+    mcpServers,
+    ...(additionalDirectories && additionalDirectories.length > 0 ? { additionalDirectories } : {}),
+  }
   const trimmedResume = resumeSessionId?.trim()
   if (trimmedResume) {
     if (initResult.sessionCapabilities.resume) {
       try {
-        return await client.resumeSession({ sessionId: trimmedResume, cwd })
+        return {
+          result: await client.resumeSession({ sessionId: trimmedResume, ...sharedOpts }),
+          via: 'resume',
+        }
       } catch (resumeError) {
         if (isAcpAuthRequiredError(resumeError)) {
           throw resumeError
         }
         if (initResult.sessionCapabilities.load || initResult.supportsLoadSession) {
           try {
-            return await client.loadSession({ sessionId: trimmedResume, cwd })
+            return {
+              result: await client.loadSession({ sessionId: trimmedResume, ...sharedOpts }),
+              via: 'load',
+            }
           } catch (loadError) {
             if (isAcpAuthRequiredError(loadError)) {
               throw loadError
@@ -1500,7 +2481,10 @@ async function openOrResumeAcpSession(
       }
     } else if (initResult.sessionCapabilities.load || initResult.supportsLoadSession) {
       try {
-        return await client.loadSession({ sessionId: trimmedResume, cwd })
+        return {
+          result: await client.loadSession({ sessionId: trimmedResume, ...sharedOpts }),
+          via: 'load',
+        }
       } catch (loadError) {
         if (isAcpAuthRequiredError(loadError)) {
           throw loadError
@@ -1508,40 +2492,73 @@ async function openOrResumeAcpSession(
       }
     }
   }
-  return client.newSession({ cwd })
+  return {
+    result: await client.newSession(sharedOpts),
+    via: 'new',
+  }
 }
 
-function buildAcpPromptContentBlocks(input: {
+export function buildAcpPromptContentBlocks(input: {
   readonly agentName: string
+  readonly audio?: readonly AcpPromptAudioInput[]
   readonly capabilities: AcpPromptCapabilities
   readonly fallbackInlineText?: string
   readonly images?: readonly AcpPromptImageInput[]
+  readonly provider?: AcpExternalAgentProvider
   readonly resources?: readonly AcpPromptResourceInput[]
   readonly text: string
 }): readonly AcpPromptContentBlock[] {
   const blocks: AcpPromptContentBlock[] = []
   const hasResources = Boolean(input.resources && input.resources.length > 0)
+  const isAntigravity = input.provider === 'antigravity'
   let textBody = hasResources && !input.capabilities.embeddedContext
     ? (input.fallbackInlineText || buildInlineResourcesFallback(input.text, input.resources!))
     : input.text
 
-  if (input.images && input.images.length > 0 && !input.capabilities.image) {
+  if (!isAntigravity && input.images && input.images.length > 0 && !input.capabilities.image) {
     const count = input.images.length
     textBody = `${textBody}\n\n[Note: ${count} image attachment${count === 1 ? '' : 's'} omitted because ${input.agentName} does not advertise ACP image input support.]`
   }
 
   blocks.push({ type: 'text', text: textBody })
 
-  if (hasResources && input.capabilities.embeddedContext) {
+  if (hasResources) {
     for (const resource of input.resources!) {
-      blocks.push({
-        type: 'resource',
-        resource: {
+      if (
+        resource.type === 'resource_link' ||
+        (isAntigravity && resource.mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'application/pdf')
+      ) {
+        blocks.push({
+          type: 'resource_link',
           uri: resource.uri,
-          ...(resource.mimeType ? { mimeType: resource.mimeType } : { mimeType: 'text/plain' }),
-          text: resource.text,
-        },
-      })
+          name: resource.name || basename(resource.path || resource.uri) || resource.uri,
+          ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+          ...(resource.title ? { title: resource.title } : {}),
+          ...(resource.description ? { description: resource.description } : {}),
+          ...(resource.size !== undefined ? { size: resource.size } : {}),
+        })
+        continue
+      }
+      if (!input.capabilities.embeddedContext) continue
+      if (resource.blob !== undefined) {
+        blocks.push({
+          type: 'resource',
+          resource: {
+            uri: resource.uri,
+            ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+            blob: resource.blob,
+          },
+        })
+      } else {
+        blocks.push({
+          type: 'resource',
+          resource: {
+            uri: resource.uri,
+            ...(resource.mimeType ? { mimeType: resource.mimeType } : { mimeType: 'text/plain' }),
+            text: resource.text ?? '',
+          },
+        })
+      }
     }
   }
 
@@ -1555,6 +2572,16 @@ function buildAcpPromptContentBlocks(input: {
     }
   }
 
+  if (input.audio && input.audio.length > 0 && input.capabilities.audio) {
+    for (const clip of input.audio) {
+      blocks.push({
+        type: 'audio',
+        data: clip.data,
+        mimeType: clip.mediaType,
+      })
+    }
+  }
+
   return blocks
 }
 
@@ -1562,11 +2589,28 @@ function buildInlineResourcesFallback(
   text: string,
   resources: readonly AcpPromptResourceInput[],
 ): string {
-  const parts = resources.map(res => {
-    const label = res.path || res.uri
-    return `<file path="${label}">\n${res.text}\n</file>`
-  })
+  const parts = resources
+    .filter(res => res.type !== 'resource_link' && res.text !== undefined)
+    .map(res => {
+      const label = res.path || res.uri
+      return `<file path="${label}">\n${res.text ?? ''}\n</file>`
+    })
+  if (parts.length === 0) return text
   return `<attached_files>\n${parts.join('\n\n')}\n</attached_files>\n\n${text}`
+}
+
+function mapAuthMethodsToWire(
+  methods: AcpInitializeResult['authMethods'],
+): readonly AcpRuntimeAuthMethod[] {
+  return methods.map(method => ({
+    id: method.id,
+    name: method.name,
+    ...(method.description ? { description: method.description } : {}),
+    ...(method.type ? { type: method.type } : {}),
+    ...(method.args && method.args.length > 0 ? { args: method.args } : {}),
+    ...(method.env ? { env: method.env } : {}),
+    ...(method.meta ? { meta: method.meta } : {}),
+  }))
 }
 
 function buildAcpRuntimeCapabilities(initResult: AcpInitializeResult): AcpRuntimeCapabilities {
@@ -1579,6 +2623,7 @@ function buildAcpRuntimeCapabilities(initResult: AcpInitializeResult): AcpRuntim
     session: {
       load: initResult.sessionCapabilities.load,
       resume: initResult.sessionCapabilities.resume,
+      fork: initResult.sessionCapabilities.fork,
       list: initResult.sessionCapabilities.list,
       close: initResult.sessionCapabilities.close,
       additional_directories: initResult.sessionCapabilities.additionalDirectories,
@@ -1587,16 +2632,12 @@ function buildAcpRuntimeCapabilities(initResult: AcpInitializeResult): AcpRuntim
       http: initResult.mcpCapabilities.http,
       sse: initResult.mcpCapabilities.sse,
     },
-    auth_methods: initResult.authMethods.map(method => ({
-      id: method.id,
-      name: method.name,
-      ...(method.description ? { description: method.description } : {}),
-    })),
+    auth_methods: mapAuthMethodsToWire(initResult.authMethods),
     ...(initResult.capabilitiesMeta ? { meta: initResult.capabilitiesMeta } : {}),
   }
 }
 
-function parseConfigOptions(configOptions: readonly unknown[]): AcpExternalConfigOption[] {
+export function parseConfigOptions(configOptions: readonly unknown[]): AcpExternalConfigOption[] {
   const parsed: AcpExternalConfigOption[] = []
   const seen = new Set<string>()
   for (const item of configOptions) {
@@ -1607,20 +2648,20 @@ function parseConfigOptions(configOptions: readonly unknown[]): AcpExternalConfi
     const name = readNonEmptyString(item, 'name', 'label', 'title') ?? id
     const description = readNonEmptyString(item, 'description')
     const category = readNonEmptyString(item, 'category')
-    const type = readNonEmptyString(item, 'type') ?? 'select'
-    const currentValue = readConfigOptionValue(item, 'currentValue', 'current_value', 'value') ?? ''
-    const rawChoices = parseOptionList(item.options, ['value', 'id', 'modelId', 'modeId'])
-    const options: AcpExternalConfigOptionChoice[] = rawChoices.map(choice => ({
-      value: choice.id,
-      name: choice.name,
-      ...(choice.description ? { description: choice.description } : {}),
-    }))
+    const inferredType =
+      readNonEmptyString(item, 'type') ??
+      (typeof item.currentValue === 'boolean' || typeof item.current_value === 'boolean' || typeof item.value === 'boolean'
+        ? 'boolean'
+        : 'select')
+    const rawValue = readConfigOptionValue(item, inferredType, 'currentValue', 'current_value', 'value')
+    const currentValue = rawValue !== undefined ? rawValue : (inferredType === 'boolean' ? false : '')
+    const options = parseConfigOptionChoices(item.options, ['value', 'id', 'modelId', 'modeId'])
     parsed.push({
       id,
       name,
       ...(description ? { description } : {}),
       ...(category ? { category } : {}),
-      type,
+      type: inferredType,
       current_value: currentValue,
       options,
     })
@@ -1630,22 +2671,77 @@ function parseConfigOptions(configOptions: readonly unknown[]): AcpExternalConfi
 
 function readConfigOptionValue(
   record: Readonly<Record<string, unknown>>,
+  optionType: string,
   ...keys: readonly string[]
-): string | undefined {
+): string | boolean | undefined {
   for (const key of keys) {
     const value = record[key]
+    if (typeof value === 'boolean') {
+      return value
+    }
     if (typeof value === 'string') {
       const trimmed = value.trim()
       if (trimmed.length > 0) {
+        if (optionType === 'boolean') {
+          const lower = trimmed.toLowerCase()
+          if (lower === 'true') return true
+          if (lower === 'false') return false
+        }
         return trimmed
       }
-    } else if (typeof value === 'boolean') {
-      return value ? 'true' : 'false'
     } else if (typeof value === 'number' && Number.isFinite(value)) {
       return String(value)
     }
   }
   return undefined
+}
+
+function parseConfigOptionChoices(
+  rawOptions: unknown,
+  idKeys: readonly string[],
+): AcpExternalConfigOptionChoice[] {
+  if (!Array.isArray(rawOptions)) {
+    return []
+  }
+  const results: AcpExternalConfigOptionChoice[] = []
+  const seen = new Set<string>()
+  const visit = (items: readonly unknown[], groupLabel?: string): void => {
+    for (const item of items) {
+      if (typeof item === 'string') {
+        const value = item.trim()
+        if (value && !seen.has(value)) {
+          seen.add(value)
+          results.push({
+            value,
+            name: value,
+            ...(groupLabel ? { group: groupLabel } : {}),
+          })
+        }
+        continue
+      }
+      if (!isAcpRecord(item)) continue
+      if (Array.isArray(item.options)) {
+        const nextGroup =
+          readNonEmptyString(item, 'name', 'group', 'label', 'title') ?? groupLabel
+        visit(item.options, nextGroup)
+        continue
+      }
+      const value = readNonEmptyString(item, ...idKeys)
+      if (!value || seen.has(value)) continue
+      seen.add(value)
+      const name = readNonEmptyString(item, 'name', 'displayName', 'display_name', 'label', 'title') ?? value
+      const description = readNonEmptyString(item, 'description')
+      const explicitGroup = readNonEmptyString(item, 'group') ?? groupLabel
+      results.push({
+        value,
+        name,
+        ...(description ? { description } : {}),
+        ...(explicitGroup ? { group: explicitGroup } : {}),
+      })
+    }
+  }
+  visit(rawOptions)
+  return results
 }
 
 function findConfigOptionEntry(
@@ -1784,7 +2880,7 @@ function mergeBindingModelAndModeState(
 
 function updateConfigOptionsValues(
   existing: readonly AcpExternalConfigOption[] | undefined,
-  updates: Readonly<Record<string, string>>,
+  updates: Readonly<Record<string, string | boolean>>,
 ): readonly AcpExternalConfigOption[] | undefined {
   if (!existing || existing.length === 0) return existing
   const keys = Object.keys(updates)
@@ -1793,8 +2889,8 @@ function updateConfigOptionsValues(
   const next = existing.map(option => {
     const direct = updates[option.id]
     const byCategory = option.category ? updates[option.category] : undefined
-    const targetValue = direct ?? byCategory
-    if (!targetValue || option.current_value === targetValue) {
+    const targetValue = direct !== undefined ? direct : byCategory
+    if (targetValue === undefined || option.current_value === targetValue) {
       return option
     }
     changed = true
@@ -1809,7 +2905,7 @@ function updateConfigOptionsValues(
 function applySingleConfigOptionPatch(
   binding: AcpSessionBinding,
   configId: string,
-  value: string,
+  value: string | boolean,
   extracted: ExtractedAcpModelAndModeState = {},
 ): AcpSessionBinding {
   const lowerId = configId.toLowerCase()
@@ -1822,26 +2918,28 @@ function applySingleConfigOptionPatch(
   const category = existingOpt?.category?.toLowerCase()
 
   let next = mergeBindingModelAndModeState(binding, extracted)
-  if (lowerId === modelCfgId || lowerId === 'model' || category === 'model') {
-    next = mergeBindingModelAndModeState(next, {
-      current_model: value,
-      model_config_id: configId,
-    })
-  } else if (lowerId === modeCfgId || lowerId === 'mode' || category === 'mode') {
-    next = mergeBindingModelAndModeState(next, {
-      current_mode: value,
-      mode_config_id: configId,
-    })
-  } else if (
-    lowerId === thoughtCfgId ||
-    lowerId === 'thought_level' ||
-    lowerId === 'thinking_level' ||
-    category === 'thought_level'
-  ) {
-    next = mergeBindingModelAndModeState(next, {
-      thought_level: value,
-      thought_level_config_id: configId,
-    })
+  if (typeof value === 'string') {
+    if (lowerId === modelCfgId || lowerId === 'model' || category === 'model') {
+      next = mergeBindingModelAndModeState(next, {
+        current_model: value,
+        model_config_id: configId,
+      })
+    } else if (lowerId === modeCfgId || lowerId === 'mode' || category === 'mode') {
+      next = mergeBindingModelAndModeState(next, {
+        current_mode: value,
+        mode_config_id: configId,
+      })
+    } else if (
+      lowerId === thoughtCfgId ||
+      lowerId === 'thought_level' ||
+      lowerId === 'thinking_level' ||
+      category === 'thought_level'
+    ) {
+      next = mergeBindingModelAndModeState(next, {
+        thought_level: value,
+        thought_level_config_id: configId,
+      })
+    }
   }
 
   const updatedOptions = updateConfigOptionsValues(next.config_options, { [configId]: value })
@@ -1886,7 +2984,7 @@ function applyLiveBindingEvent(
         entry.nativeModes = extracted.modes
       }
       next = mergeBindingModelAndModeState(next, extracted)
-    } else if (event.configId && event.value) {
+    } else if (event.configId && event.value !== undefined) {
       next = applySingleConfigOptionPatch(next, event.configId, event.value)
     }
   } else if (event.type === 'available_commands') {
@@ -2108,12 +3206,424 @@ function trimStringSet(set: Set<string>, maxEntries: number): void {
   }
 }
 
-function resolveWorkspaceScopedPath(cwd: string, requestedPath: string): string {
+const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024
+const ANTIGRAVITY_CLIENT_READ_TITLES = new Set([
+  'Running client_view_file',
+  'Run client_view_file?',
+])
+
+/**
+ * Antigravity sends native multiple-choice user questions over `session/request_permission`
+ * with `toolCallId` prefixed by `interaction_`. Unlike tool approvals, these must always be
+ * answered by the user (even in Turbo / Full Access mode).
+ */
+export function isAntigravityUserInputRequest(request: AcpClientPermissionRequest): boolean {
+  return request.toolCallId.startsWith('interaction_') && request.options.length > 0
+}
+
+/**
+ * `agy acp` 1.5.0+ supports mid-turn prompt steering via concurrent `session/prompt`;
+ * 1.4.x harnesses queue follow-ups instead. Unversioned test/dev runtimes allow live steering
+ * with automatic queued fallback.
+ */
+export function antigravitySteersWithPrompt(version: string | undefined): boolean {
+  const trimmed = version?.trim()
+  if (!trimmed) return true
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(trimmed)
+  if (!match) return true
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return major > 1 || (major === 1 && minor >= 5)
+}
+
+function selectNonInteractiveAgyAuthMethod(
+  env: Readonly<Record<string, string | undefined>> | undefined,
+): 'gemini-api-key' | 'agent-platform' | undefined {
+  if (!env) return undefined
+  if (env.GEMINI_API_KEY?.trim()) return 'gemini-api-key'
+  if (
+    env.AGY_ADC_AUTH?.trim() ||
+    (env.GOOGLE_CLOUD_QUOTA_PROJECT?.trim() && env.GOOGLE_CLOUD_LOCATION?.trim())
+  ) {
+    return 'agent-platform'
+  }
+  return undefined
+}
+
+/**
+ * `agy` emits its `update_steps` checklist as tool calls (`title === "Run update_steps"`)
+ * rather than ACP `plan` updates. Transform them into live `plan` events and drop redundant
+ * noise updates for those call IDs (matching T3 Code's `makeAntigravityUpdateStepsPlans`).
+ */
+export function makeAntigravityUpdateStepsPlans() {
+  const calls = new Set<string>()
+  return (event: AcpClientEvent): AcpClientEvent | undefined => {
+    if (event.type !== 'tool_call' && event.type !== 'tool_call_update') {
+      return event
+    }
+    const key = `${event.sessionId}\u0000${event.toolCallId}`
+    if (
+      (event.title === 'Run update_steps' || event.name === 'Run update_steps') &&
+      (!event.kind || event.kind === 'other')
+    ) {
+      calls.add(key)
+    }
+    if (!calls.has(key)) return event
+    if (event.status === 'completed' || event.status === 'failed') {
+      calls.delete(key)
+    }
+    if (!isAcpRecord(event.rawInput) || !Array.isArray(event.rawInput.steps)) {
+      return undefined
+    }
+    const entries: Array<{ readonly content: string; readonly priority?: string; readonly status?: string }> = []
+    for (const step of event.rawInput.steps) {
+      if (!isAcpRecord(step) || typeof step.title !== 'string' || !step.title.trim()) continue
+      const rawStatus = typeof step.status === 'string' ? step.status.trim() : 'pending'
+      entries.push({
+        content: step.title.trim(),
+        priority: 'medium',
+        status: rawStatus === 'done' ? 'completed' : rawStatus || 'pending',
+      })
+    }
+    return {
+      type: 'plan',
+      sessionId: event.sessionId,
+      entries,
+    }
+  }
+}
+
+function antigravityClientReadPath(
+  event: Extract<AcpClientEvent, { readonly type: 'tool_call' | 'tool_call_update' }>,
+): string | undefined {
+  const title = event.title ?? event.name
+  if (!title || !ANTIGRAVITY_CLIENT_READ_TITLES.has(title)) return undefined
+  const locationPath = event.locations?.[0]?.path
+  if (locationPath) return locationPath
+  if (isAcpRecord(event.rawInput)) {
+    const raw = event.rawInput.absolute_path ?? event.rawInput.path
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+  }
+  return undefined
+}
+
+/**
+ * `agy` sometimes leaves subagent `client_view_file` tool calls open after `fs/read_text_file`
+ * succeeds, then fails every open call with the next unrelated step error. Mark served reads
+ * completed immediately and suppress spurious later `failed` overwrites (matching T3 Code).
+ */
+export function makeAntigravityReadRepair() {
+  type Outcome = 'served' | 'refused'
+  const openReads = new Map<string, { readonly path: string; readonly sessionId: string; outcome?: Outcome }>()
+  const earlyOutcomes: Array<{ readonly path: string; readonly outcome: Outcome }> = []
+  return {
+    reset(): void {
+      openReads.clear()
+      earlyOutcomes.length = 0
+    },
+    attempted(path: string, served: boolean): { readonly sessionId: string; readonly toolCallId: string } | undefined {
+      const outcome: Outcome = served ? 'served' : 'refused'
+      for (const [toolCallId, read] of openReads) {
+        if (read.path !== path || read.outcome !== undefined) continue
+        read.outcome = outcome
+        return served ? { sessionId: read.sessionId, toolCallId } : undefined
+      }
+      earlyOutcomes.push({ path, outcome })
+      return undefined
+    },
+    repair(event: AcpClientEvent): AcpClientEvent {
+      if (event.type !== 'tool_call' && event.type !== 'tool_call_update') {
+        return event
+      }
+      const path = antigravityClientReadPath(event)
+      if (path !== undefined && !openReads.has(event.toolCallId)) {
+        const earlyIdx = earlyOutcomes.findIndex(entry => entry.path === path)
+        const outcome = earlyIdx === -1 ? undefined : earlyOutcomes.splice(earlyIdx, 1)[0]?.outcome
+        openReads.set(
+          event.toolCallId,
+          outcome === undefined ? { path, sessionId: event.sessionId } : { path, sessionId: event.sessionId, outcome },
+        )
+      }
+      const read = openReads.get(event.toolCallId)
+      if (event.status === 'pending' || event.status === 'in_progress') {
+        return read?.outcome === 'served'
+          ? { ...event, status: 'completed' }
+          : event
+      }
+      if (event.status !== 'completed' && event.status !== 'failed') {
+        return event
+      }
+      openReads.delete(event.toolCallId)
+      if (event.status === 'completed' || read?.outcome !== 'served') {
+        return event
+      }
+      if (event.type === 'tool_call_update') {
+        const { rawOutput: _stepError, isError: _isError, ...rest } = event
+        return { ...rest, status: 'completed' }
+      }
+      return { ...event, status: 'completed' }
+    },
+  }
+}
+
+function transformAntigravityClientEvent(
+  entry: ActiveAcpSession,
+  event: AcpClientEvent,
+): AcpClientEvent | undefined {
+  const repaired = entry.readRepair ? entry.readRepair.repair(event) : event
+  return entry.updateStepsPlans ? entry.updateStepsPlans(repaired) : repaired
+}
+
+function isInsideRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
+ * Resolve all symlinks (canonicalizing the deepest existing ancestor) before checking
+ * workspace and `additionalDirectories` containment (matching T3 Code's `AntigravityClientFiles`).
+ */
+export async function resolveWorkspaceScopedPathReal(
+  cwd: string,
+  requestedPath: string,
+  additionalDirectories: readonly string[] = [],
+): Promise<string> {
   const root = resolve(cwd)
   const target = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(root, requestedPath)
-  const rel = relative(root, target)
-  if (rel.startsWith('..') || isAbsolute(rel)) {
-    throw new Error(`ACP filesystem request denied: "${requestedPath}" escapes workspace "${root}"`)
+  const allowedRawRoots = [root, ...additionalDirectories.map(dir => resolve(root, dir))]
+  const deny = () =>
+    new Error(`ACP filesystem request denied: "${requestedPath}" escapes workspace "${root}"`)
+
+  let candidate = target
+  const missingSuffix: string[] = []
+  let canonicalTarget: string | undefined
+  while (true) {
+    try {
+      const real = await realpath(candidate)
+      canonicalTarget = missingSuffix.length > 0 ? join(real, ...missingSuffix) : real
+      break
+    } catch {
+      // Walk up only past truly missing paths, never past dangling/unreadable symlinks.
+      let existsOrLink = true
+      try {
+        await lstat(candidate)
+      } catch (statErr) {
+        const code = (statErr as NodeJS.ErrnoException)?.code
+        if (code === 'ENOENT') {
+          existsOrLink = false
+        }
+      }
+      const parent = dirname(candidate)
+      if (existsOrLink || parent === candidate) {
+        throw deny()
+      }
+      missingSuffix.unshift(basename(candidate))
+      candidate = parent
+    }
   }
-  return target
+
+  const canonicalRoots = await Promise.all(
+    allowedRawRoots.map(async dir => {
+      try {
+        return await realpath(dir)
+      } catch {
+        return dir
+      }
+    }),
+  )
+  for (const allowedRoot of canonicalRoots) {
+    if (isInsideRoot(allowedRoot, canonicalTarget)) {
+      return canonicalTarget
+    }
+  }
+  throw deny()
+}
+
+async function readWorkspaceScopedTextFile(
+  cwd: string,
+  fileReq: { readonly limit?: number; readonly line?: number; readonly path: string },
+  additionalDirectories: readonly string[],
+): Promise<{ readonly content: string }> {
+  const safePath = await resolveWorkspaceScopedPathReal(cwd, fileReq.path, additionalDirectories)
+  const info = await stat(safePath)
+  if (!info.isFile() || info.size > CLIENT_FILE_MAX_BYTES) {
+    throw new Error(
+      `File "${fileReq.path}" is not a readable text file under ${CLIENT_FILE_MAX_BYTES} bytes.`,
+    )
+  }
+  const bytes = await readFile(safePath)
+  let raw: string
+  try {
+    raw = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    throw new Error(`File "${fileReq.path}" is not a UTF-8 text file.`)
+  }
+  if (raw.includes('\0')) {
+    throw new Error(`File "${fileReq.path}" contains binary data.`)
+  }
+  if (fileReq.line !== undefined || fileReq.limit !== undefined) {
+    const lines = raw.split('\n')
+    const start = Math.max(0, (fileReq.line ?? 1) - 1)
+    const end =
+      fileReq.limit !== undefined && fileReq.limit > 0
+        ? Math.min(lines.length, start + fileReq.limit)
+        : lines.length
+    return { content: lines.slice(start, end).join('\n') }
+  }
+  return { content: raw }
+}
+
+function normalizeAdditionalDirectories(
+  cwd: string,
+  directories: readonly string[] | undefined,
+): readonly string[] {
+  if (!directories || directories.length === 0) return []
+  const root = resolve(cwd)
+  const seen = new Set<string>([root])
+  const out: string[] = []
+  for (const raw of directories) {
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const resolved = isAbsolute(trimmed) ? resolve(trimmed) : resolve(root, trimmed)
+    if (!seen.has(resolved)) {
+      seen.add(resolved)
+      out.push(resolved)
+    }
+  }
+  return out
+}
+
+/** Convert Xerxes MCP server configs into ACP spec `mcpServers` entries filtered by agent `mcpCapabilities`. */
+export function buildAcpWireMcpServers(
+  servers: readonly AcpConnectMcpServerInput[] | undefined,
+  capabilities: AcpMcpCapabilities,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (!servers || servers.length === 0) return []
+  const wire: Array<Readonly<Record<string, unknown>>> = []
+  const seen = new Set<string>()
+  for (const server of servers) {
+    if (server.enabled === false) continue
+    const name = server.name.trim()
+    if (!name || seen.has(name)) continue
+    const transport = server.transport ?? 'stdio'
+    if (transport === 'stdio') {
+      if (!server.command?.trim()) continue
+      seen.add(name)
+      wire.push({
+        name,
+        command: server.command.trim(),
+        args: [...(server.args ?? [])],
+        env: Object.entries(server.env ?? {}).map(([envName, value]) => ({
+          name: envName,
+          value,
+        })),
+      })
+    } else if (transport === 'streamable_http') {
+      if (!capabilities.http || !server.url?.trim()) continue
+      seen.add(name)
+      wire.push({
+        type: 'http',
+        name,
+        url: server.url.trim(),
+        headers: Object.entries(server.headers ?? {}).map(([headerName, value]) => ({
+          name: headerName,
+          value,
+        })),
+      })
+    } else if (transport === 'sse') {
+      if (!capabilities.sse || !server.url?.trim()) continue
+      seen.add(name)
+      wire.push({
+        type: 'sse',
+        name,
+        url: server.url.trim(),
+        headers: Object.entries(server.headers ?? {}).map(([headerName, value]) => ({
+          name: headerName,
+          value,
+        })),
+      })
+    }
+  }
+  return wire
+}
+
+/** Append supported `agy acp` CLI flags (`--process-per-session`, `--add-dir`, `--ide-mcp-port`, `--agent`, `--sandbox`). */
+export function buildAgyLaunchArgs(
+  command: string,
+  baseArgs: readonly string[],
+  options: {
+    readonly additionalDirectories?: readonly string[]
+    readonly agent?: string
+    readonly ideMcpPort?: number
+    readonly mcpServers?: readonly AcpConnectMcpServerInput[]
+    readonly sandbox?: boolean
+  },
+): readonly string[] {
+  const cmdBase = basename(command).toLowerCase()
+  const isAgySubcommand =
+    (cmdBase === 'agy' || cmdBase === 'agy.exe' || cmdBase === 'antigravity' || cmdBase === 'antigravity.exe') &&
+    baseArgs[0] === 'acp'
+  if (!isAgySubcommand) {
+    return baseArgs
+  }
+  const args = [...baseArgs]
+  const hasFlag = (flag: string): boolean =>
+    args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+  const hasEnabledHttpMcp = (options.mcpServers ?? []).some(
+    server => server.enabled !== false && server.transport === 'streamable_http' && Boolean(server.url?.trim()),
+  )
+  if (hasEnabledHttpMcp && !hasFlag('--process-per-session')) {
+    args.push('--process-per-session')
+  }
+  for (const dir of options.additionalDirectories ?? []) {
+    if (dir.trim()) {
+      args.push('--add-dir', dir.trim())
+    }
+  }
+  if (
+    typeof options.ideMcpPort === 'number' &&
+    Number.isInteger(options.ideMcpPort) &&
+    options.ideMcpPort > 0 &&
+    options.ideMcpPort <= 65535 &&
+    !hasFlag('--ide-mcp-port')
+  ) {
+    args.push('--ide-mcp-port', String(options.ideMcpPort))
+  }
+  if (options.agent?.trim() && !hasFlag('--agent')) {
+    args.push('--agent', options.agent.trim())
+  }
+  if (options.sandbox === true && !hasFlag('--sandbox')) {
+    args.push('--sandbox')
+  }
+  return args
+}
+
+function isAtLeastSemver(
+  version: string | undefined,
+  minMajor: number,
+  minMinor: number,
+  minPatch: number,
+): boolean {
+  if (!version) return true
+  const match = /^v?(\d+)\.(\d+)(?:\.(\d+))?/.exec(version.trim())
+  if (!match) return true
+  const major = Number.parseInt(match[1] ?? '0', 10)
+  const minor = Number.parseInt(match[2] ?? '0', 10)
+  const patch = Number.parseInt(match[3] ?? '0', 10)
+  if (major !== minMajor) return major > minMajor
+  if (minor !== minMinor) return minor > minMinor
+  return patch >= minPatch
+}
+
+function isConcurrentPromptRejection(error: unknown): boolean {
+  if (error instanceof AcpRpcError) {
+    if (error.code === -32002 || error.code === -32600 || error.code === -32603 || error.code === -32000) {
+      if (/busy|in\s+progress|concurrent|active\s+prompt|already\s+(?:running|active|in\s+progress)|not\s+supported/i.test(error.message)) {
+        return true
+      }
+      if (error.code === -32002) return true
+    }
+  }
+  const msg = errorMessage(error)
+  return /busy|prompt\s+already|in\s+progress|concurrent\s+prompt|already\s+(?:running|active)/i.test(msg)
 }

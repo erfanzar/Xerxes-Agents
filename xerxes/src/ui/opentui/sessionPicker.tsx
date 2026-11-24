@@ -802,12 +802,14 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   // short terminal it is not drawn at all, because one rule is not worth a
   // row of the list it is ruling off. Counted here so the budget and the
   // paint cannot disagree.
+  const floating = terminalHeight >= 30 || terminalWidth > width
+  const borderInset = floating ? 2 : 0
   const desiredHeight = Math.max(peek ? 36 : rows.length ? 24 : 12,
-    12 + rows.reduce((total, row) => total + (row.kind === 'live' ? 3 : 2), 0) + new Set(rows.map(row => row.group)).size)
+    12 + borderInset + rows.reduce((total, row) => total + (row.kind === 'live' ? 3 : 2), 0) + new Set(rows.map(row => row.group)).size)
   const height = terminalHeight >= 30 ? Math.min(44, terminalHeight - 6, desiredHeight) : terminalHeight
   const roomy = height >= 24
   const showHeaderRule = height >= 20
-  const chromeRows = (error || notice ? 8 : 7) + (showHeaderRule ? 1 : 0) + (roomy ? 2 : 0)
+  const chromeRows = (error || notice ? 8 : 7) + borderInset + (showHeaderRule ? 1 : 0) + (roomy ? 2 : 0)
   // Budget in RENDERED LINES, not entries: live rows are two lines tall and
   // group captions add one more, so a naive per-entry window overflowed the
   // pane and pushed the dispatch composer off-screen. Below four available
@@ -845,10 +847,11 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   // terminal leaves a list too narrow to read the titles it exists to show.
   const showInspector = width >= 120 && rows.length > 0
   const inspectorWidth = showInspector ? Math.max(32, Math.min(52, Math.floor(width * 0.36))) : 0
-  const listWidth = Math.max(20, width - inspectorWidth - 1)
+  const innerWidth = Math.max(20, width - borderInset)
+  const listWidth = Math.max(20, innerWidth - inspectorWidth - 1)
   const inspectRow = rows[selected]
   const peekRows = listRows
-  const peekText = peek ? previewLines(peek, inspectorWidth || width, peekRows) : []
+  const peekText = peek ? previewLines(peek, inspectorWidth || innerWidth, peekRows) : []
   const peekRow = peek ? rows.find(row => row.id === peek.rowId) : undefined
   // Caption counts per action group, computed once for the whole list.
   const groupCounts: Record<SessionGroup, number> = { 'needs-input': 0, review: 0, saved: 0, working: 0 }
@@ -871,160 +874,172 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
 
   return (
     <box
-      backgroundColor={t.color.overlayBg}
-      flexDirection="column"
-      height={height}
-      left={Math.floor((terminalWidth - width) / 2)}
+      alignItems="center"
+      backgroundColor={t.ds.scrim}
+      height="100%"
+      justifyContent="center"
+      left={0}
       position="absolute"
-      top={Math.floor((terminalHeight - height) / 2)}
-      width={width}
+      top={0}
+      width="100%"
       zIndex={200}
     >
-      {roomy ? <box height={1} flexShrink={0} /> : null}
-      <box flexDirection="row" flexShrink={0} height={1} paddingLeft={2} paddingRight={2}>
-        <box flexShrink={0}>
-          <text flexShrink={0}>
-            <span fg={t.color.accent}>✦ </span>
-            <b>Agent View</b>
-          </text>
+      <box
+        backgroundColor={t.color.overlayBg}
+        border={floating}
+        borderColor={floating ? t.color.border : undefined}
+        borderStyle={floating ? 'rounded' : undefined}
+        flexDirection="column"
+        flexShrink={0}
+        height={height}
+        width={width}
+      >
+        {roomy ? <box height={1} flexShrink={0} /> : null}
+        <box flexDirection="row" flexShrink={0} height={1} paddingLeft={2} paddingRight={2}>
+          <box flexShrink={0}>
+            <text flexShrink={0}>
+              <span fg={t.color.accent}>✦ </span>
+              <b>Agent View</b>
+            </text>
+          </box>
+          {/* Counts yield before the title does: their own clipped box means a
+              40-column terminal still reads the brand + name intact. */}
+          <box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <text fg={t.color.muted} flexShrink={0} truncate width="100%" wrapMode="none">
+              {`  ${activeSessions.length} chat${activeSessions.length === 1 ? "" : "s"} · ${workingCount} working`}
+            </text>
+          </box>
+          {mainSessionTitle ? (
+            <>
+              <box flexShrink={0}>
+                <text flexShrink={0}>{'main session · '}</text>
+              </box>
+              {/* Single-span truncate inside its own clipped box: span-heavy
+                  truncation blanks whole runs at narrow widths, so only the
+                  title itself shrinks — the muted label never clips mid-glyph. */}
+              <box flexShrink={1} maxWidth={Math.floor(innerWidth * 0.3)} minWidth={0} overflow="hidden">
+                <text fg={t.color.accent} flexShrink={0} truncate width="100%" wrapMode="none">
+                  {mainSessionTitle}
+                </text>
+              </box>
+            </>
+          ) : null}
+          <box flexShrink={0}>
+            <text fg={workingCount ? t.color.accent : t.color.muted} flexShrink={0}>
+              {workingCount ? ' · live' : ' · idle'}
+            </text>
+          </box>
         </box>
-        {/* Counts yield before the title does: their own clipped box means a
-            40-column terminal still reads the brand + name intact. */}
-        <box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-          <text fg={t.color.muted} flexShrink={0} truncate width="100%" wrapMode="none">
-            {`  ${activeSessions.length} chat${activeSessions.length === 1 ? "" : "s"} · ${workingCount} working`}
-          </text>
-        </box>
-        {mainSessionTitle ? (
-          <>
-            <box flexShrink={0}>
-              <text flexShrink={0}>{'main session · '}</text>
-            </box>
-            {/* Single-span truncate inside its own clipped box: span-heavy
-                truncation blanks whole runs at narrow widths, so only the
-                title itself shrinks — the muted label never clips mid-glyph. */}
-            <box flexShrink={1} maxWidth={Math.floor(width * 0.3)} minWidth={0} overflow="hidden">
-              <text fg={t.color.accent} flexShrink={0} truncate width="100%" wrapMode="none">
-                {mainSessionTitle}
-              </text>
-            </box>
-          </>
+        <InfoRow color={t.color.muted}>
+          {peek && peekRow
+            ? `${itemTitle(peekRow.item)} · ${peek.status} · preview`
+            : 'Detached sessions keep working. Subagents stay inside their parent chat.'}
+        </InfoRow>
+        {/* A hairline under the header, as the canvas rules its panel head off
+            from the content below it. */}
+        {showHeaderRule ? (
+          // A run of `─`, not a bordered box: a box with `height={1}` and a
+          // border draws all four edges, so the "hairline" came out as
+          // `┌────────┐`.
+          <box flexShrink={0} height={1} paddingLeft={2} paddingRight={2}>
+            <text fg={t.ds.divider} flexShrink={0} truncate width="100%" wrapMode="none">
+              {'─'.repeat(Math.max(0, innerWidth - 4))}
+            </text>
+          </box>
         ) : null}
-        <box flexShrink={0}>
-          <text fg={workingCount ? t.color.accent : t.color.muted} flexShrink={0}>
-            {workingCount ? ' · live' : ' · idle'}
+        {error ? <InfoRow color={t.color.error}>error: {error}</InfoRow> : notice ? <InfoRow color={t.color.warn}>{notice}</InfoRow> : null}
+
+        {/* Keep the list and preview inside the bounded session workspace. */}
+        <box flexDirection="row" flexGrow={1} minHeight={0} width="100%" paddingTop={roomy ? 1 : 0}>
+          <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0} overflow="hidden">
+            {loading ? (
+              <InfoRow color={t.color.muted}>loading live and saved chats…</InfoRow>
+            ) : peek && !showInspector ? (
+              /* Too narrow for a side panel, so the peek takes the list's place
+                 — screen 09's order of sacrifice gives up side panels first,
+                 but never the thing you actually asked to read. */
+              peekText.map((line, index) => (
+                <InfoRow color={t.color.text} key={`peek-${index}`}>
+                  {line}
+                </InfoRow>
+              ))
+            ) : rows.length ? (
+              <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
+                {!compactMode && hiddenAbove > 0 ? (
+                  <InfoRow color={t.color.muted}>{`  ↑ ${hiddenAbove} more`}</InfoRow>
+                ) : null}
+                {visibleRows.map((row, index) => {
+                  const absoluteIndex = offset + index
+                  const previous = rows[absoluteIndex - 1]
+
+                  return (
+                    <SessionListRow
+                      compactMode={compactMode}
+                      roomy={roomy}
+                      counts={groupCounts}
+                      firstInGroup={!previous || previous.group !== row.group}
+                      key={`${row.kind}:${row.id}`}
+                      maxLabelWidth={Math.max(12, listWidth - 4)}
+                      row={row}
+                      selected={selected === absoluteIndex}
+                      t={t}
+                    />
+                  )
+                })}
+                {!compactMode && hiddenBelow > 0 ? (
+                  <InfoRow color={t.color.muted}>{`  ↓ ${hiddenBelow} more`}</InfoRow>
+                ) : null}
+              </box>
+            ) : (
+              <InfoRow color={t.color.muted}>No chats yet. Type below to dispatch one.</InfoRow>
+            )}
+          </box>
+          {showInspector ? (
+            <>
+              {/* A filled column, not a per-side border: OpenTUI paints an edge
+                  THROUGH the text when a bordered child sits inside a framed
+                  parent, which is how the composer's identity row once came out
+                  as `╰─◆─code─mode─·─…─╯`. */}
+              <box backgroundColor={t.ds.hairline} flexShrink={0} width={1} />
+              <SessionInspector
+                peekRow={peekRow}
+                peekText={peekText}
+                peeking={Boolean(peek)}
+                row={inspectRow}
+                status={peek?.status}
+                t={t}
+                width={inspectorWidth}
+              />
+            </>
+          ) : null}
+        </box>
+
+        {/* Keep dispatch and keyboard actions visible below the list. */}
+        <box borderColor={t.color.border} borderStyle="rounded" flexShrink={0} height={3} marginTop={1} paddingLeft={1} paddingRight={1}>
+          <text flexShrink={0} truncate width="100%" wrapMode="none">
+            <span fg={draft ? t.color.text : t.color.accent}>❯ </span>
+            <span fg={draft ? t.color.text : t.color.muted}>
+              {/* Multi-span truncate middle-ellipsizes instead of clipping the
+                  tail, so narrow terminals get a shorter placeholder rather
+                  than a mangled one. */}
+              {draft ||
+                (peek
+                  ? width < 48
+                    ? 'Reply or steer…'
+                    : 'Reply or steer this chat…'
+                  : width < 48
+                    ? 'Dispatch a new chat…'
+                    : 'Dispatch a new independent chat…')}
+              {submitting ? ' …' : ''}
+            </span>
           </text>
         </box>
+        <InfoRow color={t.color.muted}>
+          {peek
+            ? 'type + Enter reply/steer · Esc back'
+            : 'type + Enter dispatch · ↑/↓ select · Space peek · n new chat · →/Enter attach · Esc exit'}
+        </InfoRow>
       </box>
-      <InfoRow color={t.color.muted}>
-        {peek && peekRow
-          ? `${itemTitle(peekRow.item)} · ${peek.status} · preview`
-          : 'Detached sessions keep working. Subagents stay inside their parent chat.'}
-      </InfoRow>
-      {/* A hairline under the header, as the canvas rules its panel head off
-          from the content below it. */}
-      {showHeaderRule ? (
-        // A run of `─`, not a bordered box: a box with `height={1}` and a
-        // border draws all four edges, so the "hairline" came out as
-        // `┌────────┐`.
-        <box flexShrink={0} height={1} paddingLeft={2} paddingRight={2}>
-          <text fg={t.ds.divider} flexShrink={0} truncate width="100%" wrapMode="none">
-            {'─'.repeat(Math.max(0, width - 4))}
-          </text>
-        </box>
-      ) : null}
-      {error ? <InfoRow color={t.color.error}>error: {error}</InfoRow> : notice ? <InfoRow color={t.color.warn}>{notice}</InfoRow> : null}
-
-      {/* Keep the list and preview inside the bounded session workspace. */}
-      <box flexDirection="row" flexGrow={1} minHeight={0} width="100%" paddingTop={roomy ? 1 : 0}>
-        <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0} overflow="hidden">
-          {loading ? (
-            <InfoRow color={t.color.muted}>loading live and saved chats…</InfoRow>
-          ) : peek && !showInspector ? (
-            /* Too narrow for a side panel, so the peek takes the list's place
-               — screen 09's order of sacrifice gives up side panels first,
-               but never the thing you actually asked to read. */
-            peekText.map((line, index) => (
-              <InfoRow color={t.color.text} key={`peek-${index}`}>
-                {line}
-              </InfoRow>
-            ))
-          ) : rows.length ? (
-            <box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
-              {!compactMode && hiddenAbove > 0 ? (
-                <InfoRow color={t.color.muted}>{`  ↑ ${hiddenAbove} more`}</InfoRow>
-              ) : null}
-              {visibleRows.map((row, index) => {
-                const absoluteIndex = offset + index
-                const previous = rows[absoluteIndex - 1]
-
-                return (
-                  <SessionListRow
-                    compactMode={compactMode}
-                    roomy={roomy}
-                    counts={groupCounts}
-                    firstInGroup={!previous || previous.group !== row.group}
-                    key={`${row.kind}:${row.id}`}
-                    maxLabelWidth={Math.max(12, listWidth - 4)}
-                    row={row}
-                    selected={selected === absoluteIndex}
-                    t={t}
-                  />
-                )
-              })}
-              {!compactMode && hiddenBelow > 0 ? (
-                <InfoRow color={t.color.muted}>{`  ↓ ${hiddenBelow} more`}</InfoRow>
-              ) : null}
-            </box>
-          ) : (
-            <InfoRow color={t.color.muted}>No chats yet. Type below to dispatch one.</InfoRow>
-          )}
-        </box>
-        {showInspector ? (
-          <>
-            {/* A filled column, not a per-side border: OpenTUI paints an edge
-                THROUGH the text when a bordered child sits inside a framed
-                parent, which is how the composer's identity row once came out
-                as `╰─◆─code─mode─·─…─╯`. */}
-            <box backgroundColor={t.ds.hairline} flexShrink={0} width={1} />
-            <SessionInspector
-              peekRow={peekRow}
-              peekText={peekText}
-              peeking={Boolean(peek)}
-              row={inspectRow}
-              status={peek?.status}
-              t={t}
-              width={inspectorWidth}
-            />
-          </>
-        ) : null}
-      </box>
-
-      {/* Keep dispatch and keyboard actions visible below the list. */}
-      <box borderColor={t.color.border} borderStyle="rounded" flexShrink={0} height={3} marginTop={1} paddingLeft={1} paddingRight={1}>
-        <text flexShrink={0} truncate width="100%" wrapMode="none">
-          <span fg={draft ? t.color.text : t.color.accent}>❯ </span>
-          <span fg={draft ? t.color.text : t.color.muted}>
-            {/* Multi-span truncate middle-ellipsizes instead of clipping the
-                tail, so narrow terminals get a shorter placeholder rather
-                than a mangled one. */}
-            {draft ||
-              (peek
-                ? width < 48
-                  ? 'Reply or steer…'
-                  : 'Reply or steer this chat…'
-                : width < 48
-                  ? 'Dispatch a new chat…'
-                  : 'Dispatch a new independent chat…')}
-            {submitting ? ' …' : ''}
-          </span>
-        </text>
-      </box>
-      <InfoRow color={t.color.muted}>
-        {peek
-          ? 'type + Enter reply/steer · Esc back'
-          : 'type + Enter dispatch · ↑/↓ select · Space peek · n new chat · →/Enter attach · Esc exit'}
-      </InfoRow>
     </box>
   )
 }

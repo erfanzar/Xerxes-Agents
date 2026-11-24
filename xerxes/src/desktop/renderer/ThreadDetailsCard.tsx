@@ -18,10 +18,15 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { store, showsImmortalsForSession, type Snapshot } from './store.js'
 import { desktopCall } from './desktopRpc.js'
 import { T3Icon } from './T3Icons.js'
-import { Icon } from './Icon.js'
 import { activityFleetRows, agentState } from './AgentRoster.js'
 import { parseGoal } from './goalText.js'
-import { pullRequestPrompt } from './GitPanel.js'
+import {
+  ANTIGRAVITY_COMMIT_AND_PUSH_PROMPT,
+  ANTIGRAVITY_PULL_REQUEST_PROMPT,
+  isAntigravityAcpSession,
+  prefillComposerPrompt,
+  pullRequestPrompt,
+} from './GitPanel.js'
 import { swarmMemberCounts } from './swarmState.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
 import type { DesktopPanel } from './DesktopPanels.js'
@@ -35,6 +40,12 @@ interface GitRepoSummary {
 
 function folderBase(cwd: string): string {
   return cwd.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) || 'workspace'
+}
+
+function localHostLabel(): string {
+  if (typeof navigator === 'undefined') return 'This Mac'
+  const platform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
+  return /mac/i.test(platform) ? 'This Mac' : 'This computer'
 }
 
 export function ThreadDetailsCard({
@@ -113,7 +124,7 @@ export function ThreadDetailsCard({
   }, [mode, onClose])
 
   const projectName = folderBase(snap.cwd)
-  const hostLabel = snap.contextHost?.trim() || (snap.storageScope?.startsWith('ssh:') ? snap.storageScope.slice(4) : 'This Mac')
+  const hostLabel = snap.contextHost?.trim() || (snap.storageScope?.startsWith('ssh:') ? snap.storageScope.slice(4) : localHostLabel())
   const branchName = repo?.branch || snap.branch || ''
   const sessionAdds = snap.changes.reduce((sum, file) => sum + file.adds, 0)
   const sessionDels = snap.changes.reduce((sum, file) => sum + file.dels, 0)
@@ -140,6 +151,7 @@ export function ThreadDetailsCard({
     if (snap.cwd) void window.xerxes.fileAction?.('reveal', '.', snap.cwd)
   }
 
+  const isAntigravity = isAntigravityAcpSession(snap)
   const commitAndPushPrompt = (): string =>
     `Review the current git diff on branch ${branchName || 'current branch'}, stage the changes, write a concise conventional commit message, and commit and push.`
 
@@ -200,7 +212,7 @@ export function ThreadDetailsCard({
                 <span>Open Terminal</span>
               </button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onNavigate('browser') }}>
-                <Icon name="eye" size={13} />
+                <T3Icon name="globe" size={13} />
                 <span>Open Browser</span>
               </button>
             </div>
@@ -249,7 +261,7 @@ export function ThreadDetailsCard({
         >
           <T3Icon name="gitBranch" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label t3-drow__label--mono">{branchName || 'No branch'}</span>
-          <T3Icon name="chevronDown" size={12} className="t3-drow__chev" />
+          <T3Icon name="chevronRight" size={12} className="t3-drow__chev" />
         </button>
 
         <div className="t3-drow-anchor">
@@ -271,6 +283,11 @@ export function ThreadDetailsCard({
                 disabled={!canSubmit}
                 onClick={() => {
                   setOpenMenu(null)
+                  if (isAntigravity) {
+                    onClose()
+                    prefillComposerPrompt(ANTIGRAVITY_COMMIT_AND_PUSH_PROMPT)
+                    return
+                  }
                   void store.submit(commitAndPushPrompt(), 'Commit & push')
                 }}
               >
@@ -283,6 +300,11 @@ export function ThreadDetailsCard({
                 disabled={!canSubmit}
                 onClick={() => {
                   setOpenMenu(null)
+                  if (isAntigravity) {
+                    onClose()
+                    prefillComposerPrompt(ANTIGRAVITY_PULL_REQUEST_PROMPT)
+                    return
+                  }
                   void store.submit(pullRequestPrompt(branchName || null), 'Create a pull request')
                 }}
               >
@@ -315,7 +337,7 @@ export function ThreadDetailsCard({
           ) : (
             <span className="t3-drow__meta">Clean</span>
           )}
-          <T3Icon name="chevronDown" size={12} className="t3-drow__chev" />
+          <T3Icon name="chevronRight" size={12} className="t3-drow__chev" />
         </button>
       </section>
 
@@ -324,7 +346,7 @@ export function ThreadDetailsCard({
         <section className="t3-dsec">
           {(snap.swarm?.active || showsImmortalsForSession(snap)) && (
             <button type="button" className="t3-drow" onClick={() => onNavigate('swarm')}>
-              <span className="t3-drow__ico" aria-hidden="true"><Icon name="tree" size={14} /></span>
+              <T3Icon name="network" size={14} className="t3-drow__ico" />
               <span className="t3-drow__label">Immortals</span>
               <span className="t3-drow__meta">
                 {snap.swarm?.active ? `${swarmMemberCounts(snap.swarm.members).working} active` : 'Open'}
@@ -333,7 +355,7 @@ export function ThreadDetailsCard({
           )}
           {fleet.length > 0 && (
             <button type="button" className="t3-drow" onClick={() => onNavigate('subagents')}>
-              <span className="t3-drow__ico" aria-hidden="true"><Icon name="agents" size={14} /></span>
+              <T3Icon name="bot" size={14} className="t3-drow__ico" />
               <span className="t3-drow__label">Subagents</span>
               <span className="t3-drow__meta">{workingAgents > 0 ? `${workingAgents} working` : `${fleet.length}`}</span>
             </button>
@@ -346,7 +368,7 @@ export function ThreadDetailsCard({
               title={snap.tab === 'plan' ? 'Back to conversation' : 'Open Plan & to-dos'}
               onClick={() => store.setTab(snap.tab === 'plan' ? 'activity' : 'plan')}
             >
-              <span className="t3-drow__ico" aria-hidden="true"><Icon name="plan" size={14} /></span>
+              <T3Icon name="checkCircle" size={14} className="t3-drow__ico" />
               <span className="t3-drow__label">Plan &amp; to-dos</span>
               <span className="t3-drow__meta">{doneTodos}/{todos.length}</span>
             </button>

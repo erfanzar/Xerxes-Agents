@@ -207,7 +207,7 @@ describe('clean terminal layout', () => {
         const lines = s.captureCharFrame().split("\n")
         const titleRow = lines.findIndex(line => line.includes("XERXES"))
         const rule = lines.find(line => line.includes("─".repeat(20)) && line.trim().length === Math.min(120, width - 4))!
-        expect(titleRow).toBeGreaterThan(0)
+        expect(titleRow).toBeGreaterThanOrEqual(0)
         expect(titleRow).toBeLessThan(height / 2)
         expect(rule.trim().length).toBeLessThanOrEqual(120)
         expect(rule.indexOf("─")).toBeGreaterThanOrEqual(Math.floor((width - Math.min(120, width - 4)) / 2))

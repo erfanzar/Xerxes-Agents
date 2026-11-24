@@ -51,6 +51,21 @@ export function statusLabel(file: ScmFile, group: ScmGroupKey): string {
  * so the agent reviews what you are about to commit, not the whole repo, and
  * it asks for findings rather than edits.
  */
+export const ANTIGRAVITY_PULL_REQUEST_PROMPT = 'Create a pull request for the current changes.'
+export const ANTIGRAVITY_REVIEW_PROMPT = 'Review the current git changes.'
+export const ANTIGRAVITY_COMMIT_AND_PUSH_PROMPT = 'Commit and push the current changes.'
+
+/** True when the active session is connected to Google Antigravity (`agy acp`). */
+export function isAntigravityAcpSession(snap: Pick<Snapshot, 'acpBinding'>): boolean {
+  return Boolean(snap.acpBinding?.connected && snap.acpBinding.provider === 'antigravity')
+}
+
+/** Pre-fill the chat composer with an editable plain prompt and focus it without auto-submitting. */
+export function prefillComposerPrompt(prompt: string): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent('xerxes:prefill-prompt', { detail: prompt }))
+}
+
 /**
  * The instruction behind "Create PR": the agent does the work — it can read
  * the repository's conventions, write the description and recover from a
@@ -96,24 +111,39 @@ export function reviewPrompt(status: Pick<ScmStatus, 'branch' | 'hasHead'>): str
 }
 
 export type PrimaryAction =
-  | { readonly kind: 'commit'; readonly label: string; readonly title: string }
+  | { readonly kind: 'commit'; readonly label: string; readonly title: string; readonly stagedOnly?: boolean }
   | { readonly kind: 'push' | 'pull' | 'sync' | 'publish'; readonly label: string; readonly title: string }
 
 /**
- * The main button follows the next useful step, like the editor: commit while
- * there is anything to commit; once the tree is clean, push, pull, sync or
- * publish the branch instead of offering a commit that cannot happen.
+ * The main button follows the next useful step, like the editor: when files
+ * are explicitly staged, commit ONLY staged files so unstaged/untracked work
+ * is never silently swept in; otherwise commit all changes. Once clean, push,
+ * pull, sync or publish the branch.
  */
-export function primaryAction(repo: Pick<ScmStatus, 'upstream' | 'ahead' | 'behind' | 'branch' | 'hasHead' | 'detached'>, total: number): PrimaryAction {
+export function primaryAction(
+  repo: Pick<ScmStatus, 'upstream' | 'ahead' | 'behind' | 'branch' | 'hasHead' | 'detached'> & {
+    readonly counts?: Pick<ScmStatus['counts'], 'staged'>
+  },
+  total: number,
+): PrimaryAction {
+  const staged = repo.counts?.staged ?? 0
+  if (staged > 0) {
+    return {
+      kind: 'commit',
+      stagedOnly: true,
+      label: `Commit staged (${staged})`,
+      title: `Commit ${staged} staged file${staged === 1 ? '' : 's'} without sweeping in unstaged changes`,
+    }
+  }
   if (total > 0 || !repo.hasHead || repo.detached || !repo.branch) {
-    return { kind: 'commit', label: 'Commit all', title: `Commit all ${total} changed file${total === 1 ? '' : 's'} (.gitignore respected)` }
+    return { kind: 'commit', stagedOnly: false, label: 'Commit all', title: `Commit all ${total} changed file${total === 1 ? '' : 's'} (.gitignore respected)` }
   }
   const plural = (n: number) => `${n} commit${n === 1 ? '' : 's'}`
   if (!repo.upstream) return { kind: 'publish', label: 'Publish branch', title: `Push ${repo.branch} to the remote and track it` }
   if (repo.ahead > 0 && repo.behind > 0) return { kind: 'sync', label: `Sync ↓${repo.behind} ↑${repo.ahead}`, title: `Pull ${plural(repo.behind)} (fast-forward), then push ${plural(repo.ahead)} to ${repo.upstream}` }
   if (repo.ahead > 0) return { kind: 'push', label: `Push ${repo.ahead}`, title: `Push ${plural(repo.ahead)} to ${repo.upstream}` }
   if (repo.behind > 0) return { kind: 'pull', label: `Pull ${repo.behind}`, title: `Pull ${plural(repo.behind)} from ${repo.upstream} (fast-forward only)` }
-  return { kind: 'commit', label: 'Commit all', title: 'Nothing to commit' }
+  return { kind: 'commit', stagedOnly: false, label: 'Commit all', title: 'Nothing to commit' }
 }
 
 function basename(path: string): string {
@@ -179,6 +209,9 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
   const [notice, setNotice] = useState('')
   const [branchesOpen, setBranchesOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(true)
+  const [pendingDiscard, setPendingDiscard] = useState<{ readonly files: readonly ScmFile[]; readonly prompt: string } | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const branchBtnRef = useRef<HTMLButtonElement>(null)
 
   // Refresh on open, on window focus, when a turn settles or the agent edits a
   // file, and on a slow poll while visible — outside edits (your editor, a
@@ -203,9 +236,22 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     ['unstaged', 'Changes', [...repo.unstaged, ...repo.untracked]],
   ] as const) : [], [repo])
 
-  // The diff shows beside the list right in the rail (every style shares this layout).
+  // The diff shows beside the list right in the rail; when the container is narrow
+  // (compact diff hidden via CSS container query), selecting a file asks the shell to expand.
   const inlineDiff = true
-  const choose = (selection: ScmSelection): void => { setSelected(selection) }
+  const choose = (selection: ScmSelection): void => {
+    setSelected(selection)
+    if (!expanded && onExpand) {
+      const root = rootRef.current
+      const diffEl = root?.querySelector<HTMLElement>('.scm__diff')
+      const diffHiddenByStyle =
+        diffEl && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+          ? window.getComputedStyle(diffEl).display === 'none'
+          : false
+      const narrowContainer = root ? root.getBoundingClientRect().width > 0 && root.getBoundingClientRect().width <= 640 : false
+      if (diffHiddenByStyle || narrowContainer) onExpand()
+    }
+  }
 
   // Keep the selection valid as the lists change; honour a deep link once.
   const linked = useRef('')
@@ -255,12 +301,13 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
   }
 
   const total = repo.counts.staged + repo.counts.unstaged + repo.counts.untracked + repo.counts.conflicts
-  // Commit, Generate and Review all act on every change (.gitignore respected);
-  // the Staged / Changes groups are for looking, not for choosing what ships.
+  const unstagedTotal = repo.counts.unstaged + repo.counts.untracked
+  const hasStaged = repo.counts.staged > 0
+  const hasBothStagedAndUnstaged = hasStaged && unstagedTotal > 0
   const canCommit = Boolean(message.trim()) && !scm.busy && repo.counts.conflicts === 0 && total > 0
   const primary = primaryAction(repo, total)
   const runPrimary = async (): Promise<void> => {
-    if (primary.kind === 'commit') return commit()
+    if (primary.kind === 'commit') return commit(!primary.stagedOnly)
     if (primary.kind === 'sync') {
       const pulled = await scm.act('Pulling…', 'git.pull')
       if (!pulled) return
@@ -270,9 +317,9 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     if (pushed) setNotice(primary.kind === 'publish' ? 'Branch published.' : primary.kind === 'sync' ? 'Synced.' : `Pushed to ${repo.upstream}.`)
   }
 
-  const commit = async (): Promise<void> => {
+  const commit = async (commitAll = !hasStaged): Promise<void> => {
     if (!canCommit) return
-    const result = await scm.act('Committing…', 'git.commit', { message, all: true })
+    const result = await scm.act('Committing…', 'git.commit', { message, all: commitAll })
     if (!result) return
     const done = result.commit as ScmCommit | undefined
     setMessage('')
@@ -285,6 +332,12 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
   }
 
   const review = (): void => {
+    if (isAntigravityAcpSession(snap)) {
+      prefillComposerPrompt(ANTIGRAVITY_REVIEW_PROMPT)
+      setNotice('Review prompt pre-filled in the composer — review and send when ready.')
+      onReviewSent?.()
+      return
+    }
     void store.submit(reviewPrompt(repo))
     setNotice(snap.turnActive ? 'Review request sent — it runs when the current step settles.' : 'Review request sent to the chat.')
     // The Git view covers the conversation; bring it back so the review is visible.
@@ -298,12 +351,18 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     const prompt = untracked === files.length
       ? `Delete ${what}? ${files.length === 1 ? 'It is' : 'They are'} untracked, so this cannot be undone.`
       : `Discard your unstaged changes to ${what}? This cannot be undone.${untracked ? ` ${untracked} untracked file${untracked === 1 ? '' : 's'} will be deleted.` : ''}`
-    if (!window.confirm(prompt)) return
-    void scm.act('Discarding…', 'git.discard', { paths: files.map(f => f.path) })
+    setPendingDiscard({ files, prompt })
+  }
+
+  const confirmDiscard = (): void => {
+    if (!pendingDiscard) return
+    const paths = pendingDiscard.files.map(f => f.path)
+    setPendingDiscard(null)
+    void scm.act('Discarding…', 'git.discard', { paths })
   }
 
   const onMessageKey = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void commit() }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void commit(!hasStaged) }
   }
 
   const sync = repo.upstream
@@ -320,10 +379,10 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
       : null
 
   return (
-    <div className={`scm${expanded ? '' : ' scm--compact'}`}>
+    <div ref={rootRef} className={`scm${expanded ? '' : ' scm--compact'}`}>
       <div className="scm__side">
         <header className="scm__head">
-          <button className="scm-branch" aria-expanded={branchesOpen} title={repo.detached ? 'Detached HEAD — pick a branch' : 'Switch or create a branch'} onClick={() => setBranchesOpen(value => !value)}>
+          <button ref={branchBtnRef} className="scm-branch" aria-expanded={branchesOpen} title={repo.detached ? 'Detached HEAD — pick a branch' : 'Switch or create a branch'} onClick={() => setBranchesOpen(value => !value)}>
             <Icon name="branch" size={14} /><span>{repo.detached ? 'Detached HEAD' : repo.branch ?? 'No branch'}</span><Icon name="caretDown" size={11} />
           </button>
           <span className="scm__tools">
@@ -332,20 +391,24 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
             <button className="scm-tool" title="Fetch from remotes" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Fetching…', 'git.fetch')}><Icon name="retry" size={13} /></button>
           </span>
         </header>
-        {branchesOpen && <BranchList scm={scm} onDone={() => setBranchesOpen(false)} />}
+        {branchesOpen && <BranchList scm={scm} triggerRef={branchBtnRef} onDone={() => setBranchesOpen(false)} />}
 
         <div className="scm__commit">
           <textarea
             value={message}
             rows={Math.min(14, Math.max(6, message.split('\n').length + 1))}
-            placeholder={repo.branch ? `Message (⌘⏎ to commit on ${repo.branch})` : 'Message (⌘⏎ to commit)'}
+            placeholder={
+              repo.branch
+                ? `Message (⌘⏎ to commit ${hasStaged ? 'staged ' : ''}on ${repo.branch})`
+                : `Message (⌘⏎ to commit${hasStaged ? ' staged' : ''})`
+            }
             aria-label="Commit message"
             spellCheck
             onChange={event => setMessage(event.target.value)}
             onKeyDown={onMessageKey}
           />
           <div className="scm__commit-row">
-            <button className="btn" disabled={Boolean(scm.busy) || total === 0} title="Draft a message from all changes with your current model" onClick={() => void generate()}>
+            <button className="btn" disabled={Boolean(scm.busy) || total === 0} title="Draft a message from your changes with your current model" onClick={() => void generate()}>
               <Icon name="spark" size={13} /> {scm.busy === 'Drafting a message…' ? 'Drafting…' : 'Generate'}
             </button>
             <button
@@ -357,10 +420,34 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
               <Icon name={primary.kind === 'commit' ? 'check' : primary.kind === 'pull' ? 'arrowDown' : primary.kind === 'publish' ? 'cloud' : primary.kind === 'sync' ? 'retry' : 'arrowUp'} size={13} /> {primary.label}
             </button>
           </div>
+          {hasBothStagedAndUnstaged && (
+            <div className="scm__commit-hint" role="note">
+              <span>{repo.counts.staged} staged · {unstagedTotal} unstaged kept</span>
+              <button
+                type="button"
+                className="scm-link"
+                disabled={!canCommit}
+                title={`Stage and commit all ${total} changed files`}
+                onClick={() => void commit(true)}
+              >
+                Commit all ({total})
+              </button>
+            </div>
+          )}
           <button className="scm-review" disabled={total === 0} onClick={review}>
             <Icon name="agent" size={13} /> Review all changes with the agent
           </button>
         </div>
+
+        {pendingDiscard && (
+          <div className="scm__confirm" role="alertdialog" aria-label="Confirm discard changes">
+            <span>{pendingDiscard.prompt}</span>
+            <div className="scm__confirm-actions">
+              <button type="button" className="btn btn--ghost" disabled={Boolean(scm.busy)} onClick={() => setPendingDiscard(null)}>Cancel</button>
+              <button type="button" className="btn btn--solid" disabled={Boolean(scm.busy)} onClick={confirmDiscard}>Discard</button>
+            </div>
+          </div>
+        )}
 
         {(scm.busy || scm.error || notice) && (
           <div className="scm__status" role={scm.error ? 'alert' : 'status'}>
@@ -420,10 +507,10 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
           <Icon name="chevron" size={12} /><span>{title}</span><span className="scm-count">{count}</span>
         </button>
         <span className="scm-group__actions">
-          {group !== 'staged' && group !== 'conflicts' && <button className="scm-tool" title="Discard all changes" disabled={busy} onClick={() => onDiscard(files)}><Icon name="retry" size={13} /></button>}
+          {group !== 'staged' && group !== 'conflicts' && <button type="button" className="scm-tool" aria-label="Discard all changes" title="Discard all changes" disabled={busy} onClick={() => onDiscard(files)}><Icon name="trash" size={12} /></button>}
           {staged
-            ? <button className="scm-tool" title="Unstage all" disabled={busy} onClick={onUnstageAll}><Icon name="close" size={12} /></button>
-            : <button className="scm-tool" title="Stage all" disabled={busy} onClick={onStageAll}><Icon name="plus" size={13} /></button>}
+            ? <button type="button" className="scm-tool" aria-label="Unstage all" title="Unstage all" disabled={busy} onClick={onUnstageAll}><Icon name="close" size={12} /></button>
+            : <button type="button" className="scm-tool" aria-label="Stage all" title="Stage all" disabled={busy} onClick={onStageAll}><Icon name="plus" size={13} /></button>}
         </span>
       </header>
       {open && <ul className="scm-files">
@@ -438,10 +525,10 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
                 {dir && <span className="scm-file__dir">{dir}</span>}
               </button>
               <span className="scm-file__actions">
-                {!staged && group !== 'conflicts' && <button className="scm-tool" title={file.status === '?' ? 'Delete untracked file' : 'Discard changes'} disabled={busy} onClick={() => onDiscard([file])}><Icon name={file.status === '?' ? 'trash' : 'retry'} size={12} /></button>}
+                {!staged && group !== 'conflicts' && <button type="button" className="scm-tool" aria-label={file.status === '?' ? 'Delete untracked file' : 'Discard changes'} title={file.status === '?' ? 'Delete untracked file' : 'Discard changes'} disabled={busy} onClick={() => onDiscard([file])}><Icon name="trash" size={12} /></button>}
                 {staged
-                  ? <button className="scm-tool" title="Unstage" disabled={busy} onClick={() => onUnstage([file.path])}><Icon name="close" size={11} /></button>
-                  : <button className="scm-tool" title={group === 'conflicts' ? 'Mark resolved (stage)' : 'Stage'} disabled={busy} onClick={() => onStage([file.path])}><Icon name={group === 'conflicts' ? 'check' : 'plus'} size={12} /></button>}
+                  ? <button type="button" className="scm-tool" aria-label="Unstage" title="Unstage" disabled={busy} onClick={() => onUnstage([file.path])}><Icon name="close" size={11} /></button>
+                  : <button type="button" className="scm-tool" aria-label={group === 'conflicts' ? 'Mark resolved (stage)' : 'Stage'} title={group === 'conflicts' ? 'Mark resolved (stage)' : 'Stage'} disabled={busy} onClick={() => onStage([file.path])}><Icon name={group === 'conflicts' ? 'check' : 'plus'} size={12} /></button>}
               </span>
               <span className={`scm-badge scm-badge--${statusLetter(file, rowGroup) === '!' ? 'conflict' : file.status === '?' ? 'untracked' : file.status}`} title={statusLabel(file, rowGroup)}>{statusLetter(file, rowGroup)}</span>
             </li>
@@ -452,14 +539,35 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
   )
 }
 
-function FileDiff({ scm, selection, repo }: { scm: ReturnType<typeof useScm>; selection: ScmSelection | null; repo: ScmStatus }): ReactElement {
+/** Stable identity for the currently viewed diff; changing it resets scroll and clears stale lines. */
+export function scmSelectionKey(selection: ScmSelection | null): string {
+  if (!selection) return ''
+  return `${selection.group}:${selection.commit?.hash ?? ''}:${selection.path}`
+}
+
+export function FileDiff({ scm, selection, repo }: { scm: Pick<ReturnType<typeof useScm>, 'call'>; selection: ScmSelection | null; repo: Pick<ScmStatus, 'staged' | 'unstaged' | 'counts'> }): ReactElement {
   const [lines, setLines] = useState<RpcRecord[] | null>(null)
   const [error, setError] = useState('')
+  const sourceRef = useRef<HTMLPreElement>(null)
+  const selectionKey = scmSelectionKey(selection)
+  const lastSelectionKey = useRef('')
+  // Reset scroll whenever the user picks a different file/commit so a prior
+  // horizontal or vertical offset never clips the start of the next diff.
+  useEffect(() => {
+    const el = sourceRef.current
+    if (!el) return
+    el.scrollTop = 0
+    el.scrollLeft = 0
+  }, [selectionKey])
   // Re-read when the file's status changes (stage/unstage moves its diff).
   const version = selection ? JSON.stringify([repo.staged.find(f => f.path === selection.path), repo.unstaged.find(f => f.path === selection.path), repo.counts]) : ''
   useEffect(() => {
-    if (!selection) { setLines(null); return }
+    if (!selection) { lastSelectionKey.current = ''; setLines(null); return }
     let current = true
+    if (lastSelectionKey.current !== selectionKey) {
+      lastSelectionKey.current = selectionKey
+      setLines(null)
+    }
     setError('')
     const params = selection.commit
       ? { path: selection.path, commit: selection.commit.hash, ...(selection.commit.origPath ? { orig_path: selection.commit.origPath } : {}) }
@@ -468,7 +576,7 @@ function FileDiff({ scm, selection, repo }: { scm: ReturnType<typeof useScm>; se
       .then(result => { if (current) setLines(Array.isArray(result.lines) ? result.lines as RpcRecord[] : []) })
       .catch(failure => { if (current) { setLines([]); setError(failure instanceof Error ? failure.message : String(failure)) } })
     return () => { current = false }
-  }, [selection?.path, selection?.group, selection?.commit?.hash, version, scm.call])
+  }, [selectionKey, version, scm.call])
   if (!selection) return <section className="scm__diff scm__diff--empty"><p className="studio-muted">Select a file to see its changes.</p></section>
   const visible = (lines ?? []).filter(line => line.kind !== 'file')
   return (
@@ -477,10 +585,10 @@ function FileDiff({ scm, selection, repo }: { scm: ReturnType<typeof useScm>; se
         <span>{selection.path}</span>
         <em>{selection.commit ? `Commit ${selection.commit.short}` : selection.group === 'staged' ? 'Staged' : selection.group === 'untracked' ? 'New file' : selection.group === 'conflicts' ? 'Conflict' : 'Working tree'}</em>
       </header>
-      <pre className="change-review__source" tabIndex={0} role="region" aria-label="Diff contents">
-        {lines === null && <span role="status">Loading…</span>}
-        {error && <span role="alert">{error}</span>}
-        {lines !== null && !error && visible.length === 0 && <span>No textual changes (binary file or mode change).</span>}
+      <pre ref={sourceRef} className="change-review__source" tabIndex={0} role="region" aria-label="Diff contents">
+        {lines === null && <span className="change-review__state studio-muted" role="status">Loading…</span>}
+        {error && <span className="change-review__state studio-error" role="alert">{error}</span>}
+        {lines !== null && !error && visible.length === 0 && <span className="change-review__state studio-muted">No textual changes (binary file or mode change).</span>}
         {visible.map((line, index) => (
           <span key={index} className={`studio-diff-${text(line.kind)}`}>
             <span className="diff-gutter" aria-hidden="true">{typeof line.oldLine === 'number' ? line.oldLine : ''}</span>
@@ -493,28 +601,71 @@ function FileDiff({ scm, selection, repo }: { scm: ReturnType<typeof useScm>; se
   )
 }
 
-function BranchList({ scm, onDone }: { scm: ReturnType<typeof useScm>; onDone: () => void }): ReactElement {
+function BranchList({ scm, triggerRef, onDone }: { scm: ReturnType<typeof useScm>; triggerRef?: { readonly current: HTMLButtonElement | null }; onDone: () => void }): ReactElement {
   const [branches, setBranches] = useState<ScmBranch[] | null>(null)
   const [name, setName] = useState('')
   const [filter, setFilter] = useState('')
+  const listRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     let current = true
     void scm.call('git.branches').then(result => { if (current) setBranches(Array.isArray(result.branches) ? result.branches as ScmBranch[] : []) }).catch(failure => { if (current) { setBranches([]); scm.setError(failure instanceof Error ? failure.message : String(failure)) } })
     return () => { current = false }
   }, [scm.call])
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return
+    const onOutside = (event: MouseEvent): void => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (listRef.current?.contains(target) || triggerRef?.current?.contains(target)) return
+      onDone()
+    }
+    const onEscape = (event: globalThis.KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        onDone()
+        triggerRef?.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', onOutside)
+    window.addEventListener('keydown', onEscape, true)
+    return () => {
+      document.removeEventListener('mousedown', onOutside)
+      window.removeEventListener('keydown', onEscape, true)
+    }
+  }, [onDone, triggerRef])
   const switchTo = async (branch: string, create = false): Promise<void> => {
     const result = await scm.act(create ? 'Creating branch…' : 'Switching branch…', 'git.switch', { branch, create })
     if (result) onDone()
   }
   const shown = (branches ?? []).filter(branch => !filter || branch.name.toLowerCase().includes(filter.toLowerCase()))
   return (
-    <div className="scm-branches" role="dialog" aria-label="Branches">
-      <input value={filter} placeholder="Filter branches…" aria-label="Filter branches" onChange={event => setFilter(event.target.value)} autoFocus />
+    <div
+      ref={listRef}
+      className="scm-branches"
+      role="dialog"
+      aria-label="Branches"
+      onKeyDown={event => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          onDone()
+          triggerRef?.current?.focus()
+        }
+      }}
+    >
+      <div className="scm-branches__head">
+        <input value={filter} placeholder="Filter branches…" aria-label="Filter branches" onChange={event => setFilter(event.target.value)} autoFocus />
+        <button type="button" className="scm-tool" aria-label="Close branches" title="Close branches (Esc)" onClick={onDone}>
+          <Icon name="close" size={12} />
+        </button>
+      </div>
       <ul>
         {branches === null && <li className="studio-muted">Loading branches…</li>}
+        {branches !== null && shown.length === 0 && <li className="studio-muted">No matching branches.</li>}
         {shown.map(branch => (
           <li key={branch.name}>
-            <button disabled={branch.current || Boolean(scm.busy)} onClick={() => void switchTo(branch.name)}>
+            <button type="button" disabled={branch.current || Boolean(scm.busy)} onClick={() => void switchTo(branch.name)}>
               <Icon name={branch.current ? 'check' : 'branch'} size={12} />
               <span>{branch.name}</span>
               <small>{branch.updated}</small>
@@ -524,7 +675,7 @@ function BranchList({ scm, onDone }: { scm: ReturnType<typeof useScm>; onDone: (
       </ul>
       <form className="scm-branches__new" onSubmit={event => { event.preventDefault(); if (name.trim()) void switchTo(name.trim(), true) }}>
         <input value={name} placeholder="New branch name" aria-label="New branch name" spellCheck={false} onChange={event => setName(event.target.value)} />
-        <button className="btn" disabled={!name.trim() || Boolean(scm.busy)}>Create</button>
+        <button type="submit" className="btn" disabled={!name.trim() || Boolean(scm.busy)}>Create</button>
       </form>
     </div>
   )

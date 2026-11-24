@@ -28,9 +28,14 @@ function ageLabel(updatedAt: string): string {
 
 export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null {
   if (!snap.searchOpen) return null
+  return <SessionSearchDialog snap={snap} />
+}
+
+function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
   const [needle, setNeedle] = useState('')
   const [cursor, setCursor] = useState(0)
   const ref = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   useDialogFocus(ref)
 
   // Debounced live search: 250ms after the last keystroke, ≥2 chars. The
@@ -44,6 +49,13 @@ export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null
   }, [needle])
 
   const hits = snap.searchResults
+  useEffect(() => {
+    setCursor(value => (hits.length === 0 ? 0 : Math.min(value, hits.length - 1)))
+  }, [hits.length])
+  useEffect(() => {
+    const active = listRef.current?.querySelector<HTMLElement>('.srow.is-sel')
+    active?.scrollIntoView?.({ block: 'nearest' })
+  }, [cursor, hits.length])
   // openSession stopped being a mid-turn no-op: it now navigates, or hands
   // the target to another window so the running turn keeps its connection —
   // which is exactly what the sidebar rows already do. The gate here was
@@ -102,7 +114,7 @@ export function SessionSearch({ snap }: { snap: Snapshot }): ReactElement | null
             }
           }}
         />
-        <div className="palette__list">
+        <div className="palette__list" ref={listRef}>
           {hits.length === 0 && needle.trim().length >= 2 && !snap.searchSearching && (
             <div className="search-status" role="status">{snap.searchError ? `Search failed: ${snap.searchError}` : 'No messages match.'}</div>
           )}

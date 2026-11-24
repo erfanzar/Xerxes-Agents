@@ -11,7 +11,7 @@
  * Applications folder) it says why and offers the release page.
  */
 
-import { useState, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import { Icon } from './Icon.js'
 import { Markdown } from './markdown.js'
@@ -23,6 +23,7 @@ function megabytes(bytes: number | undefined): string {
 
 export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): ReactElement | null {
   const [notesOpen, setNotesOpen] = useState(false)
+  const visible = Boolean(update && update.phase !== 'checking')
   const busy = update?.phase === 'downloading' || update?.phase === 'restarting'
   const onEscape = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Escape' || (!notesOpen && busy)) return
@@ -31,6 +32,19 @@ export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): R
     if (notesOpen) setNotesOpen(false)
     else void store.appUpdateAction('dismiss')
   }
+  useEffect(() => {
+    if (!visible) return
+    const onWindowKeyDown = (event: globalThis.KeyboardEvent): void => {
+      if (event.defaultPrevented || event.key !== 'Escape' || (!notesOpen && busy)) return
+      if (typeof document !== 'undefined' && document.querySelector('dialog[open], [role="dialog"], [role="menu"]')) return
+      event.stopPropagation()
+      event.preventDefault()
+      if (notesOpen) setNotesOpen(false)
+      else void store.appUpdateAction('dismiss')
+    }
+    window.addEventListener('keydown', onWindowKeyDown)
+    return () => window.removeEventListener('keydown', onWindowKeyDown)
+  }, [visible, notesOpen, busy])
   if (!update || update.phase === 'checking') return null
   if (update.phase === 'current') {
     return (
@@ -42,10 +56,16 @@ export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): R
     )
   }
   const version = update.version ? `Xerxes Agents ${update.version}` : 'A new version'
-  const percent = update.total ? Math.min(100, Math.round(((update.received ?? 0) / update.total) * 100)) : 0
+  const hasTotal = typeof update.total === 'number' && update.total > 0
+  const percent = hasTotal ? Math.min(100, Math.round(((update.received ?? 0) / update.total!) * 100)) : 0
+  const downloadDetail = hasTotal
+    ? `Downloading… ${percent}% (${megabytes(update.received ?? 0)} of ${megabytes(update.total)})`
+    : typeof update.received === 'number' && update.received > 0
+      ? `Downloading… ${megabytes(update.received)}`
+      : 'Downloading…'
   const title = update.phase === 'error' ? 'The update did not install.' : update.phase === 'restarting' ? 'Restarting to finish the update…' : `${version} is available.`
   const detail = update.phase === 'available' ? (update.installable ? 'It installs in the background, then restarts the app; your tasks carry on.' : update.reason ?? 'It cannot be installed from here.')
-    : update.phase === 'downloading' ? `Downloading… ${percent}% (${megabytes(update.received)} of ${megabytes(update.total)})`
+    : update.phase === 'downloading' ? downloadDetail
     : update.phase === 'restarting' ? 'The new version opens in a moment.'
     : update.message
   return (

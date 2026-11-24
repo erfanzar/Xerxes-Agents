@@ -117,7 +117,13 @@ export interface NocturnePalette {
   diffFoldBg: string
 }
 
-export const NOCTURNE_DARK: NocturnePalette = {
+/** Terminal-only Nocturne extensions kept off the shared desktop CSS token contract. */
+export interface TerminalNocturnePalette extends NocturnePalette {
+  /** Modal backdrop scrim — dark wash on dark themes, subtle paper wash on light themes. */
+  scrim: string
+}
+
+export const NOCTURNE_DARK: TerminalNocturnePalette = {
   working: '#6ea8fe',
   done: '#57ca85',
   failed: '#f47067',
@@ -129,6 +135,7 @@ export const NOCTURNE_DARK: NocturnePalette = {
   failedText: '#e39a94',
 
   backdrop: '#000000',
+  scrim: '#000000cc',
   sunken: '#08080c',
   screen: '#101216',
   chrome: '#101216',
@@ -182,7 +189,7 @@ export const NOCTURNE_DARK: NocturnePalette = {
  * the background swapped, so the tinted card grounds are near-white washes
  * rather than the dark theme's near-black ones.
  */
-export const NOCTURNE_LIGHT: NocturnePalette = {
+export const NOCTURNE_LIGHT: TerminalNocturnePalette = {
   working: '#1f64b5',
   done: '#197a4f',
   failed: '#b4233f',
@@ -194,6 +201,7 @@ export const NOCTURNE_LIGHT: NocturnePalette = {
   failedText: '#8f1c33',
 
   backdrop: '#ffffff',
+  scrim: '#e6e8ecdd',
   sunken: '#eef1f6',
   screen: '#f7f8fa',
   chrome: '#f1f3f5',
@@ -343,7 +351,7 @@ export interface Theme {
    * state cards. Screens read `ds` for those and `color` for everything else,
    * so nothing has to hard-code a hex.
    */
-  ds: NocturnePalette
+  ds: TerminalNocturnePalette
   brand: ThemeBrand
   bannerLogo: string
   bannerHero: string
@@ -484,6 +492,15 @@ function bestReadableAnsiColor(red: number, green: number, blue: number): number
   return bestColor
 }
 
+function rgbToHex(r: number, g: number, b: number): string {
+  return '#' + ((1 << 24) | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff)).toString(16).slice(1)
+}
+
+function ansi256ToHex(colorNumber: number): string {
+  const [r, g, b] = xtermEightBitRgb(colorNumber)
+  return rgbToHex(r, g, b)
+}
+
 function normalizeAnsiForeground(color: string): string {
   const rgb = parseHex(color)
   if (!rgb) {
@@ -495,7 +512,7 @@ function normalizeAnsiForeground(color: string): string {
     relativeLuminance(richRgb[0], richRgb[1], richRgb[2]) > ANSI_LIGHT_MAX_LUMINANCE
       ? bestReadableAnsiColor(rgb[0], rgb[1], rgb[2])
       : richAnsi
-  return `ansi256(${ansi})`
+  return ansi256ToHex(ansi)
 }
 
 // ── Night Standard defaults ─────────────────────────────────────────────
@@ -528,7 +545,7 @@ const cleanPromptSymbol = (s: string | undefined, fallback: string) => {
  * decided once, on screen 10 of the canvas, and each product role says which
  * step it borrows rather than re-picking a hex near it.
  */
-function nocturneTheme(ds: NocturnePalette): Theme {
+function nocturneTheme(ds: TerminalNocturnePalette): Theme {
   return {
     color: {
       // Markdown's h1 rides `accent` and h2/h3 + bold ride `primary`, so
@@ -569,7 +586,7 @@ function nocturneTheme(ds: NocturnePalette): Theme {
       sessionBorder: ds.hairline,
 
       statusBg: ds.screen,
-      overlayBg: ds.screen,
+      overlayBg: ds.card,
       statusFg: ds.title,
       statusGood: ds.done,
       statusWarn: ds.needsInput,
@@ -718,7 +735,7 @@ export function normalizeThemeForAnsiLightTerminal(
     color[key] = normalizeAnsiForeground(color[key])
   }
   for (const key of ANSI_MUTED_FOREGROUNDS) {
-    color[key] = `ansi256(${ANSI_MUTED_BUCKET})`
+    color[key] = ansi256ToHex(ANSI_MUTED_BUCKET)
   }
   return { ...theme, color }
 }
@@ -899,7 +916,7 @@ export function themeForMode(theme: Theme, mode?: string): Theme {
       completionMetaCurrentBg: activeSurface,
       sessionBorder: border,
       statusBg: ds.screen,
-      overlayBg: ds.screen,
+      overlayBg: ds.card,
       selectionBg: selection,
       shellDollar: accent
     }

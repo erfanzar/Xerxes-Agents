@@ -157,7 +157,7 @@ export function createBridge(transport: BridgeTransport) {
     return transport.invoke('desktop:remote', action, cleanParams(params))
   },
   accounts(action: unknown, params: unknown = {}): Promise<unknown> {
-    if (typeof action !== 'string' || !['list', 'login', 'relogin', 'create-gemini', 'copy-login-link', 'activate', 'usage', 'sync-review', 'sync', 'remove', 'agy-status', 'agy-sync-review', 'agy-sync', 'agy-login-start', 'agy-login-complete', 'agy-login-cancel'].includes(action)) {
+    if (typeof action !== 'string' || !['list', 'login', 'relogin', 'create-gemini', 'copy-login-link', 'activate', 'usage', 'sync-review', 'sync', 'remove', 'agy-status', 'agy-sync-review', 'agy-sync'].includes(action)) {
       return Promise.reject(new Error('Unknown provider account action'))
     }
     return transport.invoke('desktop:accounts', action, cleanParams(params))

@@ -888,7 +888,7 @@ export function SwarmOverlay({ sessionId, t }: { sessionId?: string | null; t: T
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       height="100%"
       justifyContent="center"
       left={0}

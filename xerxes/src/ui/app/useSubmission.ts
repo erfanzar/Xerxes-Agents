@@ -233,7 +233,14 @@ export function useSubmission(opts: UseSubmissionOptions) {
           if (r.code !== 0 || !out) {
             sys(`exit ${r.code}`)
           }
-          if (!sid || turnController.interrupted) return
+          const activeAcp = getUiState().acpBinding
+          const isAntigravityAcp = Boolean(
+            activeAcp &&
+            activeAcp.connected &&
+            activeAcp.transport !== 'native' &&
+            activeAcp.provider === 'antigravity'
+          )
+          if (!sid || turnController.interrupted || isAntigravityAcp) return
           // Shell output is data from the user's command, never an instruction
           // to rerun it. Persist it in the next model turn as well as showing it.
           turnController.clearStatusTimer()

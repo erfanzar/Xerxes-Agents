@@ -39,7 +39,7 @@ export interface XerxesBridge {
   voice?(action: string, params?: Record<string, unknown>): Promise<unknown>
   remote?(action: string, params?: Record<string, unknown>): Promise<unknown>
   /** create-gemini accepts user-entered label/apiKey/model only; replies never contain a key. */
-  accounts?(action: 'list' | 'login' | 'relogin' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove' | 'agy-status' | 'agy-sync-review' | 'agy-sync' | 'agy-login-start' | 'agy-login-complete' | 'agy-login-cancel', params?: Record<string, unknown>): Promise<unknown>
+  accounts?(action: 'list' | 'login' | 'relogin' | 'create-gemini' | 'copy-login-link' | 'activate' | 'usage' | 'sync-review' | 'sync' | 'remove' | 'agy-status' | 'agy-sync-review' | 'agy-sync', params?: Record<string, unknown>): Promise<unknown>
   onAccountLogin?(handler: (event: { type: 'authorization_url'; login_id: string; url: string }) => void): () => void
   /** Browser tab (sandboxed native view; on SSH workspaces its traffic leaves from the host) and port forwards. */
   browser?(action: 'state' | 'open' | 'back' | 'forward' | 'reload' | 'stop' | 'bounds' | 'external' | 'reset' | 'ports' | 'port-forward' | 'unforward', params?: Record<string, unknown>): Promise<unknown>
@@ -119,6 +119,24 @@ declare global {
 
 // ── Transcript blocks ───────────────────────────────────────────────────
 
+export interface ToolDiffEntry {
+  readonly adds?: number
+  readonly dels?: number
+  readonly path?: string
+  readonly old_text?: string
+  readonly new_text?: string
+  readonly oldText?: string
+  readonly newText?: string
+}
+
+export type ToolContentBlock =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly data: string; readonly mime_type: string; readonly uri?: string }
+  | { readonly type: 'audio'; readonly data: string; readonly mime_type: string }
+  | { readonly type: 'resource'; readonly uri: string; readonly mime_type?: string; readonly text?: string; readonly blob?: string }
+  | { readonly type: 'resource_link'; readonly uri: string; readonly name?: string; readonly title?: string; readonly description?: string; readonly mime_type?: string }
+  | { readonly type: 'terminal'; readonly terminal_id: string }
+
 export interface ToolItem {
   readonly id: string
   readonly verb: string
@@ -127,13 +145,25 @@ export interface ToolItem {
   readonly state: 'working' | 'done' | 'failed'
   /** Exact tool identifier plus unabridged request/result for inspection. */
   readonly name: string
+  readonly title?: string
+  readonly kind?: string
   readonly input: string
   readonly output: string
   readonly error?: string
   /** Workspace file the call touched, for edit-family tools. */
   readonly path?: string
   /** Line delta for edit-family calls, shown as `+a −d` on the trail row. */
-  readonly diff?: { readonly adds: number; readonly dels: number }
+  readonly diff?: {
+    readonly adds: number
+    readonly dels: number
+    readonly path?: string
+    readonly old_text?: string
+    readonly new_text?: string
+  }
+  /** All structured file diffs attached to a multi-file tool call/update/result. */
+  readonly diffs?: readonly ToolDiffEntry[]
+  /** Rich structured content blocks (`image`, `resource`, `resource_link`, `terminal`, etc.). */
+  readonly contentBlocks?: readonly ToolContentBlock[]
 }
 
 /** Who wrote a prompt the human did not: a goal round, a monitor, a schedule, a harness reminder. */
@@ -320,6 +350,10 @@ export interface TaskQuestion {
   readonly requestId: string
   readonly toolCallId: string
   readonly items: readonly QuestionItem[]
+  readonly mode?: 'form' | 'url'
+  readonly url?: string
+  readonly elicitationId?: string
+  readonly message?: string
 }
 
 // ── Workspace tabs ──────────────────────────────────────────────────────
@@ -359,6 +393,8 @@ export interface PlanState {
 export interface QueueItem {
   readonly id: number
   readonly text: string
+  /** Transcript block id of the optimistic user bubble mirrored by `steer()`. */
+  readonly blockId?: number
   readonly images?: ReadonlyArray<{
     readonly id: string
     readonly mediaType: string

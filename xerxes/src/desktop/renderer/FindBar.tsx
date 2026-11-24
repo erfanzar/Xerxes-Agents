@@ -21,10 +21,18 @@ export function FindBar(): ReactElement | null {
   const [open, setOpen] = useState(false)
   const [needle, setNeedle] = useState('')
   const [missed, setMissed] = useState(false)
+  const [searched, setSearched] = useState(false)
   const input = useRef<HTMLInputElement>(null)
+  const lastQuery = useRef('')
 
   useEffect(() => {
-    const show = (): void => { setOpen(true); setMissed(false); requestAnimationFrame(() => input.current?.select()) }
+    const show = (): void => {
+      setOpen(true)
+      setMissed(false)
+      setSearched(false)
+      lastQuery.current = ''
+      requestAnimationFrame(() => input.current?.select())
+    }
     window.addEventListener('xerxes:find', show)
     return () => window.removeEventListener('xerxes:find', show)
   }, [])
@@ -45,16 +53,30 @@ export function FindBar(): ReactElement | null {
 
   const close = (): void => {
     setOpen(false)
+    setMissed(false)
+    setSearched(false)
+    lastQuery.current = ''
     window.getSelection()?.removeAllRanges()
   }
 
   const step = (backwards: boolean): void => {
     const text = needle.trim()
-    if (!text) return
+    if (!text) {
+      setMissed(false)
+      setSearched(false)
+      lastQuery.current = ''
+      window.getSelection()?.removeAllRanges()
+      return
+    }
+    // Collapse first when the query changes: Chromium resumes from the current
+    // selection, so a stale range from the previous term skips matches above it.
+    if (text !== lastQuery.current) {
+      window.getSelection()?.removeAllRanges()
+      lastQuery.current = text
+    }
     const find = (window as unknown as { find?: Finder }).find
-    // Collapse first: Chromium resumes from the current selection, so a
-    // stale range from the previous term skips matches above it.
     const hit = find ? find(text, false, backwards, true) : false
+    setSearched(true)
     setMissed(!hit)
   }
 
@@ -68,17 +90,30 @@ export function FindBar(): ReactElement | null {
         spellCheck={false}
         placeholder="Find in this view…"
         aria-label="Find in this view"
-        onChange={event => { setNeedle(event.target.value); setMissed(false) }}
+        onChange={event => {
+          const next = event.target.value
+          setNeedle(next)
+          setMissed(false)
+          setSearched(false)
+          if (next.trim() !== lastQuery.current) {
+            lastQuery.current = ''
+            window.getSelection()?.removeAllRanges()
+          }
+        }}
         onKeyDown={event => {
           if (event.key !== 'Enter') return
           event.preventDefault()
           step(event.shiftKey)
         }}
       />
-      <button aria-label="Previous match" title="Previous match (⇧⏎)" onClick={() => step(true)}><Icon name="arrowUp" size={13} /></button>
-      <button aria-label="Next match" title="Next match (⏎)" onClick={() => step(false)}><Icon name="arrowDown" size={13} /></button>
-      {missed && <span className="findbar__miss" role="status">Not in view</span>}
-      <button aria-label="Close find" title="Close (esc)" onClick={close}><Icon name="close" size={13} /></button>
+      <button type="button" aria-label="Previous match" title="Previous match (⇧⏎)" onClick={() => step(true)}><Icon name="arrowUp" size={13} /></button>
+      <button type="button" aria-label="Next match" title="Next match (⏎)" onClick={() => step(false)}><Icon name="arrowDown" size={13} /></button>
+      {missed ? (
+        <span className="findbar__miss" role="status" aria-live="polite">Not in view</span>
+      ) : searched && needle.trim() ? (
+        <span className="findbar__miss" role="status" aria-live="polite" data-found="true">Match found</span>
+      ) : null}
+      <button type="button" aria-label="Close find" title="Close (esc)" onClick={close}><Icon name="close" size={13} /></button>
     </div>
   )
 }

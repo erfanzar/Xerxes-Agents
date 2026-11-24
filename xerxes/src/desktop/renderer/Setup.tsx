@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 
 import { setupReadiness } from './setupReadiness.js'
+import { localMachineLabel } from './runModeView.js'
 import { Icon } from './Icon.js'
 
 const SETUP_KEY = 'xerxes.desktop.setup.v1'
@@ -14,24 +15,41 @@ export function setupTodo(state: { readonly workspace: boolean; readonly runtime
   const left = [!state.workspace && 'a folder', !state.runtime && 'a runtime connection', !state.model && 'how Xerxes runs'].filter(Boolean)
   return left.length ? `Choose ${left.join(' and ')}` : 'Almost there'
 }
+/** Whether the setup checklist should render, separating first-run auto-show from explicit "Open…" requests. */
+export function shouldShowSetup(input: {
+  readonly visible: boolean
+  readonly manualOpen: boolean
+  readonly noWorkspace: boolean
+  readonly settingsOpen: boolean
+  readonly ready: boolean
+}): boolean {
+  return !input.noWorkspace && !input.settingsOpen && (input.manualOpen || (input.visible && !input.ready))
+}
 /** A resumable checklist; configuring providers uses the existing credential editor. */
 export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null {
   const [visible, setVisible] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
   const dialog = useRef<HTMLElement>(null)
   const state = setupReadiness(snap)
-  // A checklist whose every step is already ✓ is a speed bump, not an
-  // onboarding. It is also gated on having a workspace, so the genuine
-  // first run never saw it — you picked a folder and only THEN were told
-  // to "set up before your first task". Show it only when there is
-  // something to do; mark it done otherwise so it never comes back.
-  const shown = visible && !snap.noWorkspace && !snap.settingsOpen && !state.ready
+  // First-run auto-show only appears when something still needs setup, while
+  // explicit Settings → Setup checklist → Open… always reopens it to inspect status.
+  const shown = shouldShowSetup({
+    visible,
+    manualOpen,
+    noWorkspace: Boolean(snap.noWorkspace),
+    settingsOpen: snap.settingsOpen,
+    ready: state.ready,
+  })
   useEffect(() => {
     try {
       setVisible(localStorage.getItem(SETUP_KEY) !== 'done')
     } catch {
       setVisible(true)
     }
-    const reopen = () => setVisible(true)
+    const reopen = () => {
+      setVisible(true)
+      setManualOpen(true)
+    }
     window.addEventListener('xerxes:setup', reopen)
     return () => window.removeEventListener('xerxes:setup', reopen)
   }, [])
@@ -42,6 +60,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
       /* This window still dismisses in restricted storage environments. */
     }
     setVisible(false)
+    setManualOpen(false)
   }
   useEffect(() => {
     if (!shown) return
@@ -59,17 +78,18 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
     return () => { document.removeEventListener('keydown', handle, true); if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
   }, [shown])
   if (!shown) return null
+  const machine = localMachineLabel()
   return (
-    <div className="setup-backdrop">
+    <div className="setup-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) finish() }}>
     <section ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" className="setup-card" aria-label="Get started with Xerxes">
       <div className="setup-heading">
         <div>
-          <strong>Make yourself at home.</strong>
+          <strong>{state.ready ? 'Setup checklist' : 'Make yourself at home.'}</strong>
           {/* Only the unfinished steps are ever shown now, so naming them
               beats claiming there are "a few things" when there is one. */}
-          <p>{setupTodo(state)} — then you can start.</p>
+          <p>{state.ready ? 'Workspace, runtime, and model are all ready.' : `${setupTodo(state)} — then you can start.`}</p>
         </div>
-        <button onClick={finish}>Later</button>
+        <button onClick={finish}>{state.ready ? 'Close' : 'Later'}</button>
       </div>
       <div className="setup-steps">
         <div>
@@ -91,7 +111,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
         <div>
           <span>{state.model ? <Icon name="check" size={12} /> : '3'}</span>
           <strong>How Xerxes runs</strong>
-          <p>{snap.model || 'Private: local-model on this Mac. Hybrid: a cloud model leads, local-model does the file work here. Cloud: a cloud model.'}</p>
+          <p>{snap.model || `Private: a local model on ${machine}. Hybrid: a cloud model leads, a local model does the file work here. Cloud: a cloud model.`}</p>
           <button disabled={!state.runtime} onClick={() => store.openSettings('models')}>
             {state.model ? 'Change mode' : 'Choose a mode'}
           </button>
@@ -105,7 +125,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
           Review tool permissions
         </button>
         <button className="studio-primary" disabled={!state.ready} onClick={finish}>
-          Start working <Icon name="arrow" size={12} />
+          {state.ready ? 'Done' : <>Start working <Icon name="arrow" size={12} /></>}
         </button>
       </footer>
     </section>

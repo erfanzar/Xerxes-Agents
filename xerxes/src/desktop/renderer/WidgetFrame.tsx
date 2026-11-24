@@ -684,14 +684,26 @@ export function ArtifactWidgetEmbed(props: {
   const [loading, setLoading] = useState<boolean>(true)
   const [reloadNonce, setReloadNonce] = useState<number>(0)
 
-  // Auto-refresh inline embed if ArtifactTool updates this artifact mid-session.
+  // Auto-refresh inline embed if ArtifactTool (or an ACP file write for `agy:` embeds) updates it mid-session.
   useEffect(() => {
     if (typeof window === 'undefined' || !window.xerxes?.onEvent) return
+    const agyFilename = artifactId.startsWith('agy:') ? artifactId.slice('agy:'.length) : ''
     return window.xerxes.onEvent(({ type, payload }) => {
-      if (type !== 'tool_result' || payload.name !== 'ArtifactTool' || payload.permitted === false) return
-      const resultText = text(payload.result)
-      if (resultText.includes(`id ${artifactId},`)) {
-        setReloadNonce(n => n + 1)
+      if (type !== 'tool_result' || payload.permitted === false) return
+      const name = text(payload.name)
+      if (name === 'ArtifactTool') {
+        const resultText = text(payload.result)
+        if (resultText.includes(`id ${artifactId},`)) {
+          setReloadNonce(n => n + 1)
+        }
+        return
+      }
+      if (agyFilename && (name === 'write_file' || name === 'edit_file' || name === 'FileWriteTool' || name === 'FileEditTool')) {
+        const resultText = text(payload.result)
+        const argsText = text(payload.arguments)
+        if (resultText.includes(agyFilename) || argsText.includes(agyFilename)) {
+          setReloadNonce(n => n + 1)
+        }
       }
     })
   }, [artifactId])

@@ -122,6 +122,21 @@ html[data-theme='light'] {
      code, numbers, and chrome. */
   --prose: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --r-sm: 3px; --r-md: 4px; --r-lg: 6px;
+  /* Shared z-index scale: modals (150) always sit above findbar (140) and decision-dock (135),
+     context menus (160) sit above dismiss scrims (124) and modals, while portal pickers (1000)
+     and confirmation dialogs (1200) layer cleanly above everything. */
+  --z-popover: 40;
+  --z-drawer: 70;
+  --z-banner: 80;
+  --z-toast: 90;
+  --z-sheet: 120;
+  --z-scrim: 124;
+  --z-dock: 135;
+  --z-find: 140;
+  --z-modal: 150;
+  --z-menu: 160;
+  --z-picker: 1000;
+  --z-dialog: 1200;
 }
 
 /* Optional font-size steps chosen in Settings → General. */
@@ -331,7 +346,7 @@ button.hchip--btn { cursor: pointer; }
 }
 .stop:hover { background: var(--x-failed-bg); }
 
-.stream { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 16px 20px; }
+.stream { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior-y: contain; padding: 16px 20px; }
 .stream__col { max-width: 84ch; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 
 /* user = prompt line */
@@ -741,7 +756,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
    resolved to x=0 and sat in the window corner over the sidebar. */
 .wsmenu {
   position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
-  z-index: 130; width: 340px;
+  z-index: 160; z-index: var(--z-menu, 160); width: 340px;
   background: var(--x-screen); border: 1px solid var(--x-hairline);
   border-radius: var(--r-sm); padding: 4px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
@@ -764,11 +779,10 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .menu__sep { height: 1px; background: var(--x-divider); margin: 3px 5px; }
 
 /* ── Context menu (mockup 08) — mock.css .menu block byte-for-byte ── */
-/* Above its own clear dismiss scrim (.backdrop--clear, z 124): at z 41 the
-   scrim covered the menu, so every click on Copy ID or Delete landed on the
-   scrim and only closed the menu. Same stacking as .wsmenu. */
+/* Above its own clear dismiss scrim (.backdrop--clear, z 124) and modal
+   backdrops (.backdrop, z 150) so context menus always receive clicks. */
 .menu {
-  position: fixed; z-index: 130; width: 216px;
+  position: fixed; z-index: 160; z-index: var(--z-menu, 160); width: 216px;
   background: var(--x-screen); border: 1px solid var(--x-hairline);
   border-radius: var(--r-sm); padding: 3px; box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
 }
@@ -1009,6 +1023,9 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .md li { margin: 0 0 4px; display: flex; gap: 8px; align-items: baseline; }
 .md li::before { content: '·'; color: var(--x-meta); flex: 0 0 auto; }
 .md li.md__check::before { content: ''; }
+.md ol { margin: 0 0 6px; padding-left: 22px; list-style: decimal; }
+.md ol > li { display: list-item; }
+.md ol > li::before { content: none; }
 .md__box {
   flex: 0 0 auto; width: 11px; height: 11px; border-radius: 2px;
   border: 1px solid var(--x-separator); font-size: 8px; line-height: 1;
@@ -1122,11 +1139,11 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 /* ── Settings modal ───────────────────────────────────────────────── */
 .backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
-  /* Above .studio-backdrop (sheets, z-120): Settings can be opened from
-     inside a sheet, and a dialog under its own scrim is unusable. */
-  display: flex; align-items: center; justify-content: center; z-index: 125;
+  /* Above .studio-backdrop (120), .decision-dock (135), and .findbar (140):
+     Settings and dialogs always outrank in-page overlays. */
+  display: flex; align-items: center; justify-content: center; z-index: 150; z-index: var(--z-modal, 150);
 }
-.backdrop--clear { background: transparent; z-index: 124; }
+.backdrop--clear { background: transparent; z-index: 124; z-index: var(--z-scrim, 124); }
 .modal {
   width: 780px; max-width: calc(100vw - 80px); height: 540px;
   background: var(--x-screen); border: 1px solid var(--x-hairline);
@@ -1284,7 +1301,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
   position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
   /* Must outrank .studio-backdrop (sheets, z-120) — a palette mounted under
      the scrim still takes focus and still runs what you type into it. */
-  width: 560px; z-index: 130; background: var(--x-screen);
+  width: 560px; z-index: 160; z-index: var(--z-menu, 160); background: var(--x-screen);
   border: 1px solid var(--x-hairline); border-radius: var(--r-sm);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5); overflow: hidden;
 }
@@ -1505,7 +1522,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 
 /* ── Find in page (⌘F) ────────────────────────────────────────────── */
 .findbar {
-  position: fixed; top: 52px; right: 24px; z-index: 140;
+  position: fixed; top: 52px; right: 24px; z-index: var(--z-find, 140);
   display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px;
   background: var(--x-popover, var(--x-screen)); border: 1px solid var(--x-hairline);
   border-radius: 10px; box-shadow: var(--mac-shadow, 0 12px 36px rgba(0, 0, 0, 0.4));
@@ -1527,7 +1544,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 /* Pending decision, floated above a surface that hides the chat column. */
 .decision-dock {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
-  z-index: 135; width: min(84ch, calc(100vw - 48px));
+  z-index: var(--z-dock, 135); width: min(84ch, calc(100vw - 48px));
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45); border-radius: var(--r-sm);
 }
 .decision-dock > .approval, .decision-dock > .qcard { margin: 0; max-width: none; width: 100%; }
@@ -1612,13 +1629,21 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .md__mermaid[data-state='error'] .md__mermaid-note { color: var(--x-failed-text, var(--x-failed)); }
 .modelpop__error { margin: 4px 10px 8px; color: var(--x-fail-text, var(--x-failed)); font: var(--ui-small) var(--sans); }
 
-/* Return to the tail after reading back. */
+/* Return to the tail after reading back (zero-flow-height sticky dock so toggling
+   the button never alters .stream.scrollHeight or triggers bottom-overscroll loops). */
+.jump-latest-dock {
+  position: sticky; bottom: 14px; left: 0; right: 0; height: 0; overflow: visible;
+  display: flex; justify-content: center; align-items: flex-end; pointer-events: none; z-index: 6;
+}
 .jump-latest {
   position: sticky; bottom: 8px; left: 50%; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 6px; z-index: 5;
   padding: 5px 12px; border: 1px solid var(--x-hairline); border-radius: 999px;
   background: var(--x-card); color: var(--x-title); cursor: pointer;
   font: var(--ui-small) var(--sans); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.jump-latest-dock > .jump-latest {
+  position: static; left: auto; bottom: auto; transform: none; pointer-events: auto;
 }
 .jump-latest:hover { border-color: var(--x-focus); }
 .jump-latest svg { transform: rotate(90deg); }
@@ -1789,7 +1814,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .raillist__cap--standalone { margin-top: 18px; }
 
 /* Confirmations belong to the viewport, never the bottom of a scrolling settings list. */
-.action-dialog-layer { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; }
+.action-dialog-layer { position: fixed; inset: 0; z-index: var(--z-dialog, 1200); display: grid; place-items: center; padding: 20px; }
 .action-dialog-scrim { position: absolute; inset: 0; background: color-mix(in srgb, var(--x-backdrop) 76%, transparent); }
 .action-dialog { position: relative; width: min(100%, 520px); max-height: calc(100dvh - 40px); overflow: auto; box-sizing: border-box; border: 1px solid var(--x-focus); border-radius: var(--r-lg, 10px); padding: 22px; background: var(--x-card); color: var(--x-prose); box-shadow: 0 18px 70px color-mix(in srgb, var(--x-backdrop) 80%, transparent); }
 .action-dialog header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
@@ -2881,6 +2906,134 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 }
 .acp-cap-row[data-supported='true'] .acp-cap-row__value {
   color: var(--x-title);
+}
+.acp-cap-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--x-secondary);
+  font: 500 12px/1 var(--sans);
+  cursor: pointer;
+}
+.acp-cap-toggle.is-on {
+  border-color: var(--x-accent);
+  color: var(--x-title);
+}
+.acp-cap-toggle__track {
+  display: inline-flex;
+  align-items: center;
+  width: 26px;
+  height: 15px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--x-separator);
+  transition: background 120ms ease;
+}
+.acp-cap-toggle.is-on .acp-cap-toggle__track {
+  background: var(--x-accent);
+  justify-content: flex-end;
+}
+.acp-cap-toggle__thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--x-screen);
+}
+.acp-cap-select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 6px;
+  background: var(--x-sunken);
+  color: var(--x-title);
+  font: 400 12px/1 var(--sans);
+}
+.acp-optpop__group {
+  padding: 6px 10px 2px;
+  font: 600 10.5px/1.2 var(--sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--x-meta);
+}
+.acp-banner__termcmd {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.acp-banner__termcmd code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.approval__diffs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.qcard__url-wrap {
+  padding: 8px 10px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 8px;
+  background: var(--x-sunken);
+  margin: 6px 0;
+}
+.qcard__url {
+  display: block;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--x-title);
+  word-break: break-all;
+}
+.vq__skip--danger {
+  color: var(--x-danger);
+}
+.execution__blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.execution__block {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--x-hairline);
+  border-radius: 6px;
+  background: var(--x-sunken);
+  font: 400 12px/1.4 var(--sans);
+  color: var(--x-secondary);
+}
+.execution__block--resource {
+  flex-direction: column;
+  align-items: stretch;
+}
+.execution__block-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.execution__block-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--x-accent);
+  font: 500 12px/1.3 var(--sans);
+  cursor: pointer;
+  text-align: left;
+}
+.execution__block-link:hover {
+  text-decoration: underline;
+}
+.execution__block-meta {
+  color: var(--x-meta);
+  font-size: 11px;
 }
 
 /* ── Right Rail Environment Section (Claude Code flat list) ────────── */

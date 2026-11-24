@@ -108,7 +108,7 @@ export function CustomAgentEditor({ t, onClose }: { t: Theme; onClose: () => voi
   const count = Math.max(1, size.height - (wide ? 12 : 18))
   const start = Math.max(0, selected - count + 1)
   const active = rows[selected]
-  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
+  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor={t.ds.scrim} alignItems="center" justifyContent="center">
     <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={generating ? 'Generate a specialist' : draft ? `Edit agent · ${draft.id}` : 'Custom agents'} subtitle={generating ? 'Describe the job. Your current model writes the first draft.' : draft ? 'Review the instructions before saving.' : `${rows.length} specialists · this project`} />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}

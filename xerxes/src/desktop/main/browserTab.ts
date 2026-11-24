@@ -14,6 +14,7 @@
 
 import { session as electronSession, shell, WebContentsView, type BrowserWindow, type Session } from 'electron'
 
+import { planBrowserViewPlacement, type BrowserViewSize } from './browserTabPlacement.js'
 import { resolveSuspendedBrowserUrl } from './perfHygiene.js'
 import { browserLoadError, browserUrl, type RemoteNetwork } from './remoteNetwork.js'
 
@@ -43,6 +44,11 @@ export class BrowserTab {
   private view: WebContentsView | null = null
   private bounds: BrowserBounds | null = null
   private shown = false
+  private hostHidden = false
+  private attached = false
+  private viewVisible = false
+  private lastPaintedSize: BrowserViewSize | null = null
+  private repaintTimer: ReturnType<typeof setTimeout> | undefined
   private error: string | undefined
   private closed = false
   private generation = 0
@@ -158,11 +164,18 @@ export class BrowserTab {
     }
   }
 
+  private clearRepaintTimer(): void {
+    if (this.repaintTimer !== undefined) {
+      clearTimeout(this.repaintTimer)
+      this.repaintTimer = undefined
+    }
+  }
+
   private scheduleSuspend(): void {
     if (this.closed || !this.view || this.hiddenSuspendMs <= 0 || this.suspendTimer !== undefined) return
     this.suspendTimer = setTimeout(() => {
       this.suspendTimer = undefined
-      if (!this.shown || !this.bounds || this.error) this.suspend()
+      if (!this.shown || this.hostHidden || !this.bounds || this.error) this.suspend()
     }, this.hiddenSuspendMs)
     this.suspendTimer.unref?.()
   }
@@ -207,7 +220,21 @@ export class BrowserTab {
     const ok = rect && ['x', 'y', 'width', 'height'].every(key => typeof rect[key] === 'number' && Number.isFinite(rect[key] as number))
     this.bounds = ok ? { x: Math.round(rect.x as number), y: Math.round(rect.y as number), width: Math.max(0, Math.round(rect.width as number)), height: Math.max(0, Math.round(rect.height as number)) } : null
     this.shown = Boolean(this.bounds && this.bounds.width > 0 && this.bounds.height > 0)
-    if (this.shown && !this.view && !this.routeSetup && this.suspendedUrl && !this.closed) {
+    if (this.shown && !this.hostHidden && !this.view && !this.routeSetup && this.suspendedUrl && !this.closed) {
+      const restoreUrl = this.suspendedUrl
+      void this.open(restoreUrl).catch(() => {})
+      return
+    }
+    this.place()
+  }
+
+  /**
+   * Hide or restore the browser view when the owning workspace surface or host
+   * window is hidden/occluded, without discarding the panel's last known bounds.
+   */
+  setHostHidden(hidden: boolean): void {
+    this.hostHidden = hidden
+    if (!hidden && this.shown && !this.view && !this.routeSetup && this.suspendedUrl && !this.closed) {
       const restoreUrl = this.suspendedUrl
       void this.open(restoreUrl).catch(() => {})
       return
@@ -216,19 +243,52 @@ export class BrowserTab {
   }
 
   private place(): void {
+    this.clearRepaintTimer()
     const view = this.view
     if (!view || this.window.isDestroyed()) return
-    if (this.shown && this.bounds && !this.error) {
+    const plan = planBrowserViewPlacement({
+      shown: this.shown,
+      hostHidden: this.hostHidden,
+      hasError: Boolean(this.error),
+      bounds: this.bounds,
+      wasVisible: this.viewVisible,
+      lastPaintedSize: this.lastPaintedSize,
+    })
+    if (plan.action === 'show') {
       this.clearSuspendTimer()
       // Re-adding keeps it above the workspace view that the window may have restacked.
       this.window.contentView.addChildView(view)
-      view.setBounds(this.bounds)
+      this.attached = true
       view.setVisible(true)
       if (!view.webContents.isDestroyed()) {
+        view.webContents.setBackgroundThrottling(false)
         view.webContents.setAudioMuted(false)
       }
+      if (plan.nudgeBounds) {
+        view.setBounds(plan.nudgeBounds)
+        const expectedView = view
+        this.repaintTimer = setTimeout(() => {
+          this.repaintTimer = undefined
+          if (this.closed || this.window.isDestroyed() || this.view !== expectedView || !this.viewVisible || !this.bounds) return
+          expectedView.setBounds(this.bounds)
+          if (!expectedView.webContents.isDestroyed()) expectedView.webContents.invalidate?.()
+        }, 16)
+        this.repaintTimer.unref?.()
+      } else {
+        view.setBounds(plan.bounds)
+        if (plan.invalidate && !view.webContents.isDestroyed()) {
+          view.webContents.invalidate?.()
+        }
+      }
+      this.viewVisible = true
+      this.lastPaintedSize = { width: plan.bounds.width, height: plan.bounds.height }
     } else {
+      this.viewVisible = false
       view.setVisible(false)
+      if (this.attached && !this.window.isDestroyed()) {
+        this.window.contentView.removeChildView(view)
+        this.attached = false
+      }
       if (!view.webContents.isDestroyed()) {
         view.webContents.setBackgroundThrottling(true)
         view.webContents.setAudioMuted(true)
@@ -254,6 +314,7 @@ export class BrowserTab {
    */
   suspend(): void {
     this.clearSuspendTimer()
+    this.clearRepaintTimer()
     const view = this.view
     if (!view) return
     const contents = !view.webContents.isDestroyed() ? view.webContents : null
@@ -268,7 +329,10 @@ export class BrowserTab {
     this.proxyPort = undefined
     this.retryUrl = ''
     this.view = null
-    if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view)
+    this.viewVisible = false
+    this.lastPaintedSize = null
+    if (this.attached && !this.window.isDestroyed()) this.window.contentView.removeChildView(view)
+    this.attached = false
     if (contents) {
       void contents.session.clearCache().catch(() => {})
       void contents.session.closeAllConnections().catch(() => {})
@@ -280,6 +344,7 @@ export class BrowserTab {
   /** Drop the page and its session (used when the workspace changes or closes). */
   reset(): void {
     this.clearSuspendTimer()
+    this.clearRepaintTimer()
     const view = this.view
     this.generation++
     this.routeSetup = undefined
@@ -288,9 +353,12 @@ export class BrowserTab {
     this.suspendedUrl = ''
     this.suspendedTitle = ''
     this.view = null
+    this.viewVisible = false
+    this.lastPaintedSize = null
     this.error = undefined
     if (view) {
-      if (!this.window.isDestroyed()) this.window.contentView.removeChildView(view)
+      if (this.attached && !this.window.isDestroyed()) this.window.contentView.removeChildView(view)
+      this.attached = false
       if (!view.webContents.isDestroyed()) {
         void view.webContents.session.clearCache().catch(() => {})
         void view.webContents.session.closeAllConnections().catch(() => {})

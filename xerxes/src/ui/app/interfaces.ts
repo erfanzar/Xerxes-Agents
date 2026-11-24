@@ -3,7 +3,7 @@
 import type { MutableRefObject, ReactNode, RefObject, SetStateAction } from 'react'
 
 import type { GatewayClient } from '../gatewayClient.js'
-import type { SessionCloseResponse, LiveSessionStatus } from '../gatewayTypes.js'
+import type { AcpSessionBinding, SessionCloseResponse, LiveSessionStatus } from '../gatewayTypes.js'
 import type { QueuedMessage } from '../domain/queuedMessage.js'
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
@@ -13,6 +13,7 @@ import type { PasteEvent } from '../protocol/paste.js'
 import type { Theme } from '../theme.js'
 import type {
   ApprovalReq,
+  ClarifyAnswerPayload,
   ClarifyReq,
   ConfirmReq,
   DetailsMode,
@@ -178,6 +179,7 @@ export interface SessionTab {
 }
 
 export interface UiState {
+  acpBinding: AcpSessionBinding | null
   disconnected?: boolean
   bgTasks: Set<string>
   busy: boolean
@@ -292,7 +294,7 @@ export interface UseComposerStateResult {
 }
 
 export interface InputHandlerActions {
-  answerClarify: (answer: string) => void
+  answerClarify: (answer: ClarifyAnswerPayload) => void
   appendMessage: (msg: Msg) => void
   die: () => void
   dispatchQueuedSubmission: (message: QueuedMessage) => void
@@ -421,8 +423,8 @@ export interface SlashHandlerContext {
 }
 
 export interface AppLayoutActions {
-  answerApproval: (choice: string) => void
-  answerClarify: (answer: string) => void
+  answerApproval: (choice: string, optionId?: string) => void
+  answerClarify: (answer: ClarifyAnswerPayload) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
   clearSelection: () => void

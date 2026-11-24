@@ -44,7 +44,7 @@ import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTra
 import { subagentCardRows } from '../lib/subagentCards.js'
 import { toolTrailSeconds } from '../lib/toolRun.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
-import type { Msg, PanelSection, SlashCatalog } from '../types.js'
+import type { ClarifyAnswerPayload, Msg, PanelSection, SlashCatalog } from '../types.js'
 
 import { attachClipboardImage } from './clipboardPaste.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
@@ -819,7 +819,7 @@ export function useMainApp(gw: GatewayClient) {
   }, [stdout, ui.sid])
 
   const answerClarify = useCallback(
-    (answer: string) => {
+    (answer: ClarifyAnswerPayload) => {
       const clarify = overlay.clarify
 
       if (!clarify) {
@@ -828,13 +828,37 @@ export function useMainApp(gw: GatewayClient) {
 
       const label = toolTrailLabel('clarify')
       const isProviderFlow = clarify.source === 'provider'
+      const isMultiAnswerMap = typeof answer === 'object' && answer !== null && !Array.isArray(answer)
+      const displayAnswer = isMultiAnswerMap
+        ? Object.entries(answer)
+            .map(([key, value]) => {
+              const formatted = Array.isArray(value) ? value.join(', ') : value
+              const matched = clarify.questions?.find(q => q.id === key)
+              return matched && (clarify.questions?.length ?? 0) > 1
+                ? `${matched.question}: ${formatted}`
+                : formatted
+            })
+            .filter(Boolean)
+            .join('\n')
+        : Array.isArray(answer)
+          ? answer.join(', ')
+          : answer
+      const hasAnswer = isMultiAnswerMap
+        ? Object.values(answer).some(value => (Array.isArray(value) ? value.length > 0 : Boolean(value)))
+        : Array.isArray(answer)
+          ? answer.length > 0
+          : Boolean(answer)
 
       if (!isProviderFlow) {
         turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
         patchTurnState({ turnTrail: turnController.turnTools })
       }
 
-      rpc<ClarifyRespondResponse>('clarify.respond', { answer, request_id: clarify.requestId })
+      const rpcPayload = isMultiAnswerMap
+        ? { answers: answer, request_id: clarify.requestId }
+        : { answer, request_id: clarify.requestId }
+
+      rpc<ClarifyRespondResponse>('clarify.respond', rpcPayload)
         .then(r => {
           if (!r || r.ok === false) {
             // Keep the overlay on failure: the daemon is still blocked on
@@ -850,7 +874,7 @@ export function useMainApp(gw: GatewayClient) {
             return
           }
 
-          if (answer && !isProviderFlow) {
+          if (hasAnswer && !isProviderFlow) {
             if (clarify.toolId) {
               turnController.persistedToolIds.add(clarify.toolId)
             } else {
@@ -862,8 +886,8 @@ export function useMainApp(gw: GatewayClient) {
               text: '',
               tools: [buildToolTrailLine('clarify', clarify.question)]
             })
-            appendMessage({ role: 'user', text: answer })
-          } else if (!answer && !isProviderFlow) {
+            appendMessage({ role: 'user', text: displayAnswer })
+          } else if (!hasAnswer && !isProviderFlow) {
             // Esc / Ctrl+C cancel: persist the question + options as a system
             // line (not a transient "prompt cancelled" flash) so the prompt
             // survives on screen as standard output, matching the timeout path.
@@ -876,7 +900,7 @@ export function useMainApp(gw: GatewayClient) {
           // Provider setup can synchronously emit the next question before
           // the answer RPC resolves. Only close the prompt we answered; this
           // preserves the new provider step instead of leaving a blank TUI.
-          if (clearClarifyOverlay(clarify.requestId) && answer) {
+          if (clearClarifyOverlay(clarify.requestId) && hasAnswer) {
             patchUiState({ status: 'running…' })
           }
         })
@@ -1153,18 +1177,27 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const answerApproval = useCallback(
-    (choice: string) => {
+    (choice: string, optionId?: string) => {
       const requestId = overlay.approval?.requestId
 
       if (!requestId) {
         return
       }
 
-      return respondWith('approval.respond', { choice, request_id: requestId, session_id: ui.sid }, () => {
-        clearApprovalOverlay(requestId)
-        patchTurnState({ outcome: choice === 'deny' ? 'denied' : `approved (${choice})` })
-        patchUiState({ status: 'running…' })
-      })
+      return respondWith(
+        'approval.respond',
+        {
+          choice,
+          ...(optionId ? { option_id: optionId } : {}),
+          request_id: requestId,
+          session_id: ui.sid
+        },
+        () => {
+          clearApprovalOverlay(requestId)
+          patchTurnState({ outcome: choice === 'deny' || choice === 'reject' ? 'denied' : `approved (${choice})` })
+          patchUiState({ status: 'running…' })
+        }
+      )
     },
     [overlay.approval?.requestId, respondWith, ui.sid]
   )

@@ -7,7 +7,7 @@ import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect
 
 import { CommandPalette, PickerLayer, DelegationMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
-import { useTranscriptScroll } from './transcriptScroll.js'
+import { captureHistoryScrollAnchor, restoreHistoryScrollAnchor, useTranscriptScroll, type HistoryScrollAnchor } from './transcriptScroll.js'
 import { resolveExternalAcpCatalog, showsImmortalsForSession, store, type CompletionHintItem, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
@@ -23,7 +23,7 @@ import { CodeRunContext } from './codeRun.js'
 import { Dictation } from './Dictation.js'
 import { draftKey, readDraft, transitionDraft, writeDraft, acceptedDraft } from './drafts.js'
 import { PANEL_SIZES, PanelDivider, panelWidthOf, usePanelLayout, vibesPanelLayout } from './layout.js'
-import { useDialogFocus } from './dialogFocus.js'
+import { handleDialogEscape, useDialogFocus } from './dialogFocus.js'
 import { keyedActivityGroups, isDisclosedActivity } from "./activityGroups.js"
 import { approvalTitle, thinkingHeadingOf } from './activityPhrase.js'
 import { ToolCallRow } from "./Execution.js"
@@ -43,7 +43,7 @@ import {
   isExternalAcpBinding,
   transportBadgeLabel,
 } from './AcpRuntimePicker.js'
-import { RuntimeBrandIcon } from './BrandMark.js'
+import { RuntimeBrandIcon, XerxesLogoMark } from './BrandMark.js'
 import { XerxesBrandEmblem } from './XerxesSprites.js'
 import { closeTab, openTab, panelOfKey, retitleTab, tabKey, type RailTab } from './railTabs.js'
 import { activityFleetRows, agentState, agentKindLabel } from './AgentRoster.js'
@@ -77,7 +77,12 @@ import { RemoteWorkspaceGate } from './RemoteWorkspaceGate.js'
 import { DesktopNavigation, DesktopSheet, DesktopPage, DesktopRail, PAGE_TITLES, RAIL_PANELS, useDesktopNavigation, useVibesStyle, workspaceFilePath, type DesktopPageName, type DesktopPanel, type RailPanel } from './DesktopPanels.js'
 import { desktopCall } from './desktopRpc.js'
 import { ConnectedReflectionCard, LearnedBadge } from './LearnedPanel.js'
-import { pullRequestPrompt } from './GitPanel.js'
+import {
+  ANTIGRAVITY_PULL_REQUEST_PROMPT,
+  isAntigravityAcpSession,
+  prefillComposerPrompt,
+  pullRequestPrompt,
+} from './GitPanel.js'
 import { elapsedOf } from './duration.js'
 import { swarmMemberCounts } from './swarmState.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
@@ -190,6 +195,59 @@ function compactTokensOf(tokens: number): string {
 
 export { parseGoal }
 
+/** Width of the centered conversation column plus minimum symmetric side gutter for inline ThreadDetailsCard. */
+export const CONVERSATION_COLUMN_WIDTH = 728
+export const THREAD_DETAILS_MIN_GUTTER = 276
+
+/**
+ * True only when the window has enough real gutter room on BOTH sides of the
+ * centered 728px conversation column to float `ThreadDetailsCard` inline
+ * without overlapping chat prose, and no rail/launcher/sub-agent view is open.
+ */
+export function isDetailsInlineEligible(params: {
+  readonly vibesStyle: boolean
+  readonly isVscode: boolean
+  readonly noWorkspace: boolean
+  readonly railOpen: boolean
+  readonly railLauncherOpen: boolean
+  readonly agentOpen: boolean
+  readonly focused: boolean
+  readonly sidebarWidth: number
+  readonly windowWidth: number
+}): boolean {
+  if (!params.vibesStyle || params.isVscode || params.noWorkspace || params.railOpen || params.railLauncherOpen || params.agentOpen) {
+    return false
+  }
+  const requiredWidth = (params.focused ? 0 : params.sidebarWidth) + CONVERSATION_COLUMN_WIDTH + 2 * THREAD_DETAILS_MIN_GUTTER
+  return params.windowWidth >= requiredWidth
+}
+
+/** Prune workspace-scoped `files:*` tabs on cwd change and session-scoped `docs:*` tabs on thread change. */
+export function pruneRailTabsForContext(
+  tabs: readonly RailTab[],
+  activeKey: string | null | undefined,
+  opts: { readonly cwdChanged: boolean; readonly sessionChanged: boolean },
+): { readonly tabs: readonly RailTab[]; readonly activeKey: string | null | undefined } {
+  const isStaleTab = (tab: Pick<RailTab, 'panel' | 'item'>): boolean =>
+    (opts.cwdChanged && tab.panel === 'files' && Boolean(tab.item)) ||
+    (opts.sessionChanged && tab.panel === 'docs' && Boolean(tab.item))
+  const isStaleKey = (key: string | null | undefined): boolean =>
+    Boolean(
+      key &&
+      ((opts.cwdChanged && key.startsWith('files:')) ||
+        (opts.sessionChanged && key.startsWith('docs:'))),
+    )
+  const nextTabs = tabs.filter(tab => !isStaleTab(tab))
+  const activeDropped = isStaleKey(activeKey)
+  if (nextTabs.length === tabs.length && !activeDropped) {
+    return { tabs, activeKey }
+  }
+  const nextActive = activeDropped
+    ? (nextTabs.length > 0 ? tabKey(nextTabs[nextTabs.length - 1]!) : null)
+    : activeKey
+  return { tabs: nextTabs, activeKey: nextActive }
+}
+
 export function App(): ReactElement {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot)
 
@@ -261,6 +319,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   /** An artifact to open in Artifacts (a transcript card's id); the count re-opens the same one. */
   const [artifactTarget, setArtifactTarget] = useState({ id: '', count: 0 })
   const [selectedAgent, setSelectedAgent] = useState('')
+  const [page, setPage] = useState<DesktopPageName | null>(null)
   // Each side panel has its own default and minimum width (layout.tsx PANEL_SIZES);
   // the chat always keeps 320px, so a wide default narrows to fit instead of
   // taking the window. Only when even the panel's minimum does not fit does
@@ -275,7 +334,18 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const railKey = railChoice === undefined ? (vibesStyle ? null : (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null)) : railChoice
   const rail: RailPanel | null = railKey ? panelOfKey(railKey) : null
   if (rail) lastRailRef.current = rail
-  const detailsInlineEligible = vibesStyle && !isVscodeHost() && !snap.noWorkspace && rail === null && !railLauncherOpen && windowWidth >= 1220
+  const agentOpen = page === null && Boolean(selectedAgent)
+  const detailsInlineEligible = isDetailsInlineEligible({
+    vibesStyle,
+    isVscode: isVscodeHost(),
+    noWorkspace: Boolean(snap.noWorkspace),
+    railOpen: rail !== null,
+    railLauncherOpen,
+    agentOpen,
+    focused,
+    sidebarWidth: layout.sidebarWidth,
+    windowWidth,
+  })
   const detailsMode: 'inline' | 'popover' = detailsInlineEligible ? 'inline' : 'popover'
   const detailsOpen = detailsChoice === null ? detailsInlineEligible : detailsChoice
   // The entry tab (Activity) is shown before anything was opened explicitly; active swarms appear in the tab bar automatically unless closed.
@@ -284,14 +354,22 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const shownTabs = activeSwarmIdentity && dismissedActiveSwarmId !== activeSwarmIdentity && !entryTabs.some(tab => tab.panel === 'swarm')
     ? openTab(entryTabs, { panel: 'swarm' }, railKey ?? undefined)
     : entryTabs
+  const railTabsRef = useRef(shownTabs)
+  railTabsRef.current = shownTabs
+  const railChoiceRef = useRef(railChoice)
+  railChoiceRef.current = railChoice
+  const prevCwdRef = useRef(snap.cwd)
+  const prevSessionIdRef = useRef(snap.currentId)
   /** Open (or focus) a tab: a section, or one item inside it such as an artifact. Null closes the panel. */
   const setRail = (next: RailPanel | null, item?: string, title?: string): void => {
     if (next === null) {
+      setFilesExpanded(false)
       setRailLauncherOpen(false)
       setRailChoice(null)
       return
     }
     if (next === 'swarm') setDismissedActiveSwarmId('')
+    if (next === 'btw' && !store.getSnapshot().sideQuestionOpen) store.openSideQuestion()
     setRailLauncherOpen(false)
     lastRailRef.current = next
     const tab: RailTab = item ? { panel: next, item, ...(title ? { title } : {}) } : { panel: next }
@@ -319,7 +397,6 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // In a narrow window (the VS Code sidebar, a small app window) the task
   // list is a drawer over the conversation: picking a task closes it.
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
-  const [page, setPage] = useState<DesktopPageName | null>(null)
   // Back / Forward navigation history across opened threads and pages (T3 Code sidebar chrome).
   type NavEntry = { readonly sessionId: string; readonly page: DesktopPageName | null }
   const [navHistory, setNavHistory] = useState<{ readonly entries: readonly NavEntry[]; readonly index: number }>(() => ({
@@ -396,8 +473,6 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     setTerminalDrawerHeight,
     toggleTerminalDrawer,
     toggleRightPanel,
-    railMaximized: filesExpanded,
-    ...(!contextRequiresFullWidth ? { toggleRailMaximized: () => setFilesExpanded(value => !value) } : {}),
     canGoBack,
     canGoForward,
     goBack,
@@ -411,7 +486,6 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // Git sits in the rail like the others; only its expanded diff view takes the window.
   const contextFull = Boolean((rail || railLauncherOpen) && (filesExpanded || contextRequiresFullWidth))
   // An open sub-agent takes the conversation's place, composer and cards included.
-  const agentOpen = page === null && Boolean(selectedAgent)
   const chatHidden = { contextFull, any: contextFull || agentOpen }
   // The divider never drags past the width that hides the divider itself
   // (inspectorMax above): the chat always keeps 320px.
@@ -452,13 +526,44 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     if (target.sessionId) navigate(null)
   }), [])
   useEffect(() => {
-    setPanel(null); setPage(null); setSelectedAgent('')
+    setPanel(null); setPage(null); setSelectedAgent(''); setFilesExpanded(false)
+    const cwdChanged = prevCwdRef.current !== snap.cwd
+    const sessionChanged = prevSessionIdRef.current !== snap.currentId
+    prevCwdRef.current = snap.cwd
+    prevSessionIdRef.current = snap.currentId
+    if (cwdChanged || sessionChanged) {
+      const pruned = pruneRailTabsForContext(railTabsRef.current, railChoiceRef.current, { cwdChanged, sessionChanged })
+      if (pruned.tabs !== railTabsRef.current) setRailTabs(pruned.tabs)
+      if (pruned.activeKey !== railChoiceRef.current) {
+        setRailChoice(pruned.activeKey)
+        if (pruned.activeKey === null) lastRailRef.current = null
+      }
+      if (cwdChanged) {
+        setFilesTarget({ path: '', count: 0 })
+        setReviewPath('')
+      }
+      if (sessionChanged) {
+        setArtifactTarget({ id: '', count: 0 })
+      }
+    }
     const pending = pendingArtifact.current
     if (pending && (!pending.sessionId || pending.sessionId === snap.currentId)) { pendingArtifact.current = null; navigate('docs', pending.artifactId) }
   }, [snap.cwd, snap.currentId, snap.sessionOpenRevision])
   useEffect(() => { if (snap.learningOpen) { setPage('extensions'); setPanel(null); setFilesExpanded(false); if (contextRequiresFullWidth) setRail(null) } }, [snap.learningOpenRevision])
   useEffect(() => { if (snap.swarmOpen) { setPage(null); setPanel(null); setSelectedAgent(''); setRail('swarm') } }, [snap.swarmOpenRevision])
-  useEffect(() => { if (snap.sideQuestionOpen) { setPage(null); setPanel(null); setSelectedAgent(''); setRail('btw') } }, [snap.sideQuestionOpenRevision])
+  useEffect(() => {
+    if (snap.sideQuestionOpen) {
+      setPage(null); setPanel(null); setSelectedAgent(''); setRail('btw')
+    } else if (rail === 'btw' || railTabsRef.current.some(tab => tab.panel === 'btw')) {
+      const next = closeTab(railTabsRef.current, 'btw', railKey ?? 'btw')
+      setRailTabs(next.tabs)
+      setRailChoice(next.active)
+      if (next.active === null) {
+        setFilesExpanded(false)
+        lastRailRef.current = null
+      }
+    }
+  }, [snap.sideQuestionOpen, snap.sideQuestionOpenRevision])
   return (
     <DesktopNavigation.Provider value={navigate}><WidgetSessionContext.Provider value={snap.sessionKey}><WidgetOpenArtifactContext.Provider value={artifactId => navigate('docs', artifactId)}><ActivityVisible.Provider value={rail === 'activity'}><WindowChrome.Provider value={chrome}>
     <div className={`app atelier${trafficLights ? '' : ' app--no-traffic-lights'}${focused ? ' atelier--focus' : ''}${narrow ? ' app--narrow' : ''}`} style={{ '--sidebar-width': `${layout.sidebarWidth}px`, '--inspector-width': `${panelWidth}px` } as React.CSSProperties}>
@@ -481,6 +586,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
             setRailTabs(next.tabs)
             setRailChoice(next.active)
             if (next.active === null) {
+              setFilesExpanded(false)
               lastRailRef.current = null
               if (vibesStyle) setRailLauncherOpen(true)
             }
@@ -490,7 +596,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
           <RightPanelLauncher
             snap={snap}
             onPick={surface => navigate(surface)}
-            onClose={() => setRailLauncherOpen(false)}
+            onClose={() => { setFilesExpanded(false); setRailLauncherOpen(false) }}
             filesExpanded={filesExpanded}
             {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})}
           />
@@ -545,6 +651,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
             const next = closeTab(shownTabs, 'swarm', railKey ?? 'swarm')
             setRailTabs(next.tabs)
             setRailChoice(next.active)
+            if (next.active === null) setFilesExpanded(false)
           } else {
             store.openSwarmBoard()
           }
@@ -570,8 +677,6 @@ interface WindowChromeState {
   readonly setTerminalDrawerHeight?: (height: number) => void
   readonly toggleTerminalDrawer?: () => void
   readonly toggleRightPanel?: () => void
-  readonly railMaximized?: boolean
-  readonly toggleRailMaximized?: () => void
   readonly canGoBack?: boolean
   readonly canGoForward?: boolean
   readonly goBack?: () => void
@@ -783,8 +888,31 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
   const [starting, setStarting] = useState(false)
   // Every other aria-modal dialog in the renderer traps and restores focus;
   // this one shipped without it, so Tab walked out into the shell behind.
+  const dialogRef = useRef<HTMLDivElement>(null)
   const objectiveField = useRef<HTMLTextAreaElement>(null)
   useDialogFocus(objectiveField)
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (namingWorktree) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setNamingWorktree(false)
+        setWorktreeName('')
+        return
+      }
+      if (starting) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        return
+      }
+      const root = dialogRef.current
+      const ownsFocus = !root || root.contains(document.activeElement) || document.activeElement === document.body
+      handleDialogEscape(event, () => store.closeTaskModal(), ownsFocus)
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [namingWorktree, starting])
   const models = [...new Set([snap.model, ...snap.models.map(choice => choice.id)].filter(Boolean))]
   const presets = snap.agentPresets ?? []
   const selectedPreset = agentPreset || presets.find(row => row.isDefault && !row.broken)?.id || 'default'
@@ -798,8 +926,26 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
     void store.createWorktree(worktreeName)
   }
   return (
-    <div className="backdrop">
-      <div className="modal taskmodal" role="dialog" aria-modal="true" aria-label="New task" onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); event.stopPropagation(); store.closeTaskModal() } }}>
+    <div
+      className="backdrop"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !starting) store.closeTaskModal()
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="modal taskmodal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New task"
+        onKeyDown={event => {
+          if (event.key === 'Escape' && !event.defaultPrevented && !starting) {
+            event.preventDefault()
+            event.stopPropagation()
+            store.closeTaskModal()
+          }
+        }}
+      >
         <div className="modal__main">
           <h2 className="modal__title">New task</h2>
           <p className="modal__sub">Choose how you want to work, then describe your task.</p>
@@ -807,9 +953,10 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           <div className="field">
             <label>Workspace</label>
             <div className="seg" style={{ flexWrap: 'wrap' }}>
-              <button className="is-on" title={snap.cwd}>▣ {workspaceLabel(snap.cwd) || 'no workspace'}</button>
-              <button onClick={() => store.chooseWorkspace()} title="Open a different folder as the workspace"><Icon name="plus" size={13} /> different folder…</button>
+              <button type="button" className="is-on" title={snap.cwd}><Icon name="folder" size={13} /> {workspaceLabel(snap.cwd) || 'no workspace'}</button>
+              <button type="button" onClick={() => store.chooseWorkspace()} title="Open a different folder as the workspace"><Icon name="plus" size={13} /> different folder…</button>
               <button
+                type="button"
                 onClick={() => setNamingWorktree(value => !value)}
                 title="Create an isolated git worktree next to the repo and switch into it"
               >
@@ -825,7 +972,7 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
                   onChange={e => setWorktreeName(e.target.value)}
                   onKeyDown={e => {
                     if (e.key === 'Enter') { e.preventDefault(); submitWorktree() }
-                    if (e.key === 'Escape') { e.preventDefault(); setNamingWorktree(false); setWorktreeName('') }
+                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setNamingWorktree(false); setWorktreeName('') }
                   }}
                 />
               )}
@@ -850,8 +997,9 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           </div>
 
           <div className="field">
-            <label>Objective</label>
+            <label htmlFor="task-objective">Objective</label>
             <textarea
+              id="task-objective"
               ref={objectiveField}
               className="composer__input taskmodal__objective"
               rows={4}
@@ -874,6 +1022,7 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
               <div className="row__s">The agent proposes a checklist; you approve it before anything runs.</div>
             </div>
             <button
+              type="button"
               className={`switch${planFirst ? ' is-on' : ''}`}
               role="switch"
               aria-checked={planFirst}
@@ -883,8 +1032,8 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           </div>
 
           <div className="field">
-            <label>Model</label>
-            <select aria-label="Model" value={model} disabled={starting} onChange={event => setModel(event.target.value)}>
+            <label htmlFor="task-model">Model</label>
+            <select aria-label="Model" id="task-model" value={model} disabled={starting} onChange={event => setModel(event.target.value)}>
               {!model && <option value="">Choose a model</option>}
               {models.map(id => <option key={id} value={id}>{id}</option>)}
             </select>
@@ -901,8 +1050,8 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
 
           <div role="status" className="taskmodal__error">{snap.error}</div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn btn--ghost" disabled={starting} onClick={() => store.closeTaskModal()}>Cancel</button>
-            <button className="btn" disabled={starting || !objectiveText.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task'}</button>
+            <button type="button" className="btn btn--ghost" disabled={starting} onClick={() => store.closeTaskModal()}>Cancel</button>
+            <button type="button" className="btn btn--solid" disabled={starting || !objectiveText.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task'}</button>
           </div>
         </div>
       </div>
@@ -955,12 +1104,26 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
     const element = menuRef.current
     if (!element || !menu) return
     const previous = document.activeElement
-    const place = () => { const rect = element.getBoundingClientRect(); element.style.left = `${Math.max(8, Math.min(menu.x, window.innerWidth - rect.width - 8))}px`; element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - rect.height - 8))}px` }
-    place()
     element.querySelector<HTMLElement>('button,input')?.focus()
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
+  }, [menu?.key])
+  useLayoutEffect(() => {
+    const element = menuRef.current
+    if (!element || !menu) return
+    const place = (): void => {
+      const rect = element.getBoundingClientRect()
+      element.style.left = `${Math.max(8, Math.min(menu.x, window.innerWidth - rect.width - 8))}px`
+      element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - rect.height - 8))}px`
+    }
+    place()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null
+    observer?.observe(element)
     window.addEventListener('resize', place)
-    return () => { window.removeEventListener('resize', place); if(previous instanceof HTMLElement && previous.isConnected) previous.focus() }
-  }, [menu?.key, menu?.x, menu?.y, renaming])
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', place)
+    }
+  }, [menu?.key, menu?.x, menu?.y, renaming, confirmingDelete, menu?.pending, menu?.error])
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (renaming) inputRef.current?.select()
@@ -1600,23 +1763,40 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
                   onBlur={commitTitleRename}
                   onKeyDown={event => {
                     if (event.key === 'Enter') { event.preventDefault(); commitTitleRename() }
-                    else if (event.key === 'Escape') { event.preventDefault(); setRenamingTitle(false); setTitleDraft(taskTitle) }
+                    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setRenamingTitle(false); setTitleDraft(taskTitle) }
                   }}
                 />
               ) : (
-                <button
-                  type="button"
-                  className="chat__title t3-breadcrumb__thread"
-                  title="Double-click to rename · Click for thread actions"
-                  onDoubleClick={() => { if (snap.currentId) { setTitleDraft(taskTitle); setRenamingTitle(true) } }}
-                  onClick={event => {
-                    if (!snap.currentId) return
-                    const rect = event.currentTarget.getBoundingClientRect()
-                    store.openSessionMenu({ id: snap.currentId, key: snap.sessionKey || snap.currentId, title: taskTitle }, rect.left, rect.bottom + 4)
-                  }}
-                >
-                  <span className="t3-breadcrumb__thread-text">{taskTitle}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="chat__title t3-breadcrumb__thread"
+                    title={snap.currentId ? 'Double-click to rename thread' : undefined}
+                    onDoubleClick={() => { if (snap.currentId) { setTitleDraft(taskTitle); setRenamingTitle(true) } }}
+                    onContextMenu={event => {
+                      if (!snap.currentId) return
+                      event.preventDefault()
+                      store.openSessionMenu({ id: snap.currentId, key: snap.sessionKey || snap.currentId, title: taskTitle }, event.clientX, event.clientY)
+                    }}
+                  >
+                    <span className="t3-breadcrumb__thread-text">{taskTitle}</span>
+                  </button>
+                  {snap.currentId && (
+                    <button
+                      type="button"
+                      className="t3-icon-btn t3-breadcrumb__actions"
+                      aria-label="Thread actions"
+                      aria-haspopup="menu"
+                      title="Thread actions"
+                      onClick={event => {
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        store.openSessionMenu({ id: snap.currentId, key: snap.sessionKey || snap.currentId, title: taskTitle }, rect.left, rect.bottom + 4)
+                      }}
+                    >
+                      <T3Icon name="chevronDown" size={12} />
+                    </button>
+                  )}
+                </>
               )}
             </nav>
           )
@@ -1712,18 +1892,6 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
               >
                 <T3Icon name="panelRight" size={15} />
               </button>
-              {chrome.inspectorOpen && chrome.toggleRailMaximized && (
-                <button
-                  type="button"
-                  className={`t3-icon-btn${chrome.railMaximized ? ' is-selected' : ''}`}
-                  aria-pressed={Boolean(chrome.railMaximized)}
-                  aria-label={chrome.railMaximized ? 'Restore right panel size' : 'Maximize right panel'}
-                  title={chrome.railMaximized ? 'Restore right panel' : 'Maximize right panel'}
-                  onClick={chrome.toggleRailMaximized}
-                >
-                  <T3Icon name={chrome.railMaximized ? 'minimize' : 'maximize'} size={14} />
-                </button>
-              )}
             </div>
           )
         ) : (
@@ -1735,35 +1903,38 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
         )}
       </header>
 
-      {vibes && !onPage && chrome.detailsOpen && (
-        <ThreadDetailsCard
-          snap={snap}
-          mode={chrome.detailsMode ?? 'popover'}
-          onClose={() => chrome.toggleDetails?.()}
-          onNavigate={open}
-          onOpenTerminal={() => chrome.toggleTerminalDrawer?.()}
-        />
-      )}
+      {!onPage && !agent && snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
 
-      {page === 'xerxes' && <SupervisorPage />}
-      {page && page !== 'xerxes' && <DesktopPage panel={page} snap={snap} />}
-      {agent && !onPage && (agentRow
-        ? <AgentInspector key={snap.sessionKey + ':' + agentRow.id} row={agentRow} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} />
-        : <section className="agent-inspector agent-pane" aria-label="Agent inspector"><div className="stream"><div className="stream__col">
-            <p role="status">This agent is no longer available in this session.</p>
-            <button className="btn" onClick={() => openAgent('')}>Back to the conversation</button>
-          </div></div></section>)}
-      <div className="conversation-surface" hidden={page !== null || Boolean(agent)}>
-      {vibes && <div className="t3-topbar-fade" aria-hidden="true" />}
-      {snap.connection !== 'online' && snap.blocks.length > 0 && <ConnectionBanner snap={snap} />}
-      {snap.tab === 'activity' && <Stream snap={snap} />}
-      {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
-      {snap.tab === 'plan' && <div className="workspace"><PlanTab snap={snap} /></div>}
-      {snap.tab === 'log' && <div className="workspace workspace--log"><LogTab snap={snap} /></div>}
+      <div className="chat__body">
+        {vibes && !onPage && !agent && chrome.detailsOpen && (
+          <ThreadDetailsCard
+            snap={snap}
+            mode={chrome.detailsMode ?? 'popover'}
+            onClose={() => chrome.toggleDetails?.()}
+            onNavigate={open}
+            onOpenTerminal={() => chrome.toggleTerminalDrawer?.()}
+          />
+        )}
 
+        {page === 'xerxes' && <SupervisorPage />}
+        {page && page !== 'xerxes' && <DesktopPage panel={page} snap={snap} />}
+        {agent && !onPage && (agentRow
+          ? <AgentInspector key={snap.sessionKey + ':' + agentRow.id} row={agentRow} rows={fleet} sessionKey={snap.sessionKey} online={snap.connection === 'online'} />
+          : <section className="agent-inspector agent-pane" aria-label="Agent inspector"><div className="stream"><div className="stream__col">
+              <p role="status">This agent is no longer available in this session.</p>
+              <button className="btn" onClick={() => openAgent('')}>Back to the conversation</button>
+            </div></div></section>)}
+        <div className="conversation-surface" hidden={page !== null || Boolean(agent)}>
+        {vibes && <div className="t3-topbar-fade" aria-hidden="true" />}
+        {snap.tab === 'activity' && <Stream snap={snap} />}
+        {snap.tab === 'changes' && <div className="workspace"><ChangesTab snap={snap} /></div>}
+        {snap.tab === 'plan' && <div className="workspace"><PlanTab snap={snap} /></div>}
+        {snap.tab === 'log' && <div className="workspace workspace--log"><LogTab snap={snap} /></div>}
+
+        </div>
+        {/* Hidden, not unmounted, so a half-typed task message survives a visit to a page. */}
+        <div className="chat__composer-host" hidden={onPage || Boolean(agent)}><Composer snap={snap} /></div>
       </div>
-      {/* Hidden, not unmounted, so a half-typed task message survives a visit to a page. */}
-      <div className="chat__composer-host" hidden={onPage || Boolean(agent)}><Composer snap={snap} /></div>
       {vibes && !onPage && !agent && chrome.terminalDrawerOpen && (
         <TerminalDrawer
           snap={snap}
@@ -1883,7 +2054,6 @@ function sameBlockList(a: readonly Block[] | undefined, b: readonly Block[]): bo
 
 function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const sessionScope = `${snap.currentId}:${snap.sessionOpenRevision}`
-  const { ref, loadOlder, following, scrollToLatest } = useTranscriptScroll(sessionScope, { more: Boolean(snap.historyMore), loading: Boolean(snap.historyLoading), automatic: !snap.historyError, load: () => store.loadOlderHistory() })
   const [windowLimit, setWindowLimit] = useState(TRANSCRIPT_TAIL_GROUPS)
   useEffect(() => {
     setWindowLimit(TRANSCRIPT_TAIL_GROUPS)
@@ -1937,6 +2107,35 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
 
   const hiddenGroupCount = Math.max(0, allGroups.length - windowLimit)
   const shownGroups = hiddenGroupCount > 0 ? allGroups.slice(hiddenGroupCount) : allGroups
+  // Gate automatic daemon paging on `hiddenGroupCount === 0` so scrolling near the top
+  // reveals local tail-windowed groups first instead of firing duplicate daemon loads.
+  const { ref, loadOlder, following, scrollToLatest, unpin } = useTranscriptScroll(sessionScope, {
+    more: Boolean(snap.historyMore),
+    loading: Boolean(snap.historyLoading),
+    automatic: !snap.historyError && hiddenGroupCount === 0,
+    load: () => store.loadOlderHistory(),
+  })
+  const windowExpandAnchorRef = useRef<HistoryScrollAnchor | null>(null)
+  const expandWindow = useCallback((nextLimit: (current: number) => number, force = false): void => {
+    if (!force && windowExpandAnchorRef.current) return
+    const el = ref.current
+    if (el && !windowExpandAnchorRef.current) {
+      windowExpandAnchorRef.current = captureHistoryScrollAnchor(el)
+    }
+    unpin()
+    setWindowLimit(nextLimit)
+  }, [ref, unpin])
+
+  // Preserve `[data-history-anchor]` viewport offset when prepending earlier tail-windowed
+  // groups so `.stream { overflow-anchor: none }` never jumps the user to the top of the slice.
+  useLayoutEffect(() => {
+    const anchor = windowExpandAnchorRef.current
+    if (!anchor) return
+    windowExpandAnchorRef.current = null
+    const el = ref.current
+    if (!el) return
+    el.scrollTop = restoreHistoryScrollAnchor(el, anchor)
+  }, [windowLimit, hiddenGroupCount, ref])
 
   // Auto-expand earlier transcript groups when scrolling near top or opening in-page Find
   // (both DOM Cmd/Ctrl+F and native macOS Edit > Find via `xerxes:find`).
@@ -1945,10 +2144,10 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
     return attachTranscriptExpandListeners(
       ref.current,
       typeof window !== 'undefined' ? window : null,
-      () => setWindowLimit(current => current + TRANSCRIPT_TAIL_GROUPS),
-      () => setWindowLimit(current => Math.max(current, allGroups.length)),
+      () => expandWindow(current => current + TRANSCRIPT_TAIL_GROUPS),
+      () => expandWindow(current => Math.max(current, allGroups.length), true),
     )
-  }, [hiddenGroupCount, allGroups.length, ref])
+  }, [hiddenGroupCount, allGroups.length, ref, expandWindow])
 
   if (offline && blocks.length === 0 && !question) {
     return <div className="stream" ref={ref}><Offline cwd={snap.cwd} error={snap.error} /></div>
@@ -1979,7 +2178,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
               <button
                 type="button"
                 className="btn"
-                onClick={() => setWindowLimit(current => current + TRANSCRIPT_TAIL_GROUPS)}
+                onClick={() => expandWindow(current => current + TRANSCRIPT_TAIL_GROUPS)}
               >
                 Show earlier messages ({hiddenGroupCount})
               </button>
@@ -2011,13 +2210,14 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           <QuestionCard key={`${snap.currentId}:${question.requestId}`} question={question} plan={snap.plan} />
         </div>
       )}
-      {/* Scrolling up silently unpins the tail; without this the only way
-          back was to drag into a 64px band by hand, and a turn that kept
-          streaming gave no sign it had moved on without you. */}
+      {/* Zero-flow-height sticky dock so toggling .jump-latest never alters
+          .stream.scrollHeight or triggers a bottom-overscroll oscillation loop. */}
       {!following && blocks.length > 0 && (
-        <button className="jump-latest" data-working={snap.turnActive || undefined} title={snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scrollToLatest}>
-          <span className="jump-latest__label">{snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
-        </button>
+        <div className="jump-latest-dock" data-scroll-ignore="true">
+          <button className="jump-latest" data-working={snap.turnActive || undefined} title={snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scrollToLatest}>
+            <span className="jump-latest__label">{snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
+          </button>
+        </div>
       )}
     </div>
     </ReplyEnds.Provider>
@@ -2076,14 +2276,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
   </div>
 
   return <div className="welcome">
-    <img
-      className="welcome__logo welcome__emblem xerxes-brand-emblem"
-      src="./logo-128.png"
-      alt="Xerxes"
-      width={64}
-      height={64}
-      draggable={false}
-    />
+    <XerxesLogoMark size={64} className="welcome__logo" alt="Xerxes Agents" />
     <h1 className="welcome__wordmark">XERXES</h1>
 
     {place ? (
@@ -2342,9 +2535,45 @@ export function approvalKeyAction(key: string, allowPermanent?: boolean): Approv
   return null
 }
 
-function approvalDiffOf(
-  approval: NonNullable<Snapshot['approval']>,
+function approvalOptionDecision(kind: string): 'approve' | 'approve_for_session' | 'reject' {
+  if (kind === 'allow_always') return 'approve_for_session'
+  if (kind === 'reject_once' || kind === 'reject_always') return 'reject'
+  return 'approve'
+}
+
+function approvalOptionButtonClass(kind: string, vibes: boolean): string {
+  const isReject = kind === 'reject_once' || kind === 'reject_always'
+  const isPrimary = kind === 'allow_once'
+  if (vibes) {
+    if (isPrimary) return 'vq__submit'
+    return isReject ? 'vq__skip vq__skip--danger' : 'vq__skip'
+  }
+  if (isPrimary) return 'btn btn--solid'
+  if (isReject) return 'btn btn--danger'
+  return 'btn'
+}
+
+function normalizeStructuredApprovalDiff(
+  diff: { readonly path: string; readonly oldText?: string; readonly newText?: string },
+  fallbackPath: string,
 ): { readonly path: string; readonly before: string; readonly after: string } | null {
+  if (diff.oldText === undefined && diff.newText === undefined) return null
+  const rawBefore = diff.oldText ?? ''
+  const rawAfter = diff.newText ?? ''
+  if (rawBefore && rawAfter) {
+    const span = trimmedChangedLines(rawBefore, rawAfter, 3)
+    return {
+      path: diff.path || fallbackPath,
+      before: span.before.join('\n'),
+      after: span.after.join('\n'),
+    }
+  }
+  return { path: diff.path || fallbackPath, before: rawBefore, after: rawAfter }
+}
+
+function approvalDiffsOf(
+  approval: NonNullable<Snapshot['approval']>,
+): readonly { readonly path: string; readonly before: string; readonly after: string }[] {
   const inputs = approval.inputs
   const inputPath = inputs
     ? (typeof inputs.file_path === 'string' && inputs.file_path.trim())
@@ -2352,20 +2581,17 @@ function approvalDiffOf(
       || (typeof inputs.Path === 'string' && inputs.Path.trim())
       || ''
     : ''
-  if (approval.diff && (approval.diff.oldText !== undefined || approval.diff.newText !== undefined)) {
-    const rawBefore = approval.diff.oldText ?? ''
-    const rawAfter = approval.diff.newText ?? ''
-    if (rawBefore && rawAfter) {
-      const span = trimmedChangedLines(rawBefore, rawAfter, 3)
-      return {
-        path: approval.diff.path || inputPath,
-        before: span.before.join('\n'),
-        after: span.after.join('\n'),
-      }
-    }
-    return { path: approval.diff.path || inputPath, before: rawBefore, after: rawAfter }
+  if (approval.diffs && approval.diffs.length > 0) {
+    const normalized = approval.diffs
+      .map(entry => normalizeStructuredApprovalDiff(entry, inputPath))
+      .filter((entry): entry is { readonly path: string; readonly before: string; readonly after: string } => entry !== null)
+    if (normalized.length > 0) return normalized
   }
-  if (!inputs) return null
+  if (approval.diff) {
+    const single = normalizeStructuredApprovalDiff(approval.diff, inputPath)
+    if (single) return [single]
+  }
+  if (!inputs) return []
   const before =
     typeof inputs.old_string === 'string'
       ? inputs.old_string
@@ -2390,8 +2616,8 @@ function approvalDiffOf(
               : typeof inputs.Content === 'string'
                 ? inputs.Content
                 : undefined
-  if (before === undefined && after === undefined) return null
-  return { path: inputPath, before: before ?? '', after: after ?? '' }
+  if (before === undefined && after === undefined) return []
+  return [{ path: inputPath, before: before ?? '', after: after ?? '' }]
 }
 
 function ApprovalDiffPreview({ diff }: { readonly diff: { readonly path: string; readonly before: string; readonly after: string } }): ReactElement {
@@ -2448,20 +2674,24 @@ function ApprovalBody({
   approval: NonNullable<Snapshot['approval']>
   hideToolSummary?: boolean
 }): ReactElement | null {
-  const diff = approvalDiffOf(approval)
+  const diffs = approvalDiffsOf(approval)
   const inputs = approval.inputs
   const toolSummary = approvalToolSummaryOf(inputs)
   const showInlineSummary = Boolean(toolSummary && !hideToolSummary && toolSummary !== approval.reason)
   const entries = inputs
     ? Object.entries(inputs).filter(([, value]) => value !== null && value !== undefined && value !== '')
     : []
-  if (diff) {
+  if (diffs.length > 0) {
     const rest = entries.filter(
       ([key]) => !APPROVAL_DIFF_OMIT_KEYS.has(key) && !APPROVAL_PLUMBING_KEYS.has(key.toLowerCase()),
     )
     return <>
       {showInlineSummary && <p className="approval__reason">{toolSummary}</p>}
-      <ApprovalDiffPreview diff={diff} />
+      <div className="approval__diffs">
+        {diffs.map((diff, index) => (
+          <ApprovalDiffPreview key={`${diff.path}:${index}`} diff={diff} />
+        ))}
+      </div>
       {rest.length > 0 && <ApprovalFields entries={rest} />}
     </>
   }
@@ -2560,7 +2790,8 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
       const text = note.trim()
       if (!text) return
       store.approve(approval.id, 'deny')
-      void store.steer(`Keep planning; do not execute yet. Revise the plan with this feedback: ${text}`)
+      const externalAcp = isExternalAcpBinding(store.getSnapshot().acpBinding)
+      void store.steer(externalAcp ? text : `Keep planning; do not execute yet. Revise the plan with this feedback: ${text}`)
       setNote('')
       return
     }
@@ -2614,10 +2845,19 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
 function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<Snapshot['approval']>; policy: string; inline?: boolean }): ReactElement {
   const card = useRef<HTMLDivElement>(null)
   const vibes = useVibesStyle()
+  const dynamicOptions = approval.options && approval.options.length > 0 ? approval.options : null
   const canAllowSession = approval.allowPermanent !== false
   const toolSummary = approvalToolSummaryOf(approval.inputs)
   const subtitle = approval.reason || toolSummary
   const hideBodySummary = Boolean(toolSummary && subtitle === toolSummary)
+  const optionWarnings = dynamicOptions
+    ? dynamicOptions.filter(opt => Boolean(opt.warning)).map(opt => `${opt.name}: ${opt.warning}`)
+    : []
+  const primaryOption = dynamicOptions
+    ? (dynamicOptions.find(opt => opt.kind === 'allow_once')
+      ?? dynamicOptions.find(opt => opt.kind === 'allow_always')
+      ?? dynamicOptions[0])
+    : undefined
   // role="alertdialog" that never takes focus announces nothing, and the
   // 1/2/3 keys it advertises are dropped while the composer (auto-focused
   // on entry) holds focus. Moving focus here fixes both at once — and it
@@ -2632,11 +2872,20 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
   if (vibes) {
     // Same card as the Vibes question: the "Needs your input" label, then what is asked
     // on the header band, the exact command or fields, and the answers at the right.
-    // Keys 1/2/3 still answer while the card has focus (the window handler accepts .vq--approval).
+    // Keys 1..N still answer while the card has focus (the window handler accepts .vq--approval).
     const title = approvalTitle(approval.toolName || approval.action || '')
     return (
       <div ref={card} tabIndex={-1} className="vq vq--approval" role="alertdialog" aria-modal="false" aria-label={`Approve ${approval.toolName || approval.action || 'tool call'}`}
-        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); store.approve(approval.id, 'allow_once') } }}>
+        onKeyDown={event => {
+          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault()
+            if (primaryOption) {
+              store.approveWithOption(approval.id, primaryOption.optionId, approvalOptionDecision(primaryOption.kind))
+            } else {
+              store.approve(approval.id, 'allow_once')
+            }
+          }
+        }}>
         <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
         <div className="vq__card">
           <div className="vq__q vq__q--approval">
@@ -2646,10 +2895,32 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
           {subtitle && <p className="vq__reason">{subtitle}</p>}
           <div className="vq__body"><ApprovalBody approval={approval} hideToolSummary={hideBodySummary} /></div>
           {approval.cwd && <p className="vq__cwd" title={approval.cwd}>in {approval.cwd}</p>}
+          {optionWarnings.map((warn, idx) => (
+            <p key={idx} className="vq__reason" role="note">{warn}</p>
+          ))}
           <div className="vq__actions">
-            <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
-            {canAllowSession && <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'allow_session')}>Allow for this session <kbd>2</kbd></button>}
-            <button type="button" className="vq__submit" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>⌘</kbd><kbd>↵</kbd></button>
+            {dynamicOptions ? (
+              dynamicOptions.map((opt, index) => (
+                <button
+                  key={opt.optionId}
+                  type="button"
+                  className={approvalOptionButtonClass(opt.kind, true)}
+                  data-option-id={opt.optionId}
+                  data-option-kind={opt.kind}
+                  title={opt.warning || undefined}
+                  onClick={() => store.approveWithOption(approval.id, opt.optionId, approvalOptionDecision(opt.kind))}
+                >
+                  {opt.name}
+                  {index < 9 && <> <kbd>{index + 1}</kbd></>}
+                </button>
+              ))
+            ) : (
+              <>
+                <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
+                {canAllowSession && <button type="button" className="vq__skip" onClick={() => store.approve(approval.id, 'allow_session')}>Allow for this session <kbd>2</kbd></button>}
+                <button type="button" className="vq__submit" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>⌘</kbd><kbd>↵</kbd></button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2664,10 +2935,32 @@ function ToolApprovalCard({ approval, policy, inline }: { approval: NonNullable<
       </div>
       {subtitle && <p className="approval__reason">{subtitle}</p>}
       <ApprovalBody approval={approval} hideToolSummary={hideBodySummary} />
+      {optionWarnings.map((warn, idx) => (
+        <p key={idx} className="approval__reason" role="note">{warn}</p>
+      ))}
       <div className="approval__row">
-        <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>1</kbd></button>
-        {canAllowSession && <button className="btn" onClick={() => store.approve(approval.id, 'allow_session')}>This session <kbd>2</kbd></button>}
-        <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
+        {dynamicOptions ? (
+          dynamicOptions.map((opt, index) => (
+            <button
+              key={opt.optionId}
+              type="button"
+              className={approvalOptionButtonClass(opt.kind, false)}
+              data-option-id={opt.optionId}
+              data-option-kind={opt.kind}
+              title={opt.warning || undefined}
+              onClick={() => store.approveWithOption(approval.id, opt.optionId, approvalOptionDecision(opt.kind))}
+            >
+              {opt.name}
+              {index < 9 && <> <kbd>{index + 1}</kbd></>}
+            </button>
+          ))
+        ) : (
+          <>
+            <button className="btn btn--solid" onClick={() => store.approve(approval.id, 'allow_once')}>Allow once <kbd>1</kbd></button>
+            {canAllowSession && <button className="btn" onClick={() => store.approve(approval.id, 'allow_session')}>This session <kbd>2</kbd></button>}
+            <button className="btn btn--danger" onClick={() => store.approve(approval.id, 'deny')}>Deny <kbd>{canAllowSession ? '3' : '2'}</kbd></button>
+          </>
+        )}
       </div>
       <p className="approval__cwd" title={approval.cwd || undefined}>
         <span className="appr-policy">Policy: {(approval.permissionMode ?? policy) || 'runtime default'}</span>{approval.cwd && <> · in {approval.cwd}</>}
@@ -2766,7 +3059,103 @@ export function formatQuestionAnswers(
   return answers
 }
 
-function QuestionCard({
+/**
+ * ACP `elicitation/create` URL-mode consent card: always displays the full
+ * destination URL visibly before opening, lets the user launch it via the
+ * host's external URL bridge, and sends an explicit accept or decline answer.
+ */
+export function UrlConsentCard({
+  question,
+}: {
+  readonly question: NonNullable<Snapshot['question']>
+}): ReactElement {
+  const vibes = useVibesStyle()
+  const [opened, setOpened] = useState(false)
+  const item = question.items[0]
+  const consentKey = item?.id || 'url_consent'
+  const url = question.url || ''
+  const promptText = question.message || item?.question || 'The agent requests opening an external link to continue.'
+  const acceptValue =
+    item?.options.find(option => /open|continue|accept|done|yes/i.test(option))
+    || item?.options[0]
+    || 'accept'
+  const declineValue =
+    item?.options.find(option => /decline|reject|cancel|no/i.test(option))
+    || 'Decline'
+
+  const openLink = (): void => {
+    if (!url) return
+    setOpened(true)
+    if (typeof window !== 'undefined' && window.xerxes?.openExternal) {
+      void window.xerxes.openExternal(url)
+    } else if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  const accept = (): void => {
+    store.answerQuestion(question.requestId, { [consentKey]: acceptValue })
+  }
+
+  const decline = (): void => {
+    store.answerQuestion(question.requestId, { [consentKey]: declineValue })
+  }
+
+  if (vibes) {
+    return (
+      <div className="vq vq--url" role="alertdialog" aria-modal="false" aria-label="External link confirmation">
+        <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />External link requested</span>
+        <div className="vq__card">
+          <div className="vq__q">
+            <Markdown text={promptText} className="md--compact" />
+          </div>
+          {url && (
+            <div className="qcard__url-wrap">
+              <code className="qcard__url" data-elicitation-url={url}>{url}</code>
+            </div>
+          )}
+          <div className="vq__actions">
+            <button type="button" className="vq__skip vq__skip--danger" onClick={decline}>Decline</button>
+            {url && (
+              <button type="button" className="vq__skip" onClick={openLink}>
+                {opened ? 'Open link again' : 'Open link'}
+              </button>
+            )}
+            <button type="button" className="vq__submit" onClick={accept}>Continue / Done</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="qcard qcard--url" role="alertdialog" aria-modal="false" aria-label="External link confirmation">
+      <div className="qcard__head">
+        <span className="approval__dot" aria-hidden="true" />
+        <span className="qcard__title">External link confirmation</span>
+      </div>
+      <div className="qcard__q">
+        <Markdown text={promptText} className="md--compact" />
+      </div>
+      {url && (
+        <div className="qcard__url-wrap">
+          <code className="qcard__url" data-elicitation-url={url}>{url}</code>
+        </div>
+      )}
+      <div className="approval__row">
+        {url && (
+          <button type="button" className="btn" onClick={openLink}>
+            {opened ? 'Open link again' : 'Open link'}
+          </button>
+        )}
+        <button type="button" className="btn btn--solid" onClick={accept}>Continue / Done</button>
+        <button type="button" className="btn btn--danger" onClick={decline}>Decline</button>
+      </div>
+    </div>
+  )
+}
+
+export function QuestionCard({
   question,
   plan,
 }: {
@@ -2775,7 +3164,9 @@ function QuestionCard({
 }): ReactElement {
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [others, setOthers] = useState<Record<string, string>>({})
-  const review = isPlanReview(question)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const isUrlMode = question.mode === 'url'
+  const review = !isUrlMode && isPlanReview(question)
   const vibes = useVibesStyle()
   const canSubmit = question.items.length > 0 && question.items.every(item =>
     (item.allowFreeform && !!others[item.id]?.trim()) || (selections[item.id]?.length ?? 0) > 0)
@@ -2783,10 +3174,21 @@ function QuestionCard({
     if (!canSubmit) return
     store.answerQuestion(question.requestId, formatQuestionAnswers(question.items, selections, others))
   }
+  const handleCardKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.defaultPrevented || event.key !== 'Enter') return
+    if (event.metaKey || event.ctrlKey) {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('.vq__skip')) return
+      if (!canSubmit) return
+      event.preventDefault()
+      event.stopPropagation()
+      submit()
+    }
+  }
   // Number keys choose options while the card is up (not while typing); the
   // hints are only honest for the FIRST question — later ones have no keys.
   useEffect(() => {
-    if (review) return // PlanReviewCard owns its keyboard responses.
+    if (review || isUrlMode) return // PlanReviewCard & UrlConsentCard own their responses.
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.isContentEditable)) return
@@ -2804,9 +3206,23 @@ function QuestionCard({
       if (!item.multiSelect) setOthers(prev => ({ ...prev, [item.id]: '' }))
     }
     const onEnter = (event: KeyboardEvent): void => {
-      if (event.key !== 'Enter') return
+      if (event.defaultPrevented || event.key !== 'Enter') return
       const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.isContentEditable)) return
+      const modEnter = event.metaKey || event.ctrlKey
+      const insideCard = Boolean(target && cardRef.current?.contains(target))
+      const isEditable = Boolean(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable))
+      if (modEnter) {
+        if (target?.closest('.vq__skip')) return
+        // Allow ⌘↵ / Ctrl+Enter after clicking any radio/option button inside the card,
+        // without hijacking ⌘↵ steer inside an unrelated textarea (e.g. Composer).
+        if (!insideCard && isEditable) return
+        if (!canSubmit) return
+        event.preventDefault()
+        event.stopPropagation()
+        submit()
+        return
+      }
+      if (target && (isEditable || target.tagName === 'BUTTON')) return
       event.preventDefault()
       submit()
     }
@@ -2817,8 +3233,9 @@ function QuestionCard({
       window.removeEventListener('keydown', onEnter)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [question, selections, others, review])
+  }, [question, selections, others, review, isUrlMode])
 
+  if (isUrlMode) return <UrlConsentCard question={question} />
   if (review) return <PlanReviewCard question={question} plan={plan} />
   if (vibes) {
     // Claude Code's question card: a "Needs your input" pill, the question on a
@@ -2827,7 +3244,7 @@ function QuestionCard({
     const skippable = question.items.every(item => item.allowFreeform)
     const skip = (): void => store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
     return (
-      <div className="vq" role="form" aria-label="Agent questions">
+      <div ref={cardRef} className="vq" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
         <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
         <div className="vq__card">
           {question.items.map((item, qi) => {
@@ -2867,14 +3284,26 @@ function QuestionCard({
                     )
                   })}
                   {item.allowFreeform && (
-                    <label
+                    <div
                       className="vq__opt vq__opt--other"
-                      aria-checked={other.trim() !== ''}
-                      role={multi ? 'checkbox' : 'radio'}
+                      data-checked={other.trim() !== '' ? 'true' : 'false'}
                     >
-                      {multi
-                        ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
-                        : <span className="vq__radio" aria-hidden="true" />}
+                      <button
+                        type="button"
+                        role={multi ? 'checkbox' : 'radio'}
+                        aria-checked={other.trim() !== ''}
+                        aria-label={item.placeholder || 'Other'}
+                        className="vq__other-toggle"
+                        onClick={event => {
+                          const input = event.currentTarget.parentElement?.querySelector<HTMLInputElement>('input')
+                          input?.focus()
+                          if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
+                        }}
+                      >
+                        {multi
+                          ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
+                          : <span className="vq__radio" aria-hidden="true" />}
+                      </button>
                       <input
                         aria-label="Other answer"
                         placeholder={item.placeholder || 'Other'}
@@ -2885,9 +3314,9 @@ function QuestionCard({
                           setOthers(prev => ({ ...prev, [item.id]: value }))
                           if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                         }}
-                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); submit() } }}
+                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
                       />
-                    </label>
+                    </div>
                   )}
                 </div>
               </div>
@@ -2902,7 +3331,7 @@ function QuestionCard({
     )
   }
   return (
-    <div className="qcard" role="form" aria-label="Agent questions">
+    <div ref={cardRef} className="qcard" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
       <div className="qcard__head">
         <span className="approval__dot" aria-hidden="true" />
         <span className="qcard__title">{question.items.length === 1 ? 'The agent has a question' : `The agent has ${question.items.length} questions`}</span>
@@ -3171,9 +3600,30 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   useEffect(() => {
     const add = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => value ? value + ' ' + detail : detail); ref.current?.focus() } }
     const insert = (event: Event) => { const detail = (event as CustomEvent<unknown>).detail; if (typeof detail === 'string') { setDraft(value => applyCompletion(detail) + value); setHints(null); ref.current?.focus() } }
+    const prefill = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail
+      if (typeof detail === 'string') {
+        setDraft(detail)
+        setHints(null)
+        ref.current?.focus()
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => {
+            const el = ref.current
+            if (!el) return
+            el.focus()
+            el.setSelectionRange(detail.length, detail.length)
+          })
+        }
+      }
+    }
     window.addEventListener('xerxes:add-context', add)
     window.addEventListener('xerxes:insert-command', insert)
-    return () => { window.removeEventListener('xerxes:add-context', add); window.removeEventListener('xerxes:insert-command', insert) }
+    window.addEventListener('xerxes:prefill-prompt', prefill)
+    return () => {
+      window.removeEventListener('xerxes:add-context', add)
+      window.removeEventListener('xerxes:insert-command', insert)
+      window.removeEventListener('xerxes:prefill-prompt', prefill)
+    }
   }, [])
   const grow = (): void => {
     const el = ref.current
@@ -3673,8 +4123,20 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
       type="button"
       className="repobar__action repobar__pr"
       disabled={snap.connection !== 'online' || snap.turnActive || snap.submissionPending}
-      title={snap.turnActive ? 'Available when the current turn finishes' : 'Ask the agent to commit, push and open a pull request with gh'}
-      onClick={() => void store.submit(pullRequestPrompt(repo.branch ?? snap.branch ?? null), 'Create a pull request')}
+      title={
+        snap.turnActive
+          ? 'Available when the current turn finishes'
+          : isAntigravityAcpSession(snap)
+            ? 'Pre-fill a pull request prompt in the composer'
+            : 'Ask the agent to commit, push and open a pull request with gh'
+      }
+      onClick={() => {
+        if (isAntigravityAcpSession(snap)) {
+          prefillComposerPrompt(ANTIGRAVITY_PULL_REQUEST_PROMPT)
+          return
+        }
+        void store.submit(pullRequestPrompt(repo.branch ?? snap.branch ?? null), 'Create a pull request')
+      }}
     >{vibes && <T3Icon name="gitPr" size={11} />}Create PR</button>}
     {!vibes && <button type="button" className="repobar__close" aria-label="Hide repository line" title="Hide until restart" onClick={() => { hiddenRepoBars.add(snap.cwd); setHidden(true) }}><Icon name="close" size={14} /></button>}
   </div>
@@ -4038,7 +4500,10 @@ function GlobalKeys({
   // Native menu items are the discoverable half of the keyboard contract;
   // routing them here keeps one implementation per command.
   useEffect(() => window.xerxes.onMenuCommand?.(command => {
-    if (command === 'settings') store.openSettings()
+    if (command === 'settings') {
+      if (store.getSnapshot().settingsOpen) store.closeSettings()
+      else store.openSettings()
+    }
     else if (command === 'new-task') store.newChat()
     else if (command === 'new-task-wizard') store.openTaskModal()
     else if (command === 'export') void store.exportSessionTranscript(store.getSnapshot().sessionKey)
@@ -4061,7 +4526,8 @@ function GlobalKeys({
       const meta = event.metaKey || event.ctrlKey
       if (meta && event.key === ',') {
         event.preventDefault()
-        store.openSettings()
+        if (store.getSnapshot().settingsOpen) store.closeSettings()
+        else store.openSettings()
         return
       }
       if (meta && event.key.toLowerCase() === 'k') {
@@ -4096,7 +4562,7 @@ function GlobalKeys({
       }
       if (meta && event.key === ';') {
         event.preventDefault()
-        store.openSideQuestion()
+        store.toggleSideQuestion()
         return
       }
       if ((meta && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'j') || (event.ctrlKey && !event.metaKey && event.key === '`')) {
@@ -4209,6 +4675,16 @@ function GlobalKeys({
       if (!snap.approval || event.metaKey || event.ctrlKey || event.altKey) return
       const active = document.activeElement
       if (!(active instanceof HTMLElement) || !active.closest('.approval, .vq--approval')) return
+      if (snap.approval.options && snap.approval.options.length > 0) {
+        if (/^[1-9]$/.test(event.key)) {
+          const picked = snap.approval.options[Number(event.key) - 1]
+          if (picked) {
+            event.preventDefault()
+            store.approveWithOption(snap.approval.id, picked.optionId, approvalOptionDecision(picked.kind))
+          }
+        }
+        return
+      }
       const action = approvalKeyAction(event.key, snap.approval.allowPermanent)
       if (action) {
         event.preventDefault()

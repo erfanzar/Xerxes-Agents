@@ -18,6 +18,7 @@ import { isAbsolute, join } from 'node:path'
 import * as vscode from 'vscode'
 
 import { DaemonRpc } from '../desktop/main/daemon.js'
+import { pickTargetHost, type TargetHostCandidate } from './hostTarget.js'
 import type { PushFrame, ResultFrame } from './messages.js'
 import { otherCopies } from './otherCopies.js'
 import { PanelHost, isAllowedRevealPath, type PanelOptions, type PanelPorts } from './panelHost.js'
@@ -26,7 +27,13 @@ const VIEW = 'xerxes.chat'
 const PANEL = 'xerxes.panel'
 const MENU_FOCUS_MAX_RETRIES = 6
 let context: vscode.ExtensionContext
-const hosts = new Set<{ host: PanelHost; webview: vscode.Webview }>()
+let activeSeq = 0
+interface MountedHost extends TargetHostCandidate {
+  readonly host: PanelHost
+  readonly webview: vscode.Webview
+  lastActiveAt: number
+}
+const hosts = new Set<MountedHost>()
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
 /** Overflow-menu surfaces; keep in step with SHEETS in scripts/buildVscode.ts. */
 const SHEETS = ['activity', 'usage'] as const
@@ -36,7 +43,22 @@ export function activate(extension: vscode.ExtensionContext): void {
   useBundledRuntime(extension.extensionPath)
   void offerToRemoveOtherCopies(extension.extension.id)
   extension.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(VIEW, { resolveWebviewView: view => mount(view.webview, () => view.visible, view.onDidDispose) }, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.window.registerWebviewViewProvider(
+      VIEW,
+      {
+        resolveWebviewView: view =>
+          mount(
+            view.webview,
+            () => view.visible,
+            () => view.visible,
+            view.onDidDispose,
+            {},
+            'view',
+            onActivate => view.onDidChangeVisibility(() => { if (view.visible) onActivate() }),
+          ),
+      },
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
     vscode.commands.registerCommand('xerxes.newTask', () => menu('new-task')),
     vscode.commands.registerCommand('xerxes.history', () => menu('history')),
     ...SHEETS.map(name => vscode.commands.registerCommand(`xerxes.panel.${name}`, () => menu(`panel:${name}`))),
@@ -107,7 +129,15 @@ function useBundledRuntime(root: string): void {
 function openPanel(options: PanelOptions): void {
   const panel = vscode.window.createWebviewPanel(PANEL, 'Xerxes', vscode.ViewColumn.Beside, { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')] })
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png')
-  mount(panel.webview, () => panel.visible, panel.onDidDispose, options, 'panel')
+  mount(
+    panel.webview,
+    () => panel.visible,
+    () => panel.active,
+    panel.onDidDispose,
+    options,
+    'panel',
+    onActivate => panel.onDidChangeViewState(() => { if (panel.active || panel.visible) onActivate() }),
+  )
 }
 
 function currentFolder(): string | null {
@@ -122,7 +152,15 @@ function scheduleExtensionTimer(callback: () => void, delayMs: number): void {
   pendingTimers.add(timer)
 }
 
-function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscode.Event<void>, options: PanelOptions = {}, surface: 'view' | 'panel' = 'view'): void {
+function mount(
+  webview: vscode.Webview,
+  visible: () => boolean,
+  active: () => boolean,
+  onDispose: vscode.Event<void>,
+  options: PanelOptions = {},
+  surface: 'view' | 'panel' = 'view',
+  subscribeActivate?: (onActivate: () => void) => vscode.Disposable,
+): void {
   webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')] }
   const ports: PanelPorts = {
     get workspace() { return currentFolder() },
@@ -184,10 +222,19 @@ function mount(webview: vscode.Webview, visible: () => boolean, onDispose: vscod
   }
   const post = (frame: ResultFrame | PushFrame): void => { void webview.postMessage(frame) }
   const host = new PanelHost(ports, post, projectDir => new DaemonRpc({ projectDir }), options)
-  const entry = { host, webview }
+  const entry: MountedHost = {
+    host,
+    webview,
+    surface,
+    isVisible: visible,
+    isActive: active,
+    lastActiveAt: ++activeSeq,
+  }
   hosts.add(entry)
-  const received = webview.onDidReceiveMessage(message => { void host.receive(message) })
-  onDispose(() => { received.dispose(); host.dispose(); hosts.delete(entry) })
+  const markActive = (): void => { entry.lastActiveAt = ++activeSeq }
+  const activationSub = subscribeActivate?.(markActive)
+  const received = webview.onDidReceiveMessage(message => { markActive(); void host.receive(message) })
+  onDispose(() => { activationSub?.dispose(); received.dispose(); host.dispose(); hosts.delete(entry) })
   webview.html = html(webview, surface)
 }
 
@@ -218,13 +265,14 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
     <link rel="stylesheet" href="${asset('renderer/xterm.css')}" />
     <link rel="stylesheet" href="${asset('renderer/app.css')}" />
     <link rel="stylesheet" href="${asset('renderer/atelier.css')}" />
-    <link rel="stylesheet" href="${asset('vscode.css')}" />
     <!-- The one layout every style shares. -->
     <link rel="stylesheet" href="${asset('renderer/layout.css')}" />
     <!-- Claude Code's layout, shared by Vibes and Neo; Vibes colours and type. -->
     <link rel="stylesheet" href="${asset('renderer/vibes.css')}" />
-    <!-- Last: the Neo look over the same layout; inert unless data-style="neo". -->
+    <!-- The Neo look over the same layout; inert unless data-style="neo". -->
     <link rel="stylesheet" href="${asset('renderer/neo.css')}" />
+    <!-- Loaded LAST so VS Code theme tokens, High Contrast, flat sheets, and 1-box composer win. -->
+    <link rel="stylesheet" href="${asset('vscode.css')}" />
     <!-- VS Code pads every webview body (0 20px); the view is edge to edge. -->
     <style>html, body { margin: 0; padding: 0; overflow: hidden; }</style>
   </head>
@@ -236,9 +284,10 @@ function html(webview: vscode.Webview, surface: 'view' | 'panel'): string {
 </html>`
 }
 
-/** Push a menu command to every open Xerxes panel (the desktop's menu bar equivalent). */
+/** Push a menu command to the active/visible Xerxes host (never broadcast to every open panel). */
 function menu(command: string, attempt = 0): void {
-  if (!hosts.size) {
+  const target = pickTargetHost(hosts)
+  if (!target) {
     if (attempt >= MENU_FOCUS_MAX_RETRIES) return
     void vscode.commands.executeCommand(`${VIEW}.focus`).then(
       () => scheduleExtensionTimer(() => menu(command, attempt + 1), 500),
@@ -246,10 +295,10 @@ function menu(command: string, attempt = 0): void {
     )
     return
   }
-  for (const entry of hosts) void entry.webview.postMessage({ kind: 'push', channel: 'desktop:menu', value: command } satisfies PushFrame)
+  void target.webview.postMessage({ kind: 'push', channel: 'desktop:menu', value: command } satisfies PushFrame)
 }
 
-/** The editor selection, with its file and lines, into the Xerxes composer. */
+/** The editor selection, with its file and lines, into the active/visible Xerxes composer. */
 async function sendSelection(): Promise<void> {
   const editor = vscode.window.activeTextEditor
   if (!editor) return
@@ -258,7 +307,11 @@ async function sendSelection(): Promise<void> {
   const file = vscode.workspace.asRelativePath(editor.document.uri)
   const lines = selection.isEmpty ? '' : `:${selection.start.line + 1}-${selection.end.line + 1}`
   const text = `\n${file}${lines}\n\`\`\`${editor.document.languageId}\n${code}\n\`\`\`\n`
-  await vscode.commands.executeCommand(`${VIEW}.focus`)
-  const deliver = () => { for (const entry of hosts) void entry.webview.postMessage({ kind: 'push', channel: 'desktop:compose', value: text } satisfies PushFrame) }
+  const hadVisible = [...hosts].some(entry => entry.isVisible())
+  if (!hadVisible) await vscode.commands.executeCommand(`${VIEW}.focus`)
+  const deliver = () => {
+    const target = pickTargetHost(hosts)
+    if (target) void target.webview.postMessage({ kind: 'push', channel: 'desktop:compose', value: text } satisfies PushFrame)
+  }
   if (hosts.size) deliver(); else scheduleExtensionTimer(deliver, 800)
 }

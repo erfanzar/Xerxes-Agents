@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { ProviderAccountRegistry, type OAuthAccountKind, type ProviderSyncPayload } from '../../auth/providerAccountRegistry.js'
 import { nativeGeminiBaseUrl } from '../../llms/gemini.js'
-import { AgyCredentialTransfer, AgyLoginManager, type AgyInspectOptions, type AgyRemoteSyncPayload } from './agyCredentials.js'
+import { AgyCredentialTransfer, type AgyInspectOptions, type AgyRemoteSyncPayload } from './agyCredentials.js'
 import type { RemoteTarget } from './remote.js'
 import { remoteProfileReceipt, spawnSecretWriter, type RemoteProviderSyncInput } from './remoteCredentials.js'
 
@@ -88,7 +88,6 @@ export class GlobalProviderAccounts {
   private readonly syncedAccounts = new Map<string, string>()
   private recordedReport: Promise<Record<string, unknown>> | undefined
   private readonly agyTransfer: AgyCredentialTransfer
-  private readonly agyLogin = new AgyLoginManager()
   constructor(
     private readonly registry: ProviderAccountRegistry,
     private readonly remote: RemoteTarget | undefined,
@@ -116,21 +115,6 @@ export class GlobalProviderAccounts {
 
   async confirmAgySync(reviewId: string, confirm: boolean): Promise<Record<string, unknown>> {
     return this.agyTransfer.confirmSync(reviewId, confirm)
-  }
-
-  async startAgyLogin(): Promise<{ readonly ok: true; readonly login_id: string; readonly url: string }> {
-    const started = await this.agyLogin.start()
-    return { ok: true, login_id: started.loginId, url: started.url }
-  }
-
-  async completeAgyLogin(loginId: string, code: string): Promise<Record<string, unknown>> {
-    await this.agyLogin.complete(loginId, code)
-    return { ok: true, ...(await this.agyTransfer.status()) }
-  }
-
-  cancelAgyLogin(loginId?: string): Record<string, unknown> {
-    this.agyLogin.cancel(loginId)
-    return { ok: true }
   }
 
   async list(): Promise<Record<string, unknown>> {

@@ -62,7 +62,7 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
           <div className="row" key={row.name}>
             <span className={`dot ${row.enabled ? 'dot--live' : row.lastError ? 'dot--fail' : 'dot--idle'}`} />
             <div className="row__main">
-              <div className="row__t">{row.name} <span className="chipbtn" style={{ marginLeft: 6 }}>{row.adapterName}</span></div>
+              <div className="row__t">{row.name}{' '}<span className="provcard__badge provcard__badge--quiet">{row.adapterName}</span></div>
               <div className="row__s">
                 {row.enabled
                   ? 'enabled — receiving and sending'

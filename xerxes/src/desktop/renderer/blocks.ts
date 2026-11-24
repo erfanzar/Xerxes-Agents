@@ -12,7 +12,7 @@
  * everything to one thinking card and one tools card.
  */
 
-import type { AgentMember, Block, ToolItem } from './types.js'
+import type { AgentMember, Block, ToolContentBlock, ToolDiffEntry, ToolItem } from './types.js'
 import { reflectionNotice, type ReflectionNotice } from './learning.js'
 import { harnessOriginOf } from './types.js'
 import { transcriptContent, isLegacyHarnessPrompt } from './transcriptContent.js'
@@ -209,6 +209,132 @@ export function parseStructuredDiff(value: unknown): StructuredDiffPayload | nul
     ...(oldText !== undefined ? { oldText } : {}),
     ...(newText !== undefined ? { newText } : {}),
   }
+}
+
+/** Parse all structured diffs from `diffs[]` (falling back to a single `diff`). */
+export function parseStructuredDiffs(diffsValue: unknown, singleDiffValue?: unknown): readonly StructuredDiffPayload[] {
+  const out: StructuredDiffPayload[] = []
+  if (Array.isArray(diffsValue)) {
+    for (const entry of diffsValue) {
+      const parsed = parseStructuredDiff(entry)
+      if (parsed) out.push(parsed)
+    }
+  }
+  if (out.length === 0 && singleDiffValue !== undefined) {
+    const single = parseStructuredDiff(singleDiffValue)
+    if (single) out.push(single)
+  }
+  return out
+}
+
+/** Parse rich ACP/MCP tool content blocks (`text`, `image`, `audio`, `resource`, `resource_link`, `terminal`). */
+export function parseToolContentBlocks(value: unknown): readonly ToolContentBlock[] {
+  if (!Array.isArray(value)) return []
+  const out: ToolContentBlock[] = []
+  for (const raw of value) {
+    if (!isRecord(raw)) continue
+    const type = typeof raw.type === 'string' ? raw.type.trim().toLowerCase() : ''
+    if (type === 'text' && typeof raw.text === 'string') {
+      out.push({ type: 'text', text: raw.text })
+      continue
+    }
+    if (type === 'image') {
+      const data = typeof raw.data === 'string' ? raw.data : ''
+      const mimeType =
+        (typeof raw.mime_type === 'string' && raw.mime_type.trim())
+        || (typeof raw.mimeType === 'string' && raw.mimeType.trim())
+        || ''
+      const uri = typeof raw.uri === 'string' && raw.uri.trim() ? raw.uri.trim() : undefined
+      if (data && mimeType) {
+        out.push({ type: 'image', data, mime_type: mimeType, ...(uri ? { uri } : {}) })
+      }
+      continue
+    }
+    if (type === 'audio') {
+      const data = typeof raw.data === 'string' ? raw.data : ''
+      const mimeType =
+        (typeof raw.mime_type === 'string' && raw.mime_type.trim())
+        || (typeof raw.mimeType === 'string' && raw.mimeType.trim())
+        || ''
+      if (data && mimeType) {
+        out.push({ type: 'audio', data, mime_type: mimeType })
+      }
+      continue
+    }
+    if (type === 'resource') {
+      const nested = isRecord(raw.resource) ? raw.resource : raw
+      const uri = typeof nested.uri === 'string' && nested.uri.trim() ? nested.uri.trim() : ''
+      if (!uri) continue
+      const mimeType =
+        (typeof nested.mime_type === 'string' && nested.mime_type.trim())
+        || (typeof nested.mimeType === 'string' && nested.mimeType.trim())
+        || undefined
+      const text = typeof nested.text === 'string' ? nested.text : undefined
+      const blob = typeof nested.blob === 'string' ? nested.blob : undefined
+      out.push({
+        type: 'resource',
+        uri,
+        ...(mimeType ? { mime_type: mimeType } : {}),
+        ...(text !== undefined ? { text } : {}),
+        ...(blob !== undefined ? { blob } : {}),
+      })
+      continue
+    }
+    if (type === 'resource_link') {
+      const uri = typeof raw.uri === 'string' && raw.uri.trim() ? raw.uri.trim() : ''
+      if (!uri) continue
+      const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : undefined
+      const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : undefined
+      const description = typeof raw.description === 'string' && raw.description.trim() ? raw.description.trim() : undefined
+      const mimeType =
+        (typeof raw.mime_type === 'string' && raw.mime_type.trim())
+        || (typeof raw.mimeType === 'string' && raw.mimeType.trim())
+        || undefined
+      out.push({
+        type: 'resource_link',
+        uri,
+        ...(name ? { name } : {}),
+        ...(title ? { title } : {}),
+        ...(description ? { description } : {}),
+        ...(mimeType ? { mime_type: mimeType } : {}),
+      })
+      continue
+    }
+    if (type === 'terminal') {
+      const terminalId =
+        (typeof raw.terminal_id === 'string' && raw.terminal_id.trim())
+        || (typeof raw.terminalId === 'string' && raw.terminalId.trim())
+        || ''
+      if (terminalId) out.push({ type: 'terminal', terminal_id: terminalId })
+    }
+  }
+  return out
+}
+
+function diffCountsOf(diff: StructuredDiffPayload): { readonly adds: number; readonly dels: number } {
+  const oldText = diff.oldText
+  const newText = diff.newText
+  if (oldText && newText) {
+    const span = trimmedChangedLines(oldText, newText, 0)
+    return { adds: span.after.length, dels: span.before.length }
+  }
+  return {
+    adds: newText ? splitDiffLines(newText).length : 0,
+    dels: oldText ? splitDiffLines(oldText).length : 0,
+  }
+}
+
+function toToolDiffEntries(diffs: readonly StructuredDiffPayload[]): readonly ToolDiffEntry[] {
+  return diffs.map(entry => {
+    const counts = diffCountsOf(entry)
+    return {
+      adds: counts.adds,
+      dels: counts.dels,
+      ...(entry.path ? { path: entry.path } : {}),
+      ...(entry.oldText !== undefined ? { old_text: entry.oldText } : {}),
+      ...(entry.newText !== undefined ? { new_text: entry.newText } : {}),
+    }
+  })
 }
 
 /** Extract the first file path from an ACP `locations` array (`[{ path, line? }]`). */
@@ -630,12 +756,23 @@ export class BlockBuilder {
         const id = typeof payload.id === 'string' ? payload.id : typeof payload.tool_call_id === 'string' ? payload.tool_call_id : `t${this.seq++}`
         const run = this.openRun('tools')
         if (run.kind === 'tools' && !run.order.includes(id)) run.order.push(id)
-        const structuredDiff = parseStructuredDiff(payload.diff)
-        const stats = editStatsOf(payload.name, payload.arguments, structuredDiff, payload.locations)
-        const toolDiff = stats
+        const parsedDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
+        const structuredDiff = parsedDiffs[0] ?? null
+        const diffEntries = parsedDiffs.length > 0 ? toToolDiffEntries(parsedDiffs) : undefined
+        const contentBlocks = parseToolContentBlocks(payload.content_blocks ?? payload.contentBlocks)
+        const title = typeof payload.title === 'string' && payload.title.trim() ? payload.title.trim() : undefined
+        const kind = typeof payload.kind === 'string' && payload.kind.trim() ? payload.kind.trim() : undefined
+        const stats = editStatsOf(payload.name, payload.arguments ?? payload.inputs, structuredDiff, payload.locations)
+        const totalAdds = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.adds ?? 0), 0)
+          : stats?.adds
+        const totalDels = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.dels ?? 0), 0)
+          : stats?.dels
+        const toolDiff = totalAdds !== undefined && totalDels !== undefined
           ? {
-              adds: stats.adds,
-              dels: stats.dels,
+              adds: totalAdds,
+              dels: totalDels,
               ...(structuredDiff ? {
                 ...(structuredDiff.path ? { path: structuredDiff.path } : {}),
                 ...(structuredDiff.oldText !== undefined ? { old_text: structuredDiff.oldText } : {}),
@@ -643,60 +780,175 @@ export class BlockBuilder {
               } : {}),
             }
           : undefined
+        const rawArgs = payload.arguments ?? payload.inputs
+        const initialOutput = detailOf(payload.output ?? payload.result)
         this.tools.set(id, {
           id,
           verb: verbOf(payload.name),
-          arg: argOf(payload.arguments, structuredDiff, payload.locations),
+          arg: argOf(rawArgs, structuredDiff, payload.locations) || title || '',
           dur: '',
           state: 'working',
           name: typeof payload.name === 'string' ? payload.name : '',
-          input: detailOf(payload.arguments),
-          output: '',
+          ...(title ? { title } : {}),
+          ...(kind ? { kind } : {}),
+          input: detailOf(rawArgs),
+          output: initialOutput,
           ...(stats ? { path: stats.path } : {}),
           ...(toolDiff ? { diff: toolDiff } : {}),
+          ...(diffEntries ? { diffs: diffEntries } : {}),
+          ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
         })
         this.settledRunBlocks.delete(run)
         this.invalidateSnapshot()
         break
       }
-      case 'tool_result': {
-        const id = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : typeof payload.id === 'string' ? payload.id : ''
+      case 'tool_update': {
+        const id = typeof payload.tool_call_id === 'string' && payload.tool_call_id
+          ? payload.tool_call_id
+          : typeof payload.id === 'string'
+            ? payload.id
+            : ''
+        if (!id) break
         const existing = this.tools.get(id)
-        const structuredDiff = parseStructuredDiff(payload.diff)
+        const parsedDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
+        const structuredDiff = parsedDiffs[0] ?? null
+        const diffEntries = parsedDiffs.length > 0 ? toToolDiffEntries(parsedDiffs) : existing?.diffs
+        const incomingBlocks = parseToolContentBlocks(payload.content_blocks ?? payload.contentBlocks)
+        const contentBlocks = incomingBlocks.length > 0 ? incomingBlocks : existing?.contentBlocks
         const toolName = existing?.name || (typeof payload.name === 'string' ? payload.name : '')
+        const title = typeof payload.title === 'string' && payload.title.trim() ? payload.title.trim() : existing?.title
+        const kind = typeof payload.kind === 'string' && payload.kind.trim() ? payload.kind.trim() : existing?.kind
+        const rawInputs = payload.inputs !== undefined ? payload.inputs : payload.arguments
+        const nextInput = rawInputs !== undefined ? detailOf(rawInputs) : ''
+        const input = nextInput || existing?.input || ''
+        const rawOutput = payload.output !== undefined ? payload.output : payload.result
+        const nextOutput = rawOutput !== undefined ? detailOf(rawOutput) : ''
+        const output = nextOutput || existing?.output || ''
         const stats = (structuredDiff || !existing?.diff)
-          ? editStatsOf(toolName, payload.arguments ?? (existing?.input ? parseArgs(existing.input) : undefined), structuredDiff, payload.locations)
+          ? editStatsOf(toolName, rawInputs ?? (input ? parseArgs(input) : undefined), structuredDiff, payload.locations)
           : null
+        const totalAdds = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.adds ?? 0), 0)
+          : stats?.adds
+        const totalDels = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.dels ?? 0), 0)
+          : stats?.dels
         const mergedDiff = structuredDiff
           ? {
-              adds: existing?.diff?.adds ?? stats?.adds ?? 0,
-              dels: existing?.diff?.dels ?? stats?.dels ?? 0,
+              adds: totalAdds ?? existing?.diff?.adds ?? 0,
+              dels: totalDels ?? existing?.diff?.dels ?? 0,
               ...(structuredDiff.path ? { path: structuredDiff.path } : {}),
               ...(structuredDiff.oldText !== undefined ? { old_text: structuredDiff.oldText } : {}),
               ...(structuredDiff.newText !== undefined ? { new_text: structuredDiff.newText } : {}),
             }
           : existing?.diff
             ? existing.diff
-            : stats
-              ? { adds: stats.adds, dels: stats.dels }
+            : totalAdds !== undefined && totalDels !== undefined
+              ? { adds: totalAdds, dels: totalDels }
+              : undefined
+        const resolvedPath = structuredDiff?.path || firstLocationPath(payload.locations) || stats?.path || existing?.path || ''
+        const nextArg = argOf(rawInputs, structuredDiff, payload.locations) || title || existing?.arg || ''
+        const rawStatus = typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : ''
+        const state: ToolItem['state'] =
+          rawStatus === 'failed' || rawStatus === 'error'
+            ? 'failed'
+            : rawStatus === 'completed' || rawStatus === 'done'
+              ? 'done'
+              : existing?.state === 'done' || existing?.state === 'failed'
+                ? existing.state
+                : 'working'
+        const item: ToolItem = {
+          id,
+          verb: existing?.verb ?? verbOf(toolName),
+          arg: nextArg,
+          dur: existing?.dur ?? '',
+          state,
+          name: toolName,
+          ...(title ? { title } : {}),
+          ...(kind ? { kind } : {}),
+          input,
+          output,
+          ...(existing?.error ? { error: existing.error } : {}),
+          ...(resolvedPath ? { path: resolvedPath } : {}),
+          ...(mergedDiff ? { diff: mergedDiff } : {}),
+          ...(diffEntries && diffEntries.length > 0 ? { diffs: diffEntries } : {}),
+          ...(contentBlocks && contentBlocks.length > 0 ? { contentBlocks } : {}),
+        }
+        if (existing) {
+          this.tools.set(id, item)
+          const owner = this.runHolding(id)
+          if (owner) this.settledRunBlocks.delete(owner)
+        } else {
+          const run = this.openRun('tools')
+          if (run.kind === 'tools' && !run.order.includes(id)) run.order.push(id)
+          this.tools.set(id, item)
+          this.settledRunBlocks.delete(run)
+        }
+        if (this.blocks.some(block => block.kind === 'tools' && block.items.some(tool => tool.id === id))) {
+          this.blocks = this.blocks.map(block => {
+            if (block.kind !== 'tools' || !block.items.some(tool => tool.id === id)) return block
+            const items = block.items.map(tool => tool.id === id ? item : tool)
+            return { ...block, items, running: items.some(tool => tool.state === 'working') }
+          })
+        }
+        this.invalidateSnapshot()
+        break
+      }
+      case 'tool_result': {
+        const id = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : typeof payload.id === 'string' ? payload.id : ''
+        const existing = this.tools.get(id)
+        const parsedDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
+        const structuredDiff = parsedDiffs[0] ?? null
+        const diffEntries = parsedDiffs.length > 0 ? toToolDiffEntries(parsedDiffs) : existing?.diffs
+        const incomingBlocks = parseToolContentBlocks(payload.content_blocks ?? payload.contentBlocks)
+        const contentBlocks = incomingBlocks.length > 0 ? incomingBlocks : existing?.contentBlocks
+        const toolName = existing?.name || (typeof payload.name === 'string' ? payload.name : '')
+        const title = typeof payload.title === 'string' && payload.title.trim() ? payload.title.trim() : existing?.title
+        const kind = typeof payload.kind === 'string' && payload.kind.trim() ? payload.kind.trim() : existing?.kind
+        const stats = (structuredDiff || !existing?.diff)
+          ? editStatsOf(toolName, payload.arguments ?? (existing?.input ? parseArgs(existing.input) : undefined), structuredDiff, payload.locations)
+          : null
+        const totalAdds = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.adds ?? 0), 0)
+          : stats?.adds
+        const totalDels = diffEntries && diffEntries.length > 1
+          ? diffEntries.reduce((sum, entry) => sum + (entry.dels ?? 0), 0)
+          : stats?.dels
+        const mergedDiff = structuredDiff
+          ? {
+              adds: totalAdds ?? existing?.diff?.adds ?? 0,
+              dels: totalDels ?? existing?.diff?.dels ?? 0,
+              ...(structuredDiff.path ? { path: structuredDiff.path } : {}),
+              ...(structuredDiff.oldText !== undefined ? { old_text: structuredDiff.oldText } : {}),
+              ...(structuredDiff.newText !== undefined ? { new_text: structuredDiff.newText } : {}),
+            }
+          : existing?.diff
+            ? existing.diff
+            : totalAdds !== undefined && totalDels !== undefined
+              ? { adds: totalAdds, dels: totalDels }
               : undefined
         const resolvedPath = existing?.path || stats?.path || structuredDiff?.path || firstLocationPath(payload.locations) || ''
-        const output = detailOf(payload.return_value ?? payload.result ?? payload.output)
+        const rawResultOutput = detailOf(payload.return_value ?? payload.result ?? payload.output)
+        const output = rawResultOutput || existing?.output || ''
         // Saved native tool results predate an explicit error field. Permission
         // to execute is independent of whether execution succeeded.
         const error = toolFailureText(payload, output)
         const item: ToolItem = {
           id,
           verb: existing?.verb ?? verbOf(payload.name),
-          arg: existing?.arg || argOf(payload.arguments, structuredDiff, payload.locations),
+          arg: existing?.arg || argOf(payload.arguments, structuredDiff, payload.locations) || title || '',
           dur: dur(payload.duration_ms),
           state: error ? 'failed' : 'done',
           name: toolName,
+          ...(title ? { title } : {}),
+          ...(kind ? { kind } : {}),
           input: existing?.input || detailOf(payload.arguments),
           output,
           ...(error ? { error } : {}),
           ...(resolvedPath ? { path: resolvedPath } : {}),
           ...(mergedDiff ? { diff: mergedDiff } : {}),
+          ...(diffEntries && diffEntries.length > 0 ? { diffs: diffEntries } : {}),
+          ...(contentBlocks && contentBlocks.length > 0 ? { contentBlocks } : {}),
         }
         if (existing) {
           this.tools.set(id, item)
@@ -814,6 +1066,15 @@ export class BlockBuilder {
     this.blocks = [...this.blocks, { kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}), ...(images.length ? { images } : {}) }]
     this.invalidateSnapshot()
     return id
+  }
+
+  /** Remove one specific block by its minted id (e.g. a promoted queued-steer bubble). */
+  removeBlockById(blockId: number): boolean {
+    const index = this.blocks.findIndex(block => block.id === blockId)
+    if (index < 0) return false
+    this.blocks = [...this.blocks.slice(0, index), ...this.blocks.slice(index + 1)]
+    this.invalidateSnapshot()
+    return true
   }
 
   /**

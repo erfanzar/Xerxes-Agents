@@ -20,8 +20,15 @@ import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
 import { focusComposerOnPrintableInput } from './composerFocus.js'
 import { getInputSelection } from './inputSelectionStore.js'
-import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
-import { $isBlocked, $overlayState, clearApprovalOverlay, patchOverlayState } from './overlayStore.js'
+import type { InputHandlerContext, InputHandlerResult, OverlayState } from './interfaces.js'
+import {
+  $isBlocked,
+  $overlayState,
+  clearApprovalOverlay,
+  dismissOpenOverlayPatch,
+  getOverlayState,
+  patchOverlayState
+} from './overlayStore.js'
 import { toggleAllThinking } from './thinkingVisibilityStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
@@ -66,20 +73,30 @@ const nextInteractionMode = (current: string | undefined): string => {
  * Modifier-held wheel (precision mode) is included — a user who wants to
  * scroll a single line at a time during a prompt expects it to work.
  */
-export function shouldFallThroughForScroll(key: {
-  downArrow: boolean
-  pageDown: boolean
-  pageUp: boolean
-  shift: boolean
-  upArrow: boolean
-  wheelDown: boolean
-  wheelUp: boolean
-}): boolean {
+export function shouldFallThroughForScroll(
+  key: {
+    downArrow: boolean
+    pageDown: boolean
+    pageUp: boolean
+    shift: boolean
+    upArrow: boolean
+    wheelDown: boolean
+    wheelUp: boolean
+  },
+  options?: { readonly approvalActive?: boolean }
+): boolean {
   if (key.wheelUp || key.wheelDown) {
     return true
   }
 
   if (key.pageUp || key.pageDown) {
+    // While an approval prompt is active, bare PgUp/PgDn scrolls the approval
+    // details scrollbox exclusively so it never double-scrolls the transcript.
+    // Shift+PgUp/PgDn (and wheel / Shift+arrows) still scroll the transcript.
+    if (options?.approvalActive && !key.shift) {
+      return false
+    }
+
     return true
   }
 
@@ -88,6 +105,50 @@ export function shouldFallThroughForScroll(key: {
   }
 
   return false
+}
+
+export interface OverlayCtrlCHandlers {
+  readonly answerClarify: (answer: string) => unknown
+  readonly denyApproval: (requestId: string) => unknown
+  readonly cancelSudo: (requestId: string) => unknown
+  readonly cancelSecret: (requestId: string) => unknown
+  readonly patchOverlay: (patch: Partial<OverlayState>) => unknown
+}
+
+/**
+ * Dismiss whichever overlay is open when Ctrl+C is pressed. Special RPC-backed
+ * prompts (clarify, approval, sudo, secret) run their protocol cancellation
+ * hooks first; every other overlay key in `OVERLAY_FLAG_KEYS` closes cleanly
+ * through `dismissOpenOverlayPatch` so Ctrl+C is never silently swallowed.
+ */
+export function dismissOverlayForCtrlC(state: OverlayState, handlers: OverlayCtrlCHandlers): boolean {
+  if (state.clarify) {
+    handlers.answerClarify(providerPromptCancelAnswer(state.clarify))
+    return true
+  }
+
+  if (state.approval) {
+    handlers.denyApproval(state.approval.requestId)
+    return true
+  }
+
+  if (state.sudo) {
+    handlers.cancelSudo(state.sudo.requestId)
+    return true
+  }
+
+  if (state.secret) {
+    handlers.cancelSecret(state.secret.requestId)
+    return true
+  }
+
+  const patch = dismissOpenOverlayPatch(state)
+  if (!patch) {
+    return false
+  }
+
+  handlers.patchOverlay(patch)
+  return true
 }
 
 export function applyVoiceRecordResponse(
@@ -154,74 +215,30 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     terminal.selection.clearSelection()
   }
 
-  const cancelOverlayFromCtrlC = () => {
-    if (overlay.clarify) {
-      return actions.answerClarify(providerPromptCancelAnswer(overlay.clarify))
-    }
-
-    if (overlay.approval) {
-      const requestId = overlay.approval.requestId
-
-      return gateway
-        .rpc<ApprovalRespondResponse>('approval.respond', {
-          choice: 'deny',
-          request_id: requestId,
-          session_id: getUiState().sid
-        })
-        .then(r => r && (clearApprovalOverlay(requestId), patchTurnState({ outcome: 'denied' })))
-        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
-    }
-
-    if (overlay.confirm) {
-      return patchOverlayState({ confirm: null })
-    }
-
-    if (overlay.sudo) {
-      return gateway
-        .rpc<SudoRespondResponse>('sudo.respond', { password: '', request_id: overlay.sudo.requestId })
-        .then(r => r && (patchOverlayState({ sudo: null }), actions.sys('sudo cancelled')))
-        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
-    }
-
-    if (overlay.secret) {
-      return gateway
-        .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
-        .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
-        .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`))
-    }
-
-    if (overlay.copyPicker) {
-      return patchOverlayState({ copyPicker: null })
-    }
-
-    if (overlay.modelPicker) {
-      return patchOverlayState({ modelPicker: false })
-    }
-
-    if (overlay.skillsHub) {
-      return patchOverlayState({ skillsHub: false })
-    }
-
-    if (overlay.pluginsHub) {
-      return patchOverlayState({ pluginsHub: false })
-    }
-
-    if (overlay.sessions) {
-      return patchOverlayState({ sessions: false })
-    }
-
-    if (overlay.agents) {
-      return patchOverlayState({ agents: false })
-    }
-
-    if (overlay.sideQuestion) {
-      return patchOverlayState({ sideQuestion: false })
-    }
-
-    if (overlay.swarm) {
-      return patchOverlayState({ swarm: false })
-    }
-  }
+  const cancelOverlayFromCtrlC = () =>
+    dismissOverlayForCtrlC(getOverlayState(), {
+      answerClarify: answer => actions.answerClarify(answer),
+      denyApproval: requestId =>
+        gateway
+          .rpc<ApprovalRespondResponse>('approval.respond', {
+            choice: 'deny',
+            request_id: requestId,
+            session_id: getUiState().sid
+          })
+          .then(r => r && (clearApprovalOverlay(requestId), patchTurnState({ outcome: 'denied' })))
+          .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`)),
+      cancelSudo: requestId =>
+        gateway
+          .rpc<SudoRespondResponse>('sudo.respond', { password: '', request_id: requestId })
+          .then(r => r && (patchOverlayState({ sudo: null }), actions.sys('sudo cancelled')))
+          .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`)),
+      cancelSecret: requestId =>
+        gateway
+          .rpc<SecretRespondResponse>('secret.respond', { request_id: requestId, value: '' })
+          .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
+          .catch(error => actions.sys(`error: ${error instanceof Error ? error.message : String(error)}`)),
+      patchOverlay: patch => patchOverlayState(patch)
+    })
 
   const cycleQueue = (dir: 1 | -1) => {
     const len = cRefs.queueRef.current.length
@@ -301,7 +318,9 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       // skip the prompt-overlay early-return for scroll keys so they fall
       // through to the wheel / PageUp / Shift+arrow handlers below.
       const promptOverlay = overlay.approval || overlay.clarify || overlay.confirm
-      const fallThroughForScroll = promptOverlay && shouldFallThroughForScroll(key)
+      const fallThroughForScroll = Boolean(
+        promptOverlay && shouldFallThroughForScroll(key, { approvalActive: Boolean(overlay.approval) })
+      )
 
       if (promptOverlay && !fallThroughForScroll) {
         if (isCtrl(key, ch, 'c')) {

@@ -18,9 +18,16 @@ export interface AtMentionedFile {
   readonly startLine?: number;
 }
 
+export interface RawAtMentionedResource {
+  readonly path: string
+  readonly text: string
+  readonly truncated: boolean
+}
+
 export interface ProcessedAtMentions {
-  readonly enhancedMessage: string;
-  readonly mentionedFiles: readonly string[];
+  readonly enhancedMessage: string
+  readonly mentionedFiles: readonly string[]
+  readonly resources?: readonly RawAtMentionedResource[]
 }
 
 /** Extract unique file mentions without treating email addresses as paths. */
@@ -67,6 +74,7 @@ export async function processAtMentions(
 
   const fileBlocks: string[] = [];
   const mentionedFiles: string[] = [];
+  const resources: RawAtMentionedResource[] = [];
   let remainingBytes =
     MAX_ATTACHMENT_BYTES - utf8ByteLength("<attached_files>\n\n</attached_files>");
   for (const mention of mentions.slice(0, MAX_ATTACHMENT_FILES)) {
@@ -102,23 +110,30 @@ export async function processAtMentions(
       break;
     }
     const content = utf8Prefix(file.content, contentBudget);
+    const rawContent = utf8Prefix(file.rawContent, contentBudget);
     const block = `${prefix}${content}${suffix}${note}`;
     const blockBytes = utf8ByteLength(block) + separatorBytes;
     if (blockBytes > remainingBytes) {
       break;
     }
     mentionedFiles.push(file.path);
+    resources.push({
+      path: file.path,
+      text: rawContent,
+      truncated: file.truncated || utf8ByteLength(file.rawContent) > contentBudget,
+    });
     fileBlocks.push(block);
     remainingBytes -= blockBytes;
   }
 
   if (!fileBlocks.length) {
-    return { enhancedMessage: text, mentionedFiles: [] };
+    return { enhancedMessage: text, mentionedFiles: [], resources: [] };
   }
 
   return {
     enhancedMessage: `<attached_files>\n${fileBlocks.join("\n\n")}\n</attached_files>\n\n${text}`,
     mentionedFiles,
+    resources,
   };
 }
 
@@ -162,6 +177,7 @@ async function readMentionedFile(
   | {
       readonly content: string;
       readonly path: string;
+      readonly rawContent: string;
       readonly truncated: boolean;
     }
   | undefined
@@ -191,13 +207,14 @@ async function readMentionedFile(
     const start = Math.max(0, (mention.startLine ?? 1) - 1);
     const requestedEnd = Math.max(start + 1, mention.endLine ?? lines.length);
     const end = Math.min(lines.length, requestedEnd);
-    const numbered = lines
-      .slice(start, end)
+    const selectedLines = lines.slice(start, end);
+    const numbered = selectedLines
       .map((line, index) => `${start + index + 1} | ${line}`)
       .join("\n");
     if (start >= lines.length) {
       return undefined;
     }
+    const rawContent = selectedLines.join("\n");
     const total = sourceTruncated ? `at least ${lines.length}` : String(lines.length);
     const header = `[${canonical}: lines ${start + 1}-${end} of ${total}]`;
     const content = `${header}\n${numbered}`;
@@ -205,6 +222,7 @@ async function readMentionedFile(
     return {
       content: truncated ? utf8Prefix(content, maxBytes) : content,
       path: canonical,
+      rawContent: sourceTruncated || utf8ByteLength(rawContent) > maxBytes ? utf8Prefix(rawContent, maxBytes) : rawContent,
       truncated,
     };
   } catch {

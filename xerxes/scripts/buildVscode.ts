@@ -113,16 +113,15 @@ function manifest(extensionVersion: string): Record<string, unknown> {
       },
       menus: {
         'editor/context': [{ command: 'xerxes.sendSelection', when: 'editorHasSelection', group: 'xerxes@1' }],
-        // Every action is an icon on the title bar, so people can see it exists;
-        // the overflow menu hid Search, Activity, Usage, Export and Style.
+        // Primary actions stay on the title bar; History is already the `.xv-title`
+        // header button directly below the title bar, and remains in the Command Palette.
         'view/title': [
           { command: 'xerxes.newTask', when: 'view == xerxes.chat', group: 'navigation@1' },
-          { command: 'xerxes.history', when: 'view == xerxes.chat', group: 'navigation@2' },
-          { command: 'xerxes.search', when: 'view == xerxes.chat', group: 'navigation@3' },
-          ...SHEETS.map(([name], index) => ({ command: `xerxes.panel.${name}`, when: 'view == xerxes.chat', group: `navigation@${4 + index}` })),
-          { command: 'xerxes.exportTranscript', when: 'view == xerxes.chat', group: `navigation@${4 + SHEETS.length}` },
+          { command: 'xerxes.search', when: 'view == xerxes.chat', group: 'navigation@2' },
+          ...SHEETS.map(([name], index) => ({ command: `xerxes.panel.${name}`, when: 'view == xerxes.chat', group: `navigation@${3 + index}` })),
+          { command: 'xerxes.exportTranscript', when: 'view == xerxes.chat', group: `navigation@${3 + SHEETS.length}` },
           // Switch Style stays in the command palette and Settings, not the title bar.
-          { command: 'xerxes.settings', when: 'view == xerxes.chat', group: `navigation@${5 + SHEETS.length}` },
+          { command: 'xerxes.settings', when: 'view == xerxes.chat', group: `navigation@${4 + SHEETS.length}` },
         ],
       },
       keybindings: [

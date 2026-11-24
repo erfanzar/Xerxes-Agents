@@ -2,17 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { afterEach, describe, expect, test } from 'bun:test'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { AcpStdioClient, type AcpSpawnedProcess } from '../src/acp/client.js'
+import { JobStore } from '../src/cron/jobs.js'
 import type { AcpExternalAgentInfo } from '../src/acp/externalAgents.js'
-import {
-  expandXerxesAcpSlashCommand,
-  loadXerxesWorkspaceBridgeForAcp,
-} from '../src/acp/xerxesWorkspaceBridge.js'
 import { DaemonAcpBridgeHost } from '../src/daemon/acpBridgeHost.js'
 import { AGY_TASK_ID_PREFIX, AgyBrainBridge } from '../src/daemon/agyBrainBridge.js'
 import { InMemoryDaemonRuntime, inflightToolContext } from '../src/daemon/runtime.js'
@@ -20,6 +18,8 @@ import { DaemonServer } from '../src/daemon/server.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import type { LlmClient, LlmDelta } from '../src/llms/client.js'
 import type { JsonRpcPayload } from '../src/protocol/jsonRpc.js'
+import { paramsHash, signHubAuth, type HubAuthClaims } from '../src/security/hubAuthEnvelope.js'
+import { enrollHub } from '../src/security/hubIdentityVerifier.js'
 
 const encoder = new TextEncoder()
 
@@ -184,84 +184,6 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir
 }
 
-describe('Xerxes workspace bridge for Antigravity ACP', () => {
-  test('discovers XERXES.md, XERXES.local.md, .xerxes notes/skills/agents/commands, deduplicates .agents/skills, skips AGENTS.md, and expands slash commands', async () => {
-    const root = await makeTempDir('xerxes-acp-bridge-')
-    const emptyDir = await makeTempDir('xerxes-acp-empty-')
-
-    // Empty workspace returns null (zero noise on projects without Xerxes files)
-    expect(await loadXerxesWorkspaceBridgeForAcp(emptyDir)).toBeNull()
-
-    // Populate Xerxes + Antigravity workspace files
-    await writeFile(join(root, 'AGENTS.md'), '# Native AGY instructions (should NOT be duplicated)')
-    await writeFile(join(root, 'XERXES.md'), '# Project Xerxes Guide\nAlways run `bun test` before shipping.')
-    await writeFile(join(root, 'XERXES.local.md'), 'Local machine TPU host: alham')
-    await mkdir(join(root, '.xerxes', 'skills', 'tpu-bench'), { recursive: true })
-    await mkdir(join(root, '.xerxes', 'skills', 'shared-skill'), { recursive: true })
-    await mkdir(join(root, '.agents', 'skills', 'shared-skill'), { recursive: true })
-    await mkdir(join(root, '.xerxes', 'agents'), { recursive: true })
-    await mkdir(join(root, '.xerxes', 'commands'), { recursive: true })
-
-    await writeFile(
-      join(root, '.xerxes', 'architecture.md'),
-      '# Architecture Note\nUse eSurge hybrid KV cache.',
-    )
-    await writeFile(
-      join(root, '.xerxes', 'skills', 'tpu-bench', 'SKILL.md'),
-      '---\nname: tpu-bench\ndescription: Benchmark TPU serving throughput\n---\nMeasure TTFT and decode TPS.',
-    )
-    await writeFile(
-      join(root, '.xerxes', 'skills', 'shared-skill', 'SKILL.md'),
-      '---\nname: shared-skill\ndescription: Duplicated in .agents/skills\n---\nDuplicate body.',
-    )
-    await writeFile(
-      join(root, '.agents', 'skills', 'shared-skill', 'SKILL.md'),
-      '---\nname: shared-skill\ndescription: Native AGY skill\n---\nNative body.',
-    )
-    await writeFile(
-      join(root, '.xerxes', 'agents', 'reviewer.md'),
-      '---\nname: reviewer\ndescription: Strict diff reviewer\n---\nCheck edge cases and types.',
-    )
-    await writeFile(
-      join(root, '.xerxes', 'commands', 'deploy.md'),
-      '---\ndescription: Deploy serving cluster\n---\nDeploy target `$ARGUMENTS` and verify health.',
-    )
-
-    const bridge = await loadXerxesWorkspaceBridgeForAcp(root)
-    expect(bridge).not.toBeNull()
-    expect(bridge!.instructionFiles.map(f => f.label)).toEqual(['Project XERXES.md', 'Project XERXES.local.md'])
-    expect(bridge!.notes.map(n => n.relativePath)).toEqual(['architecture.md'])
-    expect(bridge!.skills.map(s => s.name)).toEqual(['tpu-bench']) // shared-skill deduped against .agents/skills
-    expect(bridge!.agents.map(a => a.name)).toEqual(['reviewer'])
-    expect(bridge!.commands.map(c => c.name)).toEqual(['deploy'])
-    expect(bridge!.firstTurnContextBlock).toContain('Always run `bun test` before shipping.')
-    expect(bridge!.firstTurnContextBlock).toContain('Local machine TPU host: alham')
-    expect(bridge!.firstTurnContextBlock).toContain('tpu-bench')
-    expect(bridge!.firstTurnContextBlock).toContain('reviewer')
-    expect(bridge!.firstTurnContextBlock).toContain('/deploy')
-    expect(bridge!.firstTurnContextBlock).not.toContain('should NOT be duplicated')
-
-    // Command expansion with $ARGUMENTS
-    const expandedCmd = await expandXerxesAcpSlashCommand('/deploy staging-v5p', bridge)
-    expect(expandedCmd).not.toBeNull()
-    expect(expandedCmd!.displayText).toBe('/deploy staging-v5p')
-    expect(expandedCmd!.matchedName).toBe('deploy')
-    expect(expandedCmd!.expandedPrompt).toContain('Deploy target `staging-v5p` and verify health.')
-
-    // Skill expansion
-    const expandedSkill = await expandXerxesAcpSlashCommand('/tpu-bench qwen38', bridge)
-    expect(expandedSkill).not.toBeNull()
-    expect(expandedSkill!.matchedName).toBe('tpu-bench')
-    expect(expandedSkill!.expandedPrompt).toContain('Measure TTFT and decode TPS.')
-    expect(expandedSkill!.expandedPrompt).toContain('qwen38')
-
-    // Never hijacks an ACP-owned slash command
-    expect(
-      await expandXerxesAcpSlashCommand('/deploy prod', bridge, new Set(['deploy'])),
-    ).toBeNull()
-  })
-})
-
 describe('Antigravity background tasks & inflight tool context', () => {
   test('inflightToolContext extracts AGY PascalCase tool parameters cleanly', () => {
     expect(
@@ -394,7 +316,7 @@ describe('Antigravity background tasks & inflight tool context', () => {
     expect(inspected!.output).toContain('Compiled 2/9 buckets')
   })
 
-  test('DaemonServer integrates AGY background tasks, live log inspection, schedule cancel, and first-turn XERXES.md + .xerxes slash bridging E2E', async () => {
+  test('DaemonServer shows AGY background tasks and logs, sends agy only what the user typed, and refuses Xerxes-composed prompts E2E', async () => {
     const root = await makeTempDir('xerxes-agy-e2e-')
     const fakeHome = await makeTempDir('xerxes-agy-home-')
     const xerxesSkillsDir = join(root, 'bundled-xerxes-skills')
@@ -582,6 +504,10 @@ describe('Antigravity background tasks & inflight tool context', () => {
       },
     )
     const socketPath = join(root, 'agy-bg-e2e.sock')
+    // A Hub that may drive this workspace, and a private schedule store (never the real one).
+    const hubKeys = generateKeyPairSync('ed25519')
+    const hubEnrollments = join(root, 'hub-enrollments.json')
+    enrollHub(hubEnrollments, { hub_id: 'hub-1', public_key_pem: hubKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), project_dirs: [root] })
     const server = new DaemonServer({
       socketPath,
       projectDirectory: root,
@@ -592,6 +518,10 @@ describe('Antigravity background tasks & inflight tool context', () => {
       autoTitle: false,
       autoSnapshotTurns: false,
       eventJournal: { directory: join(root, 'events') },
+      hubEnrollmentPath: hubEnrollments,
+      cronStoreFactory: () => new JobStore(join(root, 'jobs.json')),
+      cronLeasePath: join(root, 'cron.lease'),
+      cronArchiveDirectory: join(root, 'cron-archive'),
     })
     await server.start()
 
@@ -603,19 +533,29 @@ describe('Antigravity background tasks & inflight tool context', () => {
       const conn = await client.call('acp.connect', { session_id: sessionId, agent_id: 'antigravity' })
       expect(conn.ok).toBe(true)
 
-      // 1. Completions and acp.catalog include project .xerxes commands & skills, never built-in Xerxes skills
+      // Everything agy is sent, flattened, so no Xerxes file content can hide in any block.
+      const promptDump = (): string => JSON.stringify(receivedPromptFrames)
+      const xerxesOnlyMarkers = [
+        'Always benchmark at 32k input / 1k output.',
+        'xerxes://workspace-context',
+        'xerxes_workspace_context',
+        'Deploy `',
+        'Run decode TPS test.',
+        '[Xerxes',
+      ]
+
+      // 1. Neither completions nor acp.catalog advertise .xerxes commands or skills to agy.
       const slashCompletions = await client.call('complete', { text: '/', session_key: 'bg-s1' })
       const labels = (slashCompletions.completions as Array<{ label: string }>).map(c => c.label)
-      expect(labels).toContain('deploy')
-      expect(labels).toContain('tpu-bench')
+      expect(labels).not.toContain('deploy')
+      expect(labels).not.toContain('tpu-bench')
       expect(labels).not.toContain('immortals-coordinator')
 
       const catalog = await client.call('acp.catalog', { session_id: sessionId })
-      expect((catalog.commands as Array<{ name: string }>).map(c => c.name)).toContain('deploy')
-      expect((catalog.skills as Array<{ name: string }>).map(s => s.name)).toContain('tpu-bench')
-      expect((catalog.skills as Array<{ name: string }>).map(s => s.name)).not.toContain('immortals-coordinator')
+      expect((catalog.commands as Array<{ name: string }>).map(c => c.name)).not.toContain('deploy')
+      expect((catalog.skills as Array<{ name: string }>).map(s => s.name)).not.toContain('tpu-bench')
 
-      // 2. Turn 1 via `/deploy qwen38-v5p`: expands .xerxes command AND attaches xerxes://workspace-context ONCE
+      // 2. Turn 1 reaches agy exactly as typed: no expansion, no attached Xerxes context.
       await client.call('turn.submit', { session_key: 'bg-s1', text: '/deploy qwen38-v5p' })
       await client.waitForEvent(
         f => f.method === 'event' && f.params?.type === 'turn_end',
@@ -623,13 +563,7 @@ describe('Antigravity background tasks & inflight tool context', () => {
 
       expect(receivedPromptFrames).toHaveLength(1)
       const turn1Prompt = receivedPromptFrames[0]!.prompt as Array<Record<string, unknown>>
-      const resourceBlock = turn1Prompt.find(b => b.type === 'resource') as
-        | { resource?: { uri?: string; text?: string } }
-        | undefined
-      expect(resourceBlock?.resource?.uri).toBe('xerxes://workspace-context')
-      expect(resourceBlock?.resource?.text).toContain('Always benchmark at 32k input / 1k output.')
-      const textBlock1 = turn1Prompt.find(b => b.type === 'text') as { text?: string } | undefined
-      expect(textBlock1?.text).toContain('Deploy `qwen38-v5p` across TPU hosts.')
+      expect(turn1Prompt).toEqual([{ type: 'text', text: '/deploy qwen38-v5p' }])
 
       // 3. Background activity, status, live log inspection, and schedule listing all reflect AGY background work!
       const bgStatus = await client.call('background.status', { session_key: 'bg-s1' })
@@ -652,53 +586,371 @@ describe('Antigravity background tasks & inflight tool context', () => {
       const jobs = schedules.jobs as Array<Record<string, unknown>>
       expect(jobs.some(j => j.id === `${AGY_TASK_ID_PREFIX}${extSessionId}/task-43` && j.source === 'antigravity')).toBe(true)
 
-      // 4. Turn 2 does NOT re-inject xerxes://workspace-context when files are unchanged
+      // 4. Editing XERXES.md and adding a global one still sends agy nothing but the typed text.
+      await mkdir(join(fakeHome, '.xerxes', 'commands'), { recursive: true })
+      await writeFile(join(fakeHome, '.xerxes', 'XERXES.md'), '# Global Policy\nAlways prefer Bun over Node.')
+      await writeFile(join(root, 'XERXES.md'), '# Workspace Policy\nAlways benchmark at 32k input / 1k output and report ITL p99.')
       client.frames.length = 0
       await client.call('turn.submit', { session_key: 'bg-s1', text: 'Report final TPS' })
       await client.waitForEvent(
         f => f.method === 'event' && f.params?.type === 'turn_end',
       )
       expect(receivedPromptFrames).toHaveLength(2)
-      const turn2Prompt = receivedPromptFrames[1]!.prompt as Array<Record<string, unknown>>
-      expect(turn2Prompt.some(b => b.type === 'resource')).toBe(false)
+      expect(receivedPromptFrames[1]!.prompt).toEqual([{ type: 'text', text: 'Report final TPS' }])
 
-      // 4b. Editing XERXES.md or adding ~/.xerxes/XERXES.md mid-session dynamically refreshes xerxes://workspace-context on the next turn!
-      await mkdir(join(fakeHome, '.xerxes', 'commands'), { recursive: true })
-      await writeFile(join(fakeHome, '.xerxes', 'XERXES.md'), '# Global Policy\nAlways prefer Bun over Node.')
-      await writeFile(
-        join(fakeHome, '.xerxes', 'commands', 'global-audit.md'),
-        '---\ndescription: Global audit checklist\n---\nAudit `$ARGUMENTS` thoroughly.',
-      )
-      await writeFile(join(root, 'XERXES.md'), '# Workspace Policy\nAlways benchmark at 32k input / 1k output and report ITL p99.')
-      client.frames.length = 0
-      await client.call('turn.submit', { session_key: 'bg-s1', text: '/global-audit gdn-kernel' })
-      await client.waitForEvent(
-        f => f.method === 'event' && f.params?.type === 'turn_end',
-      )
-      expect(receivedPromptFrames).toHaveLength(3)
-      const turn3Prompt = receivedPromptFrames[2]!.prompt as Array<Record<string, unknown>>
-      const refreshedRes = turn3Prompt.find(b => b.type === 'resource') as
-        | { resource?: { uri?: string; text?: string } }
-        | undefined
-      expect(refreshedRes?.resource?.uri).toBe('xerxes://workspace-context')
-      expect(refreshedRes?.resource?.text).toContain('report ITL p99')
-      expect(refreshedRes?.resource?.text).toContain('Always prefer Bun over Node.')
-      const turn3Text = turn3Prompt.find(b => b.type === 'text') as { text?: string } | undefined
-      expect(turn3Text?.text).toContain('Audit `gdn-kernel` thoroughly.')
-
-      // 5. schedule.cancel cancels the AGY timer and dispatches manage_task(kill)
-      client.frames.length = 0
+      // 5. Board and background controls no longer write prompts for agy.
       const cancelRes = await client.call('schedule.cancel', {
         session_key: 'bg-s1',
         schedule_id: `${AGY_TASK_ID_PREFIX}${extSessionId}/task-43`,
       })
-      expect(cancelRes).toMatchObject({ ok: true, requested: true, dispatched: true })
-      const deadline = Date.now() + 2000
-      while (receivedPromptFrames.length < 4 && Date.now() < deadline) {
-        await Bun.sleep(10)
+      expect(cancelRes.ok).toBe(false)
+      expect(String(cancelRes.error)).toContain('written by Xerxes')
+      const postRes = await client.call('swarm.post', { session_key: 'bg-s1', text: '@worker-1 status?' })
+      expect(postRes.ok).toBe(false)
+      expect(String(postRes.error)).toContain('written by Xerxes')
+      const killRes = await client.call('swarm.kill', { session_key: 'bg-s1', name: 'all' })
+      expect(killRes.ok).toBe(false)
+      expect(String(killRes.error)).toContain('written by Xerxes')
+
+      // 6. A prompt Xerxes composes itself (/init) is refused, visibly, before reaching agy.
+      client.frames.length = 0
+      await client.call('slash', { command: '/init' })
+      const refused = await client.waitForEvent(
+        f => f.method === 'event' && f.params?.type === 'notification'
+          && String((f.params?.payload as Record<string, unknown> | undefined)?.message ?? '').includes('only receives messages you type'),
+      )
+      expect(refused).toBeDefined()
+      await Bun.sleep(50)
+      expect(receivedPromptFrames).toHaveLength(2)
+      for (const marker of xerxesOnlyMarkers) expect(promptDump()).not.toContain(marker)
+
+      // 7. Xerxes goal mode is off for Antigravity sessions; agy has its own.
+      const goalRes = await client.call('session.goal', { session_key: 'bg-s1', input: 'Ship the TPU benchmark report' })
+      expect(goalRes.ok).toBe(false)
+      expect(String(goalRes.error)).toContain('own goal mode')
+      const goalShow = await client.call('session.goal', { session_key: 'bg-s1', input: '' })
+      expect(goalShow.ok).not.toBe(false)
+      await Bun.sleep(30)
+      expect(receivedPromptFrames).toHaveLength(2)
+
+      // 8. Hub users (even with operator rights) cannot drive agy on the owner's Google sign-in.
+      const hubCall = (method: string, params: JsonRpcPayload) => {
+        const claims: HubAuthClaims = {
+          hub_id: 'hub-1', principal_id: 'bob', principal_kind: 'user', user_id: 'user-bob', device_id: 'bob-phone',
+          display_name: 'Bob', workspace_id: 'ws-1', session_id: sessionId, method, params_hash: paramsHash(params),
+          request_id: randomUUID(), nonce: randomUUID(), issued_at: Date.now(), expires_at: Date.now() + 60_000,
+          scopes: ['session.read', 'session.submit', 'session.steer', 'session.cancel'],
+        }
+        return client.call(method, { ...params, hub_auth: signHubAuth(claims, hubKeys.privateKey) as unknown as JsonRpcPayload })
       }
-      const killPrompt = receivedPromptFrames.at(-1)?.prompt as Array<{ text?: string }> | undefined
-      expect(killPrompt?.some(b => b.text?.includes('manage_task(Action: "kill"') && b.text?.includes(`${extSessionId}/task-43`))).toBe(true)
+      const hubSubmit = await hubCall('turn.submit', { session_key: 'bg-s1', text: 'run the benchmark for me' })
+      expect(hubSubmit).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+      const hubSteer = await hubCall('turn.steer', { session_key: 'bg-s1', content: 'also check p99' })
+      expect(hubSteer).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+      const hubCancel = await hubCall('turn.cancel', { session_key: 'bg-s1' })
+      expect(hubCancel).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+
+      // 9. A scheduled run never reaches agy, even when its prompt is plain user text.
+      const created = await client.call('schedule.create', {
+        session_key: 'bg-s1', target: 'session', prompt: 'Report TPS', schedule: '0 9 * * *', paused: true,
+        max_runs: 3, expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      })
+      expect((created.job as { target_session_id: string | null }).target_session_id).toBe(sessionId)
+      const scheduleId = String((created.job as { id: string }).id)
+      // The run fails, and says why.
+      await expect(client.call('schedule.run', { session_key: 'bg-s1', schedule_id: scheduleId })).rejects.toThrow('only receives messages you type')
+      await Bun.sleep(30)
+      expect(receivedPromptFrames).toHaveLength(2)
+    } finally {
+      client.close()
+      await server.stop()
+    }
+  })
+
+  test('refuses Hub Autopilot/remote answers on Antigravity permission & question prompts and keeps steered @mentions verbatim', async () => {
+    const root = await makeTempDir('xerxes-agy-hub-guard-')
+    const fakeHome = await makeTempDir('xerxes-agy-hub-home-')
+    await writeFile(join(root, 'notes.txt'), 'secret-note-content\n')
+
+    const extSessionId = 'agy-guard-sess-1'
+    const receivedPromptFrames: Array<Record<string, unknown>> = []
+    const agentReceivedResponses: Array<Record<string, unknown>> = []
+    let turnNumber = 0
+    let pendingPromptId: number | undefined
+    let activeHarness: InMemoryAcpHarness | undefined
+
+    const agentInfo: AcpExternalAgentInfo = {
+      id: 'antigravity',
+      name: 'Antigravity',
+      provider: 'antigravity',
+      transport: 'acp',
+      available: true,
+      command: 'agy',
+      args: ['acp'],
+      description: 'Mock Antigravity ACP',
+    }
+
+    const bridgeHost = new DaemonAcpBridgeHost({
+      homeDir: fakeHome,
+      discoverAgents: () => [agentInfo],
+      createAcpClient: opts => {
+        const harness = createInMemoryAcpTransport(frame => {
+          if (frame.method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'Antigravity ACP', version: '1.5.15' },
+                agentCapabilities: {
+                  promptCapabilities: { image: false, embeddedContext: false },
+                },
+              },
+            })
+            return
+          }
+          if (frame.method === 'session/new') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: {
+                sessionId: extSessionId,
+                modes: {
+                  currentModeId: 'default',
+                  availableModes: [{ id: 'default', name: 'Default' }],
+                },
+              },
+            })
+            return
+          }
+          if (frame.method === 'session/set_mode' || frame.method === 'session/set_config_option') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: {} })
+            return
+          }
+          if (frame.method === 'session/prompt') {
+            turnNumber += 1
+            const params = frame.params as Record<string, unknown>
+            receivedPromptFrames.push(params)
+            if (turnNumber === 1) {
+              pendingPromptId = frame.id as number
+              // Emit both a permission request and an elicitation question on Turn 1.
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id: 'perm-1',
+                method: 'session/request_permission',
+                params: {
+                  sessionId: extSessionId,
+                  toolCall: { toolCallId: 'tc-perm', title: 'Run shell command', kind: 'execute' },
+                  options: [
+                    { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+                    { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+                  ],
+                },
+              })
+              return
+            }
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: extSessionId,
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `Turn ${turnNumber} ok` },
+                },
+              },
+            })
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: { stopReason: 'end_turn' },
+            })
+            return
+          }
+          if (frame.id === 'perm-1') {
+            agentReceivedResponses.push(frame)
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: 'elicit-1',
+              method: 'elicitation/create',
+              params: {
+                sessionId: extSessionId,
+                toolCallId: 'tc-ask',
+                mode: 'form',
+                message: 'Pick an option',
+                requestedSchema: {
+                  type: 'object',
+                  required: ['choice'],
+                  properties: {
+                    choice: { type: 'string', title: 'Choice', enum: ['a', 'b'] },
+                  },
+                },
+              },
+            })
+            return
+          }
+          if (frame.id === 'elicit-1') {
+            agentReceivedResponses.push(frame)
+            if (pendingPromptId !== undefined) {
+              const id = pendingPromptId
+              pendingPromptId = undefined
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extSessionId,
+                  update: {
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'Turn 1 ok' },
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id,
+                result: { stopReason: 'end_turn' },
+              })
+            }
+          }
+        })
+        activeHarness = harness
+        return new AcpStdioClient({ ...opts, transport: harness.transport })
+      },
+    })
+
+    const runtime = new InMemoryDaemonRuntime(
+      new AgentTurnRunner({ llm: makeUnusedNativeLlm(), model: '' }),
+      {
+        currentProjectDirectory: root,
+        model: '',
+        sessionDirectory: join(root, 'sessions'),
+      },
+    )
+    const hubKeys = generateKeyPairSync('ed25519')
+    const hubEnrollPath = join(root, 'hub-enrollments.json')
+    enrollHub(hubEnrollPath, {
+      hub_id: 'hub-1',
+      public_key_pem: hubKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      project_dirs: [root],
+      workspace_ids: ['ws-1'],
+    })
+    const socketPath = join(root, 'agy-hub-guard.sock')
+    const server = new DaemonServer({
+      socketPath,
+      projectDirectory: root,
+      runtime,
+      acpBridgeHost: bridgeHost,
+      agyBrainBridge: new AgyBrainBridge({ homeDir: fakeHome }),
+      hubEnrollmentPath: hubEnrollPath,
+      autoTitle: false,
+      autoSnapshotTurns: false,
+      eventJournal: { directory: join(root, 'events') },
+    })
+    await server.start()
+
+    const client = await SocketRpcClient.open(socketPath)
+    try {
+      const init = await client.call('initialize', { session_key: 'hg-s1', project_dir: root })
+      const sessionId = String(init.session_id)
+      // Connect explicitly in `default` mode so `session/request_permission` waits for a response.
+      const conn = await client.call('acp.connect', { session_id: sessionId, agent_id: 'antigravity', mode_id: 'default' })
+      expect(conn.ok).toBe(true)
+
+      const hubInteractionCall = (
+        method: 'permission_response' | 'question_response',
+        params: JsonRpcPayload,
+        principalKind: 'agent' | 'user',
+        scopes: readonly string[],
+      ) => {
+        const claims: HubAuthClaims = {
+          hub_id: 'hub-1',
+          principal_id: principalKind === 'agent' ? 'xerxes-supervisor' : 'bob',
+          principal_kind: principalKind,
+          ...(principalKind === 'user' ? { user_id: 'user-bob', device_id: 'bob-phone' } : {}),
+          display_name: principalKind === 'agent' ? 'XERXES Supervisor' : 'Bob',
+          workspace_id: 'ws-1',
+          session_id: sessionId,
+          method,
+          params_hash: paramsHash(params),
+          request_id: randomUUID(),
+          nonce: randomUUID(),
+          issued_at: Date.now(),
+          expires_at: Date.now() + 60_000,
+          scopes,
+        }
+        return client.call(method, { ...params, hub_auth: signHubAuth(claims, hubKeys.privateKey) as unknown as JsonRpcPayload })
+      }
+
+      await client.call('turn.submit', { session_key: 'hg-s1', text: 'Start task' })
+
+      // 1. Wait for approval_request; Hub Autopilot and Hub user must BOTH be refused.
+      const approvalEvent = await client.waitForEvent(
+        f => f.method === 'event' && f.params?.type === 'approval_request',
+      )
+      const approvalId = String((approvalEvent.params?.payload as Record<string, unknown>).request_id)
+
+      const autopilotPerm = await hubInteractionCall(
+        'permission_response',
+        { request_id: approvalId, response: 'approve' },
+        'agent',
+        ['permission.delegated'],
+      )
+      expect(autopilotPerm).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+
+      const remoteUserPerm = await hubInteractionCall(
+        'permission_response',
+        { request_id: approvalId, response: 'approve' },
+        'user',
+        ['permission.respond'],
+      )
+      expect(remoteUserPerm).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+      expect(agentReceivedResponses).toHaveLength(0)
+
+      // Queue a local steer containing `@notes.txt` while Turn 1 is active: must stay verbatim (no `<attached_files>`).
+      const steerRes = await client.call('turn.steer', { session_key: 'hg-s1', content: 'Inspect @notes.txt' })
+      expect(steerRes.ok).toBe(true)
+
+      // Local owner approves the permission request -> elicitation question arrives.
+      const localPerm = await client.call('permission_response', { request_id: approvalId, response: 'approve' })
+      expect(localPerm.ok).toBe(true)
+
+      const questionEvent = await client.waitForEvent(
+        f => f.method === 'event' && f.params?.type === 'question_request',
+      )
+      const questionId = String((questionEvent.params?.payload as Record<string, unknown>).id)
+
+      // 2. Hub Autopilot and Hub user must BOTH be refused on `question_response`.
+      const autopilotQuestion = await hubInteractionCall(
+        'question_response',
+        { request_id: questionId, answers: { choice: 'a' } },
+        'agent',
+        ['question.delegated'],
+      )
+      expect(autopilotQuestion).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+
+      const remoteUserQuestion = await hubInteractionCall(
+        'question_response',
+        { request_id: questionId, answers: { choice: 'a' } },
+        'user',
+        ['question.respond'],
+      )
+      expect(remoteUserQuestion).toMatchObject({ ok: false, code: 'antigravity-local-only' })
+      expect(agentReceivedResponses).toHaveLength(1)
+
+      // Local owner answers the question -> Turn 1 finishes and queued steer triggers Turn 2.
+      const localQuestion = await client.call('question_response', { request_id: questionId, answers: { choice: 'a' } })
+      expect(localQuestion.ok).toBe(true)
+
+      // Wait for Turn 2 (the steered continuation) to settle.
+      const deadline = Date.now() + 5000
+      while (receivedPromptFrames.length < 2 && Date.now() < deadline) {
+        await Bun.sleep(15)
+      }
+      expect(receivedPromptFrames).toHaveLength(2)
+      expect(receivedPromptFrames[1]!.prompt).toEqual([{ type: 'text', text: 'Inspect @notes.txt' }])
+      expect(JSON.stringify(receivedPromptFrames[1])).not.toContain('<attached_files>')
+      expect(JSON.stringify(receivedPromptFrames[1])).not.toContain('secret-note-content')
+      expect(activeHarness).toBeDefined()
     } finally {
       client.close()
       await server.stop()

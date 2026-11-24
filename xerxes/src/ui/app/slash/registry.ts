@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { acpCommands } from './commands/acp.js'
 import { agentRetryCommands } from './commands/agentRetry.js'
 import { attachCommands } from './commands/attach.js'
 import { coreCommands } from './commands/core.js'
@@ -31,6 +32,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   ...setupCommands,
   ...debugCommands,
   ...integrationCommands,
+  ...acpCommands,
   ...attachCommands,
   // Registered last on purpose: the retry-aware `/agents` shadows the stock
   // dashboard command in the by-name map while delegating every non-retry

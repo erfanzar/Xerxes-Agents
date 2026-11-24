@@ -126,6 +126,14 @@ export function sidebarSections<T extends GroupableRow>(
       sections.push({ kind: 'context', key, host: contextHost, folder: workspaceName(cwd) || 'SSH', label: context.label, cwd, context, rows })
       continue
     }
+    if (context.saved && context.workspace) {
+      const cwd = context.workspace
+      const key = sectionKey(THIS_MAC, cwd)
+      if (rows.length === 0 && keys.has(key)) continue
+      keys.add(key)
+      sections.push({ kind: 'context', key, host: THIS_MAC, folder: workspaceName(cwd) || THIS_MAC, label: context.label, cwd, context, rows })
+      continue
+    }
     // A local view's daemon lists every folder on this computer: one section per folder.
     for (const group of groupByWorkspace(rows, '', context.workspace ? [context.workspace] : [])) {
       const key = sectionKey(THIS_MAC, group.cwd)

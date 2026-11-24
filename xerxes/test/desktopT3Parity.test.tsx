@@ -310,14 +310,14 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
       'data-project-folder="/srv/prismcore"',
       'Match T3 Code UI',
       'Swarm Bug Review',
-      './logo-128.png',
+      'data-brand-provider="xerxes"',
     ]) {
       expect(html).toContain(needle)
     }
     expect(html.match(HEX_RE) ?? []).toEqual([])
   })
 
-  test('Shell under data-style="vibes" renders T3 Breadcrumb Header, PanelLayoutControls, restored Xerxes Welcome, unified Model Trigger and inline ThreadDetailsCard without bottom RepoBar', () => {
+  test('Shell under data-style="vibes" renders T3 Breadcrumb Header, PanelLayoutControls, restored Xerxes Welcome, unified Model Trigger and inline ThreadDetailsCard only when wide enough (>=1550px)', () => {
     stampStyle('vibes')
     const snap = makeSnapshot({
       blocks: [],
@@ -326,8 +326,8 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
         { id: 'prev-1', key: 'prev-1', title: 'Earlier refactor', cwd: '/workspace/Xerxes-Agents', status: 'idle', turns: 2, messages: 4, age: '1h', untitled: false, current: false, kind: 'main' },
       ],
     })
-    const html = renderToStaticMarkup(createElement(Shell, { snap }))
-
+    // Default SSR 1440px laptop width keeps ThreadDetailsCard closed inline so it never overlaps chat prose.
+    const laptopHtml = renderToStaticMarkup(createElement(Shell, { snap }))
     for (const needle of [
       'data-app-sidebar="true"',
       'data-workspace-header="true"',
@@ -341,16 +341,30 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
       './logo-128.png',
       'Pick up where you left off',
       'data-t3-model-trigger="true"',
-      'data-thread-details-card="true"',
-      'New worktree',
     ]) {
-      expect(html).toContain(needle)
+      expect(laptopHtml).toContain(needle)
     }
-    expect(html).not.toContain('data-context-strip="true"')
-    expect(html.match(HEX_RE) ?? []).toEqual([])
+    expect(laptopHtml).not.toContain('data-thread-details-card="true"')
+    expect(laptopHtml).not.toContain('data-context-strip="true"')
+    expect(laptopHtml.match(HEX_RE) ?? []).toEqual([])
+
+    // Wide windows (>= 270 + 728 + 2*276 = 1550px) open ThreadDetailsCard inline in the clear right gutter.
+    const globalRef = globalThis as { window?: unknown }
+    const savedWindow = globalRef.window
+    let wideHtml = ''
+    try {
+      globalRef.window = { innerWidth: 1600 }
+      wideHtml = renderToStaticMarkup(createElement(Shell, { snap }))
+    } finally {
+      if (savedWindow === undefined) delete globalRef.window
+      else globalRef.window = savedWindow
+    }
+    expect(wideHtml).toContain('data-thread-details-card="true"')
+    expect(wideHtml).toContain('New worktree')
+    expect(wideHtml.match(HEX_RE) ?? []).toEqual([])
   })
 
-  test('T3ModelPicker renders real Xerxes logo, compact trigger, and clickable 3-pane popover with zero inline hexes', async () => {
+  test('T3ModelPicker renders crisp Xerxes brand mark, compact trigger, and clickable 3-pane popover with zero inline hexes', async () => {
     expect(compactModelTriggerName('Gemini 4 Neon')).toBe('4 Neon')
     expect(compactModelTriggerName('Claude Sonnet 4.6')).toBe('Sonnet 4.6')
     expect(reasoningLevelLabel('xhigh')).toBe('Extra high')
@@ -377,7 +391,7 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     for (const needle of [
       'data-t3-model-trigger="true"',
       'data-t3-model-picker="true"',
-      './logo-128.png',
+      'data-brand-provider="xerxes"',
       'aria-label="Favorites"',
       'placeholder="Search models..."',
       '⌘1',
@@ -545,7 +559,8 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     expect(css).toContain('.t3-term-drawer{')
     expect(css).toContain('.t3-details-card{')
     expect(css).toContain('border-radius:999px;background:var(--x-accent)')
-    expect(css).toContain('button.desktop-rail__tabclose{position:absolute;top:-4px;right:-4px;z-index:2;display:inline-grid;place-items:center;flex:none;width:14px;min-width:14px;max-width:14px;height:14px;min-height:14px;max-height:14px')
+    expect(css).toContain('button.desktop-rail__tabclose{position:static;display:inline-grid;place-items:center;flex:none;width:18px;min-width:18px;height:18px;min-height:18px')
+    expect(css).not.toContain('top:-4px;right:-4px')
   })
 
   test('icon-only Right Panel tabs & rehauled Subagents T3 Lucide icons render with zero inline hexes', () => {

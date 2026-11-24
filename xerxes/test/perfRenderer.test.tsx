@@ -24,6 +24,7 @@ import {
   syncPerfPaused,
 } from '../src/desktop/renderer/pageVisibility.js'
 import { LOG_CAP, Store, type Snapshot, type XerxesLike } from '../src/desktop/renderer/store.js'
+import { nextTranscriptFollowState } from '../src/desktop/renderer/transcriptScroll.js'
 import { SWARM_BOARD_TAIL_LIMIT, SwarmBoardView } from '../src/desktop/renderer/SwarmBoard.js'
 import { SwarmGraph } from '../src/desktop/renderer/SwarmGraph.js'
 import {
@@ -788,5 +789,96 @@ describe('Renderer Performance — Visibility Pausing, Pollers, Backdrop & Widge
 
     scene.dispose()
     expect(canceled).toBe(2)
+  })
+
+  test('nextTranscriptFollowState unpins immediately on subtle upward scroll and variable-height stream/swarm rows omit content-visibility:auto', () => {
+    // User is pinned at bottom (scrollTop=1000, clientHeight=600, scrollHeight=1600) and scrolls UP by just 12px.
+    // Must immediately unpin so trackpad scrolling never rubber-bands back to bottom.
+    const nudgedUp = nextTranscriptFollowState({
+      wasFollowing: true,
+      prevScrollTop: 1000,
+      scrollTop: 988,
+      clientHeight: 600,
+      scrollHeight: 1600,
+      lastFollowTop: 1000,
+    })
+    expect(nudgedUp.following).toBe(false)
+    expect(nudgedUp.nextLastFollowTop).toBeNull()
+
+    // Staying slightly above bottom (18px away) while NOT moving downward stays unpinned.
+    const stillUp = nextTranscriptFollowState({
+      wasFollowing: false,
+      prevScrollTop: 982,
+      scrollTop: 982,
+      clientHeight: 600,
+      scrollHeight: 1600,
+      lastFollowTop: null,
+    })
+    expect(stillUp.following).toBe(false)
+
+    // Scrolling DOWN back into the bottom 24px band re-pins cleanly.
+    const scrolledDown = nextTranscriptFollowState({
+      wasFollowing: false,
+      prevScrollTop: 960,
+      scrollTop: 990,
+      clientHeight: 600,
+      scrollHeight: 1600,
+      lastFollowTop: null,
+    })
+    expect(scrolledDown.following).toBe(true)
+
+    // Programmatic follow jump downward keeps following even if new streaming content arrived mid-frame.
+    const programmaticFollow = nextTranscriptFollowState({
+      wasFollowing: true,
+      prevScrollTop: 950,
+      scrollTop: 1000,
+      clientHeight: 600,
+      scrollHeight: 1700,
+      lastFollowTop: 1000,
+    })
+    expect(programmaticFollow.following).toBe(true)
+
+    // Non-overflowing content always stays pinned.
+    const fitsViewport = nextTranscriptFollowState({
+      wasFollowing: false,
+      prevScrollTop: 0,
+      scrollTop: 0,
+      clientHeight: 600,
+      scrollHeight: 500,
+      lastFollowTop: null,
+    })
+    expect(fitsViewport.following).toBe(true)
+
+    // macOS elastic overscroll past the bottom edge rebounding (1035 -> 1020 -> 1000) MUST stay pinned
+    // and never trigger an unpin/re-pin oscillation loop.
+    const overscrollRebound = nextTranscriptFollowState({
+      wasFollowing: true,
+      prevScrollTop: 1035,
+      scrollTop: 1020,
+      clientHeight: 600,
+      scrollHeight: 1600,
+      lastFollowTop: 1035,
+    })
+    expect(overscrollRebound.following).toBe(true)
+    const overscrollSettled = nextTranscriptFollowState({
+      wasFollowing: true,
+      prevScrollTop: 1020,
+      scrollTop: 1000,
+      clientHeight: 600,
+      scrollHeight: 1600,
+      lastFollowTop: 1000,
+    })
+    expect(overscrollSettled.following).toBe(true)
+
+    // .jump-latest-dock takes 0px of flow height so mounting/unmounting the jump button never alters scrollHeight.
+    const appCss = readFileSync(join(RENDERER_DIR, 'app.css'), 'utf8')
+    expect(appCss).toContain('.jump-latest-dock')
+    expect(appCss).toContain('height: 0')
+
+    // Variable-height transcript groups and swarm messages must NOT use content-visibility:auto
+    // (causes scroll viewport teleporting when paired with overflow-anchor:none).
+    const atelierCss = readFileSync(join(RENDERER_DIR, 'atelier.css'), 'utf8')
+    expect(atelierCss).not.toMatch(/\.stream__group[^{]*\{[^}]*content-visibility:\s*auto/)
+    expect(atelierCss).not.toMatch(/\.swarm-msg[^{]*\{[^}]*content-visibility:\s*auto/)
   })
 })

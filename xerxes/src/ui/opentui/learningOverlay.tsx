@@ -150,7 +150,7 @@ export function LearningOverlay() {
 
   const window = windowItems(rows, selectedIndex, Math.max(1, size.height - 10))
   const compact = terminal.width < 60
-  return <box alignItems="center" backgroundColor="#000000cc" height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
+  return <box alignItems="center" backgroundColor={t.ds.scrim} height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
     <Box backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} flexDirection="column" paddingX={1} width={size.width} height={size.height}>
       <Text bold color={t.color.accent}>What Xerxes learned</Text>
       <Text color={t.ds.secondary} wrap="truncate-end">{`${tab === 'proposal' ? '› ' : ''}Proposals ${data?.proposals.length ?? 0} · ${tab === 'lesson' ? '› ' : ''}Lessons ${data?.lessons.length ?? 0}`}</Text>

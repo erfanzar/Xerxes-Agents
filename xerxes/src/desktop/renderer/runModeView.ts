@@ -3,12 +3,47 @@
 
 import type { LocalSetupJobView, LocalStatusView, RunModeName, RunModeView } from './types.js'
 
-/** What each mode means, in the product plan's words: who does the work and what may leave. */
-export const RUN_MODE_CHOICES: ReadonlyArray<{ readonly mode: RunModeName; readonly label: string; readonly summary: string; readonly boundary: string }> = [
-  { mode: 'private', label: 'Private', summary: 'local-model on this Mac does all the work.', boundary: 'Nothing leaves during a run.' },
-  { mode: 'hybrid', label: 'Hybrid', summary: 'A cloud model plans and checks; local-model does the file work on this Mac.', boundary: 'Your files stay here. Plans and short summaries go to the cloud.' },
-  { mode: 'cloud', label: 'Cloud', summary: 'A cloud model does the work.', boundary: 'Task context may leave.' },
-]
+/** True when running on macOS; falls back to false on Windows/Linux. */
+export function isMacPlatform(): boolean {
+  if (typeof navigator !== 'undefined') {
+    const info = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`.trim()
+    if (info) return /Mac|iPhone|iPad|iPod/i.test(info)
+  }
+  return typeof process !== 'undefined' && process.platform === 'darwin'
+}
+
+/** Platform-aware label for the local device ("this Mac" on macOS, "this computer" elsewhere). */
+export function localMachineLabel(capitalized = false): string {
+  const mac = isMacPlatform()
+  if (capitalized) return mac ? 'This Mac' : 'This computer'
+  return mac ? 'this Mac' : 'this computer'
+}
+
+/** Short noun for the local device ("Mac" on macOS, "Computer" elsewhere). */
+export function localMachineNoun(capitalized = false): string {
+  const mac = isMacPlatform()
+  if (capitalized) return mac ? 'Mac' : 'Computer'
+  return mac ? 'Mac' : 'computer'
+}
+
+export interface RunModeChoice {
+  readonly mode: RunModeName
+  readonly label: string
+  readonly summary: string
+  readonly boundary: string
+}
+
+/** What each mode means, in plain words: who does the work and what may leave. */
+export function runModeChoices(machine = localMachineLabel()): ReadonlyArray<RunModeChoice> {
+  return [
+    { mode: 'private', label: 'Private', summary: `A local model on ${machine} does all the work.`, boundary: 'Nothing leaves during a run.' },
+    { mode: 'hybrid', label: 'Hybrid', summary: `A cloud model plans and checks; a local model does the file work on ${machine}.`, boundary: 'Your files stay here. Plans and short summaries go to the cloud.' },
+    { mode: 'cloud', label: 'Cloud', summary: 'A cloud model does the work.', boundary: 'Task context may leave.' },
+  ]
+}
+
+/** Default run-mode choices evaluated for the current platform. */
+export const RUN_MODE_CHOICES: ReadonlyArray<RunModeChoice> = runModeChoices()
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}

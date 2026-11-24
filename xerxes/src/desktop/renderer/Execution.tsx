@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { memo, useMemo, useState, type ReactElement } from 'react'
-import type { ToolItem } from './types.js'
+import type { ToolContentBlock, ToolItem } from './types.js'
+import { useDesktopNavigation } from './DesktopPanels.js'
 import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon, type IconName } from './Icon.js'
 import { StructuredResult, structuredOutput } from './StructuredResult.js'
@@ -549,7 +550,7 @@ export function classifyToolItem(item: ToolItem, fallbackLabel?: string): Semant
     category: 'other',
     icon: 'tools',
     badge: fallbackLabel || formatHumanLabel(rawName),
-    target: firstReadableArg(args, item.arg),
+    target: (item.title && item.title.trim()) || firstReadableArg(args, item.arg),
   }
 }
 
@@ -693,12 +694,90 @@ const GenericToolRow = memo(function GenericToolRow({ item, label }: { item: Too
   </details>
 })
 
+function ToolContentBlocks({ blocks }: { readonly blocks: readonly ToolContentBlock[] }): ReactElement | null {
+  const open = useDesktopNavigation()
+  const nonImage = blocks.filter(block => block.type !== 'image' && block.type !== 'text')
+  if (nonImage.length === 0) return null
+  return (
+    <div className="execution__blocks" role="region" aria-label="Tool attachments">
+      {nonImage.map((block, index) => {
+        if (block.type === 'resource_link') {
+          const isExternal = /^https?:\/\//i.test(block.uri)
+          const label = block.title || block.name || block.uri
+          return (
+            <div key={`rlink:${block.uri}:${index}`} className="execution__block execution__block--link">
+              <Icon name={isExternal ? 'cloud' : 'file'} size={12} />
+              {isExternal ? (
+                <button
+                  type="button"
+                  className="execution__block-link"
+                  title={block.uri}
+                  onClick={() => void window.xerxes?.openExternal?.(block.uri)}
+                >
+                  {label}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="execution__block-link"
+                  title={block.uri}
+                  onClick={() => open('files', block.uri.replace(/^file:\/\//i, ''))}
+                >
+                  {label}
+                </button>
+              )}
+              {block.description && <span className="execution__block-meta">{block.description}</span>}
+            </div>
+          )
+        }
+        if (block.type === 'resource') {
+          if (block.mime_type?.toLowerCase().startsWith('image/') && block.blob) return null
+          return (
+            <div key={`res:${block.uri}:${index}`} className="execution__block execution__block--resource">
+              <div className="execution__block-head">
+                <Icon name="file" size={12} />
+                <span title={block.uri}>{block.uri}</span>
+                {block.mime_type && <span className="execution__block-meta">{block.mime_type}</span>}
+              </div>
+              {block.text && <OutputViewer text={block.text} compact />}
+            </div>
+          )
+        }
+        if (block.type === 'terminal') {
+          return (
+            <div key={`term:${block.terminal_id}:${index}`} className="execution__block execution__block--terminal">
+              <Icon name="terminal" size={12} />
+              <button
+                type="button"
+                className="execution__block-link"
+                onClick={() => open('terminal')}
+              >
+                Terminal · {block.terminal_id}
+              </button>
+            </div>
+          )
+        }
+        if (block.type === 'audio') {
+          return (
+            <div key={`audio:${index}`} className="execution__block execution__block--audio">
+              <Icon name="activity" size={12} />
+              <span>Audio ({block.mime_type})</span>
+            </div>
+          )
+        }
+        return null
+      })}
+    </div>
+  )
+}
+
 export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const view = executionView(item)
   const failed = toolHasFailed(item)
   const output = view.stdout ?? readableOutput(item.output)
   const structured = view.stdout === null && output === item.output ? structuredOutput(item.output) : null
+  const hasBlocks = Boolean(item.contentBlocks && item.contentBlocks.some(b => b.type !== 'text'))
   const hasActions = Boolean(view.command || output || item.input)
   // A finished step says nothing about itself (Claude Code's): only running
   // or failed steps carry a status line.
@@ -710,9 +789,10 @@ export function ExecutionDetails({ item }: { item: ToolItem }): ReactElement {
     {view.command && <pre className="execution__command" title={view.cwd ?? undefined}>{view.command}</pre>}
     {output && (structured ? <><div className="execution__viewer-actions"><span>Result</span><button type="button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? 'Compact view' : 'Expand result'}</button></div><div className="execution__viewer" data-expanded={expanded || undefined} tabIndex={0} role="region" aria-label="Tool output"><StructuredResult value={structured} /></div></> : <OutputViewer text={output} compact />)}
     {!failed && <ToolImages item={item} />}
+    {!failed && item.contentBlocks && item.contentBlocks.length > 0 && <ToolContentBlocks blocks={item.contentBlocks} />}
     {view.stderr && <div className="execution__error"><strong>Standard error</strong><pre>{view.stderr}</pre></div>}
     {item.error && item.error !== output && item.error !== view.stderr && <div className="execution__error"><strong>Error</strong><pre>{item.error}</pre></div>}
-    {!output && !item.error && !view.stderr && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
+    {!output && !item.error && !view.stderr && !hasBlocks && <p className="execution__empty">{item.state === 'working' ? 'Waiting for output…' : 'No output'}</p>}
     <div className="execution__footer">
       <details className="execution__raw"><summary>Raw details</summary><code>{item.name} · {item.id}</code><strong>Input</strong><pre>{item.input || '(no arguments)'}</pre><strong>Result</strong><pre>{item.output || '(no result)'}</pre></details>
       {hasActions && <div className="execution__actions">

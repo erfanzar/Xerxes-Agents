@@ -5,8 +5,10 @@ import type { ShareableLocalProfile } from '../../protocol/shareableLocalProfile
 import type { XerxesBridge } from './types.js'
 import { desktopError } from './desktopRpc.js'
 import { relaySummary } from './RelayBadge.js'
+import { localMachineLabel } from './runModeView.js'
 import type { ProviderRelayView } from './store.js'
 import { ActionDialog } from './ActionDialog.js'
+import { SelectField } from './SelectField.js'
 import type { AccountRow, AgyStatusView } from './ProviderAccountsCenter.js'
 
 /** One account (or Antigravity `agy` credential) in a "Sync all" batch: its one-use transfer review, then its outcome. */
@@ -79,9 +81,11 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
   }
   const [review,setReview] = useState<Review | null>(null)
   const [error,setError] = useState(''), [busy,setBusy] = useState(false), [editing,setEditing] = useState(false)
+  const [confirmRevoke,setConfirmRevoke] = useState(false)
   const [selected,setSelected] = useState<string[]>([]), [primary,setPrimary] = useState('')
   const [minutes,setMinutes] = useState(480), [controlled,setControlled] = useState(false)
   const alive = useRef(false)
+  const machine = localMachineLabel()
   const read = async (reset = false) => {
     if (!remote) throw new Error('Update the desktop app to use local providers over SSH.')
     const result = await remote('provider-review', {}) as Review & {ok?:boolean;error?:string}
@@ -113,14 +117,17 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
     {!review ? <p role="status">{error ? 'Provider setup could not be loaded.' : 'Reading local provider setup…'}</p> : <>
       <div className="row__actions">
         <button className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
-        {accounts && <button className="btn" disabled={busy || review.running || syncAll!==null} title="Copy every signed-in account and saved key from this Mac to this SSH host" onClick={()=>void reviewAll()}>Sync all providers to this host</button>}
+        {accounts && <button className="btn" disabled={busy || review.running || syncAll!==null} title={`Copy every signed-in account and saved key from ${machine} to this SSH host`} onClick={()=>void reviewAll()}>Sync all providers to this host</button>}
       </div>
       <p><strong>{review.source==='remote' ? 'Remote credentials' : review.source==='local' && (review.expiresAt ?? 0)>Date.now() ? 'Local credentials · access enabled' : 'Local credentials · access needs renewal'}</strong><br/>
         Code and tools: {review.destination} · {review.workspace}</p>
       <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Choose and confirm each account you want bound to this host, or choose local access below to keep credentials on this computer.` : `Provider requests and authentication run on this computer. Access runs until ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'this window disconnects'}, renews while this window stays connected, and resumes when it reconnects. Remote credentials are never used as a fallback.`}</p>
       {!editing ? <div className="row__actions">
-        <button className="btn" disabled={busy} onClick={()=>void act(async()=>{await read(true);setEditing(true)})}>Review local provider access</button>
-        {review.source==='local' && <button className="btn" disabled={busy} onClick={()=>void act(()=>remote!('provider-revoke',{sessionKey:review.sessionKey}))}>Revoke local access</button>}
+        <button className="btn" disabled={busy} onClick={()=>void act(async()=>{setConfirmRevoke(false);await read(true);setEditing(true)})}>Review local provider access</button>
+        {review.source==='local' && (confirmRevoke ? <>
+          <button type="button" className="btn btn--danger" disabled={busy} onClick={()=>{setConfirmRevoke(false);void act(()=>remote!('provider-revoke',{sessionKey:review.sessionKey}))}}>Confirm revoke</button>
+          <button type="button" className="btn" disabled={busy} onClick={()=>setConfirmRevoke(false)}>Cancel</button>
+        </> : <button type="button" className="btn" disabled={busy} onClick={()=>setConfirmRevoke(true)}>Revoke local access</button>)}
       </div> : <fieldset disabled={busy}>
         <legend>Share selected local providers with this task and its agents</legend>
         <p>Keys stay on this computer. Updated saved keys apply to new requests for the same provider and endpoint. Access lasts up to eight hours and is not saved across app restarts.</p>
@@ -129,8 +136,32 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
           <span><strong>{profile.name}</strong> · {profile.model}<small>{profile.credentialSource}{!profile.supported ? ` · ${profile.setup}` : ''}</small></span>
         </label>)}</div>
         {!review.profiles.length && <p>No local profiles. Open a local workspace’s Models & Providers settings to add one.</p>}
-        <label className="field">Primary profile<select value={primary} onChange={event=>setPrimary(event.target.value)}>{selected.map(name=><option key={name}>{name}</option>)}</select></label>
-        <label className="field">Access duration<select value={minutes} onChange={event=>setMinutes(Number(event.target.value))}><option value={60}>1 hour</option><option value={240}>4 hours</option><option value={480}>8 hours</option></select></label>
+        <div className="field">
+          <span id="remote-primary-profile" className="tiercard__label">Primary profile</span>
+          <SelectField
+            ariaLabelledBy="remote-primary-profile"
+            listLabel="Primary profile"
+            value={primary}
+            disabled={busy || selected.length === 0}
+            options={selected.map(name => ({ value: name, label: name }))}
+            onChange={setPrimary}
+          />
+        </div>
+        <div className="field">
+          <span id="remote-access-duration" className="tiercard__label">Access duration</span>
+          <SelectField
+            ariaLabelledBy="remote-access-duration"
+            listLabel="Access duration"
+            value={String(minutes)}
+            disabled={busy}
+            options={[
+              { value: '60', label: '1 hour' },
+              { value: '240', label: '4 hours' },
+              { value: '480', label: '8 hours' },
+            ]}
+            onChange={val => setMinutes(Number(val))}
+          />
+        </div>
         <p className="studio-muted">Per provider: 10,000 requests, 16 concurrent requests, and 32,768 output tokens per request where supported. Readiness is configured, not verified by a live provider call.</p>
         {needsControlled && <label className="remote-providers__choice"><input type="checkbox" checked={controlled} onChange={event=>setControlled(event.target.checked)}/><span>Allow subscription providers to control output length; the token cap does not apply to them.</span></label>}
         {review.running && <p role="status">This task or its agents are working. Wait until they finish before changing its provider source.</p>}

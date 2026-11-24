@@ -186,6 +186,7 @@ export const coreCommands: SlashCommand[] = [
               'override one section (thinking/tools/activity; agents use /agents)'
             ],
             ['/immortals [<task>|board|status|channels|kill <name|all>|stop]', 'open the Immortals Board or coordinate a multi-agent Immortals force (alias /swarm)'],
+            ['/acp [status|list|use|connect|disconnect|model|mode|config|catalog|skills|capabilities|sessions|fork|auth]', 'connect, inspect, or configure external ACP runtimes'],
             ['/btw [question]', 'ask an ephemeral side question without interrupting or polluting chat (alias /side)'],
             ['/appearance [chrome|transparent]', 'toggle or select the locally saved terminal background design'],
             ['/fortune [random|daily]', 'show a random or daily local fortune']

@@ -3,18 +3,20 @@
 import { readTurnOutcome, turnOutcomeReason, turnOutcomeLabel } from '../types/turnOutcome.js'
 import {
   normalizeEventType,
+  type AcpSessionBinding,
   type AcpStatusEventPayload,
   type AnyEvent,
   type BtwEventKind,
   type BtwEventPayload,
   type GatewayEvent,
   type GatewayTranscriptMessage,
+  type QuestionItem,
   type SubagentEventPayload
 } from './gatewayTypes.js'
 import { compact } from './lib/compact.js'
 import { normalizeSwarmEventPayload } from './lib/swarmFormat.js'
 import { summarizeToolStartDisplay } from './lib/toolStartDisplay.js'
-import type { SessionInfo, Usage } from './types.js'
+import type { SessionInfo, ToolDiff, ToolLocation, Usage } from './types.js'
 
 const TOOL_RESULT_PREVIEW_CHARS = 600
 
@@ -165,7 +167,15 @@ export function sessionInfoFromInit(payload: Record<string, unknown>): SessionIn
         acpDiscoveredSkills.map(item => [str(item.name), str(item.description)])
       )
     : asStringRecord(payload.skill_descriptions)
+  const hasAcpBinding = Object.prototype.hasOwnProperty.call(payload, 'acp_binding')
+  const parsedAcpBinding =
+    hasAcpBinding && payload.acp_binding && typeof payload.acp_binding === 'object' && !Array.isArray(payload.acp_binding)
+      ? (payload.acp_binding as AcpSessionBinding)
+      : hasAcpBinding && payload.acp_binding === null
+        ? null
+        : undefined
   return compact<SessionInfo>({
+    acp_binding: parsedAcpBinding,
     local_provider_label: typeof payload.local_provider_label === 'string' ? payload.local_provider_label : undefined,
     remote_provider_binding_supported: typeof payload.remote_provider_binding_supported === "boolean" ? payload.remote_provider_binding_supported : undefined,
     remote_provider_bundle_supported: payload.remote_provider_bundle_supported === true,
@@ -555,6 +565,44 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
         }
       ]
 
+    case 'tool_update': {
+      const toolId = str(payload.tool_call_id, str(payload.id, 'tool'))
+      const name = optionalStr(payload.name)
+      const title = optionalStr(payload.title)
+      const kind = optionalStr(payload.kind)
+      const status = optionalStr(payload.status)
+      const inputs = payload.inputs && typeof payload.inputs === 'object' && !Array.isArray(payload.inputs)
+        ? (payload.inputs as Record<string, unknown>)
+        : undefined
+      const output = optionalStr(payload.output)
+      const diffs = parseWireDiffs(payload.diffs)
+      const diff = parseWireDiff(payload.diff) ?? diffs?.[0]
+      const locations = parseWireLocations(payload.locations)
+      const contentBlocks = Array.isArray(payload.content_blocks)
+        ? payload.content_blocks.filter(
+            (item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item))
+          )
+        : undefined
+      return [
+        {
+          type: 'tool.update',
+          payload: {
+            tool_id: toolId,
+            ...(name ? { name } : {}),
+            ...(title ? { title } : {}),
+            ...(kind ? { kind } : {}),
+            ...(status ? { status } : {}),
+            ...(inputs ? { inputs } : {}),
+            ...(output ? { output } : {}),
+            ...(diff ? { diff } : {}),
+            ...(diffs ? { diffs } : {}),
+            ...(locations ? { locations } : {}),
+            ...(contentBlocks && contentBlocks.length > 0 ? { content_blocks: contentBlocks } : {})
+          }
+        }
+      ]
+    }
+
     case 'tool_result':
       return [toolComplete(payload)]
 
@@ -563,35 +611,23 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
         ? (payload.inputs as Record<string, unknown>)
         : undefined
       const cwd = optionalStr(payload.cwd)
-      const rawDiff = payload.diff && typeof payload.diff === 'object' && !Array.isArray(payload.diff)
-        ? asRecord(payload.diff)
-        : undefined
-      const diff = rawDiff
-        ? {
-            path: str(rawDiff.path),
-            ...(typeof rawDiff.old_text === 'string' ? { old_text: rawDiff.old_text } : {}),
-            ...(typeof rawDiff.new_text === 'string' ? { new_text: rawDiff.new_text } : {})
-          }
-        : undefined
+      const diffs = parseWireDiffs(payload.diffs)
+      const diff = parseWireDiff(payload.diff) ?? diffs?.[0]
       const options = Array.isArray(payload.options)
         ? payload.options
             .map(item => asRecord(item))
             .filter(item => typeof item.option_id === 'string' && item.option_id.length > 0)
-            .map(item => ({
-              option_id: str(item.option_id),
-              name: str(item.name, str(item.option_id)),
-              kind: str(item.kind)
-            }))
+            .map(item => {
+              const warning = optionalStr(item.warning)
+              return {
+                option_id: str(item.option_id),
+                name: str(item.name, str(item.option_id)),
+                kind: str(item.kind),
+                ...(warning ? { warning } : {}),
+              }
+            })
         : undefined
-      const locations = Array.isArray(payload.locations)
-        ? payload.locations
-            .map(item => asRecord(item))
-            .filter(item => typeof item.path === 'string' && item.path.length > 0)
-            .map(item => ({
-              path: str(item.path),
-              ...(typeof item.line === 'number' && Number.isFinite(item.line) ? { line: Math.trunc(item.line) } : {})
-            }))
-        : undefined
+      const locations = parseWireLocations(payload.locations)
       return [
         {
           type: 'approval.request',
@@ -603,8 +639,9 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
             ...(inputs ? { inputs } : {}),
             ...(cwd ? { cwd } : {}),
             ...(diff ? { diff } : {}),
+            ...(diffs ? { diffs } : {}),
             ...(options && options.length > 0 ? { options } : {}),
-            ...(locations && locations.length > 0 ? { locations } : {})
+            ...(locations ? { locations } : {})
           }
         }
       ]
@@ -616,8 +653,27 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
     // Answered elsewhere (another client, or the daemon on its timeout): the prompt is dead.
     case 'question_response': {
       const answers = asRecord(payload.answers)
-      const answer = Object.values(answers).find((value): value is string => typeof value === 'string')
+      const firstVal = Object.values(answers).find((value): value is string | string[] =>
+        typeof value === 'string' || (Array.isArray(value) && value.every(item => typeof item === 'string'))
+      )
+      const answer = Array.isArray(firstVal) ? firstVal.join(', ') : firstVal
       return [{ type: 'clarify.resolved', payload: { request_id: str(payload.id), ...(answer === undefined ? {} : { answer }), auto: payload.auto === true } }]
+    }
+
+    case 'question_resolved': {
+      const elicitationId = optionalStr(payload.elicitation_id)
+      const reason = optionalStr(payload.reason)
+      return [
+        {
+          type: 'clarify.resolved',
+          payload: {
+            request_id: str(payload.id, str(payload.request_id)),
+            auto: payload.auto === true,
+            ...(elicitationId ? { elicitation_id: elicitationId } : {}),
+            ...(reason ? { reason } : {})
+          }
+        }
+      ]
     }
 
     case 'learning_changed': {
@@ -841,25 +897,86 @@ function toolComplete(payload: Record<string, unknown>): AnyEvent {
   }
 }
 
+function parseWireDiff(raw: unknown): ToolDiff | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined
+  }
+  const rec = asRecord(raw)
+  const path = str(rec.path)
+  if (!path && typeof rec.old_text !== 'string' && typeof rec.new_text !== 'string') {
+    return undefined
+  }
+  return {
+    path,
+    ...(typeof rec.old_text === 'string' ? { old_text: rec.old_text } : {}),
+    ...(typeof rec.new_text === 'string' ? { new_text: rec.new_text } : {})
+  }
+}
+
+function parseWireDiffs(raw: unknown): ToolDiff[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined
+  }
+  const parsed = raw.map(parseWireDiff).filter((item): item is ToolDiff => item !== undefined)
+  return parsed.length > 0 ? parsed : undefined
+}
+
+function parseWireLocations(raw: unknown): ToolLocation[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined
+  }
+  const parsed = raw
+    .map(item => asRecord(item))
+    .filter(item => typeof item.path === 'string' && item.path.length > 0)
+    .map(item => ({
+      path: str(item.path),
+      ...(typeof item.line === 'number' && Number.isFinite(item.line) ? { line: Math.trunc(item.line) } : {})
+    }))
+  return parsed.length > 0 ? parsed : undefined
+}
+
 function clarifyRequest(payload: Record<string, unknown>): AnyEvent {
-  const questions = Array.isArray(payload.questions) ? payload.questions.map(asRecord) : []
-  const first = questions[0] ?? {}
-  const choices = Array.isArray(first.options) ? first.options.map(String) : null
+  const rawQuestions = Array.isArray(payload.questions) ? payload.questions.map(asRecord) : []
+  const questions: QuestionItem[] = rawQuestions.map((row, index) => {
+    const placeholder = optionalStr(row.placeholder)
+    return {
+      allow_free_form: bool(row.allow_free_form, true),
+      id: str(row.id, index === 0 ? 'q' : `q_${index + 1}`),
+      ...(row.multi_select === true ? { multi_select: true } : {}),
+      ...(Array.isArray(row.options) ? { options: row.options.map(String) } : {}),
+      ...(placeholder ? { placeholder } : {}),
+      question: str(row.question, 'Input required')
+    }
+  })
+  const first = questions[0]
+  const mode = payload.mode === 'url' ? 'url' : payload.mode === 'form' ? 'form' : undefined
+  const url = optionalStr(payload.url)
+  const elicitationId = optionalStr(payload.elicitation_id)
+  const message = optionalStr(payload.message)
+  const choices = first?.options ? [...first.options] : mode === 'url' ? ['Open link & continue', 'Decline'] : null
   const daemonRequest = str(payload.id, 'question')
-  const questionId = str(first.id, 'q')
+  const questionId = first?.id ?? (mode === 'url' ? 'url_consent' : 'q')
   const source = str(payload.flow) === 'provider' ? 'provider' : 'agent'
   const toolId = optionalStr(payload.tool_call_id)
+  const allowFreeForm = first ? first.allow_free_form !== false : mode !== 'url'
+  const placeholder = first?.placeholder
   return {
     type: 'clarify.request',
     payload: {
-      allow_free_form: bool(first.allow_free_form, true),
+      allow_free_form: allowFreeForm,
       choices,
-      placeholder: optionalStr(first.placeholder),
-      question: str(first.question, 'Input required'),
+      ...(elicitationId ? { elicitation_id: elicitationId } : {}),
+      ...(message ? { message } : {}),
+      ...(mode ? { mode } : {}),
+      ...(first?.multi_select === true ? { multi_select: true } : {}),
+      ...(placeholder !== undefined ? { placeholder } : {}),
+      question: first?.question ?? message ?? (mode === 'url' ? 'Open external link to continue' : 'Input required'),
       question_id: questionId,
+      ...(questions.length > 1 ? { questions } : {}),
       request_id: `${daemonRequest}:${questionId}`,
       source,
-      ...(toolId ? { tool_id: toolId } : {})
+      ...(toolId ? { tool_id: toolId } : {}),
+      ...(url ? { url } : {})
     }
   }
 }

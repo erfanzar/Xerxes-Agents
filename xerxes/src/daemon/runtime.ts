@@ -355,6 +355,13 @@ export interface SubmitTurnOptions {
    * that connection.
    */
   readonly announceSuppressedTurn?: boolean;
+  /**
+   * The provider-facing text is exactly what a person typed, or a verbatim
+   * replay of it (/retry). Antigravity turns require this: Xerxes never sends
+   * an agy session text it composed itself (goal rounds, restart nudges,
+   * board wakes, /init, schedule follow-up instructions, …).
+   */
+  readonly userAuthored?: boolean;
 }
 
 export interface SubagentRetryRequest {
@@ -516,6 +523,7 @@ export interface DaemonRuntime {
   shutdown?(): Promise<void>;
   /** Images are validated attachments (see `validateTurnImages`); a steer may be images alone. */
   steerTurn(sessionKey: string, content: string, images?: readonly TurnImage[], author?: SteerAuthor): boolean;
+  discardPendingSteers?(sessionKey: string): number;
   /**
    * True when steering text is queued and not yet folded into the transcript.
    *
@@ -2245,6 +2253,15 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   hasPendingSteer(sessionKey: string): boolean {
     return (this.steerQueues.get(sessionKey)?.length ?? 0) > 0;
+  }
+
+  discardPendingSteers(sessionKey: string): number {
+    const queued = this.steerQueues.get(sessionKey);
+    if (!queued?.length) return 0;
+    const count = queued.length;
+    this.steerQueues.delete(sessionKey);
+    if (this.steerWakes.get(sessionKey)?.signal.aborted) this.steerWakes.delete(sessionKey);
+    return count;
   }
 
   private drainSteers(sessionKey: string): readonly SteerInput[] {

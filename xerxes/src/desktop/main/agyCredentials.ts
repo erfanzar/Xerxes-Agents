@@ -1,13 +1,13 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { access, constants, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildAgySubprocessEnv, loadAgyRuntimeEnv } from '../../auth/agyRuntimeEnv.js'
+import { loadAgyRuntimeEnv } from '../../auth/agyRuntimeEnv.js'
 import type { ProviderAccountRegistry } from '../../auth/providerAccountRegistry.js'
 import { sshDestination } from '../../daemon/sshTarget.js'
 import { cliSearchDirectories } from './localProviderSetup.js'
@@ -25,9 +25,16 @@ import type { SecretProcessSpawner } from './remoteCredentials.js'
  * - Remote files are written atomically (temp + rename) with mode 0600,
  *   preserving unrelated keys in `~/.gemini/config/config.json` and
  *   `~/.gemini/antigravity-cli/settings.json`.
+ *
+ * Only credentials the user owns independently of Antigravity (Google Cloud
+ * ADC, a Gemini API key) are transferable. Antigravity's own Google sign-in
+ * (`keyring`) is reported for status but never read, exported, or planted on
+ * another host: each host signs in through `agy` itself (`agy acp --login`).
  */
 
 export type AgyCredentialMode = 'adc' | 'gemini_api_key' | 'keyring'
+/** Credential sources Xerxes may copy to an SSH host; Antigravity's own sign-in is excluded. */
+export type AgyTransferMode = Exclude<AgyCredentialMode, 'keyring'>
 
 export interface AgyCredentialSourceStatus {
   readonly mode: AgyCredentialMode
@@ -35,6 +42,8 @@ export interface AgyCredentialSourceStatus {
   readonly available: boolean
   readonly detail: string
   readonly headlessSafe: boolean
+  /** False for Antigravity's own sign-in, which stays on the host where `agy` created it. */
+  readonly transferable: boolean
   /** Saved Gemini account id if `gemini_api_key` comes from the Xerxes account registry. */
   readonly accountId?: string
 }
@@ -42,11 +51,11 @@ export interface AgyCredentialSourceStatus {
 export interface AgyLocalStatus {
   readonly agyInstalled: boolean
   readonly sources: readonly AgyCredentialSourceStatus[]
-  readonly recommendedMode: AgyCredentialMode | null
+  readonly recommendedMode: AgyTransferMode | null
   readonly canSync: boolean
   readonly destination: string | null
   readonly syncedDestination: string | null
-  readonly syncedMode: AgyCredentialMode | null
+  readonly syncedMode: AgyTransferMode | null
 }
 
 export interface AgyAdcSyncPayload {
@@ -64,19 +73,9 @@ export interface AgyGeminiApiKeySyncPayload {
   readonly baseUrl?: string
 }
 
-export interface AgyKeyringSyncPayload {
-  readonly kind: 'agy'
-  readonly mode: 'keyring'
-  readonly secret: string
-  /** Decoded JSON OAuth token written to `~/.gemini/antigravity-cli/antigravity-oauth-token` (0600) for headless Linux/SSH hosts. */
-  readonly oauthToken?: Record<string, unknown>
-  readonly settings?: Record<string, unknown>
-}
-
 export type AgyRemoteSyncPayload =
   | AgyAdcSyncPayload
   | AgyGeminiApiKeySyncPayload
-  | AgyKeyringSyncPayload
 
 export interface AgyInspectOptions {
   readonly home?: string
@@ -84,20 +83,18 @@ export interface AgyInspectOptions {
   readonly registry?: Pick<ProviderAccountRegistry, 'list' | 'syncPayload'>
   /** Optional seam for testing OS keyring existence without touching the host keychain. */
   readonly hasKeyringEntry?: () => Promise<boolean>
-  /** Optional seam for reading OS keyring secret in tests. */
-  readonly readKeyringSecret?: () => Promise<string | undefined>
 }
 
 interface AgySyncReview {
   readonly id: string
-  readonly mode: AgyCredentialMode
+  readonly mode: AgyTransferMode
   readonly accountId?: string
   readonly target: string
   readonly expiresAt: number
 }
 
 const MAX_ADC_BYTES = 128_000
-const MAX_KEYRING_SECRET_BYTES = 128_000
+const MAX_TOOL_OUTPUT_BYTES = 16_384
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -131,51 +128,11 @@ export function adcCredentialsPath(home = homedir()): string {
   return join(home, '.config', 'gcloud', 'application_default_credentials.json')
 }
 
-export function agySettingsPath(home = homedir()): string {
-  return join(home, '.gemini', 'antigravity-cli', 'settings.json')
-}
-
 export function agyOauthTokenPath(home = homedir()): string {
   return join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token')
 }
 
-const GO_KEYRING_B64_PREFIX = 'go-keyring-base64:'
-
-/**
- * Decode an `agy` keyring or file-based OAuth token payload into its plain JSON object.
- * Supports `go-keyring-base64:<base64>` (macOS Keychain / go-keyring), hex-encoded
- * `security -w` output, and raw JSON (`antigravity-oauth-token`).
- */
-export function decodeAgyOauthToken(raw: string): Record<string, unknown> | undefined {
-  let candidate = raw.trim()
-  if (!candidate) return undefined
-  if (/^[0-9a-fA-F]+$/.test(candidate) && candidate.length % 2 === 0 && candidate.length >= 16) {
-    try {
-      const hexDecoded = Buffer.from(candidate, 'hex').toString('utf8')
-      if (hexDecoded.startsWith(GO_KEYRING_B64_PREFIX) || hexDecoded.trimStart().startsWith('{')) {
-        candidate = hexDecoded.trim()
-      }
-    } catch {
-      // Keep original candidate.
-    }
-  }
-  if (candidate.startsWith(GO_KEYRING_B64_PREFIX)) {
-    try {
-      candidate = Buffer.from(candidate.slice(GO_KEYRING_B64_PREFIX.length), 'base64').toString('utf8').trim()
-    } catch {
-      return undefined
-    }
-  }
-  try {
-    const parsed: unknown = JSON.parse(candidate)
-    if (!isPlainRecord(parsed)) return undefined
-    if (!('token' in parsed) || parsed.token === null || parsed.token === undefined) return undefined
-    return parsed
-  } catch {
-    return undefined
-  }
-}
-
+/** Whether `agy` keeps a file-based sign-in here; only checks existence, never reads it. */
 async function hasFileOauthToken(home: string): Promise<boolean> {
   try {
     await access(agyOauthTokenPath(home), constants.R_OK)
@@ -210,14 +167,14 @@ async function runTool(binary: string, args: readonly string[], timeoutMs = 4000
       finish(-1)
     }, timeoutMs)
     child.stdout?.on('data', chunk => {
-      if (stdout.length < MAX_KEYRING_SECRET_BYTES) stdout += String(chunk)
+      if (stdout.length < MAX_TOOL_OUTPUT_BYTES) stdout += String(chunk)
     })
     child.once('error', () => finish(-1))
     child.once('close', code => finish(code ?? -1))
   })
 }
 
-/** Check existence of an `agy` keyring login without reading the secret value on macOS. */
+/** Check existence of an `agy` keyring login without reading the secret value. */
 async function defaultHasKeyringEntry(): Promise<boolean> {
   if (process.platform === 'darwin') {
     const res = await runTool('/usr/bin/security', ['find-generic-password', '-s', 'gemini', '-a', 'antigravity'])
@@ -225,26 +182,21 @@ async function defaultHasKeyringEntry(): Promise<boolean> {
   }
   if (process.platform === 'linux') {
     if (!process.env.DBUS_SESSION_BUS_ADDRESS) return false
-    const res = await runTool('secret-tool', ['lookup', 'service', 'gemini', 'account', 'antigravity'])
-    return res.code === 0 && res.stdout.trim().length > 0
+    // Query only D-Bus Secret Service object paths (never `GetSecret` or `secret-tool lookup/search`, which print secrets).
+    const res = await runTool('gdbus', [
+      'call',
+      '--session',
+      '--dest',
+      'org.freedesktop.secrets',
+      '--object-path',
+      '/org/freedesktop/secrets',
+      '--method',
+      'org.freedesktop.Secret.Service.SearchItems',
+      "{'service': 'gemini', 'account': 'antigravity'}",
+    ])
+    return res.code === 0 && res.stdout.includes('/org/freedesktop/secrets/')
   }
   return false
-}
-
-/** Read the local `agy` OS keyring secret strictly in the main process when confirmed by the user. */
-async function defaultReadKeyringSecret(): Promise<string | undefined> {
-  if (process.platform === 'darwin') {
-    const res = await runTool('/usr/bin/security', ['find-generic-password', '-s', 'gemini', '-a', 'antigravity', '-w'])
-    const value = res.code === 0 ? res.stdout.replace(/\r?\n$/, '') : ''
-    return value.length > 0 ? value : undefined
-  }
-  if (process.platform === 'linux') {
-    if (!process.env.DBUS_SESSION_BUS_ADDRESS) return undefined
-    const res = await runTool('secret-tool', ['lookup', 'service', 'gemini', 'account', 'antigravity'])
-    const value = res.code === 0 ? res.stdout.replace(/\r?\n$/, '') : ''
-    return value.length > 0 ? value : undefined
-  }
-  return undefined
 }
 
 /**
@@ -253,7 +205,7 @@ async function defaultReadKeyringSecret(): Promise<string | undefined> {
  */
 export async function inspectLocalAgyCredentials(
   options: AgyInspectOptions = {},
-  context: { readonly destination?: string | null; readonly syncedDestination?: string | null; readonly syncedMode?: AgyCredentialMode | null } = {},
+  context: { readonly destination?: string | null; readonly syncedDestination?: string | null; readonly syncedMode?: AgyTransferMode | null } = {},
 ): Promise<AgyLocalStatus> {
   const home = options.home ?? homedir()
   const env = options.env ?? process.env
@@ -286,16 +238,18 @@ export async function inspectLocalAgyCredentials(
       mode: 'keyring',
       label: 'Gemini Subscription (Antigravity)',
       available: subscriptionPresent,
-      headlessSafe: true,
+      headlessSafe: false,
+      transferable: false,
       detail: subscriptionPresent
-        ? 'Local Gemini Subscription / Antigravity Google sign-in found on this computer. Transfers securely to headless Linux/TPU SSH hosts (mode 0600).'
-        : 'Not signed in locally yet. Choose Gemini Subscription above to sign in with Google, or run `agy acp --login`.',
+        ? 'Signed in to Antigravity on this computer. This sign-in stays here; on an SSH host, run `agy acp --login` there, or transfer Google Cloud ADC / a Gemini API key (recommended for headless and third-party harness use).'
+        : 'Not signed in locally yet. Run `agy acp --login` in a terminal, or configure Google Cloud ADC / a Gemini API key (recommended for headless and third-party harness use).',
     },
     {
       mode: 'adc',
       label: 'Google Cloud ADC',
       available: adcAvailable,
       headlessSafe: true,
+      transferable: true,
       detail: adcAvailable
         ? `Local Application Default Credentials (${adcType}${adcProject ? ` · ${adcProject}` : ''}). Works on headless Linux SSH hosts.`
         : 'Not found at ~/.config/gcloud/application_default_credentials.json. Run `gcloud auth application-default login` to enable headless ADC.',
@@ -305,20 +259,17 @@ export async function inspectLocalAgyCredentials(
       label: 'Gemini API key',
       available: geminiAvailable,
       headlessSafe: true,
+      transferable: true,
       detail: geminiDetail,
       ...(geminiAccount ? { accountId: geminiAccount.id } : {}),
     },
   ]
 
-  // Prefer the user's Gemini Subscription (Antigravity OAuth) first — it works on
-  // both headless Linux/TPU SSH hosts (file token storage) and macOS hosts.
-  const recommendedMode: AgyCredentialMode | null = subscriptionPresent
-    ? 'keyring'
-    : adcAvailable
-      ? 'adc'
-      : geminiAvailable
-        ? 'gemini_api_key'
-        : null
+  const recommendedMode: AgyTransferMode | null = adcAvailable
+    ? 'adc'
+    : geminiAvailable
+      ? 'gemini_api_key'
+      : null
 
   const destination = context.destination ?? null
   return {
@@ -337,7 +288,7 @@ export async function inspectLocalAgyCredentials(
  * Must stay exclusively inside the main process.
  */
 export async function readLocalAgyCredentialPayload(
-  mode: AgyCredentialMode,
+  mode: AgyTransferMode,
   options: AgyInspectOptions & { readonly accountId?: string } = {},
 ): Promise<AgyRemoteSyncPayload> {
   const home = options.home ?? homedir()
@@ -395,30 +346,7 @@ export async function readLocalAgyCredentialPayload(
     }
   }
 
-  let secret = await (options.readKeyringSecret ?? defaultReadKeyringSecret)()
-  if (!secret) {
-    try {
-      const fromFile = (await readFile(agyOauthTokenPath(home), 'utf8')).trim()
-      if (fromFile.length > 0) secret = fromFile
-    } catch {
-      // No local file-based OAuth token either.
-    }
-  }
-  if (!secret || Buffer.byteLength(secret, 'utf8') > MAX_KEYRING_SECRET_BYTES) {
-    throw new Error('No local Gemini Subscription (Antigravity) sign-in is available on this computer')
-  }
-  const oauthToken = decodeAgyOauthToken(secret)
-  const rawSettings = await readJsonFile(agySettingsPath(home))
-  const settings = rawSettings
-    ? Object.fromEntries(Object.entries(rawSettings).filter(([key, val]) => !(key === 'modelProvider' && val === 'gemini')))
-    : undefined
-  return {
-    kind: 'agy',
-    mode: 'keyring',
-    secret,
-    ...(oauthToken ? { oauthToken } : {}),
-    ...(settings && Object.keys(settings).length > 0 ? { settings } : {}),
-  }
+  throw new Error(`Antigravity credential mode "${String(mode)}" cannot be transferred`)
 }
 
 /**
@@ -501,52 +429,6 @@ if (value.mode === 'gemini_api_key') {
   process.exit(0)
 }
 
-if (value.mode === 'keyring') {
-  if (typeof value.secret !== 'string' || !value.secret.length || value.secret.length > 131072 || /[\0\r\n]/.test(value.secret)) {
-    throw new Error('invalid keyring credential')
-  }
-  let stored = false
-  if (value.oauthToken && typeof value.oauthToken === 'object' && !Array.isArray(value.oauthToken) && 'token' in value.oauthToken) {
-    // Headless-safe file token storage read natively by agy on SSH / headless Linux hosts.
-    await atomicJson(join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), value.oauthToken)
-    stored = true
-  }
-  const allowKeyring = process.env.XERXES_SKIP_OS_KEYRING !== '1'
-  if (allowKeyring && process.platform === 'darwin') {
-    const escaped = value.secret.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-    const proc = Bun.spawn(['/usr/bin/security', '-i'], {
-      stdin: new TextEncoder().encode('add-generic-password -U -s gemini -a antigravity -w "' + escaped + '"\n'),
-      stdout: 'ignore',
-      stderr: 'ignore',
-      timeout: 3000,
-    })
-    if ((await proc.exited) === 0) stored = true
-  } else if (allowKeyring && process.platform === 'linux' && process.env.DBUS_SESSION_BUS_ADDRESS && Bun.which('secret-tool')) {
-    const proc = Bun.spawn(['secret-tool', 'store', '--label=Antigravity CLI', 'service', 'gemini', 'account', 'antigravity'], {
-      stdin: new TextEncoder().encode(value.secret),
-      stdout: 'ignore',
-      stderr: 'ignore',
-      timeout: 3000,
-    })
-    if ((await proc.exited) === 0) stored = true
-  }
-  if (!stored) {
-    console.log(JSON.stringify({ ok: false, code: 'keyring_unavailable' }))
-    process.exit(1)
-  }
-  const settingsFile = join(home, '.gemini', 'antigravity-cli', 'settings.json')
-  const current = await readObj(settingsFile)
-  const merged = value.settings && typeof value.settings === 'object' && !Array.isArray(value.settings)
-    ? { ...current, ...value.settings }
-    : { ...current }
-  if (merged.modelProvider === 'gemini') delete merged.modelProvider
-  if (Object.keys(merged).length > 0 || current.modelProvider === 'gemini') {
-    await atomicJson(settingsFile, merged)
-  }
-  console.log(JSON.stringify({ ok: true, provider: 'agy', mode: 'keyring' }))
-  process.exit(0)
-}
-
 throw new Error('unsupported agy credential mode')
 `
 }
@@ -582,11 +464,6 @@ export function spawnAgySecretWriter(
     child.once('error', () => finish(new Error('Remote agy credential transfer failed')))
     child.once('close', code => {
       if (code === 0) { finish(); return }
-      // Check for the non-secret structured keyring_unavailable notice before collapsing to generic error.
-      if (output.includes('"keyring_unavailable"')) {
-        finish(new Error('keyring_unavailable'))
-        return
-      }
       finish(new Error('Remote agy credential transfer failed'))
     })
     child.stdin?.on('error', () => finish(new Error('Remote agy credential transfer failed')))
@@ -596,7 +473,7 @@ export function spawnAgySecretWriter(
 }
 
 /** Parse only the non-secret receiver acknowledgement. */
-export function remoteAgyReceipt(output: string): AgyCredentialMode {
+export function remoteAgyReceipt(output: string): AgyTransferMode {
   const lines = output.split('\n')
   for (let index = lines.length - 1; index >= 0; index--) {
     let value: unknown
@@ -606,15 +483,15 @@ export function remoteAgyReceipt(output: string): AgyCredentialMode {
       continue
     }
     if (!isPlainRecord(value)) continue
-    if (value.ok === true && value.provider === 'agy' && (value.mode === 'adc' || value.mode === 'gemini_api_key' || value.mode === 'keyring')) {
+    if (value.ok === true && value.provider === 'agy' && isAgyTransferMode(value.mode)) {
       return value.mode
     }
   }
   throw new Error('Remote agy credential transfer was not acknowledged')
 }
 
-export function isAgyCredentialMode(value: unknown): value is AgyCredentialMode {
-  return value === 'adc' || value === 'gemini_api_key' || value === 'keyring'
+export function isAgyTransferMode(value: unknown): value is AgyTransferMode {
+  return value === 'adc' || value === 'gemini_api_key'
 }
 
 /**
@@ -624,7 +501,7 @@ export function isAgyCredentialMode(value: unknown): value is AgyCredentialMode 
 export class AgyCredentialTransfer {
   private review: AgySyncReview | undefined
   private syncedDestination: string | null = null
-  private syncedMode: AgyCredentialMode | null = null
+  private syncedMode: AgyTransferMode | null = null
 
   constructor(
     private readonly remote: RemoteTarget | undefined,
@@ -644,9 +521,12 @@ export class AgyCredentialTransfer {
   async reviewSync(requestedMode?: unknown, accountId?: string): Promise<Record<string, unknown>> {
     if (!this.remote) throw new Error('Open an SSH workspace to transfer Antigravity (agy) credentials')
     const current = await this.status()
-    let mode: AgyCredentialMode
+    let mode: AgyTransferMode
     if (requestedMode !== undefined && requestedMode !== '') {
-      if (!isAgyCredentialMode(requestedMode)) throw new Error('Choose Google Cloud ADC, Gemini API key, or OS Keyring for agy transfer')
+      if (requestedMode === 'keyring') {
+        throw new Error('The Antigravity sign-in stays on this computer. Run `agy acp --login` on the SSH host, or transfer Google Cloud ADC or a Gemini API key.')
+      }
+      if (!isAgyTransferMode(requestedMode)) throw new Error('Choose Google Cloud ADC or a Gemini API key for agy transfer')
       mode = requestedMode
     } else if (current.recommendedMode) {
       mode = current.recommendedMode
@@ -702,9 +582,6 @@ export class AgyCredentialTransfer {
       this.syncedMode = acknowledged
       return { ok: true, provider: 'agy', mode: acknowledged, destination: remote.target }
     } catch (error) {
-      if (error instanceof Error && error.message === 'keyring_unavailable') {
-        throw new Error('The SSH host could not store the Antigravity OAuth token. Transfer Google Cloud ADC or a Gemini API key instead.')
-      }
       const hint = stage === 'source'
         ? 'source: the local agy credential could not be read'
         : stage === 'transfer'
@@ -713,160 +590,6 @@ export class AgyCredentialTransfer {
             ? 'receipt: the remote host replied without a valid receipt'
             : 'identity: the remote host acknowledged a different mode'
       throw new Error(`Antigravity (agy) credential transfer was not acknowledged (${hint}); review the transfer again before retrying`)
-    }
-  }
-}
-
-interface PendingAgyLogin {
-  readonly id: string
-  readonly child: ChildProcess
-  readonly done: Promise<void>
-  readonly timer: ReturnType<typeof setTimeout>
-}
-
-export interface AgyLoginManagerOptions {
-  readonly home?: string
-  readonly env?: Readonly<Record<string, string | undefined>>
-  readonly findAgyPath?: () => Promise<string | undefined>
-  readonly spawnLogin?: (binary: string, args: readonly string[], env: NodeJS.ProcessEnv) => ChildProcess
-}
-
-async function resolveAgyBinaryPath(env: Readonly<Record<string, string | undefined>>, home: string): Promise<string | undefined> {
-  const dirs = [...(env.PATH ?? '').split(':').filter(Boolean), ...cliSearchDirectories(home)]
-  for (const dir of dirs) {
-    const candidate = join(dir, 'agy')
-    if (await isExecutable(candidate)) return candidate
-  }
-  return undefined
-}
-
-/**
- * Coordinates interactive `agy acp --login` Google OAuth sign-in in the main
- * process: spawns `agy acp --login`, extracts the Google OAuth URL for the
- * browser, and submits the pasted authorization code/URL to stdin on completion.
- */
-export class AgyLoginManager {
-  private active: PendingAgyLogin | undefined
-
-  constructor(private readonly options: AgyLoginManagerOptions = {}) {}
-
-  async start(): Promise<{ readonly loginId: string; readonly url: string }> {
-    this.cancel()
-    const home = this.options.home ?? homedir()
-    const env = this.options.env ?? process.env
-    const binary = await (this.options.findAgyPath ?? (() => resolveAgyBinaryPath(env, home)))()
-    if (!binary) {
-      throw new Error('Antigravity CLI (agy) is not installed yet on this computer.')
-    }
-    const cleanEnv = buildAgySubprocessEnv(env, { stripSshSession: process.platform === 'darwin' })
-    const childEnv: NodeJS.ProcessEnv = {}
-    for (const [key, value] of Object.entries(cleanEnv)) {
-      if (typeof value === 'string') childEnv[key] = value
-    }
-    childEnv.PATH = [...cliSearchDirectories(home), childEnv.PATH ?? ''].filter(Boolean).join(':')
-
-    const child = (this.options.spawnLogin ?? ((bin, args, spawnEnv) =>
-      spawn(bin, [...args], { env: spawnEnv, stdio: ['pipe', 'pipe', 'pipe'] })
-    ))(binary, ['acp', '--login'], childEnv)
-
-    const id = randomUUID()
-    let output = ''
-    let resolveUrl: ((url: string) => void) | undefined
-    let rejectUrl: ((err: Error) => void) | undefined
-    const urlPromise = new Promise<string>((resolve, reject) => {
-      resolveUrl = resolve
-      rejectUrl = reject
-    })
-
-    let resolveDone: (() => void) | undefined
-    let rejectDone: ((err: Error) => void) | undefined
-    const done = new Promise<void>((resolve, reject) => {
-      resolveDone = resolve
-      rejectDone = reject
-    })
-    // Prevent unhandled rejections if the process exits before complete() is called.
-    done.catch(() => undefined)
-
-    const timer = setTimeout(() => {
-      this.cancel(id)
-    }, 10 * 60_000)
-    timer.unref?.()
-
-    const urlTimer = setTimeout(() => {
-      rejectUrl?.(new Error('Timed out waiting for Antigravity sign-in URL.'))
-      this.cancel(id)
-    }, 15_000)
-    urlTimer.unref?.()
-
-    const scanOutput = (chunk: Buffer | string) => {
-      output = (output + String(chunk)).slice(-8192)
-      const match = output.match(/https:\/\/accounts\.google\.com\/[^\s]+/)
-      if (match?.[0]) {
-        try {
-          const parsed = new URL(match[0])
-          if (parsed.protocol === 'https:') {
-            clearTimeout(urlTimer)
-            resolveUrl?.(parsed.toString())
-            resolveUrl = undefined
-            rejectUrl = undefined
-          }
-        } catch {
-          // Wait for full URL chunk.
-        }
-      }
-    }
-    child.stdout?.on('data', scanOutput)
-    child.stderr?.on('data', scanOutput)
-    child.once('error', error => {
-      clearTimeout(urlTimer)
-      clearTimeout(timer)
-      if (this.active?.id === id) this.active = undefined
-      rejectUrl?.(error)
-      rejectDone?.(error)
-    })
-    child.once('close', code => {
-      clearTimeout(urlTimer)
-      clearTimeout(timer)
-      if (this.active?.id === id) this.active = undefined
-      if (code === 0) {
-        resolveDone?.()
-      } else {
-        const detail = output.trim().split('\n').filter(line => !line.includes('https://accounts.google.com/')).slice(-2).join(' ').trim()
-        const err = new Error(detail || `Antigravity sign-in exited (${code ?? 'unknown'})`)
-        rejectUrl?.(err)
-        rejectDone?.(err)
-      }
-    })
-
-    this.active = { id, child, done, timer }
-    const url = await urlPromise
-    return { loginId: id, url }
-  }
-
-  async complete(loginId: string, codeOrUrl: string): Promise<void> {
-    const active = this.active
-    const cleaned = codeOrUrl.trim()
-    if (!active || active.id !== loginId) {
-      throw new Error('Sign-in session expired. Start Google sign-in again.')
-    }
-    if (!cleaned || /[\0\r\n]/.test(cleaned) || cleaned.length > 4096) {
-      throw new Error('Paste the authorization code or callback URL from your browser.')
-    }
-    active.child.stdin?.write(`${cleaned}\n`)
-    active.child.stdin?.end()
-    await active.done
-  }
-
-  cancel(loginId?: string): void {
-    const active = this.active
-    if (!active) return
-    if (loginId && active.id !== loginId) return
-    this.active = undefined
-    clearTimeout(active.timer)
-    try {
-      active.child.kill('SIGTERM')
-    } catch {
-      // Already exited.
     }
   }
 }

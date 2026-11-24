@@ -90,7 +90,7 @@ Install the platform-specific `.vsix` (`darwin-arm64`, `darwin-x64`, `linux-arm6
 | Area | Highlights |
 | --- | --- |
 | **Desktop Workspace** | Vibes & Neo visual styles, themed palettes & backdrops, Machine + Project grouped Sidebar V2 with inbox triage (pin/snooze/settle), 3-pane Provider/Model/Thinking/Permissions picker, Side Question (`/btw`), immediate **Steer now** (`⌘⏎`) & queued follow-ups, Files/Diff/Git/Terminal/Artifacts/Outputs tabs, and an embedded Browser with SSH port forwarding |
-| **External ACP Runtimes** | Switch any thread live between **Xerxes Native**, **Google Antigravity (`agy acp`)**, **Claude Code**, **OpenAI Codex**, or custom ACP commands with per-runtime model/thinking/mode controls, `ask_question` elicitation, Turbo auto-approve, credential sync, and `XERXES.md` / `.xerxes/` bridging |
+| **External ACP Runtimes** | Switch any thread live between **Xerxes Native**, **Google Antigravity (`agy acp`)**, **Claude Code**, **OpenAI Codex**, or custom ACP commands with per-runtime model/thinking/mode controls, `ask_question` elicitation, Turbo auto-approve, and SSH ADC/API-key transfer |
 | **Immortals Swarms** | Native multi-agent swarms with a shared `#main` / custom channel message board, coordinator/worker/verifier/narrator/monitor roles, isolated git worktrees (`share` / `branch`), interactive Swarm Board & Graph, and synced Desktop/TUI/VS Code/Mobile surfaces |
 | **Native Terminal (OpenTUI)** | React 19 + OpenTUI renderer with streaming Markdown, thinking, compact tool trails, live Agents rail, Background Agent View (`Left` / `/background`), and live Terminals inspector (`F8` / `/terminals`) |
 | **Hub, Mobile & Channels** | Pair phones and tablets via Xerxes Hub (`xerxes hub`), run **XERXES Supervisor** across workspaces, connect **Slack** with one-click Sign in with Slack, and bridge **Telegram** or **Discord** gateways |
@@ -105,10 +105,11 @@ Install the platform-specific `.vsix` (`darwin-arm64`, `darwin-x64`, `linux-arm6
 Click the runtime trigger in the Desktop composer (or run `/acp` in the TUI) to bind a session to an external agent runtime while keeping Xerxes's UI, session history, approvals, file previews, and remote SSH transport:
 
 - **Google Antigravity (`agy acp`)**:
-  - Defaults to **Turbo** mode (host auto-approval) with live model, thinking-level, and mode switching.
-  - Bridges project and user-global `XERXES.md`, `XERXES.local.md`, `.xerxes/*.md` notes, `.xerxes/skills`, `.xerxes/agents`, and `.xerxes/commands` read-only into `agy acp` (with dynamic mid-session content-hash refresh and `$ARGUMENTS` slash expansion, deduplicated against `.agents/skills`).
-  - Projects Antigravity background `run_command` jobs and `schedule` timers into **Activity**, **Background**, live `task-*.log` inspection, and `manage_task(kill)` cancellation.
-  - Supports local credential sync and forwarding to remote SSH hosts.
+  - Defaults to **Turbo** mode (host auto-approval) with live model, thinking-level, boolean/grouped config option, and mode switching, plus mid-turn live steering and out-of-turn permission/elicitation handling.
+  - Strictly isolated thin-client ACP v1 transport: forwards only locally typed human messages verbatim to `agy acp` (no injected `XERXES.md` / `.xerxes/*` context, no Xerxes-composed turns or hidden git/retry/shell follow-up prompts, raw `@file` resources, and no Hub/schedule automation driving Antigravity).
+  - Full ACP protocol support: form & URL elicitations (`elicitation/complete`), granular per-option permission prompts, multi-file diffs & rich tool content blocks (`image`, `resource`, `resource_link`, `terminal`), live `tool_update` streaming, `usage_update` cost tracking, `authenticate` / `authMethods`, `session/list` & `session/fork`, and MCP server / `--add-dir` pass-through.
+  - Read-only projection of Antigravity swarms, artifacts, subagents, background `run_command` jobs, `schedule` timers, and `task-*.log` files into **Activity** and **Background**.
+  - Transfers user-owned Google Cloud ADC or Gemini API keys to remote SSH hosts over stdin without ever reading or exporting Antigravity's own Google sign-in.
 - **Claude Code** (`claude` stream-json) & **OpenAI Codex** (`codex` ACP) & **Custom ACP**:
   - Strict runtime isolation keeps each runtime's own slash commands, skills, and capabilities clean without cross-leaking native Xerxes commands.
 

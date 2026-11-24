@@ -37,7 +37,7 @@ export function ModalShell({
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       flexDirection="column"
       height={height}
       left={0}

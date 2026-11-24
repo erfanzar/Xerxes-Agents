@@ -1,15 +1,36 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import type { TurnOutcomeReason } from '../types/turnOutcome.js'
+import type { AcpSessionBinding } from './gatewayTypes.js'
+
+export interface ToolDiff {
+  new_text?: string
+  old_text?: string
+  path: string
+}
+
+export interface ToolLocation {
+  line?: number
+  path: string
+}
+
 export interface ActiveTool {
   context?: string
+  diff?: ToolDiff
+  diffs?: ToolDiff[]
   id: string
+  inputs?: Record<string, unknown>
+  kind?: string
+  locations?: ToolLocation[]
   name: string
+  output?: string
   /** The model's reasoning that preceded this call, when it exists. */
   reasoning?: string
   /** Raw arguments JSON, for the expanded detail view. */
   rawArgs?: string
   startedAt?: number
+  status?: string
+  title?: string
 }
 
 export interface TodoItem {
@@ -127,11 +148,24 @@ export interface DelegationStatus {
   paused: boolean
 }
 
+export interface ApprovalOption {
+  kind: string
+  name: string
+  option_id: string
+  warning?: string
+}
+
 export interface ApprovalReq {
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
   command: string
+  cwd?: string
   description: string
+  diff?: ToolDiff
+  diffs?: ToolDiff[]
+  inputs?: Record<string, unknown>
+  locations?: ToolLocation[]
+  options?: ApprovalOption[]
   requestId: string
 }
 
@@ -144,15 +178,33 @@ export interface ConfirmReq {
   title: string
 }
 
+export interface ClarifyQuestion {
+  allowFreeform?: boolean
+  choices: string[] | null
+  id: string
+  multiSelect?: boolean
+  placeholder?: string
+  question: string
+}
+
+export type ClarifyAnswerValue = string | string[]
+export type ClarifyAnswerPayload = ClarifyAnswerValue | Record<string, ClarifyAnswerValue>
+
 export interface ClarifyReq {
   allowFreeform?: boolean
   choices: string[] | null
+  elicitationId?: string
+  message?: string
+  mode?: 'form' | 'url'
+  multiSelect?: boolean
   placeholder?: string
   question: string
   questionId?: string
+  questions?: ClarifyQuestion[]
   requestId: string
   source?: 'agent' | 'provider'
   toolId?: string
+  url?: string
 }
 
 export interface Msg {
@@ -210,6 +262,7 @@ export interface McpServerStatus {
 }
 
 export interface SessionInfo {
+  acp_binding?: AcpSessionBinding | null
   local_provider_label?: string
   remote_provider_bundle_supported?: boolean
   remote_provider_binding_supported?: boolean

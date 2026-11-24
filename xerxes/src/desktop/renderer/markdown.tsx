@@ -157,6 +157,8 @@ const HR_RE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/
 const XERXES_EMBED_RE = /^<xerxes-embed\s+([^>]+?)(?:\s*\/>|>\s*<\/xerxes-embed>)$/i
 const AGENT_EMBED_RE = /^<agent-embed\s+([^>]+?)(?:\s*\/>|>\s*<\/agent-embed>)$/i
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{2,64}$/
+const AGY_HTML_ARTIFACT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.(?:html|htm)$/i
+const AGY_BRAIN_FILE_PATH_RE = /\/brain\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/([^/]+)$/i
 const HTML_TAG_HINT_RE = /<\s*(?:!doctype|html|head|body|div|canvas|svg|script|style|section|main|header|article|p|span|button|input)\b/i
 
 function extractAttr(attrs: string, name: string): string | undefined {
@@ -166,14 +168,53 @@ function extractAttr(attrs: string, name: string): string | undefined {
   return value !== undefined ? value.trim() : undefined
 }
 
-/** Parse a standalone `<xerxes-embed>` or `<agent-embed src="artifact://...">` line. */
+function isValidEmbedArtifactId(artifactId: string): boolean {
+  if (ARTIFACT_ID_RE.test(artifactId)) return true
+  if (artifactId.startsWith('agy:')) {
+    const filename = artifactId.slice('agy:'.length)
+    return !filename.includes('..') && AGY_HTML_ARTIFACT_FILE_RE.test(filename)
+  }
+  return false
+}
+
+/**
+ * Resolve an Antigravity `file:///.../brain/<session>/<file>.html` embed URI to
+ * its read-only `agy:<file>.html` artifact id. Containment inside the active
+ * session's brain directory is enforced again on the daemon by `AgyBrainBridge`.
+ */
+function resolveAgyFileEmbedArtifactId(src: string): string | null {
+  if (!/^file:\/\//i.test(src)) return null
+  const withoutQuery = src.replace(/[?#].*$/, '')
+  const normalized = withoutQuery
+    .replace(/^file:\/\/(?:localhost)?/i, '')
+    .replaceAll('\\', '/')
+  const match = AGY_BRAIN_FILE_PATH_RE.exec(normalized)
+  if (!match?.[1]) return null
+  let filename: string
+  try {
+    filename = decodeURIComponent(match[1])
+  } catch {
+    return null
+  }
+  if (
+    filename.includes('/')
+    || filename.includes('\\')
+    || filename.includes('..')
+    || !AGY_HTML_ARTIFACT_FILE_RE.test(filename)
+  ) {
+    return null
+  }
+  return `agy:${filename}`
+}
+
+/** Parse a standalone `<xerxes-embed>` or `<agent-embed src="artifact://...|file:///.../brain/.../*.html">` line. */
 export function parseEmbedLine(line: string): { readonly artifactId: string; readonly title?: string } | null {
   const trimmed = line.trim()
   const xerxes = XERXES_EMBED_RE.exec(trimmed)
   if (xerxes) {
     const attrs = xerxes[1] ?? ''
     const artifactId = extractAttr(attrs, 'artifact')
-    if (!artifactId || !ARTIFACT_ID_RE.test(artifactId)) return null
+    if (!artifactId || !isValidEmbedArtifactId(artifactId)) return null
     const title = extractAttr(attrs, 'title')
     return title ? { artifactId, title } : { artifactId }
   }
@@ -181,11 +222,18 @@ export function parseEmbedLine(line: string): { readonly artifactId: string; rea
   if (agent) {
     const attrs = agent[1] ?? ''
     const src = extractAttr(attrs, 'src')
-    if (!src || !/^artifact:\/\//i.test(src)) return null
-    const artifactId = src.replace(/^artifact:\/\//i, '').trim()
-    if (!ARTIFACT_ID_RE.test(artifactId)) return null
+    if (!src) return null
     const title = extractAttr(attrs, 'title')
-    return title ? { artifactId, title } : { artifactId }
+    if (/^artifact:\/\//i.test(src)) {
+      const artifactId = src.replace(/^artifact:\/\//i, '').trim()
+      if (!isValidEmbedArtifactId(artifactId)) return null
+      return title ? { artifactId, title } : { artifactId }
+    }
+    const agyArtifactId = resolveAgyFileEmbedArtifactId(src)
+    if (agyArtifactId) {
+      return title ? { artifactId: agyArtifactId, title } : { artifactId: agyArtifactId }
+    }
+    return null
   }
   return null
 }
@@ -220,9 +268,82 @@ interface TableRow {
   readonly header: boolean
 }
 
+/** Split a GFM table row without breaking on `|` inside backtick code spans or escaped `\|`. */
+export function splitTableRow(line: string): string[] {
+  let trimmed = line.trim()
+  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
+  if (trimmed.endsWith('|')) {
+    let backslashes = 0
+    for (let k = trimmed.length - 2; k >= 0 && trimmed[k] === '\\'; k -= 1) backslashes += 1
+    if (backslashes % 2 === 0) trimmed = trimmed.slice(0, -1)
+  }
+  const cells: string[] = []
+  let current = ''
+  let inCodeTicks = 0
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i]!
+    if (ch === '`') {
+      let ticks = 1
+      while (i + ticks < trimmed.length && trimmed[i + ticks] === '`') ticks += 1
+      current += trimmed.slice(i, i + ticks)
+      if (inCodeTicks === 0) inCodeTicks = ticks
+      else if (inCodeTicks === ticks) inCodeTicks = 0
+      i += ticks - 1
+      continue
+    }
+    if (ch === '\\' && trimmed[i + 1] === '|') {
+      current += '|'
+      i += 1
+      continue
+    }
+    if (ch === '|' && inCodeTicks === 0) {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  cells.push(current.trim())
+  return cells
+}
+
+/** True when `lines` ends inside an unclosed fenced code block or display math block (`$$` / `\[`). */
+export function hasOpenStreamingBlock(lines: readonly string[]): boolean {
+  let openFence: { char: string; length: number } | null = null
+  let openMathClose: '$$' | '\\]' | null = null
+  for (const line of lines) {
+    if (openFence) {
+      const closeMatch = FENCE_CLOSE_RE.exec(line)
+      if (closeMatch && closeMatch[1]![0] === openFence.char && closeMatch[1]!.length >= openFence.length) {
+        openFence = null
+      }
+      continue
+    }
+    if (openMathClose) {
+      if (line.includes(openMathClose)) openMathClose = null
+      continue
+    }
+    const fence = FENCE_RE.exec(line)
+    if (fence) {
+      openFence = { char: fence[1]![0]!, length: fence[1]!.length }
+      continue
+    }
+    const mathOpen = /^\s*(\$\$|\\\[)(.*)$/.exec(line)
+    if (mathOpen) {
+      const close = mathOpen[1] === '$$' ? '$$' : '\\]'
+      const rest = mathOpen[2] ?? ''
+      const closeAt = rest.lastIndexOf(close)
+      if (closeAt >= 0 && rest.slice(closeAt + close.length).trim() === '') continue
+      if (mathOpen[1] === '\\[' || rest.trim() === '' || /^\s/.test(rest)) {
+        openMathClose = close
+      }
+    }
+  }
+  return openFence !== null || openMathClose !== null
+}
+
 function splitRow(line: string): string[] {
-  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
-  return trimmed.split('|').map(cell => cell.trim())
+  return splitTableRow(line)
 }
 
 export const MARKDOWN_CACHE_LIMIT = 256
@@ -240,8 +361,8 @@ export function markdownCacheSize(): number {
 }
 
 /** Fold markdown text into display blocks (headings / lists / code / tables / paragraphs). */
-export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true): ReactElement[] {
-  const canCache = cacheable && prefix === 'md' && markdown.length > 0 && markdown.length <= MARKDOWN_CACHE_MAX_CHARS
+export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true, streaming = false): ReactElement[] {
+  const canCache = cacheable && !streaming && prefix === 'md' && markdown.length > 0 && markdown.length <= MARKDOWN_CACHE_MAX_CHARS
   if (canCache) {
     const cached = markdownBlockCache.get(markdown)
     if (cached) {
@@ -255,6 +376,8 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
   const out: ReactElement[] = []
   let paragraph: string[] = []
   let list: Array<{ text: string; checked: boolean | null }> = []
+  let listKind: 'ul' | 'ol' | null = null
+  let listStart = 1
   let key = 0
 
   const flushParagraph = (): void => {
@@ -265,18 +388,25 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
   }
   const flushList = (): void => {
     if (list.length) {
-      out.push(
-        <ul key={`${prefix}-l${key++}`}>
-          {list.map((item, index) => (
-            <li key={index} className={item.checked === null ? undefined : 'md__check'}>
-              {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? <Icon name="check" size={11} /> : null}</span>}
-              <span className="md__item">{inlinePieces(item.text)}</span>
-            </li>
-          ))}
-        </ul>,
-      )
+      const items = list.map((item, index) => (
+        <li key={index} className={item.checked === null ? undefined : 'md__check'}>
+          {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? <Icon name="check" size={11} /> : null}</span>}
+          <span className="md__item">{inlinePieces(item.text)}</span>
+        </li>
+      ))
+      if (listKind === 'ol') {
+        out.push(
+          <ol key={`${prefix}-o${key++}`} start={listStart !== 1 ? listStart : undefined}>
+            {items}
+          </ol>,
+        )
+      } else {
+        out.push(<ul key={`${prefix}-l${key++}`}>{items}</ul>)
+      }
       list = []
     }
+    listKind = null
+    listStart = 1
   }
   const flushAll = (): void => {
     flushParagraph()
@@ -354,8 +484,10 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
         if (at >= 0) { if (next.slice(0, at).trim()) body.push(next.slice(0, at)); break }
         body.push(next)
       }
-      // Without a closing marker this is prose that happens to start with $$.
-      if (j < lines.length) {
+      // Without a closing marker, render as display math while streaming (so an
+      // in-progress `$$` block never collapses into a single-line paragraph);
+      // in finalized markdown, an unclosed `$$` stays prose.
+      if (j < lines.length || (streaming && (mathOpen[1] === '\\[' || rest.trim() === '' || /^\s/.test(rest)))) {
         flushAll()
         out.push(<MathView key={`${prefix}-m${key++}`} tex={body.join('\n').trim()} display />)
         i = j
@@ -390,7 +522,7 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
       continue
     }
 
-    const heading = /^(#{1,4})\s+(.*)$/.exec(line)
+    const heading = /^\s*(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line)
     const check = /^\s*[-*]\s+\[([ xX])]\s*(.*)$/.exec(line)
     const bullet = /^\s*[-*]\s+(.*)$/.exec(line)
     const ordered = /^\s*(\d+)[.)]\s+(.*)$/.exec(line)
@@ -399,7 +531,7 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
       flushAll()
       const level = heading[1]!.length
       const Tag = (level <= 1 ? 'h1' : level === 2 ? 'h2' : 'h3') as 'h1' | 'h2' | 'h3'
-      out.push(<Tag key={`${prefix}-h${key++}`}>{inlinePieces(heading[2]!)}</Tag>)
+      out.push(<Tag key={`${prefix}-h${key++}`}>{inlinePieces(heading[2]!.trim())}</Tag>)
     } else if (HR_RE.test(line)) {
       flushAll()
       out.push(<hr key={`${prefix}-r${key++}`} />)
@@ -421,12 +553,21 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
       continue
     } else if (check) {
       flushParagraph()
+      if (listKind === 'ol') flushList()
+      listKind = 'ul'
       list.push({ text: check[2]!, checked: check[1]!.toLowerCase() === 'x' })
     } else if (bullet) {
       flushParagraph()
+      if (listKind === 'ol') flushList()
+      listKind = 'ul'
       list.push({ text: bullet[1]!, checked: null })
     } else if (ordered) {
       flushParagraph()
+      if (listKind === 'ul') flushList()
+      if (listKind === null) {
+        listKind = 'ol'
+        listStart = Number.parseInt(ordered[1]!, 10) || 1
+      }
       list.push({ text: ordered[2]!, checked: null })
     } else if (!line.trim()) {
       flushAll()
@@ -453,14 +594,18 @@ export const Markdown = memo(function Markdown({ text, className, tail }: { text
 
   // Glue the streaming caret to the end of the text: trailing PROSE lines
   // fold into one paragraph that carries the tail inline. Structural endings
-  // (fences, tables, lists, headings, quotes) can't — the tail follows them.
+  // (fences, tables, lists, headings, quotes, or an unclosed code/math block)
+  // can't — the tail follows them without collapsing code or math into `<p>`.
   const lines = text.split('\n')
+  if (hasOpenStreamingBlock(lines)) {
+    return <div className={cls}>{markdownBlocks(text, 'md', false, true)}{tail}</div>
+  }
   let last = lines.length - 1
   while (last >= 0 && !lines[last]!.trim()) last -= 1
-  const STRUCTURAL = /^\s*(```|~~~|#{1,4}\s|[-*]\s|\d+[.)]\s|\||>\s?|(-{3,}|\*{3,}|_{3,})\s*$|<xerxes-embed\b|<agent-embed\b)/i
+  const STRUCTURAL = /^\s*(```|~~~|\$\$|\\\[|#{1,6}\s|[-*]\s|\d+[.)]\s|\||>\s?|(-{3,}|\*{3,}|_{3,})\s*$|<xerxes-embed\b|<agent-embed\b)/i
   const plain = (line: string): boolean => line.trim() !== '' && !STRUCTURAL.test(line)
   if (last < 0 || !plain(lines[last]!)) {
-    return <div className={cls}>{markdownBlocks(text, 'md', false)}{tail}</div>
+    return <div className={cls}>{markdownBlocks(text, 'md', false, true)}{tail}</div>
   }
   let start = last
   while (start > 0 && plain(lines[start - 1]!)) start -= 1

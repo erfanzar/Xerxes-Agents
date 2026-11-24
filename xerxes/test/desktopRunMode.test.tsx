@@ -105,16 +105,17 @@ test('setup progress events update the job, and a finished setup reloads the mod
   expect(store.getSnapshot().runMode?.mode).toBe('hybrid')
 })
 
-test('the Models page leads with the three modes and says what Hybrid needs: local-model on this Mac and a cloud lead', async () => {
+test('the Models page leads with the three modes and says what Hybrid needs: local model on this Mac and a cloud lead', async () => {
   const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status: localStatus, job: null } : method === 'provider_list' ? { ok: true, profiles } : { ok: true })
   await Promise.all([store.loadRunMode(), store.loadLocalSetup(), store.loadProviders()])
   const html = renderToStaticMarkup(createElement(RunModeSection, { snap: store.getSnapshot() }))
-  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary local-model 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up local-model', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
+  for (const words of ['Private', 'Hybrid', 'Cloud', 'Nothing leaves during a run.', 'Your files stay here.', 'On this Mac', 'does the file work', 'Ternary local-model 2 27B', 'llama.cpp 0.9.0', 'Download 7.6 GB and set up local model', 'Cloud lead', 'cannot read your files', 'Claude Code']) {
     expect(html).toContain(words)
   }
   expect(html).not.toContain('Bonsai')
-  expect(html).toContain('local-model on this Mac does all the work.')
-  expect(html).toContain('Light and balanced agents run on local-model and answer directly')
+  expect(html).not.toContain('Prism')
+  expect(html).toContain('A local model on this Mac does all the work.')
+  expect(html).toContain('Light and balanced agents run on the local model and answer directly')
   expect(html).toContain('aria-checked="true"')
   expect(html.match(/In use/g)).toHaveLength(1)
 
@@ -124,14 +125,14 @@ test('the Models page leads with the three modes and says what Hybrid needs: loc
   expect(renderToStaticMarkup(createElement(RunModeSection, { snap: unknown.getSnapshot() }))).toBe('')
 })
 
-test('an already downloaded model offers to start local-model without changing the model ID', async () => {
+test('an already downloaded model offers to start local model without changing the model ID', async () => {
   const status = { ...localStatus, model: { ...localStatus.model, downloaded: true } }
   const { store } = connectedStore(method => method === 'run_mode.get' ? hybrid : method === 'local.status' ? { ok: true, status, job: null } : { ok: true })
   await Promise.all([store.loadRunMode(), store.loadLocalSetup()])
   const snap = store.getSnapshot()
   expect(snap.localSetup.status?.model.id).toBe('ternary-bonsai-2-27b')
   const html = renderToStaticMarkup(createElement(RunModeSection, { snap }))
-  expect(html).toContain('Start local-model and use Hybrid')
+  expect(html).toContain('Start local model and use Hybrid')
   expect(html).not.toContain('Bonsai')
 })
 

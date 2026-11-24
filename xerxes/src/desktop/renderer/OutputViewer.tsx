@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { createPortal } from 'react-dom'
+import { copyToClipboard } from './CopyButton.js'
 import { Icon } from './Icon.js'
 
 /**
@@ -56,12 +57,40 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
   const [copied, setCopied] = useState('')
   const dialog = useRef<HTMLDialogElement>(null)
   const expandButton = useRef<HTMLButtonElement>(null)
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      clearTimeout(copyTimer.current)
+    }
+  }, [])
   useEffect(() => {
     if (!expanded) return
     dialog.current?.showModal()
     return () => { queueMicrotask(() => expandButton.current?.focus()) }
   }, [expanded])
-  const copy = () => { void navigator.clipboard.writeText(text).then(() => setCopied('Copied'), () => setCopied('Copy failed')) }
+  const copy = (): void => {
+    if (!text) return
+    clearTimeout(copyTimer.current)
+    void copyToClipboard(text).then(
+      ok => {
+        if (!mounted.current) return
+        setCopied(ok ? 'Copied' : 'Copy failed')
+        copyTimer.current = setTimeout(() => {
+          if (mounted.current) setCopied('')
+        }, 1800)
+      },
+      () => {
+        if (!mounted.current) return
+        setCopied('Copy failed')
+        copyTimer.current = setTimeout(() => {
+          if (mounted.current) setCopied('')
+        }, 1800)
+      },
+    )
+  }
   const controls = <>
     <button aria-pressed={wrap} onClick={() => setWrap(value => !value)}>Wrap lines</button>
     <button disabled={!text} onClick={copy}>{copied || 'Copy output'}</button>

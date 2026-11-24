@@ -148,7 +148,7 @@ it('bounds and centers the session manager on a large terminal without joining h
     expect(lines[footer]).toContain('Enter dispatch')
     expect(lines.find(line => line.includes('Authentication audit'))).not.toMatch(/·{3,}/)
     const activeRow = lines.findIndex(line => line.includes('Current implementation') && line.includes('attached'))
-    expect(lines[activeRow + 2]?.trim()).toBe('')
+    expect(lines[activeRow + 2]?.replace(/[│\s]/g, '')).toBe('')
   } finally {
     act(() => setup.renderer.destroy())
   }

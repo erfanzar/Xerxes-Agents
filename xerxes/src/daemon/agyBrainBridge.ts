@@ -6,14 +6,13 @@
  * brain directories into Xerxes's canonical Immortals Swarm, Artifacts, and
  * Subagent wire models.
  *
- * Strictly read-only on `.system_generated/swarm/` and `.system_generated/subagents/`
- * (mutations always go through live `agy acp` steering / RPCs). Only explicit user
- * edits via `updateArtifact` write to validated top-level `<brainRoot>/<extId>`
- * markdown/HTML artifact files.
+ * Strictly read-only: Xerxes never writes, renames, or deletes anything in an
+ * Antigravity brain directory. Artifacts are shown, not edited; change them in
+ * Antigravity itself.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync, watch, type FSWatcher } from 'node:fs'
-import { open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { open, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 
@@ -149,11 +148,6 @@ export interface AgyReadBoardOptions {
 export interface AgyInspectMemberOptions {
   readonly limit?: number
   readonly modelDisplayMap?: ReadonlyMap<string, string>
-}
-
-export interface AgyArtifactUpdateInput {
-  readonly content: string
-  readonly title?: string
 }
 
 export interface AgySubagentInspectResult {
@@ -794,14 +788,25 @@ function formatArgsPreview(rawArgs: unknown): string {
   return String(rawArgs).slice(0, MAX_ARGS_PREVIEW_CHARS)
 }
 
+const LEADING_AGY_TOOL_TIMESTAMPS_RE = /^(?:\s*(?:Created|Completed)\s+At:\s*[^\r\n]*(?:\r?\n|$))+/i
+
+function stripAgyToolTimestamps(content: string): string {
+  return content.replace(LEADING_AGY_TOOL_TIMESTAMPS_RE, '').trim()
+}
+
 function stripSystemMessageEnvelope(content: string): string {
   const trimmed = content.trim()
   if (!trimmed) return ''
+  let inner: string | undefined
   const match = /<SYSTEM_MESSAGE>\s*([\s\S]*?)\s*<\/SYSTEM_MESSAGE>/i.exec(trimmed)
-  if (!match) return trimmed
-  const inner = (match[1] ?? '').trim()
+  if (match) {
+    inner = (match[1] ?? '').trim()
+  } else if (/^<SYSTEM_MESSAGE>/i.test(trimmed)) {
+    inner = trimmed.replace(/^<SYSTEM_MESSAGE>\s*/i, '').replace(/\s*<\/SYSTEM_MESSAGE>\s*$/i, '').trim()
+  }
+  if (inner === undefined) return trimmed
   const contentIdx = inner.indexOf('content=')
-  if (contentIdx >= 0) {
+  if (contentIdx >= 0 && /^\[Message\]/i.test(inner)) {
     return inner.slice(contentIdx + 'content='.length).trim()
   }
   return inner
@@ -899,9 +904,7 @@ function analyzeTranscriptSteps(
     outputTokens += step.outputTokens
 
     if (step.type === 'USER_INPUT' || step.type === 'SYSTEM_MESSAGE') {
-      const cleaned = step.type === 'SYSTEM_MESSAGE'
-        ? stripSystemMessageEnvelope(step.content)
-        : step.content.trim()
+      const cleaned = stripSystemMessageEnvelope(step.content)
       if (!cleaned) continue
       if (step.type === 'USER_INPUT' || !lastUserPrompt) {
         if (!cleaned.startsWith('[swarm] new board message #')) {
@@ -962,7 +965,7 @@ function analyzeTranscriptSteps(
     lastStep = step
     const matched = pendingTools.shift()
     const isErr = step.status === 'ERROR' || Boolean(step.error)
-    const rawResult = step.error || step.content || ''
+    const rawResult = stripAgyToolTimestamps(step.error || step.content || '')
     const resultPreview = rawResult ? clipText(rawResult.replace(/\s+/g, ' ').trim(), MAX_RESULT_PREVIEW_CHARS) : undefined
     if (isErr && rawResult) {
       lastNonSystemError = clipText(rawResult.replace(/\s+/g, ' ').trim(), 240)
@@ -1146,9 +1149,7 @@ function buildSubagentDaemonMessages(steps: readonly ParsedTranscriptStep[]): {
 
   for (const step of steps) {
     if (step.type === 'USER_INPUT' || step.type === 'SYSTEM_MESSAGE') {
-      const cleaned = step.type === 'SYSTEM_MESSAGE'
-        ? stripSystemMessageEnvelope(step.content)
-        : step.content.trim()
+      const cleaned = stripSystemMessageEnvelope(step.content)
       if (!cleaned) continue
       messages.push({
         role: 'user',
@@ -1186,7 +1187,7 @@ function buildSubagentDaemonMessages(steps: readonly ParsedTranscriptStep[]): {
     const matched = pendingCalls.shift()
     const toolCallId = matched?.id ?? `agy-step-${step.stepIndex}`
     const toolName = matched?.name ?? 'tool'
-    const resultText = clipText((step.error || step.content || '').trim(), MAX_SUBAGENT_HISTORY_TEXT_CHARS)
+    const resultText = clipText(stripAgyToolTimestamps(step.error || step.content || ''), MAX_SUBAGENT_HISTORY_TEXT_CHARS)
     const isErr = step.status === 'ERROR' || Boolean(step.error)
     messages.push({
       role: 'tool',
@@ -1630,77 +1631,6 @@ export class AgyBrainBridge {
     if (pinned) set.add(existing.id)
     else set.delete(existing.id)
     return { ...summaryOf(existing), pinned }
-  }
-
-  async updateArtifact(
-    sessionId: string,
-    location: AgyBrainLocation,
-    id: string,
-    revision: AgyArtifactUpdateInput,
-    persistedPinnedIds?: readonly string[],
-  ): Promise<Artifact> {
-    if (persistedPinnedIds && !this.pinnedArtifactsBySession.has(sessionId)) {
-      this.setSessionPinnedArtifactIds(sessionId, persistedPinnedIds)
-    }
-    const filename = parseAgyArtifactFilename(id)
-    if (!filename) {
-      throw new ValidationError('id', `invalid Antigravity artifact id "${id}"`, id)
-    }
-    const targetPath = resolve(location.sessionDir, filename)
-    if (dirname(targetPath) !== resolve(location.sessionDir)) {
-      throw new ValidationError('id', 'artifact path escapes brain session directory', id)
-    }
-    const existing = await this.readArtifactByFilename(sessionId, location, filename)
-    if (!existing) {
-      throw new ValidationError('id', `no artifact ${id} in this session`, id)
-    }
-    const bytes = Buffer.byteLength(revision.content, 'utf8')
-    if (bytes > MAX_ARTIFACT_CONTENT_BYTES) {
-      throw new ValidationError(
-        'content',
-        `artifact content exceeds ${MAX_ARTIFACT_CONTENT_BYTES} bytes`,
-      )
-    }
-
-    const tmpPath = join(location.sessionDir, `.${filename}.${crypto.randomUUID()}.tmp`)
-    try {
-      await writeFile(tmpPath, revision.content, 'utf8')
-      await rename(tmpPath, targetPath)
-    } catch (error) {
-      await rm(tmpPath, { force: true }).catch(() => undefined)
-      throw error
-    }
-
-    const nowIso = new Date().toISOString()
-    const metaPath = `${targetPath}.metadata.json`
-    const existingMeta = await readJsonFileSafe(metaPath)
-    if (existingMeta) {
-      const nextMeta: Record<string, unknown> = {
-        ...existingMeta,
-        updatedAt: nowIso,
-        ...(typeof revision.title === 'string' && revision.title.trim()
-          ? { title: revision.title.trim().slice(0, MAX_ARTIFACT_TITLE_CHARS) }
-          : {}),
-      }
-      await writeFile(metaPath, JSON.stringify(nextMeta, null, 2), 'utf8').catch(() => undefined)
-    }
-
-    const versionKey = `${sessionId}:${existing.id}`
-    const nextVersion = (this.artifactVersions.get(versionKey) ?? existing.version) + 1
-    this.artifactVersions.set(versionKey, nextVersion)
-
-    const kind = artifactKindFromFilename(filename)
-    const nextTitle = typeof revision.title === 'string' && revision.title.trim()
-      ? revision.title.trim().slice(0, MAX_ARTIFACT_TITLE_CHARS)
-      : humanizeArtifactTitle(filename, revision.content, kind)
-
-    return {
-      ...existing,
-      title: nextTitle,
-      content: revision.content,
-      updated_at: nowIso,
-      version: nextVersion,
-    }
   }
 
   // ── Background Tasks, Schedules & Live Logs ──────────────────────────────

@@ -17,7 +17,7 @@ import { $attachments, attachmentsTotalBytes } from '../app/attachmentsStore.js'
 import { focusComposer, registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
-import { $isBlocked, $overlayState, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
+import { $isBlocked, $overlayState, openOverlayIfUnblocked, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
 import { $agentRailVisible, $panelWidthDelta, toggleAgentRail } from '../app/panelSizeStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
 import { toggleAllToolRuns } from '../app/toolRunStore.js'
@@ -34,6 +34,11 @@ import {
   derafshKaviani
 } from '../banner.js'
 import { agentContentWidth, agentSidebarWidth, shouldMountAgentSidebar } from '../domain/agentPanelLayout.js'
+import {
+  approvalChoiceForOptionKind,
+  approvalConsequenceForOptionKind,
+  formatApprovalDiffPreview
+} from '../domain/approval.js'
 import { densityFor, GLYPH, stateSkin, wrapWithContinuation } from '../domain/nocturne.js'
 import { chipKey, type StartChip, startWithChips } from '../domain/startWith.js'
 import { agentGroup } from '../lib/agentGroups.js'
@@ -60,10 +65,12 @@ import { compactProgressRows, type CompactProgressRow } from '../lib/progressRow
 import { getActiveSkin } from '../lib/skinEngine.js'
 import { compactStatusNumber, formatStatusDuration, isYoloEnabled } from '../lib/statusSnapshot.js'
 import { fmtK, formatToolCall, toolTrailParts } from '../lib/text.js'
+import { openExternalUrl } from '../lib/openExternalUrl.js'
 import { spawnRosterFromLine } from '../lib/toolStartDisplay.js'
 import { useTerminalFocus } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import { themeForMode, type Theme } from '../theme.js'
+import type { ApprovalOption, ClarifyAnswerValue, ClarifyQuestion } from '../types.js'
 
 import { AgentPanel, AgentPanelHotkey, AgentPanelOverlay, collectAgentPanelRecords } from './agentPanel.js'
 import { GoalOverlay } from './goalOverlay.js'
@@ -391,7 +398,7 @@ function CompactLiveProgress({ show }: { show: boolean }) {
         const glyph = row.kind === 'todo' ? '◇' : row.kind === 'outcome' ? '✓' : row.kind === 'activity' ? '·' : '→'
 
         return (
-          <Box key={`${row.kind}:${index}:${row.text}`} onClick={row.kind === 'todo' ? () => patchOverlayState({ goal: true }) : undefined}>
+          <Box key={`${row.kind}:${index}:${row.text}`} onClick={row.kind === 'todo' ? () => openOverlayIfUnblocked({ goal: true }) : undefined}>
             <Text color={color} wrap="truncate-end">
               <Span color={color}>{glyph} </Span>
               {row.text}
@@ -415,7 +422,7 @@ export function ComposerTaskSummary() {
   const unfinished = todos.filter(todo => todo.status !== 'completed' && todo.status !== 'cancelled')
   return <Box flexDirection="column" flexShrink={0} backgroundColor={t.color.statusBg}
     borderSides={['left']} borderColor={t.color.accent} paddingX={1}
-    onClick={() => patchOverlayState({ goal: true })}>
+    onClick={() => openOverlayIfUnblocked({ goal: true })}>
     <Box justifyContent="space-between">
       <Text bold color={t.ds.title}>{todos.length ? 'Tasks ' + todos.filter(todo => todo.status === 'completed').length + '/' + todos.length : 'Goal'}</Text>
       <Text color={t.ds.secondary}>F10 · View plan</Text>
@@ -631,7 +638,7 @@ function ProviderPromptOverlay({ actions }: Pick<AppLayoutProps, 'actions'>) {
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       flexDirection="column"
       height="100%"
       justifyContent="center"
@@ -766,6 +773,9 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
   const approvalScroll = useRef<ScrollBoxRenderable | null>(null)
   const [sel, setSel] = useState(0)
   const [customClarify, setCustomClarify] = useState(false)
+  const [stepIndex, setStepIndex] = useState(0)
+  const [collectedAnswers, setCollectedAnswers] = useState<Record<string, ClarifyAnswerValue>>({})
+  const [selectedMulti, setSelectedMulti] = useState<string[]>([])
   const [maskedValue, setMaskedValue] = useState('')
   const clarifyRef = useRef<TextareaRenderable | null>(null)
 
@@ -775,15 +785,76 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
   const secret = overlay.secret
   const sudo = overlay.sudo
   const providerClarify = isProviderPrompt(clarify)
-  const clarifyChoices = providerClarify ? [] : (clarify?.choices ?? [])
+  const clarifyQuestions: ClarifyQuestion[] = useMemo(() => {
+    if (!clarify || providerClarify) {
+      return []
+    }
+    if (clarify.questions && clarify.questions.length > 0) {
+      return clarify.questions
+    }
+    return [
+      {
+        ...(clarify.allowFreeform !== undefined ? { allowFreeform: clarify.allowFreeform } : {}),
+        choices: clarify.choices,
+        id: clarify.questionId || 'q',
+        ...(clarify.multiSelect !== undefined ? { multiSelect: clarify.multiSelect } : {}),
+        ...(clarify.placeholder !== undefined ? { placeholder: clarify.placeholder } : {}),
+        question: clarify.question
+      }
+    ]
+  }, [clarify, providerClarify])
+  const activeClarifyQuestion = clarifyQuestions[Math.min(stepIndex, Math.max(0, clarifyQuestions.length - 1))]
+  const clarifyChoices = activeClarifyQuestion?.choices ?? []
+  const clarifyAllowFreeform = activeClarifyQuestion?.allowFreeform !== false && clarify?.mode !== 'url'
+  const clarifyMultiSelect = Boolean(activeClarifyQuestion?.multiSelect && clarifyChoices.length > 0)
   const clarifyCancelAnswer = clarifyChoices.find(choice => choice.trim().toLowerCase() === 'cancel') ?? ''
-  const typingClarify = Boolean(clarify && !providerClarify && (customClarify || clarifyChoices.length === 0))
+  const typingClarify = Boolean(
+    clarify && !providerClarify && activeClarifyQuestion && (customClarify || (clarifyChoices.length === 0 && clarifyAllowFreeform))
+  )
 
+  const dynamicApprovalOptions = approval?.options && approval.options.length > 0 ? approval.options : null
   const opts = approval
     ? approval.allowPermanent === false
       ? APPROVAL_OPTS.filter(o => o !== 'always')
       : APPROVAL_OPTS
     : []
+
+  const chooseDynamicApprovalOption = useCallback(
+    (opt: ApprovalOption) => {
+      actions.answerApproval(approvalChoiceForOptionKind(opt.kind), opt.option_id)
+    },
+    [actions]
+  )
+
+  const toggleMultiChoice = useCallback((choice: string) => {
+    setSelectedMulti(prev => (prev.includes(choice) ? prev.filter(item => item !== choice) : [...prev, choice]))
+  }, [])
+
+  const commitClarifyAnswer = useCallback(
+    (value: ClarifyAnswerValue) => {
+      if (!activeClarifyQuestion) {
+        return
+      }
+      const nextAnswers: Record<string, ClarifyAnswerValue> = {
+        ...collectedAnswers,
+        [activeClarifyQuestion.id]: value
+      }
+      if (stepIndex + 1 < clarifyQuestions.length) {
+        setCollectedAnswers(nextAnswers)
+        setStepIndex(stepIndex + 1)
+        setSel(0)
+        setSelectedMulti([])
+        setCustomClarify(false)
+        return
+      }
+      if (clarifyQuestions.length > 1) {
+        actions.answerClarify(nextAnswers)
+        return
+      }
+      actions.answerClarify(value)
+    },
+    [actions, activeClarifyQuestion, clarifyQuestions.length, collectedAnswers, stepIndex]
+  )
 
   useKeyboard(event => {
     const name = event.name
@@ -808,12 +879,53 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
     }
 
     if (approval) {
-      if (name === 'pageup' || name === 'pagedown') {
+      if ((name === 'pageup' || name === 'pagedown') && !event.shift) {
         approvalScroll.current?.scrollBy(name === 'pageup' ? -3 : 3)
         event.preventDefault()
         event.stopPropagation()
         return
       }
+
+      if (dynamicApprovalOptions) {
+        const rejectOption =
+          dynamicApprovalOptions.find(opt => opt.kind === 'reject_once') ??
+          dynamicApprovalOptions.find(opt => opt.kind === 'reject_always')
+        const allowOnceOption =
+          dynamicApprovalOptions.find(opt => opt.kind === 'allow_once') ??
+          dynamicApprovalOptions.find(opt => opt.kind !== 'reject_once' && opt.kind !== 'reject_always')
+        const allowAlwaysOption = dynamicApprovalOptions.find(opt => opt.kind === 'allow_always')
+        const letter = approvalKeyChoice(event.sequence ?? '')
+
+        if (name === 'escape') {
+          rejectOption ? chooseDynamicApprovalOption(rejectOption) : actions.answerApproval('deny')
+        } else if (letter === 'deny') {
+          rejectOption ? chooseDynamicApprovalOption(rejectOption) : actions.answerApproval('deny')
+        } else if (letter === 'once' && allowOnceOption) {
+          chooseDynamicApprovalOption(allowOnceOption)
+        } else if (letter === 'session' && allowAlwaysOption) {
+          chooseDynamicApprovalOption(allowAlwaysOption)
+        } else {
+          const n = Number.parseInt(event.sequence ?? '', 10)
+
+          if (n >= 1 && n <= dynamicApprovalOptions.length) {
+            chooseDynamicApprovalOption(dynamicApprovalOptions[n - 1]!)
+          } else if (name === 'up') {
+            setSel(s => Math.max(0, s - 1))
+          } else if (name === 'down') {
+            setSel(s => Math.min(dynamicApprovalOptions.length - 1, s + 1))
+          } else if (name === 'return' || name === 'enter') {
+            chooseDynamicApprovalOption(dynamicApprovalOptions[sel] ?? dynamicApprovalOptions[0]!)
+          } else {
+            return
+          }
+        }
+
+        event.preventDefault()
+        event.stopPropagation()
+
+        return
+      }
+
       const letter = approvalKeyChoice(event.sequence ?? '')
 
       if (name === 'escape') {
@@ -847,9 +959,13 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
 
       if (name === 'escape' || lower === 'n') {
         patchOverlayState({ confirm: null })
-      } else if (lower === 'y' || name === 'return' || name === 'enter') {
+        event.preventDefault()
+        event.stopPropagation()
+      } else if (lower === 'y' || name === 'return' || name === 'enter' || name === 'kpenter') {
         patchOverlayState({ confirm: null })
         confirm.onConfirm()
+        event.preventDefault()
+        event.stopPropagation()
       }
 
       return
@@ -858,7 +974,15 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
     if (clarify && !providerClarify) {
       if (typingClarify) {
         if (name === 'escape') {
-          clarifyChoices.length ? setCustomClarify(false) : actions.answerClarify('')
+          if (clarifyChoices.length) {
+            setCustomClarify(false)
+          } else if (stepIndex > 0) {
+            setStepIndex(s => Math.max(0, s - 1))
+            setSel(0)
+            setSelectedMulti([])
+          } else {
+            actions.answerClarify('')
+          }
           event.preventDefault()
           event.stopPropagation()
         }
@@ -866,21 +990,72 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
         return
       }
 
+      if (clarify.mode === 'url' && clarify.url && (event.sequence ?? '').toLowerCase() === 'o') {
+        openExternalUrl(clarify.url)
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+
+      const maxIdx = clarifyAllowFreeform ? clarifyChoices.length : Math.max(0, clarifyChoices.length - 1)
       const n = Number.parseInt(event.sequence ?? '', 10)
 
       if (name === 'escape') {
-        actions.answerClarify(clarifyCancelAnswer)
+        if (stepIndex > 0) {
+          const prevIdx = Math.max(0, stepIndex - 1)
+          const prevQuestion = clarifyQuestions[prevIdx]
+          const prevAnswer = prevQuestion ? collectedAnswers[prevQuestion.id] : undefined
+          setStepIndex(prevIdx)
+          setSel(0)
+          setSelectedMulti(Array.isArray(prevAnswer) ? prevAnswer : [])
+        } else {
+          actions.answerClarify(clarifyCancelAnswer)
+        }
+      } else if (clarifyMultiSelect) {
+        if (name === 'space' || event.sequence === ' ') {
+          const highlighted = clarifyChoices[sel]
+          if (highlighted !== undefined) {
+            toggleMultiChoice(highlighted)
+          }
+        } else if (n >= 1 && n <= clarifyChoices.length) {
+          toggleMultiChoice(clarifyChoices[n - 1]!)
+        } else if (name === 'up') {
+          setSel(s => Math.max(0, s - 1))
+        } else if (name === 'down') {
+          setSel(s => Math.min(maxIdx, s + 1))
+        } else if (name === 'return' || name === 'enter') {
+          if (clarifyAllowFreeform && sel === clarifyChoices.length) {
+            setCustomClarify(true)
+          } else {
+            const ordered = clarifyChoices.filter(choice => selectedMulti.includes(choice))
+            const chosen = ordered.length > 0 ? ordered : clarifyChoices[sel] ? [clarifyChoices[sel]!] : []
+            if (chosen.length > 0) {
+              commitClarifyAnswer(chosen)
+            }
+          }
+        } else {
+          return
+        }
       } else if (n >= 1 && n <= clarifyChoices.length) {
-        actions.answerClarify(clarifyChoices[n - 1]!)
+        commitClarifyAnswer(clarifyChoices[n - 1]!)
       } else if (name === 'up') {
         setSel(s => Math.max(0, s - 1))
       } else if (name === 'down') {
-        setSel(s => Math.min(clarifyChoices.length, s + 1))
+        setSel(s => Math.min(maxIdx, s + 1))
       } else if (name === 'return' || name === 'enter') {
         const choice = clarifyChoices[sel]
 
-        choice ? actions.answerClarify(choice) : setCustomClarify(true)
+        if (choice !== undefined) {
+          commitClarifyAnswer(choice)
+        } else if (clarifyAllowFreeform) {
+          setCustomClarify(true)
+        }
+      } else {
+        return
       }
+
+      event.preventDefault()
+      event.stopPropagation()
     }
   })
 
@@ -897,6 +1072,9 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
   useEffect(() => {
     setSel(0)
     setCustomClarify(false)
+    setStepIndex(0)
+    setCollectedAnswers({})
+    setSelectedMulti([])
     setMaskedValue('')
   }, [approval, confirm, clarify, secret, sudo])
 
@@ -904,6 +1082,9 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
     const scope = writePolicyLabel(ui.info?.permission_mode)
     const compact = terminalRows < 32 || composerColumns < 76
     const labels = { once: 'run it once', session: 'allow this session', always: 'always allow this command', deny: 'deny' }
+    const approvalDiffs = approval.diffs?.length ? approval.diffs : approval.diff ? [approval.diff] : []
+    const diffPreview = approvalDiffs.length > 0 ? formatApprovalDiffPreview(approvalDiffs, compact ? 6 : 12) : []
+    const effectiveCwd = approval.cwd || ui.info?.cwd
     return (
       <Box flexDirection="column" flexShrink={0} marginTop={1} paddingLeft={1} borderSides={['left']} borderColor={t.color.warn}>
         <Text bold color={t.color.warn}>Approval needed · POLICY: ASK</Text>
@@ -912,9 +1093,43 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
             <Text color={t.ds.caption}>WHAT WILL RUN</Text>
             {wrapWithContinuation(approval.command, Math.max(1, contentColumnWidth(composerColumns) - 3)).map((line,index) =>
               <Text color={t.ds.strong} key={index}>{line}</Text>)}
-            {ui.info?.cwd ? <Text color={t.ds.meta} wrap="wrap">{'cwd ' + ui.info.cwd}</Text> : null}
+            {effectiveCwd ? <Text color={t.ds.meta} wrap="wrap">{'cwd ' + effectiveCwd}</Text> : null}
             <Text color={t.ds.caption}>WHO ASKED</Text>
             <Text color={t.ds.prose} wrap="wrap">{approval.description}</Text>
+            {approval.locations && approval.locations.length > 0 ? (
+              <>
+                <Text color={t.ds.caption}>LOCATIONS</Text>
+                {approval.locations.slice(0, 6).map((loc, idx) => (
+                  <Text color={t.ds.meta} key={idx} wrap="truncate-end">
+                    {loc.path}{loc.line !== undefined ? `:${loc.line}` : ''}
+                  </Text>
+                ))}
+              </>
+            ) : null}
+            {diffPreview.length > 0 ? (
+              <>
+                <Text color={t.ds.caption}>
+                  {approvalDiffs.length > 1 ? `DIFF PREVIEW (${approvalDiffs.length} files)` : 'DIFF PREVIEW'}
+                </Text>
+                {diffPreview.map((line, idx) => (
+                  <Text
+                    color={
+                      line.kind === 'add'
+                        ? t.color.statusGood
+                        : line.kind === 'del'
+                          ? t.color.error
+                          : line.kind === 'header'
+                            ? t.ds.strong
+                            : t.ds.meta
+                    }
+                    key={idx}
+                    wrap="truncate-end"
+                  >
+                    {line.text}
+                  </Text>
+                ))}
+              </>
+            ) : null}
             <Text color={t.ds.caption}>WHY YOU ARE SEEING THIS</Text>
             <Text color={t.ds.prose} wrap="wrap">{'Interaction mode is ' + (ui.info?.mode || 'code') + ' — ' + scope + '.'}</Text>
             <Text color={t.ds.meta} wrap="wrap">{approval.allowPermanent === false
@@ -922,15 +1137,47 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
               : 'Always creates a rule for this exact command shape; different arguments ask again.'}</Text>
           </Box>
         </scrollbox>
-        {opts.map((option,index)=><Box onClick={() => actions.answerApproval(option)} key={option} flexShrink={0} justifyContent="space-between"
-          backgroundColor={sel === index ? t.color.selectionBg : undefined}>
-          <Text color={sel === index ? t.ds.title : t.ds.secondary} wrap="truncate-end">
-            {(sel === index ? '› ' : '  ') + APPROVAL_HOTKEY[option] + ' ' + (compact ? labels[option] : APPROVAL_LABELS[option])}
-          </Text>
-          {!compact ? <Text color={t.ds.meta} wrap="truncate-end">{APPROVAL_CONSEQUENCE[option]}</Text> : null}
-        </Box>)}
-        {compact ? <Text color={t.ds.meta} wrap="wrap">{APPROVAL_CONSEQUENCE[opts[sel] ?? 'deny']}</Text> : null}
-        <Text color={t.ds.caption} wrap="wrap">↑↓ choose · ⏎ choose · Esc deny · PgUp/PgDn details</Text>
+        {dynamicApprovalOptions ? (
+          <>
+            {dynamicApprovalOptions.map((option, index) => {
+              const consequence = option.warning || approvalConsequenceForOptionKind(option.kind)
+              return (
+                <Box
+                  backgroundColor={sel === index ? t.color.selectionBg : undefined}
+                  flexShrink={0}
+                  justifyContent="space-between"
+                  key={option.option_id}
+                  onClick={() => chooseDynamicApprovalOption(option)}
+                >
+                  <Text color={sel === index ? t.ds.title : t.ds.secondary} wrap="truncate-end">
+                    {(sel === index ? '› ' : '  ') + `${index + 1} ${option.name}`}
+                  </Text>
+                  {!compact && consequence ? <Text color={t.ds.meta} wrap="truncate-end">{consequence}</Text> : null}
+                </Box>
+              )
+            })}
+            {compact && approvalConsequenceForOptionKind(dynamicApprovalOptions[sel]?.kind ?? '') ? (
+              <Text color={t.ds.meta} wrap="wrap">
+                {approvalConsequenceForOptionKind(dynamicApprovalOptions[sel]?.kind ?? '')}
+              </Text>
+            ) : null}
+            <Text color={t.ds.caption} wrap="wrap">
+              {`↑↓ choose · 1-${dynamicApprovalOptions.length} quick · ⏎ choose · Esc deny · PgUp/PgDn details`}
+            </Text>
+          </>
+        ) : (
+          <>
+            {opts.map((option,index)=><Box onClick={() => actions.answerApproval(option)} key={option} flexShrink={0} justifyContent="space-between"
+              backgroundColor={sel === index ? t.color.selectionBg : undefined}>
+              <Text color={sel === index ? t.ds.title : t.ds.secondary} wrap="truncate-end">
+                {(sel === index ? '› ' : '  ') + APPROVAL_HOTKEY[option] + ' ' + (compact ? labels[option] : APPROVAL_LABELS[option])}
+              </Text>
+              {!compact ? <Text color={t.ds.meta} wrap="truncate-end">{APPROVAL_CONSEQUENCE[option]}</Text> : null}
+            </Box>)}
+            {compact ? <Text color={t.ds.meta} wrap="wrap">{APPROVAL_CONSEQUENCE[opts[sel] ?? 'deny']}</Text> : null}
+            <Text color={t.ds.caption} wrap="wrap">↑↓ choose · ⏎ choose · Esc deny · PgUp/PgDn details</Text>
+          </>
+        )}
       </Box>
     )
   }
@@ -957,12 +1204,26 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
     )
   }
 
-  if (clarify && !providerClarify) {
+  if (clarify && !providerClarify && activeClarifyQuestion) {
+    const visibleChoices = clarifyAllowFreeform ? [...clarifyChoices, 'Other (type your answer)'] : clarifyChoices
     return (
       <InlinePromptPanel accent={t.color.accent}>
+        {clarifyQuestions.length > 1 ? (
+          <Text color={t.color.accent}>
+            {`Question ${stepIndex + 1} of ${clarifyQuestions.length}`}
+          </Text>
+        ) : null}
         <Text bold color={t.color.text} wrap="wrap">
-          {clarify.question}
+          {activeClarifyQuestion.question}
         </Text>
+        {clarify.mode === 'url' && clarify.url ? (
+          <>
+            <PromptPanelGap />
+            <Text color={t.color.accent} wrap="wrap">
+              {`URL: ${clarify.url}`}
+            </Text>
+          </>
+        ) : null}
         <PromptPanelGap />
         {typingClarify ? (
           <>
@@ -978,11 +1239,16 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
                   const answer = clarifyRef.current?.plainText.trim() ?? ''
 
                   if (answer) {
-                    actions.answerClarify(answer)
+                    if (clarifyMultiSelect) {
+                      const combined = [...clarifyChoices.filter(choice => selectedMulti.includes(choice)), answer]
+                      commitClarifyAnswer([...new Set(combined)])
+                    } else {
+                      commitClarifyAnswer(answer)
+                    }
                     clarifyRef.current?.clear()
                   }
                 }}
-                placeholder="Type your answer…"
+                placeholder={activeClarifyQuestion.placeholder || 'Type your answer…'}
                 placeholderColor={t.color.muted}
                 ref={clarifyRef}
                 style={{ flexGrow: 1, flexShrink: 0 }}
@@ -991,20 +1257,52 @@ export function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
             </Box>
             <PromptPanelGap />
             <Text color={t.color.muted}>
-              Enter send · Shift+Enter newline · Esc {clarifyChoices.length ? 'back' : 'cancel'}
+              Enter send · Shift+Enter newline · Esc {clarifyChoices.length || stepIndex > 0 ? 'back' : 'cancel'}
             </Text>
           </>
         ) : (
           <>
-            {[...clarifyChoices, 'Other (type your answer)'].map((choice, i) => (
-              <Box backgroundColor={sel === i ? t.color.selectionBg : undefined} key={i} paddingX={1}>
-                <Text color={sel === i ? t.color.label : t.color.muted}>
-                  {i + 1} {sel === i ? '●' : '○'} {choice}
-                </Text>
-              </Box>
-            ))}
+            {visibleChoices.map((choice, i) => {
+              const isOther = clarifyAllowFreeform && i === clarifyChoices.length
+              const checked = !isOther && selectedMulti.includes(choice)
+              const marker = clarifyMultiSelect
+                ? isOther
+                  ? sel === i
+                    ? '›'
+                    : ' '
+                  : checked
+                    ? '[x]'
+                    : '[ ]'
+                : sel === i
+                  ? '●'
+                  : '○'
+              return (
+                <Box
+                  backgroundColor={sel === i ? t.color.selectionBg : undefined}
+                  key={i}
+                  onClick={() => {
+                    if (isOther) {
+                      setCustomClarify(true)
+                    } else if (clarifyMultiSelect) {
+                      toggleMultiChoice(choice)
+                    } else {
+                      commitClarifyAnswer(choice)
+                    }
+                  }}
+                  paddingX={1}
+                >
+                  <Text color={sel === i ? t.color.label : t.color.muted} wrap="wrap">
+                    {i + 1} {marker} {choice}
+                  </Text>
+                </Box>
+              )
+            })}
             <PromptPanelGap />
-            <Text color={t.color.muted}>↑/↓ select · Enter confirm · 1-{clarifyChoices.length} quick · Esc cancel</Text>
+            <Text color={t.color.muted} wrap="wrap">
+              {clarifyMultiSelect
+                ? `↑/↓ move · Space/1-${clarifyChoices.length} toggle · Enter confirm · Esc ${stepIndex > 0 ? 'back' : 'cancel'}`
+                : `${clarify.mode === 'url' && clarify.url ? 'O open link · ' : ''}↑/↓ select · Enter confirm · 1-${clarifyChoices.length} quick · Esc ${stepIndex > 0 ? 'back' : 'cancel'}`}
+            </Text>
           </>
         )}
       </InlinePromptPanel>
@@ -1318,15 +1616,15 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
               <Span color={modeIsDefault ? t.ds.secondary : t.color.accent}>{'◆ ' + modeLabel + ' mode'}</Span>
               <Span color={t.ds.separator}>{' · '}</Span>
             </Text>
-            <Box onMouseDown={() => patchOverlayState({ modelPicker: true })}>
+            <Box onMouseDown={() => openOverlayIfUnblocked({ modelPicker: true })}>
               <Text color={t.ds.meta}>{modelLabel}</Text>
             </Box>
               {ui.info ? (
                 // No chosen effort is the provider's default, not "off".
-                <Box onMouseDown={() => patchOverlayState({ reasoningPicker: true })}><Text color={t.ds.meta}>{' · reasoning: ' + (ui.info.reasoning_effort?.trim() || 'default')}</Text></Box>
+                <Box onMouseDown={() => openOverlayIfUnblocked({ reasoningPicker: true })}><Text color={t.ds.meta}>{' · reasoning: ' + (ui.info.reasoning_effort?.trim() || 'default')}</Text></Box>
               ) : null}
             <Text wrap="wrap">
-              {narrow ? null : (
+              {contentColumnWidth(composer.cols) < 72 ? null : (
                 <Span color={yoloEnabled ? t.color.warn : t.ds.meta}>
                   {' · ' + writePolicyLabel(ui.info?.permission_mode)}
                 </Span>
@@ -1335,7 +1633,7 @@ export function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
             <BackgroundStatus sessionId={ui.sid} t={t} />
             </Box>
             {ui.info?.local_provider_label ? <Text color={t.ds.meta} wrap="truncate-end">{ui.info.local_provider_label}</Text> : null}
-            {narrow ? (
+            {contentColumnWidth(composer.cols) < 72 ? (
               <Text color={yoloEnabled ? t.color.warn : t.ds.meta} wrap="wrap">
                 {writePolicyLabel(ui.info?.permission_mode)}
               </Text>
@@ -1390,7 +1688,7 @@ function PagerOverlay({ composer }: Pick<AppLayoutProps, 'composer'>) {
     return (
       <box
         alignItems="center"
-        backgroundColor="#000000cc"
+        backgroundColor={t.ds.scrim}
         flexDirection="column"
         height="100%"
         justifyContent="center"
@@ -1775,7 +2073,7 @@ function InfoOverlay({ kind }: { kind: 'pluginsHub' | 'skillsHub' }) {
     ['Share', '/plugins export <name> <new-directory>', 'Copy the plugin source and tests; secrets are never exported.'],
     ['Remove', '/plugins uninstall <name>', 'Drop a plugin from Xerxes; its source files stay where they are.'],
   ]
-  return <box alignItems="center" backgroundColor="#000000cc" height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
+  return <box alignItems="center" backgroundColor={t.ds.scrim} height="100%" justifyContent="center" left={0} position="absolute" top={0} width="100%" zIndex={180}>
     <Box backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} flexDirection="column" paddingX={2} width={overlayPanelWidth(width, OVERLAY_PANEL_SPECS.info)} height={Math.min(height - 2, skills ? 31 : 37)}>
       <DialogHeader t={t} title={title} subtitle={skills ? 'Reusable expertise for the way you work.' : 'Extend your agent with tools of your own.'} />
       <scrollbox ref={guideScroll} flexGrow={1} minHeight={0} contentOptions={{ flexDirection: 'column' }}>
@@ -1910,6 +2208,7 @@ export function AppLayout({
     }
   })
   const compactFooterHints = width < 120
+  const compactTopChrome = height <= 28
   // One poll for the whole screen: the statusbar's branch and dirty count and
   // the home chips' file totals are the same question asked twice.
   const pulse = useRepoPulse(ui.info?.cwd ?? '')
@@ -1967,7 +2266,9 @@ export function AppLayout({
         if (panel === 'tools') toggleAllToolRuns()
         else patchOverlayState({ [panel]: true })
       }} cwdLabel={status.cwdLabel} providerModel={ui.info?.model} pulse={pulse}
-        rightLabel={compactFooterHints ? 'F6 · F7 · F8 · F9 · F10' : 'F6 agents · F7 diff · F8 terminals · F9 tools · F10 goals'} t={t} />
+        rightLabel={compactFooterHints ? 'F6 · F7 · F8 · F9 · F10' : 'F6 agents · F7 diff · F8 terminals · F9 tools · F10 goals'}
+        statusTone={compactTopChrome ? (ui.disconnected ? 'disconnected' : ui.busy ? 'busy' : 'idle') : undefined}
+        t={t} />
       <Box flexDirection="row" flexGrow={1} minHeight={0} width="100%">
         <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} minWidth={0}>
           {showStartupWelcome ? (
@@ -1975,7 +2276,7 @@ export function AppLayout({
               <Box key="welcome" flexDirection="column" flexGrow={1} minHeight={0}>
                 {/* Same context and connection facts as the session header: the
                     home screen used to say "ctx unknown" for a known model. */}
-                <SessionHeader busy={false} contextMax={usageCounts(ui.usage).max} contextUsed={usageCounts(ui.usage).used} disconnected={ui.disconnected} sessionTitle="New session" t={t} />
+                <SessionHeader busy={false} compactChrome={compactTopChrome} contextMax={usageCounts(ui.usage).max} contextUsed={usageCounts(ui.usage).used} disconnected={ui.disconnected} sessionTitle="New session" t={t} />
                 <Box flexDirection="column" flexGrow={1} minHeight={0}
                   paddingLeft={Math.max(2, Math.ceil((composer.cols - welcomeColumnWidth(composer.cols)) / 2))}
                   paddingRight={Math.max(2, Math.floor((composer.cols - welcomeColumnWidth(composer.cols)) / 2))}>
@@ -1999,6 +2300,7 @@ export function AppLayout({
             <Box key="session" flexDirection="column" flexGrow={1} minHeight={0}>
               <SessionHeader
                 busy={ui.busy}
+                compactChrome={compactTopChrome}
                 disconnected={ui.disconnected}
                 contextMax={usageCounts(ui.usage).max}
                 contextUsed={usageCounts(ui.usage).used}
@@ -2016,7 +2318,7 @@ export function AppLayout({
                 t={t}
                 width={composer.cols}
               />
-              <Box flexDirection="column" flexGrow={1} gap={1} minHeight={0} paddingX={2}>
+              <Box flexDirection="column" flexGrow={1} gap={compactTopChrome ? 0 : 1} minHeight={0} paddingX={2}>
                 <scrollbox
                   ref={scrollboxRef}
                   stickyScroll
@@ -2090,7 +2392,7 @@ export function AppLayout({
             <AgentPanel
               history={spawnHistory}
               liveAgents={liveAgents}
-              onInspect={agentId => patchOverlayState({ agents: true, agentsInspectId: agentId })}
+              onInspect={agentId => openOverlayIfUnblocked({ agents: true, agentsInspectId: agentId })}
               t={t}
             />
           </Box>

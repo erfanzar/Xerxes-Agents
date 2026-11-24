@@ -672,12 +672,8 @@ describe('AgyBrainBridge — resolver, swarm projection, inspector, artifacts & 
 
     const pinned = await bridge.pinArtifact('xrx-sess-1', loc, 'agy:interactive_chart.html', true)
     expect(pinned?.pinned).toBe(true)
-    const updated = await bridge.updateArtifact('xrx-sess-1', loc, 'agy:audit_report.md', {
-      content: '# Updated Report\n\nRevised body.\n',
-    })
-    expect(updated.version).toBe(2)
-    expect(updated.title).toBe('Updated Report')
-    expect(await readFile(join(seeded.sessionDir, 'audit_report.md'), 'utf8')).toContain('Revised body.')
+    // The bridge is read-only: it exposes no way to write into an Antigravity brain directory.
+    expect((bridge as unknown as Record<string, unknown>).updateArtifact).toBeUndefined()
 
     // Subagents: Swarm Worker filtered out; non-swarm subagent surfaced with history!
     const subagents = bridge.listSubagentSnapshotsSync(loc)
@@ -1171,7 +1167,7 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       await waitUntil(() => receivedPrompts.some(p => p.includes('/swarm audit all shaders')))
       await waitUntil(() => !acpHost.hasActiveTurn(sessionId))
 
-      // 3. Artifacts merged (`agy:audit_report.md` & `agy:interactive_chart.html`) + pin + update + traversal guard
+      // 3. Artifacts merged (`agy:audit_report.md` & `agy:interactive_chart.html`) + pin; edits are refused
       const artList = await client.call('artifacts.list')
       expect((artList.artifacts as Array<{ id: string }>).map(a => a.id).sort()).toEqual([
         'agy:audit_report.md',
@@ -1181,12 +1177,14 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       expect((artRead.artifact as { title: string }).title).toBe('Prismcore Audit Report')
       const artPin = await client.call('artifacts.pin', { id: 'agy:audit_report.md', pinned: true })
       expect((artPin.artifact as { pinned: boolean }).pinned).toBe(true)
+      const reportBefore = await readFile(join(seeded.sessionDir, 'audit_report.md'), 'utf8')
       const artUpdate = await client.call('artifacts.update', {
         id: 'agy:audit_report.md',
         content: '# Prismcore Audit Report\n\nUpdated via RPC.\n',
       })
-      expect(artUpdate.ok).toBe(true)
-      expect((artUpdate.artifact as { version: number }).version).toBe(2)
+      expect(artUpdate.ok).toBe(false)
+      expect(String(artUpdate.error)).toContain('read-only')
+      expect(await readFile(join(seeded.sessionDir, 'audit_report.md'), 'utf8')).toBe(reportBefore)
       const artTraversal = await client.call('artifacts.update', {
         id: 'agy:../escape.md',
         content: 'nope',
@@ -1213,21 +1211,19 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       expect(artToolResult.params?.payload?.artifact_id).toBe('agy:audit_report.md')
       await client.next(f => f.method === 'event' && f.params?.type === 'turn_end')
 
-      // 6. Live swarm write RPCs dispatch through `agy acp` and NEVER mutate AGY files on disk!
+      // 6. Board write controls never write prompts for agy and never mutate AGY files on disk.
+      //    Only the coordinator model switch, a real ACP set-model RPC, still works.
       const boardBefore = await readFile(join(seeded.swarmDir, 'board.jsonl'), 'utf8')
       const membersBefore = await readFile(join(seeded.swarmDir, 'members.json'), 'utf8')
+      const promptsBeforeControls = receivedPrompts.length
 
       const postRes = await client.call('swarm.post', {
         session_id: sessionId,
         text: 'Focus on fp16 edge cases @alpha-worker',
         as_feedback: true,
       })
-      expect(postRes.ok).toBe(true)
-      expect(postRes.dispatched).toBe(true)
-      await waitUntil(() => receivedPrompts.some(p => p.includes('@narrator user feedback: Focus on fp16 edge cases alpha-worker')))
-
-      // Wait for dispatched turn to finish before testing coordinator model switch
-      await waitUntil(() => !acpHost.hasActiveTurn(sessionId))
+      expect(postRes.ok).toBe(false)
+      expect(String(postRes.error)).toContain('written by Xerxes')
 
       const coordModelRes = await client.call('swarm.model', {
         session_id: sessionId,
@@ -1244,19 +1240,19 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
         model: 'gemini-4-carbon',
         reason: 'quota headroom',
       })
-      expect(workerModelRes.ok).toBe(true)
-      expect(workerModelRes.dispatched).toBe(true)
-      await waitUntil(() => receivedPrompts.some(p => p.includes('name: "alpha-worker"') && p.includes('model: "gemini-4-carbon"')))
-      await waitUntil(() => !acpHost.hasActiveTurn(sessionId))
+      expect(workerModelRes.ok).toBe(false)
+      expect(String(workerModelRes.error)).toContain('written by Xerxes')
 
       const workerKillRes = await client.call('swarm.kill', {
         session_id: sessionId,
         name: 'alpha-worker',
       })
-      expect(workerKillRes.ok).toBe(true)
-      expect(workerKillRes.killed).toEqual(['alpha-worker'])
-      await waitUntil(() => receivedPrompts.some(p => p.includes('swarm{action: "kill", name: "alpha-worker"}')))
-      await waitUntil(() => !acpHost.hasActiveTurn(sessionId))
+      expect(workerKillRes.ok).toBe(false)
+      expect(String(workerKillRes.error)).toContain('written by Xerxes')
+
+      await Bun.sleep(30)
+      expect(receivedPrompts).toHaveLength(promptsBeforeControls)
+      expect(receivedPrompts.some(p => p.includes('[Xerxes'))).toBe(false)
 
       expect(await readFile(join(seeded.swarmDir, 'board.jsonl'), 'utf8')).toBe(boardBefore)
       expect(await readFile(join(seeded.swarmDir, 'members.json'), 'utf8')).toBe(membersBefore)
@@ -1360,12 +1356,12 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       const offlinePost = await client.call('swarm.post', { session_id: sessionId, text: 'hello offline' })
       expect(offlinePost).toEqual({
         ok: false,
-        error: 'Reconnect Antigravity to send swarm actions; board remains readable offline.',
+        error: 'This Antigravity control is not available from Xerxes: it would send agy instructions written by Xerxes rather than you. Ask Antigravity directly in the chat instead.',
       })
       const offlineKill = await client.call('swarm.kill', { session_id: sessionId, name: 'alpha-worker' })
       expect(offlineKill).toEqual({
         ok: false,
-        error: 'Reconnect Antigravity to send swarm actions; board remains readable offline.',
+        error: 'This Antigravity control is not available from Xerxes: it would send agy instructions written by Xerxes rather than you. Ask Antigravity directly in the chat instead.',
       })
       const offlineModel = await client.call('swarm.model', {
         session_id: sessionId,

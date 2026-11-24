@@ -21,16 +21,18 @@ import { setSidebarViewMode, useThreadInbox, type SidebarViewMode } from './thre
 import { loadPalette, PALETTES, paletteVariant, savePalette, type Palette } from './palettes.js'
 import { applyBackdrop, backdropFromImage, BACKDROP_PRESETS, BUNDLED_BACKGROUNDS, DEFAULT_BLUR, DEFAULT_CHAT_OPACITY, DEFAULT_PANEL_OPACITY, loadBackdrop, saveBackdrop, transparencySupported, type Backdrop } from './backdrop.js'
 import { desktopError } from './desktopRpc.js'
-import { useDialogFocus } from './dialogFocus.js'
+import { handleDialogEscape, useDialogFocus } from './dialogFocus.js'
 import { ChannelsCard } from './ChannelsPanel.js'
 import { LspCard } from "./LspPanel.js"
 import { TerminalsCard } from './TerminalsPanel.js'
 import { providerRowState, store, type Snapshot } from './store.js'
 import type { CachedModel, ModelChoice, PermissionMode, ProviderRow, SettingsTab } from './types.js'
 import { RemoteProviders } from './RemoteProviders.js'
-import { ProviderAccountsCenter } from './ProviderAccountsCenter.js'
+import { ProviderAccountsCenter, accountKindLabel } from './ProviderAccountsCenter.js'
 import { USAGE_GROUP_LABEL, usageGroupOf, type UsageGroupKind } from './UsagePanel.js'
 import { RunModeSection } from './RunModeSection.js'
+import { isMacPlatform } from './runModeView.js'
+import { ScrollableCombobox } from './ScrollableCombobox.js'
 import { AgentIntelligenceCard } from './AgentIntelligenceCard.js'
 import { MemoryGuardSetting } from './MemoryGuardSetting.js'
 import { CompactionSetting } from './CompactionSetting.js'
@@ -38,83 +40,146 @@ import { Icon, type IconName } from './Icon.js'
 import { isVscodeHost } from './host.js'
 import { HubPhoneCard } from './HubPhonePanel.js'
 import { MacPermissionsCard } from './MacPermissionsPanel.js'
+import { T3Icon, type T3IconName } from './T3Icons.js'
 
 // ── Settings modal ──────────────────────────────────────────────────────
 
-const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
-  { id: 'general', label: 'General' },
-  { id: 'models', label: 'Models & Providers' },
-  { id: 'intelligence', label: 'Agent intelligence' },
-  { id: 'agents', label: 'Agent presets' },
-  { id: 'permissions', label: 'Permissions' },
-  { id: 'channels', label: 'Channels' },
-  { id: 'mcp', label: 'MCP Servers' },
-  { id: 'terminals', label: 'Terminals' },
-  { id: 'lsp', label: 'Language servers' },
-  { id: 'hub', label: 'Hub & phone' },
-  { id: 'macos', label: 'macOS permissions' },
+const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTab; label: string; icon: T3IconName }> = [
+  { id: 'general', label: 'General', icon: 'sliders' },
+  { id: 'models', label: 'Models & Providers', icon: 'sparkles' },
+  { id: 'intelligence', label: 'Agent intelligence', icon: 'workflow' },
+  { id: 'agents', label: 'Agent presets', icon: 'bot' },
+  { id: 'permissions', label: 'Permissions', icon: 'shieldCheck' },
+  { id: 'channels', label: 'Channels', icon: 'messagesSquare' },
+  { id: 'mcp', label: 'MCP Servers', icon: 'server' },
+  { id: 'terminals', label: 'Terminals', icon: 'terminalSquare' },
+  { id: 'lsp', label: 'Language servers', icon: 'codeEditor' },
+  { id: 'hub', label: 'Hub & phone', icon: 'globe' },
+  { id: 'macos', label: 'macOS permissions', icon: 'monitor' },
 ]
 
+/** Key handler for SettingsModal: closes on Escape or ⌘,/Ctrl+, when Settings is the top modal. */
+export function handleSettingsModalKey(
+  event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'defaultPrevented' | 'preventDefault' | 'stopPropagation' | 'stopImmediatePropagation'>,
+  close: () => void,
+  options: { readonly isTopDialog: boolean; readonly ownsFocus: boolean },
+): boolean {
+  if (event.defaultPrevented) return false
+  if (options.isTopDialog && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === ',') {
+    event.preventDefault()
+    event.stopPropagation()
+    event.stopImmediatePropagation()
+    close()
+    return true
+  }
+  if (event.key === 'Escape' && options.ownsFocus) {
+    handleDialogEscape(event, close, true)
+    return true
+  }
+  return false
+}
+
 export function SettingsModal({ snap }: { snap: Snapshot }): ReactElement | null {
-  const ref=useRef<HTMLDivElement>(null)
+  const ref = useRef<HTMLDivElement>(null)
+  const mainRef = useRef<HTMLDivElement>(null)
   useDialogFocus(ref, snap.settingsOpen)
   // Shading: "← Back" and a tab search lead the Settings sidebar.
   const [tabFilter, setTabFilter] = useState('')
+  const vscode = isVscodeHost()
+  useEffect(() => {
+    if (!snap.settingsOpen) setTabFilter('')
+  }, [snap.settingsOpen])
+  useEffect(() => {
+    if (!snap.settingsOpen || typeof document === 'undefined') return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return
+      const root = ref.current
+      if (!root) return
+      // Leave nested modals (e.g. ActionDialog portaled to document.body) untouched.
+      const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')
+      const isTopDialog = dialogs.length === 0 || dialogs[dialogs.length - 1] === root
+      const active = document.activeElement
+      const ownsFocus = isTopDialog && (root.contains(active) || active === document.body || active === null)
+      handleSettingsModalKey(event, () => store.closeSettings(), { isTopDialog, ownsFocus })
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [snap.settingsOpen])
+  useEffect(() => {
+    if (!snap.settingsOpen) return
+    const container = mainRef.current
+    if (!container) return
+    if (vscode) {
+      const target = container.querySelector<HTMLElement>(`[data-settings-section="${snap.settingsTab}"]`)
+      if (target) target.scrollIntoView?.({ block: 'start' })
+      else container.scrollTo?.({ top: 0 })
+      return
+    }
+    container.scrollTo?.({ top: 0 })
+  }, [snap.settingsOpen, snap.settingsTab, vscode])
   if (!snap.settingsOpen) return null
+  const closeOnBackdrop = (event: React.MouseEvent<HTMLDivElement>): void => {
+    if (event.target === event.currentTarget) store.closeSettings()
+  }
   // VS Code: one page with what a coding panel needs — models and providers,
   // how hard agents think, then approvals. No section tabs; the rest belongs
-  // to the desktop app.
-  if (isVscodeHost()) return (
-    <div className="backdrop">
-      <div className="modal modal--single" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
+  // to the desktop app, while still honoring snap.settingsTab via section scroll.
+  if (vscode) return (
+    <div className="backdrop" onMouseDown={closeOnBackdrop}>
+      <div className="modal modal--single" ref={ref} role="dialog" aria-modal="true" aria-label="Settings" data-active-tab={snap.settingsTab}>
         <header className="modal__head">
           <strong>Settings</strong>
           <button className="chipbtn" aria-label="Close settings" onClick={() => store.closeSettings()}><Icon name="close" size={13} /></button>
         </header>
-        <div className="modal__main">
-          <StyleField />
-          <ModelsCard snap={snap} />
-          <AgentIntelligenceCard snap={snap} />
-          <PermissionsCard snap={snap} />
+        <div className="modal__main" ref={mainRef}>
+          <div data-settings-section="general"><StyleField /></div>
+          <div data-settings-section="models"><ModelsCard snap={snap} /></div>
+          <div data-settings-section="intelligence"><AgentIntelligenceCard snap={snap} /></div>
+          <div data-settings-section="permissions"><PermissionsCard snap={snap} /></div>
         </div>
       </div>
     </div>
   )
+  const activeTab: SettingsTab = SETTINGS_TABS.some(tab => tab.id === snap.settingsTab) ? snap.settingsTab : 'general'
+  const filteredTabs = SETTINGS_TABS.filter(tab => !tabFilter.trim() || tab.label.toLowerCase().includes(tabFilter.trim().toLowerCase()))
   return (
-    <div className="backdrop">
+    <div className="backdrop" onMouseDown={closeOnBackdrop}>
       <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="Settings">
         <div className="modal__side">
           {<>
                 <button className="settings-back" aria-label="Close settings" onClick={() => store.closeSettings()}><span className="settings-back__icon"><Icon name="arrow" size={13} /></span><span>Back</span></button>
                 <label className="settings-search"><Icon name="search" size={13} /><input aria-label="Search Settings" placeholder="Search Settings" value={tabFilter} onChange={event => setTabFilter(event.target.value)} /></label>
               </>}
-          {SETTINGS_TABS.filter(tab => !tabFilter.trim() || tab.label.toLowerCase().includes(tabFilter.trim().toLowerCase())).map(tab => (
+          {filteredTabs.map(tab => (
             <button
               key={tab.id}
-              className={`mtab${snap.settingsTab === tab.id ? ' is-on' : ''}`}
+              type="button"
+              className={`mtab${activeTab === tab.id ? ' is-on' : ''}`}
               onClick={() => store.setSettingsTab(tab.id)}
             >
-              {tab.label}
+              <span className="mtab__icon" aria-hidden="true"><T3Icon name={tab.icon} size={14} /></span>
+              <span className="mtab__label">{tab.label}</span>
             </button>
           ))}
+          {filteredTabs.length === 0 && <p className="row__s">No matching settings.</p>}
           <div className="modal__sidefoot">
             <span className="appr-policy">
               {snap.connection === 'online' ? 'daemon connected' : 'offline — reconnect to edit'}
             </span>
           </div>
         </div>
-        <div className="modal__main">
-          {snap.settingsTab === 'general' && <GeneralCard snap={snap} />}
-          {snap.settingsTab === 'models' && <ModelsCard snap={snap} />}
-          {snap.settingsTab === 'intelligence' && <AgentIntelligenceCard snap={snap} />}
-          {snap.settingsTab === 'agents' && <AgentPresetsCard snap={snap} />}
-          {snap.settingsTab === 'permissions' && <PermissionsCard snap={snap} />}
-          {snap.settingsTab === 'channels' && <ChannelsCard snap={snap} />}
-          {snap.settingsTab === 'mcp' && <McpCard snap={snap} />}
-          {snap.settingsTab === 'terminals' && <TerminalsCard snap={snap} />}
-          {snap.settingsTab === 'lsp' && <LspCard snap={snap} />}
-          {snap.settingsTab === 'hub' && <HubPhoneCard />}
-          {snap.settingsTab === 'macos' && <MacPermissionsCard />}
+        <div className="modal__main" ref={mainRef}>
+          {activeTab === 'general' && <GeneralCard snap={snap} />}
+          {activeTab === 'models' && <ModelsCard snap={snap} />}
+          {activeTab === 'intelligence' && <AgentIntelligenceCard snap={snap} />}
+          {activeTab === 'agents' && <AgentPresetsCard snap={snap} />}
+          {activeTab === 'permissions' && <PermissionsCard snap={snap} />}
+          {activeTab === 'channels' && <ChannelsCard snap={snap} />}
+          {activeTab === 'mcp' && <McpCard snap={snap} />}
+          {activeTab === 'terminals' && <TerminalsCard snap={snap} />}
+          {activeTab === 'lsp' && <LspCard snap={snap} />}
+          {activeTab === 'hub' && <HubPhoneCard />}
+          {activeTab === 'macos' && <MacPermissionsCard />}
         </div>
       </div>
     </div>
@@ -171,8 +236,9 @@ function useNativeSwitches(): { notifications: boolean; loginItem: boolean | nul
   // Push the persisted preference once the shell is live; effects do not run
   // in the SSR/test render, so this stays headless-safe.
   useEffect(() => {
-    void window.xerxes.setNotifications?.(notifications)
-    void window.xerxes.getLoginItem?.().then(state => setLoginItem(state)).catch(() => setLoginItem(null))
+    if (typeof window === 'undefined') return
+    void window.xerxes?.setNotifications?.(notifications)
+    void window.xerxes?.getLoginItem?.().then(state => setLoginItem(state)).catch(() => setLoginItem(null))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const toggleNotifications = (): void => {
@@ -183,10 +249,11 @@ function useNativeSwitches(): { notifications: boolean; loginItem: boolean | nul
     } catch {
       // A blocked storage area leaves the choice session-scoped.
     }
-    void window.xerxes.setNotifications?.(next)
+    if (typeof window !== 'undefined') void window.xerxes?.setNotifications?.(next)
   }
   const toggleLoginItem = (): void => {
-    void window.xerxes.setLoginItem?.(!loginItem).then(state => setLoginItem(state)).catch(() => setLoginItem(null))
+    if (typeof window === 'undefined') return
+    void window.xerxes?.setLoginItem?.(!loginItem).then(state => setLoginItem(state)).catch(() => setLoginItem(null))
   }
   return { notifications, loginItem, toggleNotifications, toggleLoginItem }
 }
@@ -529,119 +596,129 @@ function GeneralCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">General</h2>
-      <p className="modal__sub">Applies immediately; nothing here is per-task.</p>
+      <p className="modal__sub">Appearance, workspace, and runtime preferences apply immediately. Per-task controls are marked below.</p>
 
-      <StyleField />
-      <BackdropField />
-      <div className="field">
-        <label>Theme</label>
-        <div className="seg">
-          <button className={theme === 'system' ? 'is-on' : ''} onClick={() => setTheme('system')}>System</button>
-          <button className={theme === 'dark' ? 'is-on' : ''} onClick={() => setTheme('dark')}>Dark</button>
-          <button className={theme === 'light' ? 'is-on' : ''} onClick={() => setTheme('light')}>Light</button>
-        </div>
-      </div>
-      <PaletteField />
-      <div className="field">
-        <label id="ui-font-size">Interface text size</label>
-        {/* Raw pixel numbers told you nothing about which way was bigger. */}
-        <div className="seg" role="group" aria-labelledby="ui-font-size">
-          {FONT_SIZES.map(size => (
-            <button key={size} aria-pressed={fontSize === size} title={`${size}px`} className={fontSize === size ? 'is-on' : ''} onClick={() => applyFont(size)}>{FONT_LABELS[size]}</button>
-          ))}
-        </div>
-      </div>
-      <DisplayFields />
-
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Setup checklist</div>
-          <div className="row__s">Provider, folder and runtime readiness in one place</div>
-        </div>
-        <button className="btn" onClick={() => { store.closeSettings(); window.dispatchEvent(new Event("xerxes:setup")) }}>Open…</button>
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Session</div>
-          <div className="row__s">
-            {snap.currentId ? `${snap.currentId} · ${snap.model || 'model unset'}` : 'No session yet'}
+      <section aria-labelledby="general-appearance-heading">
+        <h3 id="general-appearance-heading" className="row__t settings-section">Appearance</h3>
+        <StyleField />
+        <div className="field">
+          <label>Theme</label>
+          <div className="seg">
+            <button className={theme === 'system' ? 'is-on' : ''} onClick={() => setTheme('system')}>System</button>
+            <button className={theme === 'dark' ? 'is-on' : ''} onClick={() => setTheme('dark')}>Dark</button>
+            <button className={theme === 'light' ? 'is-on' : ''} onClick={() => setTheme('light')}>Light</button>
           </div>
         </div>
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Daemon</div>
-          <div className="row__s">
-            {snap.connection === 'online' ? 'Connected · shared across workspaces' : 'Offline — retrying with backoff'}
+        <PaletteField />
+        <BackdropField />
+        <div className="field">
+          <label id="ui-font-size">Interface text size</label>
+          {/* Raw pixel numbers told you nothing about which way was bigger. */}
+          <div className="seg" role="group" aria-labelledby="ui-font-size">
+            {FONT_SIZES.map(size => (
+              <button key={size} aria-pressed={fontSize === size} title={`${size}px`} className={fontSize === size ? 'is-on' : ''} onClick={() => applyFont(size)}>{FONT_LABELS[size]}</button>
+            ))}
           </div>
         </div>
-        <button className="btn" onClick={() => store.retryConnection()}>Reconnect</button>
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Creator mode</div>
-          <div className="row__s">Create and manage presets for future sessions</div>
+        <DisplayFields />
+      </section>
+
+      <section aria-labelledby="general-workspace-heading">
+        <h3 id="general-workspace-heading" className="row__t settings-section">Workspace &amp; Session</h3>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Setup checklist</div>
+            <div className="row__s">Provider, folder and runtime readiness in one place</div>
+          </div>
+          <button className="btn" onClick={() => { store.closeSettings(); window.dispatchEvent(new Event("xerxes:setup")) }}>Open…</button>
         </div>
-        <button className="btn" onClick={() => store.setSettingsTab('agents')}>Manage…</button>
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Launch at login</div>
-          <div className="row__s">Open Xerxes when you sign in</div>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Session</div>
+            <div className="row__s">
+              {snap.currentId ? `${snap.currentId} · ${snap.model || 'model unset'}` : 'No session yet'}
+            </div>
+          </div>
         </div>
-        <button
-          className={`switch${loginItem ? ' is-on' : ''}`}
-          role="switch"
-          aria-checked={loginItem === true}
-          aria-label="Launch at login"
-          disabled={loginItem === null}
-          onClick={toggleLoginItem}
-        />
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Notifications</div>
-          <div className="row__s">Show system notifications when a task needs you, stops, fails, or finishes</div>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Daemon</div>
+            <div className="row__s">
+              {snap.connection === 'online' ? 'Connected · shared across workspaces' : 'Offline — retrying with backoff'}
+            </div>
+          </div>
+          <button className="btn" onClick={() => store.retryConnection()}>Reconnect</button>
         </div>
-        <button
-          className={`switch${notifications ? ' is-on' : ''}`}
-          role="switch"
-          aria-checked={notifications}
-          aria-label="Notifications"
-          onClick={toggleNotifications}
-        />
-      </div>
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Stream thinking</div>
-          <div className="row__s">Show reasoning while the agent works. Display only; the runtime always records it</div>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Creator mode</div>
+            <div className="row__s">Create and manage presets for future sessions</div>
+          </div>
+          <button className="btn" onClick={() => store.setSettingsTab('agents')}>Manage…</button>
         </div>
-        <button
-          className={`switch${snap.streamThinking ? ' is-on' : ''}`}
-          role="switch"
-          aria-checked={snap.streamThinking}
-          aria-label="Stream thinking"
-          onClick={() => store.setStreamThinking(!snap.streamThinking)}
-        />
-      </div>
-      {/* Was write-only: it hardcoded setPlanMode(true) and never read
-          snap.planMode, so it always said "enable now" — including while
-          plan mode was already on, where clicking it did nothing visible. */}
-      <div className="row">
-        <div className="row__main">
-          <div className="row__t">Plan this task</div>
-          <div className="row__s">{snap.planMode ? 'On — the agent proposes a checklist before it changes anything' : 'Review a plan before making changes'}</div>
+      </section>
+
+      <section aria-labelledby="general-behavior-heading">
+        <h3 id="general-behavior-heading" className="row__t settings-section">Behavior &amp; Safety</h3>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Launch at login</div>
+            <div className="row__s">Open Xerxes when you sign in</div>
+          </div>
+          <button
+            className={`switch${loginItem ? ' is-on' : ''}`}
+            role="switch"
+            aria-checked={loginItem === true}
+            aria-label="Launch at login"
+            disabled={loginItem === null}
+            onClick={toggleLoginItem}
+          />
         </div>
-        <button
-          className={`switch${snap.planMode ? ' is-on' : ''}`}
-          role="switch"
-          aria-checked={snap.planMode}
-          aria-label="Plan this task"
-          onClick={() => store.setPlanMode(!snap.planMode)}
-        />
-      </div>
-      <MemoryGuardSetting snap={snap} />
-      <CompactionSetting snap={snap} />
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Notifications</div>
+            <div className="row__s">Show system notifications when a task needs you, stops, fails, or finishes</div>
+          </div>
+          <button
+            className={`switch${notifications ? ' is-on' : ''}`}
+            role="switch"
+            aria-checked={notifications}
+            aria-label="Notifications"
+            onClick={toggleNotifications}
+          />
+        </div>
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Stream thinking</div>
+            <div className="row__s">Show reasoning while the agent works. Display only; the runtime always records it</div>
+          </div>
+          <button
+            className={`switch${snap.streamThinking ? ' is-on' : ''}`}
+            role="switch"
+            aria-checked={snap.streamThinking}
+            aria-label="Stream thinking"
+            onClick={() => store.setStreamThinking(!snap.streamThinking)}
+          />
+        </div>
+        {/* Was write-only: it hardcoded setPlanMode(true) and never read
+            snap.planMode, so it always said "enable now" — including while
+            plan mode was already on, where clicking it did nothing visible. */}
+        <div className="row">
+          <div className="row__main">
+            <div className="row__t">Plan this task{' '}<span className="provcard__badge provcard__badge--quiet">This task</span></div>
+            <div className="row__s">{snap.planMode ? 'On — the agent proposes a checklist before it changes anything' : 'Review a plan before making changes'}</div>
+          </div>
+          <button
+            className={`switch${snap.planMode ? ' is-on' : ''}`}
+            role="switch"
+            aria-checked={snap.planMode}
+            aria-label="Plan this task"
+            onClick={() => store.setPlanMode(!snap.planMode)}
+          />
+        </div>
+        <MemoryGuardSetting snap={snap} />
+        <CompactionSetting snap={snap} />
+      </section>
     </>
   )
 }
@@ -653,6 +730,7 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
   const [copyName, setCopyName] = useState('')
   const [viewing, setViewing] = useState<{ id: string; content: string } | null>(null)
   const [editing, setEditing] = useState<{ id: string; content: string; dirty: boolean } | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const presets = snap.agentPresets ?? []
   const unavailable = busy || snap.connection !== 'online'
@@ -730,7 +808,7 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
                   <div className="pcard__main">
                     <span className={`dot ${row.broken ? 'dot--fail' : row.isDefault ? 'dot--live' : 'dot--idle'}`} />
                     <span className="pcard__text">
-                      <span className="pcard__name">{row.name}{row.id.toLowerCase() !== row.name.trim().toLowerCase() && <> <code>{row.id}</code></>}{row.isDefault ? <span className="chipbtn" style={{ marginLeft: 6 }}>default</span> : null}{snap.currentAgentPreset === row.id ? <span className="chipbtn" style={{ marginLeft: 6 }}>this session</span> : null}</span>
+                      <span className="pcard__name">{row.name}{row.id.toLowerCase() !== row.name.trim().toLowerCase() && <> <code>{row.id}</code></>}{row.isDefault ? <>{' '}<span className="provcard__badge provcard__badge--accent">Default</span></> : null}{snap.currentAgentPreset === row.id ? <>{' '}<span className="provcard__badge provcard__badge--quiet">This session</span></> : null}</span>
                       <span className="pcard__meta">{row.broken || row.description || 'No description.'}</span>
                     </span>
                   </div>
@@ -750,7 +828,14 @@ function AgentPresetsCard({ snap }: { snap: Snapshot }): ReactElement {
                     {!row.broken && row.manageable && <button className="chipbtn" disabled={unavailable} onClick={() => edit(row.id)}>Edit</button>}
                     {!row.broken && <button className="chipbtn" disabled={unavailable} onClick={() => { clearError(); setCopyFrom(row.id); setCopyId(''); setCopyName('') }}>Duplicate</button>}
                     {row.manageable && <button className="chipbtn" disabled={unavailable} onClick={() => { void runAction(() => store.openAgentPresetLocation(row.id)) }}>Open folder</button>}
-                    {row.manageable && <button className="chipbtn chipbtn--danger" disabled={unavailable} onClick={() => { if (window.confirm(`Delete agent preset ${row.id}? Running sessions are unaffected.`)) void runAction(() => store.removeAgentPreset(row.id)) }}>Delete</button>}
+                    {row.manageable && (confirmDelete === row.id ? (
+                      <>
+                        <button type="button" className="chipbtn chipbtn--danger" disabled={unavailable} onClick={() => { setConfirmDelete(null); void runAction(() => store.removeAgentPreset(row.id)) }}>Confirm delete</button>
+                        <button type="button" className="chipbtn" disabled={unavailable} onClick={() => setConfirmDelete(null)}>Cancel</button>
+                      </>
+                    ) : (
+                      <button type="button" className="chipbtn chipbtn--danger" disabled={unavailable} onClick={() => setConfirmDelete(row.id)}>Delete</button>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -813,7 +898,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Models & Providers</h2>
-      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={window.xerxes.remote} accounts={window.xerxes.accounts} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
+      {snap.storageScope?.startsWith('ssh:') && <RemoteProviders key={snap.sessionKey} remote={typeof window === 'undefined' ? undefined : window.xerxes?.remote} accounts={typeof window === 'undefined' ? undefined : window.xerxes?.accounts} relay={snap.providerRelay} changed={()=>store.loadModels(true)}/>}
       {/* Private and Hybrid run Bonsai on the workspace host, so the choice is offered for this Mac only. */}
       {!snap.storageScope?.startsWith('ssh:') && <RunModeSection snap={snap} />}
       <p className="modal__sub">
@@ -836,7 +921,13 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
       </div>
 
       {/* One Providers list: sign-ins and API keys share rows; a signed-in account adds its usage, Sync and Remove. */}
-      <ProviderAccountsCenter accounts={typeof window === 'undefined' ? undefined : window.xerxes.accounts} onAccountLogin={typeof window === 'undefined' ? undefined : window.xerxes.onAccountLogin} sessionKey={snap.sessionKey} turnActive={snap.turnActive} changed={()=>void store.loadModels(true)}
+      <ProviderAccountsCenter
+        key={`${snap.storageScope || 'local'}:${snap.cwd || ''}:${snap.sessionKey}`}
+        accounts={typeof window === 'undefined' ? undefined : window.xerxes?.accounts}
+        onAccountLogin={typeof window === 'undefined' ? undefined : window.xerxes?.onAccountLogin}
+        sessionKey={snap.sessionKey}
+        turnActive={snap.turnActive}
+        changed={()=>void store.loadModels(true)}
         shownProfiles={new Set(snap.providers.map(provider => provider.name))} rows={slots => <>
       {snap.providerSwitching && <p role="status">Switching to {snap.providerSwitching}…</p>}
       {snap.providerSwitchError && <p role="alert" className="studio-error">{snap.providerSwitchError}</p>}
@@ -862,6 +953,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         const heading = index === 0 || providerGroup(sorted[index - 1]!) !== providerGroup(provider)
         const name = provider.label || provider.name
         const tone = row.chip === 'Mac not connected' ? 'needs' : row.chip === 'host default' ? 'quiet' : 'accent'
+        const useViaLabel = isMacPlatform() ? 'Use via Mac' : 'Use via this computer'
         return (
         <Fragment key={provider.name}>
         {heading && <div className="provgroup">{group}</div>}
@@ -871,7 +963,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
             <span className="provcard__text">
               <span className="provcard__title">
                 <span className="provcard__name">{slot && slot.account.kind !== 'api_key' ? slot.account.label : name}</span>
-                <span className="provcard__badge provcard__badge--quiet">{slot ? slot.account.kind : provider.signsIn ? 'sign-in' : 'api_key'}</span>
+                <span className="provcard__badge provcard__badge--quiet">{accountKindLabel(slot ? slot.account.kind : provider.signsIn ? 'sign-in' : 'api_key')}</span>
                 {row.chip ? <span className={`provcard__badge provcard__badge--${tone}`}>{row.chip}</span> : null}
                 {provider.local === true && <span className="provcard__badge provcard__badge--quiet">on this machine</span>}
                 {snap.runMode?.mode === 'hybrid' && snap.runMode.worker?.profile === provider.name && <span className="provcard__badge provcard__badge--quiet">Hybrid lead</span>}
@@ -890,7 +982,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
                   {!row.inUse && (
                     <button className="btn" disabled={snap.turnActive || !!snap.providerSwitching}
                       title={snap.turnActive ? 'wait for the running turn to finish' : row.viaMac ? `run this task through ${name} on this computer` : `make ${name} the active profile`}
-                      onClick={() => store.selectProvider(provider.name)}>{row.viaMac ? 'Use via Mac' : 'Use'}</button>
+                      onClick={() => store.selectProvider(provider.name)}>{row.viaMac ? useViaLabel : 'Use'}</button>
                   )}
                   {/* The host's sign-in can be selected before any relay exists, too. */}
                   {snap.storageScope?.startsWith('ssh:') && provider.signsIn && provider.ready === true && (!row.inUse || row.viaMac) && !snap.turnActive && (
@@ -922,6 +1014,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
 
       {form !== false && (
         <ProviderForm
+          key={typeof form === 'string' ? form : 'new'}
           snap={snap}
           editing={editing}
           onCancel={() => setForm(false)}
@@ -934,7 +1027,7 @@ function ModelsCard({ snap }: { snap: Snapshot }): ReactElement {
         <div key={group.provider} className="row">
           <span className="dot dot--done" />
           <div className="row__main">
-            <div className="row__t">{group.provider} <span className="chipbtn" style={{ marginLeft: 6 }}>{group.choices.length} model{group.choices.length === 1 ? '' : 's'}</span></div>
+            <div className="row__t">{group.provider}{' '}<span className="provcard__badge provcard__badge--quiet">{group.choices.length} model{group.choices.length === 1 ? '' : 's'}</span></div>
             <div className="row__s">{group.choices.slice(0, 4).map(choice => choice.id).join(', ')}{group.choices.length > 4 ? ', …' : ''}</div>
           </div>
         </div>
@@ -979,6 +1072,8 @@ export function ProviderForm({
   const [baseUrl, setBaseUrl] = useState(editing?.baseUrl ?? '')
   const [model, setModel] = useState(editing?.model ?? '')
   const [apiKey, setApiKey] = useState('')
+  const [modelFilter, setModelFilter] = useState('')
+  const [customOpen, setCustomOpen] = useState(() => Boolean(editing?.baseUrl))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const formRef = useRef<HTMLDivElement>(null)
@@ -991,16 +1086,26 @@ export function ProviderForm({
   }, [error])
   const types = snap.providerTypes
   const known = types.find(t => t.name === provider)
+  const baseUrlRequired = !(known?.baseUrl)
   const profileModels: readonly CachedModel[] = editing
     ? (snap.providerModels[editing.name] ?? []).map(entry => typeof entry === 'string'
         ? { id: entry, overridden: false }
         : entry)
     : []
+  const modelIds = useMemo(() => profileModels.map(entry => entry.id), [profileModels])
+  const filteredModels = useMemo(() => {
+    const query = modelFilter.trim().toLowerCase()
+    if (!query) return profileModels
+    return profileModels.filter(entry => entry.id.toLowerCase().includes(query))
+  }, [profileModels, modelFilter])
   const modelsLoading = editing ? snap.providerModelLoading.includes(editing.name) : false
   const modelWarning = editing ? snap.providerModelWarnings[editing.name] ?? '' : ''
   useEffect(() => {
     if (editing) store.loadProviderModels(editing.name)
   }, [editing?.name])
+  useEffect(() => {
+    if (baseUrlRequired) setCustomOpen(true)
+  }, [baseUrlRequired])
   // Valid when the wire's required fields are covered; base URL may fall
   // back to the registry default for a known type.
   const valid = name.trim() !== '' && (baseUrl.trim() !== '' || (known?.baseUrl ?? '') !== '')
@@ -1061,25 +1166,48 @@ export function ProviderForm({
       </div>
       <div className="field">
         <label htmlFor={fieldId + '-model'}>Model <span className="field__optional">optional</span></label>
-        <input id={fieldId + '-model'} className="palette__in" value={model} spellCheck={false} placeholder="Leave blank to use the first model this key offers" onChange={e => setModel(e.target.value)} />
+        <ScrollableCombobox
+          id={fieldId + '-model'}
+          variant="field"
+          value={model}
+          options={modelIds}
+          onChange={setModel}
+          placeholder="Leave blank to use the first model this key offers"
+          listLabel={editing ? `${editing.name} models` : 'Provider models'}
+          toggleLabel="Show discovered models"
+          spellCheck={false}
+        />
       </div>
       {editing && (
         <div className="field provform__catalog">
-          {/* The count claimed the whole catalog while the list rendered
-              only the first 24, with nothing saying the rest existed. */}
-          <label>Models · {modelsLoading ? 'fetching…' : profileModels.length > 24 ? `showing 24 of ${profileModels.length}` : `${profileModels.length} discovered`}</label>
+          <label>Models · {modelsLoading ? 'fetching…' : modelFilter.trim() ? `${filteredModels.length} of ${profileModels.length} discovered` : `${profileModels.length} discovered`}</label>
+          {profileModels.length > 8 && (
+            <input
+              className="palette__in"
+              type="search"
+              aria-label={`Filter ${editing.name} models`}
+              placeholder="Filter discovered models…"
+              spellCheck={false}
+              value={modelFilter}
+              onChange={event => setModelFilter(event.target.value)}
+            />
+          )}
           {profileModels.length > 0 ? (
-            <div className="provform__models" role="list" aria-label={`${editing.name} models`}>
-              {profileModels.slice(0, 24).map(cached => (
-                <CachedModelEditor
-                  key={cached.id}
-                  profileName={editing.name}
-                  model={cached}
-                  selected={model === cached.id}
-                  onSelect={() => setModel(cached.id)}
-                />
-              ))}
-            </div>
+            filteredModels.length > 0 ? (
+              <div className="provform__models" role="list" aria-label={`${editing.name} models`}>
+                {filteredModels.map(cached => (
+                  <CachedModelEditor
+                    key={cached.id}
+                    profileName={editing.name}
+                    model={cached}
+                    selected={model === cached.id}
+                    onSelect={() => setModel(cached.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="row__s">No discovered models match “{modelFilter.trim()}”.</div>
+            )
           ) : (
             <div className="row__s">{modelsLoading ? 'asking this saved provider profile…' : 'no model catalog fetched yet'}</div>
           )}
@@ -1094,20 +1222,27 @@ export function ProviderForm({
           </button>
         </div>
       )}
-      <details className="provform__custom">
+      <details
+        className="provform__custom"
+        open={baseUrlRequired || customOpen}
+        onToggle={event => setCustomOpen(event.currentTarget.open)}
+      >
         <summary>Customized settings</summary>
         <div className="field" style={{ marginTop: 8 }}>
-          <label htmlFor={fieldId + '-base-url'}>Base URL</label>
+          <label htmlFor={fieldId + '-base-url'}>Base URL{!baseUrlRequired && <> <span className="field__optional">optional</span></>}</label>
           <input
             className="palette__in"
             id={fieldId + '-base-url'}
             value={baseUrl}
+            required={baseUrlRequired}
             spellCheck={false}
             placeholder={known?.baseUrl ? `Provider default — ${known.baseUrl}` : 'https://api.example.com/v1'}
             onChange={e => setBaseUrl(e.target.value)}
           />
           {known?.baseUrl && !baseUrl.trim() ? (
             <div className="row__s" style={{ marginTop: 4 }}>Leave blank to use the default for {known.name}.</div>
+          ) : baseUrlRequired && !baseUrl.trim() ? (
+            <div className="row__s" style={{ marginTop: 4 }}>Required for custom or OpenAI-compatible endpoints.</div>
           ) : null}
         </div>
       </details>
@@ -1821,7 +1956,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
           { id: `style:${next}`, icon: 'half', label: `Switch to ${STYLE_LABELS[next]} style`, run: () => chooseStyle(next) } satisfies PaletteAction
         ))
       })(),
-      { id: 'settings', icon: 'settings', label: 'Settings…', run: () => store.openSettings() },
+      { id: 'settings', icon: 'settings', label: 'Settings…', hint: '⌘,', run: () => store.openSettings() },
       { id: 'models-settings', icon: 'spark', label: 'Models & Providers settings…', run: () => store.openSettings('models') },
       { id: 'permissions', icon: 'shield', label: 'Permissions settings…', run: () => store.openSettings('permissions') },
       { id: 'channels', icon: 'cloud', label: 'Channels settings…', run: () => store.openSettings('channels') },
@@ -1830,7 +1965,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       { id: 't3-thread-details', icon: 'info', label: 'Toggle thread details card', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-thread-details' })) },
       { id: 't3-right-panel', icon: 'sidebar', label: 'Toggle right panel', hint: '⌘\\', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-right-panel' })) },
       { id: 't3-sidebar-mode', icon: 'folder', label: 'Toggle sidebar view (Inbox / Folders)', run: () => window.dispatchEvent(new CustomEvent('xerxes:t3-action', { detail: 'toggle-sidebar-view' })) },
-      { id: 'session-search', icon: 'search', label: 'Search sessions & messages…', run: () => store.openSessionSearch() },
+      { id: 'session-search', icon: 'search', label: 'Search sessions & messages…', hint: '⇧⌘F', run: () => store.openSessionSearch() },
     ]
     for (const provider of snap.providers) {
       if (provider.active || snap.turnActive) continue
@@ -1862,9 +1997,9 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
         id: 'new',
         icon: 'plus',
         // ⌘N runs newChat() — a blank session. This row opens the wizard
-        // (worktree, preset, plan ceiling, model), which is ⇧⌘N.
+        // (worktree, preset, plan ceiling, model), which is ⌥⌘N (⇧⌘N is New window).
         label: 'New task…',
-        hint: '⇧⌘N',
+        hint: '⌥⌘N',
         run: () => store.openTaskModal(),
       })
       list.push({
@@ -1934,6 +2069,7 @@ export function CommandPalette({ snap }: { snap: Snapshot }): ReactElement | nul
       if (action) run(action)
     } else if (event.key === 'Escape') {
       event.preventDefault()
+      event.stopPropagation()
       store.closePalette()
     }
   }

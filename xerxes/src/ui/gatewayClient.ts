@@ -30,6 +30,9 @@ import {
 import type {
   AcpAgentsParams,
   AcpAgentsResponse,
+  AcpAuthMethodInfo,
+  AcpAuthenticateParams,
+  AcpAuthenticateResponse,
   AcpAvailableCommand,
   AcpCancelParams,
   AcpCancelResponse,
@@ -42,8 +45,13 @@ import type {
   AcpDiscoveredSkill,
   AcpExternalAgentInfo,
   AcpExternalConfigOption,
+  AcpForkParams,
+  AcpForkResponse,
   AcpRuntimeCapabilities,
   AcpSessionBinding,
+  AcpSessionSummary,
+  AcpSessionsParams,
+  AcpSessionsResponse,
   AcpSetConfigOptionParams,
   AcpSetConfigOptionResponse,
   AcpSetModeParams,
@@ -51,6 +59,7 @@ import type {
   AcpSetModelParams,
   AcpSetModelResponse,
   AnyEvent,
+  ApprovalResponseKind,
   BtwEventPayload,
   GatewayTranscriptMessage,
   LiveSessionStatus,
@@ -1250,6 +1259,15 @@ export class GatewayClient extends EventEmitter {
       case 'acp.set_config_option':
         return this.acpSetConfigOption(params as unknown as AcpSetConfigOptionParams) as Promise<T>
 
+      case 'acp.authenticate':
+        return this.acpAuthenticate(params as unknown as AcpAuthenticateParams) as Promise<T>
+
+      case 'acp.sessions':
+        return this.acpSessions(params as AcpSessionsParams) as Promise<T>
+
+      case 'acp.fork':
+        return this.acpFork(params as AcpForkParams) as Promise<T>
+
       default:
         return this.rawRequest<T>(method, params)
     }
@@ -2020,14 +2038,28 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
+  respondToPermission(
+    requestId: string,
+    response: ApprovalResponseKind | 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always' | 'once' | 'session' | 'deny',
+    optionId?: string,
+    sessionId?: string
+  ): Promise<unknown> {
+    return this.approvalRespond({
+      choice: response,
+      ...(optionId ? { option_id: optionId } : {}),
+      request_id: requestId,
+      ...(sessionId ? { session_id: sessionId } : {})
+    })
+  }
+
   private approvalRespond(params: Record<string, unknown>): Promise<unknown> {
     const choice = String(params.choice ?? params.decision ?? '')
     const response =
-      choice === 'always'
+      choice === 'always' || choice === 'allow_always'
         ? 'always'
         : choice === 'session' || choice === 'approve_for_session'
           ? 'approve_for_session'
-        : choice === 'deny' || choice === 'reject'
+        : choice === 'deny' || choice === 'reject' || choice === 'reject_once' || choice === 'reject_always'
           ? 'reject'
           : 'approve'
     const optionId = optionalTrimmedText(params.option_id)
@@ -2049,8 +2081,26 @@ export class GatewayClient extends EventEmitter {
   private clarifyRespond(params: Record<string, unknown>): Promise<unknown> {
     const requestId = String(params.request_id ?? '')
     const [daemonRequestId, questionId = 'q'] = requestId.split(':', 2)
+    if (isRecord(params.answers)) {
+      const answers: Record<string, string | string[]> = {}
+      for (const [key, value] of Object.entries(params.answers)) {
+        if (Array.isArray(value)) {
+          answers[key] = value.map(item => String(item))
+        } else {
+          answers[key] = String(value ?? '')
+        }
+      }
+      return this.rawRequest('question_response', {
+        answers,
+        request_id: daemonRequestId
+      })
+    }
+    const rawAnswer = params.answer
+    const answer: string | string[] = Array.isArray(rawAnswer)
+      ? rawAnswer.map(item => String(item))
+      : String(rawAnswer ?? '')
     return this.rawRequest('question_response', {
-      answers: { [questionId]: String(params.answer ?? '') },
+      answers: { [questionId]: answer },
       request_id: daemonRequestId
     })
   }
@@ -2365,9 +2415,17 @@ export class GatewayClient extends EventEmitter {
     const agentId = String(params.agent_id ?? '').trim()
     const cwd = optionalTrimmedText(params.cwd)
     const command = optionalTrimmedText(params.command)
+    const modeId = optionalTrimmedText(params.mode_id)
     const resumeSessionId = optionalTrimmedText(params.resume_session_id)
+    const agent = optionalTrimmedText(params.agent)
     const args = Array.isArray(params.args)
       ? params.args.filter((item): item is string => typeof item === 'string')
+      : undefined
+    const additionalDirectories = Array.isArray(params.additional_directories)
+      ? params.additional_directories.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : undefined
+    const ideMcpPort = typeof params.ide_mcp_port === 'number' && Number.isFinite(params.ide_mcp_port)
+      ? Math.trunc(params.ide_mcp_port)
       : undefined
     const raw = (await this.rawRequest<RpcObject>('acp.connect', {
       ...(sid ? { session_id: sid } : {}),
@@ -2376,15 +2434,23 @@ export class GatewayClient extends EventEmitter {
       ...(cwd ? { cwd } : {}),
       ...(command ? { command } : {}),
       ...(args && args.length > 0 ? { args } : {}),
-      ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {})
+      ...(modeId ? { mode_id: modeId } : {}),
+      ...(resumeSessionId ? { resume_session_id: resumeSessionId } : {}),
+      ...(additionalDirectories && additionalDirectories.length > 0 ? { additional_directories: additionalDirectories } : {}),
+      ...(ideMcpPort !== undefined ? { ide_mcp_port: ideMcpPort } : {}),
+      ...(agent ? { agent } : {}),
+      ...(typeof params.sandbox === 'boolean' ? { sandbox: params.sandbox } : {})
     })) as RpcObject
     const error = optionalTrimmedText(raw.error)
     const installHint = optionalTrimmedText(raw.install_hint)
+    const authMethods = Array.isArray(raw.auth_methods) ? (raw.auth_methods as AcpAuthMethodInfo[]) : undefined
     return {
       ok: raw.ok === true,
       ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
       ...(error ? { error } : {}),
-      ...(installHint ? { install_hint: installHint } : {})
+      ...(installHint ? { install_hint: installHint } : {}),
+      ...(raw.auth_required === true ? { auth_required: true } : {}),
+      ...(authMethods ? { auth_methods: authMethods } : {})
     }
   }
 
@@ -2453,16 +2519,127 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  async acpSetConfigOption(params: AcpSetConfigOptionParams): Promise<AcpSetConfigOptionResponse> {
+  async acpSetConfigOption(
+    configId: string,
+    value: string | boolean,
+    opts?: { session_id?: string | null; session_key?: string }
+  ): Promise<AcpSetConfigOptionResponse>
+  async acpSetConfigOption(params: AcpSetConfigOptionParams): Promise<AcpSetConfigOptionResponse>
+  async acpSetConfigOption(
+    paramsOrConfigId: AcpSetConfigOptionParams | string,
+    positionalValue?: string | boolean,
+    positionalOpts?: { session_id?: string | null; session_key?: string }
+  ): Promise<AcpSetConfigOptionResponse> {
+    const params: AcpSetConfigOptionParams =
+      typeof paramsOrConfigId === 'string'
+        ? {
+            config_id: paramsOrConfigId,
+            value: positionalValue as string | boolean,
+            ...(positionalOpts ?? {})
+          }
+        : paramsOrConfigId
     const sid = optionalTrimmedText(params.session_id)
     const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
     const configId = String(params.config_id ?? '').trim()
-    const value = String(params.value ?? '').trim()
+    const value = typeof params.value === 'boolean' ? params.value : String(params.value ?? '').trim()
+    const explicitType = optionalTrimmedText(params.type)
+    const optionType = typeof value === 'boolean' ? 'boolean' : explicitType
     const raw = (await this.rawRequest<RpcObject>('acp.set_config_option', {
       ...(sid ? { session_id: sid } : {}),
       ...(sessionKey ? { session_key: sessionKey } : {}),
       config_id: configId,
-      value
+      value,
+      ...(optionType ? { type: optionType } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    return {
+      ok: raw.ok === true,
+      ...(isRecord(raw.binding) ? { binding: raw.binding as unknown as AcpSessionBinding } : {}),
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpAuthenticate(
+    methodId: string,
+    agentId?: string,
+    opts?: { session_id?: string | null; session_key?: string }
+  ): Promise<AcpAuthenticateResponse>
+  async acpAuthenticate(params: AcpAuthenticateParams): Promise<AcpAuthenticateResponse>
+  async acpAuthenticate(
+    paramsOrMethodId: AcpAuthenticateParams | string,
+    positionalAgentId?: string,
+    positionalOpts?: { session_id?: string | null; session_key?: string }
+  ): Promise<AcpAuthenticateResponse> {
+    const params: AcpAuthenticateParams =
+      typeof paramsOrMethodId === 'string'
+        ? {
+            method_id: paramsOrMethodId,
+            ...(positionalAgentId ? { agent_id: positionalAgentId } : {}),
+            ...(positionalOpts ?? {})
+          }
+        : paramsOrMethodId
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const methodId = String(params.method_id ?? '').trim()
+    const agentId = optionalTrimmedText(params.agent_id)
+    const raw = (await this.rawRequest<RpcObject>('acp.authenticate', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      method_id: methodId,
+      ...(agentId ? { agent_id: agentId } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    const mode = raw.mode === 'agent' || raw.mode === 'terminal' ? raw.mode : undefined
+    const command = optionalTrimmedText(raw.command)
+    const label = optionalTrimmedText(raw.label)
+    const args = Array.isArray(raw.args)
+      ? raw.args.filter((item): item is string => typeof item === 'string')
+      : undefined
+    const env = isRecord(raw.env)
+      ? Object.fromEntries(Object.entries(raw.env).map(([k, v]) => [k, String(v ?? '')]))
+      : undefined
+    return {
+      ok: raw.ok === true,
+      ...(mode ? { mode } : {}),
+      ...(command ? { command } : {}),
+      ...(args ? { args } : {}),
+      ...(env ? { env } : {}),
+      ...(label ? { label } : {}),
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpSessions(params: AcpSessionsParams = {}): Promise<AcpSessionsResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const cwd = optionalTrimmedText(params.cwd)
+    const cursor = optionalTrimmedText(params.cursor)
+    const raw = (await this.rawRequest<RpcObject>('acp.sessions', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(cursor ? { cursor } : {})
+    })) as RpcObject
+    const error = optionalTrimmedText(raw.error)
+    const nextCursor = optionalTrimmedText(raw.next_cursor)
+    return {
+      ok: raw.ok !== false,
+      sessions: Array.isArray(raw.sessions) ? (raw.sessions as AcpSessionSummary[]) : [],
+      ...(nextCursor ? { next_cursor: nextCursor } : {}),
+      ...(error ? { error } : {})
+    }
+  }
+
+  async acpFork(params: AcpForkParams = {}): Promise<AcpForkResponse> {
+    const sid = optionalTrimmedText(params.session_id)
+    const sessionKey = optionalTrimmedText(params.session_key) ?? this.keyFor(sid)
+    const cwd = optionalTrimmedText(params.cwd)
+    const externalSessionId = optionalTrimmedText(params.external_session_id)
+    const raw = (await this.rawRequest<RpcObject>('acp.fork', {
+      ...(sid ? { session_id: sid } : {}),
+      ...(sessionKey ? { session_key: sessionKey } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(externalSessionId ? { external_session_id: externalSessionId } : {})
     })) as RpcObject
     const error = optionalTrimmedText(raw.error)
     return {
@@ -2865,6 +3042,7 @@ function mergeSessionInfo(base: SessionInfo, incoming?: null | Partial<SessionIn
   return compact<SessionInfo>({
     ...base,
     ...incoming,
+    acp_binding: incoming.acp_binding !== undefined ? incoming.acp_binding : base.acp_binding,
     cwd: incoming.cwd || base.cwd,
     head_hash: incoming.head_hash || base.head_hash,
     model: incoming.model || base.model,

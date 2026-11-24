@@ -37,12 +37,7 @@ import type { SessionRow } from '../../desktop/renderer/types.js'
 import { sidebarOrder } from '../../desktop/renderer/workspaceGroups.js'
 import { ChangesTab, PlanTab } from '../../desktop/renderer/Workspaces.js'
 import { AgentBrandGlyph } from '../../desktop/renderer/XerxesSprites.js'
-import {
-  foldVscodeBtwEvent,
-  parseVscodeBtwEvent,
-  SideQuestionCard,
-  type VscodeBtwEntry,
-} from './SideQuestionCard.js'
+import { SideQuestionCard } from './SideQuestionCard.js'
 
 type Sheet = Exclude<DesktopPanel, null>
 
@@ -61,18 +56,13 @@ function useWideView(min: number): boolean {
 }
 
 /** Overflow-menu commands the extension pushes (`panel:<name>`) → the sheet they open. */
-const SHEETS: ReadonlySet<string> = new Set(['activity', 'usage', 'swarm'])
+export const SHEETS: ReadonlySet<string> = new Set(['activity', 'usage', 'swarm', 'extensions'])
 
-function readSnapBtwOpen(snap: Snapshot): { readonly open: boolean; readonly revision: number } {
-  const raw = snap as unknown as Record<string, unknown>
-  const open = raw.btwOpen === true || raw.sideQuestionOpen === true
-  const rev =
-    typeof raw.btwOpenRevision === 'number'
-      ? raw.btwOpenRevision
-      : typeof raw.sideQuestionOpenRevision === 'number'
-        ? raw.sideQuestionOpenRevision
-        : 0
-  return { open, revision: rev }
+/** Next highlighted index for the task history list; stays at 0 when empty (never -1). */
+export function nextHistoryCursor(current: number, rowCount: number, delta: 1 | -1): number {
+  if (rowCount <= 0) return 0
+  const clamped = Math.max(0, Math.min(rowCount - 1, current))
+  return Math.max(0, Math.min(rowCount - 1, clamped + delta))
 }
 
 export function VscodeApp(): ReactElement {
@@ -102,72 +92,33 @@ function RuntimeUpdate({ snap }: { snap: Snapshot }): ReactElement {
 }
 
 /** Presentational over the snapshot, like the desktop Shell. */
-export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
-  const [sheet, setSheet] = useState<Sheet | null>(null)
+export function VscodeChat({ snap, initialSheet = null }: { snap: Snapshot; initialSheet?: Sheet | null }): ReactElement {
+  const [sheet, setSheet] = useState<Sheet | null>(initialSheet)
   const [history, setHistory] = useState(false)
-  const [btwOpen, setBtwOpen] = useState(false)
-  const [btwBySession, setBtwBySession] = useState<Record<string, readonly VscodeBtwEntry[]>>({})
-  const sessionBucket = snap.currentId || snap.sessionKey || '__default__'
-  const btwEntries = btwBySession[sessionBucket] ?? []
-  const btwStreaming = btwEntries.some(entry => entry.status === 'streaming')
-  const snapBtw = readSnapBtwOpen(snap)
-
-  const updateBtwEntries = (updater: (prev: readonly VscodeBtwEntry[]) => readonly VscodeBtwEntry[]): void => {
-    setBtwBySession(current => ({
-      ...current,
-      [sessionBucket]: updater(current[sessionBucket] ?? []),
-    }))
-  }
+  const btwOpen = Boolean(snap.sideQuestionOpen)
 
   // A full window or a wide editor tab has room to keep activity in view.
   const activityColumn = useWideView(ACTIVITY_COLUMN_MIN_WIDTH) && !snap.noWorkspace
   const navigate = (panel: DesktopPanel, path?: string): void => {
     if ((panel as string | null) === 'btw') {
       setHistory(false)
-      setBtwOpen(true)
+      store.openSideQuestion()
       return
     }
     if (panel === 'activity' && activityColumn) { document.querySelector('.xv-activity')?.scrollTo({ top: 0 }); return }
     void navigateInVscode(window.xerxes, setSheet, panel, path)
   }
-  useEffect(() => { setSheet(null); setHistory(false); setBtwOpen(false) }, [snap.cwd, snap.sessionKey])
+  useEffect(() => { setSheet(null); setHistory(false) }, [snap.cwd, snap.sessionKey])
   useEffect(() => { if (snap.swarmOpen) { setHistory(false); setSheet('swarm') } }, [snap.swarmOpenRevision])
-  useEffect(() => { if (snapBtw.open) { setHistory(false); setBtwOpen(true) } }, [snapBtw.open, snapBtw.revision])
+  useEffect(() => { if (snap.sideQuestionOpen) setHistory(false) }, [snap.sideQuestionOpen, snap.sideQuestionOpenRevision])
   useEffect(() => window.xerxes.onMenuCommand?.(command => {
     if (command === 'history') setHistory(open => !open)
-    else if (command === 'btw' || command === 'panel:btw') setBtwOpen(open => !open)
+    else if (command === 'btw' || command === 'panel:btw') {
+      if (store.getSnapshot().sideQuestionOpen) store.closeSideQuestion()
+      else { setHistory(false); store.openSideQuestion() }
+    }
     else if (command.startsWith('panel:') && SHEETS.has(command.slice(6))) setSheet(command.slice(6) as Sheet)
   }), [])
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.xerxes?.onEvent) return
-    return window.xerxes.onEvent((raw: unknown) => {
-      if (!raw || typeof raw !== 'object') return
-      const frame = raw as { type?: unknown; payload?: unknown }
-      if (frame.type !== 'btw_event') return
-      const parsed = parseVscodeBtwEvent(frame.payload)
-      if (!parsed) return
-      if (snap.currentId && parsed.sessionId && parsed.sessionId !== snap.currentId) return
-      const targetBucket = parsed.sessionId || sessionBucket
-      setBtwBySession(current => ({
-        ...current,
-        [targetBucket]: foldVscodeBtwEvent(current[targetBucket] ?? [], parsed),
-      }))
-      if (parsed.kind === 'begin') {
-        setBtwOpen(true)
-      }
-    })
-  }, [snap.currentId, sessionBucket])
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === ';' && (event.metaKey || event.ctrlKey) && !event.altKey) {
-        event.preventDefault()
-        setBtwOpen(open => !open)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
   return (
     <DesktopNavigation.Provider value={navigate}>
       <div className="app atelier xv">
@@ -177,9 +128,7 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
           history={history}
           setHistory={setHistory}
           openSwarm={() => setSheet('swarm')}
-          btwOpen={btwOpen}
-          btwStreaming={btwStreaming}
-          toggleBtw={() => setBtwOpen(open => !open)}
+          openAcpSheet={() => { setHistory(false); setSheet('extensions') }}
         />
         <div className="xv-body">
           {snap.noWorkspace ? <NoFolder /> : <ErrorBoundary label="This conversation"><main className="chat xv-chat">
@@ -188,15 +137,7 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
             {snap.tab === 'changes' ? <div className="workspace"><ChangesTab snap={snap} /></div>
               : snap.tab === 'plan' ? <div className="workspace"><PlanTab snap={snap} /></div>
               : <Stream snap={snap} />}
-            {btwOpen && (
-              <SideQuestionCard
-                snap={snap}
-                entries={btwEntries}
-                onEntriesChange={updateBtwEntries}
-                onClear={() => setBtwBySession(current => ({ ...current, [sessionBucket]: [] }))}
-                onClose={() => setBtwOpen(false)}
-              />
-            )}
+            {btwOpen && <SideQuestionCard snap={snap} />}
             <Composer snap={snap} />
           </main></ErrorBoundary>}
           {activityColumn && <ErrorBoundary label="Activity"><aside className="xv-activity desktop-rail" aria-label="Activity">
@@ -216,7 +157,7 @@ export function VscodeChat({ snap }: { snap: Snapshot }): ReactElement {
           <span>{snap.workspaceError || 'Opening workspace…'}</span>
           {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
         </div>}
-        <GlobalKeys snap={snap} closeSurface={btwOpen ? () => setBtwOpen(false) : sheet || history ? () => { setSheet(null); setHistory(false); store.closeSwarmBoard() } : null} />
+        <GlobalKeys snap={snap} closeSurface={btwOpen ? () => store.closeSideQuestion() : sheet || history ? () => { setSheet(null); setHistory(false); store.closeSwarmBoard() } : null} />
       </div>
     </DesktopNavigation.Provider>
   )
@@ -254,24 +195,21 @@ function Header({
   history,
   setHistory,
   openSwarm,
-  btwOpen,
-  btwStreaming,
-  toggleBtw,
+  openAcpSheet,
 }: {
   snap: Snapshot
   history: boolean
   setHistory: (open: boolean) => void
   openSwarm: () => void
-  btwOpen: boolean
-  btwStreaming: boolean
-  toggleBtw: () => void
+  openAcpSheet: () => void
 }): ReactElement {
+  const titleRef = useRef<HTMLButtonElement>(null)
   const totals = useMemo(() => snap.changes.reduce((sum, file) => ({ adds: sum.adds + file.adds, dels: sum.dels + file.dels }), { adds: 0, dels: 0 }), [snap.changes])
   const title = snap.currentTitle || (snap.connection === 'online' ? 'New task' : snap.connection === 'connecting' ? 'Connecting…' : 'Not connected')
   const needsInput = snap.approval !== null || snap.question !== null
   const swarmCounts = snap.swarm?.active ? swarmMemberCounts(snap.swarm.members) : null
   return <header className="xv-head">
-    <button className="xv-title" aria-haspopup="dialog" aria-expanded={history} title="Switch task" onClick={() => setHistory(!history)}>
+    <button ref={titleRef} className="xv-title" aria-haspopup="dialog" aria-expanded={history} title="Switch task" onClick={() => setHistory(!history)}>
       <span className="xv-title__text">{title}</span>
       <Icon name="caretDown" size={12} />
     </button>
@@ -287,28 +225,16 @@ function Header({
           type="button"
           className="xv-pill xv-pill--acp"
           data-provider={snap.acpBinding.provider}
-          title={`${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''} — click to switch back to Xerxes`}
+          aria-haspopup="dialog"
+          title={`${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''} — click to inspect runtime & customize`}
           aria-label={`External runtime: ${snap.acpBinding.name}${summary ? ` · ${summary}` : ''}`}
-          onClick={() => void store.disconnectAcpAgent()}
+          onClick={openAcpSheet}
         >
           <AgentBrandGlyph provider={snap.acpBinding.provider} size={11} />
-          <span>{snap.acpBinding.name}{pillMeta ? ` · ${pillMeta}` : ''}</span>
+          <span className="xv-pill__label">{snap.acpBinding.name}{pillMeta ? ` · ${pillMeta}` : ''}</span>
         </button>
       )
     })()}
-    {!snap.noWorkspace && (
-      <button
-        type="button"
-        className={`xv-pill xv-pill--btw${btwOpen ? ' is-on' : ''}`}
-        data-streaming={btwStreaming ? 'true' : undefined}
-        aria-pressed={btwOpen}
-        title="Ask an ephemeral side question (/btw · ⌘;)"
-        aria-label="Ask aside"
-        onClick={toggleBtw}
-      >
-        <span>Ask aside</span>
-      </button>
-    )}
     {swarmCounts && (
       <button
         type="button"
@@ -319,25 +245,26 @@ function Header({
         onClick={openSwarm}
       >
         <Icon name="tree" size={11} />
-        <span>Immortals{swarmCounts.working > 0 ? ` · ${swarmCounts.working}` : ''}</span>
+        <span className="xv-pill__label">Immortals{swarmCounts.working > 0 ? ` · ${swarmCounts.working}` : ''}</span>
       </button>
     )}
-    {needsInput && snap.interactionHidden && <button className="xv-pill xv-pill--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}>needs input</button>}
-    {snap.changes.length > 0 && <button className="xv-pill" title="Files this task changed — open Source Control" onClick={() => void window.xerxes.showSourceControl?.()}>
+    {needsInput && snap.interactionHidden && <button className="xv-pill xv-pill--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}><span className="xv-pill__label">needs input</span></button>}
+    {snap.changes.length > 0 && <button className="xv-pill xv-pill--diff" title="Files this task changed — open Source Control" onClick={() => void window.xerxes.showSourceControl?.()}>
       <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>
     </button>}
     {snap.tab !== 'activity' && <button className="xv-icon" title="Back to the conversation" aria-label="Back to the conversation" onClick={() => store.setTab('activity')}><Icon name="chat" size={15} /></button>}
     <span className="xv-dot" data-state={snap.connection} title={snap.connection === 'online' ? 'Runtime connected' : snap.connection === 'connecting' ? 'Connecting to the runtime' : snap.error || 'Runtime offline'} />
-    {history && <History snap={snap} close={() => setHistory(false)} />}
+    {history && <History snap={snap} close={() => setHistory(false)} returnFocus={() => titleRef.current?.focus()} />}
   </header>
 }
 
 /** Earlier tasks in this folder, newest first, filterable. */
-function History({ snap, close }: { snap: Snapshot; close: () => void }): ReactElement {
+function History({ snap, close, returnFocus }: { snap: Snapshot; close: () => void; returnFocus?: () => void }): ReactElement {
   const [needle, setNeedle] = useState('')
   const [cursor, setCursor] = useState(0)
   const field = useRef<HTMLInputElement>(null)
   const panel = useRef<HTMLDivElement>(null)
+  const closeWithFocus = (): void => { close(); returnFocus?.() }
   useEffect(() => { field.current?.focus() }, [])
   useEffect(() => {
     const dismiss = (event: MouseEvent) => { if (event.target instanceof Node && !panel.current?.contains(event.target) && !(event.target as Element).closest?.('.xv-title')) close() }
@@ -351,16 +278,28 @@ function History({ snap, close }: { snap: Snapshot; close: () => void }): ReactE
     close()
     if (row.id !== snap.currentId) void store.openSession(row.id, row)
   }
-  return <div className="xv-history" ref={panel} role="dialog" aria-label="Task history">
+  return <div
+    className="xv-history"
+    ref={panel}
+    role="dialog"
+    aria-label="Task history"
+    onKeyDown={event => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        closeWithFocus()
+      }
+    }}
+  >
     <div className="xv-history__search">
       <Icon name="search" size={13} />
       <input ref={field} value={needle} placeholder="Search tasks" aria-label="Search tasks" spellCheck={false}
         onChange={event => { setNeedle(event.target.value); setCursor(0) }}
         onKeyDown={event => {
-          if (event.key === 'ArrowDown') { event.preventDefault(); setCursor(index => Math.min(rows.length - 1, index + 1)) }
-          else if (event.key === 'ArrowUp') { event.preventDefault(); setCursor(index => Math.max(0, index - 1)) }
-          else if (event.key === 'Enter') { event.preventDefault(); pick(rows[cursor]) }
-          else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close() }
+          if (event.key === 'ArrowDown') { event.preventDefault(); setCursor(index => nextHistoryCursor(index, rows.length, 1)) }
+          else if (event.key === 'ArrowUp') { event.preventDefault(); setCursor(index => nextHistoryCursor(index, rows.length, -1)) }
+          else if (event.key === 'Enter') { event.preventDefault(); if (rows.length > 0) pick(rows[cursor]) }
+          else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeWithFocus() }
         }} />
     </div>
     <button className="xv-history__new" onClick={() => { close(); store.newChat() }}><Icon name="plus" size={13} /> New task</button>

@@ -10,6 +10,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react'
 
+import { CopyButton } from './CopyButton.js'
 import { desktopError } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 
@@ -70,7 +71,7 @@ export function rectOverlapsAny(
   return false
 }
 
-const BROWSER_OVERLAY_SELECTOR = [
+export const BROWSER_OVERLAY_SELECTOR = [
   '[role="menu"]',
   '[role="dialog"]',
   '[role="listbox"]',
@@ -80,8 +81,16 @@ const BROWSER_OVERLAY_SELECTOR = [
   '.hints',
   '.t3-popover',
   '.acp-picker__pop',
+  '.acp-pop',
+  '.combo-pop',
   '.btw-model-pop',
+  '.swarm-model-picker',
   '.decision-dock',
+  '.findbar',
+  '.artifact-toast',
+  '.t3-details-card',
+  '.notice-stack',
+  '.workspace-notice',
   '.modal',
 ].join(',')
 
@@ -90,8 +99,12 @@ function overlayCoversBox(box: HTMLElement, rect: DOMRect): boolean {
   const target: BrowserBoundsRect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
   const obstacles: BrowserBoundsRect[] = []
   for (const el of document.querySelectorAll(BROWSER_OVERLAY_SELECTOR)) {
-    if (el === box || box.contains(el)) continue
+    if (el === box || box.contains(el) || el.contains(box)) continue
     if (el instanceof HTMLElement && el.hidden) continue
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      const style = window.getComputedStyle(el)
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none') continue
+    }
     const r = el.getBoundingClientRect()
     if (r.width > 0 && r.height > 0) {
       obstacles.push({ x: r.left, y: r.top, width: r.width, height: r.height })
@@ -105,7 +118,12 @@ export function BrowserPanel(): ReactElement {
   const page = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserStateView | null>(null)
   const [address, setAddress] = useState('')
-  const [editing, setEditing] = useState(false)
+  const [, setEditing] = useState(false)
+  const editingRef = useRef(false)
+  const markEditing = (next: boolean): void => {
+    editingRef.current = next
+    setEditing(next)
+  }
   const [error, setError] = useState('')
   const [ports, setPorts] = useState<{ via: string | null; ports: PortRow[] }>({ via: null, ports: [] })
   const [portInput, setPortInput] = useState('')
@@ -121,9 +139,9 @@ export function BrowserPanel(): ReactElement {
   useEffect(() => {
     if (!bridge.browser) return
     let alive = true
-    void bridge.browser('state').then(value => { const next = browserStateOf(value); if (alive && next) { setState(next); if (!editing) setAddress(displayUrl(next.url)) } }).catch(() => {})
+    void bridge.browser('state').then(value => { const next = browserStateOf(value); if (alive && next) { setState(next); if (!editingRef.current) setAddress(displayUrl(next.url)) } }).catch(() => {})
     void loadPorts().catch(() => {})
-    const off = bridge.onBrowserState?.(value => { const next = browserStateOf(value); if (next) { setState(next); setAddress(current => editing ? current : displayUrl(next.url)) } })
+    const off = bridge.onBrowserState?.(value => { const next = browserStateOf(value); if (next) { setState(next); setAddress(current => editingRef.current ? current : displayUrl(next.url)) } })
     return () => { alive = false; off?.() }
   }, [])
 
@@ -133,10 +151,10 @@ export function BrowserPanel(): ReactElement {
   useLayoutEffect(() => {
     const box = page.current
     if (!box || !bridge.browser) return
-    let occluded = false
+    let occluded = typeof document !== 'undefined' && document.documentElement.hasAttribute('data-occluded')
     let lastSent = ''
     let raf = 0
-    const sync = () => {
+    const sync = (force = false) => {
       raf = 0
       const rect = box.getBoundingClientRect()
       const hidden = occluded || rect.width <= 0 || rect.height <= 0 || overlayCoversBox(box, rect)
@@ -149,15 +167,21 @@ export function BrowserPanel(): ReactElement {
             height: Math.round(rect.height),
           }
       const key = payload ? `${payload.x},${payload.y},${payload.width},${payload.height}` : 'null'
-      if (key === lastSent) return
+      if (!force && key === lastSent) return
       lastSent = key
       void bridge.browser!('bounds', { rect: payload }).catch(() => {})
     }
     const schedule = () => {
       if (raf) return
-      raf = requestAnimationFrame(sync)
+      raf = requestAnimationFrame(() => sync(false))
     }
-    sync()
+    const onWake = () => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      sync(true)
+    }
+    sync(true)
+    // Re-check once after initial layout/tab-transition frame settles.
+    schedule()
     const observer = new ResizeObserver(schedule)
     observer.observe(box)
     const mutationObserver = typeof MutationObserver !== 'undefined'
@@ -172,15 +196,19 @@ export function BrowserPanel(): ReactElement {
       })
     }
     window.addEventListener('resize', schedule)
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
     const offOccluded = bridge.onOccluded?.(next => {
       occluded = next
-      sync()
+      sync(!next)
     })
     return () => {
       if (raf) cancelAnimationFrame(raf)
       observer.disconnect()
       mutationObserver?.disconnect()
       window.removeEventListener('resize', schedule)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
       offOccluded?.()
       lastSent = 'null'
       void bridge.browser!('bounds', { rect: null }).catch(() => {})
@@ -192,7 +220,7 @@ export function BrowserPanel(): ReactElement {
     try { await work() } catch (failure) { setError(desktopError(failure)) }
   }
   const go = () => run(async () => {
-    setEditing(false)
+    markEditing(false)
     const next = browserStateOf(await bridge.browser!('open', { url: address }))
     if (next) setState(next)
   })
@@ -213,7 +241,7 @@ export function BrowserPanel(): ReactElement {
       <button type="button" aria-label={state?.loading ? 'Stop' : 'Reload'} title={state?.loading ? 'Stop' : 'Reload'} disabled={!state?.url} onClick={() => void run(() => bridge.browser!(state?.loading ? 'stop' : 'reload'))}><Icon name={state?.loading ? 'close' : 'retry'} size={13} /></button>
       <input className="browser-panel__address" aria-label="Address" spellCheck={false} autoCapitalize="off" value={address}
         placeholder={via ? `localhost:8080 on ${via}` : 'localhost:8080'}
-        onFocus={event => { setEditing(true); event.currentTarget.select() }} onBlur={() => setEditing(false)} onChange={event => setAddress(event.target.value)} />
+        onFocus={event => { markEditing(true); event.currentTarget.select() }} onBlur={() => markEditing(false)} onChange={event => setAddress(event.target.value)} />
       <button type="button" aria-label="Ports" title="Forwarded ports" aria-pressed={showPorts} onClick={() => { setShowPorts(value => !value); void loadPorts().catch(() => {}) }}><Icon name="tree" size={13} /></button>
       <button type="button" aria-label="Open in your browser" title="Open in your browser" disabled={!state?.url} onClick={() => void run(() => bridge.browser!('external'))}><Icon name="expand" size={13} /></button>
     </form>
@@ -225,14 +253,14 @@ export function BrowserPanel(): ReactElement {
     {showPorts && <section className="browser-panel__ports" aria-label="Forwarded ports">
       {via ? <form onSubmit={event => { event.preventDefault(); void forward() }}>
         <input aria-label="Remote port" inputMode="numeric" placeholder={`Port on ${via}`} value={portInput} onChange={event => setPortInput(event.target.value.replace(/[^0-9]/g, '').slice(0, 5))} />
-        <button type="submit" disabled={!portInput}>Forward</button>
+        <button type="submit" className="btn btn--solid" disabled={!portInput}>Forward</button>
       </form> : <p className="studio-muted">Local workspace: ports are already on this computer.</p>}
       {ports.ports.map(row => <div key={row.remote} className="browser-panel__port" data-state={row.state}>
         <span>{row.remote} → <code>localhost:{row.local}</code></span>
         <span className="browser-panel__portstate">{row.state === 'failed' ? row.error ?? 'failed' : row.state}</span>
-        <button type="button" disabled={row.state !== 'ready'} onClick={() => void run(async () => { setAddress(`localhost:${row.remote}`); await bridge.browser!('open', { url: `localhost:${row.remote}` }) })}>Open</button>
-        <button type="button" onClick={() => void navigator.clipboard?.writeText(`http://localhost:${row.local}/`).catch(() => {})}>Copy URL</button>
-        <button type="button" onClick={() => void run(async () => { await bridge.browser!('unforward', { remote: row.remote }); await loadPorts() })}>Stop</button>
+        <button type="button" className="btn" disabled={row.state !== 'ready'} onClick={() => void run(async () => { setAddress(`localhost:${row.remote}`); await bridge.browser!('open', { url: `localhost:${row.remote}` }) })}>Open</button>
+        <CopyButton text={`http://localhost:${row.local}/`} label="Copy URL" />
+        <button type="button" className="btn btn--ghost" onClick={() => void run(async () => { await bridge.browser!('unforward', { remote: row.remote }); await loadPorts() })}>Stop</button>
       </div>)}
     </section>}
     <div ref={page} className="browser-panel__page" aria-label={state?.title || 'Page'}>

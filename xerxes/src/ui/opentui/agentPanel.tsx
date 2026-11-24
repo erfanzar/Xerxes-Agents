@@ -1266,7 +1266,7 @@ export function AgentPanelOverlay({
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       flexDirection="column"
       height="100%"
       justifyContent="center"

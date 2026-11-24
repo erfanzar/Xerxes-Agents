@@ -9,7 +9,7 @@ import { requestWorkspaceSshForm } from '../src/desktop/renderer/DesktopPanels.j
 
 const rendererDir = join(import.meta.dir, '../src/desktop/renderer')
 
-describe('T3Sidebar Add project (Local vs SSH) & Gemini Workspace SSH trust', () => {
+describe('T3Sidebar Add project (Local vs SSH) & native WorkspacePanel SSH trust', () => {
   test('offers Local folder and Connect via SSH choices from the Add project toolbar button', () => {
     const sidebarSource = readFileSync(join(rendererDir, 'T3Sidebar.tsx'), 'utf8')
     const vibesCss = readFileSync(join(rendererDir, 'vibes.css'), 'utf8')
@@ -53,14 +53,17 @@ describe('T3Sidebar Add project (Local vs SSH) & Gemini Workspace SSH trust', ()
     expect(browseSlice).toContain('SSH host key was not trusted')
   })
 
-  test('WorkspacePanel renders Gemini-styled SSH and Local tabs with inline errors and Save & connect', () => {
+  test('WorkspacePanel renders native token-styled SSH and Local tabs with inline errors and Save & connect', () => {
     const panelsSource = readFileSync(join(rendererDir, 'DesktopPanels.tsx'), 'utf8')
     const atelierCss = readFileSync(join(rendererDir, 'atelier.css'), 'utf8')
-    expect(panelsSource).toContain('ws-gemini')
+    expect(panelsSource).toContain('workspace-panel')
+    expect(panelsSource).not.toContain('ws-gemini')
     expect(panelsSource).toContain('SSH &amp; Remote')
     expect(panelsSource).toContain('Save &amp; connect')
     expect(panelsSource).toContain('Verifying SSH host key')
     expect(atelierCss).toContain('.workspace-sheet.studio-sheet')
-    expect(atelierCss).toContain('--g-primary:#a8c7fa')
+    expect(atelierCss).toContain('.workspace-panel .ws-card{')
+    expect(atelierCss).not.toContain('--g-primary')
+    expect(atelierCss).not.toContain('#a8c7fa')
   })
 })

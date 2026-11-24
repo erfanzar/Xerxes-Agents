@@ -26,6 +26,7 @@ import {
   normalizeToolName,
   parseArgs,
   parseStructuredDiff,
+  parseStructuredDiffs,
   toolFailureText,
   trimmedChangedLines,
   type StructuredDiffPayload,
@@ -184,6 +185,7 @@ export interface AcpConfigSelectOption {
   readonly value: string
   readonly name: string
   readonly description?: string
+  readonly group?: string
 }
 
 export interface AcpConfigOption {
@@ -192,7 +194,7 @@ export interface AcpConfigOption {
   readonly description?: string
   readonly category?: string
   readonly type: string
-  readonly current_value: string
+  readonly current_value: string | boolean
   readonly options: readonly AcpConfigSelectOption[]
 }
 
@@ -200,6 +202,34 @@ export interface AcpAuthMethodInfo {
   readonly id: string
   readonly name: string
   readonly description?: string
+  readonly type?: string
+  readonly args?: readonly string[]
+  readonly env?: Readonly<Record<string, string>>
+  readonly meta?: Readonly<Record<string, unknown>>
+}
+
+export interface AcpExternalSessionInfo {
+  readonly session_id: string
+  readonly cwd?: string
+  readonly title?: string
+  readonly updated_at?: string
+}
+
+export interface AcpSessionsResult {
+  readonly ok: boolean
+  readonly sessions: readonly AcpExternalSessionInfo[]
+  readonly next_cursor?: string
+  readonly error?: string
+}
+
+export interface AcpAuthenticateResult {
+  readonly ok: boolean
+  readonly mode?: 'agent' | 'terminal'
+  readonly command?: string
+  readonly args?: readonly string[]
+  readonly env?: Readonly<Record<string, string>>
+  readonly label?: string
+  readonly error?: string
 }
 
 export interface AcpRuntimeCapabilities {
@@ -212,6 +242,7 @@ export interface AcpRuntimeCapabilities {
     readonly load: boolean
     readonly resume: boolean
     readonly list: boolean
+    readonly fork: boolean
     readonly close: boolean
     readonly additional_directories: boolean
   }
@@ -259,11 +290,13 @@ export interface ApprovalOption {
   readonly optionId: string
   readonly name: string
   readonly kind: string
+  readonly warning?: string
 }
 
 export interface DesktopApproval extends Approval {
   readonly allowPermanent?: boolean
   readonly diff?: ApprovalDiff
+  readonly diffs?: readonly ApprovalDiff[]
   readonly options?: readonly ApprovalOption[]
 }
 
@@ -415,33 +448,56 @@ function parseAcpConfigOptions(value: unknown): readonly AcpConfigOption[] | und
     const category = typeof row.category === 'string' && row.category.trim() ? row.category.trim() : undefined
     const type = typeof row.type === 'string' && row.type.trim() ? row.type.trim() : 'select'
     const rawCurrent = row.current_value ?? row.currentValue
-    const currentValue =
-      typeof rawCurrent === 'string' && rawCurrent.trim()
-        ? rawCurrent.trim()
-        : typeof rawCurrent === 'boolean' || typeof rawCurrent === 'number'
-          ? String(rawCurrent)
-          : ''
+    const currentValue: string | boolean =
+      typeof rawCurrent === 'boolean'
+        ? rawCurrent
+        : type === 'boolean'
+          ? (typeof rawCurrent === 'string'
+              ? rawCurrent.trim().toLowerCase() === 'true'
+              : Boolean(rawCurrent))
+          : typeof rawCurrent === 'string' && rawCurrent.trim()
+            ? rawCurrent.trim()
+            : typeof rawCurrent === 'number'
+              ? String(rawCurrent)
+              : ''
     const rawOptions = Array.isArray(row.options) ? row.options : []
     const options: AcpConfigSelectOption[] = []
     const seenOpts = new Set<string>()
-    for (const rawOpt of rawOptions) {
-      if (!rawOpt || typeof rawOpt !== 'object' || Array.isArray(rawOpt)) continue
-      const opt = rawOpt as Readonly<Record<string, unknown>>
+    const pushOption = (opt: Readonly<Record<string, unknown>>, fallbackGroup?: string): void => {
       const optValue =
         typeof opt.value === 'string' && opt.value.trim()
           ? opt.value.trim()
           : typeof opt.id === 'string' && opt.id.trim()
             ? opt.id.trim()
             : ''
-      if (!optValue || seenOpts.has(optValue)) continue
+      if (!optValue || seenOpts.has(optValue)) return
       seenOpts.add(optValue)
       const optName = typeof opt.name === 'string' && opt.name.trim() ? opt.name.trim() : optValue
       const optDesc = typeof opt.description === 'string' && opt.description.trim() ? opt.description.trim() : undefined
+      const optGroup =
+        (typeof opt.group === 'string' && opt.group.trim() ? opt.group.trim() : undefined)
+        ?? fallbackGroup
       options.push({
         value: optValue,
         name: optName,
         ...(optDesc ? { description: optDesc } : {}),
+        ...(optGroup ? { group: optGroup } : {}),
       })
+    }
+    for (const rawOpt of rawOptions) {
+      if (!rawOpt || typeof rawOpt !== 'object' || Array.isArray(rawOpt)) continue
+      const opt = rawOpt as Readonly<Record<string, unknown>>
+      if (Array.isArray(opt.options)) {
+        const groupLabel =
+          (typeof opt.name === 'string' && opt.name.trim() ? opt.name.trim() : undefined)
+          ?? (typeof opt.group === 'string' && opt.group.trim() ? opt.group.trim() : undefined)
+        for (const nested of opt.options) {
+          if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue
+          pushOption(nested as Readonly<Record<string, unknown>>, groupLabel)
+        }
+        continue
+      }
+      pushOption(opt)
     }
     parsed.push({
       id,
@@ -526,6 +582,71 @@ function parseAcpDiscoveredSkills(value: unknown): readonly AcpDiscoveredSkill[]
   return parsed.length > 0 ? parsed : undefined
 }
 
+function costUsdFromPayload(payload: Readonly<Record<string, unknown>>): number | null {
+  if (typeof payload.cost_usd === 'number' && Number.isFinite(payload.cost_usd) && payload.cost_usd >= 0) {
+    return payload.cost_usd
+  }
+  if (typeof payload.costUsd === 'number' && Number.isFinite(payload.costUsd) && payload.costUsd >= 0) {
+    return payload.costUsd
+  }
+  const rawCost = payload.cost
+  if (typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0) {
+    return rawCost
+  }
+  if (rawCost && typeof rawCost === 'object' && !Array.isArray(rawCost)) {
+    const rec = rawCost as Readonly<Record<string, unknown>>
+    const amount = rec.amount
+    const currency = typeof rec.currency === 'string' ? rec.currency.trim().toUpperCase() : ''
+    if (typeof amount === 'number' && Number.isFinite(amount) && amount >= 0 && (!currency || currency === 'USD')) {
+      return amount
+    }
+  }
+  return null
+}
+
+export function parseAcpAuthMethods(value: unknown): readonly AcpAuthMethodInfo[] {
+  if (!Array.isArray(value)) return []
+  const authMethods: AcpAuthMethodInfo[] = []
+  const seenAuth = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const auth = item as Readonly<Record<string, unknown>>
+    const id = typeof auth.id === 'string' && auth.id.trim() ? auth.id.trim() : ''
+    if (!id || seenAuth.has(id)) continue
+    seenAuth.add(id)
+    const name = typeof auth.name === 'string' && auth.name.trim() ? auth.name.trim() : id
+    const description = typeof auth.description === 'string' && auth.description.trim() ? auth.description.trim() : undefined
+    const type = typeof auth.type === 'string' && auth.type.trim() ? auth.type.trim() : undefined
+    const args = Array.isArray(auth.args)
+      ? auth.args.filter((entry): entry is string => typeof entry === 'string')
+      : undefined
+    const rawEnv = auth.env && typeof auth.env === 'object' && !Array.isArray(auth.env)
+      ? (auth.env as Readonly<Record<string, unknown>>)
+      : undefined
+    let env: Record<string, string> | undefined
+    if (rawEnv) {
+      const pairs = Object.entries(rawEnv).filter((pair): pair is [string, string] => typeof pair[1] === 'string')
+      if (pairs.length > 0) env = Object.fromEntries(pairs)
+    }
+    const meta =
+      auth.meta && typeof auth.meta === 'object' && !Array.isArray(auth.meta)
+        ? (auth.meta as Readonly<Record<string, unknown>>)
+        : auth._meta && typeof auth._meta === 'object' && !Array.isArray(auth._meta)
+          ? (auth._meta as Readonly<Record<string, unknown>>)
+          : undefined
+    authMethods.push({
+      id,
+      name,
+      ...(description ? { description } : {}),
+      ...(type ? { type } : {}),
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+      ...(meta ? { meta } : {}),
+    })
+  }
+  return authMethods
+}
+
 function parseAcpRuntimeCapabilities(value: unknown): AcpRuntimeCapabilities | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const row = value as Readonly<Record<string, unknown>>
@@ -547,23 +668,7 @@ function parseAcpRuntimeCapabilities(value: unknown): AcpRuntimeCapabilities | u
       : row.mcpCapabilities && typeof row.mcpCapabilities === 'object' && !Array.isArray(row.mcpCapabilities)
         ? (row.mcpCapabilities as Readonly<Record<string, unknown>>)
         : null
-  const rawAuth = Array.isArray(row.auth_methods)
-    ? row.auth_methods
-    : Array.isArray(row.authMethods)
-      ? row.authMethods
-      : []
-  const authMethods: AcpAuthMethodInfo[] = []
-  const seenAuth = new Set<string>()
-  for (const item of rawAuth) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
-    const auth = item as Readonly<Record<string, unknown>>
-    const id = typeof auth.id === 'string' && auth.id.trim() ? auth.id.trim() : ''
-    if (!id || seenAuth.has(id)) continue
-    seenAuth.add(id)
-    const name = typeof auth.name === 'string' && auth.name.trim() ? auth.name.trim() : id
-    const description = typeof auth.description === 'string' && auth.description.trim() ? auth.description.trim() : undefined
-    authMethods.push({ id, name, ...(description ? { description } : {}) })
-  }
+  const authMethods = parseAcpAuthMethods(row.auth_methods ?? row.authMethods)
   const metaObj =
     row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)
       ? (row.meta as Readonly<Record<string, unknown>>)
@@ -589,6 +694,7 @@ function parseAcpRuntimeCapabilities(value: unknown): AcpRuntimeCapabilities | u
       load: flag(sessionObj, 'load') || row.loadSession === true,
       resume: flag(sessionObj, 'resume'),
       list: flag(sessionObj, 'list'),
+      fork: flag(sessionObj, 'fork'),
       close: flag(sessionObj, 'close'),
       additional_directories: flag(sessionObj, 'additional_directories', 'additionalDirectories'),
     },
@@ -758,12 +864,15 @@ export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null
   const modelConfig = configOptions?.find(opt => opt.category === 'model' || opt.id === 'model')
   const modeConfig = configOptions?.find(opt => opt.category === 'mode' || opt.id === 'mode')
   const thoughtConfig = configOptions?.find(opt => opt.category === 'thought_level' || opt.id === 'thought_level')
+  const modelConfigValue = typeof modelConfig?.current_value === 'string' && modelConfig.current_value ? modelConfig.current_value : undefined
+  const modeConfigValue = typeof modeConfig?.current_value === 'string' && modeConfig.current_value ? modeConfig.current_value : undefined
+  const thoughtConfigValue = typeof thoughtConfig?.current_value === 'string' && thoughtConfig.current_value ? thoughtConfig.current_value : undefined
   const currentModel =
     typeof row.current_model === 'string' && row.current_model.trim()
       ? row.current_model.trim()
       : typeof row.model_id === 'string' && row.model_id.trim()
         ? row.model_id.trim()
-        : modelConfig?.current_value || undefined
+        : modelConfigValue
   const models =
     parseAcpExternalOptions(row.models)
     ?? (modelConfig?.options.length
@@ -784,7 +893,7 @@ export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null
       ? row.current_mode.trim()
       : typeof row.mode_id === 'string' && row.mode_id.trim()
         ? row.mode_id.trim()
-        : modeConfig?.current_value || undefined
+        : modeConfigValue
   const modes =
     parseAcpExternalOptions(row.modes)
     ?? (modeConfig?.options.length
@@ -811,7 +920,7 @@ export function parseAcpSessionBinding(value: unknown): AcpSessionBinding | null
   const thoughtLevel =
     typeof row.thought_level === 'string' && row.thought_level.trim()
       ? row.thought_level.trim()
-      : thoughtConfig?.current_value || undefined
+      : thoughtConfigValue
   const thoughtLevels =
     parseAcpExternalOptions(row.thought_levels)
     ?? (thoughtConfig?.options.length
@@ -1188,6 +1297,8 @@ export interface Snapshot {
   readonly savedAcpBinding?: AcpSessionBinding | null
   readonly acpConnecting?: boolean
   readonly acpError?: string | null
+  readonly acpAuthRequired?: boolean
+  readonly acpAuthMethods?: readonly AcpAuthMethodInfo[]
   readonly learning?: LearningList | null
   readonly learningCounts?: LearningCounts
   readonly learningLoading?: boolean
@@ -1906,7 +2017,7 @@ export class Store {
   private preparingSubmissions = new Map<string, object>()
   private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
   /** `images` are the data URLs shown with the message, whichever path shows it first. */
-  private pendingSteers = new Map<string, { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean }>()
+  private pendingSteers = new Map<string, { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number }>()
   private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
@@ -1942,6 +2053,8 @@ export class Store {
       savedAcpBinding: null,
       acpConnecting: false,
       acpError: null,
+      acpAuthRequired: false,
+      acpAuthMethods: [],
       connection: 'connecting',
       noWorkspace: false,
       cwd: '',
@@ -2132,6 +2245,11 @@ export class Store {
     if (this.frame.sideQuestionOpen) this.patch({ sideQuestionOpen: false })
   }
 
+  toggleSideQuestion(): void {
+    if (this.frame.sideQuestionOpen) this.closeSideQuestion()
+    else this.openSideQuestion()
+  }
+
   clearSideQuestion(): void {
     this.patch({
       sideQuestionTurns: [],
@@ -2158,13 +2276,25 @@ export class Store {
         { role: 'user' as const, content: turn.question },
         { role: 'assistant' as const, content: turn.answer },
       ])
-    const requestedModel = (model ?? this.frame.sideQuestionModel ?? '').trim()
+    const activeAcp =
+      this.frame.acpBinding?.connected && this.frame.acpBinding.transport !== 'native'
+        ? this.frame.acpBinding
+        : null
+    const savedSideModel = (this.frame.sideQuestionModel ?? '').trim()
+    const savedMatchesAcp =
+      !activeAcp ||
+      !savedSideModel ||
+      savedSideModel === activeAcp.current_model ||
+      Boolean(activeAcp.models?.some(entry => entry.id === savedSideModel))
+    const requestedModel = (
+      model !== undefined ? model : savedMatchesAcp ? savedSideModel : ''
+    ).trim()
     const requestId = crypto.randomUUID()
     const optimistic: SideQuestionTurn = {
       requestId,
       question: clean,
       answer: '',
-      model: requestedModel || this.frame.model,
+      model: requestedModel || activeAcp?.current_model || this.frame.model,
       status: 'streaming',
     }
     this.patch({
@@ -2249,7 +2379,9 @@ export class Store {
   }
 
   clearAcpError(): void {
-    if (this.frame.acpError) this.patch({ acpError: null })
+    if (this.frame.acpError || this.frame.acpAuthRequired || (this.frame.acpAuthMethods?.length ?? 0) > 0) {
+      this.patch({ acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
+    }
   }
 
   dismissSavedAcpBinding(): void {
@@ -2317,7 +2449,7 @@ export class Store {
       ...(resumeSessionId ? { resumeSessionId } : {}),
     }
     const { isCurrent } = this.captureSessionRequest()
-    this.patch({ acpConnecting: true, acpError: null })
+    this.patch({ acpConnecting: true, acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
     const isAutoInstallableBuiltIn = !custom && (cleanId === 'antigravity' || cleanId === 'claude-code')
     const cachedAgent = this.frame.acpAgents?.find(item => item.id === cleanId)
     let ensuredProviderClis = false
@@ -2362,9 +2494,13 @@ export class Store {
         const redundantHint =
           Boolean(hint)
           && (err.includes(hint) || (/agy acp --login/i.test(err) && /agy acp --login/i.test(hint)))
+        const authMethods = parseAcpAuthMethods(result.auth_methods ?? result.authMethods)
+        const authRequired = result.auth_required === true || result.authRequired === true || authMethods.length > 0
         this.patch({
           acpConnecting: false,
           acpError: hint && !redundantHint ? `${err} — ${hint}` : err,
+          acpAuthRequired: authRequired,
+          acpAuthMethods: authMethods,
         })
         return false
       }
@@ -2379,15 +2515,25 @@ export class Store {
         ...(binding?.connected ? { savedAcpBinding: null } : {}),
         acpConnecting: false,
         acpError: null,
+        acpAuthRequired: false,
+        acpAuthMethods: [],
         ...(binding?.connected && binding.transport !== 'native'
           ? {
               modelMenuOpen: false,
               pickerOpen: false,
               reasoningPickerOpen: false,
               delegationMenuOpen: false,
+              skillSuggestions: [],
+              swarm: null,
+              swarmMessages: [],
+              swarmInspect: null,
+              swarmInspectTarget: null,
             }
           : {}),
       })
+      if (binding?.connected && binding.transport !== 'native') {
+        void this.refreshSwarm({ silent: true })
+      }
       return true
     } catch (error) {
       if (isCurrent()) {
@@ -2451,20 +2597,26 @@ export class Store {
     return false
   }
 
-  async setAcpConfigOption(configId: string, value: string): Promise<boolean> {
+  async setAcpConfigOption(configId: string, value: string | boolean): Promise<boolean> {
     const cleanConfigId = configId.trim()
-    const cleanValue = value.trim()
-    if (!cleanConfigId || !cleanValue) return false
+    if (!cleanConfigId) return false
+    const isBoolean = typeof value === 'boolean'
+    const cleanValue: string | boolean = isBoolean ? value : value.trim()
+    if (!isBoolean && !cleanValue) return false
     const { isCurrent } = this.captureSessionRequest()
     this.patch({ acpError: null })
     try {
       const result = await this.bridge.call(
         'acp.set_config_option',
-        this.swarmParams({ config_id: cleanConfigId, value: cleanValue }),
+        this.swarmParams({
+          config_id: cleanConfigId,
+          value: cleanValue,
+          ...(isBoolean ? { type: 'boolean' } : {}),
+        }),
       )
       if (!isCurrent()) return result.ok === true
       if (result.ok === false || result.kind === 'error') {
-        const err = str(result.error) || str(result.message) || `Could not update ${cleanConfigId} to ${cleanValue}`
+        const err = str(result.error) || str(result.message) || `Could not update ${cleanConfigId} to ${String(cleanValue)}`
         this.patch({ acpError: err })
         return false
       }
@@ -2476,24 +2628,28 @@ export class Store {
         const updatedConfigs = prev.config_options?.map(opt =>
           opt.id === cleanConfigId ? { ...opt, current_value: cleanValue } : opt,
         )
+        const strValue = typeof cleanValue === 'string' ? cleanValue : undefined
         const isThought =
-          cleanConfigId === (prev.thought_level_config_id ?? 'thought_level')
-          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'thought_level')
+          strValue !== undefined
+          && (cleanConfigId === (prev.thought_level_config_id ?? 'thought_level')
+            || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'thought_level'))
         const isModel =
-          cleanConfigId === (prev.model_config_id ?? 'model')
-          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'model')
+          strValue !== undefined
+          && (cleanConfigId === (prev.model_config_id ?? 'model')
+            || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'model'))
         const isMode =
-          cleanConfigId === (prev.mode_config_id ?? 'mode')
-          || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'mode')
-        const matchedModel = isModel ? prev.models?.find(m => m.id === cleanValue) : undefined
-        const matchedMode = isMode ? prev.modes?.find(m => m.id === cleanValue) : undefined
+          strValue !== undefined
+          && (cleanConfigId === (prev.mode_config_id ?? 'mode')
+            || prev.config_options?.some(opt => opt.id === cleanConfigId && opt.category === 'mode'))
+        const matchedModel = isModel ? prev.models?.find(m => m.id === strValue) : undefined
+        const matchedMode = isMode ? prev.modes?.find(m => m.id === strValue) : undefined
         this.patch({
           acpBinding: {
             ...prev,
             ...(updatedConfigs ? { config_options: updatedConfigs } : {}),
-            ...(isThought ? { thought_level: cleanValue } : {}),
-            ...(isModel ? { current_model: cleanValue, current_model_name: matchedModel?.name ?? cleanValue } : {}),
-            ...(isMode ? { current_mode: cleanValue, current_mode_name: matchedMode?.name ?? cleanValue } : {}),
+            ...(isThought && strValue !== undefined ? { thought_level: strValue } : {}),
+            ...(isModel && strValue !== undefined ? { current_model: strValue, current_model_name: matchedModel?.name ?? strValue } : {}),
+            ...(isMode && strValue !== undefined ? { current_mode: strValue, current_mode_name: matchedMode?.name ?? strValue } : {}),
           },
           acpError: null,
         })
@@ -2592,7 +2748,7 @@ export class Store {
 
   async disconnectAcpAgent(): Promise<boolean> {
     const { isCurrent } = this.captureSessionRequest()
-    this.patch({ acpConnecting: true, acpError: null })
+    this.patch({ acpConnecting: true, acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
     try {
       const result = await this.bridge.call('acp.disconnect', this.swarmParams())
       if (!isCurrent()) return result.ok !== false
@@ -2607,13 +2763,154 @@ export class Store {
         savedAcpBinding: null,
         acpConnecting: false,
         acpError: null,
+        acpAuthRequired: false,
+        acpAuthMethods: [],
+        swarm: null,
+        swarmMessages: [],
+        swarmInspect: null,
+        swarmInspectTarget: null,
       })
+      void this.refreshSwarm({ silent: true })
       return true
     } catch (error) {
       if (isCurrent()) {
         this.patch({ acpConnecting: false, acpError: desktopError(error) })
       }
       return false
+    }
+  }
+
+  async acpSessions(
+    options: { readonly cwd?: string; readonly cursor?: string; readonly agentId?: string } = {},
+  ): Promise<AcpSessionsResult> {
+    try {
+      const result = await this.bridge.call(
+        'acp.sessions',
+        this.swarmParams({
+          ...(options.cwd?.trim() ? { cwd: options.cwd.trim() } : {}),
+          ...(options.cursor?.trim() ? { cursor: options.cursor.trim() } : {}),
+          ...(options.agentId?.trim() ? { agent_id: options.agentId.trim() } : {}),
+        }),
+      )
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || 'Could not list external ACP sessions'
+        return { ok: false, sessions: [], error: err }
+      }
+      const rawList = Array.isArray(result.sessions) ? result.sessions : []
+      const sessions: AcpExternalSessionInfo[] = []
+      for (const entry of rawList) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+        const row = entry as Readonly<Record<string, unknown>>
+        const sessionId = str(row.session_id) || str(row.sessionId) || str(row.id)
+        if (!sessionId) continue
+        const cwd = str(row.cwd) || undefined
+        const title = str(row.title) || undefined
+        const updatedAt = str(row.updated_at) || str(row.updatedAt) || undefined
+        sessions.push({
+          session_id: sessionId,
+          ...(cwd ? { cwd } : {}),
+          ...(title ? { title } : {}),
+          ...(updatedAt ? { updated_at: updatedAt } : {}),
+        })
+      }
+      const nextCursor = str(result.next_cursor) || str(result.nextCursor) || undefined
+      return {
+        ok: true,
+        sessions,
+        ...(nextCursor ? { next_cursor: nextCursor } : {}),
+      }
+    } catch (error) {
+      return { ok: false, sessions: [], error: desktopError(error) }
+    }
+  }
+
+  async forkAcpSession(
+    options: { readonly cwd?: string; readonly additionalDirectories?: readonly string[] } = {},
+  ): Promise<boolean> {
+    const { isCurrent } = this.captureSessionRequest()
+    this.patch({ acpError: null })
+    try {
+      const result = await this.bridge.call(
+        'acp.fork',
+        this.swarmParams({
+          ...(options.cwd?.trim() ? { cwd: options.cwd.trim() } : {}),
+          ...(options.additionalDirectories && options.additionalDirectories.length > 0
+            ? { additional_directories: [...options.additionalDirectories] }
+            : {}),
+        }),
+      )
+      if (!isCurrent()) return result.ok === true
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || 'Could not fork ACP session'
+        this.patch({ acpError: err })
+        return false
+      }
+      const binding = parseAcpSessionBinding(result.binding)
+      if (binding) {
+        this.patch({ acpBinding: binding, acpError: null })
+      }
+      return true
+    } catch (error) {
+      if (isCurrent()) {
+        this.patch({ acpError: desktopError(error) })
+      }
+      return false
+    }
+  }
+
+  async authenticateAcp(methodId: string, agentId?: string): Promise<AcpAuthenticateResult> {
+    const cleanMethodId = methodId.trim()
+    if (!cleanMethodId) return { ok: false, error: 'Authentication method ID is required' }
+    const targetAgentId =
+      agentId?.trim()
+      || this.lastAcpConnect?.agentId
+      || this.frame.acpBinding?.agent_id
+      || this.frame.savedAcpBinding?.agent_id
+      || undefined
+    const { isCurrent } = this.captureSessionRequest()
+    try {
+      const result = await this.bridge.call(
+        'acp.authenticate',
+        this.swarmParams({
+          method_id: cleanMethodId,
+          ...(targetAgentId ? { agent_id: targetAgentId } : {}),
+        }),
+      )
+      if (result.ok === false || result.kind === 'error') {
+        const err = str(result.error) || str(result.message) || `Authentication failed for ${cleanMethodId}`
+        if (isCurrent()) this.patch({ acpError: err })
+        return { ok: false, error: err }
+      }
+      const mode = result.mode === 'terminal' ? 'terminal' : 'agent'
+      if (mode === 'agent') {
+        if (isCurrent()) {
+          this.patch({ acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
+        }
+        return { ok: true, mode: 'agent' }
+      }
+      const command = str(result.command) || undefined
+      const args = Array.isArray(result.args)
+        ? result.args.filter((entry): entry is string => typeof entry === 'string')
+        : undefined
+      const rawEnv = result.env && typeof result.env === 'object' && !Array.isArray(result.env)
+        ? (result.env as Readonly<Record<string, unknown>>)
+        : undefined
+      const envEntries = rawEnv
+        ? Object.entries(rawEnv).filter((pair): pair is [string, string] => typeof pair[1] === 'string')
+        : []
+      const label = str(result.label) || undefined
+      return {
+        ok: true,
+        mode: 'terminal',
+        ...(command ? { command } : {}),
+        ...(args && args.length > 0 ? { args } : {}),
+        ...(envEntries.length > 0 ? { env: Object.fromEntries(envEntries) } : {}),
+        ...(label ? { label } : {}),
+      }
+    } catch (error) {
+      const err = desktopError(error)
+      if (isCurrent()) this.patch({ acpError: err })
+      return { ok: false, error: err }
     }
   }
 
@@ -3341,16 +3638,33 @@ export class Store {
     // echo carries only an image count. Keep the pictures with the pending
     // steer so whichever path shows the message shows them too.
     const shownImages = images.map(image => `data:${image.mediaType};base64,${image.data}`)
-    const pending = { session: sessionKey, text: cleaned, images: shownImages, shown: false, echoed: false }
+    const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number } = {
+      session: sessionKey,
+      text: cleaned,
+      images: shownImages,
+      shown: false,
+      echoed: false,
+    }
     this.pendingSteers.set(steerId, pending)
     try {
       const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId, ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
-          if (!pending.shown) { this.builder.pushUser(cleaned, false, shownImages); pending.shown = true }
+          if (!pending.shown) {
+            pending.blockId = this.builder.pushUser(cleaned, false, shownImages)
+            pending.shown = true
+          }
           if (cleaned) this.recentSteerTexts.add(cleaned)
           if (this.frame.turnActive) {
-            this.queue = [...this.queue, { id: this.seq++, text: cleaned, ...(images.length ? { images } : {}) }]
+            this.queue = [
+              ...this.queue,
+              {
+                id: this.seq++,
+                text: cleaned,
+                ...(pending.blockId !== undefined ? { blockId: pending.blockId } : {}),
+                ...(images.length ? { images } : {}),
+              },
+            ]
             this.patch({ queue: this.queue })
           } else {
             // The turn ended while this steer was in flight; turn_end came
@@ -3409,7 +3723,12 @@ export class Store {
   async steerNow(
     text: string,
     images: readonly ComposerImage[] = [],
-    options?: { readonly preserveQueueIds?: ReadonlySet<number>; readonly promotedFromQueue?: boolean },
+    options?: {
+      readonly preserveQueueIds?: ReadonlySet<number>
+      readonly promotedFromQueue?: boolean
+      readonly promotedBlockId?: number
+      readonly restoreQueue?: readonly QueueItem[]
+    },
   ): Promise<boolean> {
     const cleaned = text.trim()
     if (!cleaned && !images.length) return false
@@ -3418,10 +3737,10 @@ export class Store {
     }
     if (this.steeringNow) return false
     const sessionKey = this.sessionKey
-    const priorQueue = [...this.queue]
+    const priorQueue = options?.restoreQueue ? [...options.restoreQueue] : [...this.queue]
     const remaining = options?.preserveQueueIds
-      ? priorQueue.filter(item => options.preserveQueueIds!.has(item.id))
-      : priorQueue
+      ? this.queue.filter(item => options.preserveQueueIds!.has(item.id))
+      : [...this.queue]
     this.steeringNow = true
     try {
       if (this.stopArmTimer !== undefined) {
@@ -3431,7 +3750,7 @@ export class Store {
       if (this.frame.stopArmed || this.frame.approval || this.frame.question) {
         this.patch({ stopArmed: false, approval: null, question: null })
       }
-      await this.bridge.call('turn.cancel', { session_key: sessionKey })
+      await this.bridge.call('turn.cancel', { session_key: sessionKey, drop_pending_steers: true })
       const settled = await this.waitForTurnState(sessionKey, false, 4500)
       if (this.sessionKey !== sessionKey) return false
       if (!settled) {
@@ -3442,13 +3761,27 @@ export class Store {
         this.fail(new Error('Current step is still stopping — try Steer now again in a moment.'))
         return false
       }
+      // Remove any queued user bubbles that `steer()` already mirrored into the
+      // transcript — even if tool calls or streaming deltas landed after them
+      // before `Steer now` ran — so promoting or re-queuing never duplicates them.
+      let removedQueuedBubble = false
       if (options?.promotedFromQueue) {
-        // Avoid duplicating the queued user bubbles that `steer()` already appended.
-        this.builder.rollbackUser(cleaned, true)
-        for (const item of remaining) {
-          this.builder.rollbackUser(item.text, true)
+        if (options.promotedBlockId !== undefined && this.builder.removeBlockById(options.promotedBlockId)) {
+          removedQueuedBubble = true
+        } else {
+          this.builder.rollbackUser(cleaned, true)
+          removedQueuedBubble = true
         }
       }
+      for (const item of remaining) {
+        if (item.blockId !== undefined && this.builder.removeBlockById(item.blockId)) {
+          removedQueuedBubble = true
+        } else {
+          this.builder.rollbackUser(item.text, true)
+          removedQueuedBubble = true
+        }
+      }
+      if (removedQueuedBubble) this.notify()
       const ok = await this.submit(cleaned, undefined, images)
       if (ok && remaining.length > 0 && this.sessionKey === sessionKey) {
         const started = await this.waitForTurnState(sessionKey, true, 1500)
@@ -3469,14 +3802,18 @@ export class Store {
 
   /** Promote a queued follow-up message: interrupt the active step and run it now. */
   async promoteQueued(id: number): Promise<boolean> {
+    if (this.steeringNow) return false
     const item = this.queue.find(entry => entry.id === id)
     if (!item) return false
+    const restoreQueue = [...this.queue]
     const otherIds = new Set(this.queue.filter(entry => entry.id !== id).map(entry => entry.id))
     this.queue = this.queue.filter(entry => entry.id !== id)
     this.patch({ queue: this.queue })
     return this.steerNow(item.text, item.images ?? [], {
       preserveQueueIds: otherIds,
       promotedFromQueue: true,
+      ...(item.blockId !== undefined ? { promotedBlockId: item.blockId } : {}),
+      restoreQueue,
     })
   }
 
@@ -3859,18 +4196,30 @@ export class Store {
     this.respondApproval(requestId, response)
   }
 
+  approveWithOption(
+    requestId: string,
+    optionId: string,
+    decision?: 'approve' | 'approve_for_session' | 'reject',
+  ): void {
+    const cleanOptionId = optionId.trim()
+    if (!cleanOptionId) return
+    const pending = this.frame.approval
+    if (pending?.id !== requestId) return
+    const matched = pending.options?.find(opt => opt.optionId === cleanOptionId)
+    const wire: 'approve' | 'approve_for_session' | 'reject' =
+      decision
+      ?? (matched?.kind === 'allow_always'
+        ? 'approve_for_session'
+        : matched?.kind === 'reject_once' || matched?.kind === 'reject_always'
+          ? 'reject'
+          : 'approve')
+    this.sendPermissionResponse(requestId, wire, cleanOptionId)
+  }
+
   private respondApproval(requestId: string, response: ApprovalResponse, planMode?: 'accept-all' | 'manual'): void {
     const pending = this.frame.approval
     if (pending?.id !== requestId) return
     if (response === 'allow_session' && pending.allowPermanent === false) return
-    if (pending.autoAcceptAt !== undefined) {
-      const { autoAcceptAt: _deadline, ...manualOnly } = pending
-      this.patch({ approval: manualOnly })
-    }
-    const sessionKey = this.sessionKey
-    const sessionId = this.frame.currentId
-    const isCurrent = () => this.sessionKey === sessionKey && this.frame.currentId === sessionId
-      && this.frame.approval?.id === requestId
     // The daemon's vocabulary is approve / approve_for_session / reject —
     // anything else resolves as reject, so map our UI labels here.
     const wire = response === 'allow_once' ? 'approve'
@@ -3883,11 +4232,30 @@ export class Store {
           ? opt.kind === 'allow_always'
           : opt.kind === 'reject_once' || opt.kind === 'reject_always',
     )
+    this.sendPermissionResponse(requestId, wire, matchedOption?.optionId, planMode)
+  }
+
+  private sendPermissionResponse(
+    requestId: string,
+    wire: 'approve' | 'approve_for_session' | 'reject',
+    optionId?: string,
+    planMode?: 'accept-all' | 'manual',
+  ): void {
+    const pending = this.frame.approval
+    if (pending?.id !== requestId) return
+    if (pending.autoAcceptAt !== undefined) {
+      const { autoAcceptAt: _deadline, ...manualOnly } = pending
+      this.patch({ approval: manualOnly })
+    }
+    const sessionKey = this.sessionKey
+    const sessionId = this.frame.currentId
+    const isCurrent = () => this.sessionKey === sessionKey && this.frame.currentId === sessionId
+      && this.frame.approval?.id === requestId
     void this.bridge
       .call('permission_response', {
         request_id: requestId,
         response: wire,
-        ...(matchedOption ? { option_id: matchedOption.optionId } : {}),
+        ...(optionId ? { option_id: optionId } : {}),
       })
       .then(result => {
         // approval_response can remove the card before the RPC reply. Only
@@ -5101,12 +5469,25 @@ export class Store {
    * whole task over. The model is told what happened; the transcript shows
    * only "Continue".
    */
+  private isExternalAcpConnected(): boolean {
+    return Boolean(this.frame.acpBinding?.connected && this.frame.acpBinding.transport !== 'native')
+  }
+
+  private isAntigravityConnected(): boolean {
+    return Boolean(this.frame.acpBinding?.connected && this.frame.acpBinding.provider === 'antigravity')
+  }
+
   retryFailed(): void {
     const failed = this.frame.failed
     if (!failed) return
     this.failure = null
     this.patch({ failed: null, turnFailed: false, tab: 'activity' })
-    if (failed.lastUser) void this.submit(`Continue. Your previous reply was cut off by an error (${failed.error.slice(0, 300)}). Pick up where you stopped; do not repeat steps that already finished.`, 'Continue')
+    if (!failed.lastUser) return
+    if (this.isExternalAcpConnected()) {
+      void this.submit('Continue')
+      return
+    }
+    void this.submit(`Continue. Your previous reply was cut off by an error (${failed.error.slice(0, 300)}). Pick up where you stopped; do not repeat steps that already finished.`, 'Continue')
   }
 
   async retryCompaction(): Promise<void> {
@@ -6016,7 +6397,7 @@ export class Store {
       currentAgentPreset: str(result.agent_name ?? session.agent_id) || this.frame.currentAgentPreset,
       branch: str(result.branch),
       daemonWarning: daemonCompatibilityWarning(result),
-      costUsd: typeof result.cost_usd === 'number' ? result.cost_usd : null,
+      costUsd: costUsdFromPayload(result),
       costBasis: (result.cost_basis ?? session.cost_basis) === 'subscription' ? 'subscription' : null,
       contextMax: contextLimit,
       approval: null,
@@ -6090,6 +6471,8 @@ export class Store {
         savedAcpBinding,
         acpConnecting: false,
         acpError: rawLiveAcp?.error ?? null,
+        acpAuthRequired: false,
+        acpAuthMethods: [],
       })
     } else if (inlineAcpBinding || savedAcpBinding) {
       this.patch({
@@ -6609,8 +6992,14 @@ export class Store {
       if (sid && knownIds.length > 0 && !knownIds.includes(sid)) return
       const binding = parseAcpSessionBinding(payload.binding)
       const agents = Array.isArray(payload.agents) ? parseAcpExternalAgents(payload.agents) : undefined
+      const wasExternal = Boolean(this.frame.acpBinding?.connected && this.frame.acpBinding.transport !== 'native')
       const isConnectedExternal = Boolean(binding?.connected && binding.transport !== 'native')
+      const runtimeTransitioned = wasExternal !== isConnectedExternal
       const statusError = binding?.error ?? (str(payload.error) || null)
+      const statusAuthMethods = parseAcpAuthMethods(payload.auth_methods ?? payload.authMethods)
+      const statusAuthRequired =
+        !isConnectedExternal
+        && (payload.auth_required === true || payload.authRequired === true || statusAuthMethods.length > 0)
       const fallbackSaved =
         !isConnectedExternal && binding && binding.transport !== 'native'
           ? { ...binding, connected: false }
@@ -6626,6 +7015,8 @@ export class Store {
             : {}),
         acpConnecting: false,
         acpError: statusError,
+        acpAuthRequired: statusAuthRequired,
+        acpAuthMethods: statusAuthRequired ? statusAuthMethods : [],
         ...(agents ? { acpAgents: agents } : {}),
         ...(isConnectedExternal
           ? {
@@ -6633,9 +7024,21 @@ export class Store {
               pickerOpen: false,
               reasoningPickerOpen: false,
               delegationMenuOpen: false,
+              skillSuggestions: [],
+            }
+          : {}),
+        ...(runtimeTransitioned
+          ? {
+              swarm: null,
+              swarmMessages: [],
+              swarmInspect: null,
+              swarmInspectTarget: null,
             }
           : {}),
       })
+      if (runtimeTransitioned) {
+        void this.refreshSwarm({ silent: true })
+      }
       return
     }
     // Background turns (bg-* sessions) share this connection's event pipe
@@ -6794,12 +7197,25 @@ export class Store {
             this.activeMetricTools.delete(id)
           }
           if (payload.permitted !== false && !payload.error && (!id || !this.foldedToolIds.has(id))) {
-            const resultDiff = parseStructuredDiff(payload.diff)
+            const resultDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
             const resultArgs = parseArgs(payload.arguments)
-            const resultStats = editStatsOf(payload.name, resultArgs, resultDiff, payload.locations)
-            if (resultStats) {
-              if (id) this.foldedToolIds.add(id)
-              this.foldChange(resultStats, resultArgs, str(payload.name), resultDiff)
+            if (resultDiffs.length > 1) {
+              let foldedAny = false
+              for (const entry of resultDiffs) {
+                const entryStats = editStatsOf(payload.name, {}, entry, payload.locations)
+                if (entryStats) {
+                  foldedAny = true
+                  this.foldChange(entryStats, {}, str(payload.name), entry)
+                }
+              }
+              if (foldedAny && id) this.foldedToolIds.add(id)
+            } else {
+              const resultDiff = resultDiffs[0] ?? null
+              const resultStats = editStatsOf(payload.name, resultArgs, resultDiff, payload.locations)
+              if (resultStats) {
+                if (id) this.foldedToolIds.add(id)
+                this.foldChange(resultStats, resultArgs, str(payload.name), resultDiff)
+              }
             }
           }
           const durationMs = Math.max(0, num(payload.duration_ms) ?? 0)
@@ -6848,16 +7264,37 @@ export class Store {
         this.builder.push(type, payload)
         this.notify()
         return
+      case 'tool_update': {
+        const metricToolId = str(payload.tool_call_id) || str(payload.id)
+        if (metricToolId) this.activeMetricTools.add(metricToolId)
+        this.setMetricPhase('tool', true)
+        this.builder.push('tool_update', payload)
+        this.notify()
+        return
+      }
       case 'tool_call': {
         // The first computer-use step is when its macOS permissions matter.
         if (payload.name === 'computer_use' && !this.frame.computerUseWanted) this.patch({ computerUseWanted: true })
-        const structuredDiff = parseStructuredDiff(payload.diff)
-        const parsedCallArgs = parseArgs(payload.arguments)
-        const stats = editStatsOf(payload.name, parsedCallArgs, structuredDiff, payload.locations)
+        const callDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
+        const parsedCallArgs = parseArgs(payload.arguments ?? payload.inputs)
         const metricToolId = str(payload.tool_call_id) || str(payload.id)
-        if (stats) {
-          if (metricToolId) this.foldedToolIds.add(metricToolId)
-          this.foldChange(stats, parsedCallArgs, str(payload.name), structuredDiff)
+        if (callDiffs.length > 1) {
+          let foldedAny = false
+          for (const entry of callDiffs) {
+            const entryStats = editStatsOf(payload.name, {}, entry, payload.locations)
+            if (entryStats) {
+              foldedAny = true
+              this.foldChange(entryStats, {}, str(payload.name), entry)
+            }
+          }
+          if (foldedAny && metricToolId) this.foldedToolIds.add(metricToolId)
+        } else {
+          const structuredDiff = callDiffs[0] ?? null
+          const stats = editStatsOf(payload.name, parsedCallArgs, structuredDiff, payload.locations)
+          if (stats) {
+            if (metricToolId) this.foldedToolIds.add(metricToolId)
+            this.foldChange(stats, parsedCallArgs, str(payload.name), structuredDiff)
+          }
         }
         this.builder.push(type, payload)
         if (metricToolId) this.activeMetricTools.add(metricToolId)
@@ -6921,8 +7358,11 @@ export class Store {
         const pending = id ? this.pendingSteers.get(id) : [...this.pendingSteers.values()].find(item => item.session === this.sessionKey && item.text === content && !item.echoed)
         if (pending) pending.echoed = true
         if (!pending?.shown) {
-          this.builder.pushUser(content, false, pending?.images ?? [])
-          if (pending) pending.shown = true
+          const blockId = this.builder.pushUser(content, false, pending?.images ?? [])
+          if (pending) {
+            pending.shown = true
+            pending.blockId = blockId
+          }
           this.notify()
         }
         return
@@ -7014,7 +7454,8 @@ export class Store {
           }
         }
         // Live cost estimate rides the same echo the ctx counter uses.
-        if (typeof payload.cost_usd === 'number') patch.costUsd = payload.cost_usd
+        const statusCostUsd = costUsdFromPayload(payload)
+        if (statusCostUsd !== null) patch.costUsd = statusCostUsd
         // Every status echo states the basis; its absence means per-token billing.
         if ('model' in payload) patch.costBasis = payload.cost_basis === 'subscription' ? 'subscription' : null
         // The daemon logs plan-mode flips; its status echo is authoritative.
@@ -7033,11 +7474,30 @@ export class Store {
         this.patch(patch)
         return
       }
+      case 'usage': {
+        const patch: Record<string, unknown> = {}
+        const usedTokens = num(payload.context_tokens) ?? num(payload.used)
+        const maxTokens = num(payload.max_context) ?? num(payload.size)
+        if (usedTokens !== null) patch.contextTokens = Math.max(0, usedTokens)
+        if (maxTokens !== null) patch.contextMax = maxTokens > 0 ? maxTokens : null
+        const inputToks = num(payload.total_input_tokens) ?? num(payload.input_tokens)
+        const outputToks = num(payload.total_output_tokens) ?? num(payload.output_tokens)
+        if (inputToks !== null) patch.inputTokens = Math.max(0, inputToks)
+        if (outputToks !== null) patch.outputTokens = Math.max(0, outputToks)
+        const cacheRead = num(payload.cache_read_tokens)
+        const cacheWrite = num(payload.cache_creation_tokens)
+        if (cacheRead !== null) patch.cacheReadTokens = Math.max(0, cacheRead)
+        if (cacheWrite !== null) patch.cacheWriteTokens = Math.max(0, cacheWrite)
+        const usageCostUsd = costUsdFromPayload(payload)
+        if (usageCostUsd !== null) patch.costUsd = usageCostUsd
+        if (Object.keys(patch).length > 0) this.patchSoft(patch)
+        return
+      }
       case 'approval_request': {
         const id = str(payload.id) || str(payload.request_id)
         if (!id || this.frame.approval?.id === id) return
         const name = str(payload.tool_name) || str(payload.name) || str(payload.action)
-        const autoAcceptAt = /^ExitPlanMode(Tool)?$/.test(name) ? Date.now() + 180_000 : undefined
+        const autoAcceptAt = /^ExitPlanMode(Tool)?$/.test(name) && !this.isAntigravityConnected() ? Date.now() + 180_000 : undefined
         // The daemon attaches the real arguments as `inputs` (and older
         // builds as `arguments`). Keep them structured for the card to
         // render per tool; the flat description is only the last resort.
@@ -7046,7 +7506,8 @@ export class Store {
           : payload.arguments && typeof payload.arguments === 'object' && !Array.isArray(payload.arguments)
             ? payload.arguments as Record<string, unknown>
             : null
-        const diff = parseStructuredDiff(payload.diff)
+        const diffs = parseStructuredDiffs(payload.diffs, payload.diff)
+        const diff = diffs[0] ?? null
         const options: ApprovalOption[] = Array.isArray(payload.options)
           ? payload.options
               .map(raw => {
@@ -7054,10 +7515,12 @@ export class Store {
                 const row = raw as Readonly<Record<string, unknown>>
                 const optionId = str(row.option_id) || str(row.optionId)
                 if (!optionId) return null
+                const warning = str(row.warning)
                 return {
                   optionId,
                   name: str(row.name) || optionId,
                   kind: str(row.kind) || 'allow_once',
+                  ...(warning ? { warning } : {}),
                 }
               })
               .filter((opt): opt is ApprovalOption => opt !== null)
@@ -7085,6 +7548,7 @@ export class Store {
             ...(str(payload.permission_mode) ? { permissionMode: str(payload.permission_mode) } : {}),
             ...(allowPermanent !== undefined ? { allowPermanent } : {}),
             ...(diff ? { diff } : {}),
+            ...(diffs.length > 0 ? { diffs } : {}),
             ...(options.length > 0 ? { options } : {}),
           },
           interactionHidden: false,
@@ -7093,8 +7557,13 @@ export class Store {
       }
       case 'question_request': {
         const requestId = str(payload.id)
+        const mode: 'form' | 'url' | undefined =
+          payload.mode === 'url' ? 'url' : payload.mode === 'form' ? 'form' : undefined
+        const url = str(payload.url) || undefined
+        const elicitationId = str(payload.elicitation_id) || str(payload.elicitationId) || undefined
+        const message = str(payload.message) || undefined
         const rawItems = Array.isArray(payload.questions) ? payload.questions : []
-        const items = rawItems.map(raw => {
+        const parsedItems = rawItems.map(raw => {
           const item = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
           return {
             id: str(item.id) || 'answer',
@@ -7105,15 +7574,29 @@ export class Store {
             ...(str(item.placeholder) ? { placeholder: str(item.placeholder) } : {}),
           }
         }).filter(item => item.question)
+        const items = parsedItems.length > 0
+          ? parsedItems
+          : mode === 'url' && url
+            ? [{
+                id: 'url_consent',
+                question: message || 'Open external link to continue',
+                options: ['Open link & continue', 'Decline'],
+                allowFreeform: false,
+              }]
+            : []
         if (!requestId || items.length === 0) return
         const question = {
           requestId,
           toolCallId: str(payload.tool_call_id),
           items,
+          ...(mode ? { mode } : {}),
+          ...(url ? { url } : {}),
+          ...(elicitationId ? { elicitationId } : {}),
+          ...(message ? { message } : {}),
         }
         this.patch({ question, interactionHidden: false })
         // A plan review captures the proposal as the session's working plan.
-        if (isPlanReview(question) && this.agentText.trim()) {
+        if (mode !== 'url' && isPlanReview(question) && this.agentText.trim()) {
           this.capturePlan(this.agentText)
         }
         return
@@ -7123,6 +7606,19 @@ export class Store {
       case 'question_response': {
         const id = str(payload.id)
         if (this.frame.question?.requestId === id) this.patch({ question: null })
+        return
+      }
+      case 'question_resolved': {
+        const id = str(payload.id) || str(payload.request_id)
+        const elicitationId = str(payload.elicitation_id) || str(payload.elicitationId)
+        const current = this.frame.question
+        if (
+          current
+          && ((id && current.requestId === id)
+            || (elicitationId && current.elicitationId === elicitationId))
+        ) {
+          this.patch({ question: null })
+        }
         return
       }
       case 'approval_response': {
@@ -7416,6 +7912,8 @@ export class Store {
       acpBinding: null,
       acpConnecting: false,
       acpError: null,
+      acpAuthRequired: false,
+      acpAuthMethods: [],
       tab: 'activity',
     })
   }
@@ -7483,13 +7981,15 @@ export class Store {
       snippets: this.snippets,
     })
     const pending = this.frame.approval
-    if (pending !== before.approval || before.currentId !== this.frame.currentId || this.frame.connection === 'offline') {
+    const agyActive = this.isAntigravityConnected()
+    const wasAgyActive = Boolean(before.acpBinding?.connected && before.acpBinding.provider === 'antigravity')
+    if (pending !== before.approval || before.currentId !== this.frame.currentId || this.frame.connection === 'offline' || agyActive !== wasAgyActive) {
       clearTimeout(this.planTimer)
       this.planTimer = undefined
-      if (pending !== before.approval && pending?.autoAcceptAt !== undefined && this.frame.connection !== 'offline') {
+      if (pending !== before.approval && pending?.autoAcceptAt !== undefined && this.frame.connection !== 'offline' && !agyActive) {
         const { isCurrent } = this.captureSessionRequest()
         this.planTimer = setTimeout(() => {
-          if (isCurrent() && this.frame.approval === pending) this.approvePlan(pending.id, 'accept-all')
+          if (isCurrent() && this.frame.approval === pending && !this.isAntigravityConnected()) this.approvePlan(pending.id, 'accept-all')
         }, Math.max(0, pending.autoAcceptAt - Date.now()))
       }
     }

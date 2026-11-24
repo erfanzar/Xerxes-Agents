@@ -46,7 +46,7 @@ const mediaTypeOf = (row: Record<string, unknown>): string | undefined => {
 }
 
 /** Every image a finished or running tool step carries, at most eight, in order. */
-export function toolImagesOf(item: Pick<ToolItem, 'name' | 'input' | 'output'>): readonly ToolImage[] {
+export function toolImagesOf(item: Pick<ToolItem, 'name' | 'input' | 'output' | 'contentBlocks'>): readonly ToolImage[] {
   const cached = cache.get(item)
   if (cached) return cached
   const out: ToolImage[] = []
@@ -65,6 +65,30 @@ export function toolImagesOf(item: Pick<ToolItem, 'name' | 'input' | 'output'>):
   }
 
   const label = `Image from ${tool || 'the tool'}`
+  if (Array.isArray(item.contentBlocks)) {
+    for (const block of item.contentBlocks) {
+      if (out.length >= MAX_TOOL_IMAGES) break
+      if (block.type === 'image') {
+        const mime = block.mime_type.toLowerCase()
+        if (mime.startsWith('image/') && block.data) {
+          add(
+            block.data.startsWith('data:')
+              ? block.data
+              : `data:${mime};base64,${block.data.replaceAll(/\s/g, '')}`,
+            block.uri ? baseName(block.uri) : label,
+          )
+        }
+      } else if (block.type === 'resource' && block.blob && block.mime_type?.toLowerCase().startsWith('image/')) {
+        const mime = block.mime_type.toLowerCase()
+        add(
+          block.blob.startsWith('data:')
+            ? block.blob
+            : `data:${mime};base64,${block.blob.replaceAll(/\s/g, '')}`,
+          baseName(block.uri),
+        )
+      }
+    }
+  }
   let nodes = 0
   const walk = (value: unknown, depth: number): void => {
     if (out.length >= MAX_TOOL_IMAGES || depth > MAX_DEPTH || ++nodes > MAX_NODES) return

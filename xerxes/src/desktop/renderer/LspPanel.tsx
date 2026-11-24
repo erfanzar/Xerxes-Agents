@@ -76,7 +76,7 @@ export function LspCard({ snap }: { snap: Snapshot }): ReactElement {
     <div className="rowlist">{view?.servers.map(row => <div className="row" key={row.name}>
       <div className="row__main"><div className="row__t">{row.name}</div><div className="row__s">{row.languageId} · {row.extensions.join(', ')} · {row.enabled ? 'Enabled' : 'Disabled'}</div></div>
       <button className="btn btn--ghost" disabled={busy || !available} onClick={() => setEditing(row)}>Edit</button>
-      <button className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.release', { name: row.name })}>Release host</button>
+      <button className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.release', { name: row.name })}>Stop server</button>
     </div>)}</div>
     {view && !view.servers.length && <p>No language servers configured.</p>}
     <div className="lsp-actions"><button className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.settings.get')}>Reload</button><button className="btn" disabled={busy || !available || !view} onClick={() => setEditing('new')}>Add server</button></div>

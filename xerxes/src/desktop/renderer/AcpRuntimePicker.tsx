@@ -22,13 +22,16 @@ import {
 } from 'react'
 
 import { ActionDialog } from './ActionDialog.js'
+import { CopyButton } from './CopyButton.js'
 import { desktopError } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { PickerLayer } from './Overlays.js'
-import type { AgyCredentialMode, AgyStatusView } from './ProviderAccountsCenter.js'
+import { agyQuickTransferSource, agyTransferDetail, type AgyStatusView, type AgyTransferMode } from './ProviderAccountsCenter.js'
 import {
   store,
+  type AcpAuthMethodInfo,
   type AcpConfigOption,
+  type AcpConfigSelectOption,
   type AcpExternalAgentInfo,
   type AcpExternalModeOption,
   type AcpExternalModelOption,
@@ -185,6 +188,36 @@ export function activeAcpThoughtLevelLabel(binding: AcpSessionBinding): string |
   return label || null
 }
 
+export function isAcpConfigOptionEnabled(option: Pick<AcpConfigOption, 'current_value'>): boolean {
+  if (typeof option.current_value === 'boolean') return option.current_value
+  return String(option.current_value).trim().toLowerCase() === 'true'
+}
+
+export interface AcpConfigOptionGroup {
+  readonly group: string | null
+  readonly options: readonly AcpConfigSelectOption[]
+}
+
+/** Partition select options into ordered visual groups while preserving agent-supplied order. */
+export function groupAcpConfigSelectOptions(
+  options: readonly AcpConfigSelectOption[],
+): readonly AcpConfigOptionGroup[] {
+  const groups: Array<{ group: string | null; options: AcpConfigSelectOption[] }> = []
+  const byKey = new Map<string, { group: string | null; options: AcpConfigSelectOption[] }>()
+  for (const opt of options) {
+    const label = opt.group?.trim() || null
+    const key = label === null ? '__ungrouped__' : `g:${label}`
+    let bucket = byKey.get(key)
+    if (!bucket) {
+      bucket = { group: label, options: [] }
+      byKey.set(key, bucket)
+      groups.push(bucket)
+    }
+    bucket.options.push(opt)
+  }
+  return groups
+}
+
 /** Extra select/boolean configOptions advertised by an ACP agent beyond Model, Thinking Level, and Mode. */
 export function extraAcpConfigOptions(binding: AcpSessionBinding): readonly AcpConfigOption[] {
   const options = binding.config_options ?? []
@@ -219,10 +252,17 @@ export function extraAcpConfigOptions(binding: AcpSessionBinding): readonly AcpC
 }
 
 export function activeAcpConfigOptionLabel(option: AcpConfigOption): string {
-  const matched = option.current_value
-    ? option.options.find(item => item.value === option.current_value)?.name
+  if (option.type === 'boolean' || typeof option.current_value === 'boolean') {
+    const enabled = isAcpConfigOptionEnabled(option)
+    const key = enabled ? 'true' : 'false'
+    const matched = option.options.find(item => item.value.trim().toLowerCase() === key)?.name
+    return (matched || (enabled ? 'On' : 'Off')).trim()
+  }
+  const current = String(option.current_value ?? '')
+  const matched = current
+    ? option.options.find(item => item.value === current)?.name
     : undefined
-  return (matched || option.current_value || option.options[0]?.name || option.name).trim()
+  return (matched || current || option.options[0]?.name || option.name).trim()
 }
 
 /** Ordered active ACP metadata parts (`model`, `thinking`, `mode`, extra config options) for tooltips and VS Code pills. */
@@ -1163,10 +1203,10 @@ export interface AcpConfigOptionPickerProps {
   readonly option: AcpConfigOption
   readonly compact?: boolean
   readonly defaultOpen?: boolean
-  readonly onSelectValue?: (configId: string, value: string) => Promise<boolean> | boolean
+  readonly onSelectValue?: (configId: string, value: string | boolean) => Promise<boolean> | boolean
 }
 
-/** Generic Claude Code-style footer picker for any additional select `configOptions` an ACP agent advertises. */
+/** Generic Claude Code-style footer picker for any additional select/boolean `configOptions` an ACP agent advertises. */
 export function AcpConfigOptionPicker({
   snap,
   option,
@@ -1182,9 +1222,10 @@ export function AcpConfigOptionPicker({
   const popupRef = useRef<HTMLDivElement>(null)
   const filterRef = useRef<HTMLInputElement>(null)
 
+  const isBoolean = option.type === 'boolean'
   const choices = option.options
-  const hasChoices = choices.length > 0
-  const showFilter = choices.length > 6
+  const hasChoices = !isBoolean && choices.length > 0
+  const showFilter = hasChoices && choices.length > 6
   const online = snap.connection === 'online'
   const busy = pending || Boolean(snap.acpConnecting)
 
@@ -1195,9 +1236,12 @@ export function AcpConfigOptionPicker({
       item =>
         item.name.toLowerCase().includes(needle)
         || item.value.toLowerCase().includes(needle)
-        || (item.description?.toLowerCase().includes(needle) ?? false),
+        || (item.description?.toLowerCase().includes(needle) ?? false)
+        || (item.group?.toLowerCase().includes(needle) ?? false),
     )
   }, [choices, query])
+  const grouped = useMemo(() => groupAcpConfigSelectOptions(filtered), [filtered])
+  const hasNamedGroups = grouped.some(entry => entry.group !== null)
 
   useAnchoredRuntimePopup(open && hasChoices, triggerRef, popupRef, 'right')
 
@@ -1219,10 +1263,46 @@ export function AcpConfigOptionPicker({
 
   useEscapeClose(open && hasChoices, close)
 
-  if (!binding || !hasChoices) return null
+  if (!binding) return null
 
   const label = activeAcpConfigOptionLabel(option)
-  const activeValue = option.current_value
+
+  if (isBoolean) {
+    const enabled = isAcpConfigOptionEnabled(option)
+    const toggleBool = async (): Promise<void> => {
+      if (busy || !online) return
+      setPending(true)
+      try {
+        await (onSelectValue ? onSelectValue(option.id, !enabled) : store.setAcpConfigOption(option.id, !enabled))
+      } finally {
+        setPending(false)
+      }
+    }
+    return (
+      <div
+        className={`chipanchor composer__acp-config composer__acp-config--bool${compact ? ' composer__acp-config--compact' : ''}`}
+        data-config-id={option.id}
+      >
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={`${option.name}: ${label}`}
+          className={`cchip composer__text acp-config-chip acp-config-chip--toggle${enabled ? ' is-on' : ''}`}
+          data-provider={binding.provider}
+          title={`${option.name}: ${label}${option.description ? ` — ${option.description}` : ''} — click to toggle`}
+          disabled={busy || !online}
+          onClick={() => void toggleBool()}
+        >
+          <span className="acp-config-chip__label">{pending ? 'Updating…' : `${option.name}: ${label}`}</span>
+        </button>
+      </div>
+    )
+  }
+
+  if (!hasChoices) return null
+
+  const activeValue = String(option.current_value ?? '')
 
   const toggle = (): void => {
     if (open) close()
@@ -1324,34 +1404,46 @@ export function AcpConfigOptionPicker({
                 {filtered.length === 0 ? (
                   <div className="acp-optpop__empty">No matching options</div>
                 ) : (
-                  filtered.map(choice => {
-                    const isActive = choice.value === activeValue
-                    const showId = !choice.description && shouldShowSecondaryId(choice.name, choice.value)
-                    return (
-                      <button
-                        key={choice.value}
-                        type="button"
-                        role="option"
-                        aria-selected={isActive}
-                        title={choice.value}
-                        disabled={busy || !online}
-                        className={`acp-opt-row${isActive ? ' is-active' : ''}`}
-                        onClick={() => void pickValue(choice.value)}
-                      >
-                        <span className="acp-opt-row__body">
-                          <span className="acp-opt-row__name">{choice.name}</span>
-                          {choice.description ? (
-                            <span className="acp-opt-row__desc">{choice.description}</span>
-                          ) : showId ? (
-                            <span className="acp-opt-row__id">{choice.value}</span>
-                          ) : null}
-                        </span>
-                        <span className="acp-opt-row__check" aria-hidden="true">
-                          {isActive ? <Icon name="check" size={13} /> : null}
-                        </span>
-                      </button>
-                    )
-                  })
+                  grouped.map(groupBucket => (
+                    <div
+                      key={groupBucket.group ?? '__default__'}
+                      className="acp-optpop__section"
+                      role={hasNamedGroups && groupBucket.group ? 'group' : undefined}
+                      aria-label={hasNamedGroups && groupBucket.group ? groupBucket.group : undefined}
+                    >
+                      {hasNamedGroups && groupBucket.group && (
+                        <div className="acp-optpop__group" role="presentation">{groupBucket.group}</div>
+                      )}
+                      {groupBucket.options.map(choice => {
+                        const isActive = choice.value === activeValue
+                        const showId = !choice.description && shouldShowSecondaryId(choice.name, choice.value)
+                        return (
+                          <button
+                            key={choice.value}
+                            type="button"
+                            role="option"
+                            aria-selected={isActive}
+                            title={choice.value}
+                            disabled={busy || !online}
+                            className={`acp-opt-row${isActive ? ' is-active' : ''}`}
+                            onClick={() => void pickValue(choice.value)}
+                          >
+                            <span className="acp-opt-row__body">
+                              <span className="acp-opt-row__name">{choice.name}</span>
+                              {choice.description ? (
+                                <span className="acp-opt-row__desc">{choice.description}</span>
+                              ) : showId ? (
+                                <span className="acp-opt-row__id">{choice.value}</span>
+                              ) : null}
+                            </span>
+                            <span className="acp-opt-row__check" aria-hidden="true">
+                              {isActive ? <Icon name="check" size={13} /> : null}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ))
                 )}
               </div>
             </div>
@@ -1396,12 +1488,42 @@ export function isAcpAuthError(message: string): boolean {
 }
 
 interface AgyQuickTransferState {
-  readonly mode: AgyCredentialMode
+  readonly mode: AgyTransferMode
   readonly label: string
   readonly destination: string
   readonly phase: 'reviewing' | 'ready' | 'working' | 'done'
   readonly review?: string
   readonly error: string
+}
+
+function formatTerminalAuthCommand(
+  method: AcpAuthMethodInfo,
+  result?: { readonly command?: string; readonly args?: readonly string[] },
+): string {
+  const quote = (token: string): string => (/^[a-zA-Z0-9_./:=,+-]+$/.test(token) ? token : JSON.stringify(token))
+  const metaTerm =
+    method.meta?.['terminal-auth'] && typeof method.meta['terminal-auth'] === 'object' && !Array.isArray(method.meta['terminal-auth'])
+      ? (method.meta['terminal-auth'] as Readonly<Record<string, unknown>>)
+      : null
+  const command =
+    result?.command?.trim()
+    || (typeof metaTerm?.command === 'string' && metaTerm.command.trim() ? metaTerm.command.trim() : '')
+  const args =
+    result?.args && result.args.length > 0
+      ? result.args
+      : method.args && method.args.length > 0
+        ? method.args
+        : Array.isArray(metaTerm?.args)
+          ? metaTerm.args.filter((entry): entry is string => typeof entry === 'string')
+          : []
+  if (command) return [quote(command), ...args.map(quote)].join(' ')
+  if (args.length > 0) return args.map(quote).join(' ')
+  return ''
+}
+
+function isTerminalAuthMethod(method: AcpAuthMethodInfo): boolean {
+  if (method.type?.trim().toLowerCase() === 'terminal') return true
+  return Boolean(method.meta && 'terminal-auth' in method.meta)
 }
 
 /**
@@ -1421,11 +1543,27 @@ export function AcpActiveBanner({
     ? snap.savedAcpBinding
     : null
   const acpError = snap.acpError?.trim() || ''
+  const authMethods: readonly AcpAuthMethodInfo[] = snap.acpAuthMethods?.length
+    ? snap.acpAuthMethods
+    : snap.acpAuthRequired && binding?.capabilities?.auth_methods?.length
+      ? binding.capabilities.auth_methods
+      : []
   const isAntigravityAuthError =
-    Boolean(acpError) && isAcpAuthError(acpError) && /\b(antigravity|agy)\b/i.test(acpError)
+    Boolean(acpError)
+    && isAcpAuthError(acpError)
+    && (/\b(antigravity|agy)\b/i.test(acpError)
+      || binding?.provider === 'antigravity'
+      || (!binding && savedBinding?.provider === 'antigravity'))
   const [agyStatus, setAgyStatus] = useState<AgyStatusView | null>(null)
   const [transfer, setTransfer] = useState<AgyQuickTransferState | null>(null)
+  const [authBusyId, setAuthBusyId] = useState<string | null>(null)
+  const [terminalCommand, setTerminalCommand] = useState<{ readonly label: string; readonly command: string } | null>(null)
   const transferReq = useRef(0)
+
+  useEffect(() => {
+    setTerminalCommand(null)
+    setAuthBusyId(null)
+  }, [acpError, authMethods.length])
 
   useEffect(() => {
     if (!isAntigravityAuthError || typeof window === 'undefined' || !window.xerxes?.accounts) {
@@ -1449,7 +1587,10 @@ export function AcpActiveBanner({
 
   const connecting = Boolean(snap.acpConnecting)
   const online = snap.connection === 'online'
-  const showAuthHint = Boolean(acpError) && isAcpAuthError(acpError) && !/agy acp --login/i.test(acpError)
+  const showAuthHint =
+    isAntigravityAuthError
+    && !/agy acp --login/i.test(acpError)
+    && authMethods.length === 0
   const canRetry = Boolean(
     onRetry
     || binding
@@ -1458,13 +1599,33 @@ export function AcpActiveBanner({
     || isAcpAuthError(acpError)
     || /\b(antigravity|agy|claude)\b/i.test(acpError),
   )
-  const transferMode = agyStatus?.canSync ? agyStatus.recommendedMode : null
-  const transferSource = transferMode ? agyStatus?.sources.find(s => s.mode === transferMode) : undefined
+  const transferSource = agyQuickTransferSource(agyStatus)
+  const transferMode = transferSource?.mode ?? null
+
+  const runAuthMethod = async (method: AcpAuthMethodInfo): Promise<void> => {
+    if (authBusyId || connecting || !online) return
+    setAuthBusyId(method.id)
+    try {
+      const result = await store.authenticateAcp(method.id)
+      if (!result.ok) return
+      if (result.mode === 'terminal' || isTerminalAuthMethod(method)) {
+        const cmd = formatTerminalAuthCommand(method, result)
+        setTerminalCommand({
+          label: result.label || method.name,
+          command: cmd || `${method.id}`,
+        })
+        return
+      }
+      await (onRetry ? onRetry() : store.retryAcpConnect())
+    } finally {
+      setAuthBusyId(null)
+    }
+  }
 
   const startTransferReview = async (): Promise<void> => {
     if (!transferMode || typeof window === 'undefined' || !window.xerxes?.accounts) return
     const req = ++transferReq.current
-    const label = transferSource?.label ?? 'Gemini Subscription (Antigravity)'
+    const label = transferSource?.label ?? 'Antigravity credentials'
     const destination = agyStatus?.destination ?? 'this SSH host'
     setTransfer({ mode: transferMode, label, destination, phase: 'reviewing', error: '' })
     try {
@@ -1537,8 +1698,32 @@ export function AcpActiveBanner({
                 {' '}Run <code>agy acp --login</code> in your terminal, then click Retry.
               </span>
             )}
+            {terminalCommand && (
+              <span className="acp-banner__termcmd">
+                {' '}Run <code>{terminalCommand.command}</code> in your terminal, then click Retry.{' '}
+                <CopyButton text={terminalCommand.command} label="Copy command" />
+              </span>
+            )}
           </span>
           <div className="acp-banner__actions">
+            {authMethods.map((method, index) => {
+              const isTerm = isTerminalAuthMethod(method)
+              const termPreview = isTerm ? formatTerminalAuthCommand(method) : ''
+              return (
+                <button
+                  key={method.id}
+                  type="button"
+                  className={`acp-banner__switch${index === 0 && !transferMode ? ' acp-banner__switch--primary' : ''}`}
+                  data-auth-method-id={method.id}
+                  data-auth-method-type={isTerm ? 'terminal' : (method.type || 'agent')}
+                  title={method.description || (termPreview ? `Run ${termPreview}` : `Authenticate with ${method.name}`)}
+                  disabled={connecting || !online || authBusyId !== null}
+                  onClick={() => void runAuthMethod(method)}
+                >
+                  {authBusyId === method.id ? 'Authenticating…' : method.name}
+                </button>
+              )
+            })}
             {transferMode && (
               <button
                 type="button"
@@ -1552,7 +1737,7 @@ export function AcpActiveBanner({
             {canRetry && (
               <button
                 type="button"
-                className={`acp-banner__switch${transferMode ? '' : ' acp-banner__switch--primary'}`}
+                className={`acp-banner__switch${transferMode || authMethods.length > 0 ? '' : ' acp-banner__switch--primary'}`}
                 disabled={connecting || !online}
                 onClick={() => void (onRetry ? onRetry() : store.retryAcpConnect())}
               >
@@ -1597,9 +1782,7 @@ export function AcpActiveBanner({
             ) : (
               <>
                 <p>Transfer your local <strong>{transfer.label}</strong> credentials to <strong>{transfer.destination}</strong> and connect Antigravity?</p>
-                <p className="studio-muted">
-                  Credentials are sent over SSH stdin only and saved with owner-only permissions (mode 0600) in ~/.gemini/antigravity-cli/antigravity-oauth-token.
-                </p>
+                <p className="studio-muted">{agyTransferDetail(transfer.mode)}</p>
               </>
             )}
           </ActionDialog>

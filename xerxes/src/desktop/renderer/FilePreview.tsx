@@ -311,20 +311,34 @@ export function RichFilePreview({ preview, requestedSheet, chooseSheet, actions 
 const SHOW_LABEL = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || navigator.userAgent) ? 'Show in Finder' : 'Show in folder'
 
 /** "Open in default app" and "Show in Finder" for the selected file. */
-export function FileActions({ path, cwd, remote }: { path: string; cwd: string; remote: boolean }): ReactElement {
+export function FileActions({ path, cwd, remote, onError, onAction }: {
+  path: string
+  cwd: string
+  remote: boolean
+  /** Lift failures above transient menus so closing the menu never hides errors. */
+  onError?: (message: string) => void
+  /** Invoked when an action starts (e.g. to close a dropdown menu). */
+  onAction?: () => void
+}): ReactElement {
   const [error, setError] = useState('')
-  useEffect(() => setError(''), [path])
+  useEffect(() => { setError(''); onError?.('') }, [path, onError])
   const bridge = typeof window === 'undefined' ? undefined : window.xerxes
   const unavailable = remote ? 'The file is on the SSH host, not on this computer' : !bridge?.fileAction || !cwd ? 'Update the app to open files from here' : ''
+  const reportError = (message: string): void => {
+    if (onError) onError(message)
+    else setError(message)
+  }
   const run = (action: 'open' | 'reveal'): void => {
-    setError('')
+    reportError('')
+    onAction?.()
     if (!bridge?.fileAction) return
     void bridge.fileAction(action, path.replace(/^\.\//, ''), cwd)
-      .then(result => { if (!result.ok) setError(result.error) }, reason => setError(desktopError(reason)))
+      .then(result => { if (!result.ok) reportError(result.error) }, reason => reportError(desktopError(reason)))
   }
+  const itemRole = onAction ? 'menuitem' : undefined
   return <>
-    <button className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || 'Open the file in the app your computer uses for it'} onClick={() => run('open')}>Open in default app</button>
-    <button className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || `${SHOW_LABEL}: ${path}`} onClick={() => run('reveal')}>{SHOW_LABEL}</button>
-    {error && <span className="file-browser__action-error" role="alert">{error}</span>}
+    <button type="button" role={itemRole} className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || 'Open the file in the app your computer uses for it'} onClick={() => run('open')}>Open in default app</button>
+    <button type="button" role={itemRole} className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || `${SHOW_LABEL}: ${path}`} onClick={() => run('reveal')}>{SHOW_LABEL}</button>
+    {!onError && error && <span className="file-browser__action-error" role="alert">{error}</span>}
   </>
 }

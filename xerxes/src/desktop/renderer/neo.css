@@ -13,10 +13,10 @@
      and Claude-layout rules without touching atelier.css or app.css.
    - keyframes are prefixed `neo-` so they never replace a Classic one.
 
-   Colour themes apply in Neo (their tokens are painted inline over these).
-   A background never shows here: backdrop.ts paints only its colours, solid
-   and unblurred, and Classic shows the picture again. The accent washes and
-   lines below derive from --x-accent so they follow either.
+   Colour themes and backgrounds both apply in Neo: their tokens are painted
+   inline over these, and pane backgrounds yield when `[data-backdrop]` is
+   active so images, gradients and transparent windows show through cleanly.
+   The accent washes and lines below derive from --x-accent so they follow either.
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* ── Tokens: dark (default and explicit) ──────────────────────────────
@@ -29,27 +29,34 @@
    Sizes stay on --ui-* so Settings ▸ Interface text size still scales. */
 :root[data-style='neo']:not(#neo) body{font-family:var(--mono);font-feature-settings:"zero" 1;font-variant-ligatures:none}
 :root[data-style='neo']:not(#neo) :is(button,input,textarea,select){font-family:var(--mono)}
-:root[data-style='neo']:not(#neo) .atelier{--mono:'JetBrains Mono',ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;--sans:var(--mono);--prose:var(--mono);--t-caption:500 calc(var(--ui-small) + .5px)/1.45 var(--mono);--t-body:400 calc(var(--ui-font) + 1px)/1.55 var(--mono);--t-title:700 calc(var(--ui-font) + 1px)/1.4 var(--mono);--t-hero:700 calc(var(--ui-large) + 4px)/1.2 var(--mono);--t-num:500 var(--ui-font)/1.4 var(--mono);--t-prose:400 calc(var(--ui-font) + 2px)/1.65 var(--mono);--card-radius:0px;font-feature-settings:"zero" 1;font-variant-ligatures:none}
-:root[data-style='neo']:not(#neo) .atelier :is(.msg,.agent-msg){font:400 calc(var(--ui-font) + 2px)/1.7 var(--mono)}
+:root[data-style='neo']:not(#neo) .atelier{--mono:'JetBrains Mono',ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;--sans:var(--mono);--prose:var(--mono);--t-caption:500 calc(var(--ui-small) + .5px)/1.45 var(--mono);--t-body:400 calc(var(--ui-font) + 1px)/1.55 var(--mono);--t-title:700 calc(var(--ui-font) + 1px)/1.4 var(--mono);--t-hero:700 calc(var(--ui-large) + 4px)/1.2 var(--mono);--t-num:500 var(--ui-font)/1.4 var(--mono);--t-prose:400 calc(var(--ui-font) + 4px)/1.65 var(--mono);--card-radius:0px;font-feature-settings:"zero" 1;font-variant-ligatures:none}
+:root[data-style='neo']:not(#neo) .atelier :is(.msg,.agent-msg){font:400 calc(var(--ui-font) + 4px)/1.7 var(--mono)}
 :root[data-style='neo']:not(#neo) ::selection{background:color-mix(in srgb,var(--x-accent) 28%,transparent)}
 /* ── Geometry: square corners, hairlines, no shadows ─────────────────
    Pseudo-elements are left alone: the round dots drawn with ::before
    (execution spine, workspace status) keep their shape. */
 :root[data-style='neo']:not(#neo) .atelier *,
 :root[data-style='neo']:not(#neo) .runtime-popover{border-radius:0}
+/* Outrank double-ID layout/vibes corner radii so Neo stays crisp and square everywhere. */
+:root[data-style='neo']:not(#neo):not(#neo-corners) .atelier :is(.artifact-card,.artifact-toast,.filetool__code,.filetool__outline,.swarm-tool__details,.swarm-spawn-summary,.plancard,.plancard__plan,.sections-menu__list,.sections-menu__preview,.sections-menu__row,.sections-menu__item,.command-activity,.command-activity>summary,.command-activity__command,.t3-add-pop__icon,.welcome__logo,.xerxes-logo-mark,.chat__back,.t3-mpop__kbd,.t3-mpop__extra-menu,.swarm-jump-latest,.rail-add__menu,.code-completion,.browser-panel__address,.browser-panel__page,.rsec__source,.rsec__editor,.rsec__seg,.rsec__seg-btn,.rsec__text,.rsec__kind-pill,.rsec__ver-pill,.artdoc__chip,.artdoc__outline>button,.execution-row[open]>.execution,.workspace-sheet,.ws-card,.ws-action-tile,.ws-action-tile__icon,.ws-host-list,.ws-host-row__badge,.ws-folder-browser,.ws-host-chip){border-radius:0}
 /* Indicators that are round by meaning, not by decoration. */
 :root[data-style='neo']:not(#neo) .atelier :is(.agent-orb,.agent-orb canvas,.dot,.sess__dot,.railstatus__dot,.railrow__dot,.command-activity__dot,.offline__dot,.runtime-status__dot,.relaybadge__dot,.approval__dot,.wgroup__mark,.resumerow__dot,.welcome__sep,.usage-plan__dot,.studio-spinner,.acard__spin,.todo__icon,.railtodos__mark,.swarm-board__dot,.swarm-member__dot,.sections-menu__dot){border-radius:50%}
 :root[data-style='neo']:not(#neo) .atelier :is(.railcard,.trail,.plan,.acard,.qcard,.approval,.palette-card,.composer-dock,.seg button,.btn,.chipbtn,.cchip,.provcard,.pcard,.activity-group){box-shadow:none}
 :root[data-style='neo']:not(#neo) ::-webkit-scrollbar-thumb{border-radius:0;border-width:4px;background-color:color-mix(in srgb,var(--x-title) 14%,transparent)}
 :root[data-style='neo']:not(#neo) :is(button,input,textarea,select,summary,a,[tabindex]):focus-visible{outline:1px solid var(--x-accent);outline-offset:1px;border-radius:0}
 /* ── Surfaces ─────────────────────────────────────────────────────────
-   Flat panes separated by one hairline, as px0 lays out its IDE. */
-:root[data-style='neo']:not(#neo) .atelier .side{background:var(--x-chrome);backdrop-filter:none;border-right:1px solid var(--x-hairline)}
-:root[data-style='neo']:not(#neo) .atelier .top{background:var(--x-chrome);backdrop-filter:none;border-bottom:1px solid var(--x-hairline)}
-:root[data-style='neo']:not(#neo) .atelier .app__body,
-:root[data-style='neo']:not(#neo) .atelier .chat{background:var(--x-screen)}
-:root[data-style='neo']:not(#neo) .atelier .chat__head{border-bottom:1px solid var(--x-hairline)}
-:root[data-style='neo']:not(#neo) .atelier .desktop-rail{border:0;border-left:1px solid var(--x-hairline);background:var(--x-chrome)}
+   Flat panes separated by one hairline, as px0 lays out its IDE.
+   Opaque pane backgrounds yield under [data-backdrop] and [data-host='vscode']. */
+:root[data-style='neo']:not([data-backdrop]):not([data-host='vscode']):not(#neo) .atelier .side{background:var(--x-chrome)}
+:root[data-style='neo']:not([data-backdrop]):not([data-host='vscode']):not(#neo) .atelier .top{background:var(--x-chrome)}
+:root[data-style='neo']:not([data-backdrop]):not([data-host='vscode']):not(#neo) .atelier .app__body,
+:root[data-style='neo']:not([data-backdrop]):not([data-host='vscode']):not(#neo) .atelier .chat{background:var(--x-screen)}
+:root[data-style='neo']:not([data-backdrop]):not([data-host='vscode']):not(#neo) .atelier .desktop-rail{background:var(--x-chrome)}
+:root[data-style='neo']:not([data-host='vscode']):not(#neo) .atelier .side{backdrop-filter:none;border-right:1px solid var(--x-hairline)}
+:root[data-style='neo']:not([data-host='vscode']):not(#neo) .atelier .top{backdrop-filter:none;border-bottom:1px solid var(--x-hairline)}
+:root[data-style='neo']:not([data-host='vscode']):not(#neo) .atelier .chat__head{border-bottom:1px solid var(--x-hairline)}
+:root[data-style='neo']:not([data-host='vscode']):not(#neo) .atelier .desktop-rail{border:0;border-left:1px solid var(--x-hairline)}
+:root[data-style='neo']:not(#neo) .atelier :is(.vq__opt,.vq__other-toggle)[aria-checked='true']>.vq__radio{border:0;background:var(--x-on-accent);box-shadow:inset 0 0 0 4px var(--x-accent)}
 :root[data-style='neo']:not(#neo) .panel-divider:hover,
 :root[data-style='neo']:not(#neo) .panel-divider:focus-visible{background:var(--x-accent)}
 /* ── Overlays: solid, square, one long soft drop ──────────────────── */
@@ -117,7 +124,7 @@
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock>.composer::before{flex:none;align-self:flex-start;padding:5px 0}
 /* The subagent box keeps its dock (display:block there): frame it directly. */
 :root[data-style='neo']:not(#neo) .atelier .composer-wrap.agent-dock>.composer-dock{border:1px solid var(--x-separator)}
-:root[data-style='neo']:not(#neo) .atelier .composer__input{font:400 14px/1.45 var(--mono)}
+:root[data-style='neo']:not(#neo) .atelier .composer__input{font:400 calc(var(--ui-font) + 3.5px)/1.45 var(--mono)}
 /* The dock's border and accent edge already show focus; the generic Neo focus
    ring drew a second box hard against the typed text. */
 :root[data-style='neo']:not(#neo) .atelier .composer__input:focus-visible{outline:none}

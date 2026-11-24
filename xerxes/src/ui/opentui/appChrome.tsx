@@ -10,7 +10,7 @@ import { $uiReviewCount, $uiSessionId } from '../app/uiStore.js'
 import type { SessionTab } from '../app/interfaces.js'
 import type { LiveSessionStatus } from '../gatewayTypes.js'
 import { GLYPH } from '../domain/nocturne.js'
-import { getOverlayState, overlayBlocksBackgroundHotkeys, patchOverlayState } from '../app/overlayStore.js'
+import { openOverlayIfUnblocked } from '../app/overlayStore.js'
 import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
 import { summarizeSwarmCounts } from '../lib/swarmFormat.js'
 import { fmtK } from '../lib/text.js'
@@ -56,6 +56,7 @@ export const displayModeLabel = (mode?: string): string => {
  */
 export function SessionHeader({
   busy,
+  compactChrome = false,
   disconnected,
   contextMax,
   contextUsed,
@@ -68,6 +69,8 @@ export function SessionHeader({
 }: {
   /** Whether a turn is in flight; drives the state dot and its verb. */
   busy?: boolean
+  /** Collapse the redundant primary row on short terminals (<= 28 rows). */
+  compactChrome?: boolean
   disconnected?: boolean
   contextMax?: number
   contextUsed?: number
@@ -94,6 +97,7 @@ export function SessionHeader({
   const max = contextMax ?? 0
   const used = contextUsed ?? 0
   const pressure = max > 0 ? Math.min(100, (used / max) * 100) : undefined
+  const showPrimaryRow = !compactChrome
 
   return (
     <Box
@@ -102,50 +106,52 @@ export function SessionHeader({
       overflow="hidden"
       paddingX={2}
       paddingY={0}
-      borderSides={height >= 30 ? ['bottom'] : undefined}
+      borderSides={showPrimaryRow && height >= 30 ? ['bottom'] : undefined}
       borderColor={t.ds.hairline}
       width="100%"
     >
-      <Box flexDirection="row" flexShrink={0} gap={2} justifyContent="space-between" overflow="hidden" width="100%">
-        <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-          <Text wrap="truncate-end">
-            <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
-            {/* The mode is stated once — in the composer's chip. Repeating it
-                here made the header read like a second status bar. An untitled
-                session still falls back to it as a name. */}
-            <Span color={t.ds.title}>{title || displayModeLabel(mode)}</Span>
-            {shortId ? (
-              <>
-                <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
-                <Span color={t.ds.meta}>{`session ${shortId}`}</Span>
-              </>
-            ) : null}
-          </Text>
+      {showPrimaryRow ? (
+        <Box flexDirection="row" flexShrink={0} gap={2} justifyContent="space-between" overflow="hidden" width="100%">
+          <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Span color={t.color.brandGold}>{`${GLYPH.brand} `}</Span>
+              {/* The mode is stated once — in the composer's chip. Repeating it
+                  here made the header read like a second status bar. An untitled
+                  session still falls back to it as a name. */}
+              <Span color={t.ds.title}>{title || displayModeLabel(mode)}</Span>
+              {shortId ? (
+                <>
+                  <Span color={t.ds.separator}>{` ${GLYPH.separator} `}</Span>
+                  <Span color={t.ds.meta}>{`session ${shortId}`}</Span>
+                </>
+              ) : null}
+            </Text>
+          </Box>
+          <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Span color={disconnected ? t.color.warn : busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
+              <Span color={t.ds.meta}>{disconnected ? 'disconnected' : busy ? 'working' : 'idle'}</Span>
+              <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
+              {max > 0 ? (
+                <>
+                  {/* One answer to "how much context is left", in one place: the
+                      bar for the glance, the numbers for the decision. It used
+                      to be rendered beside the composer as well, on the row that
+                      answers what ⏎ will do — two places, two truncation rules,
+                      and a collision at 80 columns. */}
+                  <Span color={ctxBarColor(pressure, t)}>{`${ctxMeterBar(pressure)} `}</Span>
+                  <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
+                  <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
+                </>
+              ) : (
+                <Span color={t.ds.meta}>ctx unknown</Span>
+              )}
+            </Text>
+          </Box>
         </Box>
-        <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
-          <Text wrap="truncate-end">
-            <Span color={disconnected ? t.color.warn : busy ? t.ds.working : t.ds.done}>{`${GLYPH.state} `}</Span>
-            <Span color={t.ds.meta}>{disconnected ? 'disconnected' : busy ? 'working' : 'idle'}</Span>
-            <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
-            {max > 0 ? (
-              <>
-                {/* One answer to "how much context is left", in one place: the
-                    bar for the glance, the numbers for the decision. It used
-                    to be rendered beside the composer as well, on the row that
-                    answers what ⏎ will do — two places, two truncation rules,
-                    and a collision at 80 columns. */}
-                <Span color={ctxBarColor(pressure, t)}>{`${ctxMeterBar(pressure)} `}</Span>
-                <Span color={ctxBarColor(pressure, t)}>{fmtK(used)}</Span>
-                <Span color={t.ds.meta}>{` / ${fmtK(max)} ctx`}</Span>
-              </>
-            ) : (
-              <Span color={t.ds.meta}>ctx unknown</Span>
-            )}
-          </Text>
-        </Box>
-      </Box>
+      ) : null}
       {reviewCount > 0 ? <Box flexShrink={0} onClick={() => {
-        if (!overlayBlocksBackgroundHotkeys(getOverlayState())) patchOverlayState({ learning: true })
+        openOverlayIfUnblocked({ learning: true })
       }}>
         <Text color={t.color.warn} wrap="truncate-end">{`${reviewCount} to review · /xerxes`}</Text>
       </Box> : null}
@@ -153,7 +159,7 @@ export function SessionHeader({
         <Box
           flexShrink={0}
           onClick={() => {
-            if (!overlayBlocksBackgroundHotkeys(getOverlayState())) patchOverlayState({ swarm: true })
+            openOverlayIfUnblocked({ swarm: true })
           }}
         >
           <Text color={t.color.accent} wrap="truncate-end">
@@ -163,8 +169,8 @@ export function SessionHeader({
       ) : null}
       <SessionFollowups t={t} sessionId={sessionId} />
       {goal ? (
-        <Box flexDirection="row" flexShrink={0} marginTop={1} overflow="hidden" width="100%">
-          <Box onClick={() => patchOverlayState({ goal: true })}>
+        <Box flexDirection="row" flexShrink={0} marginTop={compactChrome ? 0 : 1} overflow="hidden" width="100%">
+          <Box onClick={() => openOverlayIfUnblocked({ goal: true })}>
             <Text wrap="truncate-end">
               <Span color={t.ds.caption}>{'goal '}</Span>
               <Span color={t.ds.meta}>{goal}</Span>
@@ -354,12 +360,53 @@ export function configuredModelLabel(model: string): string {
   return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed
 }
 
+/**
+ * Shorten long workspace paths (`~/Documents/Projects/Xerxes-Agents` → `~/…/Xerxes-Agents`)
+ * so narrow 80-column terminals keep both the repo name and active model readable.
+ */
+export function shortenWorkspacePath(label: string, maxLength: number): string {
+  const trimmed = label.trim()
+  if (!trimmed || trimmed.length <= maxLength) {
+    return trimmed
+  }
+
+  // Preserve any inline branch suffix like `~/Projects/app (main)`
+  const suffixMatch = /(\s+\([^)]+\))$/.exec(trimmed)
+  const suffix = suffixMatch ? suffixMatch[1]! : ''
+  const pathPart = suffix ? trimmed.slice(0, -suffix.length) : trimmed
+  const budget = Math.max(8, maxLength - suffix.length)
+
+  if (pathPart.length <= budget) {
+    return `${pathPart}${suffix}`
+  }
+
+  const normalized = pathPart.replace(/\\/g, '/')
+  const homePrefixed = normalized.startsWith('~/')
+  const rootPrefixed = normalized.startsWith('/')
+  const segments = normalized.split('/').filter(Boolean)
+
+  if (segments.length >= 2) {
+    const lead = homePrefixed ? '~/' : rootPrefixed ? '/' : ''
+    const last = segments[segments.length - 1]!
+    const shortOne = `${lead}…/${last}`
+    if (shortOne.length <= budget) {
+      return `${shortOne}${suffix}`
+    }
+    if (last.length <= budget) {
+      return `${last}${suffix}`
+    }
+  }
+
+  return truncate(trimmed, maxLength)
+}
+
 export function WorkspaceFooter({
   onPanel,
   cwdLabel,
   providerModel,
   pulse,
   rightLabel,
+  statusTone,
   t
 }: {
   cwdLabel: string
@@ -369,15 +416,23 @@ export function WorkspaceFooter({
   /** Working-tree state. Omitted before the first `git` answer lands. */
   pulse?: RepoPulse
   rightLabel?: string
+  /** Compact status indicator shown when SessionHeader collapses on short screens. */
+  statusTone?: 'busy' | 'disconnected' | 'idle'
   t: Theme
 }) {
   const { width } = useTerminalDimensions()
   const showProvider = providerModel !== undefined
   const modelConfigured = Boolean(providerModel?.trim())
-  const branch = pulse ? branchLabel(pulse) : ''
+  const rawBranch = pulse ? branchLabel(pulse) : ''
+  const branch = rawBranch && width <= 88 ? truncate(rawBranch, 10) : rawBranch
   // Working-tree changes are neutral information; amber is reserved for prompts.
-  const tree = pulse?.dirty ? `● ${pulse.dirty} dirty` : branch ? '✓ clean' : ''
+  const tree = pulse?.dirty ? (width <= 84 ? `● ${pulse.dirty}` : `● ${pulse.dirty} dirty`) : branch ? (width <= 84 ? '✓' : '✓ clean') : ''
   const treeColor = t.ds.secondary
+  const pathMax = width <= 84 ? 22 : width < 110 ? 32 : 56
+  const displayCwd = cwdLabel ? shortenWorkspacePath(cwdLabel, pathMax) : ''
+  const compactHints = width < 88 && rightLabel ? (rightLabel.length > 18 ? 'F6–F10' : rightLabel) : rightLabel
+  const statusColor =
+    statusTone === 'disconnected' ? t.color.warn : statusTone === 'busy' ? t.ds.working : t.ds.done
 
   if (!cwdLabel && !rightLabel && !showProvider) {
     return null
@@ -393,21 +448,19 @@ export function WorkspaceFooter({
       gap={2}
       justifyContent="space-between"
       overflow="hidden"
-      paddingTop={1}
-      paddingBottom={1}
       paddingX={2}
       width="100%"
     >
-      {/* Shrink priority: the workspace path is the identity of this screen
-          and yields LAST. The hotkey hints are disposable, so their box
-          carries the shrink and truncates first; the path only truncates
-          when the terminal itself is genuinely too narrow for it. */}
-      <Box flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
-        {cwdLabel ? (
+      {/* Left segment carries flexShrink={1} and smart path shortening so at
+          80 columns the workspace stays recognizable without starving the
+          active model name and key hints on the right. */}
+      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+        {displayCwd ? (
           <Text color={t.ds.secondary} wrap="truncate-end">
-            <Span bold color={t.color.brandGold}>{`${GLYPH.brand} XERXES  `}</Span>
+            <Span bold color={t.color.brandGold}>{`${GLYPH.brand} XERXES `}</Span>
+            {statusTone ? <Span color={statusColor}>{`${GLYPH.state} `}</Span> : <Span>{' '}</Span>}
             {process.env.XERXES_REMOTE_LABEL ? <Span color={t.color.accent}>{`SSH ${process.env.XERXES_REMOTE_LABEL} · `}</Span> : null}
-            {cwdLabel}
+            {displayCwd}
             {branch ? (
               <>
                 <Span color={t.ds.rule}>{` ${GLYPH.sectionBreak} `}</Span>
@@ -418,30 +471,36 @@ export function WorkspaceFooter({
           </Text>
         ) : null}
       </Box>
-      {rightLabel || showProvider ? (
-        <Box flexDirection="row" flexShrink={1} gap={1} justifyContent="flex-end" minWidth={0} overflow="hidden">
+      {compactHints || showProvider ? (
+        <Box flexDirection="row" flexShrink={0} gap={1} justifyContent="flex-end" minWidth={0} overflow="hidden">
           {onPanel && width >= 120 ? (
             <Box gap={2} flexShrink={0}>
               {([['agents', 'F6 agents'], ['diff', 'F7 changes'], ['terminals', 'F8 terminal'], ['tools', 'F9 tools'], ['goal', 'F10 goals']] as const).map(([panel, label]) => (
                 <Box key={panel} onClick={() => onPanel(panel)}><Text color={t.ds.caption}>{label}</Text></Box>
               ))}
             </Box>
-          ) : rightLabel ? <Text color={t.ds.caption} wrap="truncate-end">{rightLabel}</Text> : null}
+          ) : compactHints ? (
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Text color={t.ds.caption} wrap="truncate-end">{compactHints}</Text>
+            </Box>
+          ) : null}
           {showProvider ? (
-            modelConfigured ? (
-              // The configured model by name. Configuration only: not evidence
-              // of credentials or connectivity. "model selected" said nothing
-              // and clipped to "mod...ected" at common widths.
-              <Text wrap="truncate-end">
-                <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
-                <Span color={t.ds.caption}>{configuredModelLabel(providerModel ?? '')}</Span>
-              </Text>
-            ) : (
-              <Text wrap="truncate-end">
-                <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
-                <Span color={t.color.warn}>{`${GLYPH.state} no model · /provider`}</Span>
-              </Text>
-            )
+            <Box flexShrink={0} maxWidth={width < 56 ? Math.max(12, Math.floor(width / 2)) : undefined} overflow="hidden">
+              {modelConfigured ? (
+                // The configured model by name. Configuration only: not evidence
+                // of credentials or connectivity. "model selected" said nothing
+                // and clipped to "mod...ected" at common widths.
+                <Text wrap="truncate-end">
+                  <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
+                  <Span color={t.ds.caption}>{configuredModelLabel(providerModel ?? '')}</Span>
+                </Text>
+              ) : (
+                <Text wrap="truncate-end">
+                  <Span color={t.ds.rule}>{`${GLYPH.sectionBreak} `}</Span>
+                  <Span color={t.color.warn}>{`${GLYPH.state} no model · /provider`}</Span>
+                </Text>
+              )}
+            </Box>
           ) : null}
         </Box>
       ) : null}

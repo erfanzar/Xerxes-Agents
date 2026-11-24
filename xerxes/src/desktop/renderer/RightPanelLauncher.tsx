@@ -10,12 +10,56 @@
  * is open, `DesktopRail` renders its tabs and the `+` RailAddMenu switcher.
  */
 
-import { useEffect, type ReactElement } from 'react'
+import { useEffect, useRef, type ReactElement } from 'react'
 import { T3Icon, railT3IconOf } from './T3Icons.js'
 import { activityFleetRows, agentState } from './AgentRoster.js'
 import { showsImmortalsForSession, type Snapshot } from './store.js'
 import { swarmMemberCounts } from './swarmState.js'
 import type { RailPanel } from './railTabs.js'
+
+const BLOCKING_OVERLAY_SELECTOR = [
+  'dialog[open]',
+  '[role="dialog"][aria-modal="true"]',
+  '[role="dialog"]',
+  '[role="menu"]',
+  '[role="listbox"]',
+  '.findbar',
+  '.palette',
+  '.hints',
+  '.t3-popover',
+  '.modelpop',
+  '.acp-pop',
+  '.combo-pop',
+  '.swarm-model-picker',
+].join(',')
+
+/** True when a modal dialog, popover, or menu outside the launcher owns keyboard shortcuts. */
+export function hasBlockingLauncherOverlay(launcherRoot: HTMLElement | null): boolean {
+  if (typeof document === 'undefined') return false
+  for (const el of document.querySelectorAll(BLOCKING_OVERLAY_SELECTOR)) {
+    if (launcherRoot && launcherRoot.contains(el)) continue
+    if (el instanceof HTMLElement && el.hidden) continue
+    return true
+  }
+  return false
+}
+
+export function isEditableEventTarget(target: EventTarget | null): boolean {
+  if (!target || typeof target !== 'object') return false
+  const el = target as HTMLElement
+  if (
+    el.tagName === 'INPUT' ||
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'SELECT' ||
+    el.isContentEditable
+  ) {
+    return true
+  }
+  if (typeof el.closest === 'function') {
+    return Boolean(el.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]'))
+  }
+  return false
+}
 
 export interface SurfaceLauncherItem {
   readonly panel: RailPanel
@@ -42,8 +86,6 @@ export function RightPanelLauncher({
   snap,
   onPick,
   onClose,
-  filesExpanded = false,
-  toggleFilesExpanded,
 }: {
   readonly snap: Snapshot
   readonly onPick: (panel: RailPanel) => void
@@ -51,6 +93,7 @@ export function RightPanelLauncher({
   readonly filesExpanded?: boolean
   readonly toggleFilesExpanded?: () => void
 }): ReactElement {
+  const rootRef = useRef<HTMLElement>(null)
   const showSwarm = showsImmortalsForSession(snap)
   const items = showSwarm
     ? XERXES_SURFACES
@@ -59,30 +102,43 @@ export function RightPanelLauncher({
   const fleet = activityFleetRows(snap.fleet, snap.blocks)
   const workingAgents = fleet.filter(row => agentState(row.status).priority < 2).length
   const swarmCounts = snap.swarm ? swarmMemberCounts(snap.swarm.members) : null
+  const snapOverlayOpen = Boolean(
+    snap.paletteOpen ||
+    snap.searchOpen ||
+    snap.taskModalOpen ||
+    snap.settingsOpen ||
+    snap.pickerOpen ||
+    snap.reasoningPickerOpen ||
+    snap.delegationMenuOpen ||
+    snap.modelMenuOpen ||
+    snap.contextMenuOpen ||
+    snap.wsMenuOpen ||
+    snap.sessionMenu,
+  )
 
-  // Single-letter shortcuts while the launcher is open (never hijacking typing in inputs).
+  // Single-letter shortcuts + Escape dismissal while the launcher is open
+  // (never hijacking typing in inputs or active modals/menus/popovers).
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
-      const target = event.target as HTMLElement | null
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable)
-      ) {
+      if (event.defaultPrevented || snapOverlayOpen || hasBlockingLauncherOverlay(rootRef.current)) return
+      if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
         return
       }
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      if (isEditableEventTarget(event.target)) return
       const key = event.key.toUpperCase()
       const match = items.find(item => item.shortcut === key)
       if (!match) return
       event.preventDefault()
+      event.stopPropagation()
       onPick(match.panel)
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [items, onPick])
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [items, onPick, onClose, snapOverlayOpen])
 
   const badgeFor = (panel: RailPanel): string | null => {
     if (panel === 'review' && snap.changes.length > 0) return `${snap.changes.length}`
@@ -97,23 +153,13 @@ export function RightPanelLauncher({
 
   return (
     <aside
+      ref={rootRef}
       className="desktop-rail studio-sheet t3-surface-launcher"
       data-right-panel-launcher="true"
       aria-label="Open a surface"
     >
       <header className="t3-surface-launcher__head">
         <span className="composer__flex" />
-        {toggleFilesExpanded && (
-          <button
-            type="button"
-            aria-label={filesExpanded ? 'Restore conversation' : 'Expand right panel'}
-            title={filesExpanded ? 'Restore conversation' : 'Expand right panel'}
-            aria-pressed={filesExpanded}
-            onClick={toggleFilesExpanded}
-          >
-            <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} />
-          </button>
-        )}
         <button type="button" aria-label="Close right panel" title="Close right panel" onClick={onClose}>
           <T3Icon name="close" size={14} />
         </button>

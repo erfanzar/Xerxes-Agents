@@ -249,7 +249,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setVoiceProcessing(false)
     // Background tasks belong to other live sessions too; switching tabs must
     // not forget them before their completion event arrives.
-    patchUiState({ disconnected: false, info: null, sid: null, usage: ZERO })
+    patchUiState({ acpBinding: null, disconnected: false, info: null, sid: null, usage: ZERO })
     setHistoryItems([])
     setLastUserMsg('')
     setStickyPrompt('')
@@ -316,6 +316,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       writeActiveSessionFile(r.session_id)
       patchUiState({
+        acpBinding: info?.acp_binding ?? null,
         info,
         sid: r.session_id,
         status: info?.version ? 'ready' : 'starting agent…',
@@ -449,6 +450,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...transcript] : transcript))
           writeActiveSessionFile(r.session_key ?? r.session_id)
           patchUiState({
+            acpBinding: info?.acp_binding ?? null,
             busy: running,
             info,
             sid: r.session_id,
@@ -540,6 +542,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             if (!replaying) setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...resumed] : resumed))
             writeActiveSessionFile(r.resumed ?? r.session_id)
             patchUiState({
+              acpBinding: info?.acp_binding ?? null,
               disconnected: false,
               busy: running,
               info,

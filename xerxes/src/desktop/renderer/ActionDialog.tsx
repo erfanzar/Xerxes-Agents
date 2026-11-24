@@ -13,7 +13,7 @@ export function ActionDialog({ title, children, confirmLabel, busyLabel = 'Worki
   const root = useRef<HTMLDivElement>(null)
   const titleId = useId(), descriptionId = useId()
   useDialogFocus(root)
-  const content = <div className="action-dialog-layer" onKeyDown={event => {
+  const content = <div className="atelier action-dialog-layer" onKeyDown={event => {
     if (event.key === 'Escape') { event.stopPropagation(); event.preventDefault(); if (!busy) onCancel() }
   }}>
     <div className="action-dialog-scrim" aria-hidden="true" onClick={() => { if (!busy) onCancel() }} />
@@ -23,7 +23,7 @@ export function ActionDialog({ title, children, confirmLabel, busyLabel = 'Worki
       {error && <p role="alert" className="studio-error">{error}</p>}
       <footer>
         {!done && <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>}
-        <button type="button" className="btn btn-primary" disabled={busy || disabled} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
+        <button type="button" className="btn btn--solid" disabled={busy || disabled} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
       </footer>
     </div>
   </div>

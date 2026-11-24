@@ -12,6 +12,7 @@ import type { ReactElement } from 'react'
 
 import { useDesktopNavigation } from './DesktopPanels.js'
 import { Icon } from './Icon.js'
+import { localMachineLabel, localMachineNoun } from './runModeView.js'
 import type { ProviderRelayView } from './store.js'
 
 export function relaySummary(relay: ProviderRelayView, now = Date.now()): string {
@@ -45,6 +46,8 @@ export function RelayBadge({ relay }: { relay: ProviderRelayView }): ReactElemen
     )
   }
   const state = !relay.live ? relay.reconnecting ? 'reconnecting' : 'ended' : relay.inFlight > 0 ? 'busy' : 'live'
+  const machine = localMachineLabel()
+  const machineNoun = localMachineNoun(true)
   return (
     <button
       className="cchip composer__text relaybadge"
@@ -54,7 +57,7 @@ export function RelayBadge({ relay }: { relay: ProviderRelayView }): ReactElemen
       onClick={() => open('workspace')}
     >
       <Icon name={state === 'ended' ? 'warning' : 'laptop'} size={14} />
-      <span>{state === 'ended' ? 'Mac not connected' : state === 'reconnecting' ? 'Reconnecting to this Mac…' : 'via this Mac'}</span>
+      <span>{state === 'ended' ? `${machineNoun} not connected` : state === 'reconnecting' ? `Reconnecting to ${machine}…` : `via ${machine}`}</span>
       {(state === 'busy' || state === 'reconnecting') && <span className="relaybadge__dot" aria-hidden="true" />}
     </button>
   )

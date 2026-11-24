@@ -134,7 +134,7 @@ export function CopyPicker({ copyFn, onCancel, onCopied, t: suppliedTheme }: Cop
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       flexDirection="column"
       height={height}
       left={0}

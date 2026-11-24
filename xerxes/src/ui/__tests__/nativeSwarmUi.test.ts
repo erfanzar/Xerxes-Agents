@@ -1266,8 +1266,18 @@ describe('Native Swarm TUI', () => {
       })
       await screen.flush()
 
-      expect(screen.captureCharFrame()).toContain('Where are slash commands defined?')
-      expect(screen.captureCharFrame()).toContain('Streaming live aside delta…')
+      const waitForText = async (needle: string): Promise<string> => {
+        for (let pass = 0; pass < 40; pass += 1) {
+          await screen.flush()
+          const frame = screen.captureCharFrame()
+          if (frame.includes(needle)) return frame
+          await new Promise(resolve => setTimeout(resolve, 15))
+        }
+        return screen.captureCharFrame()
+      }
+
+      expect(await waitForText('Where are slash commands defined?')).toContain('Where are slash commands defined?')
+      expect(await waitForText('Streaming live aside delta…')).toContain('Streaming live aside delta…')
 
       // Settle RPC response
       await act(async () => {
@@ -1281,8 +1291,7 @@ describe('Native Swarm TUI', () => {
         })
         await flushMicrotasks()
       })
-      await screen.flush()
-      expect(screen.captureCharFrame()).toContain('In xerxes/src/bridge/commands.ts.')
+      expect(await waitForText('In xerxes/src/bridge/commands.ts.')).toContain('In xerxes/src/bridge/commands.ts.')
 
       // Press 'c' to clear the ephemeral thread
       act(() => screen.mockInput.pressKey('c'))

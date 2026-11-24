@@ -187,11 +187,12 @@ export function ArtifactsSection({
   const [reload, setReload] = useState(0)
   // Edit mode: a draft of the content, saved through artifacts.update.
   const [draft, setDraft] = useState<string | null>(null)
+  const [pendingDiscardAction, setPendingDiscardAction] = useState<'cancel' | 'back' | null>(null)
   const [saving, setSaving] = useState(false)
   const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle')
   const copiedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(copiedTimer.current), [])
-  useEffect(() => { setOutlineOpen(false); setWidgetKey(0) }, [artifactId])
+  useEffect(() => { setOutlineOpen(false); setWidgetKey(0); setPendingDiscardAction(null) }, [artifactId])
   const copy = (value: string): void => {
     void copyToClipboard(value).then(ok => {
       setCopied(ok ? 'copied' : 'failed')
@@ -207,7 +208,7 @@ export function ArtifactsSection({
         const art = record(result.artifact)
         const row = artifactRowsOf([art])[0]
         if (row?.id === open.row.id) setDocument(current => !current || current.row.version <= row.version ? { row, content: text(art.content) } : current)
-        setDraft(null); setError(''); setReload(value => value + 1)
+        setDraft(null); setPendingDiscardAction(null); setError(''); setReload(value => value + 1)
       })
       .catch(reason => setError(desktopError(reason)))
       .finally(() => setSaving(false))
@@ -303,10 +304,27 @@ export function ArtifactsSection({
       .catch(reason => { if (live) setError(desktopError(reason)) })
     return () => { live = false }
   }, [artifactId, target?.count, sessionKey, online, listedVersion, announcedVersion])
-  const back = (): void => {
-    setPickedId(''); setDocument(null); setDraft(null); setSource(false); setOutlineOpen(false); setWidgetKey(0); setError('')
+  const isDirtyDraft = draft !== null && open !== null && draft !== open.content
+  const performBack = (): void => {
+    setPickedId(''); setDocument(null); setDraft(null); setPendingDiscardAction(null); setSource(false); setOutlineOpen(false); setWidgetKey(0); setError('')
     onBack?.()
   }
+  const requestDiscard = (action: 'cancel' | 'back'): void => {
+    if (isDirtyDraft) {
+      setPendingDiscardAction(action)
+      return
+    }
+    setPendingDiscardAction(null)
+    if (action === 'back') performBack()
+    else setDraft(null)
+  }
+  const confirmDiscard = (): void => {
+    const action = pendingDiscardAction
+    setPendingDiscardAction(null)
+    if (action === 'back') performBack()
+    else setDraft(null)
+  }
+  const back = (): void => { requestDiscard('back') }
   const pin = (row: ArtifactRow): void => {
     void desktopCall(window.xerxes, sessionKey, 'artifacts.pin', { id: row.id, pinned: !row.pinned })
       .then(() => { setReload(value => value + 1); setDocument(current => current?.row.id === row.id ? { ...current, row: { ...current.row, pinned: !row.pinned } } : current) })
@@ -339,13 +357,17 @@ export function ArtifactsSection({
             <T3Icon name="squareMenu" size={14} />
           </button>
         )}
-        <span className="rsec__kind-pill" data-kind={row.kind}>{kindBadgeLabel(row)}</span>
-        <strong className="rsec__title" title={row.title}>{row.title}</strong>
-        {row.version > 1 && <span className="rsec__ver-pill">v{row.version}</span>}
+        {!isMarkdownDoc && (
+          <>
+            <span className="rsec__kind-pill" data-kind={row.kind}>{kindBadgeLabel(row)}</span>
+            <strong className="rsec__title" title={row.title}>{row.title}</strong>
+            {row.version > 1 && <span className="rsec__ver-pill">v{row.version}</span>}
+          </>
+        )}
         <span className="rsec__spacer" />
         <span className="rsec__actions">
           {draft !== null ? <>
-            <button type="button" className="rsec__text" onClick={() => setDraft(null)} disabled={saving}>Cancel</button>
+            <button type="button" className="rsec__text" onClick={() => requestDiscard('cancel')} disabled={saving}>Cancel</button>
             <button type="button" className="rsec__text rsec__text--primary" onClick={save} disabled={saving || draft === open.content}>{saving ? 'Saving…' : 'Save'}</button>
           </> : <>
             {hasPreviewToggle && (
@@ -382,7 +404,8 @@ export function ArtifactsSection({
               </button>
             )}
             <button type="button" className="rsec__icon" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} title={row.pinned ? 'Unpin' : 'Pin'} onClick={() => pin(row)}><T3Icon name={row.pinned ? 'pinOff' : 'pin'} size={14} /></button>
-            <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>
+            {/* Antigravity artifacts live in agy's own brain directory, which Xerxes never writes. */}
+            {!row.id.startsWith('agy:') && <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>}
             <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>
           </>}
         </span>
@@ -404,6 +427,15 @@ export function ArtifactsSection({
           </>}
         </p>
       )}
+      {pendingDiscardAction && (
+        <div className="rsec__confirm" role="alertdialog" aria-label="Unsaved artifact changes">
+          <span>Discard unsaved changes to this artifact?</span>
+          <span className="rsec__confirm-actions">
+            <button type="button" className="rsec__text" onClick={() => setPendingDiscardAction(null)}>Keep editing</button>
+            <button type="button" className="rsec__text rsec__text--primary" onClick={confirmDiscard}>Discard</button>
+          </span>
+        </div>
+      )}
       {error && <p className="studio-error" role="alert">{error}</p>}
       {outlineOpen && outline.length > 0 && <nav className="artdoc__outline" aria-label="Outline">
         {outline.map((heading, index) => <button type="button" key={index} data-level={heading.level} title={heading.text} onClick={() => jump(index)}>{heading.text}</button>)}
@@ -411,10 +443,10 @@ export function ArtifactsSection({
       <div className="rsec__body" ref={docBody}>
         {draft !== null
           ? <textarea className="rsec__editor" aria-label={`Edit ${row.title}`} value={draft} spellCheck={false} autoFocus
-              onChange={event => setDraft(event.target.value)}
+              onChange={event => { setDraft(event.target.value); if (pendingDiscardAction) setPendingDiscardAction(null) }}
               onKeyDown={event => {
                 if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save() }
-                if (event.key === 'Escape') { event.preventDefault(); setDraft(null) }
+                if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); requestDiscard('cancel') }
               }} />
           : isHtmlPreview
             ? <div className="rsec__widget-stage">
@@ -463,6 +495,12 @@ export function ArtifactsSection({
       ? <p className="rsec__empty" role="status">This workspace runtime is older than the app and can't list artifacts yet. They appear here after the runtime restarts on the new build.</p>
       : (listError || error) && <p className="studio-error" role="alert">{listError || error}</p>}
     {loaded && !listError && rows.length === 0 && <p className="rsec__empty">No artifacts yet. Reports, plans and documents the agent saves with the artifact tool appear here.</p>}
+    {rows.length > 0 && shown.length === 0 && needle.trim() && (
+      <div className="rsec__empty rsec__empty--filter" role="status">
+        <span>No matching artifacts</span>
+        <button type="button" className="rsec__text" onClick={() => setNeedle('')}>Clear filter</button>
+      </div>
+    )}
     {shown.length > 0 && <div className="rsec__group"><span>Artifacts</span><span className="rsec__count">{shown.length}</span></div>}
     {shown.map(row => <div className="rsec__row rsec__row--artifact" key={row.id}>
       <button type="button" className="rsec__open" onClick={() => { setError(''); setPickedId(row.id) }} title={row.title}>
@@ -562,6 +600,12 @@ export function SubagentsSection({
           </button>
         </div>
       })() : <p className="rsec__empty">No subagents in this task yet.</p>
+    )}
+    {rows.length > 0 && filtered.length === 0 && needle.trim() && (
+      <div className="rsec__empty rsec__empty--filter" role="status">
+        <span>No matching subagents</span>
+        <button type="button" className="rsec__text" onClick={() => setNeedle('')}>Clear filter</button>
+      </div>
     )}
     {running.length > 0 && <><div className="rsec__group"><span>Running</span><span className="rsec__count">{running.length}</span></div>{running.map(line)}</>}
     {finished.length > 0 && <>

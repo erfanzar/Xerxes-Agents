@@ -111,7 +111,7 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
     else if (key === 'transport') setDraft(value => ({ ...value, transport: ['stdio', 'sse', 'streamable_http'][(['stdio', 'sse', 'streamable_http'].indexOf(String(value.transport ?? server.transport)) + 1) % 3] }))
     else setEditing(true)
   })
-  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
+  return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor={t.ds.scrim} alignItems="center" justifyContent="center">
     <Box width={!server && !editing ? Math.min(88, size.width) : size.width} height={!server && !editing ? Math.min(24, size.height) : size.height} backgroundColor={t.color.overlayBg} borderStyle="round" borderColor={t.color.border} padding={1} flexDirection="column">
       <DialogHeader t={t} title="Configuration · MCP servers" subtitle="Connect tools and services to your agent." />
       {server || editing ? <Text wrap="wrap">{naming ? 'New server · enter name' : server ? `${creating ? 'New' : `${selected + 1}/${settings!.servers.length}`} · ${server.name}` : 'User settings'}</Text> : null}

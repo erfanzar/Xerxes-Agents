@@ -768,7 +768,7 @@ export function TerminalPanelOverlay({ onClose, t }: { onClose: () => void; t: T
   return (
     <box
       alignItems="center"
-      backgroundColor="#000000cc"
+      backgroundColor={t.ds.scrim}
       flexDirection="column"
       height="100%"
       justifyContent="center"

@@ -40,7 +40,9 @@ export type ApprovalResponseKind = 'always' | 'approve' | 'approve_for_session' 
 export interface QuestionItem {
   allow_free_form?: boolean
   id: string
+  multi_select?: boolean
   options?: string[]
+  placeholder?: string
   question: string
 }
 
@@ -1073,7 +1075,10 @@ export interface AcpExternalConfigOptionChoice {
   readonly value: string
   readonly name: string
   readonly description?: string
+  readonly group?: string
 }
+
+export type AcpConfigSelectOption = AcpExternalConfigOptionChoice
 
 export interface AcpExternalConfigOption {
   readonly id: string
@@ -1081,7 +1086,7 @@ export interface AcpExternalConfigOption {
   readonly description?: string
   readonly category?: string
   readonly type: string
-  readonly current_value: string
+  readonly current_value: string | boolean
   readonly options: readonly AcpExternalConfigOptionChoice[]
 }
 
@@ -1106,6 +1111,7 @@ export interface AcpRuntimeSessionCapabilities {
   readonly load: boolean
   readonly resume: boolean
   readonly list: boolean
+  readonly fork: boolean
   readonly close: boolean
   readonly additional_directories: boolean
 }
@@ -1119,7 +1125,13 @@ export interface AcpRuntimeAuthMethod {
   readonly id: string
   readonly name: string
   readonly description?: string
+  readonly type?: string
+  readonly args?: readonly string[]
+  readonly env?: Readonly<Record<string, string>>
+  readonly meta?: Readonly<Record<string, unknown>>
 }
+
+export type AcpAuthMethodInfo = AcpRuntimeAuthMethod
 
 export interface AcpRuntimeCapabilities {
   readonly prompt: AcpRuntimePromptCapabilities
@@ -1204,6 +1216,10 @@ export type AcpConnectParams = {
   args?: readonly string[]
   mode_id?: string
   resume_session_id?: string
+  additional_directories?: readonly string[]
+  ide_mcp_port?: number
+  agent?: string
+  sandbox?: boolean
 }
 
 export interface AcpConnectResponse {
@@ -1211,6 +1227,8 @@ export interface AcpConnectResponse {
   binding?: AcpSessionBinding
   error?: string
   install_hint?: string
+  auth_required?: boolean
+  auth_methods?: AcpAuthMethodInfo[]
 }
 
 export type AcpDisconnectParams = {
@@ -1264,10 +1282,63 @@ export type AcpSetConfigOptionParams = {
   session_id?: string | null
   session_key?: string
   config_id: string
-  value: string
+  value: string | boolean
+  type?: 'boolean' | 'select' | string
 }
 
 export interface AcpSetConfigOptionResponse {
+  ok: boolean
+  binding?: AcpSessionBinding
+  error?: string
+}
+
+export type AcpAuthenticateParams = {
+  session_id?: string | null
+  session_key?: string
+  method_id: string
+  agent_id?: string
+}
+
+export interface AcpAuthenticateResponse {
+  ok: boolean
+  mode?: 'agent' | 'terminal'
+  command?: string
+  args?: readonly string[]
+  env?: Readonly<Record<string, string>>
+  label?: string
+  error?: string
+}
+
+export interface AcpSessionSummary {
+  readonly session_id: string
+  readonly cwd?: string
+  readonly title?: string
+  readonly updated_at?: string
+  readonly meta?: Readonly<Record<string, unknown>>
+}
+
+export type AcpSessionsParams = {
+  session_id?: string | null
+  session_key?: string
+  cwd?: string
+  cursor?: string
+}
+
+export interface AcpSessionsResponse {
+  ok: boolean
+  sessions: AcpSessionSummary[]
+  next_cursor?: string
+  error?: string
+}
+
+export type AcpForkParams = {
+  session_id?: string | null
+  session_key?: string
+  cwd?: string
+  external_session_id?: string
+}
+
+export interface AcpForkResponse {
   ok: boolean
   binding?: AcpSessionBinding
   error?: string
@@ -1347,6 +1418,23 @@ export type GatewayEvent =
     }
   | {
       payload: {
+        content_blocks?: readonly Record<string, unknown>[]
+        diff?: { new_text?: string; old_text?: string; path: string }
+        diffs?: { new_text?: string; old_text?: string; path: string }[]
+        inputs?: Record<string, unknown>
+        kind?: string
+        locations?: { line?: number; path: string }[]
+        name?: string
+        output?: string
+        status?: string
+        title?: string
+        tool_id: string
+      }
+      session_id?: string
+      type: 'tool.update'
+    }
+  | {
+      payload: {
         duration_s?: number
         error?: string
         inline_diff?: string
@@ -1364,19 +1452,25 @@ export type GatewayEvent =
       payload: {
         allow_free_form?: boolean
         choices: string[] | null
+        elicitation_id?: string
+        message?: string
+        mode?: 'form' | 'url'
+        multi_select?: boolean
         placeholder?: string
         question: string
         question_id?: string
+        questions?: QuestionItem[]
         request_id: string
         source?: 'agent' | 'provider'
         tool_id?: string
+        url?: string
       }
       session_id?: string
       type: 'clarify.request'
     }
   | {
       /** The daemon request id (without the `:question` suffix), and whether the daemon answered on its timeout. */
-      payload: { request_id: string; answer?: string; auto: boolean }
+      payload: { answer?: string; auto: boolean; elicitation_id?: string; reason?: string; request_id: string }
       session_id?: string
       type: 'clarify.resolved'
     }
@@ -1387,9 +1481,10 @@ export type GatewayEvent =
         cwd?: string
         description: string
         diff?: { new_text?: string; old_text?: string; path: string }
+        diffs?: Array<{ new_text?: string; old_text?: string; path: string }>
         inputs?: Record<string, unknown>
         locations?: Array<{ line?: number; path: string }>
-        options?: Array<{ kind: string; name: string; option_id: string }>
+        options?: Array<{ kind: string; name: string; option_id: string; warning?: string }>
         request_id: string
       }
       session_id?: string

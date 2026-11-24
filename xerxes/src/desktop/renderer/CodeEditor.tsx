@@ -49,16 +49,23 @@ function caretPoint(element: HTMLTextAreaElement, offset: number): { top: number
   const { line, character } = cursorPosition(element.value, offset)
   let left = (Number.parseFloat(style.paddingLeft) || 0) + character * width
   let popupWidth = 420
+  let top = element.offsetTop + (line + 1) * lineHeight + 2
   // Keep the list inside the visible part of the panel: on a long or scrolled line the caret's
-  // column can be past the panel's right edge.
+  // column can be past the panel's right edge, or near the bottom edge of the scroll container.
   const scroller = element.closest('.file-browser__preview')
   if (scroller instanceof HTMLElement && scroller.clientWidth > 0) {
     popupWidth = Math.max(200, Math.min(420, scroller.clientWidth - 16))
     const minLeft = scroller.scrollLeft + 8
     const maxLeft = scroller.scrollLeft + scroller.clientWidth - popupWidth - 8
     left = Math.max(minLeft, Math.min(left, maxLeft))
+    const estimatedHeight = 220
+    const visibleBottom = scroller.scrollTop + scroller.clientHeight
+    const aboveTop = element.offsetTop + line * lineHeight - estimatedHeight - 4
+    if (top + estimatedHeight > visibleBottom && aboveTop >= scroller.scrollTop + 4) {
+      top = aboveTop
+    }
   }
-  return { top: element.offsetTop + (line + 1) * lineHeight + 2, left, width: popupWidth }
+  return { top, left, width: popupWidth }
 }
 
 export function CodeEditor({ path, value, onChange, onSave, readOnly = false, complete, onFormat }: {
@@ -152,7 +159,15 @@ export function CodeEditor({ path, value, onChange, onSave, readOnly = false, co
               return
             }
             if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) { event.preventDefault(); accept(chosen); return }
-            if (event.key === 'Escape') { event.preventDefault(); close(); return }
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
+          }
+          if (event.key === 'Escape') {
+            // Never let Escape inside the code editor bubble up to GlobalKeys turn-stop.
+            event.preventDefault()
+            event.stopPropagation()
+            if (popup) close()
+            else event.currentTarget.blur()
+            return
           }
           if (onFormat && !readOnly && event.altKey && event.shiftKey && event.code === 'KeyF') {
             // Shift+Option+F formats the file (Ruff for Python).

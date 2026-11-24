@@ -41,13 +41,14 @@ import {
   type AgyBackgroundTaskSnapshot,
   type AgyBrainLocation,
 } from './agyBrainBridge.js';
-import {
-  expandXerxesAcpSlashCommand,
-  loadXerxesWorkspaceBridgeForAcp,
-} from '../acp/xerxesWorkspaceBridge.js';
 import { pathToFileURL } from 'node:url';
 import { DaemonSwarmHost, transcriptMessagesToChatMessages } from './swarmHost.js';
-import { DaemonAcpBridgeHost, type AcpPromptResourceInput } from './acpBridgeHost.js';
+import {
+  DaemonAcpBridgeHost,
+  isAntigravityUserInputRequest,
+  type AcpConnectMcpServerInput,
+  type AcpPromptResourceInput,
+} from './acpBridgeHost.js';
 import type {
   AcpClientPermissionRequest,
   AcpClientPermissionResponse,
@@ -208,7 +209,7 @@ import type { GoalTokenLedger } from '../runtime/goalTokenLedger.js';
 import { withModelCallBudget } from '../llms/callBudget.js';
 import { SessionOperationQueue } from '../runtime/sessionOperationQueue.js';
 import { readGoalWake, queueGoalWake, claimGoalWake, finishGoalWake, cancelGoalWake, recoverGoalWake, GOAL_REARM_AFTER_RESTART_KEY } from '../runtime/goalWake.js';
-import { runGoalCommand } from "./goalCommand.js";
+import { parseGoalCommand, runGoalCommand } from "./goalCommand.js";
 import { machineArguments, runMachineCommand } from "./machineCommand.js";
 import {
   nextGoalRound,
@@ -576,6 +577,9 @@ export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
   "acp.set_model",
   "acp.set_mode",
   "acp.set_config_option",
+  "acp.authenticate",
+  "acp.sessions",
+  "acp.fork",
 ]);
 
 export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
@@ -1468,6 +1472,9 @@ export class DaemonServer {
   private readonly pendingAcpApprovalIds = new Map<string, Set<string>>();
   private readonly pendingAcpQuestions = new Map<string, {
     readonly abort: () => void;
+    readonly completeByAgent?: () => void;
+    readonly elicitationId?: string;
+    readonly mode?: "form" | "url";
     readonly resolve: (answers: Readonly<Record<string, string | readonly string[]>> | null) => void;
     readonly sessionId: string;
     readonly signal: AbortSignal | undefined;
@@ -1792,18 +1799,86 @@ export class DaemonServer {
       }
       this.emitAcpStatus(sessionId, binding, live?.cwd ?? binding.cwd);
     });
+    this.acpBridgeHost.setDefaultHandlers({
+      createElicitation: async (sessionId, req, signal) => {
+        const live = this.runtime.listSessions().find((item) => item.id === sessionId);
+        if (!live || this.runtimeShutdown) return { action: "cancel" };
+        const emitOutOfTurn = this.createOutOfTurnAcpEmitter(live);
+        return this.createAcpElicitationHandler({
+          session: live,
+          emit: emitOutOfTurn,
+          signal,
+        })(req, signal);
+      },
+      requestPermission: async (sessionId, req, signal) => {
+        const live = this.runtime.listSessions().find((item) => item.id === sessionId);
+        if (!live || this.runtimeShutdown) return { outcome: "cancelled" };
+        const emitOutOfTurn = this.createOutOfTurnAcpEmitter(live);
+        const effectivePermissionMode = live.permissionMode
+          ?? (typeof this.runtime.status().permission_mode === "string"
+            ? String(this.runtime.status().permission_mode)
+            : "auto");
+        return this.createAcpPermissionHandler({
+          session: live,
+          emit: emitOutOfTurn,
+          effectivePermissionMode,
+          signal,
+        })(req);
+      },
+    });
     this.acpBridgeHost.onSessionEvent((sessionId, event) => {
       const live = this.runtime.listSessions().find((item) => item.id === sessionId);
       if (!live) return;
-      if (event.type === "usage") {
-        applyAcpUsageToSession(live, event);
+      if (event.type === "elicitation_complete") {
+        this.handleAcpElicitationComplete(live, event.elicitationId);
+      } else if (event.type === "session_replay") {
+        this.applyAcpSessionReplay(live, event.events);
+      } else if (event.type === "usage") {
+        const statusPatch = applyAcpUsageToSession(live, event);
+        const activeBinding = this.acpBridgeHost.getBinding(sessionId);
+        const activeModel = activeBinding?.current_model ?? live.model;
+        const accepts = (conn: DaemonTransportConnection): boolean =>
+          this.runtime.sessionStatus(conn.activeSessionKey)?.id === sessionId;
+        this.broadcastEvent(
+          "status_update",
+          {
+            session_id: sessionId,
+            ...(activeModel ? { model: activeModel } : {}),
+            ...statusPatch,
+          },
+          accepts,
+          [...this.sessionObservers],
+          live.cwd,
+        );
         this.notifySessionStateChanged(sessionId);
       } else if (event.type === "session_info" && event.title) {
         this.applyExternalSessionTitle(live, event.title);
+      } else if (event.type === "notice") {
+        const level =
+          event.severity === "error" || event.severity === "warning"
+            ? event.severity
+            : "info";
+        const message = event.description
+          ? `${event.title}: ${event.description}`
+          : event.title;
+        const accepts = (conn: DaemonTransportConnection): boolean =>
+          this.runtime.sessionStatus(conn.activeSessionKey)?.id === sessionId;
+        this.broadcastEvent(
+          "notification",
+          {
+            session_id: sessionId,
+            level,
+            message,
+          },
+          accepts,
+          [...this.sessionObservers],
+          live.cwd,
+        );
       } else if (
         event.type === "text_delta" ||
         event.type === "thought_delta" ||
         event.type === "tool_call" ||
+        event.type === "tool_update" ||
         event.type === "tool_result" ||
         event.type === "plan" ||
         event.type === "continuation"
@@ -3125,7 +3200,10 @@ export class DaemonServer {
       method === "acp.cancel" ||
       method === "acp.set_model" ||
       method === "acp.set_mode" ||
-      method === "acp.set_config_option"
+      method === "acp.set_config_option" ||
+      method === "acp.authenticate" ||
+      method === "acp.sessions" ||
+      method === "acp.fork"
     ) {
       return this.handleAcpRpc(connection, method, params);
     }
@@ -3141,6 +3219,15 @@ export class DaemonServer {
       }
       const previousGoalId = getGoal(session.metadata, session.id)?.id;
       const goalInput = optionalString(params.input) ?? optionalString(params.text) ?? '';
+      // Antigravity has its own goal mode. Xerxes never starts, changes, or
+      // resumes one for an agy session; show, pause, and clear stay available.
+      const goalBinding = this.acpBridgeHost.getBinding(session.id);
+      if (goalBinding?.connected && isAntigravityBinding(goalBinding)) {
+        const goalKind = parseGoalCommand(goalInput).kind;
+        if (goalKind === "create" || goalKind === "edit" || goalKind === "resume") {
+          return { ok: false, text: ANTIGRAVITY_GOAL_REFUSAL, error: ANTIGRAVITY_GOAL_REFUSAL };
+        }
+      }
       const beforeGoal = getGoal(session.metadata, session.id);
       if (goalInput.trim().toLowerCase() === 'resume' && beforeGoal?.maxTotalTokens !== undefined) {
         try {
@@ -3357,6 +3444,50 @@ export class DaemonServer {
       try {
         const session = this.runtime.sessionStatus(sessionKey(connection, params));
         if (!session) return { ok: false, error: "Active session required" };
+        const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+        const externalAcpActive = Boolean(
+          liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== "native",
+        );
+        if (externalAcpActive && liveAcpBinding) {
+          const acpSkills = liveAcpBinding.discovered_skills ?? [];
+          if (method === "capabilities.inspect") {
+            if (typeof params.name !== 'string') return { ok: false, error: 'Skill name required' };
+            const matched = findAcpDiscoveredSkill(liveAcpBinding, params.name);
+            if (!matched) return { ok: false, error: 'Skill no longer available; refresh the catalog' };
+            let instructions = matched.description ?? '';
+            if (matched.path) {
+              try {
+                instructions = await readFile(matched.path, 'utf8');
+              } catch {
+                // Keep description fallback when the external skill file is not readable locally.
+              }
+            }
+            return {
+              ok: true,
+              instructions: instructions.slice(0, 32000),
+              truncated: instructions.length > 32000,
+              source: matched.path ?? matched.source ?? liveAcpBinding.name,
+            };
+          }
+          return {
+            ok: true,
+            usage_scope: 'external ACP runtime',
+            total_skills: acpSkills.length,
+            skills: acpSkills.slice(0, 1000).map(skill => ({
+              name: skill.name,
+              description: skill.description ?? '',
+              tags: [],
+              source: skill.path ?? skill.source ?? liveAcpBinding.name,
+              platform_supported: true,
+              uses: 0,
+            })),
+            tools: [],
+            tools_source: liveAcpBinding.provider,
+            model: liveAcpBinding.current_model_name ?? liveAcpBinding.current_model ?? '',
+            provider_profile: liveAcpBinding.name,
+            reasoning_effort: liveAcpBinding.thought_level ?? '',
+          };
+        }
         await this.refreshSkills(session);
         if (method === "capabilities.inspect") {
           if (typeof params.name !== 'string') return { ok: false, error: 'Skill name required' };
@@ -4006,7 +4137,7 @@ export class DaemonServer {
         text,
         (event) => this.emit(connection, event.type, event.payload),
         connection,
-        { displayText, ...(images.length ? { images } : {}), announceSuppressedTurn: true },
+        { displayText, ...(images.length ? { images } : {}), announceSuppressedTurn: true, userAuthored: true },
       ).catch((error) => {
         // Release the idempotency key only for submissions that never became
         // a turn (refused at admission, or failed before launch) so a retry
@@ -4064,7 +4195,7 @@ export class DaemonServer {
             session_id: taskId,
           }),
         connection,
-        { displayText: text },
+        { displayText: text, userAuthored: true },
       )
         .then(() => {
           // Queue before the live emit: the notice must survive a disconnect
@@ -4109,8 +4240,22 @@ export class DaemonServer {
     }
     if (method === "turn.cancel" || method === "cancel") {
       const cancelKey = sessionKey(connection, params);
+      const hub = this.hubContexts.getStore();
+      if (hub) {
+        const targetSession = this.runtime.sessionStatus(cancelKey);
+        if (
+          (targetSession && this.isAntigravitySession(targetSession)) ||
+          (hub.session_id && this.isAntigravitySessionId(hub.session_id))
+        ) {
+          return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+        }
+      }
       // An explicit cancel drops the steers still waiting; they are not replayed as a new turn.
-      const droppedSteers = this.cancelQueuedSteers(cancelKey, "turn-cancelled");
+      const droppedDurable = this.cancelQueuedSteers(cancelKey, "turn-cancelled");
+      const droppedRuntime = params.drop_pending_steers === true
+        ? (this.runtime.discardPendingSteers?.(cancelKey) ?? 0)
+        : 0;
+      const droppedSteers = droppedDurable + droppedRuntime;
       return { ok: this.cancelTrackedTurn(cancelKey), ...(droppedSteers ? { cancelled_steers: droppedSteers } : {}) };
     }
     if (method === "cancel_all") {
@@ -4243,7 +4388,8 @@ export class DaemonServer {
       } catch (error) {
         return { ok: false, error: errorMessage(error) };
       }
-      const processed = session && content.trim()
+      const isAgy = Boolean(session && this.isAntigravitySession(session));
+      const processed = session && content.trim() && !isAgy
         ? await processAtMentions(content, session.cwd)
         : { enhancedMessage: content, mentionedFiles: [] };
       const hubSteer = this.hubContexts.getStore();
@@ -4271,13 +4417,59 @@ export class DaemonServer {
           return { ok: false, error: "No session or steering text to apply" };
         }
         const submissionId = optionalString(params.submission_id)?.trim();
+        const digest = submissionDigest(processed.enhancedMessage, "", "steer", images);
+        const allowLiveSteer =
+          params.queue !== true &&
+          this.acpBridgeHost.hasActiveTurn(session.id) &&
+          !this.hasPendingAcpInteraction(session.id) &&
+          (params.live === true ||
+            params.mode === "live" ||
+            this.acpBridgeHost.supportsLiveSteer(session.id));
+        if (allowLiveSteer) {
+          const liveOutcome = await this.acpBridgeHost.steerPrompt({
+            sessionId: session.id,
+            text: processed.enhancedMessage,
+            ...(images.length ? { images } : {}),
+            onFallbackQueue: async () => {
+              await this.queueDurableSteer({
+                session,
+                text: processed.enhancedMessage,
+                images,
+                hub: undefined,
+                submissionId,
+                digest,
+              });
+            },
+          });
+          if (liveOutcome.ok) {
+            this.emit(connection, "steer_input", {
+              content,
+              ...(images.length ? { image_count: images.length } : {}),
+              ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
+              ...(processed.mentionedFiles.length
+                ? { mentioned_files: processed.mentionedFiles }
+                : {}),
+            });
+            this.emit(connection, "steer_applied", {
+              session_id: session.id,
+              contents: [content],
+              count: 1,
+            });
+            return {
+              ok: true,
+              disposition: "live_steer",
+              ...(submissionId ? { submission_id: submissionId } : {}),
+              ...(session.activeTurnId ? { turn_id: session.activeTurnId } : {}),
+            };
+          }
+        }
         const outcome = await this.queueDurableSteer({
           session,
           text: processed.enhancedMessage,
           images,
           hub: undefined,
           submissionId,
-          digest: submissionDigest(processed.enhancedMessage, "", "steer", images),
+          digest,
         });
         if (outcome.ok === true) {
           this.emit(connection, "steer_input", {
@@ -4437,6 +4629,10 @@ export class DaemonServer {
     if (method === "skill_suggestions") {
       const session = this.runtime.sessionStatus(sessionKey(connection, params));
       if (!session) return { ok: false, error: "no active session", suggestions: [] };
+      const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+      if (liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== "native") {
+        return { ok: true, suggestions: [] };
+      }
       return {
         ok: true,
         suggestions: skillSuggestionValues(session.metadata).map((suggestion) => ({
@@ -4790,6 +4986,9 @@ export class DaemonServer {
           { action: "mode", meta: "Show or switch the active ACP mode" },
           { action: "thinking", meta: "Show or switch the active ACP thinking level" },
           { action: "config", meta: "Show or set an ACP config option" },
+          { action: "sessions", meta: "List external ACP sessions" },
+          { action: "fork", meta: "Fork the active external ACP session" },
+          { action: "auth", meta: "Authenticate with an advertised ACP auth method" },
         ]
           .filter((entry) => entry.action.startsWith(prefix))
           .map((entry) => ({
@@ -4902,16 +5101,22 @@ export class DaemonServer {
             .map((opt) => ({
               value: `/acp config ${opt.id} `,
               label: opt.id,
-              meta: `${opt.name}${opt.current_value ? ` (${opt.current_value})` : ""}`,
+              meta: `${opt.name}${opt.current_value !== "" && opt.current_value !== undefined ? ` (${String(opt.current_value)})` : ""}`,
             })),
         };
       }
       const matchedOpt = options.find((opt) => opt.id === idToken);
       const valPrefix = valToken.toLowerCase();
+      const rawChoices = matchedOpt?.type === "boolean"
+        ? [
+            { value: "true", name: "true", description: "Enable option" },
+            { value: "false", name: "false", description: "Disable option" },
+          ]
+        : (matchedOpt?.options ?? []);
       return {
         ok: true,
         kind: "slash",
-        completions: (matchedOpt?.options ?? [])
+        completions: rawChoices
           .filter(
             (choice) =>
               choice.value.toLowerCase().startsWith(valPrefix) ||
@@ -4921,6 +5126,27 @@ export class DaemonServer {
             value: `/acp config ${idToken} ${choice.value} `,
             label: choice.value,
             meta: choice.name !== choice.value ? choice.name : (choice.description ?? matchedOpt?.name ?? "ACP option"),
+          })),
+      };
+    }
+    const acpAuthArg = /^\/acp\s+auth\s+(\S*)$/.exec(text);
+    if (acpAuthArg) {
+      const prefix = (acpAuthArg[1] ?? "").toLowerCase();
+      const session = this.runtime.sessionStatus(sessionKey(connection, params));
+      const methods = session ? this.acpBridgeHost.getAuthMethods(session.id) : [];
+      return {
+        ok: true,
+        kind: "slash",
+        completions: methods
+          .filter(
+            (method) =>
+              method.id.toLowerCase().startsWith(prefix) ||
+              method.name.toLowerCase().startsWith(prefix),
+          )
+          .map((method) => ({
+            value: `/acp auth ${method.id} `,
+            label: method.id,
+            meta: method.name !== method.id ? method.name : (method.description ?? "ACP auth method"),
           })),
       };
     }
@@ -5156,55 +5382,6 @@ export class DaemonServer {
           ...(cmd.input_hint ? { input_hint: cmd.input_hint } : {}),
         },
       });
-    }
-
-    // 2b. Workspace-local & user-global `.xerxes/commands` & `.xerxes/skills` bridged into Antigravity.
-    //     Never leaks Xerxes built-in bundled skills (`immortals-*`) or duplicates `.agents/skills`.
-    if (binding.provider === "antigravity" && cwd) {
-      const xerxesBridge = await this.loadAgyXerxesBridge(cwd);
-      if (xerxesBridge) {
-        for (const cmd of xerxesBridge.commands) {
-          const lower = cmd.name.toLowerCase();
-          if (!cmd.name || seen.has(lower)) continue;
-          seen.add(lower);
-          const source = cmd.scope === "global" ? "~/.xerxes/commands" : ".xerxes/commands";
-          const description = cmd.description || `${source} command`;
-          entries.push({
-            labelLower: lower,
-            metaLower: description.toLowerCase(),
-            tierOrder: 1,
-            payload: {
-              value: `/${cmd.name}`,
-              label: cmd.name,
-              meta: description,
-              category: "acp",
-              kind: "command",
-              source,
-              path: cmd.path,
-            },
-          });
-        }
-        for (const skill of xerxesBridge.skills) {
-          const lower = skill.name.toLowerCase();
-          if (!skill.name || seen.has(lower)) continue;
-          seen.add(lower);
-          const source = skill.scope === "global" ? "~/.xerxes/skills" : ".xerxes/skills";
-          const description = skill.description || `${source} skill`;
-          entries.push({
-            labelLower: lower,
-            metaLower: description.toLowerCase(),
-            tierOrder: 1,
-            payload: {
-              value: `/${skill.name}`,
-              label: skill.name,
-              meta: description,
-              kind: "skill",
-              source,
-              path: skill.path,
-            },
-          });
-        }
-      }
     }
 
     // 3. Minimal host-bridge command set (`/acp` always; `/new`, `/clear`, `/export`
@@ -5730,7 +5907,10 @@ export class DaemonServer {
       savedRaw.agent_id !== "xerxes"
         ? { ...savedRaw, connected: false }
         : undefined;
-    const cost = liveAcpBinding ? undefined : (session.model ? this.sessionCost(session, session.model) : undefined);
+    const acpCost = acpSessionCost(session);
+    const cost = liveAcpBinding
+      ? acpCost?.amount
+      : (session.model ? this.sessionCost(session, session.model) : undefined);
     const basis = liveAcpBinding ? undefined : this.sessionCostBasis(session);
     const payload = sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
     const agyLoc = this.resolveAgyBrainLocationForSession(session);
@@ -5743,6 +5923,7 @@ export class DaemonServer {
       : existingSubagents;
     return {
       ...payload,
+      ...(liveAcpBinding && acpCost ? { cost: acpCost } : {}),
       ...(mergedSubagents.length > 0 ? { subagent_snapshots: mergedSubagents } : {}),
       ...(basis ? { cost_basis: basis } : {}),
       ...(liveAcpBinding ? { acp_binding: liveAcpBinding as unknown as JsonRpcPayload } : {}),
@@ -5804,6 +5985,8 @@ export class DaemonServer {
     const services = this.learning;
     const session = input.session;
     if (!services || signal.aborted || session.metadata.session_kind === 'subagent') return;
+    const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
+    if (liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== 'native') return;
     const mode = this.runtime.status().reflection ?? 'all';
     if (mode === 'off' || (input.trigger === 'long_turn' && mode !== 'all')) return;
     const goal = getGoal(session.metadata, session.id);
@@ -5837,6 +6020,46 @@ export class DaemonServer {
         connection => this.runtime.sessionStatus(connection.activeSessionKey)?.id === session.id, [...this.sessionObservers], session.cwd);
       return { id: record.id, summary };
     } finally { await closeLlmClient(client); }
+  }
+
+  /**
+   * Route small auxiliary prompts (commit message generation, project agent generation)
+   * through an active external ACP runtime instead of falling back to native Xerxes
+   * providers (e.g. Claude Code / OAuth profiles). Returns `null` when no external
+   * ACP bridge is connected so callers use the normal native provider path.
+   */
+  private async runAcpAuxiliaryPrompt(
+    session: DaemonSession | undefined,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly ok: true; readonly text: string } | { readonly ok: false; readonly error: string } | null> {
+    if (!session || !this.acpBridgeHost.hasActiveBridge(session.id)) {
+      return null;
+    }
+    const binding = this.acpBridgeHost.getBinding(session.id);
+    if (!binding?.connected) {
+      return null;
+    }
+    if (binding.transport !== "acp") {
+      return {
+        ok: false,
+        error: `${binding.name} does not support concurrent auxiliary prompts.`,
+      };
+    }
+    const res = await this.acpBridgeHost.runSideQuestion({
+      sessionId: session.id,
+      prompt,
+      useFork: false,
+      ...(binding.current_model ? { model: binding.current_model } : {}),
+      ...(signal ? { signal } : {}),
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: res.error || `${binding.name} could not complete the request.`,
+      };
+    }
+    return { ok: true, text: res.answer };
   }
 
   /** Auxiliary calls inherit the session's authority just like the turn.
@@ -6193,10 +6416,17 @@ export class DaemonServer {
           return { ok: true, commits: await scm.log(limit) } as unknown as JsonRpcPayload;
         }
         case "git.commitMessage": {
-          const model = session?.model || optionalString(this.runtime.status().model);
-          if (!model) throw new ScmError("Select a model before generating a commit message.");
           const context = await scm.commitContext();
           if (!context.diff.trim()) throw new ScmError("There are no changes to describe.");
+          const acpAux = await this.runAcpAuxiliaryPrompt(session, commitMessagePrompt(context), this.sessionSignal(key));
+          if (acpAux !== null) {
+            if (!acpAux.ok) throw new ScmError(acpAux.error);
+            const message = cleanCommitMessage(acpAux.text);
+            if (!message) throw new ScmError("The model returned an empty message. Try again.");
+            return { ok: true, message, truncated: context.truncated };
+          }
+          const model = session?.model || optionalString(this.runtime.status().model);
+          if (!model) throw new ScmError("Select a model before generating a commit message.");
           const client = session ? this.sessionAuxiliaryClient(session, model)
             : createCompactionClient(model, undefined, this.runtime.status());
           try {
@@ -6230,6 +6460,19 @@ export class DaemonServer {
       if (method === "agentPreset.projectRead") return { ok: true, ...readProjectAgent(cwd, id) };
       if (method === "agentPreset.projectGenerate") {
         if (typeof params.description !== "string") throw new Error("description must be a string");
+        const activeAcp = session && this.acpBridgeHost.hasActiveBridge(session.id)
+          ? this.acpBridgeHost.getBinding(session.id)
+          : null;
+        if (activeAcp?.connected) {
+          const generated = await generateProjectAgent(params.description, async (prompt) => {
+            const acpAux = await this.runAcpAuxiliaryPrompt(session, prompt, this.sessionSignal(key));
+            if (!acpAux || !acpAux.ok) {
+              throw new Error(acpAux?.error ?? `${activeAcp.name} could not generate the agent.`);
+            }
+            return acpAux.text;
+          });
+          return { ok: true, ...generated };
+        }
         const model = session?.model || optionalString(this.runtime.status().model);
         if (!model) throw new Error("Select a model before generating an agent.");
         const generated = await generateProjectAgent(params.description, async (prompt) => {
@@ -7106,12 +7349,27 @@ export class DaemonServer {
       if (isAcpAdvertisedSlashToken(acpBinding, token)) {
         return this.forwardSlashToExternalAcp(connection, key, command, acpBinding);
       }
-      if (acpBinding.provider === "antigravity" && session?.cwd) {
-        const xerxesBridge = await this.loadAgyXerxesBridge(session.cwd);
-        const acpOwned = new Set((acpBinding.available_commands ?? []).map(item => item.name.trim().toLowerCase()));
-        if (xerxesBridge && await expandXerxesAcpSlashCommand(command, xerxesBridge, acpOwned)) {
-          return this.forwardSlashToExternalAcp(connection, key, command, acpBinding);
-        }
+      if (token === "skills") {
+        const acpSkills = acpBinding.discovered_skills ?? [];
+        const lines = acpSkills.length
+          ? [
+              `${acpBinding.name} skills (${acpSkills.length}):`,
+              ...acpSkills.map(
+                (skill) =>
+                  `  \`${skill.slash_command || `/${skill.name}`}\` — ${skill.description || skill.source || `${acpBinding.name} skill`}`,
+              ),
+            ]
+          : [`No ${acpBinding.name} skills discovered in this workspace.`];
+        this.emitSlash(connection, lines.join("\n"));
+        return {
+          ok: true,
+          skills: acpSkills.map((skill) => ({
+            name: skill.name,
+            description: skill.description ?? "",
+            source: skill.path ?? skill.source ?? acpBinding.name,
+            subcommands: [],
+          })),
+        };
       }
       if (token === "skill") {
         const [skillTarget = "", ...skillRest] = args.split(/\s+/).filter(Boolean);
@@ -7457,7 +7715,7 @@ export class DaemonServer {
           this.emitSlash(connection, "Usage: `/steer <hint>`.", "warning");
           return { ok: false, error: "steer text is required" };
         }
-        const processed = session
+        const processed = session && !this.isAntigravitySession(session)
           ? await processAtMentions(args, session.cwd)
           : { enhancedMessage: args, mentionedFiles: [] };
         if (
@@ -8876,9 +9134,7 @@ export class DaemonServer {
       if (action !== "interrupt" && action !== "kill") {
         return { ok: false, error: "Antigravity background tasks support interrupt or kill only" };
       }
-      const session = this.runtime.sessionStatus(sessionKey(connection, params));
-      if (!session) return { ok: false, error: "Open a session before controlling background tasks" };
-      return this.dispatchAgyBackgroundTaskKill(session, id);
+      return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
     }
     const registry = this.terminalRegistry;
     if (!registry) {
@@ -9592,6 +9848,13 @@ export class DaemonServer {
         this.emitSlash(notify, "No active session to compact.", "warning");
       }
       return { ok: false, error: "no active session" };
+    }
+    if (this.acpBridgeHost.hasActiveBridge(session.id)) {
+      const binding = this.acpBridgeHost.getBinding(session.id);
+      const name = binding?.name || "the external ACP runtime";
+      const error = `Compaction is managed by ${name}. Use \`/compact\` directly instead of native Xerxes compaction.`;
+      if (notify) this.emitSlash(notify, error, "warning");
+      return { ok: false, error };
     }
     if (session.activeTurnId) {
       if (notify) {
@@ -10860,6 +11123,7 @@ export class DaemonServer {
       prompt,
       (event) => this.emit(connection, event.type, event.payload),
       connection,
+      { userAuthored: true },
     ).catch((error) => {
       void this.withSessionOperation(key, async () => {
         session.messages.splice(0, session.messages.length, ...priorMessages);
@@ -11212,8 +11476,7 @@ export class DaemonServer {
       const id = optionalString(params.schedule_id) ?? optionalString(params.id) ?? optionalString(params.job_id);
       if (!id) return { ok: false, error: "schedule_id is required" };
       if (method === "schedule.cancel" && id.startsWith(AGY_TASK_ID_PREFIX)) {
-        if (!activeSession) return { ok: false, error: "An active session is required" };
-        return this.dispatchAgyBackgroundTaskKill(activeSession, id);
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
       }
       const job = this.cronStore.get(id);
       if (!job || !visible(job)) return { ok: false, error: "Schedule not found in this workspace" };
@@ -11408,7 +11671,8 @@ export class DaemonServer {
       if (event.type === "status_update") {
         const reason = optionalString(event.payload.stop_reason);
         if (reason && reason !== "completed" && reason !== "objective_verified") {
-          failure = `Scheduled turn stopped before completion: ${reason}`;
+          // An explicit error notification already says why; keep it over the generic stop reason.
+          failure ??= `Scheduled turn stopped before completion: ${reason}`;
         }
       }
       if (event.type === "text_part") {
@@ -11788,6 +12052,9 @@ export class DaemonServer {
     if (hub && info) {
       const mismatch = this.interactionSessionMismatch(hub, info.sessionId);
       if (mismatch) return mismatch;
+      if (this.isAntigravitySessionId(info.sessionId)) {
+        return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+      }
       this.noteInteractionParticipant(hub, info.sessionId);
     }
     const supplied = params.interaction_revision;
@@ -11897,6 +12164,9 @@ export class DaemonServer {
     readonly digest: string;
   }): Promise<JsonRpcPayload> {
     const { session, hub, submissionId } = input;
+    if (hub && this.isAntigravitySession(session)) {
+      return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+    }
     const state = collabState(session.metadata);
     const actor = hub ? actorFromContext(hub, "steer", submissionId ? { submission_id: submissionId } : {}) : undefined;
     let entry: SteerEntry;
@@ -11929,6 +12199,17 @@ export class DaemonServer {
     return outcome;
   }
 
+  /** Whether a session id is live on Antigravity, where only the account owner's local typing may reach agy. */
+  private isAntigravitySessionId(sessionId: string): boolean {
+    const binding = this.acpBridgeHost.getBinding(sessionId);
+    return Boolean(binding?.connected && isAntigravityBinding(binding));
+  }
+
+  /** Whether this session is live on Antigravity, where only the account owner's local typing may reach agy. */
+  private isAntigravitySession(session: DaemonSession): boolean {
+    return this.isAntigravitySessionId(session.id);
+  }
+
   /** `turn.submit` for hub principals and for callers that opt in with `if_busy`. */
   private async collaborativeSubmit(input: {
     readonly connection: DaemonTransportConnection;
@@ -11943,6 +12224,9 @@ export class DaemonServer {
     const { connection, key, text, images, submissionId, ifBusy, hub } = input;
     const session = this.runtime.sessionStatus(key);
     if (!session) return { ok: false, error: "no active session" };
+    if (hub && this.isAntigravitySession(session)) {
+      return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+    }
     const state = collabState(session.metadata);
     const principalId = hub?.principal_id ?? "local";
     const digest = submissionDigest(text, input.displayText, ifBusy, images);
@@ -11971,6 +12255,8 @@ export class DaemonServer {
         ...(images.length ? { images } : {}),
         announceSuppressedTurn: true,
         ...(origin ? { origin } : {}),
+        // Only a local caller counts as the person typing; a Hub principal never does.
+        ...(hub ? {} : { userAuthored: true }),
         ...(actor ? { actor } : {}),
       },
     ).catch((error) => {
@@ -11995,6 +12281,9 @@ export class DaemonServer {
   }): Promise<JsonRpcPayload> {
     const { key, session, text, images, hub, submissionId } = input;
     if (!session || (!text.trim() && !images.length)) return { ok: false, error: "No session or steering text to apply" };
+    if (this.isAntigravitySession(session)) {
+      return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+    }
     const state = collabState(session.metadata);
     const digest = submissionDigest(text, "", "steer", images);
     if (submissionId) {
@@ -12069,8 +12358,13 @@ export class DaemonServer {
       for (const entry of entries) this.queuedSteerImages.delete(entry.steer_id);
       // Any agent-authored steer keeps the whole continuation non-human.
       const agent = entries.some(entry => entry.actor?.principal_kind === "agent");
+      const liveBinding = this.acpBridgeHost.getBinding(live.id);
+      const verbatim = Boolean(liveBinding?.connected && isAntigravityBinding(liveBinding));
       await this.submitTrackedTurn(key,
-        entries.map(entry => `[steer from ${steerLabel(entry.display_name)}]\n${entry.text}`).join("\n\n"), emit, owner, {
+        verbatim
+          ? entries.map(entry => entry.text).join("\n\n")
+          : entries.map(entry => `[steer from ${steerLabel(entry.display_name)}]\n${entry.text}`).join("\n\n"), emit, owner, {
+        ...(entries.every(entry => !entry.actor) ? { userAuthored: true } : {}),
         displayText: entries.map(entry => (entry.display_name && entry.display_name.trim().toLowerCase() !== "user" ? `${steerLabel(entry.display_name)}: ${entry.text}` : entry.text)).join("\n"),
         ...(images.length ? { images } : {}),
         ...(agent ? { origin: "agent" as const } : {}),
@@ -12146,6 +12440,9 @@ export class DaemonServer {
     if (hub && questionInfo) {
       const mismatch = this.interactionSessionMismatch(hub, questionInfo.sessionId);
       if (mismatch) return mismatch;
+      if (this.isAntigravitySessionId(questionInfo.sessionId)) {
+        return { ok: false, code: "antigravity-local-only", error: ANTIGRAVITY_REMOTE_REFUSAL };
+      }
       this.noteInteractionParticipant(hub, questionInfo.sessionId);
     }
     const suppliedRevision = params.interaction_revision;
@@ -12730,11 +13027,13 @@ export class DaemonServer {
     await this.recoverGoalWakeAfterRestart(key);
     await this.rearmGoalAfterRestart(key, connection);
     await this.resumeTurnAfterRestart(key, connection);
-    await this.refreshSkills(session);
     const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
     const externalAcpActive = Boolean(
       liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== "native",
     );
+    if (!externalAcpActive) {
+      await this.refreshSkills(session);
+    }
     const skills = externalAcpActive
       ? []
       : this.skillRegistry
@@ -13115,7 +13414,7 @@ export class DaemonServer {
 
   private recordEventInteraction(connection: DaemonTransportConnection, type: string, payload: JsonRpcPayload): void {
     this.recordInteractionOwner(connection, type, payload);
-    if (type === 'approval_response' || type === 'question_response') {
+    if (type === 'approval_response' || type === 'question_response' || type === 'question_resolved') {
       const requestId = optionalString(payload.request_id) ?? optionalString(payload.id);
       if (requestId) this.pendingInteractionFrames.delete(requestId);
     }
@@ -13684,6 +13983,19 @@ export class DaemonServer {
       };
       const activeSession = this.runtime.sessionStatus(sessionKey);
       const acpBinding = activeSession ? this.acpBridgeHost.getBinding(activeSession.id) : null;
+      if (activeSession && acpBinding?.connected && isAntigravityBinding(acpBinding) && options.userAuthored !== true) {
+        // Only what a person typed reaches an Antigravity session. Refuse,
+        // visibly, every turn whose text Xerxes composed itself.
+        if (options.goalRound !== undefined) {
+          this.blockGoalForFailure(sessionKey, "round-failed", ANTIGRAVITY_COMPOSED_TURN_REFUSAL);
+          return;
+        }
+        forward({
+          type: "notification",
+          payload: { level: "error", message: ANTIGRAVITY_COMPOSED_TURN_REFUSAL, session_id: activeSession.id },
+        });
+        return;
+      }
       if (activeSession && acpBinding?.connected) {
         await this.runExternalAcpTurn(activeSession, text, forward, options);
       } else {
@@ -14138,6 +14450,17 @@ export class DaemonServer {
       method === "swarm.inspect";
     const target = await this.resolveSwarmTarget(connection, params, !isReadOnly);
     const agySwarm = target?.session ? this.resolveAgySwarmContext(target.session) : undefined;
+    const liveExternalAcp = target?.session
+      ? this.acpBridgeHost.getBinding(target.session.id)
+      : null;
+    const isExternalAcpIsolated = Boolean(
+      target &&
+      !agySwarm &&
+      !this.swarmHost.hasActiveSwarm(target.id) &&
+      liveExternalAcp &&
+      liveExternalAcp.connected &&
+      liveExternalAcp.transport !== "native",
+    );
 
     if (method === "swarm.inspect") {
       const name = optionalString(params.name)?.trim() ?? "";
@@ -14166,6 +14489,9 @@ export class DaemonServer {
           return { ok: false, error: `unknown swarm member "${name}"` };
         }
         return inspected as unknown as JsonRpcPayload;
+      }
+      if (isExternalAcpIsolated) {
+        return { ok: false, error: `unknown swarm member "${name}"` };
       }
       const manager = await this.swarmHost.ensureSession(target);
       return manager.inspectMember(
@@ -14196,6 +14522,19 @@ export class DaemonServer {
           agySwarm.modelDisplayMap,
         );
         return status as unknown as JsonRpcPayload;
+      }
+      if (isExternalAcpIsolated) {
+        return {
+          active: false,
+          session_id: target.id,
+          title: "",
+          board: "local",
+          open_board: SWARM_OPEN_BOARD_MARKDOWN,
+          head: 0,
+          overview: null,
+          channels: [{ name: "main", topic: "", created_by: "coordinator", archived: false, subscriber_count: 0 }],
+          members: [],
+        };
       }
       const manager = await this.swarmHost.ensureSession(target);
       return manager.status() as unknown as JsonRpcPayload;
@@ -14228,6 +14567,9 @@ export class DaemonServer {
           messages: page.messages as unknown as JsonRpcPayload[],
         };
       }
+      if (isExternalAcpIsolated) {
+        return { head: 0, messages: [] };
+      }
       const manager = await this.swarmHost.ensureSession(target);
       const page = await manager.readBoard({
         caller: USER_BOARD_AUTHOR,
@@ -14251,43 +14593,10 @@ export class DaemonServer {
       const channel = optionalString(params.channel)?.trim() || undefined;
       const asFeedback = params.as_feedback === true;
       if (agySwarm && target.session) {
-        if (!agySwarm.liveConnected) {
-          return {
-            ok: false,
-            error: "Reconnect Antigravity to send swarm actions; board remains readable offline.",
-          };
-        }
-        const trimmed = text.trim();
-        if (!trimmed) {
-          return { ok: false, error: "text is required" };
-        }
-        const status = await this.agyBrainBridge.readSwarmStatus(
-          target.id,
-          agySwarm.location,
-          agySwarm.modelDisplayMap,
-        );
-        const postBody = asFeedback
-          ? formatSwarmNarratorFeedback(trimmed, status)
-          : trimmed;
-        const channelNote = channel && channel !== "main" ? ` (target channel: #${channel})` : "";
-        const instruction = [
-          `[Xerxes Immortals Board Action] The user posted a message from the Immortals Board UI${channelNote}.`,
-          "Call `post_message` verbatim with the exact text below (do not paraphrase or strip @mentions), then wait or continue as appropriate:",
-          "",
-          postBody,
-        ].join("\n");
-        await this.dispatchAgyCoordinatorAction(
-          target.session,
-          instruction,
-          asFeedback ? "Immortals feedback (@narrator)" : "Immortals board post",
-        );
-        return {
-          ok: true,
-          status: "posted",
-          dispatched: true,
-          seq: status.head,
-          channel: channel ?? "main",
-        };
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
+      }
+      if (isExternalAcpIsolated) {
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
       }
       const manager = await this.swarmHost.ensureSession(target);
       const posted = await manager.postFromUser({
@@ -14305,7 +14614,10 @@ export class DaemonServer {
     if (method === "swarm.kill") {
       const name = (optionalString(params.name) ?? "").trim();
       if (agySwarm && target.session) {
-        return this.dispatchAgySwarmKill(target.session, agySwarm, name);
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
+      }
+      if (isExternalAcpIsolated) {
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
       }
       const manager = await this.swarmHost.ensureSession(target);
       const killed = await manager.killFromHost(name);
@@ -14346,24 +14658,10 @@ export class DaemonServer {
             ...(reason === undefined ? {} : { reason }),
           };
         }
-        const reasonClause = reason ? ` Reason: ${reason}.` : "";
-        const instruction = [
-          `[Xerxes Immortals Board Action] The user requested switching worker "${targetName}" to model "${model}".${reasonClause}`,
-          `Call \`swarm\` with \`action: "model"\`, \`name: "${targetName}"\`, and \`model: "${model}"\` immediately.`,
-        ].join("\n");
-        await this.dispatchAgyCoordinatorAction(
-          target.session,
-          instruction,
-          `Immortals model switch (@${targetName} → ${model})`,
-        );
-        return {
-          ok: true,
-          status: "switched",
-          dispatched: true,
-          name: targetName,
-          model,
-          ...(reason === undefined ? {} : { reason }),
-        };
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
+      }
+      if (isExternalAcpIsolated) {
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
       }
       const manager = await this.swarmHost.ensureSession(target);
       const switched = await manager.switchModel({
@@ -14391,6 +14689,13 @@ export class DaemonServer {
       return {
         ok: true,
         active: status.active,
+        prompt_overlay: "",
+      };
+    }
+    if (isExternalAcpIsolated) {
+      return {
+        ok: true,
+        active: false,
         prompt_overlay: "",
       };
     }
@@ -14460,22 +14765,8 @@ export class DaemonServer {
         };
       }
       if (parsed.kind === "kill") {
-        const res = await this.dispatchAgySwarmKill(activeSession, agySwarm, parsed.target);
-        if (res.ok === false) {
-          const msg = String(res.error ?? "Could not stop Antigravity swarm worker.");
-          this.emitSlash(connection, msg, "warning");
-          return res;
-        }
-        const killedList = Array.isArray(res.killed)
-          ? res.killed.filter((item): item is string => typeof item === "string")
-          : [];
-        const text = killedList.length > 0
-          ? `Requested Antigravity coordinator to stop worker(s): ${killedList.join(", ")}`
-          : parsed.target.toLowerCase() === "all"
-            ? "No living Immortals workers to stop."
-            : `No living Immortals worker matched "${parsed.target}".`;
-        this.emitSlash(connection, text);
-        return { ...res, text };
+        this.emitSlash(connection, AGY_BOARD_ACTION_REFUSAL, "warning");
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
       }
       // parsed.kind === "activate": forward `/swarm <task>` to live Antigravity ACP.
       if (!agySwarm.liveConnected) {
@@ -14489,6 +14780,52 @@ export class DaemonServer {
         `/swarm ${parsed.task}`,
         agySwarm.binding,
       );
+    }
+
+    const liveExternalAcp = this.acpBridgeHost.getBinding(activeSession.id);
+    if (
+      liveExternalAcp &&
+      liveExternalAcp.connected &&
+      liveExternalAcp.transport !== "native" &&
+      !this.swarmHost.hasActiveSwarm(activeSession.id)
+    ) {
+      if (parsed.kind === "activate") {
+        return this.forwardSlashToExternalAcp(
+          connection,
+          activeSession.sessionKey,
+          `/swarm ${parsed.task}`,
+          liveExternalAcp,
+        );
+      }
+      if (parsed.kind === "kill") {
+        this.emitSlash(connection, AGY_BOARD_ACTION_REFUSAL, "warning");
+        return { ok: false, error: AGY_BOARD_ACTION_REFUSAL };
+      }
+      const idleStatus = {
+        active: false,
+        session_id: activeSession.id,
+        title: "",
+        board: "local" as const,
+        open_board: SWARM_OPEN_BOARD_MARKDOWN,
+        head: 0,
+        tail_from_seq: 1,
+        overview: null,
+        channels: [{ name: "main", topic: "", created_by: "coordinator", archived: false, subscriber_count: 0 }],
+        members: [],
+      };
+      if (parsed.kind === "channels") {
+        const text = renderSwarmChannelsText(idleStatus.channels, idleStatus.title);
+        this.emitSlash(connection, text);
+        return { ok: true, text, channels: idleStatus.channels as unknown as JsonRpcPayload[] };
+      }
+      const text = renderSwarmStatusText(idleStatus, []);
+      this.emitSlash(connection, text);
+      return {
+        ok: true,
+        text,
+        open_board: parsed.openBoard,
+        status: idleStatus as unknown as JsonRpcPayload,
+      };
     }
 
     const target = {
@@ -14658,41 +14995,6 @@ export class DaemonServer {
         (item) => item.kind !== "skill",
       );
       const skills = [...(binding.discovered_skills ?? [])];
-      if (binding.provider === "antigravity") {
-        const bridgeCwd = target?.cwd ?? binding.cwd;
-        const xerxesBridge = bridgeCwd
-          ? await this.loadAgyXerxesBridge(bridgeCwd)
-          : null;
-        if (xerxesBridge) {
-          const seenCmds = new Set(commands.map((item) => item.name.toLowerCase()));
-          const seenSkills = new Set(skills.map((item) => item.name.toLowerCase()));
-          for (const cmd of xerxesBridge.commands) {
-            const lower = cmd.name.toLowerCase();
-            if (seenCmds.has(lower) || seenSkills.has(lower)) continue;
-            seenCmds.add(lower);
-            const source = cmd.scope === "global" ? "~/.xerxes/commands" : ".xerxes/commands";
-            commands.push({
-              name: cmd.name,
-              description: cmd.description || `${source} command`,
-              kind: "command",
-              source,
-            });
-          }
-          for (const skill of xerxesBridge.skills) {
-            const lower = skill.name.toLowerCase();
-            if (seenSkills.has(lower) || seenCmds.has(lower)) continue;
-            seenSkills.add(lower);
-            const source = skill.scope === "global" ? "~/.xerxes/skills" : ".xerxes/skills";
-            skills.push({
-              name: skill.name,
-              description: skill.description || `${source} skill`,
-              source,
-              path: skill.path,
-              slash_command: `/${skill.name}`,
-            });
-          }
-        }
-      }
       const configOptions = binding.config_options ?? [];
       return {
         ok: true,
@@ -14721,6 +15023,9 @@ export class DaemonServer {
         }
         if (Object.hasOwn(target.session.extra, "acp_context")) {
           delete target.session.extra.acp_context;
+        }
+        if (Object.hasOwn(target.session.extra, "acp_cost")) {
+          delete target.session.extra.acp_cost;
         }
         await this.runtime.flushSessions();
       }
@@ -14799,19 +15104,27 @@ export class DaemonServer {
         return { ok: false, error: "no active session" };
       }
       const configId = (optionalString(params.config_id) ?? optionalString(params.id))?.trim() ?? "";
-      const value =
-        typeof params.value === "boolean"
-          ? String(params.value)
-          : typeof params.value === "number" && Number.isFinite(params.value)
-            ? String(params.value)
-            : (optionalString(params.value)?.trim() ?? "");
+      const explicitType = optionalString(params.type)?.trim();
+      let value: string | boolean | undefined;
+      if (typeof params.value === "boolean") {
+        value = params.value;
+      } else if (explicitType === "boolean" && typeof params.value === "string") {
+        const lower = params.value.trim().toLowerCase();
+        if (lower === "true") value = true;
+        else if (lower === "false") value = false;
+      } else if (typeof params.value === "number" && Number.isFinite(params.value)) {
+        value = String(params.value);
+      } else if (typeof params.value === "string") {
+        const trimmed = params.value.trim();
+        if (trimmed) value = trimmed;
+      }
       if (!configId) {
         return { ok: false, error: "config_id is required" };
       }
-      if (!value) {
+      if (value === undefined) {
         return { ok: false, error: "value is required" };
       }
-      const result = await this.acpBridgeHost.setConfigOption(target.id, configId, value);
+      const result = await this.acpBridgeHost.setConfigOption(target.id, configId, value, explicitType);
       if (!result.ok) {
         return { ok: false, error: result.error };
       }
@@ -14823,6 +15136,77 @@ export class DaemonServer {
       if (isAcpTurboMode(result.binding)) {
         this.autoApprovePendingAcpRequests(target.id, connection);
       }
+      return {
+        ok: true,
+        binding: result.binding as unknown as JsonRpcPayload,
+      };
+    }
+
+    if (method === "acp.authenticate") {
+      const methodId = (optionalString(params.method_id) ?? optionalString(params.id))?.trim() ?? "";
+      if (!methodId) {
+        return { ok: false, error: "method_id is required" };
+      }
+      const agentId = optionalString(params.agent_id)?.trim() || undefined;
+      const cwd = optionalString(params.cwd)?.trim() || target?.cwd;
+      const result = await this.acpBridgeHost.authenticate({
+        sessionId: target?.id ?? optionalString(params.session_id)?.trim() ?? "",
+        methodId,
+        ...(agentId ? { agentId } : {}),
+        ...(cwd ? { cwd: resolveProjectDirectory(cwd) } : {}),
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      if (result.mode === "terminal") {
+        return {
+          ok: true,
+          mode: "terminal",
+          command: result.command,
+          args: [...result.args],
+          env: { ...result.env },
+          label: result.label,
+        };
+      }
+      return { ok: true, mode: "agent" };
+    }
+
+    if (method === "acp.sessions") {
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const cursor = optionalString(params.cursor)?.trim() || undefined;
+      const cwd = optionalString(params.cwd)?.trim() || undefined;
+      const result = await this.acpBridgeHost.listExternalSessions(target.id, {
+        ...(cursor ? { cursor } : {}),
+        ...(cwd ? { cwd: resolveProjectDirectory(cwd) } : {}),
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      return {
+        ok: true,
+        sessions: result.sessions as unknown as JsonRpcPayload[],
+        ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}),
+      };
+    }
+
+    if (method === "acp.fork") {
+      if (!target) {
+        return { ok: false, error: "no active session" };
+      }
+      const cwd = optionalString(params.cwd)?.trim() || undefined;
+      const result = await this.acpBridgeHost.forkSession(target.id, {
+        ...(cwd ? { cwd: resolveProjectDirectory(cwd) } : {}),
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      if (target.session) {
+        target.session.metadata.acp_binding = result.binding;
+        await this.runtime.flushSessions();
+      }
+      this.emitAcpStatus(target.id, result.binding, target.cwd);
       return {
         ok: true,
         binding: result.binding as unknown as JsonRpcPayload,
@@ -14843,6 +15227,21 @@ export class DaemonServer {
     const args = Array.isArray(params.args)
       ? params.args.filter((item): item is string => typeof item === "string")
       : undefined;
+    const additionalDirectories = Array.isArray(params.additional_directories)
+      ? params.additional_directories
+          .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+          .map((item) => item.trim())
+      : undefined;
+    const ideMcpPort =
+      typeof params.ide_mcp_port === "number" &&
+      Number.isInteger(params.ide_mcp_port) &&
+      params.ide_mcp_port > 0 &&
+      params.ide_mcp_port <= 65535
+        ? params.ide_mcp_port
+        : undefined;
+    const agentFlag = optionalString(params.agent)?.trim() || undefined;
+    const sandbox = params.sandbox === true;
+    const mcpServers = this.collectAcpMcpServers(cwd);
     const permissionMode = target.session?.permissionMode
       ?? (typeof this.runtime.status().permission_mode === "string"
         ? String(this.runtime.status().permission_mode)
@@ -14882,17 +15281,24 @@ export class DaemonServer {
       sessionId: target.id,
       agentId,
       cwd,
+      ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+      ...(agentFlag ? { agent: agentFlag } : {}),
       ...(command ? { command } : {}),
       ...(args ? { args } : {}),
+      ...(ideMcpPort !== undefined ? { ideMcpPort } : {}),
       ...(initialModeId ? { initialModeId } : {}),
+      ...(mcpServers.length > 0 ? { mcpServers } : {}),
       ...(permissionMode ? { permissionMode } : {}),
       ...(resumeSessionId ? { resumeSessionId } : {}),
+      ...(sandbox ? { sandbox: true } : {}),
     });
 
     if (!result.ok) {
       return {
         ok: false,
         error: result.error,
+        ...(result.auth_required ? { auth_required: true } : {}),
+        ...(result.auth_methods ? { auth_methods: result.auth_methods as unknown as JsonRpcPayload[] } : {}),
         ...(result.install_hint ? { install_hint: result.install_hint } : {}),
       };
     }
@@ -14904,6 +15310,7 @@ export class DaemonServer {
       } else {
         delete target.session.metadata.acp_binding;
         delete target.session.extra.acp_context;
+        delete target.session.extra.acp_cost;
       }
       await this.runtime.flushSessions();
     }
@@ -14931,7 +15338,8 @@ export class DaemonServer {
       command,
       (event) => this.emit(connection, event.type, event.payload),
       connection,
-      { displayText: command, announceSuppressedTurn: true },
+      // The slash command exactly as the user typed it, handled by the runtime's own command.
+      { displayText: command, announceSuppressedTurn: true, userAuthored: true },
     ).catch((error) =>
       this.emit(connection, "notification", {
         level: "error",
@@ -15165,9 +15573,9 @@ export class DaemonServer {
 
     if (sub === "config") {
       const configId = tokens[1]?.trim() ?? "";
-      const value = tokens.slice(2).join(" ").trim();
+      const rawValue = tokens.slice(2).join(" ").trim();
       const binding = session ? this.acpBridgeHost.getBinding(session.id) : null;
-      if (!configId || !value) {
+      if (!configId || !rawValue) {
         if (!binding) {
           const usage = "Usage: `/acp config <id> <value>` (connect an external ACP agent first with `/acp use <agent>`).";
           this.emitSlash(connection, usage, "warning");
@@ -15176,8 +15584,11 @@ export class DaemonServer {
         const lines = [`Active ${binding.name} config options:`];
         if (binding.config_options && binding.config_options.length > 0) {
           for (const opt of binding.config_options) {
-            const choices = opt.options.map((c) => c.value).join(", ");
-            lines.push(`- ${opt.id} (${opt.name}): ${opt.current_value || "unset"}${choices ? ` [${choices}]` : ""}`);
+            const choices = opt.type === "boolean"
+              ? "true, false"
+              : opt.options.map((c) => c.value).join(", ");
+            const displayVal = formatAcpConfigValueDisplay(opt.current_value);
+            lines.push(`- ${opt.id} (${opt.name}): ${displayVal}${choices ? ` [${choices}]` : ""}`);
           }
         } else {
           lines.push("(none reported by external agent)");
@@ -15187,15 +15598,26 @@ export class DaemonServer {
         this.emitSlash(connection, text);
         return { ok: true, binding: binding as unknown as JsonRpcPayload, text };
       }
+      const targetOpt = binding?.config_options?.find(
+        (opt) => opt.id.toLowerCase() === configId.toLowerCase(),
+      );
+      const isBooleanOpt = targetOpt?.type === "boolean";
+      const parsedVal: string | boolean =
+        isBooleanOpt && /^(?:true|1|on)$/i.test(rawValue)
+          ? true
+          : isBooleanOpt && /^(?:false|0|off)$/i.test(rawValue)
+            ? false
+            : rawValue;
       const res = await this.handleAcpRpc(connection, "acp.set_config_option", {
         ...(session ? { session_id: session.id } : {}),
         session_key: connection.activeSessionKey,
         config_id: configId,
-        value,
+        value: parsedVal,
+        ...(typeof parsedVal === "boolean" ? { type: "boolean" } : {}),
       });
       if (res.ok === true) {
         const updated = res.binding as unknown as AcpSessionBinding | undefined;
-        const msg = `Set ${updated?.name ?? "ACP"} config "${configId}" to ${value}.`;
+        const msg = `Set ${updated?.name ?? "ACP"} config "${configId}" to ${String(parsedVal)}.`;
         this.emitSlash(connection, msg);
         return { ...res, text: msg };
       }
@@ -15204,7 +15626,98 @@ export class DaemonServer {
       return { ...res, text: errText };
     }
 
-    const usage = "Usage: `/acp [list|status|catalog|use <claude-code|antigravity|xerxes>|model <id>|mode <id>|thinking <level>|config <id> <value>|disconnect]`";
+    if (sub === "sessions") {
+      const res = await this.handleAcpRpc(connection, "acp.sessions", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+      });
+      if (res.ok === true) {
+        const rows = Array.isArray(res.sessions) ? (res.sessions as Array<Record<string, unknown>>) : [];
+        const lines = rows.length === 0
+          ? ["No external ACP sessions returned."]
+          : [
+              `External ACP sessions (${rows.length}):`,
+              ...rows.map((row) => {
+                const sid = String(row.session_id ?? "");
+                const title = typeof row.title === "string" && row.title ? ` — ${row.title}` : "";
+                const updated = typeof row.updated_at === "string" && row.updated_at ? ` (${row.updated_at})` : "";
+                return `- ${sid}${title}${updated}`;
+              }),
+            ];
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ...res, text };
+      }
+      const errText = String(res.error ?? "Failed to list external ACP sessions.");
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "fork") {
+      const res = await this.handleAcpRpc(connection, "acp.fork", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+      });
+      if (res.ok === true) {
+        const updated = res.binding as unknown as AcpSessionBinding | undefined;
+        const msg = `Forked ${updated?.name ?? "ACP"} session to ${updated?.external_session_id ?? "new session"}.`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? "Failed to fork external ACP session.");
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    if (sub === "auth") {
+      const methodId = tokens[1]?.trim() ?? "";
+      const agentId = tokens[2]?.trim() || undefined;
+      if (!methodId) {
+        const methods = session ? this.acpBridgeHost.getAuthMethods(session.id) : [];
+        if (methods.length === 0) {
+          const usage = "Usage: `/acp auth <method_id>` (no advertised auth methods on the current session).";
+          this.emitSlash(connection, usage, "warning");
+          return { ok: false, error: usage };
+        }
+        const lines = [
+          "Available ACP auth methods:",
+          ...methods.map((method) => {
+            const kindTag = method.type ? ` [${method.type}]` : "";
+            const desc = method.description ? ` — ${method.description}` : "";
+            return `- ${method.id} (${method.name})${kindTag}${desc}`;
+          }),
+          "",
+          "Run `/acp auth <method_id>` to authenticate.",
+        ];
+        const text = lines.join("\n");
+        this.emitSlash(connection, text);
+        return { ok: true, auth_methods: methods as unknown as JsonRpcPayload[], text };
+      }
+      const res = await this.handleAcpRpc(connection, "acp.authenticate", {
+        ...(session ? { session_id: session.id } : {}),
+        session_key: connection.activeSessionKey,
+        method_id: methodId,
+        ...(agentId ? { agent_id: agentId } : {}),
+      });
+      if (res.ok === true) {
+        if (res.mode === "terminal") {
+          const cmd = [String(res.command ?? ""), ...(Array.isArray(res.args) ? (res.args as string[]) : [])]
+            .filter(Boolean)
+            .join(" ");
+          const msg = `Run in your terminal to complete ${String(res.label ?? methodId)}:\n  ${cmd}`;
+          this.emitSlash(connection, msg);
+          return { ...res, text: msg };
+        }
+        const msg = `Authenticated ACP agent via "${methodId}".`;
+        this.emitSlash(connection, msg);
+        return { ...res, text: msg };
+      }
+      const errText = String(res.error ?? `Failed to authenticate via "${methodId}".`);
+      this.emitSlash(connection, errText, "warning");
+      return { ...res, text: errText };
+    }
+
+    const usage = "Usage: `/acp [list|status|catalog|use <claude-code|antigravity|xerxes>|model <id>|mode <id>|thinking <level>|config <id> <value>|sessions|fork|auth <method_id>|disconnect]`";
     this.emitSlash(connection, usage, "warning");
     return { ok: false, error: usage };
   }
@@ -15233,11 +15746,605 @@ export class DaemonServer {
     }
   }
 
-  private async loadAgyXerxesBridge(cwd: string) {
-    return loadXerxesWorkspaceBridgeForAcp(cwd, {
-      includeGlobal: true,
-      homeDir: this.acpBridgeHost.getHomeDir(),
-    }).catch(() => null);
+  private hasPendingAcpInteraction(sessionId: string): boolean {
+    if ((this.pendingAcpApprovalIds.get(sessionId)?.size ?? 0) > 0) {
+      return true;
+    }
+    for (const pending of this.pendingAcpQuestions.values()) {
+      if (pending.sessionId === sessionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private collectAcpMcpServers(cwd: string): readonly AcpConnectMcpServerInput[] {
+    const byName = new Map<string, AcpConnectMcpServerInput>();
+    const addServer = (server: {
+      readonly args?: readonly string[];
+      readonly command?: string;
+      readonly enabled?: boolean;
+      readonly env?: Readonly<Record<string, string>>;
+      readonly headers?: Readonly<Record<string, string>>;
+      readonly name: string;
+      readonly transport?: "stdio" | "sse" | "streamable_http";
+      readonly url?: string;
+    } | undefined): void => {
+      if (!server || server.enabled === false) return;
+      const name = server.name.trim();
+      if (!name || byName.has(name)) return;
+      byName.set(name, {
+        name,
+        ...(server.transport ? { transport: server.transport } : {}),
+        ...(server.command ? { command: server.command } : {}),
+        ...(server.args ? { args: [...server.args] } : {}),
+        ...(server.env ? { env: { ...server.env } } : {}),
+        ...(server.url ? { url: server.url } : {}),
+        ...(server.headers ? { headers: { ...server.headers } } : {}),
+        enabled: true,
+      });
+    };
+
+    const workspaceManager = this.workspaceCatalog.get(resolveProjectDirectory(cwd))?.mcpManager ?? this.mcpManager;
+    if (workspaceManager) {
+      for (const name of workspaceManager.listServers()) {
+        addServer(workspaceManager.getServer(name)?.config);
+      }
+    }
+    if (this.mcpSettingsStore) {
+      try {
+        const stored = this.mcpSettingsStore.read();
+        for (const server of stored.servers) {
+          addServer(server);
+        }
+      } catch {
+        // Ignore unreadable settings file during ACP connect.
+      }
+    }
+    return [...byName.values()];
+  }
+
+  private createOutOfTurnAcpEmitter(session: DaemonSession): (event: DaemonEvent) => void {
+    const owner = this.ownerlessInteractionOwner(session.sessionKey);
+    const accepts = (conn: DaemonTransportConnection): boolean =>
+      this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+    return (event: DaemonEvent): void => {
+      if (this.runtimeShutdown) return;
+      this.broadcastEvent(event.type, event.payload, accepts, [...this.sessionObservers], session.cwd);
+      if (event.type === "approval_request" || event.type === "question_request") {
+        // Ensure any observer attached to the session (or reconnecting later) can answer this out-of-turn prompt.
+        this.recordInteractionOwner(owner, event.type, event.payload);
+      }
+    };
+  }
+
+  private handleAcpElicitationComplete(session: DaemonSession, elicitationId: string): void {
+    if (!elicitationId) return;
+    const accepts = (conn: DaemonTransportConnection): boolean =>
+      this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+    for (const [requestId, pending] of [...this.pendingAcpQuestions.entries()]) {
+      if (pending.sessionId !== session.id || pending.elicitationId !== elicitationId) {
+        continue;
+      }
+      this.pendingAcpQuestions.delete(requestId);
+      pending.signal?.removeEventListener("abort", pending.abort);
+      this.questionOwners.delete(requestId);
+      this.pendingInteractionFrames.delete(requestId);
+      pending.completeByAgent?.();
+      this.broadcastEvent(
+        "question_resolved",
+        {
+          id: requestId,
+          session_id: session.id,
+          elicitation_id: elicitationId,
+          reason: "complete",
+        },
+        accepts,
+        [...this.sessionObservers],
+        session.cwd,
+      );
+    }
+  }
+
+  private applyAcpSessionReplay(
+    session: DaemonSession,
+    events: readonly AcpBridgeStreamEvent[],
+  ): void {
+    if (events.length === 0 || session.messages.length > 0) {
+      return;
+    }
+    let pendingUserText = "";
+    let pendingAssistantText = "";
+    let pendingThinkingText = "";
+    const pendingToolCalls: Array<{
+      readonly id: string;
+      readonly type: "function";
+      readonly function: { readonly name: string; readonly arguments: string };
+    }> = [];
+    const pendingToolResults: Array<{
+      readonly role: "tool";
+      readonly tool_call_id: string;
+      readonly name: string;
+      readonly content: string;
+      readonly duration_ms: number;
+      readonly is_error?: boolean;
+    }> = [];
+    const replayToolInputs = new Map<string, JsonObject>();
+
+    const flushUser = (): void => {
+      if (!pendingUserText) return;
+      session.messages.push({ role: "user", content: pendingUserText });
+      pendingUserText = "";
+    };
+    const flushAssistant = (): void => {
+      if (!pendingAssistantText && !pendingThinkingText && pendingToolCalls.length === 0 && pendingToolResults.length === 0) {
+        return;
+      }
+      if (pendingAssistantText || pendingThinkingText || pendingToolCalls.length > 0) {
+        session.messages.push({
+          role: "assistant",
+          content: pendingAssistantText,
+          ...(pendingThinkingText ? { thinking: pendingThinkingText } : {}),
+          ...(pendingToolCalls.length > 0 ? { tool_calls: [...pendingToolCalls] } : {}),
+        });
+      }
+      for (const toolResult of pendingToolResults) {
+        session.messages.push(toolResult);
+      }
+      if (pendingThinkingText.trim()) {
+        session.thinkingContent.push(pendingThinkingText);
+      }
+      pendingAssistantText = "";
+      pendingThinkingText = "";
+      pendingToolCalls.length = 0;
+      pendingToolResults.length = 0;
+    };
+
+    for (const event of events) {
+      if (event.type === "user_message_chunk") {
+        flushAssistant();
+        pendingUserText += event.text;
+      } else if (event.type === "thought_delta") {
+        flushUser();
+        pendingThinkingText += event.text;
+      } else if (event.type === "text_delta") {
+        flushUser();
+        pendingAssistantText += event.text;
+      } else if (event.type === "tool_call") {
+        flushUser();
+        const inputs = parseToolInputsObject(event.rawInput, event.argumentsText);
+        replayToolInputs.set(event.toolCallId, inputs);
+        pendingToolCalls.push({
+          id: event.toolCallId,
+          type: "function",
+          function: { name: event.name, arguments: event.argumentsText },
+        });
+      } else if (event.type === "tool_result") {
+        flushUser();
+        const isError = event.isError === true;
+        const permitted = !event.permissionDenied;
+        const inputs = replayToolInputs.get(event.toolCallId) ?? {};
+        pendingToolResults.push({
+          role: "tool",
+          tool_call_id: event.toolCallId,
+          name: event.name,
+          content: event.output,
+          duration_ms: event.durationMs ?? 0,
+          ...(isError ? { is_error: true } : {}),
+        });
+        session.toolExecutions.push({
+          toolCallId: event.toolCallId,
+          name: event.name,
+          inputs,
+          result: event.output,
+          permitted,
+          durationMs: event.durationMs ?? 0,
+          ...(isError ? { error: event.output.slice(0, 240) || "Tool execution failed." } : {}),
+          ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.diffs?.length ? { diffs: event.diffs } : {}),
+          ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+        });
+      }
+    }
+    flushUser();
+    flushAssistant();
+    if (session.messages.length > 0) {
+      session.turnCount = Math.max(
+        session.turnCount,
+        session.messages.filter((msg) => msg.role === "user").length,
+      );
+      void this.runtime.flushSessions().catch(() => undefined);
+      this.notifySessionStateChanged(session.id);
+    }
+  }
+
+  private createAcpElicitationHandler(input: {
+    readonly activeQuestionIds?: Set<string> | undefined;
+    readonly emit: (event: DaemonEvent) => void;
+    readonly questionSummaries?: Map<string, string> | undefined;
+    readonly session: DaemonSession;
+    readonly signal?: AbortSignal | undefined;
+  }): (req: AcpElicitationRequest, elicitSignal?: AbortSignal) => Promise<AcpElicitationResponse> {
+    const { session, emit, activeQuestionIds, questionSummaries } = input;
+    return async (
+      req: AcpElicitationRequest,
+      elicitSignal?: AbortSignal,
+    ): Promise<AcpElicitationResponse> => {
+      const waitSignal = elicitSignal ?? input.signal;
+      if (waitSignal?.aborted) {
+        return { action: "cancel" };
+      }
+
+      if (req.mode === "url") {
+        const requestId = crypto.randomUUID().replaceAll("-", "");
+        const toolCallId = req.toolCallId ?? "";
+        const promptText = req.message || "Open external link to continue";
+        activeQuestionIds?.add(requestId);
+        const outcome = await new Promise<
+          | { readonly kind: "answered"; readonly answers: Readonly<Record<string, string | readonly string[]>> }
+          | { readonly kind: "completed" }
+          | { readonly kind: "aborted" }
+        >((resolveWait) => {
+          const abort = () => {
+            const pending = this.pendingAcpQuestions.get(requestId);
+            if (!pending) return;
+            this.pendingAcpQuestions.delete(requestId);
+            activeQuestionIds?.delete(requestId);
+            pending.signal?.removeEventListener("abort", pending.abort);
+            this.questionOwners.delete(requestId);
+            this.pendingInteractionFrames.delete(requestId);
+            resolveWait({ kind: "aborted" });
+          };
+          const completeByAgent = () => {
+            activeQuestionIds?.delete(requestId);
+            resolveWait({ kind: "completed" });
+          };
+          this.pendingAcpQuestions.set(requestId, {
+            abort,
+            completeByAgent,
+            ...(req.elicitationId ? { elicitationId: req.elicitationId } : {}),
+            mode: "url",
+            resolve: (answers) => {
+              activeQuestionIds?.delete(requestId);
+              if (answers === null) {
+                resolveWait({ kind: "aborted" });
+              } else {
+                resolveWait({ kind: "answered", answers });
+              }
+            },
+            sessionId: session.id,
+            signal: waitSignal,
+            specs: [],
+            title: promptText,
+            toolCallId,
+          });
+          waitSignal?.addEventListener("abort", abort, { once: true });
+          if (waitSignal?.aborted) {
+            abort();
+            return;
+          }
+          emit({
+            type: "question_request",
+            payload: {
+              id: requestId,
+              session_id: session.id,
+              tool_call_id: toolCallId,
+              mode: "url",
+              ...(req.url ? { url: req.url } : {}),
+              ...(req.elicitationId ? { elicitation_id: req.elicitationId } : {}),
+              message: req.message,
+              questions: [
+                {
+                  id: "url_consent",
+                  question: promptText,
+                  options: ["Open link & continue", "Decline"],
+                  allow_free_form: false,
+                },
+              ],
+            },
+          });
+        });
+        activeQuestionIds?.delete(requestId);
+        if (outcome.kind === "aborted") {
+          return { action: "cancel" };
+        }
+        if (outcome.kind === "completed") {
+          return { action: "accept" };
+        }
+        const rawChoice = outcome.answers.url_consent ?? Object.values(outcome.answers)[0] ?? "";
+        const normalizedChoice = Array.isArray(rawChoice)
+          ? String(rawChoice[0] ?? "").trim().toLowerCase()
+          : String(rawChoice).trim().toLowerCase();
+        if (
+          !normalizedChoice ||
+          /\b(?:decline|deny|reject|cancel|skip|skipped|no)\b/.test(normalizedChoice)
+        ) {
+          return { action: "decline" };
+        }
+        // Per ACP spec, URL-mode elicitation accept omits `content`.
+        return { action: "accept" };
+      }
+
+      const specs = elicitationToQuestionItems(req);
+      if (specs.length === 0) {
+        return { action: "accept", content: {} };
+      }
+      const requestId = crypto.randomUUID().replaceAll("-", "");
+      const toolCallId = req.toolCallId ?? "";
+      const wireQuestions = specs.map((spec) => ({
+        id: spec.id,
+        question: spec.question,
+        options: [...spec.options],
+        allow_free_form: spec.allowFreeform,
+        ...(spec.multiSelect ? { multi_select: true } : {}),
+        ...(spec.placeholder ? { placeholder: spec.placeholder } : {}),
+      }));
+      activeQuestionIds?.add(requestId);
+      const rawAnswers = await new Promise<
+        Readonly<Record<string, string | readonly string[]>> | null
+      >((resolveAnswer) => {
+        const abort = () => {
+          const pending = this.pendingAcpQuestions.get(requestId);
+          if (!pending) return;
+          this.pendingAcpQuestions.delete(requestId);
+          activeQuestionIds?.delete(requestId);
+          pending.signal?.removeEventListener("abort", pending.abort);
+          this.questionOwners.delete(requestId);
+          this.pendingInteractionFrames.delete(requestId);
+          pending.resolve(null);
+        };
+        this.pendingAcpQuestions.set(requestId, {
+          abort,
+          ...(req.elicitationId ? { elicitationId: req.elicitationId } : {}),
+          mode: "form",
+          resolve: resolveAnswer,
+          sessionId: session.id,
+          signal: waitSignal,
+          specs,
+          title: specs[0]?.question || req.message || "Agent question",
+          toolCallId,
+        });
+        waitSignal?.addEventListener("abort", abort, { once: true });
+        if (waitSignal?.aborted) {
+          abort();
+          return;
+        }
+        emit({
+          type: "question_request",
+          payload: {
+            id: requestId,
+            session_id: session.id,
+            tool_call_id: toolCallId,
+            mode: "form",
+            ...(req.elicitationId ? { elicitation_id: req.elicitationId } : {}),
+            ...(req.message ? { message: req.message } : {}),
+            questions: wireQuestions,
+          },
+        });
+      });
+      activeQuestionIds?.delete(requestId);
+      if (rawAnswers === null) {
+        return { action: "cancel" };
+      }
+      const response = buildElicitationResponseFromAnswers(specs, rawAnswers);
+      if (toolCallId && questionSummaries) {
+        const summary = formatElicitationAnswersSummary(specs, response);
+        if (summary) {
+          questionSummaries.set(toolCallId, summary);
+        }
+      }
+      return response;
+    };
+  }
+
+  private createAcpPermissionHandler(input: {
+    readonly deniedToolCallIds?: Set<string> | undefined;
+    readonly effectivePermissionMode: string;
+    readonly emit: (event: DaemonEvent) => void;
+    readonly session: DaemonSession;
+    readonly signal?: AbortSignal | undefined;
+  }): (req: AcpClientPermissionRequest) => Promise<AcpClientPermissionResponse> {
+    const { session, emit, effectivePermissionMode, deniedToolCallIds, signal } = input;
+    return async (req: AcpClientPermissionRequest): Promise<AcpClientPermissionResponse> => {
+      if (signal?.aborted) {
+        return { outcome: "cancelled" };
+      }
+      const activeBinding = this.acpBridgeHost.getBinding(session.id);
+      // Native Antigravity multiple-choice questions share `session/request_permission` with
+      // `interaction_` toolCallIds; always ask the user (even in Turbo / Full Access mode),
+      // matching T3 Code's AntigravityProtocol.
+      if (activeBinding?.provider === "antigravity" && isAntigravityUserInputRequest(req)) {
+        const requestId = crypto.randomUUID().replaceAll("-", "");
+        const questionText = (req.title || "Choose an option.").trim();
+        const optionLabels = req.options.map((opt) => (opt.name.trim() || opt.optionId).slice(0, 512));
+        const labelToValue = new Map<string, string>(
+          req.options.map((opt, idx) => [optionLabels[idx]!, opt.optionId]),
+        );
+        const spec = {
+          id: req.toolCallId,
+          question: questionText,
+          options: optionLabels,
+          allowFreeform: false,
+          multiSelect: false,
+          fieldType: "string" as const,
+          choiceMap: req.options.map((opt, idx) => ({
+            const: opt.optionId,
+            title: optionLabels[idx]!,
+          })),
+        };
+        const rawAnswers = await new Promise<
+          Readonly<Record<string, string | readonly string[]>> | null
+        >((resolveAnswer) => {
+          const abort = () => {
+            const pending = this.pendingAcpQuestions.get(requestId);
+            if (!pending) return;
+            this.pendingAcpQuestions.delete(requestId);
+            pending.signal?.removeEventListener("abort", pending.abort);
+            this.questionOwners.delete(requestId);
+            this.pendingInteractionFrames.delete(requestId);
+            pending.resolve(null);
+          };
+          this.pendingAcpQuestions.set(requestId, {
+            abort,
+            resolve: resolveAnswer,
+            sessionId: session.id,
+            signal,
+            specs: [spec],
+            title: questionText,
+            toolCallId: req.toolCallId,
+          });
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) {
+            abort();
+            return;
+          }
+          emit({
+            type: "question_request",
+            payload: {
+              id: requestId,
+              session_id: session.id,
+              tool_call_id: req.toolCallId,
+              mode: "form",
+              questions: [
+                {
+                  id: req.toolCallId,
+                  question: questionText,
+                  options: optionLabels,
+                  allow_free_form: false,
+                },
+              ],
+            },
+          });
+        });
+        if (rawAnswers === null || signal?.aborted) {
+          return { outcome: "cancelled" };
+        }
+        const rawChoice = rawAnswers[req.toolCallId];
+        const chosen = Array.isArray(rawChoice) ? String(rawChoice[0] ?? "") : String(rawChoice ?? "");
+        const exactById = req.options.find((opt) => opt.optionId === chosen);
+        if (exactById) {
+          return { outcome: "selected", optionId: exactById.optionId };
+        }
+        const mappedId = labelToValue.get(chosen);
+        if (mappedId) {
+          return { outcome: "selected", optionId: mappedId };
+        }
+        const matchingByLabel = req.options.filter(
+          (opt) => (opt.name.trim() || opt.optionId).slice(0, 512) === chosen,
+        );
+        if (matchingByLabel.length === 1) {
+          return { outcome: "selected", optionId: matchingByLabel[0]!.optionId };
+        }
+        return { outcome: "cancelled" };
+      }
+      if (isAcpTurboMode(activeBinding) || this.acpBridgeHost.isTurboMode(session.id)) {
+        return selectAcpPermissionOption(req.options, "approve");
+      }
+      const agentOwnsPermissionMode =
+        activeBinding?.provider === "antigravity" ||
+        (activeBinding?.modes?.length ?? 0) > 0;
+      if (!agentOwnsPermissionMode && effectivePermissionMode === "accept-all") {
+        return selectAcpPermissionOption(req.options, "approve");
+      }
+      const requestId = crypto.randomUUID().replaceAll("-", "");
+      const inputs: JsonObject = isRecord(req.rawInput) ? (req.rawInput as JsonObject) : {};
+      const description = req.title || `${req.toolName} permission requested by external ACP agent`;
+      const allowPermanent = req.options.some((opt) => opt.kind === "allow_always");
+      if (!allowPermanent) {
+        this.acpNonPermanentApprovals.add(requestId);
+      }
+      const rawDiffs = req.diffs && req.diffs.length > 0 ? req.diffs : req.diff ? [req.diff] : [];
+      const wireDiffs = rawDiffs.map((entry) => ({
+        path: entry.path,
+        ...(entry.oldText !== undefined ? { old_text: entry.oldText } : {}),
+        ...(entry.newText !== undefined ? { new_text: entry.newText } : {}),
+      }));
+      const wireDiff = wireDiffs[0];
+      const wireOptions = req.options.length > 0
+        ? req.options.map((opt) => ({
+            option_id: opt.optionId,
+            name: opt.name,
+            kind: opt.kind ?? "",
+            ...(opt.warning ? { warning: opt.warning } : {}),
+          }))
+        : undefined;
+      let sessionPendingIds = this.pendingAcpApprovalIds.get(session.id);
+      if (!sessionPendingIds) {
+        sessionPendingIds = new Set<string>();
+        this.pendingAcpApprovalIds.set(session.id, sessionPendingIds);
+      }
+      sessionPendingIds.add(requestId);
+      emit({
+        type: "approval_request",
+        payload: {
+          id: requestId,
+          request_id: requestId,
+          session_id: session.id,
+          tool_call_id: req.toolCallId,
+          action: req.toolName,
+          name: req.toolName,
+          tool_name: req.toolName,
+          description,
+          inputs,
+          cwd: session.cwd,
+          allow_permanent: allowPermanent,
+          ...(wireDiff ? { diff: wireDiff } : {}),
+          ...(wireDiffs.length > 0 ? { diffs: wireDiffs } : {}),
+          ...(wireOptions ? { options: wireOptions } : {}),
+          ...(req.locations?.length ? { locations: req.locations } : {}),
+        },
+      });
+      let decision: "approve" | "approve_for_session" | "reject";
+      let chosenOptionId: string | undefined;
+      try {
+        decision = await this.interactions.permissionBroker(session.id).request(
+          {
+            requestId,
+            description,
+            inputs,
+            toolCall: {
+              id: req.toolCallId,
+              type: "function",
+              function: {
+                name: req.toolName,
+                arguments: inputs,
+              },
+            },
+          },
+          signal,
+        );
+        chosenOptionId = this.acpApprovalOptionChoices.get(requestId);
+      } finally {
+        sessionPendingIds.delete(requestId);
+        if (sessionPendingIds.size === 0) {
+          this.pendingAcpApprovalIds.delete(session.id);
+        }
+        this.acpApprovalOptionChoices.delete(requestId);
+        this.acpNonPermanentApprovals.delete(requestId);
+      }
+      if (signal?.aborted) {
+        return { outcome: "cancelled" };
+      }
+      const matchedOption = chosenOptionId
+        ? req.options.find((opt) => opt.optionId === chosenOptionId)
+        : undefined;
+      const resolvedResponse: AcpClientPermissionResponse = matchedOption
+        ? { outcome: "selected", optionId: matchedOption.optionId }
+        : selectAcpPermissionOption(req.options, decision);
+      const selectedMeta = resolvedResponse.optionId
+        ? req.options.find((opt) => opt.optionId === resolvedResponse.optionId)
+        : undefined;
+      if (
+        resolvedResponse.outcome === "cancelled" ||
+        selectedMeta?.kind === "reject_once" ||
+        selectedMeta?.kind === "reject_always" ||
+        (decision === "reject" && !matchedOption)
+      ) {
+        deniedToolCallIds?.add(req.toolCallId);
+      }
+      return resolvedResponse;
+    };
   }
 
   private async runExternalAcpTurn(
@@ -15287,42 +16394,20 @@ export class DaemonServer {
         ? String(this.runtime.status().permission_mode)
         : "auto");
 
-    const liveAcpBinding = this.acpBridgeHost.getBinding(session.id);
-    let effectiveText = text;
-    let xerxesContextResource: AcpPromptResourceInput | undefined;
-    if (liveAcpBinding && isAntigravityBinding(liveAcpBinding)) {
-      const xerxesBridge = await this.loadAgyXerxesBridge(session.cwd);
-      if (xerxesBridge) {
-        const acpOwned = new Set((liveAcpBinding.available_commands ?? []).map(item => item.name.trim().toLowerCase()));
-        const expanded = await expandXerxesAcpSlashCommand(text, xerxesBridge, acpOwned).catch(() => null);
-        if (expanded) {
-          effectiveText = expanded.expandedPrompt;
-        }
-        const extSid = liveAcpBinding.external_session_id?.trim() || "live";
-        const contextKey = `${extSid}:${xerxesBridge.contextHash}`;
-        if (xerxesBridge.firstTurnContextBlock && session.extra.acp_xerxes_context_key !== contextKey) {
-          xerxesContextResource = {
-            uri: "xerxes://workspace-context",
-            mimeType: "text/markdown",
-            text: xerxesBridge.firstTurnContextBlock,
-          };
-          session.extra.acp_xerxes_context_key = contextKey;
-          session.extra.acp_xerxes_context_sid = extSid;
-        }
-      }
-    }
-
-    const processedMentions = await processAtMentions(effectiveText, session.cwd);
+    // The user's text goes to the external runtime as typed. Xerxes adds no
+    // workspace context, instructions, or expanded command bodies of its own.
+    const effectiveText = text;
+    const activeAcpBinding = this.acpBridgeHost.getBinding(session.id);
+    const isAntigravity = Boolean(activeAcpBinding?.connected && isAntigravityBinding(activeAcpBinding));
+    const embeddedContextSupported = activeAcpBinding?.capabilities?.prompt.embedded_context === true;
+    const processedMentions = !isAntigravity || embeddedContextSupported
+      ? await processAtMentions(effectiveText, session.cwd)
+      : { enhancedMessage: effectiveText, mentionedFiles: [], resources: [] };
     const mentionResources = processedMentions.mentionedFiles.length > 0
-      ? extractResourcesFromProcessedMentions(processedMentions.enhancedMessage)
+      ? resourcesFromProcessedMentions(processedMentions)
       : [];
-    const acpResources: AcpPromptResourceInput[] = [
-      ...(xerxesContextResource ? [xerxesContextResource] : []),
-      ...mentionResources,
-    ];
-    const fallbackInlineText = xerxesContextResource
-      ? `${xerxesContextResource.text}\n\n${processedMentions.enhancedMessage}`
-      : processedMentions.enhancedMessage;
+    const acpResources: readonly AcpPromptResourceInput[] = mentionResources;
+    const fallbackInlineText = isAntigravity ? undefined : processedMentions.enhancedMessage;
 
     emit({
       type: "turn_begin",
@@ -15342,192 +16427,26 @@ export class DaemonServer {
         ...(acpResources.length > 0
           ? {
               resources: acpResources,
-              fallbackInlineText,
+              ...(fallbackInlineText !== undefined ? { fallbackInlineText } : {}),
             }
           : {}),
         ...(options.images?.length ? { images: options.images } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         permissionMode: effectivePermissionMode,
-        createElicitation: async (
-          req: AcpElicitationRequest,
-          elicitSignal?: AbortSignal,
-        ): Promise<AcpElicitationResponse> => {
-          const waitSignal = elicitSignal ?? options.signal;
-          if (waitSignal?.aborted) {
-            return { action: "cancel" };
-          }
-          if (req.mode === "url") {
-            return { action: "cancel" };
-          }
-          const specs = elicitationToQuestionItems(req);
-          if (specs.length === 0) {
-            return { action: "accept", content: {} };
-          }
-          const requestId = crypto.randomUUID().replaceAll("-", "");
-          const toolCallId = req.toolCallId ?? "";
-          const wireQuestions = specs.map((spec) => ({
-            id: spec.id,
-            question: spec.question,
-            options: [...spec.options],
-            allow_free_form: spec.allowFreeform,
-            ...(spec.multiSelect ? { multi_select: true } : {}),
-            ...(spec.placeholder ? { placeholder: spec.placeholder } : {}),
-          }));
-          activeAcpQuestionIds.add(requestId);
-          const rawAnswers = await new Promise<
-            Readonly<Record<string, string | readonly string[]>> | null
-          >((resolveAnswer) => {
-            const abort = () => {
-              const pending = this.pendingAcpQuestions.get(requestId);
-              if (!pending) return;
-              this.pendingAcpQuestions.delete(requestId);
-              activeAcpQuestionIds.delete(requestId);
-              pending.signal?.removeEventListener("abort", pending.abort);
-              this.questionOwners.delete(requestId);
-              this.pendingInteractionFrames.delete(requestId);
-              pending.resolve(null);
-            };
-            this.pendingAcpQuestions.set(requestId, {
-              abort,
-              resolve: resolveAnswer,
-              sessionId: session.id,
-              signal: waitSignal,
-              specs,
-              title: specs[0]?.question || req.message || "Agent question",
-              toolCallId,
-            });
-            waitSignal?.addEventListener("abort", abort, { once: true });
-            if (waitSignal?.aborted) {
-              abort();
-              return;
-            }
-            emit({
-              type: "question_request",
-              payload: {
-                id: requestId,
-                session_id: session.id,
-                tool_call_id: toolCallId,
-                questions: wireQuestions,
-              },
-            });
-          });
-          activeAcpQuestionIds.delete(requestId);
-          if (rawAnswers === null) {
-            return { action: "cancel" };
-          }
-          const response = buildElicitationResponseFromAnswers(specs, rawAnswers);
-          if (toolCallId) {
-            const summary = formatElicitationAnswersSummary(specs, response);
-            if (summary) {
-              acpQuestionSummaries.set(toolCallId, summary);
-            }
-          }
-          return response;
-        },
-        requestPermission: async (req: AcpClientPermissionRequest): Promise<AcpClientPermissionResponse> => {
-          const activeBinding = this.acpBridgeHost.getBinding(session.id);
-          if (isAcpTurboMode(activeBinding) || this.acpBridgeHost.isTurboMode(session.id)) {
-            return selectAcpPermissionOption(req.options, "approve");
-          }
-          const agentOwnsPermissionMode =
-            activeBinding?.provider === "antigravity" ||
-            (activeBinding?.modes?.length ?? 0) > 0;
-          if (!agentOwnsPermissionMode && effectivePermissionMode === "accept-all") {
-            return selectAcpPermissionOption(req.options, "approve");
-          }
-          const requestId = crypto.randomUUID().replaceAll("-", "");
-          const inputs: JsonObject = isRecord(req.rawInput) ? (req.rawInput as JsonObject) : {};
-          const description = req.title || `${req.toolName} permission requested by external ACP agent`;
-          const allowPermanent = req.options.some((opt) => opt.kind === "allow_always");
-          if (!allowPermanent) {
-            this.acpNonPermanentApprovals.add(requestId);
-          }
-          const wireDiff = req.diff
-            ? {
-                path: req.diff.path,
-                ...(req.diff.oldText !== undefined ? { old_text: req.diff.oldText } : {}),
-                ...(req.diff.newText !== undefined ? { new_text: req.diff.newText } : {}),
-              }
-            : undefined;
-          const wireOptions = req.options.length > 0
-            ? req.options.map((opt) => ({
-                option_id: opt.optionId,
-                name: opt.name,
-                kind: opt.kind ?? "",
-              }))
-            : undefined;
-          let sessionPendingIds = this.pendingAcpApprovalIds.get(session.id);
-          if (!sessionPendingIds) {
-            sessionPendingIds = new Set<string>();
-            this.pendingAcpApprovalIds.set(session.id, sessionPendingIds);
-          }
-          sessionPendingIds.add(requestId);
-          emit({
-            type: "approval_request",
-            payload: {
-              id: requestId,
-              request_id: requestId,
-              session_id: session.id,
-              tool_call_id: req.toolCallId,
-              action: req.toolName,
-              name: req.toolName,
-              tool_name: req.toolName,
-              description,
-              inputs,
-              cwd: session.cwd,
-              allow_permanent: allowPermanent,
-              ...(wireDiff ? { diff: wireDiff } : {}),
-              ...(wireOptions ? { options: wireOptions } : {}),
-              ...(req.locations?.length ? { locations: req.locations } : {}),
-            },
-          });
-          let decision: "approve" | "approve_for_session" | "reject";
-          let chosenOptionId: string | undefined;
-          try {
-            decision = await this.interactions.permissionBroker(session.id).request(
-              {
-                requestId,
-                description,
-                inputs,
-                toolCall: {
-                  id: req.toolCallId,
-                  type: "function",
-                  function: {
-                    name: req.toolName,
-                    arguments: inputs,
-                  },
-                },
-              },
-              options.signal,
-            );
-            chosenOptionId = this.acpApprovalOptionChoices.get(requestId);
-          } finally {
-            sessionPendingIds.delete(requestId);
-            if (sessionPendingIds.size === 0) {
-              this.pendingAcpApprovalIds.delete(session.id);
-            }
-            this.acpApprovalOptionChoices.delete(requestId);
-            this.acpNonPermanentApprovals.delete(requestId);
-          }
-          const matchedOption = chosenOptionId
-            ? req.options.find((opt) => opt.optionId === chosenOptionId)
-            : undefined;
-          const resolvedResponse: AcpClientPermissionResponse = matchedOption
-            ? { outcome: "selected", optionId: matchedOption.optionId }
-            : selectAcpPermissionOption(req.options, decision);
-          const selectedMeta = resolvedResponse.optionId
-            ? req.options.find((opt) => opt.optionId === resolvedResponse.optionId)
-            : undefined;
-          if (
-            resolvedResponse.outcome === "cancelled" ||
-            selectedMeta?.kind === "reject_once" ||
-            selectedMeta?.kind === "reject_always" ||
-            (decision === "reject" && !matchedOption)
-          ) {
-            deniedToolCallIds.add(req.toolCallId);
-          }
-          return resolvedResponse;
-        },
+        createElicitation: this.createAcpElicitationHandler({
+          session,
+          emit,
+          activeQuestionIds: activeAcpQuestionIds,
+          questionSummaries: acpQuestionSummaries,
+          signal: options.signal,
+        }),
+        requestPermission: this.createAcpPermissionHandler({
+          session,
+          emit,
+          effectivePermissionMode,
+          deniedToolCallIds,
+          signal: options.signal,
+        }),
         onEvent: (event: AcpBridgeStreamEvent) => {
           switch (event.type) {
             case "session_init":
@@ -15560,12 +16479,17 @@ export class DaemonServer {
               break;
             }
             case "text_delta": {
-              session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+              if (event.text) {
+                session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+              }
               emit({
                 type: "text_part",
                 payload: {
                   session_id: session.id,
                   text: event.text,
+                  ...(event.contentBlocks?.length
+                    ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+                    : {}),
                 },
               });
               break;
@@ -15602,7 +16526,12 @@ export class DaemonServer {
                   name: event.name,
                   arguments: event.argumentsText,
                   ...(event.title ? { title: event.title } : {}),
+                  ...(event.kind ? { kind: event.kind } : {}),
                   ...(event.diff ? { diff: event.diff } : {}),
+                  ...(event.diffs?.length ? { diffs: event.diffs as unknown as JsonRpcPayload[] } : {}),
+                  ...(event.contentBlocks?.length
+                    ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+                    : {}),
                   ...(event.locations?.length ? { locations: event.locations } : {}),
                 },
               });
@@ -15612,6 +16541,37 @@ export class DaemonServer {
               }
               break;
             }
+            case "tool_update": {
+              let parsedInputs: JsonObject | undefined;
+              if (event.rawInput !== undefined || event.argumentsText !== undefined) {
+                parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText ?? "");
+                toolInputsById.set(event.toolCallId, {
+                  ...(toolInputsById.get(event.toolCallId) ?? {}),
+                  ...parsedInputs,
+                });
+              }
+              emit({
+                type: "tool_update",
+                payload: {
+                  id: event.toolCallId,
+                  tool_call_id: event.toolCallId,
+                  session_id: session.id,
+                  name: event.name,
+                  ...(event.title ? { title: event.title } : {}),
+                  ...(event.kind ? { kind: event.kind } : {}),
+                  ...(event.status ? { status: event.status } : {}),
+                  ...(parsedInputs ? { inputs: parsedInputs } : {}),
+                  ...(event.output !== undefined ? { output: event.output } : {}),
+                  ...(event.diff ? { diff: event.diff } : {}),
+                  ...(event.diffs?.length ? { diffs: event.diffs as unknown as JsonRpcPayload[] } : {}),
+                  ...(event.contentBlocks?.length
+                    ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+                    : {}),
+                  ...(event.locations?.length ? { locations: event.locations } : {}),
+                },
+              });
+              break;
+            }
             case "tool_result": {
               const started = toolStartTimes.get(event.toolCallId);
               const durationMs = event.durationMs ?? (started !== undefined ? Math.max(0, Date.now() - started) : 0);
@@ -15619,8 +16579,14 @@ export class DaemonServer {
               const permitted = !event.permissionDenied && !deniedToolCallIds.has(event.toolCallId);
               const inputs = toolInputsById.get(event.toolCallId) ?? {};
               const output = event.output || acpQuestionSummaries.get(event.toolCallId) || "";
+              const allDiffs = event.diffs && event.diffs.length > 0
+                ? event.diffs
+                : event.diff
+                  ? [event.diff]
+                  : [];
+              const primaryDiff = allDiffs[0];
               const artifactId = !isError && permitted
-                ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, event.diff)
+                ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff)
                 : undefined;
               recordedToolResults.push({
                 role: "tool",
@@ -15638,7 +16604,9 @@ export class DaemonServer {
                 permitted,
                 durationMs,
                 ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-                ...(event.diff ? { diff: event.diff } : {}),
+                ...(primaryDiff ? { diff: primaryDiff } : {}),
+                ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
+                ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
                 ...(event.locations?.length ? { locations: event.locations } : {}),
                 ...(artifactId ? { artifact_id: artifactId } : {}),
               });
@@ -15655,18 +16623,18 @@ export class DaemonServer {
               this.recordAcpToolTelemetry(session, durationMs);
               this.recordAcpBackgroundToolResult(session, event.toolCallId, event.name, inputs, output, isError || !permitted);
               const displayBlocks: JsonRpcPayload[] = [];
-              if (event.diff) {
+              for (const diffItem of allDiffs) {
                 const unified = formatCompactUnifiedDiff(
-                  event.diff.path,
-                  event.diff.old_text,
-                  event.diff.new_text,
+                  diffItem.path,
+                  diffItem.old_text,
+                  diffItem.new_text,
                 );
                 if (unified) {
                   displayBlocks.push({
                     type: "diff",
                     diff: unified,
                     language: "diff",
-                    path: event.diff.path,
+                    path: diffItem.path,
                   });
                 }
               }
@@ -15676,12 +16644,18 @@ export class DaemonServer {
                   session_id: session.id,
                   tool_call_id: event.toolCallId,
                   name: event.name,
+                  ...(event.title ? { title: event.title } : {}),
+                  ...(event.kind ? { kind: event.kind } : {}),
                   return_value: output,
                   ...(event.rawOutput !== undefined ? { raw_output: event.rawOutput as JsonRpcPayload } : {}),
                   duration_ms: durationMs,
                   permitted,
                   ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-                  ...(event.diff ? { diff: event.diff } : {}),
+                  ...(primaryDiff ? { diff: primaryDiff } : {}),
+                  ...(allDiffs.length > 0 ? { diffs: allDiffs as unknown as JsonRpcPayload[] } : {}),
+                  ...(event.contentBlocks?.length
+                    ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+                    : {}),
                   ...(event.locations?.length ? { locations: event.locations } : {}),
                   ...(artifactId ? { artifact_id: artifactId } : {}),
                   display_blocks: displayBlocks,
@@ -15703,6 +16677,24 @@ export class DaemonServer {
                   session_id: session.id,
                   ...(activeModel ? { model: activeModel } : {}),
                   ...statusPatch,
+                },
+              });
+              break;
+            }
+            case "notice": {
+              const level =
+                event.severity === "error" || event.severity === "warning"
+                  ? event.severity
+                  : "info";
+              const message = event.description
+                ? `${event.title}: ${event.description}`
+                : event.title;
+              emit({
+                type: "notification",
+                payload: {
+                  session_id: session.id,
+                  level,
+                  message,
                 },
               });
               break;
@@ -15741,7 +16733,9 @@ export class DaemonServer {
                   session_id: session.id,
                   kind: "plan",
                   todos: todoItems,
-                  text: `Plan updated (${doneCount}/${todoItems.length} completed)`,
+                  text: todoItems.length === 0
+                    ? "Plan cleared"
+                    : `Plan updated (${doneCount}/${todoItems.length} completed)`,
                 },
               });
               break;
@@ -15757,6 +16751,9 @@ export class DaemonServer {
               });
               break;
             }
+            case "elicitation_complete":
+            case "session_replay":
+            case "user_message_chunk":
             case "continuation":
               break;
           }
@@ -16014,42 +17011,6 @@ export class DaemonServer {
     };
   }
 
-  private async dispatchAgyBackgroundTaskKill(
-    session: DaemonSession,
-    taskId: string,
-  ): Promise<JsonRpcPayload> {
-    const resolved = this.resolveAgyBindingForSession(session);
-    if (!resolved?.liveConnected) {
-      return {
-        ok: false,
-        error: "Reconnect Antigravity to stop or cancel its background tasks.",
-      };
-    }
-    const cleanId = taskId.trim();
-    const rawTaskId = cleanId.startsWith(AGY_TASK_ID_PREFIX)
-      ? cleanId.slice(AGY_TASK_ID_PREFIX.length)
-      : cleanId;
-    if (!rawTaskId) {
-      return { ok: false, error: "task_id is required" };
-    }
-    const liveMap = this.acpBackgroundTasks.get(session.id);
-    const existing = liveMap?.get(rawTaskId);
-    if (existing) {
-      liveMap!.set(rawTaskId, { ...existing, state: "cancelled", endedAt: Date.now() });
-      this.broadcast("background_changed", { session_id: session.id });
-    }
-    const instruction = [
-      `[Xerxes Background Control] The user requested cancelling/stopping Antigravity background task \`${rawTaskId}\`.`,
-      `Call \`manage_task(Action: "kill", TaskId: "${rawTaskId}")\` immediately.`,
-    ].join("\n");
-    await this.dispatchAgyCoordinatorAction(
-      session,
-      instruction,
-      `Cancel background task (${rawTaskId})`,
-    );
-    return { ok: true, requested: true, dispatched: true, task_id: rawTaskId };
-  }
-
   private recordAcpToolTelemetry(session: DaemonSession, durationMs: number): void {
     const prev = isRecord(session.extra.runtime_telemetry)
       ? (session.extra.runtime_telemetry as Record<string, unknown>)
@@ -16204,128 +17165,6 @@ export class DaemonServer {
     }
   }
 
-  private async dispatchAgySwarmKill(
-    session: DaemonSession,
-    agySwarm: {
-      readonly binding: AcpSessionBinding;
-      readonly liveConnected: boolean;
-      readonly location: AgyBrainLocation;
-      readonly modelDisplayMap: ReadonlyMap<string, string>;
-    },
-    rawTarget: string,
-  ): Promise<JsonRpcPayload> {
-    if (!agySwarm.liveConnected) {
-      return {
-        ok: false,
-        error: "Reconnect Antigravity to send swarm actions; board remains readable offline.",
-      };
-    }
-    const clean = rawTarget.trim();
-    if (!clean) {
-      return { ok: false, error: "name is required" };
-    }
-    const status = await this.agyBrainBridge.readSwarmStatus(
-      session.id,
-      agySwarm.location,
-      agySwarm.modelDisplayMap,
-    );
-    const livingWorkers = status.members.filter(
-      (member) => member.role !== "coordinator" && !member.killed,
-    );
-    const targets = clean.toLowerCase() === "all"
-      ? livingWorkers.map((member) => member.name)
-      : livingWorkers
-          .filter((member) => member.name.toLowerCase() === clean.toLowerCase())
-          .map((member) => member.name);
-
-    if (targets.length === 0) {
-      return { ok: true, status: "killed", killed: [] };
-    }
-
-    const calls = targets
-      .map((workerName) => `- \`swarm{action: "kill", name: "${workerName}"}\``)
-      .join("\n");
-    const instruction = [
-      `[Xerxes Immortals Board Action] The user requested stopping Antigravity swarm worker(s): ${targets.join(", ")}.`,
-      "Call the following `swarm` tool action(s) immediately:",
-      calls,
-    ].join("\n");
-    await this.dispatchAgyCoordinatorAction(
-      session,
-      instruction,
-      clean.toLowerCase() === "all" ? "Immortals stop all workers" : `Immortals kill (@${targets[0]})`,
-    );
-    return {
-      ok: true,
-      status: "killed",
-      dispatched: true,
-      killed: targets,
-    };
-  }
-
-  private async dispatchAgyCoordinatorAction(
-    session: DaemonSession,
-    promptText: string,
-    displayText: string,
-  ): Promise<void> {
-    await this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
-    const isBusy = Boolean(
-      session.activeTurnId ||
-      this.turnOwners.has(session.sessionKey) ||
-      this.acpBridgeHost.hasActiveTurn(session.id),
-    );
-    if (isBusy) {
-      const state = collabState(session.metadata);
-      const entry = enqueueSteer(state, {
-        text: promptText,
-        image_count: 0,
-        display_name: "user",
-        principal_id: "local",
-      });
-      this.publishSteerStatus(session, [entry]);
-      await this.runtime.flushSessions().catch(() => undefined);
-      return;
-    }
-
-    const accepts = (conn: DaemonTransportConnection): boolean =>
-      this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
-    const emitBroadcast = (turnEvent: DaemonEvent): void => {
-      this.broadcastEvent(
-        turnEvent.type,
-        {
-          ...turnEvent.payload,
-          session_id: session.id,
-          ...(turnEvent.type === "turn_begin" ? { origin: "agent" } : {}),
-        },
-        accepts,
-        [...this.sessionObservers],
-        session.cwd,
-      );
-    };
-    void this.submitTrackedTurn(
-      session.sessionKey,
-      promptText,
-      emitBroadcast,
-      undefined,
-      {
-        origin: "agent",
-        displayText,
-      },
-    ).catch((error) => {
-      this.broadcastEvent(
-        "notification",
-        {
-          level: "error",
-          message: `Antigravity swarm action failed: ${errorMessage(error)}`,
-          session_id: session.id,
-        },
-        accepts,
-        [...this.sessionObservers],
-        session.cwd,
-      );
-    });
-  }
-
   private detectAgyArtifactId(
     session: DaemonSession,
     toolName: string,
@@ -16418,23 +17257,8 @@ export class DaemonServer {
           : { ok: false, error: `no artifact ${id} in this session` };
       }
       if (method === "artifacts.update") {
-        if (typeof params.content !== "string") {
-          return { ok: false, error: "content must be a string" };
-        }
-        if (params.title !== undefined && typeof params.title !== "string") {
-          return { ok: false, error: "title must be a string" };
-        }
-        const updated = await this.agyBrainBridge.updateArtifact(
-          session.id,
-          agyLoc,
-          id,
-          {
-            content: params.content,
-            ...(typeof params.title === "string" ? { title: params.title } : {}),
-          },
-          persistedPins,
-        );
-        return { ok: true, artifact: agyArtifactWire(updated) };
+        // Xerxes never writes into an Antigravity brain directory.
+        return { ok: false, error: "Antigravity artifacts are read-only in Xerxes. Edit them in Antigravity." };
       }
       if (typeof params.pinned !== "boolean") {
         return { ok: false, error: "pinned must be a boolean" };
@@ -16469,6 +17293,7 @@ export class DaemonServer {
       | { readonly type: "text_delta" }
       | { readonly type: "thought_delta" }
       | { readonly type: "tool_call" }
+      | { readonly type: "tool_update" }
       | { readonly type: "tool_result" }
       | { readonly type: "plan" }
       | { readonly type: "continuation" }
@@ -16532,11 +17357,16 @@ export class DaemonServer {
         break;
       }
       case "text_delta": {
-        wakeup.assistantText += event.text;
-        session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+        if (event.text) {
+          wakeup.assistantText += event.text;
+          session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+        }
         broadcastWake("text_part", {
           session_id: session.id,
           text: event.text,
+          ...(event.contentBlocks?.length
+            ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+            : {}),
         });
         break;
       }
@@ -16582,13 +17412,46 @@ export class DaemonServer {
           name: event.name,
           arguments: event.argumentsText,
           ...(event.title ? { title: event.title } : {}),
+          ...(event.kind ? { kind: event.kind } : {}),
           ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.diffs?.length ? { diffs: event.diffs as unknown as JsonRpcPayload[] } : {}),
+          ...(event.contentBlocks?.length
+            ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+            : {}),
           ...(event.locations?.length ? { locations: event.locations } : {}),
         });
         if (isAgySwarmTriggerTool(event.name)) {
           this.ensureAgySwarmWatch(session);
           this.agyBrainBridge.refreshSession(session.id);
         }
+        break;
+      }
+      case "tool_update": {
+        let parsedInputs: JsonObject | undefined;
+        if (event.rawInput !== undefined || event.argumentsText !== undefined) {
+          parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText ?? "");
+          wakeup.toolInputsById.set(event.toolCallId, {
+            ...(wakeup.toolInputsById.get(event.toolCallId) ?? {}),
+            ...parsedInputs,
+          });
+        }
+        broadcastWake("tool_update", {
+          id: event.toolCallId,
+          tool_call_id: event.toolCallId,
+          session_id: session.id,
+          name: event.name,
+          ...(event.title ? { title: event.title } : {}),
+          ...(event.kind ? { kind: event.kind } : {}),
+          ...(event.status ? { status: event.status } : {}),
+          ...(parsedInputs ? { inputs: parsedInputs } : {}),
+          ...(event.output !== undefined ? { output: event.output } : {}),
+          ...(event.diff ? { diff: event.diff } : {}),
+          ...(event.diffs?.length ? { diffs: event.diffs as unknown as JsonRpcPayload[] } : {}),
+          ...(event.contentBlocks?.length
+            ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+            : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+        });
         break;
       }
       case "tool_result": {
@@ -16599,8 +17462,14 @@ export class DaemonServer {
         const inputs = wakeup.toolInputsById.get(event.toolCallId) ?? {};
         const output = event.output || "";
         wakeup.pendingToolCallIds.delete(event.toolCallId);
+        const allDiffs = event.diffs && event.diffs.length > 0
+          ? event.diffs
+          : event.diff
+            ? [event.diff]
+            : [];
+        const primaryDiff = allDiffs[0];
         const artifactId = !isError && permitted
-          ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, event.diff)
+          ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff)
           : undefined;
         wakeup.recordedToolResults.push({
           role: "tool",
@@ -16618,7 +17487,9 @@ export class DaemonServer {
           permitted,
           durationMs,
           ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-          ...(event.diff ? { diff: event.diff } : {}),
+          ...(primaryDiff ? { diff: primaryDiff } : {}),
+          ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
+          ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
           ...(event.locations?.length ? { locations: event.locations } : {}),
           ...(artifactId ? { artifact_id: artifactId } : {}),
         });
@@ -16635,18 +17506,18 @@ export class DaemonServer {
         this.recordAcpToolTelemetry(session, durationMs);
         this.recordAcpBackgroundToolResult(session, event.toolCallId, event.name, inputs, output, isError || !permitted);
         const displayBlocks: JsonRpcPayload[] = [];
-        if (event.diff) {
+        for (const diffItem of allDiffs) {
           const unified = formatCompactUnifiedDiff(
-            event.diff.path,
-            event.diff.old_text,
-            event.diff.new_text,
+            diffItem.path,
+            diffItem.old_text,
+            diffItem.new_text,
           );
           if (unified) {
             displayBlocks.push({
               type: "diff",
               diff: unified,
               language: "diff",
-              path: event.diff.path,
+              path: diffItem.path,
             });
           }
         }
@@ -16654,12 +17525,18 @@ export class DaemonServer {
           session_id: session.id,
           tool_call_id: event.toolCallId,
           name: event.name,
+          ...(event.title ? { title: event.title } : {}),
+          ...(event.kind ? { kind: event.kind } : {}),
           return_value: output,
           ...(event.rawOutput !== undefined ? { raw_output: event.rawOutput as JsonRpcPayload } : {}),
           duration_ms: durationMs,
           permitted,
           ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-          ...(event.diff ? { diff: event.diff } : {}),
+          ...(primaryDiff ? { diff: primaryDiff } : {}),
+          ...(allDiffs.length > 0 ? { diffs: allDiffs as unknown as JsonRpcPayload[] } : {}),
+          ...(event.contentBlocks?.length
+            ? { content_blocks: event.contentBlocks as unknown as JsonRpcPayload[] }
+            : {}),
           ...(event.locations?.length ? { locations: event.locations } : {}),
           ...(artifactId ? { artifact_id: artifactId } : {}),
           display_blocks: displayBlocks,
@@ -16705,11 +17582,16 @@ export class DaemonServer {
     if (wakeup.settleTimer !== undefined) {
       clearTimeout(wakeup.settleTimer);
     }
-    const delayMs = wakeup.pendingToolCallIds.size > 0
+    const waitingOnHuman = this.hasPendingAcpInteraction(wakeup.sessionId);
+    const delayMs = wakeup.pendingToolCallIds.size > 0 || waitingOnHuman
       ? Math.max(this.acpWakeupIdleMs * 10, 15_000)
       : this.acpWakeupIdleMs;
     wakeup.settleTimer = setTimeout(() => {
       wakeup.settleTimer = undefined;
+      if (this.hasPendingAcpInteraction(wakeup.sessionId)) {
+        this.scheduleAcpOutOfTurnSettle(wakeup);
+        return;
+      }
       void this.settleAcpOutOfTurnWakeup(wakeup.sessionId, "end_turn");
     }, delayMs);
     wakeup.settleTimer.unref?.();
@@ -16864,12 +17746,45 @@ export class DaemonServer {
     const workspaceDir = resolveProjectDirectory(
       target?.cwd ?? this.projectDirectory ?? process.cwd(),
     );
+    const acpBinding =
+      session && this.acpBridgeHost.hasActiveBridge(session.id)
+        ? this.acpBridgeHost.getBinding(session.id)
+        : null;
+    const acpKnowsModel = Boolean(
+      acpBinding?.connected &&
+      (!requestedModel ||
+        requestedModel === acpBinding.current_model ||
+        acpBinding.models?.some((entry) => entry.id === requestedModel)),
+    );
+    // Keep /btw strictly inside an active external ACP runtime (including Antigravity /
+    // Gemini ACP via standard session/fork or session/new -> session/prompt -> session/close)
+    // so side questions never silently fall back to unrelated native providers or OAuth tokens.
+    const useAcpSideQuestion = Boolean(
+      session &&
+      acpBinding?.connected &&
+      acpBinding.transport === "acp",
+    );
+    const acpModelForCall =
+      useAcpSideQuestion && acpBinding
+        ? requestedModel && (acpKnowsModel || !acpBinding.models?.length)
+          ? requestedModel
+          : acpBinding.current_model || ""
+        : "";
+    const runtimeModel = String(this.runtime.status().model ?? "").trim();
+    const activeProfileModel = (this.profileStore.active()?.model ?? "").trim();
+    // Never mistake an external ACP model (e.g. Antigravity `gemini-4-neon`)
+    // for a native Xerxes provider model — doing so routes `gemini-4-neon` into
+    // an unrelated local profile such as an unauthenticated `claude-code` CLI.
     const configuredNativeModel =
       requestedModel ||
-      (target?.model && target.model.trim()) ||
-      String(this.runtime.status().model ?? "").trim() ||
-      (this.profileStore.active()?.model ?? "").trim();
-    const initialModel = configuredNativeModel || "default";
+      (acpBinding?.connected
+        ? (runtimeModel && runtimeModel !== acpBinding.current_model ? runtimeModel : "") ||
+          activeProfileModel
+        : (target?.model && target.model.trim()) || runtimeModel || activeProfileModel);
+    const initialModel =
+      (useAcpSideQuestion
+        ? acpModelForCall || acpBinding?.name
+        : configuredNativeModel) || "default";
 
     if (!question) {
       return {
@@ -16893,6 +17808,109 @@ export class DaemonServer {
       this.broadcastEvent("btw_event", payload, accepts, [...this.sessionObservers], workspaceDir);
     };
 
+    const rawTranscript = session
+      ? (this.runtime.liveTurnMessages?.(session) ?? session.messages)
+      : [];
+    const forkedMessages: ChatMessage[] = sanitizeForkedMessages(
+      transcriptMessagesToChatMessages(rawTranscript),
+    );
+    const sideHistory: Array<{ readonly role: "user" | "assistant"; readonly content: string }> = [];
+    if (Array.isArray(params.history)) {
+      for (const entry of params.history) {
+        if (!isRecord(entry)) continue;
+        const role = entry.role;
+        const content = typeof entry.content === "string" ? entry.content.trim() : "";
+        if ((role === "user" || role === "assistant") && content) {
+          forkedMessages.push({ role, content });
+          sideHistory.push({ role, content });
+        }
+      }
+    }
+
+    if (useAcpSideQuestion && session && acpBinding) {
+      const acpModel = acpModelForCall || acpBinding.name;
+      const plainSidePrompt = isAntigravityBinding(acpBinding);
+      emitBtw({
+        session_id: sessionId,
+        request_id: requestId,
+        kind: "begin",
+        question,
+        model: acpModel,
+      });
+      const acpPrompt = buildAcpSideQuestionPrompt({
+        workspaceDir,
+        transcript: forkedMessages.slice(0, forkedMessages.length - sideHistory.length),
+        history: sideHistory,
+        question,
+        plain: plainSidePrompt,
+      });
+      const forkedPrompt = buildAcpForkedSideQuestionPrompt({
+        history: sideHistory,
+        question,
+        plain: plainSidePrompt,
+      });
+      const acpResult = await this.acpBridgeHost.runSideQuestion({
+        sessionId: session.id,
+        prompt: acpPrompt,
+        forkedPrompt,
+        ...(acpModelForCall ? { model: acpModelForCall } : {}),
+        onDelta: (delta) => {
+          emitBtw({
+            session_id: sessionId,
+            request_id: requestId,
+            kind: "delta",
+            delta,
+            model: acpModel,
+          });
+        },
+        onTool: (tool) => {
+          emitBtw({
+            session_id: sessionId,
+            request_id: requestId,
+            kind: "tool",
+            model: acpModel,
+            tool,
+          });
+        },
+      });
+      if (acpResult.ok) {
+        emitBtw({
+          session_id: sessionId,
+          request_id: requestId,
+          kind: "end",
+          question,
+          answer: acpResult.answer,
+          model: acpResult.model || acpModel,
+        });
+        return {
+          ok: true,
+          request_id: requestId,
+          session_id: sessionId,
+          question,
+          answer: acpResult.answer,
+          model: acpResult.model || acpModel,
+        };
+      }
+      const errorText = acpResult.error || `${acpBinding.name} could not answer the side question.`;
+      emitBtw({
+        session_id: sessionId,
+        request_id: requestId,
+        kind: "error",
+        question,
+        model: acpResult.model || acpModel,
+        error: errorText,
+      });
+      return {
+        ok: false,
+        request_id: requestId,
+        session_id: sessionId,
+        question,
+        answer: acpResult.answer,
+        model: acpResult.model || acpModel,
+        error: errorText,
+      };
+    }
+
     const resolvedLlm = this.resolveSideQuestionLlm(
       session,
       initialModel,
@@ -16900,7 +17918,6 @@ export class DaemonServer {
       Boolean(configuredNativeModel),
     );
     if (!resolvedLlm) {
-      const acpBinding = session ? this.acpBridgeHost.getBinding(session.id) : null;
       const error = acpBinding?.connected
         ? `Side questions (/btw) run on a native Xerxes provider profile so they don't interrupt ${acpBinding.name}. Configure a provider with \`/provider\` (or pass \`/btw --model <model> <question>\`) to enable /btw alongside ${acpBinding.name}.`
         : "No model provider configured for side questions.";
@@ -16923,23 +17940,6 @@ export class DaemonServer {
       };
     }
     const model = resolvedLlm.model;
-
-    const rawTranscript = session
-      ? (this.runtime.liveTurnMessages?.(session) ?? session.messages)
-      : [];
-    const forkedMessages: ChatMessage[] = sanitizeForkedMessages(
-      transcriptMessagesToChatMessages(rawTranscript),
-    );
-    if (Array.isArray(params.history)) {
-      for (const entry of params.history) {
-        if (!isRecord(entry)) continue;
-        const role = entry.role;
-        const content = typeof entry.content === "string" ? entry.content.trim() : "";
-        if ((role === "user" || role === "assistant") && content) {
-          forkedMessages.push({ role, content });
-        }
-      }
-    }
 
     const safeToolNames = new Set([
       "ReadFile",
@@ -19086,6 +20086,67 @@ function findProfileForSideQuestionModel(
   return undefined;
 }
 
+function buildAcpForkedSideQuestionPrompt(input: {
+  readonly history: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
+  readonly question: string;
+  readonly plain?: boolean;
+}): string {
+  if (input.history.length === 0) {
+    return input.question;
+  }
+  const historyLines = input.history.map(
+    (entry) => `[${entry.role === "user" ? (input.plain ? "Q" : "Side Q") : (input.plain ? "A" : "Side A")}]\n${entry.content}`,
+  );
+  return `${historyLines.join("\n\n")}\n\n${input.question}`;
+}
+
+function buildAcpSideQuestionPrompt(input: {
+  readonly workspaceDir: string;
+  readonly transcript: readonly ChatMessage[];
+  readonly history: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
+  readonly question: string;
+  readonly plain?: boolean;
+}): string {
+  const MAX_CONTEXT_CHARS = 16_000;
+  const sections: string[] = input.plain
+    ? [
+        "Answer this read-only question concisely (do not edit files or run mutating commands).",
+      ]
+    : [
+        "You are answering an ephemeral, read-only side question (`/btw`) alongside an active Xerxes session.",
+        `Workspace: ${input.workspaceDir}`,
+        "Rules:",
+        "- Answer concisely, accurately, and directly in Markdown.",
+        "- Read-only only: never edit, write, or delete files, never run mutating shell commands, and never alter the main session.",
+      ];
+
+  const contextLines: string[] = [];
+  let usedChars = 0;
+  for (let i = input.transcript.length - 1; i >= 0; i -= 1) {
+    const msg = input.transcript[i];
+    if (!msg || (msg.role !== "user" && msg.role !== "assistant")) continue;
+    const raw = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (!raw) continue;
+    const label = msg.role === "user" ? "User" : "Assistant";
+    const snippet = raw.length > 2400 ? `${raw.slice(0, 2400)}…` : raw;
+    const line = `[${label}]\n${snippet}`;
+    if (usedChars + line.length > MAX_CONTEXT_CHARS && contextLines.length > 0) break;
+    contextLines.unshift(line);
+    usedChars += line.length;
+  }
+  if (contextLines.length > 0) {
+    sections.push("", input.plain ? "Recent context:" : "Recent main-session context:", contextLines.join("\n\n"));
+  }
+  if (input.history.length > 0) {
+    const historyLines = input.history.map(
+      (entry) => `[${entry.role === "user" ? (input.plain ? "Q" : "Side Q") : (input.plain ? "A" : "Side A")}]\n${entry.content}`,
+    );
+    sections.push("", input.plain ? "Previous questions:" : "Previous side-question exchange:", historyLines.join("\n\n"));
+  }
+  sections.push("", input.plain ? "Question:" : "Side question:", input.question);
+  return sections.join("\n");
+}
+
 function sideQuestionToolTarget(args: JsonObject, workspaceDir: string): string {
   const pathRaw =
     (typeof args.file_path === "string" && args.file_path.trim()) ||
@@ -19178,6 +20239,13 @@ function findAcpDiscoveredSkill(
   });
 }
 
+function formatAcpConfigValueDisplay(value: string | boolean): string {
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return value || "unset";
+}
+
 function formatAcpCapabilitiesSummary(binding: AcpSessionBinding): string | undefined {
   const caps = binding.capabilities;
   if (!caps) return undefined;
@@ -19189,6 +20257,7 @@ function formatAcpCapabilitiesSummary(binding: AcpSessionBinding): string | unde
   const sessionFlags = [
     caps.session.load ? "load" : "",
     caps.session.resume ? "resume" : "",
+    caps.session.fork ? "fork" : "",
     caps.session.list ? "list" : "",
     caps.session.close ? "close" : "",
     caps.session.additional_directories ? "additional-dirs" : "",
@@ -19221,7 +20290,7 @@ function formatAcpCatalogText(binding: AcpSessionBinding): string {
   }
   if (binding.config_options && binding.config_options.length > 0) {
     const cfgSummary = binding.config_options
-      .map((opt) => `${opt.id}=${opt.current_value || "unset"}`)
+      .map((opt) => `${opt.id}=${formatAcpConfigValueDisplay(opt.current_value)}`)
       .join(" · ");
     lines.push(`Config options (${binding.config_options.length}): ${cfgSummary}`);
   }
@@ -19244,7 +20313,7 @@ function formatAcpCatalogText(binding: AcpSessionBinding): string {
       lines.push(`  /${skill.name}${source}${skill.description ? ` — ${skill.description}` : ""}`);
     }
   }
-  lines.push("", "Host controls: `/acp status`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, `/acp disconnect`.");
+  lines.push("", "Host controls: `/acp status`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, `/acp sessions`, `/acp fork`, `/acp auth <method_id>`, `/acp disconnect`.");
   return lines.join("\n");
 }
 
@@ -19279,7 +20348,7 @@ function formatAcpAgentsStatusText(
     }
     if (active.config_options && active.config_options.length > 0) {
       discoveryLines.push(
-        `Config: ${active.config_options.map((opt) => `${opt.id}=${opt.current_value || "unset"}`).join(", ")}`,
+        `Config: ${active.config_options.map((opt) => `${opt.id}=${formatAcpConfigValueDisplay(opt.current_value)}`).join(", ")}`,
       );
     }
   }
@@ -19299,7 +20368,7 @@ function formatAcpAgentsStatusText(
     "",
     ...lines,
     "",
-    "Switch with `/acp use <claude-code|antigravity|xerxes>`, `/acp catalog`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, or `/acp disconnect`.",
+    "Switch with `/acp use <claude-code|antigravity|xerxes>`, `/acp catalog`, `/acp model <id>`, `/acp mode <id>`, `/acp thinking <level>`, `/acp config <id> <value>`, `/acp sessions`, `/acp fork`, `/acp auth <method_id>`, or `/acp disconnect`.",
   ].join("\n");
 }
 
@@ -19315,6 +20384,18 @@ function acpContextSize(session: DaemonSession): number | undefined {
   return typeof ctx?.size === "number" && Number.isFinite(ctx.size) && ctx.size > 0
     ? Math.trunc(ctx.size)
     : undefined;
+}
+
+function acpSessionCost(
+  session: DaemonSession,
+): { readonly amount: number; readonly currency: string } | undefined {
+  const raw = isRecord(session.extra.acp_cost) ? session.extra.acp_cost : undefined;
+  if (!raw) return undefined;
+  if (typeof raw.amount !== "number" || !Number.isFinite(raw.amount) || raw.amount < 0) {
+    return undefined;
+  }
+  const currency = typeof raw.currency === "string" && raw.currency.trim() ? raw.currency.trim() : "USD";
+  return { amount: raw.amount, currency };
 }
 
 function applyAcpUsageToSession(
@@ -19348,6 +20429,17 @@ function applyAcpUsageToSession(
     };
   }
 
+  let nextCost: { readonly amount: number; readonly currency: string } | undefined;
+  if (event.cost && typeof event.cost.amount === "number" && Number.isFinite(event.cost.amount) && event.cost.amount >= 0) {
+    nextCost = { amount: event.cost.amount, currency: event.cost.currency || "USD" };
+    session.extra.acp_cost = nextCost;
+  } else if (typeof event.costUsd === "number" && Number.isFinite(event.costUsd) && event.costUsd >= 0) {
+    nextCost = { amount: event.costUsd, currency: "USD" };
+    session.extra.acp_cost = nextCost;
+  } else {
+    nextCost = acpSessionCost(session);
+  }
+
   let cacheReadTokens: number | undefined;
   let cacheWriteTokens: number | undefined;
   let cacheHitRate: number | undefined;
@@ -19378,6 +20470,12 @@ function applyAcpUsageToSession(
   return {
     ...(nextUsed !== undefined ? { context_tokens: nextUsed } : {}),
     ...(nextSize !== undefined ? { max_context: nextSize, context_limit: nextSize } : {}),
+    ...(nextCost !== undefined
+      ? {
+          cost: nextCost,
+          ...(nextCost.currency.toUpperCase() === "USD" ? { cost_usd: nextCost.amount } : {}),
+        }
+      : {}),
     input_tokens: session.totalInputTokens,
     output_tokens: session.totalOutputTokens,
     total_input_tokens: session.totalInputTokens,
@@ -19386,14 +20484,6 @@ function applyAcpUsageToSession(
     ...(cacheWriteTokens !== undefined ? { cache_creation_tokens: cacheWriteTokens } : {}),
     ...(cacheHitRate !== undefined ? { cache_hit_rate: cacheHitRate } : {}),
   };
-}
-
-function unescapeXmlAttribute(value: string): string {
-  return value
-    .replaceAll("&quot;", '"')
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&amp;", "&");
 }
 
 function guessTextMimeType(filePath: string): string {
@@ -19411,18 +20501,18 @@ function guessTextMimeType(filePath: string): string {
   return "text/plain";
 }
 
-function extractResourcesFromProcessedMentions(enhancedMessage: string): readonly AcpPromptResourceInput[] {
+function resourcesFromProcessedMentions(processed: {
+  readonly resources?: readonly { readonly path: string; readonly text: string }[];
+}): readonly AcpPromptResourceInput[] {
+  const rawResources = processed.resources ?? [];
   const resources: AcpPromptResourceInput[] = [];
-  const blockPattern = /<file path="([^"]+)">\n([\s\S]*?)\n<\/file>/g;
-  for (let match = blockPattern.exec(enhancedMessage); match; match = blockPattern.exec(enhancedMessage)) {
-    const rawPath = unescapeXmlAttribute(match[1] ?? "");
-    const content = match[2] ?? "";
-    if (!rawPath) continue;
+  for (const item of rawResources) {
+    if (!item.path) continue;
     resources.push({
-      path: rawPath,
-      uri: pathToFileURL(rawPath).href,
-      mimeType: guessTextMimeType(rawPath),
-      text: content,
+      path: item.path,
+      uri: pathToFileURL(item.path).href,
+      mimeType: guessTextMimeType(item.path),
+      text: item.text,
     });
   }
   return resources;
@@ -19521,6 +20611,23 @@ function compactWireMemberActivity(activity: SwarmMemberActivitySnapshot): Swarm
     ...(activity.updated_at === undefined ? {} : { updated_at: activity.updated_at }),
   };
 }
+
+/**
+ * Board and background controls used to work by sending Antigravity a prompt
+ * Xerxes wrote (`[Xerxes Immortals Board Action] … Call swarm …`). Xerxes no
+ * longer puts its own words into an agy session, so these are refused.
+ */
+const ANTIGRAVITY_GOAL_REFUSAL =
+  "Xerxes goal mode is off for Antigravity sessions. Antigravity has its own goal mode: ask for it in the chat.";
+
+const ANTIGRAVITY_COMPOSED_TURN_REFUSAL =
+  "Antigravity only receives messages you type. This turn was started by Xerxes, not typed by you (goal round, scheduled run or /loop, restart resume, board wake, or /init), so it was not sent. Disconnect Antigravity (/acp disconnect) to run it on a Xerxes provider.";
+
+const ANTIGRAVITY_REMOTE_REFUSAL =
+  "This session runs on Antigravity with the owner's Google sign-in, so it only takes messages typed on the owner's computer. Hub and remote access cannot drive it.";
+
+const AGY_BOARD_ACTION_REFUSAL =
+  "This Antigravity control is not available from Xerxes: it would send agy instructions written by Xerxes rather than you. Ask Antigravity directly in the chat instead.";
 
 function isAntigravityBinding(binding: AcpSessionBinding | null | undefined): boolean {
   if (!binding) return false;

@@ -180,11 +180,11 @@ export function foldVscodeBtwEvent(
 
 export interface SideQuestionCardProps {
   readonly snap: Snapshot
-  readonly entries: readonly VscodeBtwEntry[]
+  readonly entries?: readonly VscodeBtwEntry[]
   readonly defaultModelPickerOpen?: boolean
-  readonly onEntriesChange: (updater: (prev: readonly VscodeBtwEntry[]) => readonly VscodeBtwEntry[]) => void
-  readonly onClear: () => void
-  readonly onClose: () => void
+  readonly onEntriesChange?: (updater: (prev: readonly VscodeBtwEntry[]) => readonly VscodeBtwEntry[]) => void
+  readonly onClear?: () => void
+  readonly onClose?: () => void
 }
 
 export function SideQuestionCard({
@@ -203,20 +203,71 @@ export function SideQuestionCard({
   const autoLoadedRef = useRef(false)
 
   const online = snap.connection === 'online'
-  const streaming = entries.some(item => item.status === 'streaming')
-  const latestDone = [...entries].reverse().find(item => item.answer.trim().length > 0)
+  const resolvedEntries: readonly VscodeBtwEntry[] = entries ?? snap.sideQuestionTurns ?? []
+  const streaming = entries
+    ? resolvedEntries.some(item => item.status === 'streaming')
+    : Boolean(snap.sideQuestionStreaming || resolvedEntries.some(item => item.status === 'streaming'))
+  const cardError =
+    !entries && snap.sideQuestionError && !resolvedEntries.some(item => item.status === 'error')
+      ? snap.sideQuestionError
+      : null
+  const latestDone = [...resolvedEntries].reverse().find(item => item.answer.trim().length > 0)
   const selectedModel = snap.sideQuestionModel ?? ''
   const storeSnap = store.getSnapshot()
-  const models = snap.models.length > 0 ? snap.models : storeSnap.models
-  const modelsLoading = Boolean(snap.modelsLoading || storeSnap.modelsLoading)
-  const modelsError = snap.modelsError ?? storeSnap.modelsError ?? null
+  const nativeModels = snap.models.length > 0 ? snap.models : storeSnap.models
+  const acpBinding =
+    snap.acpBinding?.connected && snap.acpBinding.transport !== 'native'
+      ? snap.acpBinding
+      : storeSnap.acpBinding?.connected && storeSnap.acpBinding.transport !== 'native'
+        ? storeSnap.acpBinding
+        : null
+  const acpModels = acpBinding?.models?.map(item => ({
+    id: item.id,
+    label: item.name || item.id,
+    provider: acpBinding.name,
+  })) ?? []
+  const models = acpBinding ? acpModels : nativeModels
+  const effectiveSelectedModel =
+    acpBinding &&
+    selectedModel &&
+    acpModels.length > 0 &&
+    !acpModels.some(entry => entry.id === selectedModel)
+      ? ''
+      : selectedModel
+  const sessionModel = acpBinding?.current_model || snap.model
+  const modelsLoading = acpBinding ? false : Boolean(snap.modelsLoading || storeSnap.modelsLoading)
+  const modelsError = acpBinding ? null : (snap.modelsError ?? storeSnap.modelsError ?? null)
+
+  const closeCard = (): void => {
+    if (onClose) onClose()
+    else store.closeSideQuestion()
+  }
+  const closeRef = useRef(closeCard)
+  closeRef.current = closeCard
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
 
+  // Intercept ⌘; / Ctrl+; in capture phase while the card is mounted so it
+  // closes cleanly before GlobalKeys' bubble listener calls openSideQuestion().
   useEffect(() => {
-    if (!online) {
+    if (typeof window === 'undefined') return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return
+      if (typeof document !== 'undefined' && document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')) return
+      if (event.key === ';' && (event.metaKey || event.ctrlKey) && !event.altKey) {
+        event.preventDefault()
+        event.stopPropagation()
+        closeRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
+
+  useEffect(() => {
+    if (!online || acpBinding) {
       autoLoadedRef.current = false
       return
     }
@@ -224,23 +275,70 @@ export function SideQuestionCard({
       autoLoadedRef.current = true
       void store.loadModels()
     }
-  }, [online, models.length, modelsLoading, modelsError])
+  }, [online, acpBinding, models.length, modelsLoading, modelsError])
+
+  const pinnedRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
+  const prevEntriesLenRef = useRef(resolvedEntries.length)
 
   useEffect(() => {
     const node = listRef.current
-    if (node) node.scrollTop = node.scrollHeight
-  }, [entries])
+    if (!node) return
+    const onWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0 && node.scrollHeight > node.clientHeight + 2) {
+        pinnedRef.current = false
+      }
+    }
+    const onScroll = (): void => {
+      const maxTop = Math.max(0, node.scrollHeight - node.clientHeight)
+      const clampedTop = Math.min(Math.max(0, node.scrollTop), maxTop)
+      const clampedPrev = Math.min(Math.max(0, lastScrollTopRef.current), maxTop)
+      lastScrollTopRef.current = clampedTop
+      if (maxTop <= 2 || maxTop - clampedTop <= 2) {
+        pinnedRef.current = true
+      } else if (clampedTop < clampedPrev - 1) {
+        pinnedRef.current = false
+      } else if (clampedTop > clampedPrev && maxTop - clampedTop <= 24) {
+        pinnedRef.current = true
+      }
+    }
+    node.addEventListener('wheel', onWheel, { passive: true })
+    node.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      node.removeEventListener('wheel', onWheel)
+      node.removeEventListener('scroll', onScroll)
+    }
+  }, [])
+
+  useEffect(() => {
+    const node = listRef.current
+    if (!node) return
+    if (resolvedEntries.length > prevEntriesLenRef.current) {
+      pinnedRef.current = true
+    }
+    prevEntriesLenRef.current = resolvedEntries.length
+    if (pinnedRef.current) {
+      node.scrollTop = node.scrollHeight
+      lastScrollTopRef.current = node.scrollTop
+    }
+  }, [resolvedEntries])
 
   const submit = async (event?: FormEvent): Promise<void> => {
     event?.preventDefault()
     const question = stripLeadingBtwPrefix(draft)
     if (!question || !online || streaming) return
 
-    const requestId = createVscodeBtwRequestId()
-    const history = buildVscodeBtwHistory(entries)
-    const submitGeneration = generationRef.current
-    const chosenModel = selectedModel.trim()
+    const chosenModel = effectiveSelectedModel.trim()
     setDraft('')
+
+    if (!onEntriesChange) {
+      await store.askSideQuestion(question, chosenModel || undefined)
+      return
+    }
+
+    const requestId = createVscodeBtwRequestId()
+    const history = buildVscodeBtwHistory(resolvedEntries)
+    const submitGeneration = generationRef.current
 
     onEntriesChange(prev => [
       ...prev.filter(item => item.requestId !== requestId),
@@ -248,7 +346,7 @@ export function SideQuestionCard({
         requestId,
         question,
         answer: '',
-        ...(chosenModel || snap.model ? { model: chosenModel || snap.model } : {}),
+        ...(chosenModel || sessionModel ? { model: chosenModel || sessionModel } : {}),
         status: 'streaming',
       },
     ])
@@ -327,7 +425,8 @@ export function SideQuestionCard({
 
   const clearAll = (): void => {
     generationRef.current += 1
-    onClear()
+    if (onClear) onClear()
+    else store.clearSideQuestion()
     setDraft('')
     inputRef.current?.focus()
   }
@@ -340,7 +439,7 @@ export function SideQuestionCard({
         if (event.key === 'Escape') {
           event.preventDefault()
           event.stopPropagation()
-          onClose()
+          closeCard()
         }
       }}
     >
@@ -348,60 +447,65 @@ export function SideQuestionCard({
         <span className="xv-btw__title">Side question</span>
         <span className="xv-btw__badge">ephemeral · read-only</span>
         <span className="xv-btw__flex" />
+        <div className="xv-btw__actions">
+          {latestDone && (
+            <button
+              type="button"
+              className="xv-btw__action"
+              title="Copy latest answer"
+              onClick={copyLatest}
+            >
+              <Icon name={copied ? 'check' : 'copy'} size={12} />
+              <span>{copied ? 'Copied' : 'Copy'}</span>
+            </button>
+          )}
+          {resolvedEntries.length > 0 && (
+            <button
+              type="button"
+              className="xv-btw__action"
+              title="Clear side thread"
+              onClick={clearAll}
+            >
+              <span>Clear</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="xv-btw__close"
+            aria-label="Close side question"
+            title="Close (Esc — main task keeps running)"
+            onClick={closeCard}
+          >
+            <Icon name="close" size={13} />
+          </button>
+        </div>
+      </header>
+
+      <div className="xv-btw__bar">
         <SideQuestionModelPicker
           models={models}
           modelsLoading={modelsLoading}
           modelsError={modelsError}
-          sessionModel={snap.model}
-          selectedModel={selectedModel}
+          sessionModel={sessionModel}
+          selectedModel={effectiveSelectedModel}
           online={online}
           compact
           defaultOpen={defaultModelPickerOpen}
           triggerClassName="xv-btw__model-btn"
           onSelectModel={model => store.setSideQuestionModel(model)}
           onRequestModels={() => {
-            if (online) void store.loadModels(models.length === 0)
+            if (online && !acpBinding) void store.loadModels(models.length === 0)
           }}
         />
-        {latestDone && (
-          <button
-            type="button"
-            className="xv-btw__action"
-            title="Copy latest answer"
-            onClick={copyLatest}
-          >
-            <Icon name={copied ? 'check' : 'copy'} size={12} />
-            <span>{copied ? 'Copied' : 'Copy'}</span>
-          </button>
-        )}
-        {entries.length > 0 && (
-          <button
-            type="button"
-            className="xv-btw__action"
-            title="Clear side thread"
-            onClick={clearAll}
-          >
-            <span>Clear</span>
-          </button>
-        )}
-        <button
-          type="button"
-          className="xv-btw__close"
-          aria-label="Close side question"
-          title="Close (Esc — main task keeps running)"
-          onClick={onClose}
-        >
-          <Icon name="close" size={13} />
-        </button>
-      </header>
+      </div>
 
       <div className="xv-btw__body" ref={listRef}>
-        {entries.length === 0 ? (
+        {resolvedEntries.length === 0 ? (
           <p className="xv-btw__empty">
             Ask an aside about this task or codebase — even while a turn is running. Nothing here is saved to the conversation.
           </p>
         ) : (
-          entries.map(entry => {
+          resolvedEntries.map(entry => {
             const hasRunningTool = Boolean(entry.tools?.some(tool => tool.status === 'running'))
             return (
               <article key={entry.requestId} className="xv-btw__turn">
@@ -455,6 +559,11 @@ export function SideQuestionCard({
             )
           })
         )}
+        {cardError && (
+          <p className="xv-btw__err" role="alert">
+            {cardError}
+          </p>
+        )}
       </div>
 
       <form className="xv-btw__form" onSubmit={event => void submit(event)}>
@@ -465,7 +574,7 @@ export function SideQuestionCard({
           placeholder={
             !online
               ? 'Connect to runtime first…'
-              : entries.length > 0
+              : resolvedEntries.length > 0
                 ? 'Ask a follow-up side question…'
                 : 'Ask aside (/btw) — never interrupts or pollutes chat…'
           }

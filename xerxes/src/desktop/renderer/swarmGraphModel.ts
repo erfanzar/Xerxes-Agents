@@ -328,7 +328,7 @@ function parseMessageSignals(message: SwarmBoardMessage): ParsedMessageSignals {
   let isBroadcast = message.broadcast === true
   let isDone = false
 
-  for (const token of tokenizeSwarmMessage(message.text)) {
+  for (const token of tokenizeSwarmMessage(message.text, { allowBold: false, allowItalic: false, allowStrike: false })) {
     if (token.kind === 'broadcast') {
       isBroadcast = true
     } else if (token.kind === 'done') {

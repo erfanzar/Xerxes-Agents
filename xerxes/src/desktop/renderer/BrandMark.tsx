@@ -7,14 +7,21 @@ import { isVscodeHost } from './host.js'
 import { AgentBrandGlyph, XerxesBrandEmblem, type AgentBrandProvider } from './XerxesSprites.js'
 
 /**
- * Renders Xerxes's real bundled phoenix emblem (`./logo-128.png`) on Desktop,
- * falling back to the compact vector mark only inside VS Code webviews where
- * the desktop asset bundle is not served from the webview root.
+ * Minimum icon dimension (px) for the real bundled Xerxes phoenix PNG on
+ * Desktop (`0` — always use `./logo-128.png` on Desktop so the real Xerxes
+ * icon appears everywhere, including 13–20px picker rails and sidebar badges).
+ */
+export const RASTER_BRAND_MIN_SIZE = 0
+
+/**
+ * Renders Xerxes's real bundled phoenix emblem (`./logo-128.png`) at every size
+ * on Desktop, falling back to the vector mark only inside VS Code webviews
+ * where the desktop asset bundle is not served from the webview root.
  */
 export function XerxesLogoMark({
   size = 20,
   className,
-  alt = 'Xerxes',
+  alt = 'Xerxes Agents',
   decorative = false,
 }: {
   readonly size?: number
@@ -41,6 +48,7 @@ export function XerxesLogoMark({
       height={size}
       className={classes}
       data-brand-provider="xerxes"
+      decoding="async"
       draggable={false}
     />
   )

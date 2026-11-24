@@ -443,6 +443,18 @@ export function SideQuestionModelPicker({
   )
 }
 
+export const SIDE_QUESTION_SCROLL_PIN_THRESHOLD = 48
+
+export function isSideQuestionNearBottom(
+  metrics: { readonly scrollTop: number; readonly clientHeight: number; readonly scrollHeight: number },
+  threshold = SIDE_QUESTION_SCROLL_PIN_THRESHOLD,
+): boolean {
+  const maxTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight)
+  if (maxTop <= 2) return true
+  const clampedTop = Math.min(Math.max(0, metrics.scrollTop), maxTop)
+  return maxTop - clampedTop <= threshold
+}
+
 export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
   const {
     turns,
@@ -468,10 +480,67 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
   const threadRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
+  const pinnedRef = useRef(true)
+  const [pinned, setPinned] = useState(true)
+  const lastScrollTopRef = useRef(0)
+  const prevTurnsLenRef = useRef(turns.length)
+
+  const setPinnedState = (next: boolean): void => {
+    if (pinnedRef.current !== next) {
+      pinnedRef.current = next
+      setPinned(next)
+    }
+  }
+
   useEffect(() => {
     const el = threadRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    const onWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0 && el.scrollHeight > el.clientHeight + 2) {
+        setPinnedState(false)
+      }
+    }
+    const onScroll = (): void => {
+      const maxTop = Math.max(0, el.scrollHeight - el.clientHeight)
+      const clampedTop = Math.min(Math.max(0, el.scrollTop), maxTop)
+      const clampedPrev = Math.min(Math.max(0, lastScrollTopRef.current), maxTop)
+      lastScrollTopRef.current = clampedTop
+      if (maxTop <= 2 || maxTop - clampedTop <= 2) {
+        setPinnedState(true)
+      } else if (clampedTop < clampedPrev - 1) {
+        setPinnedState(false)
+      } else if (clampedTop > clampedPrev && isSideQuestionNearBottom(el, SIDE_QUESTION_SCROLL_PIN_THRESHOLD)) {
+        setPinnedState(true)
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('scroll', onScroll)
+    }
+  }, [])
+
+  useEffect(() => {
+    const el = threadRef.current
+    if (!el) return
+    if (turns.length === 0 || turns.length > prevTurnsLenRef.current) {
+      setPinnedState(true)
+    }
+    prevTurnsLenRef.current = turns.length
+    if (pinnedRef.current) {
+      el.scrollTop = el.scrollHeight
+      lastScrollTopRef.current = el.scrollTop
+    }
   }, [turns.length, turns.at(-1)?.answer, turns.at(-1)?.status, turns.at(-1)?.tools?.length])
+
+  const jumpToLatest = (): void => {
+    const el = threadRef.current
+    setPinnedState(true)
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    lastScrollTopRef.current = el.scrollTop
+  }
 
   return (
     <section className="side-question" aria-label="Side question">
@@ -602,6 +671,16 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
             )
           })
         )}
+        {turns.length > 0 && !pinned && (
+          <button
+            type="button"
+            className="rsec__text side-question__jump"
+            aria-label="Jump to latest side question output"
+            onClick={jumpToLatest}
+          >
+            <Icon name="arrowDown" size={11} /> Latest
+          </button>
+        )}
       </div>
 
       <form
@@ -699,12 +778,34 @@ export function SideQuestionPanel({
   const online = snap.connection === 'online'
   const selectedModel = snap.sideQuestionModel ?? ''
   const storeSnap = store.getSnapshot()
-  const models = snap.models.length > 0 ? snap.models : storeSnap.models
-  const modelsLoading = Boolean(snap.modelsLoading || storeSnap.modelsLoading)
-  const modelsError = snap.modelsError ?? storeSnap.modelsError ?? null
+  const nativeModels = snap.models.length > 0 ? snap.models : storeSnap.models
+  const acpBinding =
+    snap.acpBinding?.connected && snap.acpBinding.transport !== 'native'
+      ? snap.acpBinding
+      : storeSnap.acpBinding?.connected && storeSnap.acpBinding.transport !== 'native'
+        ? storeSnap.acpBinding
+        : null
+  const acpModels: ModelChoice[] = acpBinding?.models?.map(item => ({
+    id: item.id,
+    label: item.name || item.id,
+    provider: acpBinding.name,
+  })) ?? []
+  // When connected to an external ACP runtime (e.g. Antigravity / Gemini ACP), keep /btw
+  // strictly isolated to that runtime's models — never mix in native Xerxes provider models.
+  const models = acpBinding ? acpModels : nativeModels
+  const effectiveSelectedModel =
+    acpBinding &&
+    selectedModel &&
+    acpModels.length > 0 &&
+    !acpModels.some(entry => entry.id === selectedModel)
+      ? ''
+      : selectedModel
+  const sessionModel = acpBinding?.current_model || snap.model
+  const modelsLoading = acpBinding ? false : Boolean(snap.modelsLoading || storeSnap.modelsLoading)
+  const modelsError = acpBinding ? null : (snap.modelsError ?? storeSnap.modelsError ?? null)
 
   useEffect(() => {
-    if (!online) {
+    if (!online || acpBinding) {
       autoLoadedRef.current = false
       return
     }
@@ -713,10 +814,10 @@ export function SideQuestionPanel({
       if (onLoadModels) onLoadModels()
       else void store.loadModels()
     }
-  }, [online, models.length, modelsLoading, modelsError, onLoadModels])
+  }, [online, acpBinding, models.length, modelsLoading, modelsError, onLoadModels])
 
   const requestModels = (): void => {
-    if (!online) return
+    if (!online || acpBinding) return
     if (onLoadModels) {
       onLoadModels()
       return
@@ -729,7 +830,7 @@ export function SideQuestionPanel({
     const clean = draft.trim()
     if (!clean || !online || streaming) return
     setDraft('')
-    const chosen = selectedModel.trim() || undefined
+    const chosen = effectiveSelectedModel.trim() || undefined
     const ok = await (onAsk ? onAsk(clean, chosen) : store.askSideQuestion(clean, chosen))
     if (!ok) setDraft(clean)
   }
@@ -757,8 +858,8 @@ export function SideQuestionPanel({
       models={models}
       modelsLoading={modelsLoading}
       modelsError={modelsError}
-      sessionModel={snap.model}
-      selectedModel={selectedModel}
+      sessionModel={sessionModel}
+      selectedModel={effectiveSelectedModel}
       defaultModelPickerOpen={defaultModelPickerOpen}
       onSelectModel={model => (onSelectModel ? onSelectModel(model) : store.setSideQuestionModel(model))}
       onRequestModels={requestModels}

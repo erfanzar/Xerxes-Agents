@@ -7,7 +7,7 @@
  * through memory_guard.get/save; the default is half the computer's memory.
  */
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { desktopCall, desktopError, type RpcRecord } from './desktopRpc.js'
 import type { Snapshot } from './store.js'
@@ -36,10 +36,23 @@ export function guardStateOf(result: RpcRecord): GuardState {
 
 const gb = (mb: number) => Math.round((mb / 1024) * 10) / 10
 
+/** Compare the GB draft against the effective MB limit with epsilon tolerance so float rounding never leaves Save stuck enabled. */
+export function isMemoryGuardDraftUnchanged(draft: string, effectiveMb: number): boolean {
+  const trimmed = draft.trim()
+  if (!trimmed) return false
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) return false
+  return Math.abs(value - gb(effectiveMb)) < 1e-6
+    || Math.abs(value * 1024 - effectiveMb) < 1e-6
+    || Math.round(value * 1024) === effectiveMb
+}
+
 export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement | null {
   const [state, setState] = useState<GuardState | null>(null)
   const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'saved'; text: string } | null>(null)
+  const inFlight = useRef(false)
   const online = snap.connection === 'online'
 
   useEffect(() => {
@@ -56,7 +69,12 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
 
   if (!state) return null
   const on = state.effectiveMb > 0
+  const locked = busy || !online
+  const unchanged = isMemoryGuardDraftUnchanged(draft, state.effectiveMb)
   const save = async (limitMb: number | null) => {
+    if (inFlight.current || !online) return
+    inFlight.current = true
+    setBusy(true)
     setMessage(null)
     try {
       const next = guardStateOf(await desktopCall(window.xerxes, snap.sessionKey, 'memory_guard.save', { limit_mb: limitMb }))
@@ -64,8 +82,13 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
       setDraft(String(gb(next.effectiveMb || next.defaultMb)))
       setMessage({ kind: 'saved', text: next.effectiveMb > 0 ? `Saved. Commands are stopped past ${gb(next.effectiveMb)} GB.` : 'Saved. The memory guard is off.' })
     } catch (error) { setMessage({ kind: 'error', text: desktopError(error) }) }
+    finally {
+      inFlight.current = false
+      setBusy(false)
+    }
   }
   const applyDraft = () => {
+    if (locked || unchanged) return
     const value = Number(draft)
     if (!Number.isFinite(value) || value <= 0) { setMessage({ kind: 'error', text: 'Enter a limit in GB above 0, or turn the guard off.' }); return }
     void save(Math.round(value * 1024))
@@ -88,7 +111,8 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
           role="switch"
           aria-checked={on}
           aria-label="Memory guard"
-          disabled={!state.supported || !online || state.environmentOverride}
+          aria-busy={busy}
+          disabled={!state.supported || locked || state.environmentOverride}
           onClick={() => void save(on ? 0 : null)}
         />
       </div>
@@ -96,12 +120,20 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
         <div className="row memguard">
           <label className="memguard__field">
             <span>Limit per command</span>
-            <input type="number" min={0.5} step={0.5} value={draft} onChange={event => { setDraft(event.target.value); setMessage(null) }}
-              onKeyDown={event => { if (event.key === 'Enter') applyDraft() }} aria-label="Memory limit in GB" />
+            <input
+              type="number"
+              min={0.5}
+              step={0.5}
+              value={draft}
+              disabled={locked}
+              onChange={event => { setDraft(event.target.value); setMessage(null) }}
+              onKeyDown={event => { if (event.key === 'Enter') applyDraft() }}
+              aria-label="Memory limit in GB"
+            />
             <span>GB</span>
           </label>
-          <button className="btn" disabled={Number(draft) * 1024 === state.effectiveMb} onClick={applyDraft}>Save</button>
-          {state.limitMb !== null && <button className="btn btn--ghost" onClick={() => void save(null)}>Use default ({gb(state.defaultMb)} GB)</button>}
+          <button className="btn" disabled={locked || !draft.trim() || unchanged} onClick={applyDraft}>{busy ? 'Saving…' : 'Save'}</button>
+          {state.limitMb !== null && <button className="btn btn--ghost" disabled={locked} onClick={() => void save(null)}>Use default ({gb(state.defaultMb)} GB)</button>}
         </div>
       )}
       {message && <p className={message.kind === 'error' ? 'studio-error' : 'row__s'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}

@@ -248,7 +248,7 @@ params fall back to per-connection defaults.
 | `artifacts.list`        | `{ session_key? }`                                           | `{ ok, artifacts[] }` or `{ ok: false, error }`             | Titled documents the agent saved for the user with `ArtifactTool` (reports, plans, specs), kept per session under `<xerxes home>/artifacts/<session id>/`. Rows are `{ id, title, kind, language?, size, created_at, updated_at, pinned, version }` without content: `kind` is `markdown`, `html`, `code` or `text`, `size` is the content's UTF-8 bytes, pinned rows first, then newest `updated_at` first. Corrupt files are skipped. |
 | `artifacts.read`        | `{ session_key?, id }`                                       | `{ ok, artifact }` or `{ ok: false, error }`                | One artifact: the `artifacts.list` row plus `content` (at most 2 MiB). An unknown session or id is `{ ok: false, error }`. |
 | `artifacts.pin`         | `{ session_key?, id, pinned }`                               | `{ ok, artifact }` or `{ ok: false, error }`                | Pin or unpin an artifact (`pinned` boolean). Returns the updated row without content; `version` and `updated_at` do not change. |
-| `artifacts.update`      | `{ session_key?, id, content, title? }`                      | `{ ok, artifact }` or `{ ok: false, error }`                | Replace an artifact's content (a person's edit from the viewer), optionally its title. Bumps `version` and `updated_at`; returns the artifact with content. |
+| `artifacts.update`      | `{ session_key?, id, content, title? }`                      | `{ ok, artifact }` or `{ ok: false, error }`                | Replace an artifact's content (a person's edit from the viewer), optionally its title. Bumps `version` and `updated_at`; returns the artifact with content. Antigravity (`agy:`) artifacts are read-only and return `{ ok: false, error }`. |
 | `session.usage`         | `{ session_key? }`                                           | `{ ok, ..., models?, advisor? }` or `{ ok: false }`         | Token/telemetry totals for one session, with the resolved context limit. `models[]` and `advisor` are described under "Per-task model usage".      |
 | `usage.report`          | `{ session_key?, refresh? }`                                 | `{ ok, fetched_at, profiles[], session?, models?, models_since? }` | Session statistics plus every imported provider profile: `status` `ok` (plan `windows[]` with `usedPercent`/`resetsAt`/`resetAfterSeconds`, or an API `balance`, plus optional `facts[]` label/value rows such as OpenRouter credit left and spend today/this week/this month/all time), `unsupported`, or `error` with `message`. `models[]` (when the daemon keeps a usage ledger) totals the rounds recorded since `models_since` (30 days) per model and profile: `calls`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `cost_usd` only when a published price exists. Cached per credential for 60s; `refresh` bypasses it. `cost_basis: "subscription"` (on `session`, each `models[]` row, `status_update`, session payloads and the `/cost` result) marks calls a plan pays for (Claude Code, Codex, Copilot, keyless Anthropic): `cost_usd` is then only what API prices would charge, clients show "Included in plan" and leave it out of spend totals. Absent means per-token billing. Each `models[]` row also carries `local` (true on this machine, false in the cloud, null when the profile is unknown), and `session` carries the task's own `models[]` and `advisor` (see "Per-task model usage"). |
 | `plugins.secret.set`    | `{ plugin, name, value, session_key? }`                      | `{ ok, plugin, name, stored }` or `{ ok: false, error }`    | Store one secret a managed or project plugin declares in `permissions.secrets`. The value goes straight to the encrypted store (mode 0600) and never appears in a reply, notification, transcript or log; empty or over-16 KB values are refused. Clients send it from a password field, never a slash command. |
@@ -2958,8 +2958,8 @@ clients without entering the foreground transcript.
 Session-scoped external agent bridge supporting **Claude Code** (native ACP
 bridge or official `claude` CLI `stream-json`), **Google Antigravity**
 (`antigravity-acp`, `agy acp`, or `antigravity acp`), and custom stdio ACP
-agents (`~/.xerxes/acp-agents.json` or explicit command). All eight RPCs bypass
-the foreground turn queue; `acp.agents` and `acp.catalog` are read-only.
+agents (`~/.xerxes/acp-agents.json` or explicit command). All eleven RPCs bypass
+the foreground turn queue; `acp.agents`, `acp.catalog`, and `acp.sessions` are read-only.
 
 - `acp.agents` `{ session_id?, session_key? }` → `{ ok: true, agents: AcpExternalAgentInfo[], active: AcpSessionBinding | null }`.
 - `acp.catalog` `{ session_id?, session_key? }`
@@ -3018,6 +3018,19 @@ the foreground turn queue; `acp.agents` and `acp.catalog` are read-only.
   `session/set_config_option`, refreshes dynamic `config_options`
   and `thought_levels`, persists `session.metadata.acp_binding`, and broadcasts
   `acp_status`.
+- `acp.authenticate` `{ session_id?, session_key?, agent_id?, cwd?, method_id | id }`
+  → `{ ok: true, mode: "agent" }` or `{ ok: true, mode: "terminal", command, args, env, label }` or `{ ok: false, error: string }`.
+  Runs the ACP `authenticate` handshake for an advertised `authMethod` (or
+  returns the terminal auth launch specification when the method is a terminal
+  login flow such as `agy acp --login`).
+- `acp.sessions` `{ session_id?, session_key?, cursor?, cwd? }`
+  → `{ ok: true, sessions: AcpListedSession[], next_cursor?: string }` or `{ ok: false, error: string }`.
+  Lists resumable external ACP sessions via `session/list` when advertised by
+  the connected agent.
+- `acp.fork` `{ session_id?, session_key?, cwd? }`
+  → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string }`.
+  Forks the connected external ACP session via `session/fork`, updates
+  `session.metadata.acp_binding`, and broadcasts `acp_status`.
 
 `acp_status` (event, broadcast) `{ session_id, binding: AcpSessionBinding | null, agents?: AcpExternalAgentInfo[] }`
 notifies attached clients whenever a session switches between native Xerxes and

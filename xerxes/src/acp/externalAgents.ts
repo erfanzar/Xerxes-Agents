@@ -10,16 +10,18 @@ import { errorMessage } from '../executors/toolRegistry.js'
 import type {
   AcpAvailableCommand,
   AcpClientEvent,
+  AcpContentBlock,
   AcpElicitationField,
   AcpElicitationFieldType,
   AcpElicitationOption,
   AcpElicitationRequest,
   AcpElicitationResponse,
   AcpPlanEntry,
+  AcpUsageCost,
 } from './client.js'
 import { isAcpRecord } from './types.js'
 
-export type { AcpAvailableCommand } from './client.js'
+export type { AcpAvailableCommand, AcpContentBlock, AcpUsageCost } from './client.js'
 
 export type AcpExternalAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
 export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json'
@@ -54,6 +56,7 @@ export interface AcpExternalConfigOptionChoice {
   readonly value: string
   readonly name: string
   readonly description?: string
+  readonly group?: string
 }
 
 export interface AcpExternalConfigOption {
@@ -61,8 +64,8 @@ export interface AcpExternalConfigOption {
   readonly name: string
   readonly description?: string
   readonly category?: string
-  readonly type: string
-  readonly current_value: string
+  readonly type: 'select' | 'boolean' | string
+  readonly current_value: string | boolean
   readonly options: readonly AcpExternalConfigOptionChoice[]
 }
 
@@ -77,6 +80,7 @@ export interface AcpRuntimePromptCapabilities {
 export interface AcpRuntimeSessionCapabilities {
   readonly load: boolean
   readonly resume: boolean
+  readonly fork: boolean
   readonly list: boolean
   readonly close: boolean
   readonly additional_directories: boolean
@@ -88,9 +92,13 @@ export interface AcpRuntimeMcpCapabilities {
 }
 
 export interface AcpRuntimeAuthMethod {
-  readonly id: string
-  readonly name: string
+  readonly args?: readonly string[]
   readonly description?: string
+  readonly env?: Readonly<Record<string, string>>
+  readonly id: string
+  readonly meta?: Readonly<Record<string, unknown>>
+  readonly name: string
+  readonly type?: 'agent' | 'terminal' | string
 }
 
 export interface AcpRuntimeCapabilities {
@@ -193,7 +201,10 @@ export function isAcpTurboMode(binding: AcpSessionBinding | null | undefined): b
       opt.category?.toLowerCase() === 'mode' ||
       opt.id.toLowerCase() === 'mode',
   )
-  return modeOption?.current_value?.trim().toLowerCase() === ACP_TURBO_MODE_ID
+  return (
+    typeof modeOption?.current_value === 'string' &&
+    modeOption.current_value.trim().toLowerCase() === ACP_TURBO_MODE_ID
+  )
 }
 
 export interface AcpSessionBinding {
@@ -229,27 +240,64 @@ export interface AcpSessionBinding {
 /** Unified streaming event union shared by ACP stdio agents and Claude stream-json. */
 export type AcpBridgeStreamEvent =
   | { readonly externalSessionId: string; readonly model?: string; readonly type: 'session_init' }
-  | { readonly text: string; readonly type: 'text_delta' }
+  | {
+    readonly contentBlocks?: readonly AcpContentBlock[]
+    readonly meta?: Readonly<Record<string, unknown>>
+    readonly text: string
+    readonly type: 'text_delta'
+  }
+  | {
+    readonly contentBlocks?: readonly AcpContentBlock[]
+    readonly text: string
+    readonly type: 'user_message_chunk'
+  }
   | { readonly text: string; readonly type: 'thought_delta' }
   | {
     readonly argumentsText: string
+    readonly content?: string
+    readonly contentBlocks?: readonly AcpContentBlock[]
     readonly diff?: AcpBridgeDiff
+    readonly diffs?: readonly AcpBridgeDiff[]
+    readonly kind?: string
     readonly locations?: readonly AcpBridgeLocation[]
+    readonly meta?: Readonly<Record<string, unknown>>
     readonly name: string
     readonly rawInput?: unknown
+    readonly status?: string
     readonly title?: string
     readonly toolCallId: string
     readonly type: 'tool_call'
   }
   | {
+    readonly argumentsText?: string
+    readonly contentBlocks?: readonly AcpContentBlock[]
     readonly diff?: AcpBridgeDiff
+    readonly diffs?: readonly AcpBridgeDiff[]
+    readonly kind?: string
+    readonly locations?: readonly AcpBridgeLocation[]
+    readonly meta?: Readonly<Record<string, unknown>>
+    readonly name: string
+    readonly output?: string
+    readonly rawInput?: unknown
+    readonly status?: string
+    readonly title?: string
+    readonly toolCallId: string
+    readonly type: 'tool_update'
+  }
+  | {
+    readonly contentBlocks?: readonly AcpContentBlock[]
+    readonly diff?: AcpBridgeDiff
+    readonly diffs?: readonly AcpBridgeDiff[]
     readonly durationMs?: number
     readonly isError?: boolean
+    readonly kind?: string
     readonly locations?: readonly AcpBridgeLocation[]
+    readonly meta?: Readonly<Record<string, unknown>>
     readonly name: string
     readonly output: string
     readonly permissionDenied?: boolean
     readonly rawOutput?: unknown
+    readonly title?: string
     readonly toolCallId: string
     readonly type: 'tool_result'
   }
@@ -261,16 +309,20 @@ export type AcpBridgeStreamEvent =
     readonly configOptions?: readonly unknown[]
     readonly raw: Readonly<Record<string, unknown>>
     readonly type: 'config_update'
-    readonly value?: string
+    readonly value?: string | boolean
   }
   | { readonly commands: readonly AcpExternalCommandOption[]; readonly type: 'available_commands' }
   | { readonly title?: string; readonly type: 'session_info'; readonly updatedAt?: string }
+  | { readonly description?: string; readonly severity: string; readonly title: string; readonly type: 'notice' }
+  | { readonly elicitationId: string; readonly type: 'elicitation_complete' }
+  | { readonly events: readonly AcpBridgeStreamEvent[]; readonly type: 'session_replay' }
   | { readonly raw: Readonly<Record<string, unknown>>; readonly text?: string; readonly type: 'continuation' }
   | {
     readonly cachedReadTokens?: number
     readonly cachedWriteTokens?: number
     readonly contextSize?: number
     readonly contextUsed?: number
+    readonly cost?: AcpUsageCost
     readonly costUsd?: number
     readonly inputTokens?: number
     readonly outputTokens?: number
@@ -737,8 +789,12 @@ function readOptionalText(
 }
 
 export interface AcpToolMetaSnapshot {
+  readonly contentBlocks?: readonly AcpContentBlock[]
   readonly diff?: AcpBridgeDiff
+  readonly diffs?: readonly AcpBridgeDiff[]
+  readonly kind?: string
   readonly locations?: readonly AcpBridgeLocation[]
+  readonly title?: string
 }
 
 function wireDiffOf(diff: { readonly newText?: string; readonly oldText?: string; readonly path: string } | undefined): AcpBridgeDiff | undefined {
@@ -750,6 +806,20 @@ function wireDiffOf(diff: { readonly newText?: string; readonly oldText?: string
   }
 }
 
+function wireDiffsOf(
+  diffs: readonly { readonly newText?: string; readonly oldText?: string; readonly path: string }[] | undefined,
+  singleDiff: { readonly newText?: string; readonly oldText?: string; readonly path: string } | undefined,
+): readonly AcpBridgeDiff[] | undefined {
+  const source = diffs && diffs.length > 0 ? diffs : singleDiff ? [singleDiff] : []
+  if (source.length === 0) return undefined
+  const out: AcpBridgeDiff[] = []
+  for (const item of source) {
+    const mapped = wireDiffOf(item)
+    if (mapped) out.push(mapped)
+  }
+  return out.length > 0 ? out : undefined
+}
+
 /** Convert an {@link AcpClientEvent} into a unified {@link AcpBridgeStreamEvent}. */
 export function bridgeEventFromAcpClientEvent(
   event: AcpClientEvent,
@@ -759,20 +829,41 @@ export function bridgeEventFromAcpClientEvent(
 ): AcpBridgeStreamEvent | undefined {
   switch (event.type) {
     case 'text_delta':
-      return { type: 'text_delta', text: event.text }
+      return {
+        type: 'text_delta',
+        text: event.text,
+        ...(event.contentBlocks?.length ? { contentBlocks: event.contentBlocks } : {}),
+        ...(event.meta ? { meta: event.meta } : {}),
+      }
+    case 'user_message_chunk':
+      return {
+        type: 'user_message_chunk',
+        text: event.text,
+        ...(event.contentBlocks?.length ? { contentBlocks: event.contentBlocks } : {}),
+      }
     case 'thought_delta':
       return { type: 'thought_delta', text: event.text }
     case 'tool_call': {
       toolNamesById.set(event.toolCallId, event.name)
-      const diff = wireDiffOf(event.diff)
+      const diffs = wireDiffsOf(event.diffs, event.diff)
+      const diff = diffs?.[0]
+      const contentBlocks = event.contentBlocks && event.contentBlocks.length > 0 ? event.contentBlocks : undefined
       const locations = event.locations && event.locations.length > 0 ? event.locations : undefined
-      if (toolMetaById && (diff || locations)) {
+      if (toolMetaById && (diff || diffs || contentBlocks || locations || event.kind || event.title)) {
         const prev = toolMetaById.get(event.toolCallId)
-        const mergedDiff = diff ?? prev?.diff
+        const mergedDiffs = diffs ?? prev?.diffs
+        const mergedDiff = diff ?? mergedDiffs?.[0] ?? prev?.diff
+        const mergedBlocks = contentBlocks ?? prev?.contentBlocks
         const mergedLocations = locations ?? prev?.locations
+        const mergedKind = event.kind ?? prev?.kind
+        const mergedTitle = event.title ?? prev?.title
         toolMetaById.set(event.toolCallId, {
           ...(mergedDiff ? { diff: mergedDiff } : {}),
+          ...(mergedDiffs ? { diffs: mergedDiffs } : {}),
+          ...(mergedBlocks ? { contentBlocks: mergedBlocks } : {}),
           ...(mergedLocations ? { locations: mergedLocations } : {}),
+          ...(mergedKind ? { kind: mergedKind } : {}),
+          ...(mergedTitle ? { title: mergedTitle } : {}),
         })
       }
       const argumentsText =
@@ -788,8 +879,14 @@ export function bridgeEventFromAcpClientEvent(
         argumentsText,
         ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
         ...(event.title ? { title: event.title } : {}),
+        ...(event.kind ? { kind: event.kind } : {}),
+        ...(event.status ? { status: event.status } : {}),
+        ...(event.content !== undefined ? { content: event.content } : {}),
         ...(diff ? { diff } : {}),
+        ...(diffs ? { diffs } : {}),
+        ...(contentBlocks ? { contentBlocks } : {}),
         ...(locations ? { locations } : {}),
+        ...(event.meta ? { meta: event.meta } : {}),
       }
     }
     case 'tool_call_update': {
@@ -797,15 +894,25 @@ export function bridgeEventFromAcpClientEvent(
       if (event.name) {
         toolNamesById.set(event.toolCallId, event.name)
       }
-      const diff = wireDiffOf(event.diff)
+      const diffs = wireDiffsOf(event.diffs, event.diff)
+      const diff = diffs?.[0]
+      const contentBlocks = event.contentBlocks && event.contentBlocks.length > 0 ? event.contentBlocks : undefined
       const locations = event.locations && event.locations.length > 0 ? event.locations : undefined
-      if (toolMetaById && (diff || locations)) {
+      if (toolMetaById && (diff || diffs || contentBlocks || locations || event.kind || event.title)) {
         const prev = toolMetaById.get(event.toolCallId)
-        const mergedDiff = diff ?? prev?.diff
+        const mergedDiffs = diffs ?? prev?.diffs
+        const mergedDiff = diff ?? mergedDiffs?.[0] ?? prev?.diff
+        const mergedBlocks = contentBlocks ?? prev?.contentBlocks
         const mergedLocations = locations ?? prev?.locations
+        const mergedKind = event.kind ?? prev?.kind
+        const mergedTitle = event.title ?? prev?.title
         toolMetaById.set(event.toolCallId, {
           ...(mergedDiff ? { diff: mergedDiff } : {}),
+          ...(mergedDiffs ? { diffs: mergedDiffs } : {}),
+          ...(mergedBlocks ? { contentBlocks: mergedBlocks } : {}),
           ...(mergedLocations ? { locations: mergedLocations } : {}),
+          ...(mergedKind ? { kind: mergedKind } : {}),
+          ...(mergedTitle ? { title: mergedTitle } : {}),
         })
       }
 
@@ -828,7 +935,38 @@ export function bridgeEventFromAcpClientEvent(
         isTerminalStatus ||
         (!isNonTerminalStatus && (event.isError === true || event.rawOutput !== undefined || event.content !== undefined))
       if (!settled) {
-        return undefined
+        if (settledToolCallIds?.has(event.toolCallId)) {
+          return undefined
+        }
+        const cachedMeta = toolMetaById?.get(event.toolCallId)
+        const resolvedDiffs = diffs ?? cachedMeta?.diffs
+        const resolvedDiff = diff ?? resolvedDiffs?.[0] ?? cachedMeta?.diff
+        const resolvedBlocks = contentBlocks ?? cachedMeta?.contentBlocks
+        const resolvedLocations = locations ?? cachedMeta?.locations
+        const resolvedKind = event.kind ?? cachedMeta?.kind
+        const resolvedTitle = event.title ?? cachedMeta?.title
+        const argumentsText =
+          event.rawInput === undefined
+            ? undefined
+            : typeof event.rawInput === 'string'
+              ? event.rawInput
+              : safeJsonStringify(event.rawInput)
+        return {
+          type: 'tool_update',
+          toolCallId: event.toolCallId,
+          name,
+          ...(resolvedTitle ? { title: resolvedTitle } : {}),
+          ...(resolvedKind ? { kind: resolvedKind } : {}),
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
+          ...(argumentsText !== undefined ? { argumentsText } : {}),
+          ...(event.content !== undefined ? { output: event.content } : {}),
+          ...(resolvedDiff ? { diff: resolvedDiff } : {}),
+          ...(resolvedDiffs ? { diffs: resolvedDiffs } : {}),
+          ...(resolvedBlocks ? { contentBlocks: resolvedBlocks } : {}),
+          ...(resolvedLocations ? { locations: resolvedLocations } : {}),
+          ...(event.meta ? { meta: event.meta } : {}),
+        }
       }
       if (settledToolCallIds) {
         if (settledToolCallIds.has(event.toolCallId)) {
@@ -837,8 +975,12 @@ export function bridgeEventFromAcpClientEvent(
         settledToolCallIds.add(event.toolCallId)
       }
       const cachedMeta = toolMetaById?.get(event.toolCallId)
-      const resolvedDiff = diff ?? cachedMeta?.diff
+      const resolvedDiffs = diffs ?? cachedMeta?.diffs
+      const resolvedDiff = diff ?? resolvedDiffs?.[0] ?? cachedMeta?.diff
+      const resolvedBlocks = contentBlocks ?? cachedMeta?.contentBlocks
       const resolvedLocations = locations ?? cachedMeta?.locations
+      const resolvedKind = event.kind ?? cachedMeta?.kind
+      const resolvedTitle = event.title ?? cachedMeta?.title
       toolMetaById?.delete(event.toolCallId)
       const output =
         event.content !== undefined
@@ -853,11 +995,16 @@ export function bridgeEventFromAcpClientEvent(
         toolCallId: event.toolCallId,
         name,
         output,
+        ...(resolvedTitle ? { title: resolvedTitle } : {}),
+        ...(resolvedKind ? { kind: resolvedKind } : {}),
         ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
         ...(event.isError ? { isError: true } : {}),
         ...(event.permissionDenied ? { permissionDenied: true } : {}),
         ...(resolvedDiff ? { diff: resolvedDiff } : {}),
+        ...(resolvedDiffs ? { diffs: resolvedDiffs } : {}),
+        ...(resolvedBlocks ? { contentBlocks: resolvedBlocks } : {}),
         ...(resolvedLocations ? { locations: resolvedLocations } : {}),
+        ...(event.meta ? { meta: event.meta } : {}),
       }
     }
     case 'plan':
@@ -879,7 +1026,7 @@ export function bridgeEventFromAcpClientEvent(
         type: 'config_update',
         ...(event.configOptions ? { configOptions: event.configOptions } : {}),
         ...(event.configId ? { configId: event.configId } : {}),
-        ...(event.value ? { value: event.value } : {}),
+        ...(event.value !== undefined ? { value: event.value } : {}),
         raw: event.rawUpdate,
       }
     case 'usage_update':
@@ -893,6 +1040,8 @@ export function bridgeEventFromAcpClientEvent(
         ...(event.cachedWriteTokens !== undefined ? { cachedWriteTokens: event.cachedWriteTokens } : {}),
         ...(event.thoughtTokens !== undefined ? { thoughtTokens: event.thoughtTokens } : {}),
         ...(event.totalTokens !== undefined ? { totalTokens: event.totalTokens } : {}),
+        ...(event.cost ? { cost: event.cost } : {}),
+        ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}),
       }
     case 'session_info':
       return {
@@ -904,6 +1053,18 @@ export function bridgeEventFromAcpClientEvent(
       return {
         type: 'available_commands',
         commands: event.commands,
+      }
+    case 'notice':
+      return {
+        type: 'notice',
+        severity: event.severity,
+        title: event.title,
+        ...(event.description ? { description: event.description } : {}),
+      }
+    case 'elicitation_complete':
+      return {
+        type: 'elicitation_complete',
+        elicitationId: event.elicitationId,
       }
     case 'continuation':
       return {

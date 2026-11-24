@@ -431,8 +431,8 @@ describe('AcpStdioClient bidirectional JSON-RPC 2.0 transport', () => {
       jsonrpc: '2.0',
       method: 'initialize',
       params: {
-        protocolVersion: 1,
-        clientInfo: { name: 'xerxes-agents' },
+        protocolVersion: 2,
+        clientInfo: { name: 'xerxes-agents', title: 'Xerxes Agents' },
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
       },
     })
@@ -1475,9 +1475,9 @@ describe('External ACP model & mode discovery, fallback switching, Claude --mode
           type: 'select',
           current_value: 'gemini-4-carbon-high',
           options: [
-            { value: 'gemini-4-carbon-high', name: 'Gemini 4 Carbon (High)', description: 'Deep reasoning' },
-            { value: 'gemini-4-flash', name: 'Gemini 4 Flash' },
-            { value: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+            { value: 'gemini-4-carbon-high', name: 'Gemini 4 Carbon (High)', description: 'Deep reasoning', group: 'Gemini' },
+            { value: 'gemini-4-flash', name: 'Gemini 4 Flash', group: 'Gemini' },
+            { value: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', group: 'Claude' },
           ],
         },
         {
@@ -2156,7 +2156,7 @@ describe('Automatic ACP Runtime Feature & Skill Discovery (Track A)', () => {
       expect(genericConn.binding.agent_version).toBe('3.2.1')
       expect(genericConn.binding.capabilities).toEqual({
         prompt: { image: true, audio: true, embedded_context: true },
-        session: { load: true, resume: true, list: true, close: true, additional_directories: true },
+        session: { load: true, resume: true, list: true, fork: false, close: true, additional_directories: true },
         mcp: { http: true, sse: true },
         auth_methods: [{ id: 'api-key', name: 'API Key', description: 'Use vendor API key' }],
         meta: { vendor: { streaming: true } },
@@ -2174,7 +2174,7 @@ describe('Automatic ACP Runtime Feature & Skill Discovery (Track A)', () => {
           id: 'web_search',
           name: 'Web Search',
           type: 'boolean',
-          current_value: 'true',
+          current_value: true,
           options: [
             { value: 'true', name: 'Enabled' },
             { value: 'false', name: 'Disabled' },

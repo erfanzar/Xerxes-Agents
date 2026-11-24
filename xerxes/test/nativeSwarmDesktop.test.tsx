@@ -1585,6 +1585,100 @@ describe('Large-scale Immortals board polish: ISO timestamps, inline Markdown, a
     expect(chromeHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
   })
 
+  test('renders Markdown headings (###), italics (*(note)*), strikethrough, ordered lists, code fences, quotes, rules and tables without breaking #seq refs or snake_case identifiers', () => {
+    const auditPost = [
+      '### Verification',
+      '- In _resolve_shard_specs under TPU use_forced_layout=True, `pytest -q` passed.',
+      '- Pure-Python check -> Exit 0 (`ALL_CONTRACT_CHECKS_PASSED`). *(Full multi-device model compute tests in `test_fused_layout_tp_portability.py` require TPU hardware and were not run on CPU.)*',
+      '',
+      '#### Next steps',
+      '1. Run ~~legacy~~ new TPU check for #7 and @worker-api.',
+      '2. Inspect `#12` inside code.',
+      '',
+      '> Keep _italic notes_ readable without touching linear_attention_merged_split_proj.',
+      '',
+      '---',
+      '',
+      '```python',
+      '### comment inside code stays literal',
+      'x = 1 * 2 * 3',
+      '```',
+      '',
+      '| Suite | Result |',
+      '| --- | --- |',
+      '| CPU | **Pass** |',
+    ].join('\n')
+
+    const blocks = parseSwarmMessageBlocks(auditPost)
+    expect(blocks.map(b => b.kind)).toEqual([
+      'heading',
+      'list',
+      'heading',
+      'ordered_list',
+      'quote',
+      'hr',
+      'code',
+      'table',
+    ])
+    expect(blocks[0]).toEqual({ kind: 'heading', level: 3, text: 'Verification' })
+    expect(blocks[2]).toEqual({ kind: 'heading', level: 4, text: 'Next steps' })
+
+    // Snake_case identifiers must never be turned into italics.
+    const snakeTokens = tokenizeSwarmMessage(
+      'In _resolve_shard_specs with linear_attention_merged_split_proj and _italic_ plus *(note)*',
+    )
+    expect(snakeTokens.filter(t => t.kind === 'italic')).toEqual([
+      { kind: 'italic', raw: '_italic_', text: 'italic' },
+      { kind: 'italic', raw: '*(note)*', text: '(note)' },
+    ])
+
+    // `#12` seq refs and `#main` remain paragraph text, never headings.
+    expect(parseSwarmMessageBlocks('#12 confirmed on #main')).toEqual([
+      { kind: 'paragraph', text: '#12 confirmed on #main' },
+    ])
+
+    const html = renderToStaticMarkup(
+      createElement(SwarmBoard, {
+        status: sampleStatus,
+        initialExpandedSeqs: [150],
+        messages: [
+          {
+            seq: 150,
+            agent: 'test-verifier',
+            channel: 'main',
+            text: auditPost,
+            mentions: ['worker-api'],
+            channel_mentions: [],
+            broadcast: false,
+            time: '2026-11-24T00:15:00.000Z',
+          },
+        ],
+      }),
+    )
+
+    expect(html).toContain('<h4 class="swarm-msg__heading" data-level="3">Verification</h4>')
+    expect(html).toContain('<h4 class="swarm-msg__heading" data-level="4">Next steps</h4>')
+    expect(html).not.toContain('### Verification')
+    expect(html).not.toContain('#### Next steps')
+    expect(html).toContain('<em class="swarm-msg__em">(Full multi-device model compute tests in <code class="swarm-msg__code"')
+    expect(html).toContain('>test_fused_layout_tp_portability.py</code> require TPU hardware and were not run on CPU.)</em>')
+    expect(html).toContain('_resolve_shard_specs')
+    expect(html).toContain('linear_attention_merged_split_proj')
+    expect(html).toContain('<em class="swarm-msg__em">italic notes</em>')
+    expect(html).toContain('<del class="swarm-msg__del">legacy</del>')
+    expect(html).toContain('<ol class="swarm-msg__list swarm-msg__list--ordered"')
+    expect(html).toContain('aria-label="Jump to message #7"')
+    expect(html).toContain('<blockquote class="swarm-msg__quote">')
+    expect(html).toContain('<hr class="swarm-msg__hr"/>')
+    expect(html).toContain('<pre class="swarm-msg__pre" data-lang="python"><code>### comment inside code stays literal')
+    expect(html).toContain('<table class="swarm-msg__table">')
+    expect(html).toContain('<th>Suite</th>')
+    expect(html).toContain('>Pass</strong>')
+
+    const chromeHtml = html.replace(/<svg[^>]*swarm-member__sprite[\s\S]*?<\/svg>/g, '')
+    expect(chromeHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
+  })
+
   test('auto-folds board messages with > 6 lines or > 420 chars and toggles cleanly between Show more and Show less', () => {
     const shortMsg = 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6'
     expect(previewSwarmMessage(shortMsg).foldable).toBe(false)
@@ -1953,5 +2047,69 @@ describe('Large-scale Immortals board polish: ISO timestamps, inline Markdown, a
     expect(atelierCss).toContain('.swarm-jump-latest{position:absolute;right:16px;bottom:14px')
     expect(atelierCss).toContain('border-radius:999px;background:var(--x-popover,var(--x-dialog))')
     expect(vibesCss).toContain('.swarm-jump-latest{background:var(--x-popover);border:1px solid var(--x-hairline);border-radius:999px')
+  })
+
+  test('renders AGY-inspired Immortals Overview, Board, Members, and Graph layouts with SimurghSprite branding and zero hardcoded hex colors', () => {
+    const html = renderToStaticMarkup(
+      createElement(SwarmBoard, {
+        status: sampleStatus,
+        messages: sampleMessages,
+        models: baseSnapshot().models,
+      }),
+    )
+
+    // Default tab is Overview; underline tabs follow Overview -> Board -> Members -> Graph
+    expect(html).toContain('data-tab="overview"')
+    const overviewIdx = html.indexOf('>Overview</span>')
+    const boardIdx = html.indexOf('>Board</span>')
+    const membersIdx = html.indexOf('>Members</span>')
+    const graphIdx = html.indexOf('>Graph</span>')
+    expect(overviewIdx).toBeGreaterThan(-1)
+    expect(overviewIdx).toBeLessThan(boardIdx)
+    expect(boardIdx).toBeLessThan(membersIdx)
+    expect(membersIdx).toBeLessThan(graphIdx)
+
+    // Live Overview dashboard: Running card, X of Y tasks done card, Threads groups, and The team SimurghSprite tile strip
+    expect(html).toContain('swarm-ov-card--running')
+    expect(html).toContain('>Running</span>')
+    expect(html).toContain('tasks done')
+    expect(html).toContain('>Threads</h4>')
+    expect(html).toContain('>The team</h4>')
+    expect(html).toContain('swarm-ov-coord')
+    expect(html).toContain('aria-label="Immortals team tiles"')
+    expect(html).toContain('swarm-avatar-tile--all')
+    expect(html).toContain('swarm-avatar-tile__sleep')
+
+    // Board: AGY search bar, filter toggle, author -> recipient headers, and SimurghSprite avatars
+    expect(html).toContain('aria-label="Search board messages"')
+    expect(html).toContain('aria-label="Filter board messages"')
+    expect(html).toContain('swarm-msg__arrow')
+    expect(html).toContain('swarm-msg__recipients')
+    expect(html).toContain('swarm-msg__avatar')
+
+    // Members: Search members bar, STANDING BY / RETIRED section dividers, and latest post preview
+    expect(html).toContain('aria-label="Search members"')
+    expect(html).toContain('STANDING BY')
+    expect(html).toContain('RETIRED')
+    expect(html).toContain('swarm-member__preview')
+
+    // Idle Immortals empty state renders clean card without narrator feedback clutter
+    const idleHtml = renderToStaticMarkup(
+      createElement(SwarmBoard, {
+        status: null,
+        messages: [],
+        models: [],
+      }),
+    )
+    expect(idleHtml).toContain('Immortals ready')
+    expect(idleHtml).toContain('/immortals &lt;task&gt;')
+    expect(idleHtml).not.toContain('<strong>0</strong> active')
+    expect(idleHtml).not.toContain('Feedback to narrator…')
+    expect(html).toContain('swarm-pill-composer')
+    expect(html).toContain('swarm-pill-composer__send')
+
+    // Zero hardcoded hex colors anywhere in rendered chrome
+    const chromeHtml = html.replace(/<svg[^>]*swarm-member__sprite[\s\S]*?<\/svg>/g, '')
+    expect(chromeHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
   })
 })

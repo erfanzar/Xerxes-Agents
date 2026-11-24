@@ -5,20 +5,62 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { desktopError } from './desktopRpc.js'
 import { CopyButton } from './CopyButton.js'
+import { SelectField } from './SelectField.js'
 import { ActionDialog } from './ActionDialog.js'
+import { localMachineLabel } from './runModeView.js'
 import type { XerxesBridge } from './types.js'
 
 export interface AccountRow {id:string;kind:string;label:string;profileName:string;provider:string;model:string;available:boolean}
 export type AgyCredentialMode = 'adc' | 'gemini_api_key' | 'keyring'
-export interface AgySourceView {readonly mode:AgyCredentialMode;readonly label:string;readonly available:boolean;readonly detail:string;readonly headlessSafe:boolean;readonly accountId?:string}
+
+/** Human-readable badge label for a provider account kind token. */
+export function accountKindLabel(kind: string): string {
+  switch (kind) {
+    case 'api_key': return 'API key'
+    case 'claude': return 'Claude sign-in'
+    case 'claude-code': return 'Claude Code sign-in'
+    case 'codex': return 'Codex sign-in'
+    case 'sign-in': return 'Sign-in'
+    default: return kind.replace(/[_-]+/g, ' ')
+  }
+}
+
+/** Human-readable label for an Antigravity credential mode token. */
+export function agyModeLabel(mode: string): string {
+  switch (mode) {
+    case 'adc': return 'Google Cloud ADC'
+    case 'gemini_api_key': return 'Gemini API key'
+    case 'keyring': return 'Antigravity sign-in'
+    default: return mode.replace(/[_-]+/g, ' ')
+  }
+}
+/** Sources that may be copied to an SSH host. Antigravity's own sign-in (`keyring`) never leaves the computer it was made on. */
+export type AgyTransferMode = Exclude<AgyCredentialMode, 'keyring'>
+export interface AgySourceView {readonly mode:AgyCredentialMode;readonly label:string;readonly available:boolean;readonly detail:string;readonly headlessSafe:boolean;readonly transferable?:boolean;readonly accountId?:string}
+/** Narrow a source to one Xerxes may transfer; guards against an older main process still offering `keyring`. */
+export function isTransferableAgySource(source:AgySourceView):source is AgySourceView & {readonly mode:AgyTransferMode} {
+  return source.available && source.mode!=='keyring' && source.transferable!==false
+}
+/** The source a one-click "transfer to SSH" uses, or null when nothing transferable is available. */
+export function agyQuickTransferSource(status:AgyStatusView|null|undefined):(AgySourceView & {readonly mode:AgyTransferMode})|null {
+  if(!status?.canSync)return null
+  const sources=status.sources.filter(isTransferableAgySource)
+  return sources.find(source=>source.mode===status.recommendedMode)??sources[0]??null
+}
 export interface AgyStatusView {
   readonly agyInstalled:boolean
   readonly sources:readonly AgySourceView[]
-  readonly recommendedMode:AgyCredentialMode|null
+  readonly recommendedMode:AgyTransferMode|null
   readonly canSync:boolean
   readonly destination:string|null
   readonly syncedDestination:string|null
-  readonly syncedMode:AgyCredentialMode|null
+  readonly syncedMode:AgyTransferMode|null
+}
+/** What an agy credential transfer writes on the SSH host, for the confirmation dialog. */
+export function agyTransferDetail(mode:AgyTransferMode):string {
+  return mode==='adc'
+    ?'Transfers ~/.config/gcloud/application_default_credentials.json (mode 0600), enables ADC in ~/.gemini/config/config.json, and writes owner-only agy runtime env settings over SSH stdin.'
+    :'Transfers the Gemini API key into owner-only ~/.xerxes/provider-accounts/agy/env.json (mode 0600) and sets modelProvider: "gemini" for agy over SSH stdin.'
 }
 /** What a provider row borrows from its signed-in account: usage, Sync and Remove (which also clears the credential). */
 export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNode;readonly busy:boolean;readonly remove?:()=>void;readonly sync?:()=>void
@@ -27,15 +69,22 @@ export interface AccountSlot {readonly account:AccountRow;readonly usage:ReactNo
 interface AccountList {accounts:readonly AccountRow[];can_sync:boolean;destination:string|null}
 interface UsageWindow {label:string;used_percent:number;resets_at:string|null;detail:string|null}
 interface SyncReview {review:string;account_id:string;destination:string}
-interface AgySyncReview {review:string;mode:AgyCredentialMode;label:string;headless_safe:boolean;destination:string}
+interface AgySyncReview {review:string;mode:AgyTransferMode;label:string;headless_safe:boolean;destination:string}
 interface AccountAction {kind:'sync'|'remove';account:AccountRow;phase:'reviewing'|'ready'|'working'|'done';review?:SyncReview;error:string}
-interface AgySyncAction {mode:AgyCredentialMode;label:string;phase:'reviewing'|'ready'|'working'|'done';review?:AgySyncReview;error:string}
+interface AgySyncAction {mode:AgyTransferMode;label:string;phase:'reviewing'|'ready'|'working'|'done';review?:AgySyncReview;error:string}
 
 export function formatAccountUsageWindow(window: UsageWindow): string {
   if (!Number.isFinite(window.used_percent)) return `${window.label}: usage unavailable`
   const reset = window.resets_at && Number.isFinite(Date.parse(window.resets_at)) ? ` · resets ${new Date(window.resets_at).toLocaleString()}` : ''
   return `${window.label}: ${Math.round(window.used_percent)}% used${reset}`
 }
+
+export const ACCOUNT_PROVIDER_OPTIONS = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'gemini_subscription', label: 'Gemini Subscription (Antigravity)' },
+  { value: 'gemini', label: 'Gemini (API key)' },
+] as const
 
 export function ProviderLoginLink({url,busy,write}:{url:string;busy:boolean;write?:(text:string)=>Promise<unknown>}) {
   return <div className="provider-accounts__signin" data-state={busy?'waiting':'ready'}>
@@ -88,20 +137,22 @@ export function AgyCredentialCard({
   onSync,
 }: {
   readonly status: AgyStatusView
-  readonly selectedMode: AgyCredentialMode | ''
-  readonly onSelectMode: (mode: AgyCredentialMode) => void
+  readonly selectedMode: AgyTransferMode | ''
+  readonly onSelectMode: (mode: AgyTransferMode) => void
   readonly busy: boolean
   readonly onSync: () => void
 }) {
   const availableSources = status.sources.filter(source => source.available)
-  const chosen = availableSources.find(source => source.mode === selectedMode) ?? availableSources[0]
+  const transferSources = status.sources.filter(isTransferableAgySource)
+  const chosen = transferSources.find(source => source.mode === selectedMode) ?? transferSources[0]
+  const shown = chosen ?? availableSources[0]
   return <div className="provcard provider-account provider-account--agy" aria-label="Antigravity CLI credentials">
     <div className="provcard__main">
       <span className="provcard__text">
         <span className="provcard__title">
           <span className="provcard__name">Antigravity (agy)</span>
           <span className="provcard__badge provcard__badge--quiet">{status.agyInstalled ? 'CLI ready' : 'auto-installs'}</span>
-          {status.syncedDestination && status.syncedMode && <span className="provcard__badge provcard__badge--quiet">synced · {status.syncedMode}</span>}
+          {status.syncedDestination && status.syncedMode && <span className="provcard__badge provcard__badge--quiet">Synced · {agyModeLabel(status.syncedMode)}</span>}
         </span>
         <span className="provcard__model">
           {availableSources.length > 0
@@ -109,13 +160,13 @@ export function AgyCredentialCard({
             : 'No local agy credentials detected yet'}
         </span>
         <span className="provcard__meta">
-          {chosen
-            ? chosen.detail
+          {shown
+            ? shown.detail
             : 'Sign in with `agy acp --login`, run `gcloud auth application-default login`, or save a Gemini API-key account above.'}
         </span>
       </span>
-      {status.canSync && availableSources.length > 0 && <span className="provcard__tools">
-        {availableSources.length > 1 && (
+      {status.canSync && transferSources.length > 0 && <span className="provcard__tools">
+        {transferSources.length > 1 && (
           <select
             className="palette__in"
             aria-label="Antigravity credential source"
@@ -123,10 +174,10 @@ export function AgyCredentialCard({
             disabled={busy}
             onChange={event => {
               const value = event.target.value
-              if (value === 'adc' || value === 'gemini_api_key' || value === 'keyring') onSelectMode(value)
+              if (value === 'adc' || value === 'gemini_api_key') onSelectMode(value)
             }}
           >
-            {availableSources.map(source => (
+            {transferSources.map(source => (
               <option key={source.mode} value={source.mode}>
                 {source.label}
               </option>
@@ -144,9 +195,8 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
   rows?:(slots:ReadonlyMap<string,AccountSlot>)=>ReactNode
   /** Profiles the caller already shows; their accounts are not listed a second time. */
   shownProfiles?:ReadonlySet<string>}) {
-  const alive=useRef(true), [list,setList]=useState<AccountList|null>(null), [usage,setUsage]=useState<Record<string,unknown>>({})
-  const [agyStatus,setAgyStatus]=useState<AgyStatusView|null>(null), [agyMode,setAgyMode]=useState<AgyCredentialMode|''>(''), [agyAction,setAgyAction]=useState<AgySyncAction|null>(null), agyRequest=useRef(0)
-  const [agyLogin,setAgyLogin]=useState<{loginId:string;url:string;code:string;submitting:boolean;error:string}|null>(null)
+  const alive=useRef(true), loadEpoch=useRef(0), [list,setList]=useState<AccountList|null>(null), [usage,setUsage]=useState<Record<string,unknown>>({})
+  const [agyStatus,setAgyStatus]=useState<AgyStatusView|null>(null), [agyMode,setAgyMode]=useState<AgyTransferMode|''>(''), [agyAction,setAgyAction]=useState<AgySyncAction|null>(null), agyRequest=useRef(0)
   const [kind,setKind]=useState<'claude'|'codex'|'gemini_subscription'|'gemini'>('claude'), [label,setLabel]=useState(''), [busy,setBusy]=useState(false), [error,setError]=useState('')
   const [action,setAction]=useState<AccountAction|null>(null), actionRequest=useRef(0)
   const closeAction=()=>{actionRequest.current+=1;setAction(null)}
@@ -158,12 +208,13 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
   }),[onAccountLogin])
   const load=async()=>{
     if(!accounts)return
+    const epoch=++loadEpoch.current
     const [result, agy] = await Promise.all([
       accounts('list',{}) as Promise<AccountList & {ok?:boolean;error?:string}>,
       accounts('agy-status',{}).catch(()=>null) as Promise<(AgyStatusView & {ok?:boolean})|null>,
     ])
     if(result.ok===false)throw new Error(result.error||'Could not load provider accounts')
-    if(!alive.current)return
+    if(!alive.current||loadEpoch.current!==epoch)return
     setList(result)
     if(agy&&Array.isArray(agy.sources)){
       setAgyStatus(agy)
@@ -171,16 +222,18 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
         if(current&&agy.sources.some(source=>source.mode===current&&source.available))return current
         return agy.recommendedMode??''
       })
+    } else {
+      setAgyStatus(null)
     }
     void Promise.all(result.accounts.map(async account=>{
-      try{const report=await accounts('usage',{accountId:account.id});if(alive.current)setUsage(current=>({...current,[account.id]:report}))}
-      catch(error){if(alive.current)setUsage(current=>({...current,[account.id]:{status:'unknown',reason:desktopError(error)}}))}
+      try{const report=await accounts('usage',{accountId:account.id});if(alive.current&&loadEpoch.current===epoch)setUsage(current=>({...current,[account.id]:report}))}
+      catch(error){if(alive.current&&loadEpoch.current===epoch)setUsage(current=>({...current,[account.id]:{status:'unknown',reason:desktopError(error)}}))}
     }))
   }
-  const reviewAgySync=async(mode:AgyCredentialMode)=>{
+  const reviewAgySync=async(mode:AgyTransferMode)=>{
     if(!accounts)return
     const source=agyStatus?.sources.find(item=>item.mode===mode)
-    const label=source?.label??mode
+    const label=source?.label??agyModeLabel(mode)
     const request=++agyRequest.current
     setAgyAction({mode,label,phase:'reviewing',error:''})
     try {
@@ -207,7 +260,10 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       if(alive.current&&agyRequest.current===request)setAgyAction({mode:agyAction.mode,label:agyAction.label,phase:'ready',error:desktopError(error)})
     }
   }
-  useEffect(()=>{void load().catch(error=>{if(alive.current)setError(desktopError(error))})},[accounts])
+  useEffect(()=>{
+    setList(null);setUsage({});setAgyStatus(null);setError('')
+    void load().catch(error=>{if(alive.current)setError(desktopError(error))})
+  },[accounts,sessionKey])
   const run=async(work:()=>Promise<void>)=>{setBusy(true);setError('');try{await work()}catch(error){if(alive.current)setError(desktopError(error))}finally{if(alive.current)setBusy(false)}}
   const login=()=>run(async()=>{
     setSigningIn(true)
@@ -225,6 +281,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
     } finally {if(alive.current)setSigningIn(false)}
   })
   const [notice,setNotice]=useState('')
+  const machine=localMachineLabel()
   const relogin=(account:AccountRow)=>run(async()=>{
     setSigningIn(true);setNotice('')
     loginId.current=globalThis.crypto.randomUUID()
@@ -234,7 +291,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       if(result.ok===false)throw new Error(result.error||'Sign-in failed')
       setLoginUrl('');loginId.current=''
       if(alive.current)setNotice(result.synced?`${account.label} signed in again and synced to ${result.synced}.`
-        :result.sync_error?`${account.label} signed in again on this Mac. Sync to SSH failed: ${result.sync_error}`
+        :result.sync_error?`${account.label} signed in again on ${machine}. Sync to SSH failed: ${result.sync_error}`
         :`${account.label} signed in again.`)
       await load();changed()
     } catch(error) {
@@ -306,87 +363,36 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
   }]))
   const merged=Boolean(rows)
   const unlisted=(list?.accounts??[]).filter(account=>!shownProfiles?.has(account.profileName))
-  const startAgyLogin=()=>run(async()=>{
-    if(!accounts)return
-    setAgyLogin(null)
-    const started=await accounts('agy-login-start',{}) as {ok?:boolean;login_id?:string;url?:string;error?:string}
-    if(started.ok===false||typeof started.login_id!=='string'||typeof started.url!=='string'){
-      throw new Error(started.error||'Could not start Antigravity Google sign-in')
-    }
-    if(alive.current)setAgyLogin({loginId:started.login_id,url:started.url,code:'',submitting:false,error:''})
-  })
-  const completeAgyLogin=async()=>{
-    if(!accounts||!agyLogin||agyLogin.submitting)return
-    const code=agyLogin.code.trim()
-    if(!code)return
-    setAgyLogin(current=>current?{...current,submitting:true,error:''}:null)
-    try{
-      const res=await accounts('agy-login-complete',{loginId:agyLogin.loginId,code}) as {ok?:boolean;error?:string}
-      if(res.ok===false)throw new Error(res.error||'Could not complete Antigravity sign-in')
-      if(alive.current){
-        setAgyLogin(null)
-        setNotice('Signed in to Gemini Subscription (Antigravity) on this computer.')
-      }
-      await load();changed()
-    }catch(error){
-      if(alive.current)setAgyLogin(current=>current?{...current,submitting:false,error:desktopError(error)}:null)
-    }
-  }
-  const cancelAgyLogin=()=>{
-    if(!agyLogin)return
-    const id=agyLogin.loginId
-    setAgyLogin(null)
-    void accounts?.('agy-login-cancel',{loginId:id}).catch(()=>{})
-  }
+  const recheckAgySignIn=()=>run(async()=>{await load();changed()})
   const agySubscriptionSignedIn=Boolean(agyStatus?.sources.some(source=>source.mode==='keyring'&&source.available))
   return <section className="provider-accounts" aria-label={merged?'Providers':'Provider accounts'}>
     <div className="row__t">{merged?'Providers':'Provider accounts'}</div>
     <p className="modal__sub">{merged
       ? 'Sign in to Claude, Codex, or Gemini Subscription (Antigravity), or save a Gemini API key. Other API keys and endpoints use Add provider below.'
-      : 'One account center for this Mac and every SSH workspace. Each Claude/Codex login has isolated credentials. Gemini Subscription signs in via Antigravity (agy) and syncs to SSH hosts; native Gemini is API-key only (no Gemini OAuth quota readback).'}</p>
+      : `One account center for ${machine} and every SSH workspace. Each Claude/Codex login has isolated credentials. Gemini Subscription signs in via Antigravity (agy) on each computer that runs it; native Gemini is API-key only (no Gemini OAuth quota readback).`}</p>
     <div className="provider-accounts__login">
-      <select className="palette__in" aria-label="Account provider" value={kind} onChange={event=>{const value=event.target.value;if(value==='claude'||value==='codex'||value==='gemini_subscription'||value==='gemini')setKind(value)}} disabled={busy}>
-        <option value="claude">Claude</option>
-        <option value="codex">Codex</option>
-        <option value="gemini_subscription">Gemini Subscription (Antigravity)</option>
-        <option value="gemini">Gemini (API key)</option>
-      </select>
-      {(kind==='claude'||kind==='codex')&&<><input className="palette__in" aria-label="OAuth account label" value={label} onChange={event=>setLabel(event.target.value)} placeholder="Account label (work, personal…)" disabled={busy}/>
-      <button className="btn" disabled={busy||!accounts||!label.trim()} onClick={login}>Sign in</button></>}
+      <SelectField
+        className="provider-accounts__select"
+        ariaLabel="Account provider"
+        listLabel="Account provider"
+        value={kind}
+        disabled={busy}
+        options={ACCOUNT_PROVIDER_OPTIONS}
+        onChange={value => {
+          if (value === 'claude' || value === 'codex' || value === 'gemini_subscription' || value === 'gemini') setKind(value)
+        }}
+      />
+      {(kind==='claude'||kind==='codex')&&<><input className="palette__in" aria-label="OAuth account label" value={label} onChange={event=>setLabel(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!busy&&accounts&&label.trim()){event.preventDefault();void login()}}} placeholder="Account label (work, personal…)" disabled={busy}/>
+      <button type="button" className="btn" disabled={busy||!accounts||!label.trim()} onClick={login}>Sign in</button></>}
       {kind==='gemini_subscription'&&<>
-        <button className="btn" disabled={busy||!accounts||Boolean(agyLogin?.submitting)} onClick={startAgyLogin}>
-          {agySubscriptionSignedIn?'Re-sign in with Google':'Sign in with Google'}
-        </button>
-        {agyStatus?.canSync&&agySubscriptionSignedIn&&(
-          <button className="btn" disabled={busy||!accounts} onClick={()=>void reviewAgySync('keyring')}>Sync to SSH</button>
-        )}
+        <button type="button" className="btn" disabled={busy||!accounts} onClick={recheckAgySignIn}>Check again</button>
       </>}
     </div>
     {kind==='gemini_subscription'&&<div className="provider-accounts__gemini" aria-label="Gemini Subscription (Antigravity)">
       <p>{agySubscriptionSignedIn
-        ? 'Signed in to Gemini Subscription (Antigravity) on this computer. Transfer it to any SSH workspace below or from the Antigravity runtime banner.'
-        : 'Sign in with Google via Antigravity CLI (`agy`) to use Gemini Subscription models locally and transfer credentials securely to SSH hosts.'}</p>
-      {agyLogin&&<>
-        <ProviderLoginLink url={agyLogin.url} busy={agyLogin.submitting} write={text=>accounts!('copy-login-link',{url:text})}/>
-        <form onSubmit={event=>{event.preventDefault();void completeAgyLogin()}} style={{display:'flex',gap:'8px',marginTop:'8px',alignItems:'center'}}>
-          <input
-            className="palette__in"
-            aria-label="Antigravity authorization code"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="Paste authorization code or callback URL from Google…"
-            value={agyLogin.code}
-            disabled={agyLogin.submitting}
-            onChange={event=>setAgyLogin(current=>current?{...current,code:event.target.value}:null)}
-            style={{flex:1}}
-          />
-          <button className="btn" type="submit" disabled={agyLogin.submitting||!agyLogin.code.trim()}>
-            {agyLogin.submitting?'Completing…':'Complete sign-in'}
-          </button>
-          <button className="btn" type="button" disabled={agyLogin.submitting} onClick={cancelAgyLogin}>Cancel</button>
-        </form>
-        {agyLogin.error&&<p role="alert" className="studio-error">{agyLogin.error}</p>}
-      </>}
+        ? 'Signed in to Gemini Subscription (Antigravity) on this computer. The sign-in stays here: on an SSH host, run the command below there. For headless or third-party harness usage, Google recommends a Gemini API key or Google Cloud ADC.'
+        : 'Antigravity signs in on its own. Run this in a terminal, finish the Google sign-in in your browser, then click Check again. Xerxes never sees your Google sign-in. For headless or third-party harness usage, Google recommends a Gemini API key or Google Cloud ADC.'}</p>
+      <div className="provider-accounts__signin-link"><input aria-label="Antigravity sign-in command" readOnly value="agy acp --login" spellCheck={false} onFocus={event=>event.currentTarget.select()}/><CopyButton text="agy acp --login" label="Copy command"/></div>
     </div>}
     {kind==='gemini'&&<GeminiAccountForm busy={busy||!accounts} save={saveGemini}/>}
     {(signingIn||loginUrl)&&<ProviderLoginLink url={loginUrl} busy={signingIn} write={text=>accounts!('copy-login-link',{url:text})}/>}
@@ -397,7 +403,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       return <div className="provcard provider-account" key={account.id}>
         <div className="provcard__main">
           <span className="provcard__text">
-            <span className="provcard__title"><span className="provcard__name">{account.label}</span><span className="provcard__badge provcard__badge--quiet">{account.kind}</span></span>
+            <span className="provcard__title"><span className="provcard__name">{account.label}</span><span className="provcard__badge provcard__badge--quiet">{accountKindLabel(account.kind)}</span></span>
             <span className="provcard__model">{account.profileName} · {account.model||'model chosen when used'}</span>
             <span className="provcard__meta">{account.provider} · {account.available?'available on this workspace':'not available on this workspace yet'}</span>
           </span>
@@ -429,7 +435,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       onConfirm={()=>void confirmAction()} onCancel={closeAction}>
       {action.phase==='reviewing'?<p role="status">Preparing transfer review for <strong>{action.account.label}</strong>…</p>
         :action.phase==='done'?<p role="status">{action.kind==='sync'?<><strong>{action.account.label}</strong> synced to <strong>{action.review?.destination||list?.destination||'this SSH host'}</strong>.</>:<><strong>{action.account.label}</strong> was removed. Other accounts were not changed.</>}</p>
-        :<><p>{action.kind==='sync'?<>Transfer <strong>{action.account.label}</strong> to <strong>{action.review?.destination||list?.destination||'this SSH host'}</strong>?</>:<>Remove <strong>{action.account.label}</strong> and its saved {action.account.kind==='api_key'?'API key':'sign-in'} from this Mac?</>}</p>
+        :<><p>{action.kind==='sync'?<>Transfer <strong>{action.account.label}</strong> to <strong>{action.review?.destination||list?.destination||'this SSH host'}</strong>?</>:<>Remove <strong>{action.account.label}</strong> and its saved {action.account.kind==='api_key'?'API key':'sign-in'} from {machine}?</>}</p>
           <p className="studio-muted">{action.kind==='sync'?'Only this account’s credential and linked profile are sent over SSH. A same-named remote profile will be replaced on confirmation. Other accounts are not transferred.':'Its local provider profile is also removed. This does not sign out other accounts or delete copies previously synchronized to SSH hosts.'}</p></>}
     </ActionDialog>}
     {agyAction&&<ActionDialog
@@ -441,11 +447,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       {agyAction.phase==='reviewing'?<p role="status">Preparing transfer review for <strong>Antigravity ({agyAction.label})</strong>…</p>
         :agyAction.phase==='done'?<p role="status"><strong>Antigravity ({agyAction.label})</strong> credentials transferred to <strong>{agyAction.review?.destination||agyStatus?.destination||'this SSH host'}</strong>.</p>
         :<><p>Transfer <strong>Antigravity ({agyAction.label})</strong> credentials to <strong>{agyAction.review?.destination||agyStatus?.destination||'this SSH host'}</strong>?</p>
-          <p className="studio-muted">{agyAction.mode==='adc'
-            ?'Transfers ~/.config/gcloud/application_default_credentials.json (mode 0600), enables ADC in ~/.gemini/config/config.json, and writes owner-only agy runtime env settings over SSH stdin.'
-            :agyAction.mode==='gemini_api_key'
-              ?'Transfers the Gemini API key into owner-only ~/.xerxes/provider-accounts/agy/env.json (mode 0600) and sets modelProvider: "gemini" for agy over SSH stdin.'
-              :'Transfers your local Gemini Subscription (Antigravity) OAuth token over SSH stdin into ~/.gemini/antigravity-cli/antigravity-oauth-token (mode 0600) and the host keyring when available. Works on headless Linux/TPU SSH hosts.'}</p></>}
+          <p className="studio-muted">{agyTransferDetail(agyAction.mode)}</p></>}
     </ActionDialog>}
   </section>
 }

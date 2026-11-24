@@ -7,6 +7,7 @@ import { relativeTime } from '../../client/format.js'
 import { displayOrigin, type CockpitDevice, type CockpitMachine, type CockpitPairing, type CockpitStatus } from '../hubShared.js'
 import { CopyButton } from './CopyButton.js'
 import { HUB_CHANGED_EVENT, cockpitCall, windowCockpitApi } from './hubClient.js'
+import { localMachineLabel } from './runModeView.js'
 
 /**
  * Settings → "Hub & phone". Redesigned cockpit for connecting this Mac to a
@@ -57,6 +58,22 @@ const HEALTH_TEXT: Readonly<Record<string, string>> = {
 
 export function healthText(health: string): string {
   return HEALTH_TEXT[health] ?? 'Unknown'
+}
+
+const DEVICE_STATUS_TEXT: Readonly<Record<string, string>> = {
+  active: 'Active',
+  pending: 'Pending',
+  revoked: 'Revoked',
+  expired: 'Expired',
+  offline: 'Offline',
+}
+
+/** Human-readable device status label for paired devices. */
+export function deviceStatusText(status: string): string {
+  const mapped = DEVICE_STATUS_TEXT[status]
+  if (mapped) return mapped
+  const cleaned = status.replace(/[_-]+/g, ' ').trim()
+  return cleaned ? cleaned[0]!.toUpperCase() + cleaned.slice(1) : 'Unknown'
 }
 
 export interface HubPhoneViewProps {
@@ -192,7 +209,7 @@ function DevicesList({
                   <span className="hubphone__device-title">
                     <span className={`hubphone__dot ${device.status === 'active' ? 'hubphone__dot--online' : 'hubphone__dot--connecting'}`} aria-hidden="true" />
                     <strong>{device.label}</strong>
-                    <span className="hubphone__pill">{device.status}</span>
+                    <span className="hubphone__pill">{deviceStatusText(device.status)}</span>
                   </span>
                   <span className="studio-muted hubphone__device-meta">
                     {device.displayName ? `${device.displayName} · ` : ''}
@@ -270,14 +287,20 @@ function PairingBlock({ pairing, confirming, error, onConfirm }: {
 
 export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
   const { available, status, link, pair, machines, devices } = props
+  const [confirmForget, setConfirmForget] = useState(false)
   const connected = status !== undefined && status.target !== null && status.origin !== null
+  const machine = localMachineLabel()
+  const machineTitle = localMachineLabel(true)
+  useEffect(() => {
+    if (status?.target === null) setConfirmForget(false)
+  }, [status?.target])
   return (
     <section className="hubphone" aria-labelledby="hubphone-title">
       <header className="hubphone__header">
         <div className="hubphone__row">
           <div>
-            <h3 id="hubphone-title">Hub &amp; phone</h3>
-            <p className="studio-muted">Your Hub is the always-on server that lets your phone and the XERXES tab reach every machine. Enter its SSH address once and this app does the rest.</p>
+            <h2 id="hubphone-title" className="modal__title">Hub &amp; phone</h2>
+            <p className="modal__sub">Your Hub is the always-on server that lets your phone and the XERXES tab reach every machine. Enter its SSH address once and this app does the rest.</p>
           </div>
           {status !== undefined ? (
             <span className={`hubphone__status-badge ${connected ? 'hubphone__status-badge--live' : ''}`}>
@@ -309,7 +332,27 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                   <button type="submit" className="btn btn--solid" disabled={props.saving || props.address.trim() === ''}>
                     {props.saving ? 'Checking the Hub…' : status.target === null ? 'Save and connect' : 'Save'}
                   </button>
-                  {status.target !== null ? <button type="button" className="btn" disabled={props.saving} onClick={props.onForget}>Forget this Hub</button> : null}
+                  {status.target !== null ? (
+                    confirmForget ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn--danger"
+                          disabled={props.saving}
+                          onClick={() => { setConfirmForget(false); props.onForget() }}
+                        >
+                          Confirm forget
+                        </button>
+                        <button type="button" className="btn" disabled={props.saving} onClick={() => setConfirmForget(false)}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button type="button" className="btn" disabled={props.saving} onClick={() => setConfirmForget(true)}>
+                        Forget this Hub
+                      </button>
+                    )
+                  ) : null}
                 </div>
                 {connected && props.onOpenWeb ? (
                   <button type="button" className="btn" onClick={() => props.onOpenWeb?.(status.origin!)}>Open Hub web app</button>
@@ -319,7 +362,7 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
             </form>
 
             {!connected ? (
-              <p className="studio-muted hubphone__empty-note">No Hub is saved on this Mac yet.</p>
+              <p className="studio-muted hubphone__empty-note">No Hub is saved on {machine} yet.</p>
             ) : (
               <dl className="hubphone__facts">
                 <dt>Web address</dt><dd>{displayOrigin(status.origin!)}</dd>
@@ -335,13 +378,13 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                 <div className="hubphone__row">
                   <div>
                     <div className="hubphone__subhead">
-                      <strong>This Mac</strong>
+                      <strong>{machineTitle}</strong>
                       <span className="hubphone__pill">{status.linkedMachineId !== null ? 'Linked' : 'Unlinked'}</span>
                     </div>
-                    <p className="studio-muted">{status.linkedMachineId !== null ? `Linked to the Hub as ${status.linkedMachineId}. Every project on this Mac is connected automatically.` : 'Not linked yet. Linking connects every project on this Mac to the Hub.'}</p>
+                    <p className="studio-muted">{status.linkedMachineId !== null ? `Linked to the Hub as ${status.linkedMachineId}. Every project on ${machine} is connected automatically.` : `Not linked yet. Linking connects every project on ${machine} to the Hub.`}</p>
                   </div>
                   <button type="button" className="btn btn--solid" disabled={link.phase === 'running'} onClick={props.onLink}>
-                    {link.phase === 'running' ? 'Linking…' : status.linkedMachineId !== null ? 'Link this Mac again' : 'Link this Mac'}
+                    {link.phase === 'running' ? 'Linking…' : status.linkedMachineId !== null ? `Link ${machine} again` : `Link ${machine}`}
                   </button>
                 </div>
                 {link.phase === 'running' ? (

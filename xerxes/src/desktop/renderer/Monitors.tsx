@@ -23,6 +23,7 @@ export function Monitors({snap}:{snap:Snapshot}):ReactElement {
   const [rows,setRows]=useState<MonitorView[]>([]),[detail,setDetail]=useState<MonitorView|null>(null),[creating,setCreating]=useState(false),[editing,setEditing]=useState(false)
   const [source,setSource]=useState('terminal'),[trigger,setTrigger]=useState('output'),[react,setReact]=useState(false),[webhooks,setWebhooks]=useState<string[]>([])
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[selected,setSelected]=useState<string|null>(null)
+  const createFormRef=useRef<HTMLFormElement>(null), editFormRef=useRef<HTMLFormElement>(null)
   const context=useRef({key:snap.sessionKey,active:true,pending:false})
   if(context.current.key!==snap.sessionKey){context.current.active=false;context.current={key:snap.sessionKey,active:true,pending:false}}
   const scope=context.current
@@ -30,27 +31,46 @@ export function Monitors({snap}:{snap:Snapshot}):ReactElement {
   const run=async(work:()=>Promise<void>)=>{if(scope.pending||!scope.active)return;scope.pending=true;setBusy(true);setError('');try{await work()}catch(failure){if(scope.active)setError(desktopError(failure))}finally{scope.pending=false;if(scope.active)setBusy(false)}}
   const load=async()=>{const next=await listMonitors(rpc);if(scope.active)setRows(next)}
   const inspect=async(id:string,action:'inspect'|'stop'='inspect')=>{const next=await monitorAction(rpc,id,action);if(scope.active){setDetail(next);setSelected(next.id);setEditing(false)}}
-  useEffect(()=>{scope.active=true;setDetail(null);setSelected(null);setCreating(false);setRows([]);void run(load);return()=>{scope.active=false}},[snap.sessionKey])
+  useEffect(()=>{scope.active=true;setDetail(null);setSelected(null);setCreating(false);setEditing(false);setRows([]);void run(load);return()=>{scope.active=false}},[snap.sessionKey])
+  const closeDialog=()=>{setSelected(null);setDetail(null);setCreating(false);setEditing(false);setError('')}
+  const submitForm=(form:HTMLFormElement|null)=>{
+    if(!form)return
+    if(typeof form.requestSubmit==='function')form.requestSubmit()
+    else form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))
+  }
+  const editingLimits=Boolean(editing&&detail?.policy&&!creating)
+  const dialogTitle=creating?'Create monitor':editingLimits?'Edit reaction limits':'Monitor details'
+  const dialogDone=!creating&&!editingLimits
+  const dialogConfirmLabel=creating?'Start monitor':editingLimits?'Save limits':'Close'
+  const dialogBusyLabel=creating?'Starting monitor…':editingLimits?'Saving limits…':'Updating monitor…'
+  const handleDialogCancel=()=>editingLimits?setEditing(false):closeDialog()
+  const handleDialogConfirm=()=>{
+    if(creating){submitForm(createFormRef.current);return}
+    if(editingLimits){submitForm(editFormRef.current);return}
+    closeDialog()
+  }
   return <section className="monitor-manager" aria-label="Monitors">
-    <div className="lsp-actions"><button disabled={busy} onClick={()=>void run(load)}>Refresh monitors</button><button disabled={busy} onClick={()=>{setSelected(null);setDetail(null);setError('');setCreating(true);setEditing(false);setReact(false);setSource("terminal");setTrigger("output");storeTerminals();}}>Create monitor</button></div>
-    {error&&<p className="studio-error" role="alert">{error}</p>}{busy&&<p role="status">Updating monitors…</p>}
+    <div className="lsp-actions"><button type="button" className="btn btn--ghost" disabled={busy} onClick={()=>void run(load)}>Refresh monitors</button><button type="button" className="btn" disabled={busy} onClick={()=>{setSelected(null);setDetail(null);setError('');setCreating(true);setEditing(false);setReact(false);setSource("terminal");setTrigger("output");storeTerminals();}}>Create monitor</button></div>
+    {error&&!creating&&selected===null&&<p className="studio-error" role="alert">{error}</p>}{busy&&!creating&&selected===null&&<p role="status">Updating monitors…</p>}
     {!busy&&!error&&!rows.length&&<p>No monitors in this session.</p>}
-    {rows.map(row=><div className="goal-criterion" key={row.id}><strong>{row.source?.kind==='file'?row.source.path:row.source?.kind==='websocket'?row.source.url:row.source?.kind==='webhook'?row.source.name:row.terminalId}</strong><p>{row.state} · {row.trigger} · {row.reaction}</p><button disabled={busy} onClick={()=>{setSelected(row.id);setDetail(null);setEditing(false);void run(()=>inspect(row.id))}}>Inspect monitor</button></div>)}
-    {(selected!==null||creating)&&<ActionDialog title={creating?'Create monitor':'Monitor details'} done confirmLabel="Close" busy={busy} error={error} onCancel={()=>{setSelected(null);setDetail(null);setCreating(false)}} onConfirm={()=>{setSelected(null);setDetail(null);setCreating(false)}}>
+    {rows.map(row=><div className="goal-criterion" key={row.id}><strong>{row.source?.kind==='file'?row.source.path:row.source?.kind==='websocket'?row.source.url:row.source?.kind==='webhook'?row.source.name:row.terminalId}</strong><p>{row.state} · {row.trigger} · {row.reaction}</p><button type="button" className="btn btn--ghost" disabled={busy} onClick={()=>{setSelected(row.id);setDetail(null);setEditing(false);void run(()=>inspect(row.id))}}>Inspect monitor</button></div>)}
+    {(selected!==null||creating)&&<ActionDialog title={dialogTitle} done={dialogDone} confirmLabel={dialogConfirmLabel} busyLabel={dialogBusyLabel} busy={busy} error={error} onCancel={handleDialogCancel} onConfirm={handleDialogConfirm}>
     {busy&&<p role="status">Updating monitor…</p>}
-    {selected&&!detail&&!busy&&error&&<button className="btn" onClick={()=>void run(()=>inspect(selected))}>Retry inspection</button>}
-    {detail&&<div className="monitor-detail"><h4>Monitor details</h4><p>{detail.sourceStatus} · {detail.state}</p><p>{detail.reaction}</p>{detail.error&&<p className="studio-error">{detail.error}</p>}{detail.events.map((event,i)=><pre key={i}>{event}</pre>)}{detail.omittedEvents>0&&<p>{detail.omittedEvents} earlier events omitted.</p>}
-      <div className="lsp-actions">{detail.stopAction&&<button disabled={busy} onClick={()=>void run(async()=>{await inspect(detail.id,'stop');await load()})}>{detail.stopAction==='cancel-reactions'?'Cancel reactions':'Stop watching'}</button>}{detail.policy&&<button disabled={busy} onClick={()=>{setEditing(true);setCreating(false)}}>Edit reaction limits</button>}</div>
-      {editing&&detail.policy&&<form key={detail.policy.revision} onSubmit={e=>{e.preventDefault();const data=new FormData(e.currentTarget);void run(async()=>{await desktopCall(window.xerxes,snap.sessionKey,'monitor.update',{monitor_id:detail.id,revision:detail.policy!.revision,max_reactions:Number(data.get('attempts')),reaction_timeout_seconds:Number(data.get('timeout')),max_total_tokens:String(data.get('tokens')??'').trim()?Number(data.get('tokens')):null});if(!scope.active)return;await inspect(detail.id);await load()})}}><ReactionFields policy={detail.policy}/><div className="lsp-actions"><button disabled={busy}>Save limits</button><button type="button" disabled={busy} onClick={()=>setEditing(false)}>Cancel</button></div></form>}
+    {selected&&!detail&&!busy&&error&&<button type="button" className="btn" onClick={()=>void run(()=>inspect(selected))}>Retry inspection</button>}
+    {detail&&!creating&&<div className="monitor-detail">
+      {!editingLimits&&<><p>{detail.sourceStatus} · {detail.state}</p><p>{detail.reaction}</p>{detail.error&&<p className="studio-error">{detail.error}</p>}{detail.events.map((event,i)=><pre key={i}>{event}</pre>)}{detail.omittedEvents>0&&<p>{detail.omittedEvents} earlier events omitted.</p>}
+        <div className="lsp-actions">{detail.stopAction&&<button type="button" className="btn btn--danger" disabled={busy} onClick={()=>void run(async()=>{await inspect(detail.id,'stop');await load()})}>{detail.stopAction==='cancel-reactions'?'Cancel reactions':'Stop watching'}</button>}{detail.policy&&<button type="button" className="btn" disabled={busy} onClick={()=>{setEditing(true);setCreating(false)}}>Edit reaction limits</button>}</div>
+      </>}
+      {editingLimits&&detail.policy&&<form ref={editFormRef} key={detail.policy.revision} onSubmit={e=>{e.preventDefault();const data=new FormData(e.currentTarget);void run(async()=>{await desktopCall(window.xerxes,snap.sessionKey,'monitor.update',{monitor_id:detail.id,revision:detail.policy!.revision,max_reactions:Number(data.get('attempts')),reaction_timeout_seconds:Number(data.get('timeout')),max_total_tokens:String(data.get('tokens')??'').trim()?Number(data.get('tokens')):null});if(!scope.active)return;await inspect(detail.id);await load()})}}><ReactionFields policy={detail.policy}/></form>}
     </div>}
-    {creating&&<form className="monitor-create" onSubmit={e=>{e.preventDefault();try{const settings=monitorFormSettings(new FormData(e.currentTarget));void run(async()=>{const next=await createMonitor(rpc,settings);if(!scope.active)return;setDetail(next);setSelected(next.id);setCreating(false);await load()})}catch(failure){setError(desktopError(failure))}}}>
-      <h4>Create monitor</h4><label className="field">Source<select name="source" aria-label="Monitor source" value={source} onChange={e=>{setSource(e.target.value);if(e.target.value==='webhook')void run(async()=>setWebhooks(await listMonitorWebhooks(rpc)))}}><option value="terminal">Terminal</option><option value="file">Workspace file</option><option value="websocket">WebSocket</option><option value="webhook">Configured webhook</option></select></label>
+    {creating&&<form ref={createFormRef} className="monitor-create" onSubmit={e=>{e.preventDefault();try{const settings=monitorFormSettings(new FormData(e.currentTarget));void run(async()=>{const next=await createMonitor(rpc,settings);if(!scope.active)return;setDetail(next);setSelected(next.id);setCreating(false);await load()})}catch(failure){setError(desktopError(failure))}}}>
+      <label className="field">Source<select name="source" aria-label="Monitor source" value={source} onChange={e=>{setSource(e.target.value);if(e.target.value==='webhook')void run(async()=>setWebhooks(await listMonitorWebhooks(rpc)))}}><option value="terminal">Terminal</option><option value="file">Workspace file</option><option value="websocket">WebSocket</option><option value="webhook">Configured webhook</option></select></label>
       <label className="field">{source==='terminal'?'Terminal':source==='file'?'Workspace-relative file path':source==='websocket'?'WebSocket URL':'Webhook'}{source==='terminal'?<select name="target" aria-label="Monitor target" required>{snap.terminals.filter(t=>t.running).map(t=><option value={t.id} key={t.id}>{t.label||t.command||t.id}</option>)}</select>:source==='webhook'?<select name="target" aria-label="Monitor target" required>{webhooks.map(name=><option key={name}>{name}</option>)}</select>:<input name="target" aria-label="Monitor target" required placeholder={source==='file'?'reports/results.json':'wss://example.com/events'}/>}</label>
       {source==='terminal'&&<label className="field">Trigger<select name="trigger" value={trigger} onChange={e=>setTrigger(e.target.value)}><option value="output">Output contains text</option><option value="completion">Command finishes</option></select></label>}
       {source!=='file'&&(source!=='terminal'||trigger==='output')&&<label className="field">Text to match<input name="match" required/></label>}
       <label className="field">Watch duration (seconds)<input name="duration" type="number" min={1} max={86400} defaultValue={3600} required/></label>
       <label className="choice-row"><input name="react" type="checkbox" checked={react} onChange={e=>setReact(e.target.checked)}/> Let the agent react automatically</label><p>{react?'Each reaction can use tools and model tokens within these limits.':'Only notify this session when the monitor matches.'}</p>
-      <div hidden={!react}><ReactionFields/></div><div className="lsp-actions"><button disabled={busy}>Start monitor</button><button type="button" disabled={busy} onClick={()=>setCreating(false)}>Cancel</button></div>
+      <div hidden={!react}><ReactionFields/></div>
     </form>}
     </ActionDialog>}
   </section>

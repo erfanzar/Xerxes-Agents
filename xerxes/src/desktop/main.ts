@@ -16,7 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url'
 
 import { activateWorkspaceView } from './main/workspaceNavigation.js'
-import { contextKey, contextLabel, contextScope, contextSessions, latestSessionIn, sameRemote, sessionsFor, type WorkspaceContext } from './main/contextNavigation.js'
+import { cleanFolder, contextKey, contextLabel, contextScope, contextSessions, latestSessionIn, sameRemote, sessionsFor, type WorkspaceContext } from './main/contextNavigation.js'
 import { loadWindowLayout, saveWindowLayout, visibleWindowBounds, WindowLayoutRecorder, type SavedWindow } from './main/windowState.js'
 import {
   applyChromiumPerformanceSwitches,
@@ -30,6 +30,7 @@ import { WindowRoutes } from './main/windowRoutes.js'
 import { windowRecovery } from './main/windowRecovery.js'
 import { desktopMachineCommand } from './main/machines.js'
 import { SavedHostContexts } from './main/savedHosts.js'
+import { SavedLocalContexts } from './main/savedLocal.js'
 import { xerxesHome } from '../daemon/paths.js'
 import { DaemonRpc } from './main/daemon.js'
 import { DesktopProviderForwarding } from './main/providerForwarding.js'
@@ -78,9 +79,9 @@ import { FILE_ACTION_CHANNEL, fileActionRequestOf } from './fileActionShared.js'
 import { performFileAction } from './main/fileActions.js'
 import { sanitizeDesktopInheritedEnv, sanitizeTmpdirEnv } from './main/safeTmp.js'
 
-// Drop stale TMPDIR/TEMP/TMP and outer SSH/agent-sandbox vars inherited from
-// ephemeral launcher shells so local daemons and `agy acp` never fail with
-// ENOENT or mistakenly skip the desktop OS keyring.
+// Drop stale TMPDIR/TEMP/TMP inherited from ephemeral launcher shells (ENOENT),
+// and a parent Antigravity sandbox's private variables so a child `agy acp`
+// never borrows another agy instance's internals.
 sanitizeTmpdirEnv()
 sanitizeDesktopInheritedEnv()
 
@@ -283,31 +284,21 @@ const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
 const savedHostContexts = new SavedHostContexts({ list: () => desktopMachineCommand(join(xerxesHome(), 'machines.json'), 'list') })
 /**
- * Stable negative context IDs reserved for remembered local ("This Mac") folders
- * so remote SSH views ALWAYS list This Mac in the sidebar — even when the local
- * view was evicted or the app launched directly onto an SSH workspace.
+ * Shared read-only local ("This Mac") session reader so remote SSH views ALWAYS
+ * show real local sessions under This Mac — even when no local view is open.
  */
-const savedLocalContextIds = new Map<string, number>()
-const savedLocalContextPaths = new Map<number, string>()
-let nextSavedLocalContextId = -1_000_000
-function savedLocalContexts(): WorkspaceContext[] {
-  return localDesktopWorkspaces(workspaceFile()).map(folder => {
-    let id = savedLocalContextIds.get(folder)
-    if (id === undefined) {
-      id = nextSavedLocalContextId--
-      savedLocalContextIds.set(folder, id)
-      savedLocalContextPaths.set(id, folder)
-    }
-    return {
-      id,
-      label: contextLabel('This Mac', folder),
-      workspace: folder,
-      remote: false,
-      saved: true,
-      sessions: [],
-    }
-  })
-}
+let localContextDaemon: DaemonRpc | null = null
+const savedLocalContexts = new SavedLocalContexts({
+  workspaces: () => localDesktopWorkspaces(workspaceFile()),
+  fetchSessions: async () => {
+    const rpc = (localContextDaemon ??= new DaemonRpc({ projectDir: homedir() }))
+    const [savedRows, liveRows] = await Promise.all([
+      rpc.call<Record<string, unknown>>('session.list', { kind: 'main', scope: 'global', limit: 60 }),
+      rpc.call<Record<string, unknown>>('session.active_list', { history_limit: 0 }),
+    ])
+    return { saved: savedRows.sessions, live: liveRows.sessions }
+  },
+})
 function openContextRemotes(host?: BrowserWindow): RemoteTarget[] {
   const remotes: RemoteTarget[] = []
   for (const [id, surface] of workspaceSurfaces) {
@@ -442,10 +433,11 @@ function activateSurface(id: number): void {
   surface.lastActiveAt = Date.now()
   activeSurfaces.set(surface.host.id, id)
   windowStates.used(id)
-  syncWindowVisibility(surface.host, true)
   // An already attached view keeps its old stacking position. Activation must
-  // bring it above the other retained workspaces as well as make it visible.
+  // bring it above the other retained workspaces BEFORE syncWindowVisibility
+  // restores the active surface's BrowserTab view on top of it.
   if (surface.view) surface.host.contentView.addChildView(surface.view)
+  syncWindowVisibility(surface.host, true)
   const contents = surface.view?.webContents ?? surface.host.webContents
   if (!contents.isDestroyed()) contents.focus()
   const state = windowStates.get(id)?.()
@@ -660,7 +652,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     hasActiveTurn: false,
     isBusy: () => Boolean(remoteAttempt || voiceRequest),
     onHostHidden: hidden => {
-      if (hidden) browserTab?.setBounds(null)
+      browserTab?.setHostHidden(hidden)
     },
     suspendBrowser: () => {
       browserTab?.suspend()
@@ -827,15 +819,30 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     void savedHostContexts.refresh(open)
     const openContexts = await Promise.all(readers)
     // Remote SSH views get `desktop:workspaces` = []; include remembered local
-    // folders so "This Mac" is always one click away even if no local view is open.
-    const localSaved = currentScope === 'local' ? [] : savedLocalContexts()
+    // folders WITH their real local sessions so "This Mac" works just like saved
+    // SSH hosts even when no local view is materialized.
+    let localSaved: WorkspaceContext[] = []
+    if (currentScope !== 'local') {
+      const openLocal = openContexts.filter(ctx => !ctx.remote)
+      if (openLocal.length > 0) {
+        const coveredFolders = new Set<string>()
+        for (const ctx of openLocal) {
+          if (ctx.workspace) coveredFolders.add(cleanFolder(ctx.workspace))
+          for (const row of ctx.sessions) coveredFolders.add(cleanFolder(row.cwd))
+        }
+        localSaved = savedLocalContexts.contexts({ coveredFolders, includeSessions: false })
+      } else {
+        await savedLocalContexts.refresh({ awaitInitial: true })
+        localSaved = savedLocalContexts.contexts()
+      }
+    }
     return [...openContexts, ...localSaved, ...savedHostContexts.contexts(open)]
   })
   handle('desktop:activate-context', async (_event, contextId: unknown, sessionId?: unknown) => {
     if (typeof contextId !== 'number' || !Number.isSafeInteger(contextId) || sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(sessionId))) throw new Error('Invalid workspace context')
-    const savedLocalDir = savedLocalContextPaths.get(contextId)
-    if (savedLocalDir !== undefined) {
-      openWorkspaceView(window, savedLocalDir, typeof sessionId === 'string' ? sessionId : undefined)
+    if (savedLocalContexts.has(contextId)) {
+      const selection = savedLocalContexts.selection(contextId, sessionId)
+      openWorkspaceView(window, selection.directory, selection.sessionId)
       return
     }
     if (contextId < 0) {
@@ -1179,13 +1186,6 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     if (action === 'agy-status') return accounts.agyStatus()
     if (action === 'agy-sync-review') return accounts.reviewAgySync(params.mode, typeof params.accountId === 'string' ? params.accountId : undefined)
     if (action === 'agy-sync') return accounts.confirmAgySync(String(params.review ?? ''), params.confirm === true)
-    if (action === 'agy-login-start') {
-      const started = await accounts.startAgyLogin()
-      void shell.openExternal(started.url).catch(() => undefined)
-      return started
-    }
-    if (action === 'agy-login-complete') return accounts.completeAgyLogin(String(params.loginId ?? ''), String(params.code ?? ''))
-    if (action === 'agy-login-cancel') return accounts.cancelAgyLogin(typeof params.loginId === 'string' ? params.loginId : undefined)
     throw new Error('Unknown provider account action')
   })
 
@@ -1558,6 +1558,9 @@ void app.whenReady().then(async () => {
       const activeId = activeSurfaces.get(win.id)
       if (activeId !== undefined) activateSurface(activeId)
     }
+    if (plans.length > 0 && plans.every(({ primary }) => Boolean(primary.remote))) {
+      void savedLocalContexts.refresh()
+    }
   }
   else createWorkspaceWindow(loadWorkspace())
   // Probe saved endpoints without opening views or running setup. Results are
@@ -1580,6 +1583,9 @@ void app.whenReady().then(async () => {
     powerMonitor.removeListener('resume', onSystemResume)
     powerMonitor.removeListener('unlock-screen', onSystemResume)
     savedHostContexts.dispose()
+    savedLocalContexts.dispose()
+    localContextDaemon?.dispose()
+    localContextDaemon = null
   })
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWorkspaceWindow(loadWorkspace()) })
 })

@@ -112,7 +112,7 @@ export function PresetEditor({ t, sessionId, onClose }: { t: Theme; sessionId: s
   const wide = size.width >= 90
   const count = Math.max(1, wide ? size.height - 12 : 3)
   const start = Math.max(0, selected - count + 1)
-  return <box position="absolute" width="100%" height="100%" zIndex={150} backgroundColor="#000000cc" alignItems="center" justifyContent="center">
+  return <box position="absolute" width="100%" height="100%" zIndex={150} backgroundColor={t.ds.scrim} alignItems="center" justifyContent="center">
     <Box width={size.width} height={size.height} flexDirection="column" paddingX={1} borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={editing ? `Edit composition · ${active?.id}` : 'Agent compositions'} subtitle="Complete preset instructions, tools and configuration." />
       {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}

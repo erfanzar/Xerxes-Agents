@@ -375,9 +375,12 @@ export const SwarmGraph = memo(function SwarmGraph({
     const x = node.x - node.width / 2
     const y = node.y - node.height / 2
     const spriteSize = 14
-    const spriteX = x + 9
+    const spriteX = x + 10
     const spriteY = node.y - spriteSize / 2
-    const labelX = spriteX + spriteSize + 6
+    const dotCx = spriteX + spriteSize + 2.5
+    const dotCy = spriteY + 2
+    const labelX = spriteX + spriteSize + 9
+    const pillRx = Math.max(node.rx, Math.round(node.height / 2))
     const togglePin = (): void => {
       setPinnedMember(cur => (cur === member.name ? null : member.name))
     }
@@ -425,7 +428,7 @@ export const SwarmGraph = memo(function SwarmGraph({
           y={y}
           width={node.width}
           height={node.height}
-          rx={node.rx}
+          rx={pillRx}
           strokeDasharray={member.postedWithoutMention ? '3 3' : undefined}
         />
         <g transform={`translate(${spriteX}, ${spriteY})`}>
@@ -436,6 +439,13 @@ export const SwarmGraph = memo(function SwarmGraph({
             animate={false}
           />
         </g>
+        <circle
+          className="swarm-graph__node-dot"
+          data-state={member.state}
+          cx={dotCx}
+          cy={dotCy}
+          r={2.5}
+        />
         <text
           className="swarm-graph__node-label"
           x={labelX}
@@ -853,7 +863,15 @@ export const SwarmGraph = memo(function SwarmGraph({
             onClick={() => void handleExportGif()}
           >
             <Icon name="download" size={12} />
-            {exportStatus === 'exporting' ? <span>Exporting…</span> : exportStatus === 'saved' ? <span>Saved GIF</span> : exportStatus === 'error' ? <span>Export failed</span> : null}
+            <span>
+              {exportStatus === 'exporting'
+                ? 'Exporting…'
+                : exportStatus === 'saved'
+                  ? 'Saved GIF'
+                  : exportStatus === 'error'
+                    ? 'Export failed'
+                    : 'Export GIF'}
+            </span>
           </button>
           {exportNote && (
             <span className="swarm-graph__export-note" role="status">
@@ -977,9 +995,18 @@ export const SwarmGraph = memo(function SwarmGraph({
       )}
 
       {/* ── Interactive Graph Stage ── */}
+      {(() => {
+        const svgMinWidth = mode === 'battlefield' && battlefieldLayout
+          ? Math.min(battlefieldLayout.width, 560)
+          : mentionsLayout
+            ? Math.min(mentionsLayout.width, 440)
+            : 0
+        const needsHorizontalScroll = svgMinWidth > 0 && stageWidth < svgMinWidth
+        return (
       <div
         className="swarm-graph__stage"
         ref={stageRef}
+        style={needsHorizontalScroll ? { justifyContent: 'flex-start' } : undefined}
         onClick={() => {
           if (effectivePinnedMember !== null) setPinnedMember(null)
         }}
@@ -996,6 +1023,7 @@ export const SwarmGraph = memo(function SwarmGraph({
           <svg
             className="swarm-graph__svg swarm-graph__svg--battlefield"
             viewBox={`0 0 ${battlefieldLayout.width} ${battlefieldLayout.height}`}
+            style={{ minWidth: `${svgMinWidth}px`, margin: 'auto' }}
             role="img"
             aria-label={`Immortals map showing ${frame.doneCount} of ${frame.totalWorkers} workers completed`}
           >
@@ -1071,6 +1099,7 @@ export const SwarmGraph = memo(function SwarmGraph({
           <svg
             className="swarm-graph__svg swarm-graph__svg--mentions"
             viewBox={`0 0 ${mentionsLayout.width} ${mentionsLayout.height}`}
+            style={{ minWidth: `${svgMinWidth}px`, margin: 'auto' }}
             role="img"
             aria-label={`Immortals Mentions graph with ${mentionsLayout.nodes.length} members and ${mentionsLayout.edges.length} links`}
           >
@@ -1138,7 +1167,11 @@ export const SwarmGraph = memo(function SwarmGraph({
               {hoveredNode.model && <span>{hoveredNode.model}</span>}
               <span>{hoveredNode.postCount} posts</span>
               {hoveredNode.allCount > 0 && <span>@all {hoveredNode.allCount}</span>}
-              {onInspectMember && <span>Click to inspect</span>}
+              {mode === 'mentions' ? (
+                <span>{effectivePinnedMember === hoveredNode.name ? 'Click to clear trace' : 'Click to trace'}</span>
+              ) : (
+                onInspectMember && <span>Click to inspect</span>
+              )}
             </div>
             {hoveredNode.currentActivity && (
               <div className="swarm-graph__tooltip-act">{hoveredNode.currentActivity}</div>
@@ -1146,6 +1179,8 @@ export const SwarmGraph = memo(function SwarmGraph({
           </div>
         )}
       </div>
+        )
+      })()}
 
       {/* ── Bottom Legend ── */}
       <footer className="swarm-graph__legend" aria-label="Graph legend">
@@ -1179,7 +1214,12 @@ export const SwarmGraph = memo(function SwarmGraph({
               <span>Dispatch sent</span>
             </span>
             <span className="swarm-graph__legend-item">
-              <span className="swarm-graph__swatch swarm-graph__swatch--wait" aria-hidden="true">--&gt;</span>
+              <span className="swarm-graph__swatch swarm-graph__swatch--wait" aria-hidden="true">
+                <svg width="20" height="10" viewBox="0 0 20 10" fill="none" aria-hidden="true">
+                  <line x1="1" y1="5" x2="14" y2="5" stroke="var(--x-meta)" strokeWidth="1.5" strokeDasharray="3 2.5" strokeLinecap="round" />
+                  <path d="M 12 2.2 L 18 5 L 12 7.8 L 13.5 5 z" fill="var(--x-meta)" />
+                </svg>
+              </span>
               <span>Awaiting handoff</span>
             </span>
           </>

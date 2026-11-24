@@ -146,6 +146,8 @@ export type SwarmTextToken =
   | { readonly kind: 'text'; readonly raw: string }
   | { readonly kind: 'code'; readonly raw: string; readonly code: string }
   | { readonly kind: 'bold'; readonly raw: string; readonly text: string }
+  | { readonly kind: 'italic'; readonly raw: string; readonly text: string }
+  | { readonly kind: 'strike'; readonly raw: string; readonly text: string }
   | { readonly kind: 'done'; readonly raw: string }
   | { readonly kind: 'stall'; readonly raw: string }
   | { readonly kind: 'broadcast'; readonly raw: string }
@@ -154,8 +156,14 @@ export type SwarmTextToken =
   | { readonly kind: 'seq_ref'; readonly raw: string; readonly seq: number }
 
 export type SwarmMessageBlock =
+  | { readonly kind: 'heading'; readonly level: 1 | 2 | 3 | 4 | 5 | 6; readonly text: string }
   | { readonly kind: 'paragraph'; readonly text: string }
   | { readonly kind: 'list'; readonly items: readonly string[] }
+  | { readonly kind: 'ordered_list'; readonly start: number; readonly items: readonly string[] }
+  | { readonly kind: 'code'; readonly language: string; readonly code: string }
+  | { readonly kind: 'quote'; readonly text: string }
+  | { readonly kind: 'hr' }
+  | { readonly kind: 'table'; readonly headers: readonly string[]; readonly rows: readonly (readonly string[])[] }
 
 export type SwarmMemberFilter = 'all' | 'active' | 'waiting' | 'retired'
 
@@ -697,23 +705,54 @@ export function sortSwarmMembers(members: readonly SwarmMemberSnapshot[]): reado
 }
 
 const TOKEN_BOUNDARY_BEFORE = /[\s([{"',;:<>]/
-const TOKEN_PATTERN_WITH_BOLD =
-  /(`[^`\n]+`)|(\*\*[^\s*\n](?:[^\n]*?[^\s*\n])?\*\*)|(\[(?:done|stall)\])|(@#[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\b)|(@all\b)|(@[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\b)|(#[1-9]\d*\b)/gi
-const TOKEN_PATTERN_PLAIN =
-  /(`[^`\n]+`)|(\[(?:done|stall)\])|(@#[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\b)|(@all\b)|(@[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\b)|(#[1-9]\d*\b)/gi
+const UNDERSCORE_ITALIC_BEFORE = /[\s([{"']/
+const UNDERSCORE_ITALIC_AFTER = /[\s)\]}"'.,;:!?]/
+const SWARM_BASE_TOKEN_PARTS = [
+  '(`[^`\\n]+`)',
+  '(\\[(?:done|stall)\\])',
+  '(@#[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\\b)',
+  '(@all\\b)',
+  '(@[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}\\b)',
+  '(#[1-9]\\d*\\b)',
+] as const
+
+const tokenPatternCache = new Map<string, RegExp>()
+
+function swarmTokenPattern(allowBold: boolean, allowItalic: boolean, allowStrike: boolean): RegExp {
+  const key = `${allowBold ? 1 : 0}${allowItalic ? 1 : 0}${allowStrike ? 1 : 0}`
+  const cached = tokenPatternCache.get(key)
+  if (cached) return cached
+  const parts: string[] = [SWARM_BASE_TOKEN_PARTS[0]]
+  if (allowBold) parts.push('(\\*\\*[^\\s*\\n](?:[^\\n]*?[^\\s*\\n])?\\*\\*)')
+  if (allowStrike) parts.push('(~~[^\\s~\\n](?:[^\\n]*?[^\\s~\\n])?~~)')
+  if (allowItalic) {
+    parts.push('(\\*[^\\s*\\n](?:[^*\\n]*?[^\\s*\\n])?\\*)')
+    parts.push('(_[^\\s_\\n](?:[^_\\n]*?[^\\s_\\n])?_)')
+  }
+  parts.push(...SWARM_BASE_TOKEN_PARTS.slice(1))
+  const compiled = new RegExp(parts.join('|'), 'gi')
+  tokenPatternCache.set(key, compiled)
+  return compiled
+}
 
 /**
  * Tokenize a board message into plain text, inline `` `code` `` spans,
- * `**bold**` spans, `[done]` / `[stall]` status badges,
- * `@all` / `@#channel` / `@worker` chips, and clickable `#<seq>` references.
+ * `**bold**`, `*italic*` / `_italic_`, `~~strikethrough~~`, `[done]` / `[stall]`
+ * status badges, `@all` / `@#channel` / `@worker` chips, and clickable `#<seq>` refs.
  */
 export function tokenizeSwarmMessage(
   input: string,
-  options: { readonly allowBold?: boolean } = {},
+  options: {
+    readonly allowBold?: boolean
+    readonly allowItalic?: boolean
+    readonly allowStrike?: boolean
+  } = {},
 ): readonly SwarmTextToken[] {
   if (!input) return []
   const allowBold = options.allowBold !== false
-  const pattern = allowBold ? TOKEN_PATTERN_WITH_BOLD : TOKEN_PATTERN_PLAIN
+  const allowItalic = options.allowItalic !== false
+  const allowStrike = options.allowStrike !== false
+  const pattern = swarmTokenPattern(allowBold, allowItalic, allowStrike)
   const tokens: SwarmTextToken[] = []
   let cursor = 0
   const pushText = (chunk: string): void => {
@@ -730,6 +769,7 @@ export function tokenizeSwarmMessage(
     const start = match.index ?? 0
     const raw = match[0]
     const prevChar = start > 0 ? input[start - 1]! : ''
+    const afterChar = start + raw.length < input.length ? input[start + raw.length]! : ''
 
     if (raw.startsWith('`') && raw.endsWith('`') && raw.length >= 2) {
       if (start > cursor) pushText(input.slice(cursor, start))
@@ -740,8 +780,35 @@ export function tokenizeSwarmMessage(
 
     if (allowBold && raw.startsWith('**') && raw.endsWith('**') && raw.length >= 5) {
       if (start > 0 && /[a-zA-Z0-9*]/.test(prevChar)) continue
+      if (afterChar === '*') continue
       if (start > cursor) pushText(input.slice(cursor, start))
       tokens.push({ kind: 'bold', raw, text: raw.slice(2, -2) })
+      cursor = start + raw.length
+      continue
+    }
+
+    if (allowStrike && raw.startsWith('~~') && raw.endsWith('~~') && raw.length >= 5) {
+      if (start > 0 && /[a-zA-Z0-9~]/.test(prevChar)) continue
+      if (start > cursor) pushText(input.slice(cursor, start))
+      tokens.push({ kind: 'strike', raw, text: raw.slice(2, -2) })
+      cursor = start + raw.length
+      continue
+    }
+
+    if (allowItalic && raw.startsWith('*') && raw.endsWith('*') && !raw.startsWith('**') && raw.length >= 3) {
+      if ((start > 0 && /[a-zA-Z0-9*]/.test(prevChar)) || /[a-zA-Z0-9*]/.test(afterChar)) continue
+      if (start > cursor) pushText(input.slice(cursor, start))
+      tokens.push({ kind: 'italic', raw, text: raw.slice(1, -1) })
+      cursor = start + raw.length
+      continue
+    }
+
+    if (allowItalic && raw.startsWith('_') && raw.endsWith('_') && !raw.startsWith('__') && raw.length >= 3) {
+      const okBefore = start === 0 || UNDERSCORE_ITALIC_BEFORE.test(prevChar)
+      const okAfter = !afterChar || UNDERSCORE_ITALIC_AFTER.test(afterChar)
+      if (!okBefore || !okAfter) continue
+      if (start > cursor) pushText(input.slice(cursor, start))
+      tokens.push({ kind: 'italic', raw, text: raw.slice(1, -1) })
       cursor = start + raw.length
       continue
     }
@@ -777,11 +844,22 @@ export function tokenizeSwarmMessage(
   return tokens
 }
 
+const HEADING_LINE_PATTERN = /^\s*(#{1,6})\s+(.+?)\s*#*\s*$/
+const FENCE_OPEN_PATTERN = /^\s*(`{3,}|~{3,})([^\s`~]*)\s*$/
+const HR_LINE_PATTERN = /^\s*(?:---+|\*\*\*+|___+)\s*$/
+const QUOTE_LINE_PATTERN = /^\s*>\s?(.*)$/
 const BULLET_LINE_PATTERN = /^\s*[-*•]\s+(.*)$/
+const ORDERED_LIST_PATTERN = /^\s*(\d+)[.)]\s+(.*)$/
+const TABLE_SEP_PATTERN = /^\s*\|?\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+\s*\|?\s*$/
+
+function splitTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
+}
 
 /**
- * Split a board message into structured paragraph and bullet-list blocks
- * so `- ` / `• ` / `* ` walls render as clean lists rather than raw text walls.
+ * Split a board message into structured Markdown blocks (headings, paragraphs,
+ * bullet & ordered lists, fenced code blocks, blockquotes, rules, and tables)
+ * so worker reports never leak raw `###` / `---` / fenced syntax.
  */
 export function parseSwarmMessageBlocks(input: string): readonly SwarmMessageBlock[] {
   if (!input) return []
@@ -789,6 +867,10 @@ export function parseSwarmMessageBlocks(input: string): readonly SwarmMessageBlo
   const blocks: SwarmMessageBlock[] = []
   let paragraphLines: string[] = []
   let listItems: string[] = []
+  let orderedItems: string[] = []
+  let orderedStart = 1
+  let quoteLines: string[] = []
+  let fence: { char: string; length: number; language: string; lines: string[] } | null = null
 
   const flushParagraph = (): void => {
     if (paragraphLines.length === 0) return
@@ -800,25 +882,118 @@ export function parseSwarmMessageBlocks(input: string): readonly SwarmMessageBlo
     blocks.push({ kind: 'list', items: listItems })
     listItems = []
   }
+  const flushOrdered = (): void => {
+    if (orderedItems.length === 0) return
+    blocks.push({ kind: 'ordered_list', start: orderedStart, items: orderedItems })
+    orderedItems = []
+    orderedStart = 1
+  }
+  const flushQuote = (): void => {
+    if (quoteLines.length === 0) return
+    blocks.push({ kind: 'quote', text: quoteLines.join('\n') })
+    quoteLines = []
+  }
+  const flushAll = (): void => {
+    flushParagraph()
+    flushList()
+    flushOrdered()
+    flushQuote()
+  }
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? ''
+
+    if (fence) {
+      const closeRe = new RegExp(`^\\s*${fence.char}{${fence.length},}\\s*$`)
+      if (closeRe.test(line)) {
+        blocks.push({ kind: 'code', language: fence.language, code: fence.lines.join('\n') })
+        fence = null
+      } else {
+        fence.lines.push(line)
+      }
+      continue
+    }
+
+    const fenceOpen = FENCE_OPEN_PATTERN.exec(line)
+    if (fenceOpen) {
+      flushAll()
+      const marker = fenceOpen[1]!
+      fence = { char: marker[0]!, length: marker.length, language: (fenceOpen[2] ?? '').trim(), lines: [] }
+      continue
+    }
+
+    if (!line.trim()) {
+      flushAll()
+      continue
+    }
+
+    const headingMatch = HEADING_LINE_PATTERN.exec(line)
+    if (headingMatch) {
+      flushAll()
+      const level = Math.min(6, Math.max(1, headingMatch[1]!.length)) as 1 | 2 | 3 | 4 | 5 | 6
+      blocks.push({ kind: 'heading', level, text: headingMatch[2]!.trim() })
+      continue
+    }
+
+    if (HR_LINE_PATTERN.test(line)) {
+      flushAll()
+      blocks.push({ kind: 'hr' })
+      continue
+    }
+
+    if (line.includes('|') && i + 1 < lines.length && TABLE_SEP_PATTERN.test(lines[i + 1] ?? '')) {
+      flushAll()
+      const headers = splitTableRow(line)
+      const rows: string[][] = []
+      let j = i + 2
+      for (; j < lines.length; j += 1) {
+        const rowLine = lines[j] ?? ''
+        if (!rowLine.trim() || !rowLine.includes('|')) break
+        rows.push(splitTableRow(rowLine))
+      }
+      blocks.push({ kind: 'table', headers, rows })
+      i = j - 1
+      continue
+    }
+
+    const quoteMatch = QUOTE_LINE_PATTERN.exec(line)
+    if (quoteMatch) {
+      flushParagraph()
+      flushList()
+      flushOrdered()
+      quoteLines.push(quoteMatch[1] ?? '')
+      continue
+    }
+
     const bulletMatch = BULLET_LINE_PATTERN.exec(line)
     if (bulletMatch) {
       flushParagraph()
+      flushOrdered()
+      flushQuote()
       listItems.push(bulletMatch[1] ?? '')
       continue
     }
-    if (!line.trim()) {
+
+    const orderedMatch = ORDERED_LIST_PATTERN.exec(line)
+    if (orderedMatch) {
       flushParagraph()
       flushList()
+      flushQuote()
+      if (orderedItems.length === 0) orderedStart = Number.parseInt(orderedMatch[1]!, 10) || 1
+      orderedItems.push(orderedMatch[2] ?? '')
       continue
     }
+
     flushList()
+    flushOrdered()
+    flushQuote()
     paragraphLines.push(line)
   }
 
-  flushParagraph()
-  flushList()
+  if (fence) {
+    blocks.push({ kind: 'code', language: fence.language, code: fence.lines.join('\n') })
+  }
+  flushAll()
   return blocks
 }
 

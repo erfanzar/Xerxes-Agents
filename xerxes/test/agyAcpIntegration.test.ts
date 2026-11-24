@@ -35,6 +35,23 @@ import { GatewayClient } from '../src/ui/gatewayClient.js'
 
 const encoder = new TextEncoder()
 
+function extractSpecPromptText(params: Record<string, unknown> | undefined): string {
+  if (!params) return ''
+  if (typeof params.text === 'string') return params.text
+  if (Array.isArray(params.prompt)) {
+    return params.prompt
+      .map(block => {
+        if (!block || typeof block !== 'object') return ''
+        const rec = block as Record<string, unknown>
+        if (rec.type === 'text' && typeof rec.text === 'string') return rec.text
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+  return ''
+}
+
 // Minimal valid 1x1 transparent PNG (68 bytes) for deterministic multimodal tests.
 const SAMPLE_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
@@ -367,15 +384,15 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
       { type: 'session_info', sessionId: 's1', title: 'Bat and Ball Riddle Solution' },
     ])
 
-    // user_message_chunk replay echo is ignored (not assistant text/continuation)
+    // user_message_chunk emits structured user_message_chunk (never assistant text_delta/continuation)
     expect(
       normalizeAcpSessionUpdate('s1', {
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'replayed prompt' },
       }),
-    ).toEqual([])
+    ).toEqual([{ type: 'user_message_chunk', sessionId: 's1', text: 'replayed prompt' }])
 
-    // Intermediate pending/in_progress tool_call_update carrying diff content MUST NOT emit premature tool_result
+    // Intermediate pending/in_progress tool_call_update carrying diff content emits live tool_update (NOT premature tool_result)
     const toolNames = new Map<string, string>()
     const toolMeta = new Map<string, AcpToolMetaSnapshot>()
     const settled = new Set<string>()
@@ -403,7 +420,12 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
       status: 'pending',
       content: [{ type: 'diff', path: '/repo/a.ts', oldText: 'const a = 1\n', newText: 'const a = 2\n' }],
     })
-    expect(bridgeEventFromAcpClientEvent(pendingUpdate[0]!, toolNames, toolMeta, settled)).toBeUndefined()
+    expect(bridgeEventFromAcpClientEvent(pendingUpdate[0]!, toolNames, toolMeta, settled)).toMatchObject({
+      type: 'tool_update',
+      toolCallId: 'tc-edit',
+      status: 'pending',
+      diff: { path: '/repo/a.ts', old_text: 'const a = 1\n', new_text: 'const a = 2\n' },
+    })
 
     const inProgressUpdate = normalizeAcpSessionUpdate('s1', {
       sessionUpdate: 'tool_call_update',
@@ -411,7 +433,12 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
       status: 'in_progress',
       content: [{ type: 'diff', path: '/repo/a.ts', oldText: 'const a = 1\n', newText: 'const a = 2\n' }],
     })
-    expect(bridgeEventFromAcpClientEvent(inProgressUpdate[0]!, toolNames, toolMeta, settled)).toBeUndefined()
+    expect(bridgeEventFromAcpClientEvent(inProgressUpdate[0]!, toolNames, toolMeta, settled)).toMatchObject({
+      type: 'tool_update',
+      toolCallId: 'tc-edit',
+      status: 'in_progress',
+      diff: { path: '/repo/a.ts', old_text: 'const a = 1\n', new_text: 'const a = 2\n' },
+    })
 
     // Terminal completed update emits exactly ONE tool_result with full structured diff preserved (not flattened!)
     const completedUpdate = normalizeAcpSessionUpdate('s1', {
@@ -535,10 +562,13 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
     expect(harnessRef!.receivedFrames[0]).toMatchObject({
       method: 'initialize',
       params: {
+        protocolVersion: 2,
+        clientInfo: { name: 'xerxes-agents', title: 'Xerxes Agents' },
         clientCapabilities: {
-          fs: { readTextFile: true, writeTextFile: true },
+          fs: { readTextFile: true, writeTextFile: false },
           terminal: false,
-          elicitation: { form: {} },
+          session: { configOptions: { boolean: {} }, notices: {}, compaction: {} },
+          elicitation: { form: {}, url: {} },
         },
       },
     })
@@ -581,7 +611,9 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
       createAcpClient: opts => {
         spawnCount += 1
         let pendingPromptId: unknown
+        let slowTurnActive = false
         let permCount = 0
+        let newSessionCount = 0
         const h = createInMemoryAcpTransport((frame, harness) => {
           if (typeof frame.method === 'string') {
             receivedMethods.push(frame.method)
@@ -604,9 +636,12 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
             return
           }
           if (frame.method === 'session/new' || frame.method === 'session/resume') {
+            newSessionCount += 1
             const sid = frame.method === 'session/resume'
               ? String((frame.params as Record<string, unknown>).sessionId)
-              : `agy-ext-${spawnCount}`
+              : newSessionCount === 1
+                ? `agy-ext-${spawnCount}`
+                : `agy-ext-${spawnCount}-side-${newSessionCount}`
             harness.pushAgentFrame({
               jsonrpc: '2.0',
               method: 'session/update',
@@ -663,13 +698,44 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
             return
           }
           if (frame.method === 'session/prompt') {
-            pendingPromptId = frame.id
             const params = frame.params as Record<string, unknown>
+            if (slowTurnActive) {
+              // Simulate an agent rejecting concurrent mid-turn session/prompt so fallback queued_steer is exercised.
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id: frame.id,
+                error: { code: -32002, message: 'session prompt already in progress' },
+              })
+              return
+            }
+            pendingPromptId = frame.id
             receivedPrompts.push(params)
             const sid = String(params.sessionId)
-            const text = String(params.text ?? '')
+            const text = extractSpecPromptText(params)
+
+            if (text.includes('Quick question?')) {
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: sid,
+                  update: {
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'Prelude, loop, and coda answered on Antigravity.' },
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id: frame.id,
+                result: { stopReason: 'end_turn' },
+              })
+              return
+            }
 
             if (text.includes('SLOW_STEER_TURN')) {
+              slowTurnActive = true
+              const slowPromptId = frame.id
               harness.pushAgentFrame({
                 jsonrpc: '2.0',
                 method: 'session/update',
@@ -679,9 +745,10 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
                 },
               })
               releaseSlowTurn = () => {
+                slowTurnActive = false
                 harness.pushAgentFrame({
                   jsonrpc: '2.0',
-                  id: pendingPromptId,
+                  id: slowPromptId,
                   result: { stopReason: 'end_turn' },
                 })
               }
@@ -692,7 +759,8 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
               return
             }
 
-            if (text.includes('[steer from user]')) {
+            // The steer reaches agy exactly as typed, with no Xerxes label around it.
+            if (text === 'Also check edge cases') {
               harness.pushAgentFrame({
                 jsonrpc: '2.0',
                 method: 'session/update',
@@ -1167,14 +1235,24 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
           ).length >= 2,
       )
 
-      // 6. Helpful /btw error when on external ACP with no native Xerxes provider (Fix #14)
+      // 6. /btw routes strictly through Antigravity ACP (session/new -> session/prompt -> session/close)
+      //    with zero "Xerxes" preamble and never falls back to native providers — even if a stale native model is passed.
+      const promptsBeforeBtw = receivedPrompts.length
       const btwRes = await client.call('session.side_question', {
         session_id: sessionId,
         question: 'Quick question?',
+        model: 'claude-haiku-4-5',
       })
-      expect(btwRes.ok).toBe(false)
-      expect(String(btwRes.error)).toContain('native Xerxes provider profile')
-      expect(String(btwRes.error)).toContain('Antigravity')
+      expect(btwRes).toMatchObject({
+        ok: true,
+        answer: 'Prelude, loop, and coda answered on Antigravity.',
+        model: 'gemini-3.1-pro',
+      })
+      expect(receivedPrompts).toHaveLength(promptsBeforeBtw + 1)
+      const btwPromptText = extractSpecPromptText(receivedPrompts[promptsBeforeBtw]!)
+      expect(btwPromptText).toContain('Quick question?')
+      expect(btwPromptText).not.toContain('Xerxes')
+      expect(receivedMethods).toContain('session/close')
 
       // 7. cancel_all cancels active ACP turn (Fix #13)
       const beforeCancelAllIdx = client.frames.length
@@ -1303,7 +1381,8 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
     expect(promptBlocks).toHaveLength(1)
     expect(promptBlocks[0]!.type).toBe('text')
     expect(String(promptBlocks[0]!.text)).toContain('<attached_files>')
-    expect(String(promptBlocks[0]!.text)).toContain('image attachment omitted')
+    // Antigravity sessions never inject Xerxes synthetic image-omitted notes into user prompt text.
+    expect(String(promptBlocks[0]!.text)).not.toContain('image attachment')
     await host.disposeAll()
 
     // 2. /acp command registry metadata includes model/mode/thinking/config
@@ -1518,7 +1597,7 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
           }
           if (frame.method === 'session/prompt') {
             const params = frame.params as Record<string, unknown>
-            const promptText = String(params.text ?? '')
+            const promptText = extractSpecPromptText(params)
             receivedAcpPrompts.push(promptText)
             harness.pushAgentFrame({
               jsonrpc: '2.0',
@@ -1636,7 +1715,7 @@ describe('End-to-end DaemonServer Antigravity ACP integration (Fixes 1, 2, 3, 4,
           slash_command: '/antigravity-guide',
         },
       ])
-      expect(catalogConfig.some(o => o.id === 'grounding' && o.type === 'boolean' && o.current_value === 'true')).toBe(
+      expect(catalogConfig.some(o => o.id === 'grounding' && o.type === 'boolean' && o.current_value === true)).toBe(
         true,
       )
       // ZERO Xerxes native skills in acp.catalog
@@ -2110,7 +2189,7 @@ describe('Antigravity ACP elicitation/create (ask_question) end-to-end', () => {
           }
           if (frame.method === 'session/prompt') {
             activePromptId = frame.id
-            const text = String((frame.params as Record<string, unknown>)?.text ?? '')
+            const text = extractSpecPromptText(frame.params as Record<string, unknown>)
             if (text.includes('MULTI_Q')) {
               activeToolCallId = 'call_ask_multi'
               h.pushAgentFrame({
@@ -2531,7 +2610,7 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
           }
           if (frame.method === 'session/prompt') {
             pendingPromptId = frame.id
-            const text = String((frame.params as Record<string, unknown>)?.text ?? '')
+            const text = extractSpecPromptText(frame.params as Record<string, unknown>)
             // Real agy acp emits current_mode_update + config_option_update at prompt start reporting native 'auto'!
             h.pushAgentFrame({
               jsonrpc: '2.0',
@@ -2837,12 +2916,11 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
     }
   })
 
-  test('Antigravity subprocess env strips outer host sandbox vars and retries without SSH_CONNECTION on darwin keyring fallback', async () => {
-    // 1. Outer Antigravity / T3 host sandbox env is stripped on the first attempt while preserving SSH_AUTH_SOCK & GEMINI_API_KEY.
+  test('Antigravity subprocess env strips private vars of a parent agy sandbox but never touches SSH session vars or retries sign-in', async () => {
+    // 1. A parent Antigravity sandbox's private env is stripped; SSH session vars and GEMINI_API_KEY pass through untouched.
     const seenOuterEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
     const outerHost = new DaemonAcpBridgeHost({
       discoverAgents: () => AGY_AGENT_ROSTER,
-      platform: 'darwin',
       env: {
         PATH: '/usr/bin:/bin',
         SSH_CONNECTION: '127.0.0.1 12345 127.0.0.1 22',
@@ -2872,64 +2950,22 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
     expect(seenOuterEnvs[0]?.ANTIGRAVITY_APP_DATA_DIR).toBeUndefined()
     expect(seenOuterEnvs[0]?.ANTIGRAVITY_CSRF_TOKEN).toBeUndefined()
     expect(seenOuterEnvs[0]?.GEMINI_HOME).toBeUndefined()
-    expect(seenOuterEnvs[0]?.SSH_CONNECTION).toBeUndefined()
+    expect(seenOuterEnvs[0]?.SSH_CONNECTION).toBe('127.0.0.1 12345 127.0.0.1 22')
     expect(seenOuterEnvs[0]?.SSH_AUTH_SOCK).toBe('/tmp/ssh-agent.sock')
     expect(seenOuterEnvs[0]?.GEMINI_API_KEY).toBe('test-gemini-key')
     await outerHost.disposeAll()
 
-    // 2. Plain SSH_CONNECTION on darwin: first attempt keeps SSH_CONNECTION, fails auth_required -> retries once without SSH_CONNECTION and succeeds.
-    const darwinEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
-    const darwinHost = new DaemonAcpBridgeHost({
+    // 2. A sign-in failure under SSH is reported once. Xerxes never retries with SSH vars
+    //    removed to steer agy toward a different token store.
+    const sshEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
+    const sshHost = new DaemonAcpBridgeHost({
       discoverAgents: () => AGY_AGENT_ROSTER,
-      platform: 'darwin',
-      env: {
-        PATH: '/usr/bin:/bin',
-        SSH_CONNECTION: '127.0.0.1 12345 127.0.0.1 22',
-        SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
-      },
-      createAcpClient: opts => {
-        darwinEnvs.push(opts.env)
-        const h = createInMemoryAcpTransport((frame, harness) => {
-          if (frame.method === 'initialize') {
-            harness.pushAgentFrame({
-              jsonrpc: '2.0',
-              id: frame.id,
-              result: { protocolVersion: 1, authMethods: [{ id: 'oauth-personal', name: 'Log in with Google' }] },
-            })
-          } else if (frame.method === 'session/new') {
-            if (opts.env?.SSH_CONNECTION) {
-              harness.pushAgentFrame({
-                jsonrpc: '2.0',
-                id: frame.id,
-                error: { code: -32000, message: 'Authentication required' },
-              })
-            } else {
-              harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'agy-darwin-keychain-1' } })
-            }
-          }
-        })
-        return new AcpStdioClient({ ...opts, transport: h.transport })
-      },
-    })
-    const darwinRes = await darwinHost.connect({ sessionId: 'darwin-retry-1', agentId: 'antigravity', cwd: '/tmp' })
-    expect(darwinRes.ok).toBe(true)
-    expect(darwinEnvs).toHaveLength(2)
-    expect(darwinEnvs[0]?.SSH_CONNECTION).toBe('127.0.0.1 12345 127.0.0.1 22')
-    expect(darwinEnvs[1]?.SSH_CONNECTION).toBeUndefined()
-    expect(darwinEnvs[1]?.SSH_AUTH_SOCK).toBe('/tmp/ssh-agent.sock')
-    await darwinHost.disposeAll()
-
-    // 3. Plain SSH_CONNECTION on linux: does NOT retry without SSH_CONNECTION and returns clean non-duplicated auth error.
-    const linuxEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
-    const linuxHost = new DaemonAcpBridgeHost({
-      discoverAgents: () => AGY_AGENT_ROSTER,
-      platform: 'linux',
       env: {
         PATH: '/usr/bin:/bin',
         SSH_CONNECTION: '10.0.0.1 54321 10.0.0.2 22',
       },
       createAcpClient: opts => {
-        linuxEnvs.push(opts.env)
+        sshEnvs.push(opts.env)
         const h = createInMemoryAcpTransport((frame, harness) => {
           if (frame.method === 'initialize') {
             harness.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } })
@@ -2944,11 +2980,13 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
         return new AcpStdioClient({ ...opts, transport: h.transport })
       },
     })
-    const linuxRes = await linuxHost.connect({ sessionId: 'linux-no-retry-1', agentId: 'antigravity', cwd: '/tmp' })
-    expect(linuxRes.ok).toBe(false)
-    expect(linuxEnvs).toHaveLength(1)
-    if (!linuxRes.ok) {
-      expect(linuxRes.install_hint).toBeUndefined()
+    const sshRes = await sshHost.connect({ sessionId: 'ssh-no-retry-1', agentId: 'antigravity', cwd: '/tmp' })
+    expect(sshRes.ok).toBe(false)
+    expect(sshEnvs).toHaveLength(1)
+    expect(sshEnvs[0]?.SSH_CONNECTION).toBe('10.0.0.1 54321 10.0.0.2 22')
+    if (!sshRes.ok) {
+      expect(sshRes.error).toContain('agy acp --login')
+      expect(sshRes.install_hint).toBeUndefined()
     }
   })
 })

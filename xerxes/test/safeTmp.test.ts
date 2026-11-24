@@ -18,7 +18,7 @@ describe('safeTmp', () => {
     expect(env.TEMP).toBe('/tmp')
   })
 
-  it('strips inherited SSH session and outer Antigravity sandbox vars while preserving SSH_AUTH_SOCK', () => {
+  it('strips private vars of a parent Antigravity sandbox and leaves SSH session vars alone', () => {
     const env: NodeJS.ProcessEnv = {
       SSH_CONNECTION: '127.0.0.1 12345 127.0.0.1 22',
       SSH_CLIENT: '127.0.0.1 12345 22',
@@ -32,9 +32,9 @@ describe('safeTmp', () => {
       HOME: '/Users/example',
     }
     sanitizeDesktopInheritedEnv(env)
-    expect(env.SSH_CONNECTION).toBeUndefined()
-    expect(env.SSH_CLIENT).toBeUndefined()
-    expect(env.SSH_TTY).toBeUndefined()
+    expect(env.SSH_CONNECTION).toBe('127.0.0.1 12345 127.0.0.1 22')
+    expect(env.SSH_CLIENT).toBe('127.0.0.1 12345 22')
+    expect(env.SSH_TTY).toBe('/dev/ttys001')
     expect(env.AGY_ACP_FORCE_FILE_STORAGE).toBeUndefined()
     expect(env.ANTIGRAVITY_APP_DATA_DIR).toBeUndefined()
     expect(env.ANTIGRAVITY_AGENT).toBeUndefined()
@@ -50,7 +50,7 @@ describe('safeTmp', () => {
       GEMINI_HOME: '/Users/example/custom-gemini',
     }
     sanitizeDesktopInheritedEnv(env)
-    expect(env.SSH_CONNECTION).toBeUndefined()
+    expect(env.SSH_CONNECTION).toBe('127.0.0.1 12345 127.0.0.1 22')
     expect(env.GEMINI_HOME).toBe('/Users/example/custom-gemini')
   })
 

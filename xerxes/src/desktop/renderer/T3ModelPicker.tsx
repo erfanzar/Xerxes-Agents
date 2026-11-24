@@ -17,6 +17,7 @@
 
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -32,6 +33,8 @@ import {
   activeAcpModelLabel,
   activeAcpThoughtLevelLabel,
   extraAcpConfigOptions,
+  groupAcpConfigSelectOptions,
+  isAcpConfigOptionEnabled,
   isExternalAcpBinding,
   parseCustomArgs,
   resolveRuntimeList,
@@ -41,7 +44,7 @@ import { ActionDialog } from './ActionDialog.js'
 import { RuntimeBrandIcon } from './BrandMark.js'
 import { desktopError } from './desktopRpc.js'
 import { PickerLayer, bareModelName, DELEGATION_CHOICES } from './Overlays.js'
-import type { AgyCredentialMode, AgyStatusView } from './ProviderAccountsCenter.js'
+import { agyQuickTransferSource, agyTransferDetail, type AgyStatusView, type AgyTransferMode } from './ProviderAccountsCenter.js'
 import { T3Icon } from './T3Icons.js'
 import type { AgentBrandProvider } from './XerxesSprites.js'
 import { store, type AcpExternalAgentInfo, type Snapshot } from './store.js'
@@ -135,21 +138,25 @@ interface UnifiedModelEntry {
 export function T3ModelPicker({
   snap,
   defaultOpen = false,
+  defaultOpenExtraConfigId = null,
 }: {
   readonly snap: Snapshot
   readonly defaultOpen?: boolean
+  readonly defaultOpenExtraConfigId?: string | null
 }): ReactElement {
-  const [open, setOpen] = useState(defaultOpen)
+  const [open, setOpen] = useState(defaultOpen || Boolean(snap.pickerOpen))
   const [search, setSearch] = useState('')
+  const [cursor, setCursor] = useState(0)
   const [selectedRail, setSelectedRail] = useState<string>('active')
   const [favorites, setFavorites] = useState<readonly string[]>(loadFavoriteModels)
   const [permissionsExpanded, setPermissionsExpanded] = useState(false)
+  const [openExtraConfigId, setOpenExtraConfigId] = useState<string | null>(defaultOpenExtraConfigId)
   const [customOpen, setCustomOpen] = useState(false)
   const [customCommand, setCustomCommand] = useState('')
   const [customArgs, setCustomArgs] = useState('')
   const [agyStatus, setAgyStatus] = useState<AgyStatusView | null>(null)
   const [agyTransfer, setAgyTransfer] = useState<{
-    readonly mode: AgyCredentialMode
+    readonly mode: AgyTransferMode
     readonly label: string
     readonly destination: string
     readonly phase: 'reviewing' | 'ready' | 'working' | 'done'
@@ -157,6 +164,8 @@ export function T3ModelPicker({
     readonly error: string
   } | null>(null)
   const agyTransferReq = useRef(0)
+  const prevPickerOpenRef = useRef(Boolean(snap.pickerOpen))
+  const listId = useId()
 
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popupRef = useRef<HTMLDivElement>(null)
@@ -197,10 +206,10 @@ export function T3ModelPicker({
   }, [open, effectiveRail])
 
   const startAgyTransfer = async (): Promise<void> => {
-    const mode = agyStatus?.canSync ? agyStatus.recommendedMode : null
-    if (!mode || typeof window === 'undefined' || !window.xerxes?.accounts) return
-    const source = agyStatus?.sources.find(item => item.mode === mode)
-    const label = source?.label ?? 'Gemini Subscription (Antigravity)'
+    const source = agyQuickTransferSource(agyStatus)
+    if (!source || typeof window === 'undefined' || !window.xerxes?.accounts) return
+    const mode = source.mode
+    const label = source.label
     const destination = agyStatus?.destination ?? 'this SSH host'
     const req = ++agyTransferReq.current
     setAgyTransfer({ mode, label, destination, phase: 'reviewing', error: '' })
@@ -254,12 +263,43 @@ export function T3ModelPicker({
     }
   }
 
-  const toggle = (): void => {
-    if (open) {
+  // Observe store.openPicker() (e.g. Settings -> Models & Providers -> Current model)
+  // so opening via store syncs the T3 picker open and closing clears snap.pickerOpen.
+  useEffect(() => {
+    const wasOpen = prevPickerOpenRef.current
+    const isStoreOpen = Boolean(snap.pickerOpen)
+    prevPickerOpenRef.current = isStoreOpen
+    if (isStoreOpen && !wasOpen) {
+      setSelectedRail(activeRuntimeId)
+      setSearch('')
+      setPermissionsExpanded(false)
+      setCustomOpen(false)
+      setOpen(true)
+      if (online) {
+        void store.refreshAcpAgents({ silent: true })
+        if (!externalBinding) {
+          if (snap.models.length === 0) void store.loadModels()
+          store.loadReasoningLevels({ silent: snap.reasoningLevels.length > 0 })
+        }
+      }
+    } else if (!isStoreOpen && wasOpen) {
       setOpen(false)
       setPermissionsExpanded(false)
       setCustomOpen(false)
-      triggerRef.current?.focus()
+    }
+  }, [snap.pickerOpen])
+
+  const close = (): void => {
+    setOpen(false)
+    setPermissionsExpanded(false)
+    setCustomOpen(false)
+    if (snap.pickerOpen || store.getSnapshot().pickerOpen) store.closePicker()
+    triggerRef.current?.focus()
+  }
+
+  const toggle = (): void => {
+    if (open) {
+      close()
       return
     }
     setSelectedRail(activeRuntimeId)
@@ -274,13 +314,6 @@ export function T3ModelPicker({
         store.loadReasoningLevels({ silent: snap.reasoningLevels.length > 0 })
       }
     }
-  }
-
-  const close = (): void => {
-    setOpen(false)
-    setPermissionsExpanded(false)
-    setCustomOpen(false)
-    triggerRef.current?.focus()
   }
 
   // Anchor popup above the trigger button aligned to its right edge (clamped to viewport).
@@ -435,27 +468,31 @@ export function T3ModelPicker({
     }
   }
 
-  const selectRailProvider = async (railId: string): Promise<void> => {
+  // Browse-only left rail: switching tabs inspects a provider's pane without
+  // mutating, disconnecting, or auto-installing the live session runtime until
+  // the user selects a model or clicks the explicit Connect / Switch CTA.
+  const selectRailProvider = (railId: string): void => {
     setCustomOpen(false)
     setSelectedRail(railId)
-    if (railId === 'favorites') return
-    if (railId === 'xerxes') {
-      if (externalBinding && !snap.turnActive) {
-        await store.disconnectAcpAgent()
-      }
-      if (online) {
-        if (snap.models.length === 0) void store.loadModels()
-        store.loadReasoningLevels({ silent: snap.reasoningLevels.length > 0 })
-      }
-      return
-    }
-    const agent = agents.find(item => item.id === railId)
-    if (!agent) return
-    const autoInstallable = agent.id === 'antigravity' || agent.id === 'claude-code'
-    if ((agent.available || autoInstallable) && externalBinding?.agent_id !== agent.id && !snap.turnActive) {
-      await store.connectAcpAgent(agent.id)
+    setSearch('')
+    if (railId === 'xerxes' && online) {
+      if (snap.models.length === 0) void store.loadModels()
+      if (!externalBinding) store.loadReasoningLevels({ silent: snap.reasoningLevels.length > 0 })
     }
   }
+
+  const activeCursor = visibleModels.length > 0 ? Math.max(0, Math.min(cursor, visibleModels.length - 1)) : -1
+
+  useEffect(() => {
+    const activeIdx = visibleModels.findIndex(entry => entry.active)
+    setCursor(activeIdx >= 0 ? activeIdx : 0)
+  }, [search, effectiveRail, open])
+
+  useEffect(() => {
+    if (!open || activeCursor < 0) return
+    const row = popupRef.current?.querySelector<HTMLElement>(`[data-option-index="${activeCursor}"]`)
+    row?.scrollIntoView?.({ block: 'nearest' })
+  }, [open, activeCursor])
 
   const toggleFavorite = (entryKey: string): void => {
     setFavorites(current => {
@@ -539,6 +576,27 @@ export function T3ModelPicker({
         event.preventDefault()
         void pickModelEntry(entry)
       }
+      return
+    }
+    if (customOpen || visibleModels.length === 0) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setCursor(current => (current + 1) % visibleModels.length)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setCursor(current => (current - 1 + visibleModels.length) % visibleModels.length)
+      return
+    }
+    if (event.key === 'Enter') {
+      const target = event.target as HTMLElement | null
+      if (target && target.tagName === 'BUTTON') return
+      const entry = visibleModels[activeCursor]
+      if (entry) {
+        event.preventDefault()
+        void pickModelEntry(entry)
+      }
     }
   }
 
@@ -583,7 +641,7 @@ export function T3ModelPicker({
                   aria-pressed={effectiveRail === 'favorites'}
                   title="Favorites"
                   aria-label="Favorites"
-                  onClick={() => void selectRailProvider('favorites')}
+                  onClick={() => selectRailProvider('favorites')}
                 >
                   <T3Icon name="star" size={16} />
                 </button>
@@ -600,7 +658,7 @@ export function T3ModelPicker({
                       data-provider={agent.provider}
                       title={`${agent.name} — ${runtimeSubtitle(agent)}`}
                       aria-label={agent.name}
-                      onClick={() => void selectRailProvider(agent.id)}
+                      onClick={() => selectRailProvider(agent.id)}
                     >
                       <RuntimeBrandIcon provider={agent.provider} size={18} />
                     </button>
@@ -664,6 +722,11 @@ export function T3ModelPicker({
                           ref={searchRef}
                           className="t3-mpop__search-in"
                           type="text"
+                          role="combobox"
+                          aria-expanded={open}
+                          aria-controls={`${listId}-list`}
+                          aria-autocomplete="list"
+                          aria-activedescendant={activeCursor >= 0 ? `${listId}-opt-${activeCursor}` : undefined}
                           spellCheck={false}
                           placeholder="Search models..."
                           aria-label="Search models"
@@ -682,7 +745,7 @@ export function T3ModelPicker({
                         )}
                       </label>
 
-                      <div className="t3-mpop__list" role="listbox" aria-label="Models">
+                      <div className="t3-mpop__list" id={`${listId}-list`} role="listbox" aria-label="Models">
                         {connecting ? (
                           <div className="t3-mpop__empty">
                             {selectedRailAgent && !selectedRailAgent.available
@@ -710,7 +773,7 @@ export function T3ModelPicker({
                                 >
                                   Switch to {selectedRailAgent.name}
                                 </button>
-                                {selectedRailAgent.id === 'antigravity' && agyStatus?.canSync && agyStatus.recommendedMode && (
+                                {selectedRailAgent.id === 'antigravity' && agyQuickTransferSource(agyStatus) && (
                                   <button
                                     type="button"
                                     className="t3-mpop__secondary"
@@ -760,6 +823,16 @@ export function T3ModelPicker({
                         ) : visibleModels.length === 0 ? (
                           <div className="t3-mpop__empty">
                             {snap.modelsLoading ? 'Loading models…' : search ? 'No matching models' : 'No models discovered'}
+                            {effectiveRail === 'xerxes' && Boolean(externalBinding) && !search && (
+                              <button
+                                type="button"
+                                className="t3-mpop__primary"
+                                disabled={snap.turnActive || connecting}
+                                onClick={() => void store.disconnectAcpAgent()}
+                              >
+                                Switch to Xerxes
+                              </button>
+                            )}
                             {effectiveRail === 'xerxes' && !search && (
                               <button
                                 type="button"
@@ -773,15 +846,20 @@ export function T3ModelPicker({
                         ) : (
                           visibleModels.map((entry, idx) => {
                             const starred = favorites.includes(entry.key)
+                            const focused = idx === activeCursor
                             return (
                               <div key={entry.key} className="t3-mpop__row-wrap">
                                 <button
+                                  id={`${listId}-opt-${idx}`}
                                   type="button"
                                   role="option"
                                   aria-selected={entry.active}
+                                  data-option-index={idx}
+                                  data-focused={focused ? 'true' : undefined}
                                   disabled={snap.turnActive || connecting}
-                                  className={`t3-mpop__row${entry.active ? ' is-active' : ''}`}
+                                  className={`t3-mpop__row${entry.active ? ' is-active' : ''}${focused ? ' is-focused' : ''}`}
                                   title={entry.id}
+                                  onMouseEnter={() => setCursor(idx)}
                                   onClick={() => void pickModelEntry(entry)}
                                 >
                                   <RuntimeBrandIcon provider={entry.provider} size={14} className="t3-mpop__row-ico" />
@@ -845,24 +923,86 @@ export function T3ModelPicker({
                       {/* Extra ACP options or Xerxes Plan/Agents controls neatly docked below */}
                       {externalBinding && extraAcpOptions.length > 0 && (
                         <div className="t3-mpop__extras">
-                          {extraAcpOptions.map(opt => (
-                            <div key={opt.id} className="t3-mpop__extra-group">
-                              <span className="t3-mpop__extra-label">{opt.name}</span>
-                              <button
-                                type="button"
-                                className="t3-mpop__extra-btn"
-                                disabled={snap.turnActive}
-                                onClick={() => {
-                                  const idx = opt.options.findIndex(item => item.value === opt.current_value)
-                                  const next = opt.options[(idx + 1) % opt.options.length]
-                                  if (next) void store.setAcpConfigOption(opt.id, next.value)
-                                }}
-                              >
-                                <span>{activeAcpConfigOptionLabel(opt)}</span>
-                                <T3Icon name="chevronRight" size={11} />
-                              </button>
-                            </div>
-                          ))}
+                          {extraAcpOptions.map(opt => {
+                            if (opt.type === 'boolean') {
+                              const enabled = isAcpConfigOptionEnabled(opt)
+                              return (
+                                <div key={opt.id} className="t3-mpop__extra-group t3-mpop__extra-group--bool" data-config-id={opt.id}>
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={enabled}
+                                    aria-label={opt.name}
+                                    className={`t3-mpop__extra-btn t3-mpop__extra-toggle${enabled ? ' is-on' : ''}`}
+                                    disabled={snap.turnActive || !online}
+                                    title={opt.description || `${opt.name}: ${activeAcpConfigOptionLabel(opt)}`}
+                                    onClick={() => void store.setAcpConfigOption(opt.id, !enabled)}
+                                  >
+                                    <span>{opt.name}</span>
+                                    <span className="t3-mpop__extra-val">{activeAcpConfigOptionLabel(opt)}</span>
+                                  </button>
+                                </div>
+                              )
+                            }
+                            const isMenuOpen = openExtraConfigId === opt.id
+                            const grouped = groupAcpConfigSelectOptions(opt.options)
+                            const hasNamedGroups = grouped.some(bucket => bucket.group !== null)
+                            const activeVal = String(opt.current_value ?? '')
+                            return (
+                              <div key={opt.id} className="t3-mpop__extra-group" data-config-id={opt.id}>
+                                <span className="t3-mpop__extra-label">{opt.name}</span>
+                                <button
+                                  type="button"
+                                  className={`t3-mpop__extra-btn${isMenuOpen ? ' is-on' : ''}`}
+                                  aria-haspopup="listbox"
+                                  aria-expanded={isMenuOpen}
+                                  aria-label={`${opt.name}: ${activeAcpConfigOptionLabel(opt)}`}
+                                  disabled={snap.turnActive || !online}
+                                  onClick={() => setOpenExtraConfigId(current => (current === opt.id ? null : opt.id))}
+                                >
+                                  <span>{activeAcpConfigOptionLabel(opt)}</span>
+                                  <T3Icon name={isMenuOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+                                </button>
+                                {isMenuOpen && (
+                                  <div className="t3-mpop__extra-menu" role="listbox" aria-label={opt.name}>
+                                    {grouped.map(bucket => (
+                                      <div
+                                        key={bucket.group ?? '__default__'}
+                                        className="t3-mpop__extra-section"
+                                        role={hasNamedGroups && bucket.group ? 'group' : undefined}
+                                        aria-label={hasNamedGroups && bucket.group ? bucket.group : undefined}
+                                      >
+                                        {hasNamedGroups && bucket.group && (
+                                          <div className="t3-mpop__extra-group-head" role="presentation">{bucket.group}</div>
+                                        )}
+                                        {bucket.options.map(choice => {
+                                          const selected = choice.value === activeVal
+                                          return (
+                                            <button
+                                              key={choice.value}
+                                              type="button"
+                                              role="option"
+                                              aria-selected={selected}
+                                              className={`t3-mpop__effort-row${selected ? ' is-active' : ''}`}
+                                              title={choice.description || choice.value}
+                                              disabled={snap.turnActive || !online}
+                                              onClick={() => {
+                                                setOpenExtraConfigId(null)
+                                                void store.setAcpConfigOption(opt.id, choice.value)
+                                              }}
+                                            >
+                                              <span>{choice.name}</span>
+                                              {selected && <T3Icon name="check" size={12} />}
+                                            </button>
+                                          )
+                                        })}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
                         </div>
                       )}
 
@@ -975,9 +1115,7 @@ export function T3ModelPicker({
           ) : (
             <>
               <p>Transfer your local <strong>{agyTransfer.label}</strong> credentials to <strong>{agyTransfer.destination}</strong> and switch to Antigravity?</p>
-              <p className="studio-muted">
-                Sent over SSH stdin only and written with mode 0600 to ~/.gemini/antigravity-cli/antigravity-oauth-token.
-              </p>
+              <p className="studio-muted">{agyTransferDetail(agyTransfer.mode)}</p>
             </>
           )}
         </ActionDialog>

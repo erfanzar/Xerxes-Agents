@@ -295,7 +295,7 @@ export function GoalOverlay({ t }: GoalOverlayProps) {
   const continuationLine = continuationDisplay(inspection?.continuation ?? null, terminal.width < 60)
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150}
-      backgroundColor="#000000cc" alignItems="center" justifyContent="center">
+      backgroundColor={t.ds.scrim} alignItems="center" justifyContent="center">
       <Box backgroundColor={t.color.overlayBg} borderColor={t.color.border} borderStyle="round"
         flexDirection="column" width={size.width} height={size.height} paddingX={2} paddingY={terminal.height >= 24 ? 1 : 0}>
         <Text bold color={t.color.text}>Goal & Todos</Text>

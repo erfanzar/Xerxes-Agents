@@ -12,6 +12,10 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { desktopCall, desktopError } from './desktopRpc.js'
+import { Icon } from './Icon.js'
+import { localMachineLabel } from './runModeView.js'
+import { ScrollableCombobox } from './ScrollableCombobox.js'
+import { SelectField, type SelectFieldOption } from './SelectField.js'
 import type { Snapshot } from './store.js'
 
 export const INTELLIGENCE_TIERS = [
@@ -171,60 +175,129 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
         </p>
       )}
       {mode === 'hybrid' && cloudTiers.length > 0 && (
-        <p className="row__s">In Hybrid, agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} run in the cloud and cannot read your files; the others run on local-model on this Mac and do the file work.</p>
+        <p className="row__s">In Hybrid, agents on the {cloudTiers.join(' and ')} tier{cloudTiers.length === 1 ? '' : 's'} run in the cloud and cannot read your files; the others run on the local model on {localMachineLabel()} and do the file work.</p>
       )}
       <div className="tierlist">
         {INTELLIGENCE_TIERS.map(({ id, label, hint }) => {
           const tier = draft.tiers[id]
           const suggestions = models[tier.provider_profile] ?? []
           const choices = efforts[effortKey(tier)] ?? []
+          const providerOptions: SelectFieldOption[] = [
+            {
+              value: '',
+              label: activeProfile ? `Active (${activeProfile.label})` : 'Active provider',
+              ...(activeProfile?.provider ? { detail: activeProfile.provider } : {}),
+            },
+            ...profiles.map(profile => ({
+              value: profile.name,
+              label: profile.label,
+              ...(profile.provider ? { detail: profile.provider } : {}),
+            })),
+          ]
+          const effortOptions: SelectFieldOption[] = [
+            { value: '', label: 'Model default' },
+            ...choices.map(effort => ({ value: effort, label: effort })),
+            ...(tier.reasoning_effort && !choices.includes(tier.reasoning_effort)
+              ? [{ value: tier.reasoning_effort, label: tier.reasoning_effort }]
+              : []),
+          ]
           return (
             <section key={id} className="tiercard" aria-label={`${label} tier`}>
               <header className="tiercard__head">
-                <span className="tiercard__name">{label}</span>
-                <span className="tiercard__hint">{hint}</span>
-                {tier.model && <button className="chipbtn" onClick={() => setTier(id, EMPTY_TIER)}>Clear</button>}
+                <div className="tiercard__title-group">
+                  <span className="tiercard__name">{label}</span>
+                  <span className="tiercard__hint">{hint}</span>
+                </div>
+                {tier.model && (
+                  <button type="button" className="chipbtn tiercard__clear" onClick={() => setTier(id, EMPTY_TIER)}>
+                    Clear
+                  </button>
+                )}
               </header>
               <div className="tiercard__fields">
-                <label className="field">
-                  <span>Provider</span>
-                  <select value={tier.provider_profile} onChange={event => setTier(id, { provider_profile: event.target.value, reasoning_effort: '' })}>
-                    <option value="">Active provider{activeProfile ? ` (${activeProfile.label})` : ''}</option>
-                    {profiles.map(profile => <option key={profile.name} value={profile.name}>{profile.label}{profile.provider ? ` · ${profile.provider}` : ''}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Model</span>
-                  <input list={`tier-models-${id}`} value={tier.model} spellCheck={false} placeholder="Not set"
-                    onChange={event => setTier(id, { model: event.target.value, reasoning_effort: '' })} />
-                  <datalist id={`tier-models-${id}`}>{suggestions.map(model => <option key={model} value={model} />)}</datalist>
-                </label>
-                <label className="field">
-                  <span>Reasoning effort</span>
-                  <select value={tier.reasoning_effort} disabled={!tier.model.trim()} onChange={event => setTier(id, { reasoning_effort: event.target.value })}>
-                    <option value="">Model default</option>
-                    {choices.map(effort => <option key={effort} value={effort}>{effort}</option>)}
-                    {tier.reasoning_effort && !choices.includes(tier.reasoning_effort) && <option value={tier.reasoning_effort}>{tier.reasoning_effort}</option>}
-                  </select>
-                </label>
+                <div className="tiercard__field">
+                  <span id={`tier-provider-label-${id}`} className="tiercard__label">Provider</span>
+                  <SelectField
+                    id={`tier-provider-${id}`}
+                    ariaLabelledBy={`tier-provider-label-${id}`}
+                    listLabel={`${label} tier provider`}
+                    value={tier.provider_profile}
+                    options={providerOptions}
+                    onChange={provider_profile => setTier(id, { provider_profile, reasoning_effort: '' })}
+                  />
+                </div>
+                <div className="tiercard__field">
+                  <label htmlFor={`tier-models-${id}`} className="tiercard__label">Model</label>
+                  <ScrollableCombobox
+                    id={`tier-models-${id}`}
+                    variant="field"
+                    value={tier.model}
+                    options={suggestions}
+                    placeholder="Not set"
+                    listLabel={`${label} tier models`}
+                    toggleLabel={`Show ${label} tier models`}
+                    spellCheck={false}
+                    onChange={model => setTier(id, { model, reasoning_effort: '' })}
+                  />
+                </div>
+                <div className="tiercard__field">
+                  <span id={`tier-effort-label-${id}`} className="tiercard__label">Reasoning effort</span>
+                  <SelectField
+                    id={`tier-effort-${id}`}
+                    ariaLabelledBy={`tier-effort-label-${id}`}
+                    listLabel={`${label} tier reasoning effort`}
+                    value={tier.reasoning_effort}
+                    disabled={!tier.model.trim()}
+                    options={effortOptions}
+                    onChange={reasoning_effort => setTier(id, { reasoning_effort })}
+                  />
+                </div>
               </div>
             </section>
           )
         })}
       </div>
-      <label className="field tierdefault">
-        <span>New agents use</span>
-        <select value={draft.default} onChange={event => { setStatus({ kind: 'idle' }); setDraft({ ...draft, default: event.target.value as IntelligenceDraft['default'] }) }}>
-          <option value="inherit">The task's own model (no tier)</option>
-          {INTELLIGENCE_TIERS.map(({ id, label }) => <option key={id} value={id} disabled={!draft.tiers[id].model.trim()}>{label}{draft.tiers[id].model.trim() ? '' : ' — set a model first'}</option>)}
-        </select>
-      </label>
+      <div className="tierdefault-card">
+        <div className="tierdefault-card__copy">
+          <span id="tier-default-label" className="tierdefault-card__title">New agents use</span>
+          <span className="tierdefault-card__desc">Default tier when an agent does not declare an explicit model.</span>
+        </div>
+        <div className="tierdefault-card__control">
+          <SelectField
+            id="tier-default"
+            ariaLabelledBy="tier-default-label"
+            listLabel="Default tier for new agents"
+            value={draft.default}
+            options={[
+              { value: 'inherit', label: "Task's own model", detail: 'no tier' },
+              ...INTELLIGENCE_TIERS.map(({ id, label }) => {
+                const hasModel = Boolean(draft.tiers[id].model.trim())
+                return {
+                  value: id,
+                  label,
+                  ...(hasModel ? { detail: draft.tiers[id].model.trim() } : { detail: 'set a model first', disabled: true }),
+                }
+              }),
+            ]}
+            onChange={next => {
+              setStatus({ kind: 'idle' })
+              setDraft({ ...draft, default: next as IntelligenceDraft['default'] })
+            }}
+          />
+        </div>
+      </div>
       {problem && <p className="studio-error" role="alert">{problem}</p>}
       {status.kind === 'error' && <p className="studio-error" role="alert">{status.message}</p>}
-      <div className="approval__row">
-        <button className="btn btn--solid" disabled={!dirty || !!problem || status.kind === 'saving'} onClick={() => void save()}>{status.kind === 'saving' ? 'Saving…' : 'Save'}</button>
-        {dirty && <button className="btn" onClick={() => { setDraft(saved); setStatus({ kind: 'idle' }) }}>Revert</button>}
-        {status.kind === 'saved' && !dirty && <span className="row__s" role="status">Saved. New agents use these tiers.</span>}
+      <div className="approval__row tieractions">
+        {status.kind === 'saved' && !dirty && (
+          <span className="tieractions__status" role="status">
+            <Icon name="check" size={12} /> Saved — new agents use these tiers.
+          </span>
+        )}
+        {dirty && <button type="button" className="btn btn--ghost" onClick={() => { setDraft(saved); setStatus({ kind: 'idle' }) }}>Revert</button>}
+        <button type="button" className="btn btn--solid" disabled={!dirty || !!problem || status.kind === 'saving'} onClick={() => void save()}>
+          {status.kind === 'saving' ? 'Saving…' : 'Save changes'}
+        </button>
       </div>
     </>
   )

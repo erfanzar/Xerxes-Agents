@@ -554,6 +554,50 @@ describe('Side Question state, model selector & read-only tool pills', () => {
     expect(vscodeCardHtml).toContain('side-question__tool-pill')
     expect(vscodeCardHtml).toContain('server.ts')
   })
+
+  test('SideQuestionPanel, SideQuestionCard, and Store isolate /btw models strictly to active external ACP runtime', async () => {
+    const agyBtwSnap = sampleSnapshot({
+      model: 'claude-opus-4-6',
+      sideQuestionModel: 'claude-haiku-4-5', // stale native choice from an earlier session
+      acpBinding: sampleAntigravityBinding,
+    })
+
+    const desktopHtml = renderToStaticMarkup(
+      createElement(SideQuestionPanel, { snap: agyBtwSnap, defaultModelPickerOpen: true }),
+    )
+    expect(desktopHtml).toContain('Gemini 4 Carbon (High)')
+    expect(desktopHtml).toContain('Gemini 3 Flash')
+    // Must never leak native Xerxes provider models when Antigravity ACP is active
+    expect(desktopHtml).not.toContain('title="claude-opus-4-6"')
+    expect(desktopHtml).not.toContain('Anthropic')
+    expect(desktopHtml).not.toContain('Claude Haiku 4.5')
+    expect(desktopHtml).not.toContain('Gemini 2.5 Flash')
+
+    const vscodeHtml = renderToStaticMarkup(
+      createElement(SideQuestionCard, {
+        snap: agyBtwSnap,
+        entries: [],
+        defaultModelPickerOpen: true,
+        onEntriesChange: () => {},
+        onClear: () => {},
+        onClose: () => {},
+      }),
+    )
+    expect(vscodeHtml).toContain('Gemini 4 Carbon (High)')
+    expect(vscodeHtml).toContain('Gemini 3 Flash')
+    expect(vscodeHtml).not.toContain('title="claude-opus-4-6"')
+    expect(vscodeHtml).not.toContain('Anthropic')
+    expect(vscodeHtml).not.toContain('Claude Haiku 4.5')
+
+    // Store ignores stale native localStorage sideQuestionModel while connected to Antigravity ACP
+    const { store, bridge } = await setupConnectedStore()
+    store.setSideQuestionModel('claude-haiku-4-5')
+    expect(await store.connectAcpAgent('antigravity', { command: 'agy', args: ['acp'] })).toBe(true)
+    bridge.calls.length = 0
+    expect(await store.askSideQuestion('Explain this diff')).toBe(true)
+    const call = bridge.calls.find(c => c.method === 'session.side_question')
+    expect(call?.params.model).toBeUndefined()
+  })
 })
 
 describe('External ACP Agent Runtime Switcher (Store, Desktop & VS Code)', () => {
@@ -1593,18 +1637,19 @@ describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & C
     })
 
     // Fresh Antigravity connect passes mode_id: 'turbo'
+    bridge.calls.length = 0
     expect(await store.connectAcpAgent('antigravity')).toBe(true)
-    expect(bridge.calls.at(-1)?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'turbo' })
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'turbo' })
 
     // Explicit modeId overrides default Turbo
     bridge.calls.length = 0
     expect(await store.connectAcpAgent('antigravity', undefined, { modeId: 'plan' })).toBe(true)
-    expect(bridge.calls.at(-1)?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'plan' })
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({ agent_id: 'antigravity', mode_id: 'plan' })
 
     // Non-Antigravity agent does NOT force mode_id: 'turbo'
     bridge.calls.length = 0
     expect(await store.connectAcpAgent('claude-code')).toBe(true)
-    expect(bridge.calls.at(-1)?.params.mode_id).toBeUndefined()
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params.mode_id).toBeUndefined()
   })
 
   test('Activity metrics hydrate from session.inflight.tools during Turn 1 and fallback extracts AGY background jobs & schedules', async () => {
@@ -1848,6 +1893,66 @@ describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & C
     const gdnOrKvBubbles = store.getSnapshot().blocks.filter(b => b.kind === 'user' && b.text.includes('Also log KV usage'))
     expect(gdnOrKvBubbles).toHaveLength(1)
     expect(gdnOrKvBubbles[0]!.text).toBe('Also log KV usage')
+  })
+
+  test('store.promoteQueued removes the earlier queued bubble by blockId even when intervening tool calls finish after it', async () => {
+    const cancelParams: Array<Record<string, unknown>> = []
+    const submittedTexts: string[] = []
+    const { store, bridge } = await setupConnectedStore({
+      'turn.steer': params => {
+        // Mirror daemon emitting steer_input before replying
+        bridge.emit('steer_input', {
+          session_id: 'sess-acp-1',
+          content: String(params.content ?? ''),
+          client_steer_id: String(params.client_steer_id ?? ''),
+        })
+        return { ok: true, disposition: 'queued_steer' }
+      },
+      'turn.cancel': params => {
+        cancelParams.push(params)
+        setTimeout(() => bridge.emit('turn_end', { session_id: 'sess-acp-1', cancelled: true }), 5)
+        return { ok: true }
+      },
+      'turn.submit': params => {
+        submittedTexts.push(String(params.text ?? ''))
+        setTimeout(() => bridge.emit('turn_begin', { session_id: 'sess-acp-1', user_input: String(params.text ?? '') }), 5)
+        return { ok: true }
+      },
+    })
+
+    // Connect Antigravity ACP with `/swarm` advertised as an ACP command (matching real agy acp)
+    bridge.emit('acp_status', {
+      session_id: 'sess-acp-1',
+      binding: {
+        ...sampleAntigravityBinding,
+        available_commands: [{ name: 'swarm', description: 'Coordinate a swarm' }],
+      },
+    })
+
+    // Turn 1 starts and runs tools
+    bridge.emit('turn_begin', { session_id: 'sess-acp-1', user_input: 'Search GLM 5.4 loop transformer' })
+    bridge.emit('tool_start', { session_id: 'sess-acp-1', call_id: 'c1', name: 'search_web', arguments: '{"query":"glm 5.4"}' })
+    bridge.emit('tool_end', { session_id: 'sess-acp-1', call_id: 'c1', name: 'search_web', result: 'ok' })
+
+    // User submits `/swarm ...` while Turn 1 is still active -> queued via `turn.steer`
+    const followUp = '/swarm transform qwen 3.8-27b into a loop transformer'
+    expect(await store.submit(followUp)).toBe(true)
+    const queuedItem = store.getSnapshot().queue[0]!
+    expect(queuedItem.blockId).toBeGreaterThan(0)
+
+    // Intervening tool calls stream AFTER the queued user bubble and commit on turn_end!
+    bridge.emit('tool_start', { session_id: 'sess-acp-1', call_id: 'c2', name: 'search_web', arguments: '{"query":"loop transformer"}' })
+    bridge.emit('tool_end', { session_id: 'sess-acp-1', call_id: 'c2', name: 'search_web', error: 'cancelled' })
+
+    // User clicks "Steer now" on the queued item
+    expect(await store.promoteQueued(queuedItem.id)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 15))
+
+    expect(cancelParams).toHaveLength(1)
+    expect(cancelParams[0]?.drop_pending_steers).toBe(true)
+    expect(submittedTexts).toEqual([followUp])
+    const swarmBubbles = store.getSnapshot().blocks.filter(b => b.kind === 'user' && b.text === followUp)
+    expect(swarmBubbles).toHaveLength(1)
   })
 
   test('BrowserPanel rectOverlapsAny detects overlapping dropdown menus and ignores disjoint elements', () => {

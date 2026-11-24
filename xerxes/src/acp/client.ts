@@ -44,9 +44,13 @@ export interface AcpAvailableCommand {
 
 /** Auth method advertised by an ACP agent during `initialize`. */
 export interface AcpAuthMethod {
+  readonly args?: readonly string[]
   readonly description?: string
+  readonly env?: Readonly<Record<string, string>>
   readonly id: string
+  readonly meta?: Readonly<Record<string, unknown>>
   readonly name: string
+  readonly type?: 'agent' | 'terminal' | string
 }
 
 /** Prompt input capabilities advertised by an ACP agent during `initialize`. */
@@ -60,6 +64,7 @@ export interface AcpPromptCapabilities {
 export interface AcpSessionCapabilities {
   readonly additionalDirectories: boolean
   readonly close: boolean
+  readonly fork: boolean
   readonly list: boolean
   readonly load: boolean
   readonly resume: boolean
@@ -74,20 +79,69 @@ export interface AcpMcpCapabilities {
 /** Content block sent inside an ACP `session/prompt` request. */
 export type AcpPromptContentBlock =
   | { readonly text: string; readonly type: 'text' }
-  | { readonly data: string; readonly mimeType: string; readonly type: 'image' }
+  | { readonly data: string; readonly mimeType: string; readonly type: 'image'; readonly uri?: string }
+  | { readonly data: string; readonly mimeType: string; readonly type: 'audio' }
+  | {
+    readonly resource:
+      | {
+          readonly mimeType?: string
+          readonly text: string
+          readonly uri: string
+        }
+      | {
+          readonly blob: string
+          readonly mimeType?: string
+          readonly uri: string
+        }
+    readonly type: 'resource'
+  }
+  | {
+    readonly description?: string
+    readonly mimeType?: string
+    readonly name: string
+    readonly size?: number
+    readonly title?: string
+    readonly type: 'resource_link'
+    readonly uri: string
+  }
+
+/** Structured content block emitted by ACP tool calls/updates or message chunks. */
+export type AcpContentBlock =
+  | { readonly text: string; readonly type: 'text' }
+  | { readonly data: string; readonly mimeType: string; readonly type: 'image'; readonly uri?: string }
+  | { readonly data: string; readonly mimeType: string; readonly type: 'audio' }
   | {
     readonly resource: {
+      readonly blob?: string
       readonly mimeType?: string
-      readonly text: string
+      readonly text?: string
       readonly uri: string
     }
     readonly type: 'resource'
   }
+  | {
+    readonly description?: string
+    readonly mimeType?: string
+    readonly name: string
+    readonly size?: number
+    readonly title?: string
+    readonly type: 'resource_link'
+    readonly uri: string
+  }
+  | { readonly terminalId: string; readonly type: 'terminal' }
+
+/** Monetary cost reported by an ACP `usage_update` or prompt usage object. */
+export interface AcpUsageCost {
+  readonly amount: number
+  readonly currency: string
+}
 
 /** Token usage reported on an ACP `session/prompt` result. */
 export interface AcpPromptUsage {
   readonly cachedReadTokens?: number
   readonly cachedWriteTokens?: number
+  readonly cost?: AcpUsageCost
+  readonly costUsd?: number
   readonly inputTokens?: number
   readonly outputTokens?: number
   readonly thoughtTokens?: number
@@ -96,12 +150,28 @@ export interface AcpPromptUsage {
 
 /** Normalized stream events emitted by {@link AcpStdioClient}. */
 export type AcpClientEvent =
-  | { readonly sessionId: string; readonly text: string; readonly type: 'text_delta' }
+  | {
+    readonly contentBlocks?: readonly AcpContentBlock[]
+    readonly meta?: Readonly<Record<string, unknown>>
+    readonly sessionId: string
+    readonly text: string
+    readonly type: 'text_delta'
+  }
+  | {
+    readonly contentBlocks?: readonly AcpContentBlock[]
+    readonly sessionId: string
+    readonly text: string
+    readonly type: 'user_message_chunk'
+  }
   | { readonly sessionId: string; readonly text: string; readonly type: 'thought_delta' }
   | {
+    readonly content?: string
+    readonly contentBlocks?: readonly AcpContentBlock[]
     readonly diff?: AcpToolDiff
+    readonly diffs?: readonly AcpToolDiff[]
     readonly kind?: string
     readonly locations?: readonly AcpToolLocation[]
+    readonly meta?: Readonly<Record<string, unknown>>
     readonly name: string
     readonly rawInput?: unknown
     readonly sessionId: string
@@ -112,9 +182,13 @@ export type AcpClientEvent =
   }
   | {
     readonly content?: string
+    readonly contentBlocks?: readonly AcpContentBlock[]
     readonly diff?: AcpToolDiff
+    readonly diffs?: readonly AcpToolDiff[]
     readonly isError?: boolean
+    readonly kind?: string
     readonly locations?: readonly AcpToolLocation[]
+    readonly meta?: Readonly<Record<string, unknown>>
     readonly name?: string
     readonly permissionDenied?: boolean
     readonly rawInput?: unknown
@@ -144,13 +218,15 @@ export type AcpClientEvent =
     readonly rawUpdate: Readonly<Record<string, unknown>>
     readonly sessionId: string
     readonly type: 'config_update'
-    readonly value?: string
+    readonly value?: string | boolean
   }
   | {
     readonly cachedReadTokens?: number
     readonly cachedWriteTokens?: number
     readonly contextSize?: number
     readonly contextUsed?: number
+    readonly cost?: AcpUsageCost
+    readonly costUsd?: number
     readonly inputTokens?: number
     readonly outputTokens?: number
     readonly sessionId: string
@@ -170,6 +246,18 @@ export type AcpClientEvent =
     readonly type: 'available_commands'
   }
   | {
+    readonly description?: string
+    readonly sessionId: string
+    readonly severity: string
+    readonly title: string
+    readonly type: 'notice'
+  }
+  | {
+    readonly elicitationId: string
+    readonly sessionId?: string
+    readonly type: 'elicitation_complete'
+  }
+  | {
     readonly rawUpdate: Readonly<Record<string, unknown>>
     readonly sessionId: string
     readonly text?: string
@@ -181,14 +269,18 @@ export type AcpClientEvent =
 
 export interface AcpPermissionOption {
   readonly kind?: string
+  readonly meta?: Readonly<Record<string, unknown>>
   readonly name: string
   readonly optionId: string
+  readonly warning?: string
 }
 
 export interface AcpClientPermissionRequest {
   readonly diff?: AcpToolDiff
+  readonly diffs?: readonly AcpToolDiff[]
   readonly kind?: string
   readonly locations?: readonly AcpToolLocation[]
+  readonly meta?: Readonly<Record<string, unknown>>
   readonly options: readonly AcpPermissionOption[]
   readonly rawInput?: unknown
   readonly sessionId: string
@@ -215,6 +307,45 @@ export interface AcpWriteTextFileRequest {
   readonly sessionId: string
 }
 
+export interface AcpTerminalEnvVar {
+  readonly name: string
+  readonly value: string
+}
+
+export interface AcpCreateTerminalRequest {
+  readonly args?: readonly string[]
+  readonly command: string
+  readonly cwd?: string
+  readonly env?: readonly AcpTerminalEnvVar[]
+  readonly outputByteLimit?: number
+  readonly sessionId: string
+}
+
+export interface AcpCreateTerminalResponse {
+  readonly terminalId: string
+}
+
+export interface AcpTerminalIdRequest {
+  readonly sessionId: string
+  readonly terminalId: string
+}
+
+export interface AcpTerminalExitStatus {
+  readonly exitCode?: number | null
+  readonly signal?: string | null
+}
+
+export interface AcpTerminalOutputResponse {
+  readonly exitStatus?: AcpTerminalExitStatus
+  readonly output: string
+  readonly truncated: boolean
+}
+
+export interface AcpWaitForTerminalExitResponse {
+  readonly exitCode?: number | null
+  readonly signal?: string | null
+}
+
 export type AcpElicitationFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'array'
 
 export interface AcpElicitationOption {
@@ -227,6 +358,7 @@ export interface AcpElicitationField {
   readonly description?: string
   readonly enum?: readonly string[]
   readonly enumNames?: readonly string[]
+  readonly format?: string
   readonly items?: {
     readonly anyOf?: readonly AcpElicitationOption[]
     readonly enum?: readonly string[]
@@ -234,13 +366,21 @@ export interface AcpElicitationField {
     readonly type?: string
   }
   readonly key: string
+  readonly maxItems?: number
+  readonly maxLength?: number
+  readonly maximum?: number
+  readonly minItems?: number
+  readonly minLength?: number
+  readonly minimum?: number
   readonly oneOf?: readonly AcpElicitationOption[]
+  readonly pattern?: string
   readonly required: boolean
   readonly title?: string
   readonly type: AcpElicitationFieldType
 }
 
 export interface AcpElicitationRequest {
+  readonly elicitationId?: string
   readonly fields: readonly AcpElicitationField[]
   readonly message: string
   readonly mode: 'form' | 'url' | string
@@ -261,12 +401,27 @@ export interface AcpClientHostHandlers {
   readonly createElicitation?: (
     request: AcpElicitationRequest,
   ) => Promise<AcpElicitationResponse> | AcpElicitationResponse
+  readonly createTerminal?: (
+    request: AcpCreateTerminalRequest,
+  ) => Promise<AcpCreateTerminalResponse> | AcpCreateTerminalResponse
+  readonly getTerminalOutput?: (
+    request: AcpTerminalIdRequest,
+  ) => Promise<AcpTerminalOutputResponse> | AcpTerminalOutputResponse
+  readonly killTerminal?: (
+    request: AcpTerminalIdRequest,
+  ) => Promise<void> | void
   readonly readTextFile?: (
     request: AcpReadTextFileRequest,
   ) => Promise<{ readonly content: string }> | { readonly content: string }
+  readonly releaseTerminal?: (
+    request: AcpTerminalIdRequest,
+  ) => Promise<void> | void
   readonly requestPermission?: (
     request: AcpClientPermissionRequest,
   ) => Promise<AcpClientPermissionResponse> | AcpClientPermissionResponse
+  readonly waitForTerminalExit?: (
+    request: AcpTerminalIdRequest,
+  ) => Promise<AcpWaitForTerminalExitResponse> | AcpWaitForTerminalExitResponse
   readonly writeTextFile?: (
     request: AcpWriteTextFileRequest,
   ) => Promise<void> | void
@@ -274,8 +429,9 @@ export interface AcpClientHostHandlers {
 
 /** Injectable process/stream seam for deterministic offline unit tests. */
 export interface AcpSpawnedProcess {
+  readonly closeStdin?: () => void
   readonly exited: Promise<number | null>
-  readonly kill: () => void
+  readonly kill: (signal?: NodeJS.Signals | number) => void
   readonly stderr?: ReadableStream<Uint8Array> | null
   readonly stdout: ReadableStream<Uint8Array>
   readonly writeLine: (line: string) => void | Promise<void>
@@ -294,6 +450,7 @@ export interface AcpInitializeParams {
   readonly clientCapabilities?: Readonly<Record<string, unknown>>
   readonly clientInfo?: {
     readonly name: string
+    readonly title?: string
     readonly version: string
   }
   readonly protocolVersion?: number
@@ -317,6 +474,7 @@ export interface AcpInitializeResult {
 }
 
 export interface AcpNewSessionParams {
+  readonly additionalDirectories?: readonly string[]
   readonly cwd: string
   readonly mcpServers?: readonly Readonly<Record<string, unknown>>[]
 }
@@ -330,6 +488,7 @@ export interface AcpNewSessionResult {
 }
 
 export interface AcpLoadSessionParams {
+  readonly additionalDirectories?: readonly string[]
   readonly cwd: string
   readonly mcpServers?: readonly Readonly<Record<string, unknown>>[]
   readonly sessionId: string
@@ -344,6 +503,7 @@ export interface AcpLoadSessionResult {
 }
 
 export interface AcpResumeSessionParams {
+  readonly additionalDirectories?: readonly string[]
   readonly cwd: string
   readonly mcpServers?: readonly Readonly<Record<string, unknown>>[]
   readonly sessionId: string
@@ -355,6 +515,40 @@ export interface AcpResumeSessionResult {
   readonly modes?: unknown
   readonly raw: Readonly<Record<string, unknown>>
   readonly sessionId: string
+}
+
+export interface AcpForkSessionParams {
+  readonly additionalDirectories?: readonly string[]
+  readonly cwd: string
+  readonly mcpServers?: readonly Readonly<Record<string, unknown>>[]
+  readonly sessionId: string
+}
+
+export interface AcpForkSessionResult {
+  readonly configOptions?: readonly unknown[]
+  readonly models?: unknown
+  readonly modes?: unknown
+  readonly raw: Readonly<Record<string, unknown>>
+  readonly sessionId: string
+}
+
+export interface AcpListedSession {
+  readonly cwd?: string
+  readonly meta?: Readonly<Record<string, unknown>>
+  readonly sessionId: string
+  readonly title?: string
+  readonly updatedAt?: string
+}
+
+export interface AcpListSessionsParams {
+  readonly cursor?: string
+  readonly cwd?: string
+}
+
+export interface AcpListSessionsResult {
+  readonly nextCursor?: string
+  readonly raw: Readonly<Record<string, unknown>>
+  readonly sessions: readonly AcpListedSession[]
 }
 
 export interface AcpSetModelParams {
@@ -372,19 +566,25 @@ export interface AcpSetModeParams {
 export interface AcpSetConfigOptionParams {
   readonly configId: string
   readonly sessionId: string
-  readonly value: string
+  readonly type?: 'boolean' | 'select' | string
+  readonly value: string | boolean
 }
 
 /** Typed JSON-RPC 2.0 error returned by an external ACP agent. */
 export class AcpRpcError extends Error {
   readonly code: number
+  readonly data?: unknown
   readonly method: string
 
-  constructor(method: string, code: number, message: string) {
-    super(`ACP RPC "${method}" error (${code}): ${message}`)
+  constructor(method: string, code: number, message: string, data?: unknown) {
+    const detail = formatAcpRpcErrorData(data, message)
+    super(`ACP RPC "${method}" error (${code}): ${message}${detail ? ` — ${detail}` : ''}`)
     this.name = 'AcpRpcError'
     this.code = code
     this.method = method
+    if (data !== undefined) {
+      this.data = data
+    }
   }
 }
 
@@ -423,7 +623,9 @@ interface PendingRpc {
 }
 
 const DEFAULT_RPC_TIMEOUT_MS = 120_000
+const DISPOSE_EOF_WAIT_MS = 600
 const DISPOSE_EXIT_WAIT_MS = 1_500
+const DISPOSE_KILL_WAIT_MS = 300
 const DEFAULT_CANCEL_GRACE_MS = 500
 const STDERR_EXIT_DRAIN_WAIT_MS = 50
 
@@ -432,11 +634,13 @@ const STDERR_EXIT_DRAIN_WAIT_MS = 50
  *
  * Spawns an external ACP agent subprocess (or attaches to an injected stream
  * transport) over newline-delimited JSON-RPC 2.0, handles client-to-agent RPCs
- * (`initialize`, `session/new`, `session/load`, `session/prompt`,
- * `session/cancel`), normalizes incoming `session/update` notifications
+ * (`initialize`, `authenticate`, `session/new`, `session/load`, `session/resume`,
+ * `session/fork`, `session/list`, `session/prompt`, `session/cancel`),
+ * normalizes incoming `session/update` and `elicitation/complete` notifications
  * (including post-settle continuation frames), and answers incoming
  * agent-to-client requests (`session/request_permission`, `elicitation/create`,
- * `fs/read_text_file`, `fs/write_text_file`) through injectable host callbacks.
+ * `fs/read_text_file`, `fs/write_text_file`, `terminal/*`) through injectable
+ * host callbacks.
  */
 export class AcpStdioClient {
   private readonly command: string
@@ -448,7 +652,8 @@ export class AcpStdioClient {
   private readonly injectedTransport: AcpSpawnedProcess | undefined
   private handlers: AcpClientHostHandlers
   private readonly listeners = new Set<(event: AcpClientEvent) => void>()
-  private readonly promptListeners = new Map<string, (event: AcpClientEvent) => void>()
+  private readonly promptListeners = new Map<string, Set<(event: AcpClientEvent) => void>>()
+  private readonly activePromptCounts = new Map<string, number>()
   private readonly pending = new Map<number, PendingRpc>()
   private readonly settledSessions = new Set<string>()
   private readonly stderrTail: string[] = []
@@ -463,6 +668,7 @@ export class AcpStdioClient {
   private started = false
   private exited = false
   private lastInitializeResult: AcpInitializeResult | undefined
+  private readonly pendingCancels = new Map<string, Promise<void>>()
 
   constructor(options: AcpStdioClientOptions) {
     this.command = options.command
@@ -481,6 +687,11 @@ export class AcpStdioClient {
   /** Replace or update host callbacks (e.g., per-turn approval forwarding). */
   setHandlers(handlers: AcpClientHostHandlers): void {
     this.handlers = handlers
+  }
+
+  /** Number of currently active `session/prompt` RPCs for a session. */
+  activePromptCount(sessionId: string): number {
+    return this.activePromptCounts.get(sessionId) ?? 0
   }
 
   /** Subscribe to all normalized ACP client events. */
@@ -562,18 +773,29 @@ export class AcpStdioClient {
   async initialize(params: AcpInitializeParams = {}): Promise<AcpInitializeResult> {
     this.start()
     const payload = {
-      protocolVersion: params.protocolVersion ?? 1,
+      protocolVersion: params.protocolVersion ?? 2,
       clientInfo: params.clientInfo ?? {
         name: 'xerxes-agents',
+        title: 'Xerxes Agents',
         version: XERXES_VERSION,
       },
       clientCapabilities: params.clientCapabilities ?? {
         fs: {
-          readTextFile: true,
-          writeTextFile: true,
+          readTextFile: Boolean(this.handlers.readTextFile),
+          writeTextFile: Boolean(this.handlers.writeTextFile),
         },
-        terminal: false,
-        ...(this.handlers.createElicitation ? { elicitation: { form: {} } } : {}),
+        terminal: Boolean(this.handlers.createTerminal),
+        session: {
+          configOptions: {
+            boolean: {},
+          },
+          notices: {},
+          compaction: {},
+        },
+        auth: {
+          terminal: true,
+        },
+        ...(this.handlers.createElicitation ? { elicitation: { form: {}, url: {} } } : {}),
       },
     }
     const rawResult = await this.call('initialize', payload)
@@ -622,6 +844,7 @@ export class AcpStdioClient {
     const sessionCapabilities: AcpSessionCapabilities = {
       resume: hasSessionCap(rawSessionCaps.resume),
       close: hasSessionCap(rawSessionCaps.close),
+      fork: hasSessionCap(rawSessionCaps.fork),
       load: supportsLoadSession || hasSessionCap(rawSessionCaps.load),
       list: hasSessionCap(rawSessionCaps.list),
       additionalDirectories:
@@ -659,11 +882,30 @@ export class AcpStdioClient {
     return initResult
   }
 
+  async authenticate(methodId: string): Promise<Record<string, unknown>> {
+    this.start()
+    const targetId = methodId.trim()
+    if (!targetId) {
+      throw new Error('ACP authenticate requires a non-empty methodId')
+    }
+    const known = this.lastInitializeResult?.authMethods.find(item => item.id === targetId)
+    if (known?.type === 'terminal' || isAcpRecord(known?.meta?.['terminal-auth'])) {
+      throw new Error(
+        `ACP auth method "${targetId}" is a terminal auth method and must be run in an interactive terminal, not via authenticate()`,
+      )
+    }
+    const rawResult = await this.call('authenticate', { methodId: targetId })
+    return isAcpRecord(rawResult) ? rawResult : {}
+  }
+
   async newSession(params: AcpNewSessionParams): Promise<AcpNewSessionResult> {
     this.start()
     const rawResult = await this.call('session/new', {
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
+      ...(params.additionalDirectories && params.additionalDirectories.length > 0
+        ? { additionalDirectories: params.additionalDirectories }
+        : {}),
     })
     const raw = isAcpRecord(rawResult) ? rawResult : {}
     const sessionId = readStringField(raw, 'sessionId', 'session_id')
@@ -690,6 +932,9 @@ export class AcpStdioClient {
       sessionId: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
+      ...(params.additionalDirectories && params.additionalDirectories.length > 0
+        ? { additionalDirectories: params.additionalDirectories }
+        : {}),
     })
     const raw = isAcpRecord(rawResult) ? rawResult : {}
     const sessionId = readStringField(raw, 'sessionId', 'session_id') || params.sessionId
@@ -713,6 +958,9 @@ export class AcpStdioClient {
       sessionId: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
+      ...(params.additionalDirectories && params.additionalDirectories.length > 0
+        ? { additionalDirectories: params.additionalDirectories }
+        : {}),
     })
     const raw = isAcpRecord(rawResult) ? rawResult : {}
     const sessionId = readStringField(raw, 'sessionId', 'session_id') || params.sessionId
@@ -730,6 +978,72 @@ export class AcpStdioClient {
     }
   }
 
+  async forkSession(params: AcpForkSessionParams): Promise<AcpForkSessionResult> {
+    this.start()
+    const rawResult = await this.call('session/fork', {
+      sessionId: params.sessionId,
+      cwd: params.cwd,
+      mcpServers: params.mcpServers ?? [],
+      ...(params.additionalDirectories && params.additionalDirectories.length > 0
+        ? { additionalDirectories: params.additionalDirectories }
+        : {}),
+    })
+    const raw = isAcpRecord(rawResult) ? rawResult : {}
+    const sessionId = readStringField(raw, 'sessionId', 'session_id')
+    if (!sessionId) {
+      throw new Error('ACP agent session/fork response did not include a sessionId')
+    }
+    const configOptions = Array.isArray(raw.configOptions)
+      ? raw.configOptions
+      : Array.isArray(raw.config_options)
+        ? raw.config_options
+        : undefined
+    return {
+      sessionId,
+      ...(configOptions !== undefined ? { configOptions } : {}),
+      ...(raw.models !== undefined ? { models: raw.models } : {}),
+      ...(raw.modes !== undefined ? { modes: raw.modes } : {}),
+      raw,
+    }
+  }
+
+  async listSessions(params: AcpListSessionsParams = {}): Promise<AcpListSessionsResult> {
+    this.start()
+    const rawResult = await this.call('session/list', {
+      ...(params.cwd ? { cwd: params.cwd } : {}),
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+    })
+    const raw = isAcpRecord(rawResult) ? rawResult : {}
+    const rawSessions = Array.isArray(raw.sessions) ? raw.sessions : []
+    const sessions: AcpListedSession[] = []
+    for (const item of rawSessions) {
+      if (!isAcpRecord(item)) continue
+      const sessionId = readStringField(item, 'sessionId', 'session_id', 'id')
+      if (!sessionId) continue
+      const cwd = readStringField(item, 'cwd') || undefined
+      const title = readStringField(item, 'title') || undefined
+      const updatedAt = readStringField(item, 'updatedAt', 'updated_at') || undefined
+      const meta = isAcpRecord(item._meta)
+        ? item._meta
+        : isAcpRecord(item.meta)
+          ? item.meta
+          : undefined
+      sessions.push({
+        sessionId,
+        ...(cwd ? { cwd } : {}),
+        ...(title ? { title } : {}),
+        ...(updatedAt ? { updatedAt } : {}),
+        ...(meta ? { meta } : {}),
+      })
+    }
+    const nextCursor = readStringField(raw, 'nextCursor', 'next_cursor') || undefined
+    return {
+      sessions,
+      ...(nextCursor ? { nextCursor } : {}),
+      raw,
+    }
+  }
+
   async closeSession(sessionId: string, timeoutMs = 500): Promise<void> {
     if (this.disposed || !this.started || this.exited) {
       return
@@ -739,10 +1053,15 @@ export class AcpStdioClient {
 
   async setConfigOption(params: AcpSetConfigOptionParams): Promise<Record<string, unknown>> {
     this.start()
+    const isBoolean = typeof params.value === 'boolean' || params.type === 'boolean'
+    const wireValue = isBoolean
+      ? (typeof params.value === 'boolean' ? params.value : params.value.trim().toLowerCase() === 'true')
+      : String(params.value)
     const rawResult = await this.call('session/set_config_option', {
       sessionId: params.sessionId,
       configId: params.configId,
-      value: params.value,
+      ...(isBoolean ? { type: 'boolean' } : {}),
+      value: wireValue,
     })
     return isAcpRecord(rawResult) ? rawResult : {}
   }
@@ -832,9 +1151,25 @@ export class AcpStdioClient {
     if (params.signal?.aborted) {
       throw new Error('ACP prompt aborted before start')
     }
+    const inflightCancel = this.pendingCancels.get(params.sessionId)
+    if (inflightCancel) {
+      await inflightCancel.catch(() => undefined)
+      if (params.signal?.aborted) {
+        throw new Error('ACP prompt aborted before start')
+      }
+    }
     this.settledSessions.delete(params.sessionId)
+    this.activePromptCounts.set(
+      params.sessionId,
+      (this.activePromptCounts.get(params.sessionId) ?? 0) + 1,
+    )
     if (params.onEvent) {
-      this.promptListeners.set(params.sessionId, params.onEvent)
+      let set = this.promptListeners.get(params.sessionId)
+      if (!set) {
+        set = new Set()
+        this.promptListeners.set(params.sessionId, set)
+      }
+      set.add(params.onEvent)
     }
 
     const promptBlocks: readonly AcpPromptContentBlock[] =
@@ -846,9 +1181,7 @@ export class AcpStdioClient {
       'session/prompt',
       {
         sessionId: params.sessionId,
-        session_id: params.sessionId,
         prompt: promptBlocks,
-        text: params.text,
       },
       // Prompts can run for many minutes while tools execute; rely on explicit cancel/abort.
       0,
@@ -896,9 +1229,21 @@ export class AcpStdioClient {
       if (graceTimer !== undefined) {
         clearTimeout(graceTimer)
       }
-      this.settledSessions.add(params.sessionId)
-      if (params.onEvent && this.promptListeners.get(params.sessionId) === params.onEvent) {
-        this.promptListeners.delete(params.sessionId)
+      const remaining = Math.max(0, (this.activePromptCounts.get(params.sessionId) ?? 1) - 1)
+      if (remaining === 0) {
+        this.activePromptCounts.delete(params.sessionId)
+        this.settledSessions.add(params.sessionId)
+      } else {
+        this.activePromptCounts.set(params.sessionId, remaining)
+      }
+      if (params.onEvent) {
+        const set = this.promptListeners.get(params.sessionId)
+        if (set) {
+          set.delete(params.onEvent)
+          if (set.size === 0) {
+            this.promptListeners.delete(params.sessionId)
+          }
+        }
       }
       if (params.signal && onAbort) {
         params.signal.removeEventListener('abort', onAbort)
@@ -910,14 +1255,20 @@ export class AcpStdioClient {
     if (this.disposed || !this.started) {
       return
     }
-    await this.sendFrame({
+    const sendPromise = this.sendFrame({
       jsonrpc: '2.0',
       method: 'session/cancel',
       params: {
         sessionId,
-        session_id: sessionId,
       },
     })
+    const tracked = sendPromise.finally(() => {
+      if (this.pendingCancels.get(sessionId) === tracked) {
+        this.pendingCancels.delete(sessionId)
+      }
+    })
+    this.pendingCancels.set(sessionId, tracked)
+    await tracked
   }
 
   async dispose(): Promise<void> {
@@ -926,14 +1277,27 @@ export class AcpStdioClient {
     }
     this.disposed = true
     this.promptListeners.clear()
+    this.activePromptCounts.clear()
     this.rejectAllPending(new Error('ACP client disposed'))
     const proc = this.proc
     this.proc = undefined
     if (proc) {
-      try {
-        proc.kill()
-      } catch {
-        // Ignore kill failures on already-exited processes.
+      // Close stdin first and give the agent a brief EOF drain window to persist
+      // session state cleanly (e.g., `agy 1.5.3+`) before escalating to SIGTERM/SIGKILL.
+      if (proc.closeStdin && !this.exited) {
+        try {
+          proc.closeStdin()
+        } catch {
+          // Ignore already-closed stdin.
+        }
+        await raceWithUnrefTimeout(proc.exited.catch(() => null), DISPOSE_EOF_WAIT_MS)
+      }
+      if (!this.exited) {
+        try {
+          proc.kill('SIGTERM')
+        } catch {
+          // Ignore kill failures on already-exited processes.
+        }
       }
     }
     if (this.stdoutReader) {
@@ -944,6 +1308,14 @@ export class AcpStdioClient {
     }
     if (proc && !this.exited) {
       await raceWithUnrefTimeout(proc.exited.catch(() => null), DISPOSE_EXIT_WAIT_MS)
+      if (!this.exited) {
+        try {
+          proc.kill('SIGKILL')
+        } catch {
+          // Ignore kill failures on already-exited processes.
+        }
+        await raceWithUnrefTimeout(proc.exited.catch(() => null), DISPOSE_KILL_WAIT_MS)
+      }
     }
     await Promise.allSettled([
       this.stdoutTask ?? Promise.resolve(),
@@ -1146,7 +1518,7 @@ export class AcpStdioClient {
           ? parsed.error.message
           : `ACP RPC "${pending.method}" failed`
         const code = typeof parsed.error.code === 'number' ? parsed.error.code : -32000
-        pending.reject(new AcpRpcError(pending.method, code, message))
+        pending.reject(new AcpRpcError(pending.method, code, message, parsed.error.data))
       } else {
         pending.resolve(parsed.result)
       }
@@ -1193,7 +1565,7 @@ export class AcpStdioClient {
           }
           const request = parseElicitationRequest(params)
           const response = await this.resolveElicitation(request)
-          await this.sendFrame(acpJsonRpcSuccess(id, formatElicitationRpcResult(response)))
+          await this.sendFrame(acpJsonRpcSuccess(id, formatElicitationRpcResult(response, request.mode)))
           return
         }
         case 'fs/read_text_file': {
@@ -1234,6 +1606,95 @@ export class AcpStdioClient {
             content: typeof params.content === 'string' ? params.content : '',
           }
           await this.handlers.writeTextFile(req)
+          await this.sendFrame(acpJsonRpcSuccess(id, {}))
+          return
+        }
+        case 'terminal/create': {
+          if (!this.handlers.createTerminal) {
+            await this.sendFrame(
+              acpJsonRpcFailure(
+                id,
+                ACP_JSON_RPC_ERRORS.methodNotFound,
+                'terminal/create handler is not configured on this ACP client',
+              ),
+            )
+            return
+          }
+          const req = parseCreateTerminalRequest(params)
+          const result = await this.handlers.createTerminal(req)
+          await this.sendFrame(acpJsonRpcSuccess(id, { terminalId: result.terminalId }))
+          return
+        }
+        case 'terminal/output': {
+          if (!this.handlers.getTerminalOutput) {
+            await this.sendFrame(
+              acpJsonRpcFailure(
+                id,
+                ACP_JSON_RPC_ERRORS.methodNotFound,
+                'terminal/output handler is not configured on this ACP client',
+              ),
+            )
+            return
+          }
+          const req = parseTerminalIdRequest(params)
+          const result = await this.handlers.getTerminalOutput(req)
+          await this.sendFrame(
+            acpJsonRpcSuccess(id, {
+              output: result.output,
+              truncated: result.truncated,
+              ...(result.exitStatus ? { exitStatus: result.exitStatus } : {}),
+            }),
+          )
+          return
+        }
+        case 'terminal/wait_for_exit': {
+          if (!this.handlers.waitForTerminalExit) {
+            await this.sendFrame(
+              acpJsonRpcFailure(
+                id,
+                ACP_JSON_RPC_ERRORS.methodNotFound,
+                'terminal/wait_for_exit handler is not configured on this ACP client',
+              ),
+            )
+            return
+          }
+          const req = parseTerminalIdRequest(params)
+          const result = await this.handlers.waitForTerminalExit(req)
+          await this.sendFrame(
+            acpJsonRpcSuccess(id, {
+              ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+              ...(result.signal !== undefined ? { signal: result.signal } : {}),
+            }),
+          )
+          return
+        }
+        case 'terminal/kill': {
+          if (!this.handlers.killTerminal) {
+            await this.sendFrame(
+              acpJsonRpcFailure(
+                id,
+                ACP_JSON_RPC_ERRORS.methodNotFound,
+                'terminal/kill handler is not configured on this ACP client',
+              ),
+            )
+            return
+          }
+          await this.handlers.killTerminal(parseTerminalIdRequest(params))
+          await this.sendFrame(acpJsonRpcSuccess(id, {}))
+          return
+        }
+        case 'terminal/release': {
+          if (!this.handlers.releaseTerminal) {
+            await this.sendFrame(
+              acpJsonRpcFailure(
+                id,
+                ACP_JSON_RPC_ERRORS.methodNotFound,
+                'terminal/release handler is not configured on this ACP client',
+              ),
+            )
+            return
+          }
+          await this.handlers.releaseTerminal(parseTerminalIdRequest(params))
           await this.sendFrame(acpJsonRpcSuccess(id, {}))
           return
         }
@@ -1285,6 +1746,21 @@ export class AcpStdioClient {
   }
 
   private handleAgentNotification(method: string, params: Readonly<Record<string, unknown>>): void {
+    if (method === 'elicitation/complete' || method === 'elicitation_complete') {
+      const elicitationId = readStringField(params, 'elicitationId', 'elicitation_id')
+      const sessionId = readStringField(params, 'sessionId', 'session_id') || undefined
+      if (elicitationId) {
+        this.emit(
+          {
+            type: 'elicitation_complete',
+            elicitationId,
+            ...(sessionId ? { sessionId } : {}),
+          },
+          sessionId,
+        )
+      }
+      return
+    }
     if (method !== 'session/update' && method !== 'session_update') {
       return
     }
@@ -1303,12 +1779,14 @@ export class AcpStdioClient {
 
   private emit(event: AcpClientEvent, sessionId?: string): void {
     if (sessionId) {
-      const promptListener = this.promptListeners.get(sessionId)
-      if (promptListener) {
-        try {
-          promptListener(event)
-        } catch {
-          // Keep stream healthy if a subscriber throws.
+      const promptListeners = this.promptListeners.get(sessionId)
+      if (promptListeners) {
+        for (const promptListener of promptListeners) {
+          try {
+            promptListener(event)
+          } catch {
+            // Keep stream healthy if a subscriber throws.
+          }
         }
       }
     }
@@ -1334,15 +1812,28 @@ export function normalizeAcpSessionUpdate(
 ): AcpClientEvent[] {
   const events: AcpClientEvent[] = []
   const kind = readStringField(update, 'sessionUpdate', 'type', 'kind')
+  const meta = isAcpRecord(update._meta)
+    ? update._meta
+    : isAcpRecord(update.meta)
+      ? update.meta
+      : undefined
 
   switch (kind) {
     case 'agent_message_chunk':
     case 'text_delta':
     case 'text': {
       const text = extractAcpContentText(update.content) || readStringField(update, 'delta', 'text')
-      if (text) {
-        events.push({ type: 'text_delta', sessionId, text })
-        if (isPostSettle) {
+      const contentBlocks = extractAcpContentBlocks(update.content)
+      const hasNonTextBlocks = contentBlocks.some(block => block.type !== 'text')
+      if (text || hasNonTextBlocks) {
+        events.push({
+          type: 'text_delta',
+          sessionId,
+          text,
+          ...(hasNonTextBlocks ? { contentBlocks } : {}),
+          ...(meta ? { meta } : {}),
+        })
+        if (isPostSettle && text) {
           events.push({ type: 'continuation', sessionId, text, rawUpdate: update })
         }
       }
@@ -1367,7 +1858,10 @@ export function normalizeAcpSessionUpdate(
       const name = readStringField(update, 'name', 'toolName', 'tool_name') || title || toolKind || 'tool'
       const status = readStringField(update, 'status') || 'in_progress'
       const rawInput = update.rawInput ?? update.inputs ?? update.arguments
-      const diff = extractAcpToolDiff(update.content)
+      const diffs = extractAcpToolDiffs(update.content)
+      const diff = diffs[0]
+      const contentBlocks = extractAcpContentBlocks(update.content)
+      const content = extractAcpToolContent(update.content) || undefined
       const locations = extractAcpToolLocations(update.locations)
       events.push({
         type: 'tool_call',
@@ -1378,8 +1872,12 @@ export function normalizeAcpSessionUpdate(
         ...(toolKind ? { kind: toolKind } : {}),
         ...(status ? { status } : {}),
         ...(rawInput !== undefined ? { rawInput } : {}),
+        ...(content !== undefined ? { content } : {}),
         ...(diff ? { diff } : {}),
+        ...(diffs.length > 0 ? { diffs } : {}),
+        ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
         ...(locations && locations.length > 0 ? { locations } : {}),
+        ...(meta ? { meta } : {}),
       })
       return events
     }
@@ -1388,11 +1886,14 @@ export function normalizeAcpSessionUpdate(
     case 'tool_end': {
       const toolCallId = readStringField(update, 'toolCallId', 'tool_call_id', 'id') || 'tool'
       const title = readStringField(update, 'title') || undefined
+      const toolKind = readStringField(update, 'kind') || undefined
       const name = readStringField(update, 'name', 'toolName', 'tool_name') || title || undefined
       const status = readStringField(update, 'status') || (kind === 'tool_end' ? 'completed' : undefined)
       const rawInput = update.rawInput ?? update.inputs
       const rawOutput = update.rawOutput ?? update.result
-      const diff = extractAcpToolDiff(update.content)
+      const diffs = extractAcpToolDiffs(update.content)
+      const diff = diffs[0]
+      const contentBlocks = extractAcpContentBlocks(update.content)
       const locations = extractAcpToolLocations(update.locations)
       const textContent = extractAcpToolContent(update.content)
       const content = textContent || stringifyOutput(rawOutput) || undefined
@@ -1416,20 +1917,33 @@ export function normalizeAcpSessionUpdate(
         toolCallId,
         ...(name ? { name } : {}),
         ...(title ? { title } : {}),
+        ...(toolKind ? { kind: toolKind } : {}),
         ...(status ? { status } : {}),
         ...(rawInput !== undefined ? { rawInput } : {}),
         ...(rawOutput !== undefined ? { rawOutput } : {}),
         ...(content !== undefined ? { content } : {}),
         ...(diff ? { diff } : {}),
+        ...(diffs.length > 0 ? { diffs } : {}),
+        ...(contentBlocks.length > 0 ? { contentBlocks } : {}),
         ...(locations && locations.length > 0 ? { locations } : {}),
         ...(isError ? { isError: true } : {}),
         ...(permissionDenied ? { permissionDenied: true } : {}),
+        ...(meta ? { meta } : {}),
       })
       return events
     }
 
-    case 'plan': {
-      const rawEntries = Array.isArray(update.entries) ? update.entries : []
+    case 'plan':
+    case 'plan_update':
+    case 'plan_removed':
+    case 'plan_clear': {
+      const planRecord = kind === 'plan_update' && isAcpRecord(update.plan) ? update.plan : undefined
+      const rawEntries =
+        kind === 'plan' && Array.isArray(update.entries)
+          ? update.entries
+          : planRecord && Array.isArray(planRecord.entries)
+            ? planRecord.entries
+            : []
       const entries: AcpPlanEntry[] = []
       for (const item of rawEntries) {
         if (!isAcpRecord(item)) continue
@@ -1443,7 +1957,80 @@ export function normalizeAcpSessionUpdate(
           ...(priority ? { priority } : {}),
         })
       }
+      if (entries.length === 0 && planRecord) {
+        const mdContent = readStringField(planRecord, 'content')
+        const fileUri = readStringField(planRecord, 'uri')
+        if (mdContent) {
+          entries.push({ content: mdContent, status: 'in_progress' })
+        } else if (fileUri) {
+          entries.push({ content: fileUri, status: 'in_progress' })
+        }
+      }
       events.push({ type: 'plan', sessionId, entries })
+      return events
+    }
+
+    case 'compaction_update': {
+      const compactionId = readStringField(update, 'compactionId', 'compaction_id') || 'default'
+      const rawStatus = readStringField(update, 'status').toLowerCase()
+      const status =
+        rawStatus === 'completed'
+          ? 'completed'
+          : rawStatus === 'failed' || rawStatus === 'cancelled'
+            ? 'failed'
+            : 'in_progress'
+      const summaryBlocks = Array.isArray(update.summary) ? extractAcpContentBlocks(update.summary) : []
+      const summaryText = Array.isArray(update.summary) ? extractAcpContentText(update.summary) : ''
+      const errorText = readStringField(update, 'error')
+      const content = errorText || summaryText || undefined
+      const meta = isAcpRecord(update._meta) ? update._meta : undefined
+      events.push({
+        type: 'tool_call_update',
+        sessionId,
+        toolCallId: `acp-compaction:${compactionId}`,
+        name: 'Compact context',
+        title: 'Compact context',
+        kind: 'think',
+        status,
+        ...(content !== undefined ? { content } : {}),
+        ...(summaryBlocks.length > 0 ? { contentBlocks: summaryBlocks } : {}),
+        ...(status === 'failed' ? { isError: true } : {}),
+        ...(meta ? { meta } : {}),
+      })
+      return events
+    }
+
+    case 'compaction_summary_chunk': {
+      const compactionId = readStringField(update, 'compactionId', 'compaction_id') || 'default'
+      const text = extractAcpContentText(update.content) || readStringField(update, 'delta', 'text')
+      const meta = isAcpRecord(update._meta) ? update._meta : undefined
+      events.push({
+        type: 'tool_call_update',
+        sessionId,
+        toolCallId: `acp-compaction:${compactionId}`,
+        name: 'Compact context',
+        title: 'Compact context',
+        kind: 'think',
+        status: 'in_progress',
+        ...(text ? { content: text } : {}),
+        ...(meta ? { meta } : {}),
+      })
+      return events
+    }
+
+    case 'notice': {
+      const title = readStringField(update, 'title').trim().slice(0, 1024)
+      const description = readStringField(update, 'description', 'message').trim().slice(0, 4096)
+      const severity = readStringField(update, 'severity', 'level').trim().slice(0, 64) || 'info'
+      if (title || description) {
+        events.push({
+          type: 'notice',
+          sessionId,
+          severity,
+          title: title || description,
+          ...(title && description ? { description } : {}),
+        })
+      }
       return events
     }
 
@@ -1486,14 +2073,14 @@ export function normalizeAcpSessionUpdate(
           ? update.config_options
           : undefined
       const configId = readStringField(update, 'configId', 'config_id', 'id') || undefined
-      const value = readStringField(update, 'value', 'currentValue', 'current_value') || undefined
-      if (configOptions || (configId && value)) {
+      const value = readConfigValueField(update, 'value', 'currentValue', 'current_value')
+      if (configOptions || (configId && value !== undefined)) {
         events.push({
           type: 'config_update',
           sessionId,
           ...(configOptions ? { configOptions } : {}),
           ...(configId ? { configId } : {}),
-          ...(value ? { value } : {}),
+          ...(value !== undefined ? { value } : {}),
           rawUpdate: update,
         })
       }
@@ -1510,6 +2097,7 @@ export function normalizeAcpSessionUpdate(
       const cachedWriteTokens = readNumberField(nestedUsage, 'cachedWriteTokens', 'cached_write_tokens', 'cacheCreationTokens', 'cache_creation_tokens')
       const thoughtTokens = readNumberField(nestedUsage, 'thoughtTokens', 'thought_tokens', 'reasoningTokens', 'reasoning_tokens')
       const totalTokens = readNumberField(nestedUsage, 'totalTokens', 'total_tokens')
+      const parsedCost = parseUsageCost(update.cost ?? nestedUsage.cost, update, nestedUsage)
       if (
         contextUsed !== undefined ||
         contextSize !== undefined ||
@@ -1518,7 +2106,9 @@ export function normalizeAcpSessionUpdate(
         cachedReadTokens !== undefined ||
         cachedWriteTokens !== undefined ||
         thoughtTokens !== undefined ||
-        totalTokens !== undefined
+        totalTokens !== undefined ||
+        parsedCost.cost !== undefined ||
+        parsedCost.costUsd !== undefined
       ) {
         events.push({
           type: 'usage_update',
@@ -1531,6 +2121,8 @@ export function normalizeAcpSessionUpdate(
           ...(cachedWriteTokens !== undefined ? { cachedWriteTokens } : {}),
           ...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
           ...(totalTokens !== undefined ? { totalTokens } : {}),
+          ...(parsedCost.cost ? { cost: parsedCost.cost } : {}),
+          ...(parsedCost.costUsd !== undefined ? { costUsd: parsedCost.costUsd } : {}),
         })
       }
       return events
@@ -1571,17 +2163,17 @@ export function normalizeAcpSessionUpdate(
           (inputRecord ? readStringField(inputRecord, 'hint', 'placeholder', 'description') : '') ||
           readStringField(item, 'inputHint', 'input_hint') ||
           undefined
-        const meta = isAcpRecord(item._meta)
+        const itemMeta = isAcpRecord(item._meta)
           ? item._meta
           : isAcpRecord(item.meta)
             ? item.meta
             : undefined
         const rawKind = (
           readStringField(item, 'kind', 'type', 'category') ||
-          (meta ? readStringField(meta, 'kind', 'type', 'category') : '')
+          (itemMeta ? readStringField(itemMeta, 'kind', 'type', 'category') : '')
         ).toLowerCase()
-        const metaPath = meta ? readStringField(meta, 'path', 'skillPath', 'skill_path') : ''
-        const kind: 'command' | 'skill' | undefined =
+        const metaPath = itemMeta ? readStringField(itemMeta, 'path', 'skillPath', 'skill_path') : ''
+        const cmdKind: 'command' | 'skill' | undefined =
           rawKind === 'skill' ||
           rawKind === 'skills' ||
           /(?:^|[/\\])skill\.md$/i.test(metaPath)
@@ -1591,13 +2183,13 @@ export function normalizeAcpSessionUpdate(
               : undefined
         const source =
           readStringField(item, 'source') ||
-          (meta ? readStringField(meta, 'source', 'origin') : '') ||
+          (itemMeta ? readStringField(itemMeta, 'source', 'origin') : '') ||
           undefined
         commands.push({
           name: rawName,
           ...(description ? { description } : {}),
           ...(inputHint ? { input_hint: inputHint } : {}),
-          ...(kind ? { kind } : {}),
+          ...(cmdKind ? { kind: cmdKind } : {}),
           ...(source ? { source } : {}),
         })
       }
@@ -1606,7 +2198,18 @@ export function normalizeAcpSessionUpdate(
     }
 
     case 'user_message_chunk': {
-      // Replay echo during session/load; never treat user echoes as assistant deltas.
+      // Replay echo during session/load; emit dedicated user_message_chunk, never assistant text_delta.
+      const text = extractAcpContentText(update.content) || readStringField(update, 'delta', 'text')
+      const contentBlocks = extractAcpContentBlocks(update.content)
+      const hasNonTextBlocks = contentBlocks.some(block => block.type !== 'text')
+      if (text || hasNonTextBlocks) {
+        events.push({
+          type: 'user_message_chunk',
+          sessionId,
+          text,
+          ...(hasNonTextBlocks ? { contentBlocks } : {}),
+        })
+      }
       return events
     }
 
@@ -1628,16 +2231,11 @@ export function normalizeAcpSessionUpdate(
     }
 
     default: {
-      // Preserve Antigravity-style continuation or vendor-specific post-settle updates cleanly.
-      const fallbackText = extractAcpContentText(update.content) || readStringField(update, 'delta', 'text')
-      if (fallbackText) {
-        events.push({ type: 'text_delta', sessionId, text: fallbackText })
-      }
-      if (isPostSettle || fallbackText || kind) {
+      // Never leak unknown future session/update kinds into assistant text_delta prose.
+      if (isPostSettle) {
         events.push({
           type: 'continuation',
           sessionId,
-          ...(fallbackText ? { text: fallbackText } : {}),
           rawUpdate: update,
         })
       }
@@ -1649,17 +2247,25 @@ export function normalizeAcpSessionUpdate(
 /** True when an ACP JSON-RPC error indicates the external agent requires user login. */
 export function isAcpAuthRequiredError(error: unknown): boolean {
   if (error instanceof AcpRpcError) {
-    if (
-      (error.code === -32000 || error.code === 401) &&
-      /auth(?:entication)?\s+required|not\s+(?:signed|logged)\s+in|unauthenticated|unauthorized|login\s+required/i.test(
-        error.message,
-      )
-    ) {
+    if (error.code === -32000 || error.code === 401) {
+      if (
+        /auth(?:entication)?\s+required|not\s+(?:signed|logged)\s+in|unauthenticated|unauthorized|login\s+required/i.test(
+          error.message,
+        )
+      ) {
+        return true
+      }
+    }
+    // agy 1.5 CLI answers `authenticate` with -32603 "No browser is available here" when unauthenticated without a display.
+    if (error.code === -32603 && /\bno browser is available here\b/i.test(error.message)) {
+      return true
+    }
+    if (isAcpRecord(error.data) && error.data.authRequired === true) {
       return true
     }
   }
   const msg = errorMessage(error)
-  return /\bauthentication\s+required\b|\bunauthenticated\b|\blogin\s+required\b/i.test(msg)
+  return /\bauthentication\s+required\b|\bunauthenticated\b|\blogin\s+required\b|\bno browser is available here\b/i.test(msg)
 }
 
 function parsePermissionRequest(params: Readonly<Record<string, unknown>>): AcpClientPermissionRequest {
@@ -1678,8 +2284,14 @@ function parsePermissionRequest(params: Readonly<Record<string, unknown>>): AcpC
     toolKind ||
     'tool'
   const rawInput = toolCall.rawInput ?? params.rawInput ?? params.inputs
-  const diff = extractAcpToolDiff(toolCall.content ?? params.content)
+  const diffs = extractAcpToolDiffs(toolCall.content ?? params.content)
+  const diff = diffs[0]
   const locations = extractAcpToolLocations(toolCall.locations ?? params.locations)
+  const meta = isAcpRecord(toolCall._meta)
+    ? toolCall._meta
+    : isAcpRecord(params._meta)
+      ? params._meta
+      : undefined
   const rawOptions = Array.isArray(params.options) ? params.options : []
   const options: AcpPermissionOption[] = []
   for (const item of rawOptions) {
@@ -1688,7 +2300,22 @@ function parsePermissionRequest(params: Readonly<Record<string, unknown>>): AcpC
     if (!optionId) continue
     const name = readStringField(item, 'name', 'label') || optionId
     const kind = readStringField(item, 'kind') || undefined
-    options.push({ optionId, name, ...(kind ? { kind } : {}) })
+    const optMeta = isAcpRecord(item._meta) ? item._meta : undefined
+    let warning: string | undefined
+    const rawWarning = optMeta ? optMeta['agy.security.warning'] : undefined
+    if (isAcpRecord(rawWarning)) {
+      const text = (readStringField(rawWarning, 'message') || readStringField(rawWarning, 'title')).trim()
+      if (text) {
+        warning = text.length > 512 ? `${text.slice(0, 509)}...` : text
+      }
+    }
+    options.push({
+      optionId,
+      name,
+      ...(kind ? { kind } : {}),
+      ...(optMeta ? { meta: optMeta } : {}),
+      ...(warning ? { warning } : {}),
+    })
   }
   return {
     sessionId,
@@ -1698,7 +2325,9 @@ function parsePermissionRequest(params: Readonly<Record<string, unknown>>): AcpC
     ...(toolKind ? { kind: toolKind } : {}),
     ...(rawInput !== undefined ? { rawInput } : {}),
     ...(diff ? { diff } : {}),
+    ...(diffs.length > 0 ? { diffs } : {}),
     ...(locations && locations.length > 0 ? { locations } : {}),
+    ...(meta ? { meta } : {}),
     options,
   }
 }
@@ -1733,6 +2362,7 @@ function formatPermissionRpcResult(response: AcpClientPermissionResponse): Recor
 export function parseElicitationRequest(params: Readonly<Record<string, unknown>>): AcpElicitationRequest {
   const sessionId = readStringField(params, 'sessionId', 'session_id')
   const toolCallId = readStringField(params, 'toolCallId', 'tool_call_id') || undefined
+  const elicitationId = readStringField(params, 'elicitationId', 'elicitation_id') || undefined
   const url = readStringField(params, 'url') || undefined
   const mode = readStringField(params, 'mode') || (url ? 'url' : 'form')
   const message = readStringField(params, 'message', 'title') || 'Input required'
@@ -1744,6 +2374,7 @@ export function parseElicitationRequest(params: Readonly<Record<string, unknown>
   const fields = requestedSchema ? parseElicitationFields(requestedSchema) : []
   return {
     sessionId,
+    ...(elicitationId ? { elicitationId } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     mode,
     message,
@@ -1774,6 +2405,14 @@ function parseElicitationFields(schema: Readonly<Record<string, unknown>>): AcpE
         : 'string'
     const title = readStringField(rawField, 'title') || undefined
     const description = readStringField(rawField, 'description') || undefined
+    const format = readStringField(rawField, 'format') || undefined
+    const pattern = readStringField(rawField, 'pattern') || undefined
+    const minLength = readFiniteNumber(rawField.minLength)
+    const maxLength = readFiniteNumber(rawField.maxLength)
+    const minimum = readFiniteNumber(rawField.minimum)
+    const maximum = readFiniteNumber(rawField.maximum)
+    const minItems = readFiniteNumber(rawField.minItems)
+    const maxItems = readFiniteNumber(rawField.maxItems)
     const oneOf = parseElicitationOptions(rawField.oneOf ?? rawField.anyOf)
     const enumValues = Array.isArray(rawField.enum)
       ? rawField.enum.filter((item): item is string => typeof item === 'string')
@@ -1804,6 +2443,14 @@ function parseElicitationFields(schema: Readonly<Record<string, unknown>>): AcpE
       required: requiredKeys.has(key),
       ...(title ? { title } : {}),
       ...(description ? { description } : {}),
+      ...(format ? { format } : {}),
+      ...(pattern ? { pattern } : {}),
+      ...(minLength !== undefined ? { minLength } : {}),
+      ...(maxLength !== undefined ? { maxLength } : {}),
+      ...(minimum !== undefined ? { minimum } : {}),
+      ...(maximum !== undefined ? { maximum } : {}),
+      ...(minItems !== undefined ? { minItems } : {}),
+      ...(maxItems !== undefined ? { maxItems } : {}),
       ...(rawField.default !== undefined ? { default: rawField.default } : {}),
       ...(oneOf && oneOf.length > 0 ? { oneOf } : {}),
       ...(enumValues && enumValues.length > 0 ? { enum: enumValues } : {}),
@@ -1834,8 +2481,14 @@ function parseElicitationOptions(raw: unknown): readonly AcpElicitationOption[] 
   return options.length > 0 ? options : undefined
 }
 
-function formatElicitationRpcResult(response: AcpElicitationResponse): Record<string, unknown> {
+function formatElicitationRpcResult(
+  response: AcpElicitationResponse,
+  mode?: string,
+): Record<string, unknown> {
   if (response.action === 'accept') {
+    if (mode === 'url') {
+      return { action: 'accept' }
+    }
     return {
       action: 'accept',
       content: response.content ?? {},
@@ -1845,6 +2498,44 @@ function formatElicitationRpcResult(response: AcpElicitationResponse): Record<st
     return { action: 'decline' }
   }
   return { action: 'cancel' }
+}
+
+function parseCreateTerminalRequest(params: Readonly<Record<string, unknown>>): AcpCreateTerminalRequest {
+  const sessionId = readStringField(params, 'sessionId', 'session_id')
+  const command = readStringField(params, 'command')
+  const args = Array.isArray(params.args)
+    ? params.args.filter((item): item is string => typeof item === 'string')
+    : undefined
+  const cwd = readStringField(params, 'cwd') || undefined
+  const outputByteLimit = readNumberField(params, 'outputByteLimit', 'output_byte_limit')
+  let env: AcpTerminalEnvVar[] | undefined
+  if (Array.isArray(params.env)) {
+    const parsedEnv: AcpTerminalEnvVar[] = []
+    for (const item of params.env) {
+      if (!isAcpRecord(item)) continue
+      const name = readStringField(item, 'name')
+      if (!name || typeof item.value !== 'string') continue
+      parsedEnv.push({ name, value: item.value })
+    }
+    if (parsedEnv.length > 0) {
+      env = parsedEnv
+    }
+  }
+  return {
+    sessionId,
+    command,
+    ...(args && args.length > 0 ? { args } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(env ? { env } : {}),
+    ...(outputByteLimit !== undefined ? { outputByteLimit } : {}),
+  }
+}
+
+function parseTerminalIdRequest(params: Readonly<Record<string, unknown>>): AcpTerminalIdRequest {
+  return {
+    sessionId: readStringField(params, 'sessionId', 'session_id'),
+    terminalId: readStringField(params, 'terminalId', 'terminal_id'),
+  }
 }
 
 function extractAcpContentText(content: unknown): string {
@@ -1866,8 +2557,9 @@ function extractAcpContentText(content: unknown): string {
   return ''
 }
 
-function extractAcpToolDiff(content: unknown): AcpToolDiff | undefined {
+function extractAcpToolDiffs(content: unknown): AcpToolDiff[] {
   const entries = Array.isArray(content) ? content : content !== undefined ? [content] : []
+  const diffs: AcpToolDiff[] = []
   for (const entry of entries) {
     if (!isAcpRecord(entry)) continue
     if (entry.type !== 'diff') continue
@@ -1883,14 +2575,102 @@ function extractAcpToolDiff(content: unknown): AcpToolDiff | undefined {
         ? entry.new_text
         : undefined
     if (path || oldText !== undefined || newText !== undefined) {
-      return {
+      diffs.push({
         path,
         ...(oldText !== undefined ? { oldText } : {}),
         ...(newText !== undefined ? { newText } : {}),
+      })
+    }
+  }
+  return diffs
+}
+
+function extractAcpContentBlocks(content: unknown): AcpContentBlock[] {
+  const entries = Array.isArray(content) ? content : content !== undefined ? [content] : []
+  const blocks: AcpContentBlock[] = []
+  const pushFromEntry = (rawEntry: unknown): void => {
+    if (!isAcpRecord(rawEntry)) return
+    const type = readStringField(rawEntry, 'type')
+    if (type === 'diff') return
+    if (type === 'content' && rawEntry.content !== undefined) {
+      if (Array.isArray(rawEntry.content)) {
+        for (const inner of rawEntry.content) pushFromEntry(inner)
+      } else {
+        pushFromEntry(rawEntry.content)
+      }
+      return
+    }
+    if (type === 'text' && typeof rawEntry.text === 'string') {
+      blocks.push({ type: 'text', text: rawEntry.text })
+      return
+    }
+    if (type === 'image') {
+      const data = typeof rawEntry.data === 'string' ? rawEntry.data : ''
+      const mimeType = readStringField(rawEntry, 'mimeType', 'mime_type', 'mediaType', 'media_type')
+      const uri = readStringField(rawEntry, 'uri') || undefined
+      if (data && mimeType) {
+        blocks.push({ type: 'image', data, mimeType, ...(uri ? { uri } : {}) })
+      }
+      return
+    }
+    if (type === 'audio') {
+      const data = typeof rawEntry.data === 'string' ? rawEntry.data : ''
+      const mimeType = readStringField(rawEntry, 'mimeType', 'mime_type', 'mediaType', 'media_type')
+      if (data && mimeType) {
+        blocks.push({ type: 'audio', data, mimeType })
+      }
+      return
+    }
+    if (type === 'resource' && isAcpRecord(rawEntry.resource)) {
+      const res = rawEntry.resource
+      const uri = readStringField(res, 'uri')
+      const mimeType = readStringField(res, 'mimeType', 'mime_type') || undefined
+      const text = typeof res.text === 'string' ? res.text : undefined
+      const blob = typeof res.blob === 'string' ? res.blob : undefined
+      if (uri && (text !== undefined || blob !== undefined)) {
+        blocks.push({
+          type: 'resource',
+          resource: {
+            uri,
+            ...(mimeType ? { mimeType } : {}),
+            ...(text !== undefined ? { text } : {}),
+            ...(blob !== undefined ? { blob } : {}),
+          },
+        })
+      }
+      return
+    }
+    if (type === 'resource_link') {
+      const uri = readStringField(rawEntry, 'uri')
+      const name = readStringField(rawEntry, 'name') || uri
+      if (uri) {
+        const mimeType = readStringField(rawEntry, 'mimeType', 'mime_type') || undefined
+        const title = readStringField(rawEntry, 'title') || undefined
+        const description = readStringField(rawEntry, 'description') || undefined
+        const size = readNumberField(rawEntry, 'size')
+        blocks.push({
+          type: 'resource_link',
+          uri,
+          name,
+          ...(mimeType ? { mimeType } : {}),
+          ...(title ? { title } : {}),
+          ...(description ? { description } : {}),
+          ...(size !== undefined ? { size } : {}),
+        })
+      }
+      return
+    }
+    if (type === 'terminal') {
+      const terminalId = readStringField(rawEntry, 'terminalId', 'terminal_id')
+      if (terminalId) {
+        blocks.push({ type: 'terminal', terminalId })
       }
     }
   }
-  return undefined
+  for (const entry of entries) {
+    pushFromEntry(entry)
+  }
+  return blocks
 }
 
 function extractAcpToolLocations(raw: unknown): readonly AcpToolLocation[] | undefined {
@@ -1924,7 +2704,7 @@ function extractAcpToolContent(content: unknown): string {
       }
       if (!isAcpRecord(entry)) continue
       if (entry.type === 'diff') {
-        // Structured diff blocks are preserved intact on `event.diff` rather than flattened.
+        // Structured diff blocks are preserved intact on `event.diff` / `event.diffs` rather than flattened.
         continue
       }
       const text = extractAcpContentText(entry)
@@ -1951,13 +2731,75 @@ function parseAuthMethods(raw: unknown): readonly AcpAuthMethod[] {
     seen.add(id)
     const name = readStringField(item, 'name', 'label') || id
     const description = readStringField(item, 'description') || undefined
+    const meta = isAcpRecord(item._meta)
+      ? item._meta
+      : isAcpRecord(item.meta)
+        ? item.meta
+        : undefined
+    const terminalAuthMeta = isAcpRecord(meta?.['terminal-auth']) ? meta['terminal-auth'] : undefined
+    const rawType = readStringField(item, 'type') || (terminalAuthMeta ? 'terminal' : undefined)
+    const rawArgs = Array.isArray(item.args)
+      ? item.args
+      : Array.isArray(terminalAuthMeta?.args)
+        ? terminalAuthMeta.args
+        : undefined
+    const args = rawArgs
+      ? rawArgs.filter((entry): entry is string => typeof entry === 'string')
+      : undefined
+    const rawEnv = isAcpRecord(item.env)
+      ? item.env
+      : isAcpRecord(terminalAuthMeta?.env)
+        ? terminalAuthMeta.env
+        : undefined
+    let env: Record<string, string> | undefined
+    if (rawEnv) {
+      const cleaned: Record<string, string> = {}
+      for (const [k, v] of Object.entries(rawEnv)) {
+        if (typeof v === 'string') cleaned[k] = v
+      }
+      if (Object.keys(cleaned).length > 0) {
+        env = cleaned
+      }
+    }
     methods.push({
       id,
       name,
       ...(description ? { description } : {}),
+      ...(rawType ? { type: rawType } : {}),
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(env ? { env } : {}),
+      ...(meta ? { meta } : {}),
     })
   }
   return methods
+}
+
+function parseUsageCost(
+  rawCost: unknown,
+  primary: Readonly<Record<string, unknown>>,
+  secondary?: Readonly<Record<string, unknown>>,
+): { readonly cost?: AcpUsageCost; readonly costUsd?: number } {
+  if (isAcpRecord(rawCost)) {
+    const amount = readNumberField(rawCost, 'amount', 'value')
+    if (amount !== undefined) {
+      const currency = readStringField(rawCost, 'currency') || 'USD'
+      const cost: AcpUsageCost = { amount, currency }
+      return {
+        cost,
+        ...(currency.toUpperCase() === 'USD' ? { costUsd: amount } : {}),
+      }
+    }
+  }
+  const directUsd =
+    readNumberField(primary, 'costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd') ??
+    (secondary ? readNumberField(secondary, 'costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd') : undefined)
+  if (directUsd !== undefined) {
+    return {
+      cost: { amount: directUsd, currency: 'USD' },
+      costUsd: directUsd,
+    }
+  }
+  return {}
 }
 
 function parsePromptUsage(raw: unknown): AcpPromptUsage | undefined {
@@ -1970,13 +2812,16 @@ function parsePromptUsage(raw: unknown): AcpPromptUsage | undefined {
   const cachedWriteTokens = readNumberField(raw, 'cachedWriteTokens', 'cached_write_tokens', 'cacheCreationTokens', 'cache_creation_tokens')
   const thoughtTokens = readNumberField(raw, 'thoughtTokens', 'thought_tokens', 'reasoningTokens', 'reasoning_tokens')
   const totalTokens = readNumberField(raw, 'totalTokens', 'total_tokens')
+  const parsedCost = parseUsageCost(raw.cost, raw)
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
     cachedReadTokens === undefined &&
     cachedWriteTokens === undefined &&
     thoughtTokens === undefined &&
-    totalTokens === undefined
+    totalTokens === undefined &&
+    parsedCost.cost === undefined &&
+    parsedCost.costUsd === undefined
   ) {
     return undefined
   }
@@ -1987,7 +2832,29 @@ function parsePromptUsage(raw: unknown): AcpPromptUsage | undefined {
     ...(cachedWriteTokens !== undefined ? { cachedWriteTokens } : {}),
     ...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(parsedCost.cost ? { cost: parsedCost.cost } : {}),
+    ...(parsedCost.costUsd !== undefined ? { costUsd: parsedCost.costUsd } : {}),
   }
+}
+
+function formatAcpRpcErrorData(data: unknown, message: string): string {
+  if (data === undefined || data === null) return ''
+  let detail = ''
+  if (typeof data === 'string') {
+    detail = data.trim()
+  } else if (isAcpRecord(data)) {
+    detail = readStringField(data, 'detail', 'details', 'reason', 'message', 'error')
+    if (!detail) {
+      try {
+        const serialized = JSON.stringify(data)
+        if (serialized && serialized !== '{}') detail = serialized
+      } catch {
+        detail = ''
+      }
+    }
+  }
+  if (!detail || message.includes(detail)) return ''
+  return detail.length > 240 ? `${detail.slice(0, 237)}...` : detail
 }
 
 function stringifyOutput(value: unknown): string {
@@ -2022,6 +2889,22 @@ function readStringField(record: Readonly<Record<string, unknown>>, ...keys: rea
   return ''
 }
 
+function readConfigValueField(
+  record: Readonly<Record<string, unknown>>,
+  ...keys: readonly string[]
+): string | boolean | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'boolean') {
+      return value
+    }
+    if (typeof value === 'string' && value.length > 0) {
+      return value
+    }
+  }
+  return undefined
+}
+
 function readNumberField(record: Readonly<Record<string, unknown>>, ...keys: readonly string[]): number | undefined {
   for (const key of keys) {
     const value = record[key]
@@ -2030,6 +2913,10 @@ function readNumberField(record: Readonly<Record<string, unknown>>, ...keys: rea
     }
   }
   return undefined
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function spawnBunAcpProcess(
@@ -2064,7 +2951,16 @@ function spawnBunAcpProcess(
         void child.stdin.flush?.()
       }
     },
-    kill: () => {
+    closeStdin: () => {
+      try {
+        if (child.stdin && typeof child.stdin !== 'number') {
+          void child.stdin.end?.()
+        }
+      } catch {
+        // Ignore already-closed stdin.
+      }
+    },
+    kill: (signal?: NodeJS.Signals | number) => {
       try {
         if (child.stdin && typeof child.stdin !== 'number') {
           void child.stdin.end?.()
@@ -2073,7 +2969,11 @@ function spawnBunAcpProcess(
         // Ignore already-closed stdin.
       }
       try {
-        child.kill()
+        if (signal !== undefined) {
+          child.kill(signal)
+        } else {
+          child.kill()
+        }
       } catch {
         // Ignore already-exited subprocess.
       }

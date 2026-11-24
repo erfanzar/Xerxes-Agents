@@ -325,6 +325,18 @@ test('markdown renders <xerxes-embed>, <agent-embed>, ```widget, ```html-widget,
     title: 'My Sim',
   })
   expect(parseEmbedLine('<agent-embed src="artifact://z9y8x7w6"></agent-embed>')).toEqual({ artifactId: 'z9y8x7w6' })
+  expect(
+    parseEmbedLine('<agent-embed src="file:///Users/demo/.gemini/antigravity-cli/brain/83077c62-1572-4755-a9d0-b21533b609c1/orbital%20scene.html" title="Orbital"></agent-embed>'),
+  ).toEqual({
+    artifactId: 'agy:orbital scene.html',
+    title: 'Orbital',
+  })
+  expect(parseEmbedLine('<agent-embed src="artifact://agy:widget.html"></agent-embed>')).toEqual({
+    artifactId: 'agy:widget.html',
+  })
+  expect(parseEmbedLine('<agent-embed src="file:///etc/passwd"></agent-embed>')).toBeNull()
+  expect(parseEmbedLine('<agent-embed src="file:///Users/demo/.gemini/antigravity-cli/brain/sess-1/..%2Fsecret.html"></agent-embed>')).toBeNull()
+  expect(parseEmbedLine('<agent-embed src="file:///Users/demo/.gemini/antigravity-cli/brain/sess-1/notes.md"></agent-embed>')).toBeNull()
   expect(parseEmbedLine('<agent-embed src="https://evil.example/x.html"></agent-embed>')).toBeNull()
 
   const md = [

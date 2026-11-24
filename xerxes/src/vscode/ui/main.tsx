@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Entry for the VS Code chat view. Light/dark follows the VS Code theme. The
- * Style setting (Xerxes: Style) picks the look: Neo (the default) draws its
- * own colours and fonts with neo.css; Classic maps the app's tokens onto the
- * VS Code theme (vscode.css). High-contrast themes always keep VS Code's
- * colours. Backgrounds and colour themes are desktop-only.
+ * Entry for the VS Code chat view. Light/dark and colour tokens follow the
+ * VS Code theme (vscode.css loads last with host precedence). The Style
+ * setting (Xerxes: Style) switches between Vibes (default sans/rounded) and
+ * Neo (monospace/square). High-contrast themes clear data-style and enforce
+ * VS Code's contrast borders. Backgrounds and colour themes are desktop-only.
  */
 
 import { createRoot } from 'react-dom/client'

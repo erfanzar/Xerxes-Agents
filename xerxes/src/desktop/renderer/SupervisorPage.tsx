@@ -74,15 +74,26 @@ const SUGGESTIONS: readonly string[] = ['What needs me right now?', 'What is eve
 type PillTone = 'on' | 'off' | 'warn'
 
 /** A header control: its name and live state; opens the controls dialog on its tab. */
-function ControlPill({ name, value, tone, expanded, onClick }: {
+function ControlPill({ name, value, tone, expanded, disabled = false, title, onClick }: {
   readonly name: string
   readonly value: string
   readonly tone: PillTone
   readonly expanded: boolean
+  readonly disabled?: boolean
+  readonly title?: string
   readonly onClick: () => void
 }): ReactElement {
   return (
-    <button type="button" className="xpill" data-tone={tone} aria-haspopup="dialog" aria-expanded={expanded} title={`${name}: ${value}`} onClick={onClick}>
+    <button
+      type="button"
+      className="xpill"
+      data-tone={tone}
+      aria-haspopup="dialog"
+      aria-expanded={expanded}
+      disabled={disabled}
+      title={title ?? `${name}: ${value}`}
+      onClick={onClick}
+    >
       <span className="xpill__dot" aria-hidden="true" />
       <span className="xpill__name">{name}</span>
       <span className="xpill__value">{value}</span>
@@ -222,6 +233,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
   const unconfigured = config.status === 'unconfigured'
   // An unconfigured XERXES keeps its chooser in the page; everything else opens the controls dialog.
   const inlineChooser = unconfigured && supervisor.phase !== 'unsupported'
+  const inlineChooserRef = useRef<HTMLDivElement>(null)
   const controlsTab: ControlsTab | undefined = safetyOpen && safetyAvailable ? 'safety' : showAutopilot ? 'autopilot' : showWatch ? 'watch'
     : props.chooserOpen && !inlineChooser && supervisor.phase !== 'unsupported' ? 'model' : undefined
   const controlTabs: ControlsTabEntry[] = [
@@ -230,7 +242,32 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     { id: 'model', label: 'Model', hint: modelChipText(config) },
     ...(safetyAvailable ? [{ id: 'safety' as const, label: 'Safety', hint: 'Owner controls' }] : []),
   ]
+  const closeControls = (): void => {
+    setSafetyOpen(false)
+    if (props.autopilotOpen) props.onAutopilotChange?.(false)
+    if (props.watchOpen) props.onWatchChange?.(false)
+    if (props.chooserOpen) props.onChooserChange(false)
+  }
+  const focusInlineChooser = (): void => {
+    closeControls()
+    setSlackOpen(false)
+    props.onChooserShown()
+    const focus = (): void => {
+      const container = inlineChooserRef.current
+      if (!container) return
+      container.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+      const target = container.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]') ?? container
+      target.focus?.()
+    }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focus)
+    else focus()
+  }
   const openTab = (tab: ControlsTab): void => {
+    if (tab === 'model' && inlineChooser) {
+      focusInlineChooser()
+      return
+    }
+    if (tab === 'model' && supervisor.phase === 'unsupported') return
     setSafetyOpen(tab === 'safety')
     if (tab !== 'autopilot' && props.autopilotOpen) props.onAutopilotChange?.(false)
     if (tab !== 'watch' && props.watchOpen) props.onWatchChange?.(false)
@@ -238,12 +275,6 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
     if (tab === 'autopilot' && !props.autopilotOpen) props.onAutopilotChange?.(true)
     if (tab === 'watch' && !props.watchOpen) props.onWatchChange?.(true)
     if (tab === 'model' && !props.chooserOpen) props.onChooserChange(true)
-  }
-  const closeControls = (): void => {
-    setSafetyOpen(false)
-    if (props.autopilotOpen) props.onAutopilotChange?.(false)
-    if (props.watchOpen) props.onWatchChange?.(false)
-    if (props.chooserOpen) props.onChooserChange(false)
   }
   const ready = supervisor.phase === 'ready'
   const conversing = supervisor.phase !== 'unsupported' && supervisor.phase !== 'error'
@@ -329,7 +360,15 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               tone={watchChip === undefined ? 'off' : watch.rows.some(row => row.active && (row.stats?.anomalies.length ?? 0) > 0) ? 'warn' : 'on'}
               expanded={controlsTab === 'watch'} onClick={() => openTab('watch')} />
           ) : null}
-          <ControlPill name="Model" value={modelChipText(config)} tone={modelTone(config)} expanded={controlsTab === 'model' || inlineChooser} onClick={() => openTab('model')} />
+          <ControlPill
+            name="Model"
+            value={modelChipText(config)}
+            tone={modelTone(config)}
+            expanded={controlsTab === 'model' || inlineChooser}
+            disabled={supervisor.phase === 'unsupported'}
+            title={inlineChooser ? 'Model: No model chosen — jump to model setup' : `Model: ${modelChipText(config)}`}
+            onClick={() => openTab('model')}
+          />
           {safetyAvailable ? <ControlPill name="Safety" value="Owner controls" tone="off" expanded={controlsTab === 'safety'} onClick={() => openTab('safety')} /> : null}
         </div>
         <span className="xbar__sep" aria-hidden="true" />
@@ -381,13 +420,15 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           {watch.unsupported || supervisor.phase === 'unsupported' ? null : <WatchStrip rows={watch.rows} now={now} />}
           {inlineChooser ? (
             // No model yet: the chat cannot work without one, so the chooser stays in the page.
-            <ModelChooser
-              machines={state.machines}
-              config={config}
-              onOptions={props.onOptions}
-              onSave={props.onSaveModel}
-              onOpen={props.onChooserShown}
-            />
+            <div ref={inlineChooserRef} tabIndex={-1}>
+              <ModelChooser
+                machines={state.machines}
+                config={config}
+                onOptions={props.onOptions}
+                onSave={props.onSaveModel}
+                onOpen={props.onChooserShown}
+              />
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -445,17 +486,19 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           </div>
         </div>
         {!showSlack && !scroll.following ? (
-          <button
-            type="button"
-            className="jump-latest"
-            data-working={thinking ? '' : undefined}
-            aria-label="Jump to latest"
-            title="Jump to latest"
-            onClick={scroll.scrollToLatest}
-          >
-            <Icon name="arrowDown" size={14} />
-            <span className="jump-latest__label">Jump to latest</span>
-          </button>
+          <div className="jump-latest-dock" data-scroll-ignore="true">
+            <button
+              type="button"
+              className="jump-latest"
+              data-working={thinking ? '' : undefined}
+              aria-label="Jump to latest"
+              title="Jump to latest"
+              onClick={scroll.scrollToLatest}
+            >
+              <Icon name="arrowDown" size={14} />
+              <span className="jump-latest__label">Jump to latest</span>
+            </button>
+          </div>
         ) : null}
       </div>
       {conversing && !showThread && !showSlack ? (
@@ -490,7 +533,12 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               {autopilotChip === undefined ? 'Asks first when others are in the thread' : 'Autopilot on · acts at once'}
             </span>
             <span className="composer__flex" />
-            <button type="button" className={`cchip composer__text supervisor__model-btn${unconfigured ? ' is-custom' : ''}`} title="XERXES's model — click to change" onClick={() => props.onChooserChange(true)}>
+            <button
+              type="button"
+              className={`cchip composer__text supervisor__model-btn${unconfigured ? ' is-custom' : ''}`}
+              title={inlineChooser ? 'Choose a model for XERXES in the setup panel above' : "XERXES's model — click to change"}
+              onClick={() => openTab('model')}
+            >
               <span>{modelChipText(config)}</span>
               <Icon name="caretDown" size={10} />
             </button>

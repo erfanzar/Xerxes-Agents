@@ -312,6 +312,49 @@ test('ACP stdio transport rejects an unterminated oversized frame and stops read
   expect(frames[0]?.error?.message).toContain('maximum size')
 }, 10_000)
 
+test('ACP stdio transport accepts spec sessionId + prompt ContentBlock[] and session/cancel with sessionId', async () => {
+  const receivedPrompts: Array<{ sessionId: string; text: string }> = []
+  const server = new AcpServer({
+    promptHandler: async ({ session, text, emit }) => {
+      receivedPrompts.push({ sessionId: session.sessionId, text })
+      await emit?.({ kind: 'text_delta', text: `echo:${text}` })
+      return { ok: true, stopReason: 'end_turn' }
+    },
+  })
+  const sessionId = String(server.openSession('/tmp').session_id)
+  const output: string[] = []
+  const input = readableChunks([
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session/prompt',
+      params: {
+        sessionId,
+        prompt: [
+          { type: 'text', text: 'line one' },
+          { type: 'resource', resource: { uri: 'file:///tmp/a.ts', text: 'const x = 1' } },
+        ],
+      },
+    })}\n`,
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/cancel',
+      params: { sessionId },
+    })}\n`,
+  ])
+
+  await serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+
+  expect(receivedPrompts).toEqual([{ sessionId, text: 'line one\nconst x = 1' }])
+  const frames = output.map(line => JSON.parse(line) as { id?: number; method?: string; result?: unknown; params?: Record<string, unknown> })
+  expect(frames.find(f => f.id === 1)?.result).toEqual({ ok: true, stopReason: 'end_turn' })
+  expect(frames.find(f => f.id === 2)?.result).toEqual({ ok: true })
+  expect(server.sessions.get(sessionId)?.cancelled).toBe(true)
+})
+
 function readableChunks(chunks: readonly string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   return readableByteChunks(chunks.map(chunk => encoder.encode(chunk)))

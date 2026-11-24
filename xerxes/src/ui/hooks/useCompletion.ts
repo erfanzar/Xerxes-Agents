@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { CompletionItem } from '../app/interfaces.js'
+import { acpSubcommandCompletions } from '../app/slash/commands/acp.js'
 import { SLASH_COMMANDS } from '../app/slash/registry.js'
 import { getActiveSwarmSlice } from '../app/swarmStore.js'
+import { getUiState } from '../app/uiStore.js'
 import { looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { CompletionResponse } from '../gatewayTypes.js'
@@ -105,6 +107,9 @@ export function tuiSlashCompletions(input: string, catalog: null | SlashCatalog)
   if (/^\/(?:immortals|swarm)\s+/i.test(input)) {
     return swarmSubcommandCompletions(input, getActiveSwarmSlice().status)
   }
+  if (/^\/acp\s+/i.test(input)) {
+    return acpSubcommandCompletions(input, getUiState().acpBinding)
+  }
   return mergeCompletionItems(slashCompletionsFromCatalog(input, panelCatalog), slashCompletionsFromCatalog(input, catalog))
 }
 
@@ -132,8 +137,8 @@ export function completionRequestForInput(
 
   // These argument candidates are owned by the daemon, including package
   // versions and preset IDs. Keep the complete command in the replacement.
-  if (/^\/(?:forge|presets?|config|plugins|skills|immortals|swarm|xerxes)\s+\S*$/.test(input)
-    || /^\/(?:forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect|(?:immortals|swarm)\s+kill|xerxes\s+(?:show|approve|reject))\s+\S*(?:\s+\S*)?$/.test(input)) {
+  if (/^\/(?:acp|forge|presets?|config|plugins|skills|immortals|swarm|xerxes)\s+\S*$/.test(input)
+    || /^\/(?:acp\s+(?:use|connect|model|mode|config|auth)|forge\s+inspect|presets?\s+(?:use|default|copy|remove)|plugins\s+(?:inspect|enable|disable)|skills\s+inspect|(?:immortals|swarm)\s+kill|xerxes\s+(?:show|approve|reject))\s+\S*(?:\s+\S*)?$/.test(input)) {
     return { method: 'complete.slash', params: { text: input }, replaceFrom: 1 }
   }
   const fileArg = input.match(/^\/file\s+(.*)$/)

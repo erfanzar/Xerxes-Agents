@@ -13,6 +13,7 @@ import type { ToolItem } from './types.js'
 import { Icon, type IconName } from './Icon.js'
 import { CopyButton } from './CopyButton.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
+import { ToolImages } from './ImageView.js'
 import { parseArgs, trimmedChangedLines } from './blocks.js'
 
 export type DiffLine = {
@@ -327,9 +328,13 @@ function firstStringValue(...values: readonly unknown[]): string | undefined {
   return undefined
 }
 
-/** The file tool a call is, from its name, arguments, and optional structured diff; null for any other tool. */
+/** The file tool a call is, from its name, arguments, and optional structured diffs; null for any other tool. */
 export function fileToolOf(
-  item: Pick<ToolItem, 'name' | 'input'> & { readonly path?: string; readonly diff?: StructuredToolDiff },
+  item: Pick<ToolItem, 'name' | 'input'> & {
+    readonly path?: string
+    readonly diff?: StructuredToolDiff
+    readonly diffs?: readonly StructuredToolDiff[]
+  },
 ): FileTool | null {
   const name = normalizeFileToolName(item.name)
   const args = parseArgs(item.input ?? '')
@@ -339,8 +344,49 @@ export function fileToolOf(
     || (typeof args.path === 'string' && args.path.trim())
     || (typeof args.Path === 'string' && args.Path.trim())
     || (typeof diffObj?.path === 'string' && diffObj.path.trim())
+    || (typeof item.diffs?.[0]?.path === 'string' && item.diffs[0].path.trim())
     || (typeof item.path === 'string' && item.path.trim())
     || ''
+
+  if (item.diffs && item.diffs.length > 1) {
+    const files: PatchFileDiff[] = []
+    for (const entry of item.diffs) {
+      const entryPath = (typeof entry.path === 'string' && entry.path.trim()) || path
+      const rawBefore = firstStringValue(entry.old_text, entry.oldText)
+      const rawAfter = firstStringValue(entry.new_text, entry.newText)
+      if (!entryPath && rawBefore === undefined && rawAfter === undefined) continue
+      let before = rawBefore ?? ''
+      let after = rawAfter ?? ''
+      if (before && after) {
+        const span = trimmedChangedLines(before, after, 3)
+        before = span.before.join('\n')
+        after = span.after.join('\n')
+      }
+      const lines = lineDiff(before, after)
+      const adds = lines.filter(line => line.kind === 'add').length
+      const dels = lines.filter(line => line.kind === 'del').length
+      const action: PatchFileDiff['action'] = !rawBefore && rawAfter !== undefined
+        ? 'add'
+        : rawBefore !== undefined && rawAfter === ''
+          ? 'delete'
+          : 'update'
+      files.push({
+        path: entryPath || 'file',
+        action,
+        lines,
+        adds,
+        dels,
+      })
+    }
+    if (files.length > 1) {
+      return {
+        kind: 'patch',
+        path: files[0]!.path,
+        files,
+        dryRun: false,
+      }
+    }
+  }
 
   if (name === 'applypatchtool' || name === 'applypatch') {
     const patchText = typeof args.patch === 'string' ? args.patch : typeof args.diff === 'string' ? args.diff : ''
@@ -403,7 +449,11 @@ export function fileToolOf(
  * `ApplyPatchTool`). Returns null for non-mutating or non-file tools.
  */
 export function fileToolStats(
-  item: Pick<ToolItem, 'name' | 'input'> & { readonly path?: string; readonly diff?: StructuredToolDiff },
+  item: Pick<ToolItem, 'name' | 'input'> & {
+    readonly path?: string
+    readonly diff?: StructuredToolDiff
+    readonly diffs?: readonly StructuredToolDiff[]
+  },
 ): { readonly adds: number; readonly dels: number } | null {
   const tool = fileToolOf(item)
   if (!tool) {
@@ -739,5 +789,6 @@ export const FileToolRow = memo(function FileToolRow({ item, tool, failed, defau
         )}
       </>
     )}
+    {showBody && <ToolImages item={item} />}
   </div>
 })

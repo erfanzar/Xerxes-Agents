@@ -53,9 +53,9 @@ export const $overlayState = atom<OverlayState>(buildOverlayState())
  * gates on their own — excluding them here means a new boolean-ish overlay
  * added to `OverlayState` automatically joins every policy table below.
  */
-type OverlayFlagKey = Exclude<keyof OverlayState, 'agentsInitialHistoryIndex' | 'agentsInspectId'>
+export type OverlayFlagKey = Exclude<keyof OverlayState, 'agentsInitialHistoryIndex' | 'agentsInspectId'>
 
-const OVERLAY_FLAG_KEYS = [
+export const OVERLAY_FLAG_KEYS = [
   'agents',
   'approval',
   'clarify',
@@ -164,6 +164,81 @@ export const getOverlayState = () => $overlayState.get()
 
 export const patchOverlayState = (next: Partial<OverlayState> | ((state: OverlayState) => OverlayState)) =>
   $overlayState.set(typeof next === 'function' ? next($overlayState.get()) : { ...$overlayState.get(), ...next })
+
+/**
+ * Exhaustive closed value for every overlay key in `OVERLAY_FLAG_KEYS`.
+ * Compile-time checked so adding a new overlay automatically supports Ctrl+C
+ * dismissal instead of silently swallowing the keypress.
+ */
+export const OVERLAY_CLOSED_VALUES: Pick<OverlayState, OverlayFlagKey> = {
+  agents: false,
+  approval: null,
+  clarify: null,
+  confirm: null,
+  copyPicker: null,
+  diff: false,
+  goal: false,
+  learning: false,
+  loops: false,
+  schedules: false,
+  agentSettings: false,
+  lspSettings: false,
+  mcpSettings: false,
+  contextInspector: false,
+  usage: false,
+  machinePicker: false,
+  customAgentEditor: false,
+  presetEditor: false,
+  forge: false,
+  activity: false,
+  monitors: false,
+  runs: false,
+  sideQuestion: false,
+  snapshots: false,
+  swarm: false,
+  workspaces: false,
+  modelPicker: false,
+  pager: null,
+  pluginsHub: false,
+  reasoningPicker: false,
+  secret: null,
+  sessions: false,
+  capabilities: false,
+  skillsHub: false,
+  sudo: null,
+  terminals: false
+}
+
+/**
+ * Return the state patch that dismisses the first active overlay in
+ * `OVERLAY_FLAG_KEYS`, or null if none is open. Callers that need RPC cancel
+ * hooks (clarify, approval, sudo, secret) handle those first.
+ */
+export function dismissOpenOverlayPatch(state: OverlayState): null | Partial<OverlayState> {
+  for (const key of OVERLAY_FLAG_KEYS) {
+    if (!state[key]) {
+      continue
+    }
+    if (key === 'agents') {
+      return { agents: false, agentsInspectId: null }
+    }
+    return { [key]: OVERLAY_CLOSED_VALUES[key] } as Partial<OverlayState>
+  }
+  return null
+}
+
+/**
+ * Gate clickable chrome actions so mouse clicks never stack a new overlay on
+ * top of an active approval, dialog, or other blocking modal.
+ */
+export function openOverlayIfUnblocked(patch: Partial<OverlayState>): boolean {
+  const current = $overlayState.get()
+  if (overlayBlocksBackgroundHotkeys(current) || current.agents) {
+    return false
+  }
+  patchOverlayState(patch)
+  return true
+}
 
 /** Close one approval without erasing a newer request that replaced it. */
 export const clearApprovalOverlay = (requestId: string): boolean => {

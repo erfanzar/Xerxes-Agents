@@ -6,11 +6,7 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import {
-  AGY_OUTER_HOST_ENV_KEYS,
-  hasOuterAgyHostEnv,
-  SSH_SESSION_ENV_KEYS,
-} from '../../auth/agyRuntimeEnv.js'
+import { AGY_OUTER_HOST_ENV_KEYS, hasOuterAgyHostEnv } from '../../auth/agyRuntimeEnv.js'
 
 /**
  * Strip stale TMPDIR/TEMP/TMP variables inherited from ephemeral launcher shells
@@ -24,19 +20,13 @@ export function sanitizeTmpdirEnv(env: NodeJS.ProcessEnv = process.env): void {
 }
 
 /**
- * Strip inherited SSH-TTY and outer Antigravity/agent sandbox variables from
- * the Electron desktop main process so local GUI daemons and `agy acp`
- * subprocesses use the user's real desktop keyring instead of thinking they
- * are running inside an SSH session or a parent agent sandbox.
- *
- * `SSH_AUTH_SOCK` is intentionally preserved so remote SSH workspaces keep using
- * the local SSH agent.
+ * Strip a parent Antigravity sandbox's private variables (its CSRF token,
+ * language-server address, app-data dir) from the Electron desktop main process
+ * so a child `agy acp` never borrows another agy instance's internals. SSH
+ * session variables are left alone: how agy stores its sign-in is agy's call.
  */
 export function sanitizeDesktopInheritedEnv(env: NodeJS.ProcessEnv = process.env): void {
   const outerHostDetected = hasOuterAgyHostEnv(env)
-  for (const key of SSH_SESSION_ENV_KEYS) {
-    delete env[key]
-  }
   for (const key of AGY_OUTER_HOST_ENV_KEYS) {
     delete env[key]
   }

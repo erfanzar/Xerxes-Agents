@@ -227,15 +227,22 @@ export class StdioJsonRpcServer {
         return
       case 'set_model':
       case 'session_set_model':
-        await this.result(request, this.server.setModel(stringParameter(request.params.session_id), modelParameter(request.params.model) ?? null), send)
+        await this.result(
+          request,
+          this.server.setModel(
+            sessionIdParameter(request.params),
+            modelParameter(request.params.modelId ?? request.params.model) ?? null,
+          ),
+          send,
+        )
         return
       case 'cancel':
       case 'session_cancel':
-        await this.result(request, this.server.cancel(stringParameter(request.params.session_id)), send)
+        await this.result(request, this.server.cancel(sessionIdParameter(request.params)), send)
         return
       case 'close_session':
       case 'session_close':
-        await this.result(request, this.server.closeSession(stringParameter(request.params.session_id)), send)
+        await this.result(request, this.server.closeSession(sessionIdParameter(request.params)), send)
         return
       case 'respond_permission':
       case 'permission_respond':
@@ -297,7 +304,7 @@ export class StdioJsonRpcServer {
   }
 
   private async startPrompt(request: ParsedRequest, send: Sender): Promise<void> {
-    const sessionId = stringParameter(request.params.session_id)
+    const sessionId = sessionIdParameter(request.params)
     const session = this.server.sessions.get(sessionId)
     if (!session) {
       if (request.canReply) {
@@ -305,9 +312,7 @@ export class StdioJsonRpcServer {
       }
       return
     }
-    const text = typeof request.params.text === 'string'
-      ? request.params.text
-      : stringParameter(request.params.prompt)
+    const text = extractPromptParameterText(request.params)
     const worker = this.runPromptWorker(request, sessionId, text, send)
     this.workers.add(worker)
     void worker.then(
@@ -381,6 +386,32 @@ function recordParameter(value: unknown): Record<string, unknown> | undefined {
 
 function stringParameter(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function sessionIdParameter(params: Readonly<Record<string, unknown>>): string {
+  return stringParameter(params.sessionId) || stringParameter(params.session_id)
+}
+
+function extractPromptParameterText(params: Readonly<Record<string, unknown>>): string {
+  if (Array.isArray(params.prompt)) {
+    const parts: string[] = []
+    for (const block of params.prompt) {
+      if (typeof block === 'string') {
+        parts.push(block)
+      } else if (isAcpRecord(block)) {
+        if (typeof block.text === 'string') {
+          parts.push(block.text)
+        } else if (block.type === 'resource' && isAcpRecord(block.resource) && typeof block.resource.text === 'string') {
+          parts.push(block.resource.text)
+        }
+      }
+    }
+    return parts.join('\n')
+  }
+  if (typeof params.text === 'string') {
+    return params.text
+  }
+  return stringParameter(params.prompt)
 }
 
 function modelParameter(value: unknown): string | null | undefined {

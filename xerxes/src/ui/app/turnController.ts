@@ -22,7 +22,7 @@ import {
   sameToolTrailGroup,
   toolTrailLabel
 } from '../lib/text.js'
-import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from '../types.js'
+import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem, ToolDiff, ToolLocation } from '../types.js'
 
 import type { Notice } from './interfaces.js'
 import { getOverlayState, patchOverlayState, resetFlowOverlays, resetOverlayState } from './overlayStore.js'
@@ -1063,6 +1063,83 @@ class TurnController {
       this.toolProgressTimer = null
       patchTurnState({ tools: [...this.activeTools] })
     }, STREAM_BATCH_MS)
+  }
+
+  recordToolUpdate(update: {
+    diff?: ToolDiff
+    diffs?: ToolDiff[]
+    inputs?: Record<string, unknown>
+    kind?: string
+    locations?: ToolLocation[]
+    name?: string
+    output?: string
+    status?: string
+    title?: string
+    toolId: string
+  }) {
+    if (this.interrupted || this.completedToolIds.has(update.toolId)) {
+      return
+    }
+
+    const index = this.activeTools.findIndex(tool => tool.id === update.toolId)
+    const existing = index >= 0 ? this.activeTools[index]! : undefined
+    const name = update.name || existing?.name || 'tool'
+    const rawArgs = update.inputs ? JSON.stringify(update.inputs) : existing?.rawArgs
+    const firstLoc = update.locations?.[0]
+    const locLabel = firstLoc ? `${firstLoc.path}${firstLoc.line !== undefined ? `:${firstLoc.line}` : ''}` : ''
+    const nextContext =
+      update.title?.trim() ||
+      (update.inputs ? summarizeToolStartDisplay(name, '', JSON.stringify(update.inputs)).context : '') ||
+      locLabel ||
+      update.diff?.path ||
+      update.diffs?.[0]?.path ||
+      existing?.context ||
+      ''
+    const nextDiff = update.diff ?? update.diffs?.[0] ?? existing?.diff
+    const nextDiffs = update.diffs ?? existing?.diffs
+    const nextLocations = update.locations ?? existing?.locations
+    const nextInputs = update.inputs ?? existing?.inputs
+    const nextOutput = update.output !== undefined ? update.output : existing?.output
+    const nextTitle = update.title ?? existing?.title
+    const nextKind = update.kind ?? existing?.kind
+    const nextStatus = update.status ?? existing?.status
+
+    const updated: ActiveTool = compact<ActiveTool>({
+      context: nextContext || undefined,
+      diff: nextDiff,
+      diffs: nextDiffs,
+      id: update.toolId,
+      inputs: nextInputs,
+      kind: nextKind,
+      locations: nextLocations,
+      name,
+      output: nextOutput,
+      rawArgs,
+      reasoning: existing?.reasoning,
+      startedAt: existing?.startedAt ?? Date.now(),
+      status: nextStatus,
+      title: nextTitle
+    })
+
+    if (index >= 0) {
+      this.activeTools = this.activeTools.map((tool, i) => (i === index ? updated : tool))
+    } else {
+      this.activeTools = [...this.activeTools, updated]
+    }
+
+    const prevRecord = getTurnState().toolRecords[update.toolId]
+    patchTurnState({
+      tools: [...this.activeTools],
+      toolRecords: {
+        ...getTurnState().toolRecords,
+        [update.toolId]: {
+          ...prevRecord,
+          name,
+          ...(rawArgs ? { args: rawArgs } : {}),
+          ...(nextOutput ? { result: nextOutput } : {})
+        }
+      }
+    })
   }
 
   recordToolStart(toolId: string, name: string, context: string, reasoning?: string, rawArgs?: string) {
