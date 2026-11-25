@@ -31,6 +31,17 @@ export interface XerxesBridge {
   onMenuCommand?(handler: (command: string) => void): () => void
   /** A clicked notification names a task and maybe an artifact to open. */
   onNavigate?(handler: (target: { sessionId?: string; panel?: 'docs'; artifactId?: string }) => void): () => void
+  /** In-app alert toast mirrored from native notifications. */
+  onToast?(handler: (toast: {
+    readonly id: string
+    readonly title: string
+    readonly body: string
+    readonly kind?: 'artifact' | 'attention' | 'finished' | 'stopped' | 'failed'
+    readonly surfaceId?: number
+    readonly target?: { readonly sessionId?: string; readonly panel?: 'docs'; readonly artifactId?: string }
+  }) => void): () => void
+  /** Jump to the workspace surface and task/artifact referenced by a notification toast. */
+  activateToast?(surfaceId?: number, target?: { readonly sessionId?: string; readonly panel?: 'docs'; readonly artifactId?: string }): Promise<void>
   getContextScope?(): Promise<string>
   getContextHost?(): Promise<string | null>
   getContexts?(): Promise<WorkspaceContext[]>
@@ -94,8 +105,12 @@ export interface XerxesBridge {
   useWorkspace?(dir: string, resumeSessionId?: string): Promise<unknown>
   /** Saved workspace folder, or null when the create-workspace gate shows. */
   getWorkspace?(): Promise<string | null>
-  /** Ping for needs-input / task-finished moments when the app is unfocused. */
+  /** Ping for needs-input / artifact / task-finished moments. */
   setNotifications?(on: boolean): Promise<boolean>
+  /** Send a test system notification to confirm OS banner permissions. */
+  testNotification?(): Promise<boolean>
+  /** Open the OS notification settings pane for Xerxes Agents. */
+  openNotificationSettings?(): Promise<boolean>
   /** Launch-at-login registration (main-process login item). */
   getLoginItem?(): Promise<boolean>
   setLoginItem?(on: boolean): Promise<boolean>

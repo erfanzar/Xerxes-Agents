@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 import { store, type Snapshot } from './store.js'
 
 import { setupReadiness } from './setupReadiness.js'
@@ -30,6 +30,7 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
   const [visible, setVisible] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
   const dialog = useRef<HTMLElement>(null)
+  const titleId = useId()
   const state = setupReadiness(snap)
   // First-run auto-show only appears when something still needs setup, while
   // explicit Settings → Setup checklist → Open… always reopens it to inspect status.
@@ -81,50 +82,50 @@ export function FirstRunSetup({ snap }: { snap: Snapshot }): ReactElement | null
   const machine = localMachineLabel()
   return (
     <div className="setup-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) finish() }}>
-    <section ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" className="setup-card" aria-label="Get started with Xerxes">
+    <section ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" className="setup-card" aria-labelledby={titleId}>
       <div className="setup-heading">
         <div>
-          <strong>{state.ready ? 'Setup checklist' : 'Make yourself at home.'}</strong>
+          <h2 id={titleId}>{state.ready ? 'Setup checklist' : 'Set up Xerxes'}</h2>
           {/* Only the unfinished steps are ever shown now, so naming them
               beats claiming there are "a few things" when there is one. */}
-          <p>{state.ready ? 'Workspace, runtime, and model are all ready.' : `${setupTodo(state)} — then you can start.`}</p>
+          <p>{state.ready ? 'Workspace, runtime, and model are all ready.' : `${setupTodo(state)}, then you can start.`}</p>
         </div>
-        <button onClick={finish}>{state.ready ? 'Close' : 'Later'}</button>
+        <button type="button" className="btn btn--ghost" onClick={finish}>{state.ready ? 'Close' : 'Later'}</button>
       </div>
       <div className="setup-steps">
         <div>
-          <span>{state.workspace ? <Icon name="check" size={12} /> : '1'}</span>
+          <span aria-hidden="true">{state.workspace ? <Icon name="check" size={12} /> : '1'}</span>
           <strong>Your workspace</strong>
           <p>{snap.cwd || 'Choose a project folder.'}</p>
-          <button onClick={() => store.chooseWorkspace()}>Change folder</button>
+          <button type="button" className="btn" onClick={() => store.chooseWorkspace()}>Change folder</button>
         </div>
         <div>
-          <span>{state.runtime ? <Icon name="check" size={12} /> : '2'}</span>
+          <span aria-hidden="true">{state.runtime ? <Icon name="check" size={12} /> : '2'}</span>
           <strong>Runtime</strong>
           <p>{state.runtime ? 'Connected and ready.' : state.runtimeStalled ? (snap.error || 'This workspace needs attention before the runtime can start.') : 'Connecting to the shared runtime…'}</p>
           {!state.runtime && (
             state.runtimeStalled
-              ? <button onClick={() => store.openSettings()}>Open settings</button>
-              : <button onClick={() => store.retryConnection()}>Retry connection</button>
+              ? <button type="button" className="btn" onClick={() => store.openSettings()}>Open settings</button>
+              : <button type="button" className="btn" onClick={() => store.retryConnection()}>Retry connection</button>
           )}
         </div>
         <div>
-          <span>{state.model ? <Icon name="check" size={12} /> : '3'}</span>
+          <span aria-hidden="true">{state.model ? <Icon name="check" size={12} /> : '3'}</span>
           <strong>How Xerxes runs</strong>
           <p>{snap.model || `Private: a local model on ${machine}. Hybrid: a cloud model leads, a local model does the file work here. Cloud: a cloud model.`}</p>
-          <button disabled={!state.runtime} onClick={() => store.openSettings('models')}>
+          <button type="button" className="btn" disabled={!state.runtime} onClick={() => store.openSettings('models')}>
             {state.model ? 'Change mode' : 'Choose a mode'}
           </button>
         </div>
       </div>
       <footer>
         <small>
-          Provider credentials are managed in Preferences. No test prompt is sent during setup.
+          Provider credentials are managed in Settings. No test prompt is sent during setup.
         </small>
-        <button disabled={!state.runtime} onClick={() => store.openSettings('permissions')}>
+        <button type="button" className="btn" disabled={!state.runtime} onClick={() => store.openSettings('permissions')}>
           Review tool permissions
         </button>
-        <button className="studio-primary" disabled={!state.ready} onClick={finish}>
+        <button type="button" className="btn btn--solid studio-primary" disabled={!state.ready} onClick={finish}>
           {state.ready ? 'Done' : <>Start working <Icon name="arrow" size={12} /></>}
         </button>
       </footer>

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code 1:1 unified 3-pane Provider + Model + Thinking Level + Permissions picker.
+ * Unified 3-pane Provider + Model + Thinking Level + Permissions picker.
  *
  * Trigger: `[ProviderIcon] 4 Neon  Extra` (single calm composer control).
  * Popover:
@@ -267,14 +267,15 @@ export function T3ModelPicker({
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
-        if (customOpen) setCustomOpen(false)
+        if (openExtraConfigId !== null) setOpenExtraConfigId(null)
+        else if (customOpen) setCustomOpen(false)
         else if (permissionsExpanded) setPermissionsExpanded(false)
         else close()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, customOpen, permissionsExpanded])
+  }, [open, openExtraConfigId, customOpen, permissionsExpanded])
 
   // Build model rows for the currently active runtime and native Xerxes.
   const nativeEntries = useMemo<UnifiedModelEntry[]>(() => {
@@ -569,7 +570,7 @@ export function T3ModelPicker({
                       className={`t3-mpop__rail-btn${selected ? ' is-selected' : ''}${connected ? ' is-connected' : ''}${!agent.available && agent.id !== 'xerxes' ? ' is-unavailable' : ''}`}
                       aria-pressed={selected}
                       data-provider={agent.provider}
-                      title={`${agent.name} — ${runtimeSubtitle(agent)}`}
+                      title={`${agent.name} · ${runtimeSubtitle(agent)}`}
                       aria-label={agent.name}
                       onClick={() => selectRailProvider(agent.id)}
                     >
@@ -619,6 +620,7 @@ export function T3ModelPicker({
                         onChange={event => setCustomArgs(event.target.value)}
                       />
                     </label>
+                    {snap.acpError && <p className="studio-error" role="alert">{snap.acpError}</p>}
                     <div className="t3-mpop__custom-foot">
                       <button type="submit" className="t3-mpop__primary" disabled={!customCommand.trim() || connecting}>
                         {connecting ? 'Connecting…' : 'Connect'}
@@ -634,7 +636,7 @@ export function T3ModelPicker({
                         <input
                           ref={searchRef}
                           className="t3-mpop__search-in"
-                          type="text"
+                          type="search"
                           role="combobox"
                           aria-expanded={open}
                           aria-controls={`${listId}-list`}
@@ -764,7 +766,7 @@ export function T3ModelPicker({
                             const starred = favorites.includes(entry.key)
                             const focused = idx === activeCursor
                             return (
-                              <div key={entry.key} className="t3-mpop__row-wrap">
+                              <div key={entry.key} className="t3-mpop__row-wrap" role="none">
                                 <button
                                   id={`${listId}-opt-${idx}`}
                                   type="button"

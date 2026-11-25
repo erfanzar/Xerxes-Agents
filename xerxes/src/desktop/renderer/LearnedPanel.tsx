@@ -24,6 +24,8 @@ export interface LearningReviewControlsViewProps extends Omit<LearningReviewCont
   readonly reasonOpen: boolean
   readonly onOpenReason: () => void
   readonly onCancelReason: () => void
+  readonly reasonError?: string
+  readonly onReasonError?: (message: string) => void
 }
 
 export function LearnedBadge({ snap }: { snap: Snapshot }): ReactElement | null {
@@ -43,6 +45,8 @@ export function LearningReviewControlsView({
   reasonOpen,
   onOpenReason,
   onCancelReason,
+  reasonError = '',
+  onReasonError,
   children,
 }: LearningReviewControlsViewProps): ReactElement {
   const busy = Boolean(disabled || snap.learningReviewBusy || snap.learningLoading || snap.connection !== 'online')
@@ -51,10 +55,7 @@ export function LearningReviewControlsView({
   const confirmLabel = approved ? 'Confirm roll back' : 'Confirm reject'
   const showReasonForm = reasonOpen && !disabled
   return (
-    <div
-      className="learning-review"
-      style={{ alignItems: showReasonForm ? 'flex-end' : 'center', gap: '8px', marginTop: '10px', paddingTop: '10px' }}
-    >
+    <div className={`learning-review${showReasonForm ? ' is-open' : ''}`}>
       {children}
       {!approved && (
         <button
@@ -72,19 +73,22 @@ export function LearningReviewControlsView({
           className="btn"
           disabled={busy}
           aria-expanded={false}
-          onClick={onOpenReason}
+          onClick={() => { onReasonError?.(''); onOpenReason() }}
         >
           {label}
         </button>
       ) : (
         <form
           className="learning-reason"
-          style={{ flexBasis: '100%', marginTop: '4px' }}
           onSubmit={event => {
             event.preventDefault()
             const input = event.currentTarget.elements.namedItem('reason') as HTMLInputElement | null
             const reason = input?.value ?? ''
-            if (!reason.trim()) return
+            if (!reason.trim()) {
+              onReasonError?.(`Enter a reason to ${approved ? 'roll back' : 'reject'}.`)
+              return
+            }
+            onReasonError?.('')
             void actions.reviewLearning(target, id, action, reason)
           }}
         >
@@ -96,28 +100,32 @@ export function LearningReviewControlsView({
               autoFocus
               disabled={busy}
               autoComplete="off"
+              aria-invalid={reasonError ? true : undefined}
               placeholder={approved ? 'Why roll back this lesson…' : 'Why reject this proposal…'}
-              aria-label={`Reason to ${approved ? 'roll back' : 'reject'} ${target} ${id}`}
+              aria-label={`Reason to ${approved ? 'roll back' : 'reject'} this ${target}`}
+              onChange={() => { if (reasonError) onReasonError?.('') }}
               onKeyDown={event => {
                 if (event.key === 'Escape') {
                   event.preventDefault()
                   event.stopPropagation()
+                  onReasonError?.('')
                   onCancelReason()
                 }
               }}
             />
           </label>
-          <button type="submit" className="btn" disabled={busy}>
+          <button type="submit" className="btn btn--danger" disabled={busy}>
             {confirmLabel}
           </button>
           <button
             type="button"
             className="btn btn--ghost"
             disabled={busy}
-            onClick={onCancelReason}
+            onClick={() => { onReasonError?.(''); onCancelReason() }}
           >
             Cancel
           </button>
+          {reasonError && <p className="studio-error" role="alert">{reasonError}</p>}
         </form>
       )}
     </div>
@@ -130,13 +138,19 @@ export function LearningReviewControls({
   ...props
 }: LearningReviewControlsProps): ReactElement {
   const [reasonOpen, setReasonOpen] = useState(initialReasonOpen)
+  const [reasonError, setReasonError] = useState('')
   useEffect(() => {
-    if (props.disabled) setReasonOpen(false)
+    if (props.disabled) {
+      setReasonOpen(false)
+      setReasonError('')
+    }
   }, [props.disabled, props.id, props.approved])
   return (
     <LearningReviewControlsView
       {...props}
       reasonOpen={reasonOpen}
+      reasonError={reasonError}
+      onReasonError={setReasonError}
       onOpenReason={() => setReasonOpen(true)}
       onCancelReason={() => setReasonOpen(false)}
     />
@@ -198,15 +212,16 @@ export function formatOutcomeEntries(outcome: Readonly<Record<string, unknown>>)
 export function ProposalCard({ stored, snap, actions }: ReviewProps & { stored: StoredReflectionProposal }): ReactElement {
   const proposal = stored.proposal
   const outcomeRows = stored.outcome ? formatOutcomeEntries(stored.outcome) : []
+  const statusLabel = stored.status ? stored.status[0]!.toUpperCase() + stored.status.slice(1) : ''
   return <article className="railcard learned-card" tabIndex={-1} data-learning-proposal={stored.id} aria-label={`${proposalKindLabel(proposal.kind)}: ${proposal.target}`}>
-    <div className="railcard__head"><strong className="railcard__title">{proposalKindLabel(proposal.kind)}</strong><span className="railcard__meta">{stored.status}</span></div>
-    <h3>{proposal.target}</h3><p className="learning-prose">{proposal.rationale}</p>
-    <h4>Quoted evidence</h4><pre className="studio-source">{proposal.evidence.join('\n')}</pre>
-    <details className="learning-preview"><summary>Preview proposed content</summary>{proposalPreview(proposal).map(item => <section key={item.title}><h4>{item.title}</h4><pre className="studio-source">{item.content}</pre></section>)}</details>
+    <div className="railcard__head"><strong className="railcard__title">{proposalKindLabel(proposal.kind)}</strong><span className="railcard__meta">{statusLabel}</span></div>
+    <h4>{proposal.target}</h4><p className="learning-prose">{proposal.rationale}</p>
+    <h5>Quoted evidence</h5><pre className="studio-source">{proposal.evidence.join('\n')}</pre>
+    <details className="learning-preview"><summary>Preview proposed content</summary>{proposalPreview(proposal).map(item => <section key={item.title}><h5>{item.title}</h5><pre className="studio-source">{item.content}</pre></section>)}</details>
     {stored.reason && <p className="learning-prose">Review reason: {stored.reason}</p>}
     {outcomeRows.length > 0 && <details className="learning-preview" open={stored.status === 'failed'}><summary>Review outcome</summary><dl className="learning-outcome">{outcomeRows.map(row => <div key={row.label} className="learning-outcome__row"><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl></details>}
     {stored.hint && <p>{stored.hint}</p>}
-    {stored.status === 'acknowledged' && !stored.hint && <p>Idea acknowledged. Use /plugin-creator to develop it; no plugin code was applied.</p>}
+    {stored.status === 'acknowledged' && !stored.hint && <p>Idea acknowledged. Use <code>/plugin-creator</code> to develop it; no plugin code was applied.</p>}
     <ReviewResult target="proposal" id={stored.id} snap={snap} />
     {stored.status === 'pending' && <LearningReviewControls target="proposal" id={stored.id} snap={snap} actions={actions} />}
   </article>
@@ -314,11 +329,11 @@ export function LearnedPanel({ snap, actions = store }: { snap: Snapshot; action
       <span className="learned-panel__summary">{pendingTotal === 0 ? 'Nothing awaiting review' : `${pendingTotal} ${pendingTotal === 1 ? 'item' : 'items'} awaiting review`}</span>
     </div>
     <div className="learned-panel__toolbar">
-      <div className="learned-panel__tabs" role="group" aria-label="Learned views">
-        <button className={tab === 'proposals' ? 'is-selected' : ''} aria-pressed={tab === 'proposals'} onClick={() => choose('proposals')}>Proposals{pendingProposals ? <span className="learned-badge" aria-label={`${pendingProposals} pending proposals`}>{pendingProposals}</span> : null}</button>
-        <button className={tab === 'lessons' ? 'is-selected' : ''} aria-pressed={tab === 'lessons'} onClick={() => choose('lessons')}>Lessons{pendingLessons ? <span className="learned-badge" aria-label={`${pendingLessons} pending lessons`}>{pendingLessons}</span> : null}</button>
+      <div className="learned-panel__tabs" role="tablist" aria-label="Learned views">
+        <button type="button" role="tab" aria-selected={tab === 'proposals'} className={tab === 'proposals' ? 'is-selected' : ''} onClick={() => choose('proposals')}>Proposals{pendingProposals ? <span className="learned-badge" aria-label={`${pendingProposals} pending proposals`}>{pendingProposals}</span> : null}</button>
+        <button type="button" role="tab" aria-selected={tab === 'lessons'} className={tab === 'lessons' ? 'is-selected' : ''} onClick={() => choose('lessons')}>Lessons{pendingLessons ? <span className="learned-badge" aria-label={`${pendingLessons} pending lessons`}>{pendingLessons}</span> : null}</button>
       </div>
-      <button className="btn btn--ghost learned-panel__refresh" disabled={snap.learningLoading || snap.learningReviewBusy || snap.connection !== 'online'} onClick={() => void actions.refreshLearning()}>Refresh</button>
+      <button type="button" className="btn btn--ghost learned-panel__refresh" disabled={snap.learningLoading || snap.learningReviewBusy || snap.connection !== 'online'} onClick={() => void actions.refreshLearning()}>Refresh</button>
     </div>
     {snap.learningLoading && <p className="studio-progress" role="status">Loading learned items…</p>}
     {snap.learningReviewBusy && <p className="studio-progress" role="status">Reviewing…</p>}
@@ -370,7 +385,7 @@ export function ReflectionCard({ reflection, snap, actions = store }: ReviewProp
         {reviewButton}
       </LearningReviewControls>
     ) : (
-      <div className="learning-review" style={{ alignItems: 'center', gap: '8px', marginTop: '10px', paddingTop: '10px' }}>
+      <div className="learning-review">
         {reviewButton}
       </div>
     )}

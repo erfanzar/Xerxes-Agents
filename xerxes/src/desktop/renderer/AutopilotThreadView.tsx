@@ -38,7 +38,7 @@ export function AutopilotThreadView({ thread, live, now, onRespond }: AutopilotT
       {thread.phase === 'error' ? <p role="alert" className="xevent" data-tone="error">Could not open Activity: {thread.error ?? 'unknown error'}</p> : null}
       {empty ? (
         <div className="xempty" role="status">
-          <strong>Nothing yet</strong>
+          <h3>No Autopilot activity yet</h3>
           <p>Autopilot&apos;s wake-ups and the actions waiting for you will show up here.</p>
         </div>
       ) : null}

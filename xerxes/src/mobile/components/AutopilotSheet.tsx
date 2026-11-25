@@ -73,7 +73,7 @@ function Settings({ row }: { row: AutopilotRow }): ReactElement {
         {lapsed ? <p role="status" className="block-meta">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p> : null}
         <div className="composer-row">
           <span className="block-meta">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
-          <button type="submit" className="btn" disabled={!live || saving || tooLong}>{saving ? 'Saving…' : 'Save'}</button>
+          <button type="submit" className="btn btn-primary" disabled={!live || saving || tooLong}>{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
     </details>

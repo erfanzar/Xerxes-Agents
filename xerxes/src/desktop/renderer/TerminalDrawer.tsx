@@ -2,13 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code-style resizable bottom Terminal Drawer (`data-thread-terminal-drawer`).
+ * Resizable bottom Terminal Drawer (`data-thread-terminal-drawer`).
  * Docks beneath the chat canvas and composer, shares Xerxes's durable PTY shells
  * via `TerminalPanel`, persists its height in localStorage, and lets the user
  * pop it out to the right panel or close it with ⌘J / Ctrl+`.
  */
 
 import { useState, type ReactElement } from 'react'
+import { isMacPlatform } from './runModeView.js'
 import type { Snapshot } from './store.js'
 import { TerminalPanel } from './TerminalPanel.js'
 import { T3Icon } from './T3Icons.js'
@@ -119,7 +120,7 @@ export function TerminalDrawer({
           <button
             type="button"
             className="t3-term-drawer__btn"
-            title="Close terminal drawer (⌘J)"
+            title={`Close terminal drawer (${isMacPlatform() ? '⌘J' : 'Ctrl+J'})`}
             aria-label="Close terminal drawer"
             onClick={onClose}
           >

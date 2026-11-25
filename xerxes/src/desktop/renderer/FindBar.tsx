@@ -85,6 +85,7 @@ export function FindBar(): ReactElement | null {
     <div className="findbar" role="search" aria-label="Find in page">
       <input
         ref={input}
+        type="search"
         className="findbar__in"
         value={needle}
         spellCheck={false}
@@ -113,7 +114,7 @@ export function FindBar(): ReactElement | null {
       ) : searched && needle.trim() ? (
         <span className="findbar__miss" role="status" aria-live="polite" data-found="true">Match found</span>
       ) : null}
-      <button type="button" aria-label="Close find" title="Close (esc)" onClick={close}><Icon name="close" size={13} /></button>
+      <button type="button" aria-label="Close find" title="Close (Esc)" onClick={close}><Icon name="close" size={13} /></button>
     </div>
   )
 }

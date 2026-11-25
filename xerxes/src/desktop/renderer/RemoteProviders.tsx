@@ -107,35 +107,36 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
     finally{if(alive.current)setBusy(false)}
   }
   const needsControlled = review?.profiles.some(profile=>selected.includes(profile.name)&&profile.providerControlledOutput)
+  const syncCount = syncAll ? syncAll.items.filter(item=>item.review).length : 0
   return <section className="remote-providers" aria-label="SSH provider source">
     <h3>Provider source for this conversation</h3>
     {relay && <div className="remote-providers__activity" data-live={relay.live || relay.reconnecting === true} role="status">
-      <strong>{relay.onHost ? `Prompts run on ${relay.destination ?? 'the SSH host'}` : relay.live ? 'Prompts run on this computer' : relay.reconnecting ? 'Reconnecting to this computer…' : 'This computer is not connected'}</strong>
+      <strong>{relay.onHost ? `Prompts run on ${relay.destination ?? 'the SSH host'}` : relay.live ? `Prompts run on ${machine}` : relay.reconnecting ? `Reconnecting to ${machine}…` : `${localMachineLabel(true)} is not connected`}</strong>
       {relaySummary(relay).split('\n').slice(0, -1).map(line => <p key={line}>{line}</p>)}
     </div>}
-    {error && <p className="studio-error" role="alert">{error} <button className="btn" disabled={busy} onClick={()=>void act(()=>read(true))}>Refresh setup</button></p>}
+    {error && <div className="row__actions"><p className="studio-error" role="alert">{error}</p><button type="button" className="btn" disabled={busy} onClick={()=>void act(()=>read(true))}>Refresh setup</button></div>}
     {!review ? <p role="status">{error ? 'Provider setup could not be loaded.' : 'Reading local provider setup…'}</p> : <>
       <div className="row__actions">
-        <button className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
-        {accounts && <button className="btn" disabled={busy || review.running || syncAll!==null} title={`Copy every signed-in account and saved key from ${machine} to this SSH host`} onClick={()=>void reviewAll()}>Sync all providers to this host</button>}
+        <button type="button" className="btn" disabled={busy} onClick={()=>void act(()=>read())}>Refresh provider status</button>
+        {accounts && <button type="button" className="btn" disabled={busy || review.running || syncAll!==null} title={`Copy every signed-in account and saved key from ${machine} to this SSH host`} onClick={()=>void reviewAll()}>Sync all providers to this host</button>}
       </div>
       <p><strong>{review.source==='remote' ? 'Remote credentials' : review.source==='local' && (review.expiresAt ?? 0)>Date.now() ? 'Local credentials · access enabled' : 'Local credentials · access needs renewal'}</strong><br/>
         Code and tools: {review.destination} · {review.workspace}</p>
-      <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Choose and confirm each account you want bound to this host, or choose local access below to keep credentials on this computer.` : `Provider requests and authentication run on this computer. Access runs until ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'this window disconnects'}, renews while this window stays connected, and resumes when it reconnects. Remote credentials are never used as a fallback.`}</p>
+      <p className="studio-muted">{review.source==='remote' ? `This task uses the remote host’s saved setup (${review.remoteProfile || 'no profile reported'}). Choose and confirm each account you want bound to this host, or choose local access below to keep credentials on ${machine}.` : `Provider requests and authentication run on ${machine}. Access runs until ${review.expiresAt ? new Date(review.expiresAt).toLocaleString() : 'this window disconnects'}, renews while this window stays connected, and resumes when it reconnects. Remote credentials are never used as a fallback.`}</p>
       {!editing ? <div className="row__actions">
-        <button className="btn" disabled={busy} onClick={()=>void act(async()=>{setConfirmRevoke(false);await read(true);setEditing(true)})}>Review local provider access</button>
+        <button type="button" className="btn" disabled={busy} onClick={()=>void act(async()=>{setConfirmRevoke(false);await read(true);setEditing(true)})}>Review local provider access</button>
         {review.source==='local' && (confirmRevoke ? <>
           <button type="button" className="btn btn--danger" disabled={busy} onClick={()=>{setConfirmRevoke(false);void act(()=>remote!('provider-revoke',{sessionKey:review.sessionKey}))}}>Confirm revoke</button>
           <button type="button" className="btn" disabled={busy} onClick={()=>setConfirmRevoke(false)}>Cancel</button>
         </> : <button type="button" className="btn" disabled={busy} onClick={()=>setConfirmRevoke(true)}>Revoke local access</button>)}
       </div> : <fieldset disabled={busy}>
         <legend>Share selected local providers with this task and its agents</legend>
-        <p>Keys stay on this computer. Updated saved keys apply to new requests for the same provider and endpoint. Access lasts up to eight hours and is not saved across app restarts.</p>
+        <p>Keys stay on {machine}. Updated saved keys apply to new requests for the same provider and endpoint. Access lasts up to eight hours and is not saved across app restarts.</p>
         <div className="remote-providers__list">{review.profiles.map(profile=><label key={profile.name} className="remote-providers__choice">
           <input type="checkbox" checked={selected.includes(profile.name)} disabled={!profile.supported} onChange={event=>{const names=event.target.checked?[...selected,profile.name]:selected.filter(name=>name!==profile.name);setSelected(names);if(!names.includes(primary))setPrimary(names[0]??'')}}/>
           <span><strong>{profile.name}</strong> · {profile.model}<small>{profile.credentialSource}{!profile.supported ? ` · ${profile.setup}` : ''}</small></span>
         </label>)}</div>
-        {!review.profiles.length && <p>No local profiles. Open a local workspace’s Models & Providers settings to add one.</p>}
+        {!review.profiles.length && <p>No local profiles. Open a local workspace’s Models &amp; Providers settings to add one.</p>}
         <div className="field">
           <span id="remote-primary-profile" className="tiercard__label">Primary profile</span>
           <SelectField
@@ -165,16 +166,16 @@ export function RemoteProviders({remote, relay, changed, accounts}: {remote?: Xe
         <p className="studio-muted">Per provider: 10,000 requests, 16 concurrent requests, and 32,768 output tokens per request where supported. Readiness is configured, not verified by a live provider call.</p>
         {needsControlled && <label className="remote-providers__choice"><input type="checkbox" checked={controlled} onChange={event=>setControlled(event.target.checked)}/><span>Allow subscription providers to control output length; the token cap does not apply to them.</span></label>}
         {review.running && <p role="status">This task or its agents are working. Wait until they finish before changing its provider source.</p>}
-        <div className="row__actions"><button className="btn" disabled={review.running || !selected.length || !primary || selected.length>32 || Boolean(needsControlled&&!controlled)} onClick={()=>void act(async()=>{
+        <div className="row__actions"><button type="button" className="btn btn--solid" disabled={review.running || !selected.length || !primary || selected.length>32 || Boolean(needsControlled&&!controlled)} onClick={()=>void act(async()=>{
           const result=await remote!('provider-share',{consent:true,review:review.review,profiles:selected,profile:primary,minutes,providerControlledOutput:controlled}) as {ok?:boolean;error?:string}
           if(result.ok!==true)throw new Error(result.error || 'Could not share local providers.')
           if(alive.current)setEditing(false)
-        })}>Enable local access for this task</button><button className="btn" onClick={()=>setEditing(false)}>Cancel</button></div>
+        })}>Enable local access for this task</button><button type="button" className="btn" onClick={()=>setEditing(false)}>Cancel</button></div>
       </fieldset>}
     </>}
     {syncAll && <ActionDialog
       title={syncAll.phase==='done' ? 'Providers synced' : `Sync all providers to ${syncAll.destination || 'this SSH host'}`}
-      confirmLabel={syncAll.phase==='done' ? 'Done' : `Sync ${syncAll.items.filter(item=>item.review).length} accounts`}
+      confirmLabel={syncAll.phase==='done' ? 'Done' : `Sync ${syncCount} ${syncCount === 1 ? 'account' : 'accounts'}`}
       busyLabel="Syncing accounts…" busy={syncAll.phase==='working'} done={syncAll.phase==='done'} error={syncAll.error}
       disabled={syncAll.phase==='reviewing' || (syncAll.phase==='ready' && !syncAll.items.some(item=>item.review))}
       onConfirm={()=>void confirmAll()} onCancel={()=>setSyncAll(null)}>

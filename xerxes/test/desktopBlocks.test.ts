@@ -514,3 +514,50 @@ test('a stored message with an attached image replays the image in the person\'s
   expect(users[2]).toMatchObject({ text: 'look\n[image omitted: 2400 KB]' })
   expect(users[2]).not.toHaveProperty('images')
 })
+
+test('blocksFromStoredMessages preserves tool diffs, locations, title, kind, and per-message inline thinking on reload', () => {
+  const blocks = blocksFromStoredMessages(
+    [
+      { role: 'user', content: 'update app' },
+      {
+        role: 'assistant',
+        content: '',
+        thinking: 'First step reasoning',
+        tool_calls: [{ id: 'tc-edit', type: 'function', function: { name: 'EditFile', arguments: '{"path":"src/app.ts"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc-edit', name: 'EditFile', content: 'Updated src/app.ts' },
+      { role: 'assistant', content: 'All done.', thinking: 'Second step reasoning' },
+    ],
+    {
+      executions: [
+        {
+          toolCallId: 'tc-edit',
+          name: 'EditFile',
+          title: 'Edit src/app.ts',
+          kind: 'edit',
+          inputs: { path: 'src/app.ts' },
+          result: 'Updated src/app.ts',
+          permitted: true,
+          durationMs: 42,
+          diff: { path: 'src/app.ts', old_text: 'old\n', new_text: 'new\nline2\n' },
+          locations: [{ path: 'src/app.ts', line: 1 }],
+        },
+      ],
+    },
+  )
+
+  expect(blocks.map(b => b.kind)).toEqual(['user', 'thinking', 'tools', 'thinking', 'agent'])
+  const thinkingBlocks = blocks.filter(b => b.kind === 'thinking')
+  expect(thinkingBlocks.map(b => b.text)).toEqual(['First step reasoning', 'Second step reasoning'])
+  const toolsBlock = blocks.find(b => b.kind === 'tools')
+  expect(toolsBlock?.kind).toBe('tools')
+  if (toolsBlock?.kind === 'tools') {
+    expect(toolsBlock.items[0]).toMatchObject({
+      id: 'tc-edit',
+      title: 'Edit src/app.ts',
+      kind: 'edit',
+      path: 'src/app.ts',
+      diff: { adds: 2, dels: 1, path: 'src/app.ts', old_text: 'old\n', new_text: 'new\nline2\n' },
+    })
+  }
+})

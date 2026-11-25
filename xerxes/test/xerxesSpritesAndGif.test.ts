@@ -705,8 +705,8 @@ describe('XerxesSprites', () => {
     expect(activeMark).toContain('data-thinking-active="true"')
     expect(activeMark).toContain('data-emblem="xerxes-progress"')
     expect(activeMark).toContain('xerxes-mark-spin')
-    expect(activeMark).toContain('stroke-width="1.75"')
-    expect(activeMark).toContain('<path')
+    expect(activeMark).toContain('xerxes-dot-grid')
+    expect(activeMark.match(/<circle /g)?.length).toBe(4)
     expect(activeMark.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
 
     const settledMark = renderToStaticMarkup(createElement(XerxesThinkingMark, { size: 15, active: false }))

@@ -74,9 +74,9 @@ export function WorkspaceFileTree({ sessionKey, path = './', selected, select, l
   return <div role={level === 1 ? 'tree' : 'group'} aria-label={level === 1 ? 'Workspace files' : undefined}>
     {rows.map(row => <FileTreeEntry key={text(row.value)} row={row} sessionKey={sessionKey} selected={selected} select={select} level={level} {...(changed ? { changed } : {})} />)}
     {loading && <p className="studio-muted" role="status">Loading folder…</p>}
-    {error && <div role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>Retry folder</button></div>}
+    {error && <div role="alert">{error} <button type="button" className="btn" onClick={() => setRetry(value => value + 1)}>Retry folder</button></div>}
     {!loading && !error && !rows.length && <p className="studio-muted">Empty folder</p>}
-    {more && !loading && !error && <button onClick={() => setOffset(rows.length)}>Load more entries</button>}
+    {more && !loading && !error && <button type="button" className="btn" onClick={() => setOffset(rows.length)}>Load more entries</button>}
   </div>
 }
 
@@ -96,7 +96,7 @@ function FileTreeEntry({ row, sessionKey, selected, select, level, changed }: {
   const [loaded, setLoaded] = useState(false)
   const expand = () => { setOpen(value => !value); setLoaded(true) }
   return <div role="none">
-    <button role="treeitem" aria-level={level} aria-expanded={directory ? open : undefined} aria-selected={!directory && selected === path}
+    <button type="button" role="treeitem" aria-level={level} aria-expanded={directory ? open : undefined} aria-selected={!directory && selected === path}
       className="file-browser__entry" style={{ paddingLeft: 7 + (level - 1) * 16 }}
       title={(directory ? (open ? 'Collapse folder: ' : 'Expand folder: ') : 'Select file: ') + path}
       onClick={() => directory ? expand() : select(path)}

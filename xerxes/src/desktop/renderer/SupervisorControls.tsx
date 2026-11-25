@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useRef, type ReactElement, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type ReactElement, type ReactNode } from 'react'
 
 import { useDialogFocus } from './dialogFocus.js'
 
@@ -31,15 +31,29 @@ export interface SupervisorControlsProps {
 
 export function SupervisorControls({ tab, tabs, onTab, onClose, children }: SupervisorControlsProps): ReactElement {
   const dialog = useRef<HTMLDivElement>(null)
+  const mainRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
   useDialogFocus(dialog)
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0
+  }, [tab])
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      onClose()
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [onClose])
   const current = tabs.find(entry => entry.id === tab)
   return (
     <div
       className="backdrop"
       onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}
-      onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); onClose() } }}
     >
-      <div ref={dialog} className="modal xcontrols" role="dialog" aria-modal="true" aria-label="XERXES controls" tabIndex={-1}>
+      <div ref={dialog} className="modal xcontrols" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <nav className="modal__side" aria-label="XERXES controls">
           <div className="cap">XERXES</div>
           {tabs.map(entry => (
@@ -55,9 +69,9 @@ export function SupervisorControls({ tab, tabs, onTab, onClose, children }: Supe
             </button>
           ))}
         </nav>
-        <div className="modal__main">
+        <div ref={mainRef} className="modal__main">
           <div className="xcontrols__head">
-            <h2 className="modal__title">{current?.label ?? ''}</h2>
+            <h2 id={titleId} className="modal__title">{current?.label ?? 'XERXES controls'}</h2>
             <button type="button" className="btn" onClick={onClose}>Close</button>
           </div>
           {children}

@@ -349,6 +349,9 @@ export function derafshAnimationEnabled(
   if (TRUE_RE.test(override)) {
     return true
   }
+  if (TRUE_RE.test((env.REDUCED_MOTION ?? '').trim())) {
+    return false
+  }
 
   return env.TERM !== 'dumb' && env.NODE_ENV !== 'test' && !TRUE_RE.test((env.CI ?? '').trim())
 }

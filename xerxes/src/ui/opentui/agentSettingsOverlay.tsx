@@ -150,16 +150,16 @@ export function AgentSettingsOverlay({ t }: { t: Theme }) {
     <Text wrap="wrap">Default: {defaultMode} · F2 change · F4 disable selected mode</Text>
     <scrollbox style={{ flexGrow: 1, minHeight: 0 }} contentOptions={{ flexDirection: 'column' }}>
       <Text wrap="wrap" color={t.ds.secondary}>Blank provider/effort: inherit. Empty tier: disabled.</Text>
-      <Text wrap="wrap">Provider profiles: {loaded?.profiles?.map(profile => `${profile.name} (${profile.provider})`).join(' · ') || 'Loading…'}</Text>
+      <Text wrap="wrap">Provider profiles: {loaded ? (loaded.profiles?.map(profile => `${profile.name} (${profile.provider})`).join(' · ') || 'None configured') : 'Loading…'}</Text>
       {tiers.map((tier, i) => i !== row ? null : <Box key={tier} flexDirection="column" marginTop={1}>
         <DialogSection t={t}>{tier.toUpperCase()}</DialogSection>
         {keys.map((name, j) => <SettingRow key={name} t={t} selected={field === i * 3 + j} label={['Provider profile', 'Model ID', 'Reasoning effort'][j]!}>{rows[i]?.[name] || '(inherit / unset)'}</SettingRow>)}
       </Box>)}
-      {loaded ? <textarea key={field} ref={input} focused={!busy} minHeight={1} maxHeight={2} onContentChange={() => { const text = input.current?.plainText ?? ''; setRows(current => current.map((value, i) => i === row ? { ...value, [key]: text } : value)) }} /> : null}
+      {loaded ? <Box borderStyle="round" borderColor={t.color.accent} paddingX={1} flexShrink={0}><textarea key={field} ref={input} focused={!busy} minHeight={1} maxHeight={2} focusedBackgroundColor={t.ds.sunken} focusedTextColor={t.color.text} placeholder={key === 'provider_profile' ? 'Provider profile (blank to inherit)…' : key === 'model' ? 'Model ID…' : 'Reasoning effort (blank to inherit)…'} placeholderColor={t.color.muted} onContentChange={() => { const text = input.current?.plainText ?? ''; setRows(current => current.map((value, i) => i === row ? { ...value, [key]: text } : value)) }} /></Box> : null}
       {choices.length > 0 ? <Text wrap="wrap" color={t.ds.secondary}>↑/↓ choose: {choices.slice(Math.max(0, choices.indexOf(selected[key]) - 2), Math.max(0, choices.indexOf(selected[key]) - 2) + 6).map(value => value || '(inherit)').join(' · ')}{choices.length > 6 ? ' …' : ''}</Text> : null}
       {key === 'model' && modelStatus ? <Text wrap="wrap" color={t.ds.secondary}>{modelStatus}</Text> : null}
-      {optionsError && key === 'reasoning_effort' ? <Text wrap="wrap" color={t.color.warn}>{optionsError}</Text> : null}
-      {error ? <Text wrap="wrap" color={t.color.warn}>{error}</Text> : null}
+      {optionsError && key === 'reasoning_effort' ? <Text wrap="wrap" color={t.color.error}>{optionsError}</Text> : null}
+      {error ? <Text wrap="wrap" color={error.startsWith('Saved.') ? t.color.ok : error.includes('disabled in draft') ? t.ds.secondary : t.color.error}>{error}</Text> : null}
     </scrollbox>
     <DialogFooter t={t}><Text wrap="wrap">{busy ? 'Saving…' : 'Tab field/mode · F6 routing notes · Enter save · Esc close'}</Text></DialogFooter>
     </>}

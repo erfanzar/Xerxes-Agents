@@ -11,7 +11,7 @@
  * native menu owns are marked so it stays honest about who handles what.
  */
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 
 import { useDialogFocus } from './dialogFocus.js'
 
@@ -29,13 +29,14 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
       { keys: '⇧⌘N', label: 'New window' },
       { keys: '⇧⌘O', label: 'Open another workspace in a new window' },
       { keys: '⌘W', label: 'Close the shown workspace view, or the window' },
-      { keys: '⌘E', label: 'Export this transcript as markdown' },
+      { keys: '⌘E', label: 'Export this transcript as Markdown' },
     ],
   },
   {
     title: 'Finding things',
     items: [
       { keys: '⌘K', label: 'Command palette' },
+      { keys: '⌘;', label: 'Open side question' },
       { keys: '⌘J', label: 'Toggle bottom terminal drawer (also Ctrl+`)' },
       { keys: '⌘\\', label: 'Toggle right panel' },
       { keys: '⌥S', label: 'Toggle Immortals Board' },
@@ -43,22 +44,22 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
       { keys: '⌘F', label: 'Find in this conversation' },
       { keys: '⇧⌘F', label: 'Search the messages of every task' },
       { keys: '⌘,', label: 'Settings' },
-      { keys: '⌘/', label: 'This list' },
+      { keys: '⌘/', label: 'Keyboard shortcuts' },
     ],
   },
   {
     title: 'While a task runs',
     items: [
-      { keys: '⏎', label: 'Send — or queue as steering while the agent acts' },
+      { keys: '⏎', label: 'Send, or queue as steering while the agent acts' },
       { keys: '⇧⏎', label: 'Newline' },
-      { keys: 'esc', label: 'Close what is open' },
-      { keys: 'esc esc', label: 'Stop the running task and its agents' },
+      { keys: 'Esc', label: 'Close what is open' },
+      { keys: 'Esc Esc', label: 'Stop the running task and its agents' },
     ],
   },
   {
     title: 'When the agent asks',
     items: [
-      { keys: '1', label: 'Allow once — only while the approval card has focus' },
+      { keys: '1', label: 'Allow once (while the approval card has focus)' },
       { keys: '2', label: 'Allow for this task' },
       { keys: '3', label: 'Deny' },
       { keys: '1…9', label: 'Choose an answer on a question or plan card' },
@@ -69,6 +70,7 @@ const GROUPS: readonly { readonly title: string; readonly items: readonly Bindin
 export function Shortcuts(): ReactElement | null {
   const [open, setOpen] = useState(false)
   const card = useRef<HTMLDivElement>(null)
+  const titleId = useId()
   useDialogFocus(card, open)
   useEffect(() => {
     const show = (): void => setOpen(true)
@@ -90,9 +92,9 @@ export function Shortcuts(): ReactElement | null {
   if (!open) return null
   return (
     <div className="backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setOpen(false) }}>
-      <div ref={card} className="modal shortcuts" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div ref={card} className="modal shortcuts" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="modal__main">
-          <h2 className="modal__title">Keyboard shortcuts</h2>
+          <h2 id={titleId} className="modal__title">Keyboard shortcuts</h2>
           <p className="modal__sub">On Windows and Linux, ⌘ is Ctrl and ⌥ is Alt.</p>
           {GROUPS.map(group => (
             <section key={group.title} className="shortcuts__group">
@@ -107,8 +109,8 @@ export function Shortcuts(): ReactElement | null {
               </dl>
             </section>
           ))}
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn" onClick={() => setOpen(false)}>Close</button>
+          <div className="shortcuts__foot">
+            <button type="button" className="btn" onClick={() => setOpen(false)}>Close</button>
           </div>
         </div>
       </div>

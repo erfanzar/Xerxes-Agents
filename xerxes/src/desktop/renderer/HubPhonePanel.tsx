@@ -297,11 +297,8 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
   return (
     <section className="hubphone" aria-labelledby="hubphone-title">
       <header className="hubphone__header">
-        <div className="hubphone__row">
-          <div>
-            <h2 id="hubphone-title" className="modal__title">Hub &amp; phone</h2>
-            <p className="modal__sub">Your Hub is the always-on server that lets your phone and the XERXES tab reach every machine. Enter its SSH address once and this app does the rest.</p>
-          </div>
+        <div className="hubphone__title-row">
+          <h2 id="hubphone-title" className="modal__title">Hub &amp; phone</h2>
           {status !== undefined ? (
             <span className={`hubphone__status-badge ${connected ? 'hubphone__status-badge--live' : ''}`}>
               <span className={`hubphone__dot ${connected ? 'hubphone__dot--online' : 'hubphone__dot--offline'}`} aria-hidden="true" />
@@ -309,12 +306,13 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
             </span>
           ) : null}
         </div>
+        <p className="modal__sub">Your Hub is the always-on server that lets your phone and the XERXES tab reach every machine. Enter its SSH address once and this app does the rest.</p>
       </header>
 
       {!available ? (
         <p role="status" className="notice">Hub &amp; phone is only available in the Xerxes desktop app.</p>
       ) : status === undefined ? (
-        <p aria-busy="true">Reading the saved Hub…</p>
+        <p role="status" aria-busy="true">Reading the saved Hub…</p>
       ) : (
         <>
           <div className="hubphone__card">
@@ -324,12 +322,14 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                 <input
                   id="hub-ssh-address" type="text" value={props.address} placeholder="xerxes@203.0.113.10"
                   spellCheck={false} autoComplete="off" autoCapitalize="off" disabled={props.saving}
+                  aria-invalid={props.saveError ? true : undefined}
+                  {...(props.saveError ? { 'aria-describedby': 'hub-ssh-error' } : {})}
                   onChange={event => props.onAddress(event.target.value)}
                 />
               </div>
               <div className="hubphone__row">
                 <div className="hubphone__actions">
-                  <button type="submit" className="btn btn--solid" disabled={props.saving || props.address.trim() === ''}>
+                  <button type="submit" className={connected ? 'btn' : 'btn btn--solid'} disabled={props.saving || props.address.trim() === ''}>
                     {props.saving ? 'Checking the Hub…' : status.target === null ? 'Save and connect' : 'Save'}
                   </button>
                   {status.target !== null ? (
@@ -358,7 +358,7 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                   <button type="button" className="btn" onClick={() => props.onOpenWeb?.(status.origin!)}>Open Hub web app</button>
                 ) : null}
               </div>
-              {props.saveError ? <p role="alert" className="action-card__error">{props.saveError}</p> : null}
+              {props.saveError ? <p id="hub-ssh-error" role="alert" className="action-card__error">{props.saveError}</p> : null}
             </form>
 
             {!connected ? (
@@ -383,7 +383,7 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                     </div>
                     <p className="studio-muted">{status.linkedMachineId !== null ? `Linked to the Hub as ${status.linkedMachineId}. Every project on ${machine} is connected automatically.` : `Not linked yet. Linking connects every project on ${machine} to the Hub.`}</p>
                   </div>
-                  <button type="button" className="btn btn--solid" disabled={link.phase === 'running'} onClick={props.onLink}>
+                  <button type="button" className={status.linkedMachineId === null ? 'btn btn--solid' : 'btn'} disabled={link.phase === 'running'} onClick={props.onLink}>
                     {link.phase === 'running' ? 'Linking…' : status.linkedMachineId !== null ? `Link ${machine} again` : `Link ${machine}`}
                   </button>
                 </div>
@@ -402,9 +402,10 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                     <strong>Phone</strong>
                     <p className="studio-muted">Pair a phone to follow tasks, start new ones, and talk to XERXES from anywhere.</p>
                   </div>
-                  <div className="hubphone__pair-controls">
+                  <form className="hubphone__pair-controls" onSubmit={event => { event.preventDefault(); if (pair.phase !== 'creating') props.onPair() }}>
                     {props.onDeviceLabel ? (
                       <input
+                        id="hub-phone-label"
                         className="hubphone__label-input"
                         type="text"
                         aria-label="Phone label"
@@ -415,10 +416,10 @@ export function HubPhoneView(props: HubPhoneViewProps): ReactElement {
                         onChange={event => props.onDeviceLabel?.(event.target.value)}
                       />
                     ) : null}
-                    <button type="button" className="btn btn--solid" disabled={pair.phase === 'creating'} onClick={props.onPair}>
+                    <button type="submit" className={status.linkedMachineId !== null && pair.phase === 'idle' ? 'btn btn--solid' : 'btn'} disabled={pair.phase === 'creating'}>
                       {pair.phase === 'creating' ? 'Creating link…' : pair.phase === 'idle' ? 'Pair a phone' : 'New pairing link'}
                     </button>
-                  </div>
+                  </form>
                 </div>
                 {pair.phase === 'ready' ? <PairingBlock pairing={pair.pairing} confirming={pair.confirming} {...(pair.error === undefined ? {} : { error: pair.error })} onConfirm={props.onConfirm} /> : null}
                 {pair.phase === 'confirmed' ? <p role="status" className="notice">Phone paired. It can open the Hub now.</p> : null}

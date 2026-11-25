@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Crisp 24-grid stroke glyphs matching T3 Code's Lucide chrome iconography.
+ * Crisp 24-grid stroke glyphs for desktop chrome iconography.
  * Every glyph inherits `currentColor` (zero hard-coded hex colors) and stays
  * inline so the Electron CSP (`default-src 'none'`) needs no remote assets.
  */
@@ -78,7 +78,7 @@ export type T3IconName =
   | 'workflow'
   | 'image'
 
-/** Cohesive T3 Code Lucide icon mapping for every Right Panel surface. */
+/** Cohesive stroke icon mapping for every Right Panel surface. */
 export function railT3IconOf(panel: RailPanel): T3IconName {
   switch (panel) {
     case 'browser': return 'globe'

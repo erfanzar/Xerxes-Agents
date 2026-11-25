@@ -288,15 +288,15 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     if (/Unknown method: git\./.test(scm.error)) {
       return <div className="scm scm--empty">
         <div className="scm-empty"><Icon name="branch" size={22} /><strong>Update the workspace runtime</strong><p>The running runtime is older than this app and has no Git support yet. Updating restarts it once your running work finishes.</p></div>
-        <button className="btn" onClick={() => { void store.restartDaemon().then(() => refresh()) }}>Update runtime</button>
+        <button type="button" className="btn" onClick={() => { void store.restartDaemon().then(() => refresh()) }}>Update runtime</button>
       </div>
     }
-    return <div className="scm scm--empty"><p className="studio-muted">Reading the repository…</p>{scm.error && <p className="studio-error" role="alert">{scm.error}</p>}</div>
+    return <div className="scm scm--empty"><p className="studio-muted" role="status">Reading the repository…</p>{scm.error && <p className="studio-error" role="alert">{scm.error}</p>}</div>
   }
   if (repo === null) {
     return <div className="scm scm--empty">
       <div className="scm-empty"><Icon name="branch" size={22} /><strong>No git repository</strong><p>{scm.reason || 'This folder is not a git repository.'}</p></div>
-      {onSnapshots && <button className="btn" onClick={onSnapshots}>Snapshots & restore</button>}
+      {onSnapshots && <button type="button" className="btn" onClick={onSnapshots}>Snapshots &amp; restore</button>}
     </div>
   }
 
@@ -323,7 +323,7 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
     if (!result) return
     const done = result.commit as ScmCommit | undefined
     setMessage('')
-    setNotice(done ? `Committed ${done.short} — ${done.subject}` : 'Committed')
+    setNotice(done ? `Committed ${done.short} · ${done.subject}` : 'Committed')
   }
 
   const generate = async (): Promise<void> => {
@@ -334,12 +334,12 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
   const review = (): void => {
     if (isAntigravityAcpSession(snap)) {
       prefillComposerPrompt(ANTIGRAVITY_REVIEW_PROMPT)
-      setNotice('Review prompt pre-filled in the composer — review and send when ready.')
+      setNotice('Review prompt pre-filled in the composer. Review and send when ready.')
       onReviewSent?.()
       return
     }
     void store.submit(reviewPrompt(repo))
-    setNotice(snap.turnActive ? 'Review request sent — it runs when the current step settles.' : 'Review request sent to the chat.')
+    setNotice(snap.turnActive ? 'Review request queued for when the current step settles.' : 'Review request sent to the chat.')
     // The Git view covers the conversation; bring it back so the review is visible.
     onReviewSent?.()
   }
@@ -367,33 +367,33 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
 
   const sync = repo.upstream
     ? <>
-        <button className="scm-tool" title={repo.behind ? `Pull ${repo.behind} commit${repo.behind === 1 ? '' : 's'} (fast-forward only)` : 'Pull'} disabled={Boolean(scm.busy)} onClick={() => void scm.act('Pulling…', 'git.pull').then(r => r && setNotice('Pulled.'))}>
+        <button type="button" className="scm-tool" aria-label={repo.behind ? `Pull ${repo.behind} commit${repo.behind === 1 ? '' : 's'}` : 'Pull'} title={repo.behind ? `Pull ${repo.behind} commit${repo.behind === 1 ? '' : 's'} (fast-forward only)` : 'Pull'} disabled={Boolean(scm.busy)} onClick={() => void scm.act('Pulling…', 'git.pull').then(r => r && setNotice('Pulled.'))}>
           <Icon name="arrowDown" size={13} />{repo.behind > 0 && <span>{repo.behind}</span>}
         </button>
-        <button className="scm-tool" title={repo.ahead ? `Push ${repo.ahead} commit${repo.ahead === 1 ? '' : 's'} to ${repo.upstream}` : `Push to ${repo.upstream}`} disabled={Boolean(scm.busy)} onClick={() => void scm.act('Pushing…', 'git.push').then(r => r && setNotice(`Pushed to ${repo.upstream}.`))}>
+        <button type="button" className="scm-tool" aria-label={repo.ahead ? `Push ${repo.ahead} commit${repo.ahead === 1 ? '' : 's'} to ${repo.upstream}` : `Push to ${repo.upstream}`} title={repo.ahead ? `Push ${repo.ahead} commit${repo.ahead === 1 ? '' : 's'} to ${repo.upstream}` : `Push to ${repo.upstream}`} disabled={Boolean(scm.busy)} onClick={() => void scm.act('Pushing…', 'git.push').then(r => r && setNotice(`Pushed to ${repo.upstream}.`))}>
           <Icon name="arrowUp" size={13} />{repo.ahead > 0 && <span>{repo.ahead}</span>}
         </button>
       </>
     : repo.branch && repo.hasHead
-      ? <button className="scm-tool scm-tool--label" title="Push this branch and track it on the remote" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Publishing…', 'git.push').then(r => r && setNotice('Branch published.'))}><Icon name="cloud" size={13} /><span>Publish</span></button>
+      ? <button type="button" className="scm-tool scm-tool--label" title="Push this branch and track it on the remote" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Publishing…', 'git.push').then(r => r && setNotice('Branch published.'))}><Icon name="cloud" size={13} /><span>Publish</span></button>
       : null
 
   return (
     <div ref={rootRef} className={`scm${expanded ? '' : ' scm--compact'}`}>
       <div className="scm__side">
         <header className="scm__head">
-          <button ref={branchBtnRef} className="scm-branch" aria-expanded={branchesOpen} title={repo.detached ? 'Detached HEAD — pick a branch' : 'Switch or create a branch'} onClick={() => setBranchesOpen(value => !value)}>
+          <button ref={branchBtnRef} type="button" className="scm-branch" aria-expanded={branchesOpen} title={repo.detached ? 'Detached HEAD · pick a branch' : 'Switch or create a branch'} onClick={() => setBranchesOpen(value => !value)}>
             <Icon name="branch" size={14} /><span>{repo.detached ? 'Detached HEAD' : repo.branch ?? 'No branch'}</span><Icon name="caretDown" size={11} />
           </button>
           <span className="scm__tools">
-            {!expanded && onExpand && <button className="scm-tool" title="Show changes — open the diff view" aria-label="Show changes" onClick={onExpand}><Icon name="changes" size={13} /></button>}
+            {!expanded && onExpand && <button type="button" className="scm-tool" title="Show changes · open diff view" aria-label="Show changes" onClick={onExpand}><Icon name="changes" size={13} /></button>}
             {sync}
-            <button className="scm-tool" title="Fetch from remotes" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Fetching…', 'git.fetch')}><Icon name="retry" size={13} /></button>
+            <button type="button" className="scm-tool" aria-label="Fetch from remotes" title="Fetch from remotes" disabled={Boolean(scm.busy)} onClick={() => void scm.act('Fetching…', 'git.fetch')}><Icon name="retry" size={13} /></button>
           </span>
         </header>
         {branchesOpen && <BranchList scm={scm} triggerRef={branchBtnRef} onDone={() => setBranchesOpen(false)} />}
 
-        <div className="scm__commit">
+        <form className="scm__commit" onSubmit={event => { event.preventDefault(); void runPrimary() }}>
           <textarea
             value={message}
             rows={Math.min(14, Math.max(6, message.split('\n').length + 1))}
@@ -408,14 +408,14 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
             onKeyDown={onMessageKey}
           />
           <div className="scm__commit-row">
-            <button className="btn" disabled={Boolean(scm.busy) || total === 0} title="Draft a message from your changes with your current model" onClick={() => void generate()}>
+            <button type="button" className="btn" disabled={Boolean(scm.busy) || total === 0} title="Draft a message from your changes with your current model" onClick={() => void generate()}>
               <Icon name="spark" size={13} /> {scm.busy === 'Drafting a message…' ? 'Drafting…' : 'Generate'}
             </button>
             <button
+              type="submit"
               className="btn btn--solid"
               disabled={primary.kind === 'commit' ? !canCommit : Boolean(scm.busy)}
               title={primary.kind === 'commit' && repo.counts.conflicts ? 'Resolve merge conflicts first' : primary.title}
-              onClick={() => void runPrimary()}
             >
               <Icon name={primary.kind === 'commit' ? 'check' : primary.kind === 'pull' ? 'arrowDown' : primary.kind === 'publish' ? 'cloud' : primary.kind === 'sync' ? 'retry' : 'arrowUp'} size={13} /> {primary.label}
             </button>
@@ -434,17 +434,17 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
               </button>
             </div>
           )}
-          <button className="scm-review" disabled={total === 0} onClick={review}>
+          <button type="button" className="scm-review" disabled={total === 0} onClick={review}>
             <Icon name="agent" size={13} /> Review all changes with the agent
           </button>
-        </div>
+        </form>
 
         {pendingDiscard && (
           <div className="scm__confirm" role="alertdialog" aria-label="Confirm discard changes">
             <span>{pendingDiscard.prompt}</span>
             <div className="scm__confirm-actions">
               <button type="button" className="btn btn--ghost" disabled={Boolean(scm.busy)} onClick={() => setPendingDiscard(null)}>Cancel</button>
-              <button type="button" className="btn btn--solid" disabled={Boolean(scm.busy)} onClick={confirmDiscard}>Discard</button>
+              <button type="button" className="btn btn--danger" disabled={Boolean(scm.busy)} onClick={confirmDiscard}>Discard</button>
             </div>
           </div>
         )}
@@ -452,12 +452,12 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
         {(scm.busy || scm.error || notice) && (
           <div className="scm__status" role={scm.error ? 'alert' : 'status'}>
             {scm.busy ? <><span className="studio-spinner" /> {scm.busy}</> : scm.error ? <span className="scm__error">{scm.error}</span> : <span>{notice}</span>}
-            {!scm.busy && (scm.error || notice) && <button className="scm-tool" aria-label="Dismiss" onClick={() => { scm.setError(''); setNotice('') }}><Icon name="close" size={11} /></button>}
+            {!scm.busy && (scm.error || notice) && <button type="button" className="scm-tool" aria-label="Dismiss" onClick={() => { scm.setError(''); setNotice('') }}><Icon name="close" size={11} /></button>}
           </div>
         )}
 
         <div className="scm__groups">
-          {total === 0 && <div className="scm-clean"><Icon name="checkCircle" size={16} /> Nothing to commit — the working tree is clean.</div>}
+          {total === 0 && <div className="scm-clean"><Icon name="checkCircle" size={16} /> Nothing to commit. The working tree is clean.</div>}
           {groups.map(([key, title, files]) => files.length === 0 ? null : (
             <ScmGroup
               key={key}
@@ -482,7 +482,7 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
           <summary>Recent commits</summary>
           {historyOpen && <History scm={scm} head={repo.hasHead ? `${repo.branch}:${repo.ahead}:${repo.behind}:${repo.counts.staged}` : ''} selected={selected} onSelect={choose} onPreselect={setSelected} />}
         </details>
-        {onSnapshots && <button className="scm-link" onClick={onSnapshots}>Snapshots & restore…</button>}
+        {onSnapshots && <button type="button" className="scm-link" onClick={onSnapshots}>Snapshots &amp; restore…</button>}
       </div>
 
       {(expanded || inlineDiff) && <FileDiff scm={scm} selection={selected} repo={repo} />}
@@ -503,7 +503,7 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
   return (
     <section className="scm-group">
       <header className="scm-group__head">
-        <button className="scm-group__toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+        <button type="button" className="scm-group__toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>
           <Icon name="chevron" size={12} /><span>{title}</span><span className="scm-count">{count}</span>
         </button>
         <span className="scm-group__actions">
@@ -520,7 +520,7 @@ function ScmGroup({ title, count, files, group, selected, busy, onSelect, onStag
           const dir = dirname(file.path)
           return (
             <li key={`${rowGroup}:${file.path}`} className={`scm-file${isSelected ? ' is-selected' : ''}`}>
-              <button className="scm-file__open" title={file.origPath ? `${file.origPath} → ${file.path}` : file.path} onClick={() => onSelect({ path: file.path, group: rowGroup })}>
+              <button type="button" className="scm-file__open" title={file.origPath ? `${file.origPath} → ${file.path}` : file.path} onClick={() => onSelect({ path: file.path, group: rowGroup })}>
                 <span className="scm-file__name">{basename(file.path)}</span>
                 {dir && <span className="scm-file__dir">{dir}</span>}
               </button>
@@ -655,7 +655,7 @@ function BranchList({ scm, triggerRef, onDone }: { scm: ReturnType<typeof useScm
       }}
     >
       <div className="scm-branches__head">
-        <input value={filter} placeholder="Filter branches…" aria-label="Filter branches" onChange={event => setFilter(event.target.value)} autoFocus />
+        <input type="search" value={filter} placeholder="Filter branches…" aria-label="Filter branches" onChange={event => setFilter(event.target.value)} autoFocus />
         <button type="button" className="scm-tool" aria-label="Close branches" title="Close branches (Esc)" onClick={onDone}>
           <Icon name="close" size={12} />
         </button>
@@ -717,7 +717,7 @@ export function History({ scm, head, selected, onSelect, onPreselect }: { scm: R
         const expanded = open === commit.hash
         return (
           <li key={commit.hash} className={expanded ? 'is-open' : ''}>
-            <button className="scm-log__row" aria-expanded={expanded} title={`${commit.hash}\n${commit.author}, ${commit.when}`} onClick={() => toggle(commit)}>
+            <button type="button" className="scm-log__row" aria-expanded={expanded} title={`${commit.hash}\n${commit.author}, ${commit.when}`} onClick={() => toggle(commit)}>
               <span className="scm-log__subject">{commit.subject}</span>
               <span className="scm-log__meta"><code>{commit.short}</code> · {commit.author} · {commit.when}</span>
             </button>

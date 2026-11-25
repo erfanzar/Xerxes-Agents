@@ -27,6 +27,7 @@ import {
 import { createPortal } from 'react-dom'
 
 import { CopyButton } from './CopyButton.js'
+import { useDialogFocus } from './dialogFocus.js'
 import { Icon } from './Icon.js'
 import { desktopCall, desktopError, record, text } from './desktopRpc.js'
 import { isPerfPaused, readDocumentTheme, subscribeDocumentTheme, subscribePerfPaused } from './pageVisibility.js'
@@ -122,21 +123,21 @@ function widgetTokensCss(mode: 'inline' | 'panel'): string {
     '  --muted-foreground: #9ca3af;',
     '  --placeholder: #6b7280;',
     '  --code-foreground: #e5e7eb;',
-    '  --primary: #a855f7;',
+    '  --primary: #346bf1;',
     '  --primary-foreground: #ffffff;',
     '  --secondary: #23232e;',
     '  --secondary-foreground: #e5e7eb;',
     '  --accent: #fbbf24;',
-    '  --link: #7aa2f7;',
+    '  --link: #60a5fa;',
     '  --success: #34d399;',
     '  --warning: #fbbf24;',
     '  --error: #f87171;',
-    '  --chart-1: #a855f7;',
+    '  --chart-1: #60a5fa;',
     '  --chart-2: #38bdf8;',
     '  --chart-3: #fbbf24;',
     '  --chart-4: #34d399;',
     '  --chart-5: #f472b6;',
-    '  --chart-6: #818cf8;',
+    '  --chart-6: #93c5fd;',
     '}',
     'html.light {',
     '  color-scheme: light;',
@@ -150,21 +151,21 @@ function widgetTokensCss(mode: 'inline' | 'panel'): string {
     '  --muted-foreground: #52525b;',
     '  --placeholder: #71717a;',
     '  --code-foreground: #27272a;',
-    '  --primary: #7e22ce;',
+    '  --primary: #1b4ed8;',
     '  --primary-foreground: #ffffff;',
     '  --secondary: #e4e4e7;',
     '  --secondary-foreground: #18181b;',
     '  --accent: #d97706;',
-    '  --link: #2563eb;',
+    '  --link: #1d4ed8;',
     '  --success: #059669;',
     '  --warning: #d97706;',
-    '  --error: #dc2626;',
-    '  --chart-1: #7e22ce;',
-    '  --chart-2: #0284c7;',
+    '  --error: #c81e1e;',
+    '  --chart-1: #1d4ed8;',
+    '  --chart-2: #0369a1;',
     '  --chart-3: #d97706;',
     '  --chart-4: #059669;',
-    '  --chart-5: #db2777;',
-    '  --chart-6: #4f46e5;',
+    '  --chart-5: #be185d;',
+    '  --chart-6: #0284c7;',
     '}',
     '*, *::before, *::after { box-sizing: border-box; }',
     'html, body {',
@@ -188,9 +189,11 @@ function widgetTokensCss(mode: 'inline' | 'panel'): string {
     '  padding: 5px 10px; border-radius: 7px; border: 1px solid var(--border);',
     '  background: var(--secondary); color: var(--secondary-foreground);',
     '  font: 500 12px/1.2 inherit; cursor: pointer;',
-    '  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;',
+    '  transition: background 120ms ease, border-color 120ms ease, transform 90ms cubic-bezier(0.2, 0.8, 0.2, 1);',
     '}',
     '.x-btn:hover { border-color: var(--primary); }',
+    '.x-btn:active:not(:disabled) { transform: translateY(1px) scale(0.985); }',
+    '.x-btn:focus-visible, .x-range:focus-visible, a:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }',
     '.x-btn.is-active, .x-btn--primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }',
     '.x-pill {',
     '  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;',
@@ -201,6 +204,7 @@ function widgetTokensCss(mode: 'inline' | 'panel'): string {
     ".x-mono { font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }",
     '.x-muted { color: var(--muted-foreground); font-size: 12px; }',
     '.x-canvas-wrap { position: relative; width: 100%; overflow: hidden; border-radius: 8px; }',
+    '@media (prefers-reduced-motion: reduce) { .x-btn { transition: background 120ms ease, border-color 120ms ease; } .x-btn:active { transform: none; } }',
   ].join('\n')
 }
 
@@ -366,7 +370,9 @@ export const WidgetFrame = memo(function WidgetFrame(props: WidgetFrameProps): R
 
   const rootRef = useRef<HTMLElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const modalRef = useRef<HTMLDivElement>(null)
   const modalIframeRef = useRef<HTMLIFrameElement>(null)
+  useDialogFocus(modalRef, fullscreen)
   const [blobUrl, setBlobUrl] = useState<string>('')
   const [modalBlobUrl, setModalBlobUrl] = useState<string>('')
 
@@ -482,7 +488,7 @@ export const WidgetFrame = memo(function WidgetFrame(props: WidgetFrameProps): R
     return () => window.removeEventListener('message', onMessage)
   }, [mode, embedId])
 
-  // Escape closes fullscreen modal cleanly.
+  // Escape closes fullscreen modal cleanly in capture phase so it never stops an active turn.
   useEffect(() => {
     if (!fullscreen || typeof window === 'undefined') return
     const onKey = (event: KeyboardEvent): void => {
@@ -492,8 +498,8 @@ export const WidgetFrame = memo(function WidgetFrame(props: WidgetFrameProps): R
         setFullscreen(false)
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [fullscreen])
 
   const rootClasses = [
@@ -607,54 +613,60 @@ export const WidgetFrame = memo(function WidgetFrame(props: WidgetFrameProps): R
       </div>
 
       {fullscreen && typeof document !== 'undefined' && createPortal(
-        <div
-          className="widget-frame__modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${frameTitle} — fullscreen`}
-          onClick={event => {
-            if (event.target === event.currentTarget) setFullscreen(false)
-          }}
-        >
-          <div className="widget-frame__modal">
-            <header className="widget-frame__bar widget-frame__modal-bar">
-              <span className="widget-frame__badge" data-3d={is3d ? 'true' : undefined}>
-                {is3d ? '3D' : 'Interactive'}
-              </span>
-              <span className="widget-frame__title" title={frameTitle}>{frameTitle}</span>
-              <span className="widget-frame__spacer" />
-              <div className="widget-frame__actions">
-                <button
-                  type="button"
-                  className="widget-frame__btn"
-                  title="Reload widget"
-                  onClick={() => setReloadNonce(n => n + 1)}
-                >
-                  <Icon name="retry" size={12} />
-                  <span>Reload</span>
-                </button>
-                <button
-                  type="button"
-                  className="widget-frame__btn widget-frame__btn--icon"
-                  title="Close fullscreen (Esc)"
-                  aria-label="Close fullscreen"
-                  onClick={() => setFullscreen(false)}
-                >
-                  <Icon name="close" size={13} />
-                </button>
-              </div>
-            </header>
-            <iframe
-              ref={modalIframeRef}
-              className="widget-frame__iframe widget-frame__iframe--modal"
-              title={`${frameTitle} (fullscreen)`}
-              sandbox="allow-scripts"
-              src={modalBlobUrl || undefined}
-              onLoad={() => {
-                pushTheme(modalIframeRef.current, theme)
-                pushPause(modalIframeRef.current, isPerfPaused())
-              }}
-            />
+        <div className="atelier widget-modal-layer">
+          <div
+            className="widget-frame__modal-backdrop"
+            onClick={event => {
+              if (event.target === event.currentTarget) setFullscreen(false)
+            }}
+          >
+            <div
+              ref={modalRef}
+              className="widget-frame__modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`${frameTitle} (fullscreen)`}
+              tabIndex={-1}
+            >
+              <header className="widget-frame__bar widget-frame__modal-bar">
+                <span className="widget-frame__badge" data-3d={is3d ? 'true' : undefined}>
+                  {is3d ? '3D' : 'Interactive'}
+                </span>
+                <span className="widget-frame__title" title={frameTitle}>{frameTitle}</span>
+                <span className="widget-frame__spacer" />
+                <div className="widget-frame__actions">
+                  <button
+                    type="button"
+                    className="widget-frame__btn"
+                    title="Reload widget"
+                    onClick={() => setReloadNonce(n => n + 1)}
+                  >
+                    <Icon name="retry" size={12} />
+                    <span>Reload</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="widget-frame__btn widget-frame__btn--icon"
+                    title="Close fullscreen (Esc)"
+                    aria-label="Close fullscreen"
+                    onClick={() => setFullscreen(false)}
+                  >
+                    <Icon name="close" size={13} />
+                  </button>
+                </div>
+              </header>
+              <iframe
+                ref={modalIframeRef}
+                className="widget-frame__iframe widget-frame__iframe--modal"
+                title={`${frameTitle} (fullscreen)`}
+                sandbox="allow-scripts"
+                src={modalBlobUrl || undefined}
+                onLoad={() => {
+                  pushTheme(modalIframeRef.current, theme)
+                  pushPause(modalIframeRef.current, isPerfPaused())
+                }}
+              />
+            </div>
           </div>
         </div>,
         document.body,

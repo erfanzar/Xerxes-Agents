@@ -705,6 +705,7 @@ export const FileToolRow = memo(function FileToolRow({ item, tool, failed, defau
 
   const extraPatchFiles = tool.kind === 'patch' && tool.files.length > 1 ? tool.files.length - 1 : 0
   const symbolCount = parsedOutline?.symbols.length ?? 0
+  const stateLabel = failed ? 'Failed' : item.state === 'working' ? 'Running' : item.dur && item.dur !== '0.0s' ? item.dur : ''
 
   return <div className="filetool" data-kind={tool.kind} data-state={failed ? 'failed' : item.state} data-expanded={showBody || undefined}>
     <div className="filetool__head">
@@ -743,9 +744,7 @@ export const FileToolRow = memo(function FileToolRow({ item, tool, failed, defau
           <Icon name="chevron" size={11} />
         </button>
       )}
-      <span className="filetool__state">
-        {failed ? 'Failed' : item.state === 'working' ? 'Running' : item.dur && item.dur !== '0.0s' ? item.dur : ''}
-      </span>
+      {stateLabel && <span className="filetool__state">{stateLabel}</span>}
     </div>
     {error && <p className="filetool__error" title={item.error || item.output}>{error}</p>}
     {showBody && tool.kind === 'patch' && tool.files.length > 0 && (

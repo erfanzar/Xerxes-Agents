@@ -174,18 +174,19 @@ describe('Cosmic Simurgh AgentOrb & XerxesStatusMark', () => {
     expect(compactOutputs.size).toBe(5)
     expect(regalOutputs.size).toBe(5)
 
-    // Active: clean 1.75px open-arc spinner inside faint hairline track
+    // Active: clean 2×2 chasing 4-dot grid loader
     const activeHtml = renderToStaticMarkup(
       createElement(AgentOrb, { state: 'working', size: 20, live: true }),
     )
     expect(activeHtml).toContain('xerxes-mark-spin')
-    expect(activeHtml).toContain('var(--x-working')
-    expect(activeHtml).toContain('stroke-width="1.75"')
-    expect(activeHtml).toContain('<path')
+    expect(activeHtml).toContain('xerxes-dot-grid')
+    expect(activeHtml).toContain('var(--x-title')
+    expect(activeHtml.match(/<circle /g)?.length).toBe(4)
     const stillActive = renderToStaticMarkup(
       createElement(AgentOrb, { state: 'working', size: 20, live: false }),
     )
     expect(stillActive).not.toContain('xerxes-mark-spin')
+    expect(stillActive).toContain('xerxes-dot-grid')
 
     // Idle: quiet 3.5px solid dot
     const idleHtml = renderToStaticMarkup(

@@ -201,6 +201,8 @@ export function SideQuestionCard({
   const listRef = useRef<HTMLDivElement>(null)
   const generationRef = useRef(0)
   const autoLoadedRef = useRef(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => { if (copyTimerRef.current !== undefined) clearTimeout(copyTimerRef.current) }, [])
 
   const online = snap.connection === 'online'
   const resolvedEntries: readonly VscodeBtwEntry[] = entries ?? snap.sideQuestionTurns ?? []
@@ -394,6 +396,7 @@ export function SideQuestionCard({
     } catch (failure) {
       if (generationRef.current !== submitGeneration) return
       const message = desktopError(failure)
+      setDraft(current => current || question)
       onEntriesChange(prev =>
         prev.map(item => {
           if (item.requestId !== requestId) return item
@@ -417,7 +420,8 @@ export function SideQuestionCard({
     void navigator.clipboard?.writeText(latestDone.answer).then(
       () => {
         setCopied(true)
-        setTimeout(() => setCopied(false), 1_400)
+        if (copyTimerRef.current !== undefined) clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1_400)
       },
       () => undefined,
     )
@@ -445,7 +449,7 @@ export function SideQuestionCard({
     >
       <header className="xv-btw__head">
         <span className="xv-btw__title">Side question</span>
-        <span className="xv-btw__badge">ephemeral · read-only</span>
+        <span className="xv-btw__badge">Temporary · read-only</span>
         <span className="xv-btw__flex" />
         <div className="xv-btw__actions">
           {latestDone && (
@@ -473,7 +477,7 @@ export function SideQuestionCard({
             type="button"
             className="xv-btw__close"
             aria-label="Close side question"
-            title="Close (Esc — main task keeps running)"
+            title="Close (Esc; main task keeps running)"
             onClick={closeCard}
           >
             <Icon name="close" size={13} />
@@ -502,7 +506,7 @@ export function SideQuestionCard({
       <div className="xv-btw__body" ref={listRef}>
         {resolvedEntries.length === 0 ? (
           <p className="xv-btw__empty">
-            Ask an aside about this task or codebase — even while a turn is running. Nothing here is saved to the conversation.
+            Ask an aside about this task or codebase, even while a turn is running. Nothing here is saved to the conversation.
           </p>
         ) : (
           resolvedEntries.map(entry => {
@@ -543,6 +547,8 @@ export function SideQuestionCard({
                       className="md--compact"
                       tail={entry.status === 'streaming' ? '▍' : undefined}
                     />
+                  ) : entry.status === 'done' ? (
+                    <p className="side-question__empty-reply">No response was returned.</p>
                   ) : null}
                   {entry.status === 'error' && (
                     <p className="xv-btw__err" role="alert">
@@ -576,11 +582,14 @@ export function SideQuestionCard({
               ? 'Connect to runtime first…'
               : resolvedEntries.length > 0
                 ? 'Ask a follow-up side question…'
-                : 'Ask aside (/btw) — never interrupts or pollutes chat…'
+                : 'Ask aside (/btw). Never interrupts or pollutes chat…'
           }
           spellCheck={false}
           value={draft}
           onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => {
+            if (event.nativeEvent.isComposing && event.key === 'Enter') event.preventDefault()
+          }}
         />
         <button
           type="submit"

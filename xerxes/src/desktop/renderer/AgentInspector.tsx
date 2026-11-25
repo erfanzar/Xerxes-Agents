@@ -203,7 +203,7 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
         {history.kind === 'unavailable' && <p className="agent-transcript__note">{history.note}</p>}
         {info?.provisional && <p role="status" className="agent-transcript__note">{state.tone === 'failed' && info.error ? 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request.' : state.priority < 2 ? 'Waiting for the runtime to identify this spawn request.' : 'This request has finished. Its runtime identity was not recorded.'}</p>}
         {page && (page.more || older.error) && <div className="history-pager">
-          <button className="btn" disabled={older.loading} onClick={() => void scroll.loadOlder()}>{older.loading ? 'Loading earlier activity…' : older.error ? 'Retry loading earlier activity' : 'Show earlier activity'}</button>
+          <button type="button" className="btn" disabled={older.loading} onClick={() => void scroll.loadOlder()}>{older.loading ? 'Loading earlier activity…' : older.error ? 'Retry loading earlier activity' : 'Show earlier activity'}</button>
           {older.error && <p role="alert">{older.error}</p>}
         </div>}
         <AgentTranscriptFeed blocks={blocks} active={active} />
@@ -211,12 +211,12 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
         {loading && <p className="agent-transcript__note">Loading the agent’s conversation…</p>}
         {page?.clipped && <p className="agent-transcript__note">Some long text in this conversation is shortened.</p>}
         {info?.error && <p className="studio-error">{info.error}</p>}
-        {error && <div role="alert" className="studio-error"><p>{error}</p><button disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
+        {error && <div role="alert" className="studio-error"><p>{error}</p><button type="button" className="btn" disabled={!online} onClick={() => setRetry(value => value+1)}>Retry agent details</button></div>}
       </div>
-      {!scroll.following && blocks.length > 0 && (
+      {scroll.showJumpLatest && blocks.length > 0 && (
         <div className="jump-latest-dock" data-scroll-ignore="true">
-          <button className="jump-latest" data-working={active || undefined} title={active ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scroll.scrollToLatest}>
-            <span className="jump-latest__label">{active ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
+          <button type="button" className="jump-latest" data-working={active || undefined} title={active ? 'Still working · Jump to latest' : 'Jump to latest'} onClick={scroll.scrollToLatest}>
+            <span className="jump-latest__label">{active ? 'Still working · Jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
           </button>
         </div>
       )}
@@ -301,27 +301,26 @@ function AgentDock({ id, title, active, online }: { id: string; title: string; a
         aria-label={active ? 'Message this agent' : 'Follow-up for retry'}
         placeholder={active ? 'Message this agent' : 'Continue this agent'}
         value={message}
-        spellCheck={false}
         onChange={event => setMessage(event.target.value)}
         onKeyDown={event => {
           // Enter sends: a running agent reads it at its next step; a settled one
           // continues in a new attempt that opens with this message.
-          if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (message.trim()) void run(active ? 'send' : 'retry') }
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); if (message.trim()) void run(active ? 'send' : 'retry') }
           // The window's Escape arms stopping the task's turn; here it only leaves the box.
           else if (event.key === 'Escape') { event.stopPropagation(); event.currentTarget.blur() }
         }}
       />
       <div className="agent-dock__actions">
         {active ? <>
-          <button className="composer__send composer__send--stop" aria-label="Stop agent" title="Stop this agent — the task and its other agents keep running" disabled={busy !== ''} onClick={() => void run('stop')}><Icon name="stop" size={16} /></button>
-          <button className="composer__send" aria-label="Send to agent" title="Send (⏎ · ⇧⏎ newline)" disabled={busy !== '' || !message.trim()} onClick={() => void run('send')}><Icon name="arrowUp" size={16} /></button>
+          <button type="button" className="composer__send composer__send--stop" aria-label="Stop agent" title="Stop this agent. The task and its other agents keep running." disabled={busy !== ''} onClick={() => void run('stop')}><Icon name="stop" size={16} /></button>
+          <button type="button" className="composer__send" aria-label="Send to agent" title="Send (⏎ · ⇧⏎ newline)" disabled={busy !== '' || !message.trim()} onClick={() => void run('send')}><Icon name="arrowUp" size={16} /></button>
         </> : message.trim()
-          ? <button className="composer__send" aria-label="Send to agent" title="Send — the agent continues in a new attempt (⏎)" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="arrowUp" size={16} /></button>
-          : <button className="composer__send agent-dock__retry" aria-label="Retry agent" title="Start a new attempt of this agent" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="retry" size={14} /><span>{busy === 'retry' ? 'Retrying…' : 'Retry'}</span></button>}
+          ? <button type="button" className="composer__send" aria-label="Send to agent" title="Send to continue in a new attempt (⏎)" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="arrowUp" size={16} /></button>
+          : <button type="button" className="composer__send agent-dock__retry" aria-label="Retry agent" title="Start a new attempt of this agent" disabled={busy !== ''} onClick={() => void run('retry')}><Icon name="retry" size={14} /><span>{busy === 'retry' ? 'Retrying…' : 'Retry'}</span></button>}
       </div>
     </div></div>
     <div className="agent-dock__foot">{feedback
-      ? <p role="status" data-error={feedback.failed || undefined}>{feedback.text}</p>
+      ? <p role={feedback.failed ? 'alert' : 'status'} data-error={feedback.failed || undefined}>{feedback.text}</p>
       : <span>{active ? 'Stopping ends only this agent. The task and other agents keep running.' : 'This agent has finished. Sending a message continues it in a new attempt.'}</span>}</div>
   </fieldset>
 }

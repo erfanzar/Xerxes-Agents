@@ -34,45 +34,46 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <>
       <h2 className="modal__title">Channels</h2>
+      <p className="modal__sub">
+        Messaging gateways the runtime answers chats through: Telegram, Discord, Slack, WhatsApp, Email, and Signal. Credentials live outside this app; a gateway only runs when the runtime found its config at startup.
+      </p>
       {(error || snap.channelsError) && <p className="studio-error" role="alert">{error || snap.channelsError}</p>}
       {snap.channelsLoading && <p role="status">Refreshing channels…</p>}
-      <p className="modal__sub">
-        Messaging gateways the daemon answers chats through — telegram, discord, slack, whatsapp, email, signal. Credentials live outside this app; a gateway only runs when the daemon found its config at boot.
-      </p>
-      {!snap.channelsLoading && !snap.channelsError && !snap.channelsAvailable && (
-        <div className="row">
-          <span className="dot dot--idle" />
-          <div className="row__main">
-            <div className="row__t">Channel manager not configured</div>
-            <div className="row__s">This runtime started without channel adapters, so there is nothing to enable.</div>
-          </div>
-        </div>
-      )}
-      {snap.channelsAvailable && !snap.channelsConfigured && (
-        <div className="row">
-          <span className="dot dot--idle" />
-          <div className="row__main">
-            <div className="row__t">No channel credentials found</div>
-            <div className="row__s">Configure a gateway (token or secret in env or config), then restart the runtime to list it here.</div>
-          </div>
-        </div>
-      )}
       <div className="rowlist">
+        {!snap.channelsLoading && !snap.channelsError && !snap.channelsAvailable && (
+          <div className="row">
+            <span className="dot dot--idle" aria-hidden="true" />
+            <div className="row__main">
+              <div className="row__t">Channel manager not configured</div>
+              <div className="row__s">This runtime started without channel adapters, so there is nothing to enable.</div>
+            </div>
+          </div>
+        )}
+        {snap.channelsAvailable && !snap.channelsConfigured && (
+          <div className="row">
+            <span className="dot dot--idle" aria-hidden="true" />
+            <div className="row__main">
+              <div className="row__t">No channel credentials found</div>
+              <div className="row__s">Configure a gateway (token or secret in env or config), then restart the runtime to list it here.</div>
+            </div>
+          </div>
+        )}
         {channels.map(row => (
           <div className="row" key={row.name}>
-            <span className={`dot ${row.enabled ? 'dot--live' : row.lastError ? 'dot--fail' : 'dot--idle'}`} />
+            <span className={`dot ${row.enabled ? 'dot--live' : row.lastError ? 'dot--fail' : 'dot--idle'}`} aria-hidden="true" />
             <div className="row__main">
               <div className="row__t">{row.name}{' '}<span className="provcard__badge provcard__badge--quiet">{row.adapterName}</span></div>
               <div className="row__s">
                 {row.enabled
-                  ? 'enabled — receiving and sending'
+                  ? 'Enabled · receiving and sending'
                   : row.lastError
-                    ? `disabled — last attempt failed: ${row.lastError}`
-                    : 'disabled'}
-                {row.lastOperation ? ` · last op: ${row.lastOperation}` : ''}
+                    ? `Disabled · last attempt failed: ${row.lastError}`
+                    : 'Disabled'}
+                {row.lastOperation ? ` · last operation: ${row.lastOperation}` : ''}
               </div>
             </div>
             <button
+              type="button"
               className={`switch${row.enabled ? ' is-on' : ''}`}
               role="switch"
               aria-checked={row.enabled}
@@ -84,8 +85,8 @@ export function ChannelsCard({ snap }: { snap: Snapshot }): ReactElement {
           </div>
         ))}
       </div>
-      <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn btn--ghost" disabled={snap.channelsLoading || busy !== null || snap.connection !== 'online'} onClick={() => { setError(''); store.loadChannels() }}><Icon name="retry" size={13} /> {snap.channelsLoading ? 'Refreshing…' : 'Refresh'}</button>
+      <div className="settings-actions">
+        <button type="button" className="btn btn--ghost" disabled={snap.channelsLoading || busy !== null || snap.connection !== 'online'} onClick={() => { setError(''); store.loadChannels() }}><Icon name="retry" size={13} /> {snap.channelsLoading ? 'Refreshing…' : 'Refresh'}</button>
       </div>
     </>
   )

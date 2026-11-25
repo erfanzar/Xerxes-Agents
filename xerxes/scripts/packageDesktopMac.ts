@@ -140,9 +140,18 @@ async function packageDesktopMac(): Promise<void> {
   plist = replacePlistString(plist, 'CFBundleName', productName)
   plist = replacePlistString(plist, 'CFBundleShortVersionString', version)
   plist = replacePlistString(plist, 'CFBundleVersion', version)
-  const microphoneKey = 'NSMicrophoneUsageDescription'
-  if (plist.includes('<key>' + microphoneKey + '</key>')) plist = replacePlistString(plist, microphoneKey, 'Record speech only when you choose Dictate, then transcribe it into your draft.')
-  else plist = plist.replace('</dict>', '<key>' + microphoneKey + '</key><string>Record speech only when you choose Dictate, then transcribe it into your draft.</string></dict>')
+  const insertRootPlistString = (xml: string, key: string, value: string): string => {
+    if (xml.includes(`<key>${key}</key>`)) return replacePlistString(xml, key, value)
+    const rootClose = xml.lastIndexOf('</dict>')
+    if (rootClose === -1) throw new Error('Electron Info.plist is missing root </dict>')
+    return `${xml.slice(0, rootClose)}  <key>${key}</key>\n  <string>${value}</string>\n${xml.slice(rootClose)}`
+  }
+  plist = insertRootPlistString(
+    plist,
+    'NSMicrophoneUsageDescription',
+    'Record speech only when you choose Dictate, then transcribe it into your draft.',
+  )
+  plist = insertRootPlistString(plist, 'NSUserNotificationAlertStyle', 'banner')
   await writeFile(plistPath, plist, 'utf8')
 
   // Modifying a vendor-signed Electron.app invalidates its outer signature.

@@ -15,8 +15,13 @@ export function Sheet({ title, onClose, children, tall = false, fullScreen = fal
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const overflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     panel.current?.focus()
-    return () => { previous?.focus() }
+    return () => {
+      document.body.style.overflow = overflow
+      if (previous?.isConnected) previous.focus()
+    }
   }, [])
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
@@ -45,7 +50,7 @@ export function Sheet({ title, onClose, children, tall = false, fullScreen = fal
       <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={`sheet${tall ? ' sheet-tall' : ''}${fullScreen ? ' sheet-fullscreen' : ''}`} onKeyDown={onKeyDown}>
         <header className="sheet-head">
           <h2 id={titleId}>{title}</h2>
-          <button type="button" className="btn btn-quiet" onClick={onClose}>Close</button>
+          <button type="button" className="btn btn-quiet" aria-label="Close dialog" onClick={onClose}>Close</button>
         </header>
         <div className="sheet-body">{children}</div>
       </div>

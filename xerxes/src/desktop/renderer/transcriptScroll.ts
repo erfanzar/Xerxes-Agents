@@ -9,8 +9,32 @@ const MAX_INVISIBLE_PAGES = 10
 const VISIBLE_GROWTH_PX = 24
 /** Distance from the bottom edge at which an intentional downward scroll re-pins auto-follow. */
 export const REPIN_BOTTOM_THRESHOLD_PX = 24
+/** Minimum distance above the bottom before offering the floating "Jump to latest" button. */
+export const JUMP_LATEST_SHOW_THRESHOLD_PX = 96
 /** Tolerance (px) within which the viewport is considered resting on the bottom edge. */
 const BOTTOM_EDGE_TOLERANCE_PX = 2
+
+export interface JumpToLatestVisibilityInput {
+  readonly following: boolean
+  readonly scrollTop: number
+  readonly clientHeight: number
+  readonly scrollHeight: number
+}
+
+/**
+ * Pure visibility predicate for the floating "Jump to latest" control.
+ *
+ * Unlike `following` (which pauses immediately on any 1px upward scroll so
+ * streaming never fights a reader), the jump-to-bottom button must NEVER appear
+ * while the user is already at or near the bottom edge of the transcript.
+ */
+export function shouldShowJumpToLatest(input: JumpToLatestVisibilityInput): boolean {
+  if (input.following || input.clientHeight <= 0) return false
+  const maxScrollTop = Math.max(0, input.scrollHeight - input.clientHeight)
+  if (maxScrollTop <= JUMP_LATEST_SHOW_THRESHOLD_PX) return false
+  const clampedTop = Math.min(Math.max(0, input.scrollTop), maxScrollTop)
+  return maxScrollTop - clampedTop > JUMP_LATEST_SHOW_THRESHOLD_PX
+}
 
 export interface TranscriptScrollDecisionInput {
   readonly wasFollowing: boolean
@@ -129,11 +153,13 @@ export function useTranscriptScroll(
   ref: RefObject<HTMLDivElement | null>
   loadOlder: () => Promise<void>
   following: boolean
+  showJumpLatest: boolean
   scrollToLatest: () => void
   unpin: () => void
 } {
   const ref = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
+  const [showJumpLatest, setShowJumpLatest] = useState(false)
   const session = useRef(sessionId)
   const following = useRef(true)
   const lastFollowTop = useRef<number | null>(null)
@@ -145,10 +171,23 @@ export function useTranscriptScroll(
   /** The session whose too-short transcript was already topped up once on open. */
   const filledFor = useRef<string | null>(null)
 
+  const syncJumpVisibility = useCallback((element: HTMLElement | null, isFollowing: boolean): void => {
+    const next = element
+      ? shouldShowJumpToLatest({
+          following: isFollowing,
+          scrollTop: element.scrollTop,
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+        })
+      : false
+    setShowJumpLatest(current => (current === next ? current : next))
+  }, [])
+
   const syncPinned = useCallback((next: boolean): void => {
     following.current = next
     setPinned(current => (current === next ? current : next))
-  }, [])
+    syncJumpVisibility(ref.current, next)
+  }, [syncJumpVisibility])
 
   const unpin = useCallback((): void => {
     lastFollowTop.current = null
@@ -223,13 +262,30 @@ export function useTranscriptScroll(
         syncPinned(true)
         lastFollowTop.current = 0
         lastScrollTop.current = 0
+        return
       }
+      syncJumpVisibility(element, false)
     }
 
     const onWheel = (event: WheelEvent): void => {
-      if (event.deltaY < 0 && element.clientHeight > 0 && element.scrollHeight > element.clientHeight + BOTTOM_EDGE_TOLERANCE_PX) {
+      if (element.clientHeight <= 0) return
+      const maxTop = Math.max(0, element.scrollHeight - element.clientHeight)
+      // Ignore predominantly horizontal swipes (e.g. scrolling wide code blocks).
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+      if (event.deltaY < 0 && maxTop > BOTTOM_EDGE_TOLERANCE_PX) {
+        // Ignore upward wheel events while still elastically overscrolled past maxTop.
+        if (element.scrollTop > maxTop + BOTTOM_EDGE_TOLERANCE_PX) return
         lastFollowTop.current = null
         syncPinned(false)
+      } else if (event.deltaY > 0 && !following.current) {
+        // A downward wheel while already resting at maxTop does not emit a DOM
+        // scroll event, so re-pin explicitly when the user is already in the bottom band.
+        const clampedTop = clampScrollPosition(element)
+        if (maxTop - clampedTop <= REPIN_BOTTOM_THRESHOLD_PX) {
+          lastFollowTop.current = clampedTop
+          lastScrollTop.current = clampedTop
+          syncPinned(true)
+        }
       }
     }
 
@@ -309,6 +365,8 @@ export function useTranscriptScroll(
       syncPinned(true)
       lastFollowTop.current = 0
       lastScrollTop.current = 0
+    } else {
+      syncJumpVisibility(element, false)
     }
 
     if (
@@ -323,5 +381,5 @@ export function useTranscriptScroll(
     }
   })
 
-  return { ref, loadOlder, following: pinned, scrollToLatest, unpin }
+  return { ref, loadOlder, following: pinned, showJumpLatest, scrollToLatest, unpin }
 }

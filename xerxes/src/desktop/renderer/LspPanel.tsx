@@ -73,13 +73,25 @@ export function LspCard({ snap }: { snap: Snapshot }): ReactElement {
     {notice && <p role="status">{notice}</p>}
     {busy && <p role="status">Updating language servers…</p>}
     {view?.warnings.map((warning, i) => <p role="status" key={i}>{warning}</p>)}
-    <div className="rowlist">{view?.servers.map(row => <div className="row" key={row.name}>
-      <div className="row__main"><div className="row__t">{row.name}</div><div className="row__s">{row.languageId} · {row.extensions.join(', ')} · {row.enabled ? 'Enabled' : 'Disabled'}</div></div>
-      <button className="btn btn--ghost" disabled={busy || !available} onClick={() => setEditing(row)}>Edit</button>
-      <button className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.release', { name: row.name })}>Stop server</button>
-    </div>)}</div>
-    {view && !view.servers.length && <p>No language servers configured.</p>}
-    <div className="lsp-actions"><button className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.settings.get')}>Reload</button><button className="btn" disabled={busy || !available || !view} onClick={() => setEditing('new')}>Add server</button></div>
+    {(view && view.servers.length > 0) ? (
+      <div className="rowlist">{view.servers.map(row => <div className="row" key={row.name}>
+        <span className={`dot ${row.enabled ? 'dot--done' : 'dot--idle'}`} aria-hidden="true" />
+        <div className="row__main"><div className="row__t">{row.name}</div><div className="row__s">{row.languageId} · {row.extensions.join(', ')} · {row.enabled ? 'Enabled' : 'Disabled'}</div></div>
+        <button type="button" className="btn btn--ghost" disabled={busy || !available} onClick={() => setEditing(row)}>Edit</button>
+        <button type="button" className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.release', { name: row.name })}>Stop server</button>
+      </div>)}</div>
+    ) : view ? (
+      <div className="rowlist">
+        <div className="row">
+          <span className="dot dot--idle" aria-hidden="true" />
+          <div className="row__main">
+            <div className="row__t">No language servers configured.</div>
+            <div className="row__s">Add a server below to enable go-to-definition and diagnostics.</div>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    <div className="lsp-actions"><button type="button" className="btn btn--ghost" disabled={busy || !available} onClick={() => void run('lsp.settings.get')}>Reload</button><button type="button" className="btn btn--solid" disabled={busy || !available || !view} onClick={() => setEditing('new')}>Add server</button></div>
     {editing && <form className="lsp-editor" key={server?.name ?? 'new'} onSubmit={event => {
       event.preventDefault()
       try { const data = new FormData(event.currentTarget); void run('lsp.settings.save', { revision: view?.revision, name: server?.name ?? String(data.get('name')).trim(), action: server ? 'update' : 'create', changes: lspChanges(data) }) }
@@ -96,7 +108,7 @@ export function LspCard({ snap }: { snap: Snapshot }): ReactElement {
         <div className="field"><label htmlFor="lsp-command">Executable</label><input id="lsp-command" name="command" required={!server} autoComplete="off"/></div>
         <div className="field"><label htmlFor="lsp-args">Arguments (JSON array)</label><textarea id="lsp-args" name="args" rows={2} placeholder={'["--stdio"]'}/></div>
         <div className="field"><label htmlFor="lsp-env">Environment (JSON object)</label><textarea id="lsp-env" name="env" rows={2} autoComplete="off" spellCheck={false}/></div>
-        <div className="lsp-actions"><button className="btn" type="submit">Save server</button><button className="btn btn--ghost" type="button" onClick={() => setEditing(null)}>Cancel</button>{server && (confirmRemove === server.name
+        <div className="lsp-actions"><button className="btn btn--solid" type="submit">Save server</button><button className="btn btn--ghost" type="button" onClick={() => setEditing(null)}>Cancel</button>{server && (confirmRemove === server.name
           ? <><button className="btn btn--danger" type="button" onClick={() => { setConfirmRemove(null); void run('lsp.settings.save', { revision: view?.revision, name: server.name, action: 'remove' }) }}>Remove for good</button><button className="btn btn--ghost" type="button" onClick={() => setConfirmRemove(null)}>Keep</button></>
           : <button className="btn btn--ghost" type="button" onClick={() => setConfirmRemove(server.name)}>Remove server</button>)}</div>
       </fieldset>

@@ -96,8 +96,8 @@ function PermissionRow({ item, busy, onOpen, onRequest }: { item: MacPermissionI
         {item.detail && <div className="row__s macperm-detail">{item.detail}</div>}
       </div>
       <div className="macperm-actions">
-        {item.can_request && <button className="btn" disabled={busy} onClick={onRequest}>Request</button>}
-        <button className="btn" disabled={busy} onClick={onOpen}>Open Settings</button>
+        {item.can_request && <button type="button" className="btn" aria-label={`Request ${item.label} permission`} disabled={busy} onClick={onRequest}>Request</button>}
+        <button type="button" className="btn" aria-label={`Open System Settings for ${item.label}`} disabled={busy} onClick={onOpen}>Open Settings</button>
       </div>
     </div>
   )
@@ -106,31 +106,39 @@ function PermissionRow({ item, busy, onOpen, onRequest }: { item: MacPermissionI
 /** Settings → macOS permissions, as a pure view (tests render it directly). */
 export function MacPermissionsView(props: MacPermissionsViewProps): ReactElement {
   const { available, state, busy, error } = props
+  const [confirmRelaunch, setConfirmRelaunch] = useState(false)
   return (
     <section aria-labelledby="macperm-title">
       <h2 className="modal__title" id="macperm-title">macOS permissions</h2>
       {!available ? <p role="status" className="notice">macOS permissions are only checked in the Xerxes desktop app.</p>
-        : !state ? <>{error ? <p role="alert" className="studio-error">{error}</p> : <p role="status">Checking permissions…</p>}{error && <button className="btn" disabled={busy !== null} onClick={props.onRecheck}>{busy === 'recheck' ? 'Checking…' : 'Retry'}</button>}</>
+        : !state ? <>{error ? <p role="alert" className="studio-error">{error}</p> : <p role="status">Checking permissions…</p>}{error && <button type="button" className="btn" disabled={busy !== null} onClick={props.onRecheck}>{busy === 'recheck' ? 'Checking…' : 'Retry'}</button>}</>
         : state.platform !== 'darwin' ? <p role="status" className="notice">These permissions only exist on macOS; nothing to turn on here.</p>
         : (
           <>
-            <p className="modal__sub">{hostNote(state.app_label)} Statuses are read without asking macOS to prompt; Request shows macOS's own dialog only when you click it.</p>
+            <p className="modal__sub">{hostNote(state.app_label)} Statuses are read without asking macOS to prompt; Request shows macOS's own dialog only when you select it.</p>
             {error && <p role="alert" className="studio-error">{error}</p>}
             <div className="rowlist">
               {state.items.map(item => (
                 <PermissionRow key={item.id} item={item} busy={busy !== null} onOpen={() => props.onOpen(item.id)} onRequest={() => props.onRequest(item.id)} />
               ))}
             </div>
-            {screenMayNeedRelaunch(state) && <p className="modal__sub">macOS applies a new Screen Recording grant only after {state.app_label} relaunches.</p>}
+            {screenMayNeedRelaunch(state) && <p className="macperm-note">macOS applies a new Screen Recording grant only after {state.app_label} relaunches.</p>}
             <div className="macperm-footer">
-              <button className="btn btn--ghost" disabled={busy !== null} onClick={props.onRecheck}>{busy === 'recheck' ? 'Checking…' : 'Re-check'}</button>
-              <button className="btn btn--ghost" onClick={props.onRelaunch}>Relaunch {state.app_label}</button>
+              <button type="button" className="btn btn--ghost" disabled={busy !== null} onClick={props.onRecheck}>{busy === 'recheck' ? 'Checking…' : 'Re-check'}</button>
+              {confirmRelaunch ? (
+                <>
+                  <button type="button" className="btn btn--danger" onClick={() => { setConfirmRelaunch(false); props.onRelaunch() }}>Confirm relaunch</button>
+                  <button type="button" className="btn btn--ghost" onClick={() => setConfirmRelaunch(false)}>Cancel</button>
+                </>
+              ) : (
+                <button type="button" className="btn btn--ghost" onClick={() => setConfirmRelaunch(true)}>Relaunch {state.app_label}</button>
+              )}
               <label className="macperm-remind">
                 <input type="checkbox" checked={!state.dismissed} onChange={event => props.onRemind(event.currentTarget.checked)} />
                 Remind me at start when computer use is missing a permission
               </label>
             </div>
-            <p className="modal__sub">Last checked {new Date(state.checked_at).toLocaleTimeString()}. Coming back to this window from System Settings checks again.</p>
+            {Number.isFinite(Date.parse(state.checked_at)) && <p className="macperm-note">Last checked {new Date(state.checked_at).toLocaleTimeString()}. Coming back to this window from System Settings checks again.</p>}
           </>
         )}
     </section>
@@ -172,12 +180,12 @@ export function MacPermissionsNoticeView(props: MacPermissionsNoticeProps): Reac
       {props.error && <p role="alert" className="studio-error">{props.error}</p>}
       {props.busy && <p role="status">Working…</p>}
       <div className="macperm-notice__actions">
-        <button className="btn btn--solid" disabled={Boolean(props.busy)} onClick={() => props.onOpen(first.id)}>Open settings</button>
-        {missing.length > 1 && missing.slice(1).map(item => <button key={item.id} className="btn" disabled={Boolean(props.busy)} onClick={() => props.onOpen(item.id)}>Open {item.label}</button>)}
-        {screen && <button className="btn" disabled={Boolean(props.busy)} onClick={props.onRelaunch}>Relaunch now</button>}
-        <button className="btn btn--ghost" onClick={props.onDetails}>Details</button>
-        <button className="btn btn--ghost" onClick={props.onLater}>Not now</button>
-        <button className="btn btn--ghost" disabled={Boolean(props.busy)} onClick={props.onDismiss}>Don't remind me</button>
+        <button type="button" className="btn btn--solid" disabled={Boolean(props.busy)} onClick={() => props.onOpen(first.id)}>Open settings</button>
+        {missing.length > 1 && missing.slice(1).map(item => <button key={item.id} type="button" className="btn" disabled={Boolean(props.busy)} onClick={() => props.onOpen(item.id)}>Open {item.label}</button>)}
+        {screen && <button type="button" className="btn" disabled={Boolean(props.busy)} onClick={props.onRelaunch}>Relaunch now</button>}
+        <button type="button" className="btn btn--ghost" onClick={props.onDetails}>Details</button>
+        <button type="button" className="btn btn--ghost" onClick={props.onLater}>Not now</button>
+        <button type="button" className="btn btn--ghost" disabled={Boolean(props.busy)} onClick={props.onDismiss}>Don't remind me</button>
       </div>
     </div>
   )

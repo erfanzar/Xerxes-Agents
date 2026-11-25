@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useState, type ReactElement } from 'react'
+import { useId, useState, type ReactElement } from 'react'
 
 import { plural, relativeTime } from '../../client/format.js'
 import { canMutate, inboxCounts, inboxTasks, presenceFor, workspaceAvailable, type InboxStatusFilter } from '../../client/hubStore.js'
@@ -96,6 +96,7 @@ function NewTaskSheet({
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const errorId = useId()
 
   const submit = async (): Promise<void> => {
     if (busy || !selectedWs || !controller.createTask) return
@@ -129,11 +130,13 @@ function NewTaskSheet({
             rows={3}
             value={prompt}
             disabled={busy}
+            aria-invalid={error !== undefined ? true : undefined}
+            aria-describedby={error !== undefined ? errorId : undefined}
             placeholder="Describe what you want Xerxes to work on…"
             onChange={event => setPrompt(event.target.value)}
           />
         </label>
-        {error !== undefined ? <p role="alert" className="field-error">{error}</p> : null}
+        {error !== undefined ? <p id={errorId} role="alert" className="field-error">{error}</p> : null}
         <div className="approval-actions">
           <button type="submit" className="btn btn-primary" disabled={busy || !selectedWs}>
             {busy ? 'Starting…' : 'Start task'}
@@ -242,7 +245,7 @@ export function InboxTab(): ReactElement {
                 onChange={event => setQuery(event.target.value)}
               />
               {query !== '' ? (
-                <button type="button" className="btn btn-quiet inbox-search-clear" onClick={() => setQuery('')}>Clear</button>
+                <button type="button" className="btn btn-quiet inbox-search-clear" aria-label="Clear search" onClick={() => setQuery('')}>Clear</button>
               ) : null}
             </div>
           ) : null}
@@ -279,7 +282,7 @@ export function InboxTab(): ReactElement {
         </div>
       ) : null}
 
-      {!state.inboxLoaded && state.inboxError === undefined ? <p aria-busy="true">Loading tasks…</p> : null}
+      {!state.inboxLoaded && state.inboxError === undefined ? <p role="status" aria-busy="true">Loading tasks…</p> : null}
       {state.inboxLoaded && tasks.length === 0 && state.workspaceOrder.length === 0 ? (
         <div className="empty-state">
           <h2>No workspaces connected</h2>
@@ -289,7 +292,12 @@ export function InboxTab(): ReactElement {
       {state.inboxLoaded && tasks.length === 0 && state.workspaceOrder.length > 0 ? (
         status === 'all' && workspaceId === undefined && needle === ''
           ? <div className="empty-state"><h2>No tasks yet</h2><p>No open chats on {state.workspaceOrder.length === 1 ? workspaceLabel(state, state.workspaceOrder[0]!) : `${state.workspaceOrder.length} workspaces`}. Start one right here or from the desktop and it appears here.</p></div>
-          : <p className="empty">No tasks match these filters.</p>
+          : (
+            <div className="empty-state">
+              <p className="empty">No tasks match these filters.</p>
+              <button type="button" className="btn" onClick={() => { setQuery(''); choose({ status: 'all' }) }}>Clear filters</button>
+            </div>
+          )
       ) : null}
       {groupTasksByMachine(state, tasks).map(group => (
         <section key={group.key} aria-label={group.label === undefined ? undefined : `Machine ${group.label}`}>

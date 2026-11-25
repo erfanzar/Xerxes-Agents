@@ -1220,28 +1220,264 @@ interface ChannelStatusData {
   readonly configured: boolean;
 }
 
+type AcpRecordedToolCall = {
+  readonly id: string;
+  readonly type: "function";
+  function: { readonly name: string; arguments: string };
+};
+
+type AcpRecordedToolResult = {
+  readonly role: "tool";
+  readonly tool_call_id: string;
+  readonly name: string;
+  content: string;
+  readonly duration_ms: number;
+  readonly is_error?: boolean;
+};
+
+/**
+ * Chronological step-by-step transcript builder for external ACP turns,
+ * autonomous coordinator wakeups, and session replays.
+ *
+ * Preserves the exact interleaved order of user inputs, live steers, thinking,
+ * tool calls/results, and intermediate/final assistant replies so reloading a
+ * long ACP session never scrambles answers above tools, drops late tool updates,
+ * or slices the final answer off a paginated history window.
+ */
+class AcpTurnTranscriptRecorder {
+  private readonly messages: Array<DaemonSession["messages"][number]> = [];
+  private readonly toolExecutions: Array<Record<string, unknown>> = [];
+  private readonly thinkingEntries: string[] = [];
+  private readonly toolCallById = new Map<string, AcpRecordedToolCall>();
+  private readonly toolResultById = new Map<string, AcpRecordedToolResult>();
+  private readonly toolExecutionById = new Map<string, Record<string, unknown>>();
+  private stepThinking = "";
+  private stepText = "";
+  private stepToolCalls: AcpRecordedToolCall[] = [];
+  private stepToolResults: AcpRecordedToolResult[] = [];
+  private stepHasToolResults = false;
+  private sawAssistantText = false;
+  private sawThinkingText = false;
+  private committed = false;
+
+  get isCommitted(): boolean {
+    return this.committed;
+  }
+
+  get hasAssistantText(): boolean {
+    return this.sawAssistantText;
+  }
+
+  get hasThinkingText(): boolean {
+    return this.sawThinkingText;
+  }
+
+  private flushStep(): void {
+    if (
+      !this.stepThinking &&
+      !this.stepText &&
+      this.stepToolCalls.length === 0 &&
+      this.stepToolResults.length === 0
+    ) {
+      return;
+    }
+    if (this.stepThinking || this.stepText || this.stepToolCalls.length > 0) {
+      this.messages.push({
+        role: "assistant",
+        content: this.stepText,
+        ...(this.stepThinking ? { thinking: this.stepThinking } : {}),
+        ...(this.stepToolCalls.length > 0 ? { tool_calls: [...this.stepToolCalls] } : {}),
+      });
+      if (this.stepThinking.trim()) {
+        this.thinkingEntries.push(this.stepThinking);
+      }
+    }
+    for (const toolMsg of this.stepToolResults) {
+      this.messages.push(toolMsg);
+    }
+    this.stepThinking = "";
+    this.stepText = "";
+    this.stepToolCalls = [];
+    this.stepToolResults = [];
+    this.stepHasToolResults = false;
+  }
+
+  addUser(content: unknown, displayText?: string): void {
+    this.flushStep();
+    this.messages.push({
+      role: "user",
+      content,
+      ...(displayText !== undefined ? { displayText } : {}),
+    });
+  }
+
+  addThought(text: string): void {
+    if (!text) return;
+    this.sawThinkingText = true;
+    if (this.stepToolCalls.length > 0 || this.stepHasToolResults || this.stepText.length > 0) {
+      this.flushStep();
+    }
+    this.stepThinking += text;
+  }
+
+  addText(text: string): void {
+    if (!text) return;
+    this.sawAssistantText = true;
+    if (this.stepToolCalls.length > 0 || this.stepHasToolResults) {
+      this.flushStep();
+    }
+    this.stepText += text;
+  }
+
+  addToolCall(id: string, name: string, argumentsText: string): void {
+    if (this.stepHasToolResults) {
+      this.flushStep();
+    }
+    const existing = this.toolCallById.get(id);
+    if (existing) {
+      if (argumentsText && (!existing.function.arguments || existing.function.arguments === "{}")) {
+        existing.function.arguments = argumentsText;
+      }
+      return;
+    }
+    const call: AcpRecordedToolCall = {
+      id,
+      type: "function",
+      function: { name, arguments: argumentsText },
+    };
+    this.toolCallById.set(id, call);
+    this.stepToolCalls.push(call);
+  }
+
+  addToolResult(msg: AcpRecordedToolResult, exec: Record<string, unknown>): void {
+    this.stepHasToolResults = true;
+    const id = msg.tool_call_id;
+    const existingMsg = id ? this.toolResultById.get(id) : undefined;
+    const existingExec = id ? this.toolExecutionById.get(id) : undefined;
+    if (existingMsg && existingExec) {
+      if (msg.content && msg.content !== existingMsg.content) {
+        existingMsg.content = existingMsg.content
+          ? (msg.content.includes(existingMsg.content)
+              ? msg.content
+              : `${existingMsg.content}\n${msg.content}`)
+          : msg.content;
+        existingExec.result = existingMsg.content;
+      }
+      for (const key of ["title", "kind", "diff", "diffs", "content_blocks", "locations", "artifact_id", "error"] as const) {
+        if (exec[key] !== undefined) {
+          existingExec[key] = exec[key];
+        }
+      }
+      return;
+    }
+    if (id) {
+      this.toolResultById.set(id, msg);
+      this.toolExecutionById.set(id, exec);
+    }
+    this.stepToolResults.push(msg);
+    this.toolExecutions.push(exec);
+  }
+
+  updateTool(
+    id: string,
+    patch: {
+      readonly argumentsText?: string;
+      readonly artifactId?: string;
+      readonly contentBlocks?: readonly unknown[];
+      readonly diff?: Record<string, unknown>;
+      readonly diffs?: readonly Record<string, unknown>[];
+      readonly inputs?: JsonObject;
+      readonly kind?: string;
+      readonly locations?: readonly unknown[];
+      readonly output?: string;
+      readonly title?: string;
+    },
+  ): void {
+    const existingCall = this.toolCallById.get(id);
+    if (
+      existingCall &&
+      patch.argumentsText &&
+      (!existingCall.function.arguments ||
+        existingCall.function.arguments === "{}" ||
+        patch.argumentsText.length > existingCall.function.arguments.length)
+    ) {
+      existingCall.function.arguments = patch.argumentsText;
+    }
+    const existingMsg = this.toolResultById.get(id);
+    const existingExec = this.toolExecutionById.get(id);
+    if (existingMsg && patch.output) {
+      if (!existingMsg.content) {
+        existingMsg.content = patch.output;
+      } else if (patch.output !== existingMsg.content && !existingMsg.content.includes(patch.output)) {
+        existingMsg.content = patch.output.includes(existingMsg.content)
+          ? patch.output
+          : `${existingMsg.content}\n${patch.output}`;
+      }
+    }
+    if (existingExec) {
+      if (patch.inputs && Object.keys(patch.inputs).length > 0) {
+        const prevInputs = isRecord(existingExec.inputs) ? existingExec.inputs : {};
+        existingExec.inputs = { ...prevInputs, ...patch.inputs };
+      }
+      if (existingMsg) {
+        existingExec.result = existingMsg.content;
+      } else if (patch.output) {
+        existingExec.result = patch.output;
+      }
+      if (patch.title) existingExec.title = patch.title;
+      if (patch.kind) existingExec.kind = patch.kind;
+      if (patch.diff) existingExec.diff = patch.diff;
+      if (patch.diffs?.length) existingExec.diffs = patch.diffs;
+      if (patch.contentBlocks?.length) existingExec.content_blocks = patch.contentBlocks;
+      if (patch.locations?.length) existingExec.locations = patch.locations;
+      if (patch.artifactId) existingExec.artifact_id = patch.artifactId;
+    }
+  }
+
+  commitTo(session: DaemonSession): boolean {
+    if (this.committed) return false;
+    this.committed = true;
+    this.flushStep();
+    if (this.messages.length > 0) {
+      session.messages.push(...this.messages);
+    }
+    if (this.toolExecutions.length > 0) {
+      session.toolExecutions.push(...this.toolExecutions);
+    }
+    if (this.thinkingEntries.length > 0) {
+      session.thinkingContent.push(...this.thinkingEntries);
+    }
+    return this.messages.length > 0 || this.toolExecutions.length > 0;
+  }
+}
+
+function summarizeAcpContentBlocksForText(blocks: readonly unknown[] | undefined): string {
+  if (!blocks || blocks.length === 0) return "";
+  const lines: string[] = [];
+  for (const raw of blocks) {
+    if (!isRecord(raw)) continue;
+    const type = typeof raw.type === "string" ? raw.type : "";
+    if (type === "text" && typeof raw.text === "string" && raw.text) {
+      lines.push(raw.text);
+    } else if (type === "resource_link" && typeof raw.uri === "string" && raw.uri) {
+      const label = typeof raw.name === "string" && raw.name ? raw.name : raw.uri;
+      lines.push(`[${label}](${raw.uri})`);
+    } else if (type === "resource" && typeof raw.text === "string" && raw.text) {
+      lines.push(raw.text);
+    } else if (type === "image" && typeof raw.uri === "string" && raw.uri) {
+      lines.push(`![image](${raw.uri})`);
+    }
+  }
+  return lines.join("\n");
+}
+
 interface AcpOutOfTurnWakeupState {
   readonly sessionId: string;
   readonly turnId: string;
   readonly startedAt: number;
-  assistantText: string;
-  thinkingText: string;
+  readonly recorder: AcpTurnTranscriptRecorder;
   readonly toolStartTimes: Map<string, number>;
   readonly toolInputsById: Map<string, JsonObject>;
-  readonly recordedToolCalls: Array<{
-    readonly id: string;
-    readonly type: "function";
-    readonly function: { readonly name: string; readonly arguments: string };
-  }>;
-  readonly recordedToolResults: Array<{
-    readonly role: "tool";
-    readonly tool_call_id: string;
-    readonly name: string;
-    readonly content: string;
-    readonly duration_ms: number;
-    readonly is_error?: boolean;
-  }>;
-  readonly recordedToolExecutions: Array<Record<string, unknown>>;
   readonly pendingToolCallIds: Set<string>;
   lastPlanTodoText: string | undefined;
   settleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1468,6 +1704,7 @@ export class DaemonServer {
   private readonly acpBackgroundTasks = new Map<string, Map<string, AgyBackgroundTaskSnapshot>>();
   private readonly acpWakeupIdleMs: number;
   private readonly acpOutOfTurnWakeups = new Map<string, AcpOutOfTurnWakeupState>();
+  private readonly activeAcpTurnRecorders = new Map<string, AcpTurnTranscriptRecorder>();
   private readonly acpApprovalOptionChoices = new Map<string, string>();
   private readonly acpNonPermanentApprovals = new Set<string>();
   private readonly pendingAcpApprovalIds = new Map<string, Set<string>>();
@@ -4442,10 +4679,55 @@ export class DaemonServer {
             params.mode === "live" ||
             this.acpBridgeHost.supportsLiveSteer(session.id));
         if (allowLiveSteer) {
+          let recordedLiveSteer = false;
+          const recordLiveSteerAccepted = (): void => {
+            if (recordedLiveSteer) return;
+            recordedLiveSteer = true;
+            const steerDisplay = content.trim() || processed.enhancedMessage.trim();
+            if (steerDisplay || images.length) {
+              session.inflightSteers = [
+                ...(session.inflightSteers ?? []),
+                {
+                  text: steerDisplay,
+                  ...(images.length ? { images } : {}),
+                },
+              ];
+              const activeRecorder = this.activeAcpTurnRecorders.get(session.id);
+              if (activeRecorder) {
+                const steerContent = images.length
+                  ? [{ type: "text" as const, text: steerDisplay }, ...imageUrlContentParts(images)]
+                  : steerDisplay;
+                activeRecorder.addUser(steerContent, images.length ? steerDisplay : undefined);
+              }
+            }
+            this.emit(connection, "steer_input", {
+              content,
+              ...(images.length ? { image_count: images.length } : {}),
+              ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
+              ...(processed.mentionedFiles.length
+                ? { mentioned_files: processed.mentionedFiles }
+                : {}),
+            });
+            const steerAccepts = (conn: DaemonTransportConnection): boolean =>
+              conn === connection ||
+              this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+            this.broadcastEvent(
+              "steer_applied",
+              {
+                session_id: session.id,
+                contents: [content],
+                count: 1,
+              },
+              steerAccepts,
+              [connection, ...this.sessionObservers],
+              session.cwd,
+            );
+          };
           const liveOutcome = await this.acpBridgeHost.steerPrompt({
             sessionId: session.id,
             text: processed.enhancedMessage,
             ...(images.length ? { images } : {}),
+            onAccepted: recordLiveSteerAccepted,
             onFallbackQueue: async () => {
               await this.queueDurableSteer({
                 session,
@@ -4458,19 +4740,7 @@ export class DaemonServer {
             },
           });
           if (liveOutcome.ok) {
-            this.emit(connection, "steer_input", {
-              content,
-              ...(images.length ? { image_count: images.length } : {}),
-              ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
-              ...(processed.mentionedFiles.length
-                ? { mentioned_files: processed.mentionedFiles }
-                : {}),
-            });
-            this.emit(connection, "steer_applied", {
-              session_id: session.id,
-              contents: [content],
-              count: 1,
-            });
+            recordLiveSteerAccepted();
             return {
               ok: true,
               disposition: "live_steer",
@@ -5176,10 +5446,11 @@ export class DaemonServer {
     // Strict runtime isolation: when an external ACP runtime is active on this
     // session, never leak Xerxes's native daemon commands or bundled skills.
     const activeAcpSession = this.runtime.sessionStatus(sessionKey(connection, params));
-    const activeAcpBinding = activeAcpSession
+    let activeAcpBinding = activeAcpSession
       ? this.acpBridgeHost.getBinding(activeAcpSession.id)
       : null;
-    if (activeAcpBinding && activeAcpBinding.connected && activeAcpBinding.transport !== "native") {
+    if (activeAcpSession && activeAcpBinding && activeAcpBinding.connected && activeAcpBinding.transport !== "native") {
+      activeAcpBinding = this.refreshAcpRuntimeFeaturesForSession(activeAcpSession) ?? activeAcpBinding;
       if (stripped.startsWith("/") && !/\s/.test(stripped)) {
         return {
           ok: true,
@@ -5187,14 +5458,14 @@ export class DaemonServer {
           completions: await this.completeAcpSlashAndSkills(
             stripped,
             activeAcpBinding,
-            activeAcpSession?.cwd ?? activeAcpBinding.cwd,
+            activeAcpSession.cwd ?? activeAcpBinding.cwd,
           ),
         };
       }
       if (stripped.startsWith("/")) {
         return { ok: true, kind: "slash", completions: [] };
       }
-      const cwd = activeAcpSession?.cwd ?? process.cwd();
+      const cwd = activeAcpSession.cwd ?? process.cwd();
       return {
         ok: true,
         kind: "path",
@@ -7362,6 +7633,9 @@ export class DaemonServer {
     // to `runExternalAcpTurn` before Xerxes's native slash handlers or plugins
     // can hijack it. Keep `/acp ...` on the Xerxes host so the user can always
     // manage models/modes/thinking/config or disconnect back to Xerxes.
+    if (session && this.acpBridgeHost.hasActiveBridge(session.id)) {
+      this.refreshAcpRuntimeFeaturesForSession(session);
+    }
     const acpBinding = session ? this.acpBridgeHost.getBinding(session.id) : null;
     const isExternalAcp = Boolean(
       acpBinding && acpBinding.connected && acpBinding.transport !== "native",
@@ -13406,6 +13680,14 @@ export class DaemonServer {
       this.eventJournal.deliverPrivate(deliver);
       return;
     }
+    // Live local-observer attention pings mirror already-journaled session events
+    // (including approval/question frames) to other local clients; keeping them
+    // private preserves per-principal redaction in `events.read` and avoids
+    // duplicating notifications in durable replay.
+    if (type === 'session_attention') {
+      this.eventJournal.deliverPrivate(deliver);
+      return;
+    }
     const nested = isRecord(payload.payload) ? payload.payload : undefined;
     const id = optionalString(payload.session_id) ?? optionalString(nested?.session_id);
     const session = id
@@ -13476,11 +13758,20 @@ export class DaemonServer {
       this.notifySessionStateChanged(queuedSession.id);
       cancelledQueued = true;
     }
-    const reactionOwner = this.runtime.sessionStatus(sessionKey)?.id;
+    const reactionOwner = queuedSession?.id;
     if (reactionOwner) this.reactionDispatcher?.cancel(reactionOwner);
-    const acpCancelled = reactionOwner && this.acpBridgeHost.hasActiveTurn(reactionOwner);
+    const hasWakeup = Boolean(reactionOwner && this.acpOutOfTurnWakeups.has(reactionOwner));
+    const acpCancelled = Boolean(
+      reactionOwner &&
+        (this.acpBridgeHost.hasActiveTurn(reactionOwner) ||
+          hasWakeup ||
+          (Boolean(queuedSession?.activeTurnId) && this.acpBridgeHost.hasActiveBridge(reactionOwner))),
+    );
     if (acpCancelled && reactionOwner) {
       void this.acpBridgeHost.cancel(reactionOwner);
+      if (hasWakeup) {
+        void this.settleAcpOutOfTurnWakeup(reactionOwner, "cancelled");
+      }
     }
     const owner = this.turnOwners.get(sessionKey);
     if (!owner) {
@@ -13997,17 +14288,21 @@ export class DaemonServer {
         }
         this.rememberTurnInteraction(event, interactionIds);
         emit(event);
+        const turnSession = this.runtime.sessionStatus(sessionKey);
+        this.emitSessionAttention(turnSession, event);
         // After the emitter, which records whichever raw socket it reached.
         if (interactionOwner) this.recordInteractionOwner(interactionOwner, event.type, event.payload);
         const live = ["turn_begin", "tool_result", "status_update", "turn_end"].includes(event.type)
-          ? this.runtime.sessionStatus(sessionKey) : undefined;
+          ? turnSession : undefined;
         if (live) {
           const goal = getGoal(live.metadata, live.id);
           const goalState = { goal: goal?.objective ?? null, goal_phase: goal?.phase ?? null };
           const fingerprint = JSON.stringify(goalState);
           if (fingerprint !== lastGoal) {
             lastGoal = fingerprint;
-            emit({ type: "status_update", payload: { session_id: live.id, ...goalState } });
+            const goalEvent: DaemonEvent = { type: "status_update", payload: { session_id: live.id, ...goalState } };
+            emit(goalEvent);
+            this.emitSessionAttention(live, goalEvent);
           }
         }
       };
@@ -14990,6 +15285,22 @@ export class DaemonServer {
     this.broadcastEvent("acp_status", payload, accepts, [...this.sessionObservers], workspaceDir);
   }
 
+  private refreshAcpRuntimeFeaturesForSession(
+    sessionOrId: DaemonSession | string | undefined,
+  ): AcpSessionBinding | null {
+    if (!sessionOrId) return null;
+    const sessionId = typeof sessionOrId === "string" ? sessionOrId : sessionOrId.id;
+    const session = typeof sessionOrId === "string"
+      ? this.runtime.listSessions().find((item) => item.id === sessionId)
+      : sessionOrId;
+    this.acpBridgeHost.refreshRuntimeFeatures(sessionId);
+    const latest = this.acpBridgeHost.getBinding(sessionId);
+    if (latest && session) {
+      session.metadata.acp_binding = latest;
+    }
+    return latest;
+  }
+
   private async handleAcpRpc(
     connection: DaemonTransportConnection,
     method: string,
@@ -14999,6 +15310,9 @@ export class DaemonServer {
     const target = await this.resolveSwarmTarget(connection, params, !isReadOnly && method === "acp.connect");
 
     if (method === "acp.agents") {
+      if (target) {
+        this.refreshAcpRuntimeFeaturesForSession(target.session ?? target.id);
+      }
       const { agents, active } = this.acpBridgeHost.listAgents(target?.id);
       return {
         ok: true,
@@ -15008,7 +15322,7 @@ export class DaemonServer {
     }
 
     if (method === "acp.catalog") {
-      const binding = target ? this.acpBridgeHost.getBinding(target.id) : null;
+      const binding = target ? this.refreshAcpRuntimeFeaturesForSession(target.session ?? target.id) : null;
       const connected = Boolean(
         binding && binding.connected && binding.transport !== "native",
       );
@@ -15889,11 +16203,60 @@ export class DaemonServer {
     return (event: DaemonEvent): void => {
       if (this.runtimeShutdown) return;
       this.broadcastEvent(event.type, event.payload, accepts, [...this.sessionObservers], session.cwd);
+      this.emitSessionAttention(session, event);
       if (event.type === "approval_request" || event.type === "question_request") {
         // Ensure any observer attached to the session (or reconnecting later) can answer this out-of-turn prompt.
         this.recordInteractionOwner(owner, event.type, event.payload);
       }
     };
+  }
+
+  /**
+   * Notify connected desktop/TUI session observers currently viewing a DIFFERENT
+   * session when this session finishes/stops/fails, needs input, saves an artifact,
+   * or hits a terminal/blocked goal phase. Never alters the active session stream.
+   */
+  private emitSessionAttention(session: DaemonSession | undefined, event: DaemonEvent): void {
+    if (!session || this.runtimeShutdown || this.sessionObservers.size === 0) return;
+    const payload = event.payload ?? {};
+    let worthy = false;
+    if (event.type === "turn_end") {
+      worthy = payload.unstarted !== true;
+    } else if (event.type === "approval_request" || event.type === "question_request") {
+      worthy = true;
+    } else if (event.type === "tool_result") {
+      if (payload.permitted !== false && !optionalString(payload.error)) {
+        const artifactId = optionalString(payload.artifact_id);
+        const toolName = optionalString(payload.name);
+        const resultText = optionalString(payload.result) ?? optionalString(payload.return_value) ?? "";
+        worthy = Boolean(artifactId) || (toolName === "ArtifactTool" && /^(Created|Updated) artifact "/.test(resultText));
+      }
+    } else if (event.type === "status_update") {
+      const phase = optionalString(payload.goal_phase);
+      worthy = phase === "complete" || phase === "blocked";
+    }
+    if (!worthy) return;
+    const title = displayTitle(optionalString(session.metadata.title) ?? "") || undefined;
+    const accepts = (conn: DaemonTransportConnection): boolean =>
+      this.sessionObservers.has(conn) && conn.activeSessionKey !== session.sessionKey;
+    const innerPayload: JsonRpcPayload = {
+      ...payload,
+      session_id: session.id,
+      ...(title ? { session_title: title } : {}),
+    };
+    this.broadcastEvent(
+      "session_attention",
+      {
+        session_id: session.id,
+        ...(title ? { session_title: title } : {}),
+        cwd: session.cwd,
+        event_type: event.type,
+        payload: innerPayload,
+      },
+      accepts,
+      [...this.sessionObservers],
+      session.cwd,
+    );
   }
 
   private handleAcpElicitationComplete(session: DaemonSession, elicitationId: string): void {
@@ -15931,106 +16294,103 @@ export class DaemonServer {
     if (events.length === 0 || session.messages.length > 0) {
       return;
     }
+    const recorder = new AcpTurnTranscriptRecorder();
     let pendingUserText = "";
-    let pendingAssistantText = "";
-    let pendingThinkingText = "";
-    const pendingToolCalls: Array<{
-      readonly id: string;
-      readonly type: "function";
-      readonly function: { readonly name: string; readonly arguments: string };
-    }> = [];
-    const pendingToolResults: Array<{
-      readonly role: "tool";
-      readonly tool_call_id: string;
-      readonly name: string;
-      readonly content: string;
-      readonly duration_ms: number;
-      readonly is_error?: boolean;
-    }> = [];
     const replayToolInputs = new Map<string, JsonObject>();
     let replayPlanTodoText: string | undefined;
 
     const flushUser = (): void => {
       if (!pendingUserText) return;
-      session.messages.push({ role: "user", content: pendingUserText });
+      recorder.addUser(pendingUserText);
       pendingUserText = "";
-    };
-    const flushAssistant = (): void => {
-      if (!pendingAssistantText && !pendingThinkingText && pendingToolCalls.length === 0 && pendingToolResults.length === 0) {
-        return;
-      }
-      if (pendingAssistantText || pendingThinkingText || pendingToolCalls.length > 0) {
-        session.messages.push({
-          role: "assistant",
-          content: pendingAssistantText,
-          ...(pendingThinkingText ? { thinking: pendingThinkingText } : {}),
-          ...(pendingToolCalls.length > 0 ? { tool_calls: [...pendingToolCalls] } : {}),
-        });
-      }
-      for (const toolResult of pendingToolResults) {
-        session.messages.push(toolResult);
-      }
-      if (pendingThinkingText.trim()) {
-        session.thinkingContent.push(pendingThinkingText);
-      }
-      pendingAssistantText = "";
-      pendingThinkingText = "";
-      pendingToolCalls.length = 0;
-      pendingToolResults.length = 0;
     };
 
     for (const event of events) {
       if (event.type === "user_message_chunk") {
-        flushAssistant();
         pendingUserText += event.text;
       } else if (event.type === "thought_delta") {
         flushUser();
-        pendingThinkingText += event.text;
+        recorder.addThought(event.text);
       } else if (event.type === "text_delta") {
         flushUser();
-        pendingAssistantText += event.text;
+        const deltaText = event.text || summarizeAcpContentBlocksForText(event.contentBlocks);
+        if (deltaText) {
+          recorder.addText(deltaText);
+        }
       } else if (event.type === "tool_call") {
         flushUser();
         const inputs = parseToolInputsObject(event.rawInput, event.argumentsText);
         replayToolInputs.set(event.toolCallId, inputs);
-        pendingToolCalls.push({
-          id: event.toolCallId,
-          type: "function",
-          function: { name: event.name, arguments: event.argumentsText },
+        recorder.addToolCall(event.toolCallId, event.name, event.argumentsText);
+      } else if (event.type === "tool_update") {
+        flushUser();
+        let parsedInputs: JsonObject | undefined;
+        if (event.rawInput !== undefined || event.argumentsText !== undefined) {
+          parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText ?? "");
+          replayToolInputs.set(event.toolCallId, {
+            ...(replayToolInputs.get(event.toolCallId) ?? {}),
+            ...parsedInputs,
+          });
+        }
+        const updateDiffs = event.diffs && event.diffs.length > 0
+          ? event.diffs
+          : event.diff
+            ? [event.diff]
+            : [];
+        recorder.updateTool(event.toolCallId, {
+          ...(event.argumentsText !== undefined ? { argumentsText: event.argumentsText } : {}),
+          ...(parsedInputs ? { inputs: parsedInputs } : {}),
+          ...(event.output !== undefined ? { output: event.output } : {}),
+          ...(event.title ? { title: event.title } : {}),
+          ...(event.kind ? { kind: event.kind } : {}),
+          ...(updateDiffs[0] ? { diff: updateDiffs[0] as unknown as Record<string, unknown> } : {}),
+          ...(updateDiffs.length > 0 ? { diffs: updateDiffs as unknown as Record<string, unknown>[] } : {}),
+          ...(event.contentBlocks?.length ? { contentBlocks: event.contentBlocks } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
         });
       } else if (event.type === "tool_result") {
         flushUser();
         const isError = event.isError === true;
         const permitted = !event.permissionDenied;
         const inputs = replayToolInputs.get(event.toolCallId) ?? {};
-        pendingToolResults.push({
-          role: "tool",
-          tool_call_id: event.toolCallId,
-          name: event.name,
-          content: event.output,
-          duration_ms: event.durationMs ?? 0,
-          ...(isError ? { is_error: true } : {}),
-        });
-        session.toolExecutions.push({
-          toolCallId: event.toolCallId,
-          name: event.name,
-          inputs,
-          result: event.output,
-          permitted,
-          durationMs: event.durationMs ?? 0,
-          ...(isError ? { error: event.output.slice(0, 240) || "Tool execution failed." } : {}),
-          ...(event.diff ? { diff: event.diff } : {}),
-          ...(event.diffs?.length ? { diffs: event.diffs } : {}),
-          ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
-          ...(event.locations?.length ? { locations: event.locations } : {}),
-        });
+        const allDiffs = event.diffs && event.diffs.length > 0
+          ? event.diffs
+          : event.diff
+            ? [event.diff]
+            : [];
+        const primaryDiff = allDiffs[0];
+        recorder.addToolResult(
+          {
+            role: "tool",
+            tool_call_id: event.toolCallId,
+            name: event.name,
+            content: event.output,
+            duration_ms: event.durationMs ?? 0,
+            ...(isError ? { is_error: true } : {}),
+          },
+          {
+            toolCallId: event.toolCallId,
+            name: event.name,
+            inputs,
+            result: event.output,
+            permitted,
+            durationMs: event.durationMs ?? 0,
+            ...(event.title ? { title: event.title } : {}),
+            ...(event.kind ? { kind: event.kind } : {}),
+            ...(isError ? { error: event.output.slice(0, 240) || "Tool execution failed." } : {}),
+            ...(primaryDiff ? { diff: primaryDiff } : {}),
+            ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
+            ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
+            ...(event.locations?.length ? { locations: event.locations } : {}),
+          },
+        );
       } else if (event.type === "plan") {
         const todoItems = formatAcpPlanTodoItems(event.entries);
         replayPlanTodoText = formatAcpPlanTodoText(todoItems);
       }
     }
     flushUser();
-    flushAssistant();
+    recorder.commitTo(session);
     if (replayPlanTodoText !== undefined) {
       session.toolExecutions.push({
         toolCallId: "acp-plan-replay",
@@ -16454,6 +16814,7 @@ export class DaemonServer {
     session.cancelRequested = false;
     session.lastActive = Date.now();
     session.inflightUser = displayText;
+    session.inflightSteers = [];
     session.inflightAssistant = "";
     session.inflightThinking = "";
     session.inflightStartedAt = Date.now();
@@ -16465,20 +16826,15 @@ export class DaemonServer {
     const deniedToolCallIds = new Set<string>();
     const acpQuestionSummaries = new Map<string, string>();
     const activeAcpQuestionIds = new Set<string>();
-    const recordedToolCalls: Array<{
-      readonly id: string;
-      readonly type: "function";
-      readonly function: { readonly name: string; readonly arguments: string };
-    }> = [];
-    const recordedToolResults: Array<{
-      readonly role: "tool";
-      readonly tool_call_id: string;
-      readonly name: string;
-      readonly content: string;
-      readonly duration_ms: number;
-      readonly is_error?: boolean;
-    }> = [];
-    const recordedToolExecutions: Array<Record<string, unknown>> = [];
+    const recorder = new AcpTurnTranscriptRecorder();
+    const userContent = options.images?.length
+      ? [{ type: "text" as const, text: displayText }, ...imageUrlContentParts(options.images)]
+      : displayText;
+    recorder.addUser(
+      userContent,
+      displayText !== text || options.images?.length ? displayText : undefined,
+    );
+    this.activeAcpTurnRecorders.set(session.id, recorder);
     let lastPlanTodoText: string | undefined;
     let persistedPlanTodo = false;
 
@@ -16513,6 +16869,7 @@ export class DaemonServer {
 
     let stopReason = "end_turn";
     let cancelled = false;
+    let turnError: string | undefined;
     try {
       const result = await this.acpBridgeHost.runPrompt({
         sessionId: session.id,
@@ -16561,7 +16918,8 @@ export class DaemonServer {
               break;
             }
             case "thought_delta": {
-              session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-8000);
+              recorder.addThought(event.text);
+              session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-32000);
               emit({
                 type: "think_part",
                 payload: {
@@ -16572,8 +16930,10 @@ export class DaemonServer {
               break;
             }
             case "text_delta": {
-              if (event.text) {
-                session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+              const deltaText = event.text || summarizeAcpContentBlocksForText(event.contentBlocks);
+              if (deltaText) {
+                recorder.addText(deltaText);
+                session.inflightAssistant = `${session.inflightAssistant ?? ""}${deltaText}`;
               }
               emit({
                 type: "text_part",
@@ -16591,14 +16951,7 @@ export class DaemonServer {
               toolStartTimes.set(event.toolCallId, Date.now());
               const parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText);
               toolInputsById.set(event.toolCallId, parsedInputs);
-              recordedToolCalls.push({
-                id: event.toolCallId,
-                type: "function",
-                function: {
-                  name: event.name,
-                  arguments: event.argumentsText,
-                },
-              });
+              recorder.addToolCall(event.toolCallId, event.name, event.argumentsText);
               const toolCtx = inflightToolContext(event.name, event.rawInput ?? event.argumentsText);
               session.inflightTools = [
                 ...(session.inflightTools ?? []),
@@ -16643,6 +16996,38 @@ export class DaemonServer {
                   ...parsedInputs,
                 });
               }
+              const updateDiffs = event.diffs && event.diffs.length > 0
+                ? event.diffs
+                : event.diff
+                  ? [event.diff]
+                  : [];
+              const primaryUpdateDiff = updateDiffs[0];
+              const updateArtifactId = this.detectAgyArtifactId(
+                session,
+                event.name,
+                toolInputsById.get(event.toolCallId) ?? parsedInputs ?? {},
+                event.locations,
+                primaryUpdateDiff,
+                event.kind,
+              );
+              recorder.updateTool(event.toolCallId, {
+                ...(event.argumentsText !== undefined ? { argumentsText: event.argumentsText } : {}),
+                ...(parsedInputs ? { inputs: parsedInputs } : {}),
+                ...(event.output !== undefined ? { output: event.output } : {}),
+                ...(event.title ? { title: event.title } : {}),
+                ...(event.kind ? { kind: event.kind } : {}),
+                ...(primaryUpdateDiff ? { diff: primaryUpdateDiff as unknown as Record<string, unknown> } : {}),
+                ...(updateDiffs.length > 0 ? { diffs: updateDiffs as unknown as Record<string, unknown>[] } : {}),
+                ...(event.contentBlocks?.length ? { contentBlocks: event.contentBlocks } : {}),
+                ...(event.locations?.length ? { locations: event.locations } : {}),
+                ...(updateArtifactId ? { artifactId: updateArtifactId } : {}),
+              });
+              if (event.output && session.inflightTools) {
+                const match = session.inflightTools.find(item => item.id === event.toolCallId);
+                if (match && !match.output_preview) {
+                  match.output_preview = event.output.slice(0, 240);
+                }
+              }
               emit({
                 type: "tool_update",
                 payload: {
@@ -16679,35 +17064,42 @@ export class DaemonServer {
                   : [];
               const primaryDiff = allDiffs[0];
               const artifactId = !isError && permitted
-                ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff)
+                ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff, event.kind)
                 : undefined;
-              recordedToolResults.push({
-                role: "tool",
-                tool_call_id: event.toolCallId,
-                name: event.name,
-                content: output,
-                duration_ms: durationMs,
-                ...(isError ? { is_error: true } : {}),
-              });
-              recordedToolExecutions.push({
-                toolCallId: event.toolCallId,
-                name: event.name,
-                inputs,
-                result: output,
-                permitted,
-                durationMs,
-                ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-                ...(primaryDiff ? { diff: primaryDiff } : {}),
-                ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
-                ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
-                ...(event.locations?.length ? { locations: event.locations } : {}),
-                ...(artifactId ? { artifact_id: artifactId } : {}),
-              });
+              recorder.addToolResult(
+                {
+                  role: "tool",
+                  tool_call_id: event.toolCallId,
+                  name: event.name,
+                  content: output,
+                  duration_ms: durationMs,
+                  ...(isError ? { is_error: true } : {}),
+                },
+                {
+                  toolCallId: event.toolCallId,
+                  name: event.name,
+                  inputs,
+                  result: output,
+                  permitted,
+                  durationMs,
+                  ...(event.title ? { title: event.title } : {}),
+                  ...(event.kind ? { kind: event.kind } : {}),
+                  ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+                  ...(primaryDiff ? { diff: primaryDiff } : {}),
+                  ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
+                  ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
+                  ...(event.locations?.length ? { locations: event.locations } : {}),
+                  ...(artifactId ? { artifact_id: artifactId } : {}),
+                },
+              );
               if (session.inflightTools) {
                 const match = session.inflightTools.find(item => item.id === event.toolCallId);
                 if (match) {
                   match.ok = !isError && permitted;
                   match.duration_ms = durationMs;
+                  if (output) {
+                    match.output_preview = output.slice(0, 240);
+                  }
                   if ((isError || !permitted) && output) {
                     match.error = output.slice(0, 200);
                   }
@@ -16835,6 +17227,7 @@ export class DaemonServer {
               break;
             }
             case "error": {
+              turnError = event.message || turnError;
               emit({
                 type: "notification",
                 payload: {
@@ -16857,30 +17250,15 @@ export class DaemonServer {
       stopReason = result.stopReason;
       cancelled = result.cancelled;
 
-      // Persist user + assistant + tool messages, toolExecutions, and thinkingContent
-      // onto the session transcript so history, replay, diffs, and `/btw` work seamlessly!
-      const userContent = options.images?.length
-        ? [{ type: "text" as const, text: displayText }, ...imageUrlContentParts(options.images)]
-        : displayText;
-      session.messages.push({
-        role: "user",
-        content: userContent,
-        ...(displayText !== text || options.images?.length ? { displayText } : {}),
-      });
-      if (result.assistantText || result.thinkingText || recordedToolCalls.length > 0) {
-        session.messages.push({
-          role: "assistant",
-          content: result.assistantText,
-          ...(result.thinkingText ? { thinking: result.thinkingText } : {}),
-          ...(recordedToolCalls.length > 0 ? { tool_calls: recordedToolCalls } : {}),
-        });
+      // Persist chronological user + steer + assistant + tool steps onto the session
+      // transcript so history, reload, diffs, pagination, and `/btw` preserve full content.
+      if (!recorder.hasThinkingText && result.thinkingText) {
+        recorder.addThought(result.thinkingText);
       }
-      for (const toolMsg of recordedToolResults) {
-        session.messages.push(toolMsg);
+      if (!recorder.hasAssistantText && result.assistantText) {
+        recorder.addText(result.assistantText);
       }
-      if (recordedToolExecutions.length > 0) {
-        session.toolExecutions.push(...recordedToolExecutions);
-      }
+      recorder.commitTo(session);
       if (lastPlanTodoText !== undefined) {
         session.toolExecutions.push({
           toolCallId: `acp-plan-${turnId}`,
@@ -16892,15 +17270,26 @@ export class DaemonServer {
         });
         persistedPlanTodo = true;
       }
-      if (result.thinkingText.trim()) {
-        session.thinkingContent.push(result.thinkingText);
-      }
       session.turnCount += 1;
       const latestBinding = this.acpBridgeHost.getBinding(session.id);
       if (latestBinding) {
         session.metadata.acp_binding = latestBinding;
       }
+    } catch (error) {
+      turnError = turnError ?? errorMessage(error);
+      throw error;
     } finally {
+      if (this.activeAcpTurnRecorders.get(session.id) === recorder) {
+        this.activeAcpTurnRecorders.delete(session.id);
+      }
+      // Even if the external ACP process crashed, disconnected, or errored mid-turn,
+      // preserve every streamed thought, tool call/result, steer, and reply before
+      // clearing transient inflight state.
+      if (!recorder.isCommitted) {
+        if (recorder.commitTo(session)) {
+          session.turnCount += 1;
+        }
+      }
       for (const requestId of [...activeAcpQuestionIds]) {
         this.pendingAcpQuestions.get(requestId)?.abort();
       }
@@ -16910,6 +17299,7 @@ export class DaemonServer {
       session.status = "idle";
       session.lastActive = Date.now();
       delete session.inflightUser;
+      delete session.inflightSteers;
       delete session.inflightAssistant;
       delete session.inflightThinking;
       delete session.inflightTools;
@@ -16926,6 +17316,7 @@ export class DaemonServer {
         persistedPlanTodo = true;
       }
       delete session.inflightTodoResult;
+      this.refreshAcpRuntimeFeaturesForSession(session);
       await this.runtime.flushSessions().catch(error => {
         console.error(`Could not persist external ACP turn: ${errorMessage(error)}`);
       });
@@ -16935,6 +17326,7 @@ export class DaemonServer {
           session_id: session.id,
           stop_reason: stopReason,
           ...(cancelled ? { cancelled: true } : {}),
+          ...(turnError ? { failed: true, error: turnError } : {}),
         },
       });
     }
@@ -17295,14 +17687,21 @@ export class DaemonServer {
     inputs: JsonObject,
     locations?: readonly { readonly path: string; readonly line?: number }[],
     diff?: { readonly path: string },
+    toolKind?: string,
   ): string | undefined {
     const normalizedTool = toolName.trim().toLowerCase();
-    if (
-      normalizedTool !== "write_file" &&
-      normalizedTool !== "edit_file" &&
-      normalizedTool !== "write" &&
-      normalizedTool !== "edit"
-    ) {
+    const normalizedKind = toolKind?.trim().toLowerCase();
+    const isWriteLike =
+      normalizedKind === "edit" ||
+      normalizedTool === "write_file" ||
+      normalizedTool === "edit_file" ||
+      normalizedTool === "write" ||
+      normalizedTool === "edit" ||
+      normalizedTool === "write_to_file" ||
+      normalizedTool === "replace_file_content" ||
+      normalizedTool === "multi_replace_file_content" ||
+      /^(?:run\s+|running\s+)?(?:write|edit|create|update|save|replace|multi_replace)\b/.test(normalizedTool);
+    if (!isWriteLike) {
       return undefined;
     }
     const location = this.resolveAgyBrainLocationForSession(session);
@@ -17311,6 +17710,8 @@ export class DaemonServer {
       optionalString(inputs.Path) ??
       optionalString(inputs.path) ??
       optionalString(inputs.TargetFile) ??
+      optionalString(inputs.AbsolutePath) ??
+      optionalString(inputs.absolute_path) ??
       optionalString(inputs.file_path) ??
       diff?.path ??
       locations?.[0]?.path;
@@ -17444,13 +17845,9 @@ export class DaemonServer {
         sessionId: session.id,
         turnId,
         startedAt: Date.now(),
-        assistantText: "",
-        thinkingText: "",
+        recorder: new AcpTurnTranscriptRecorder(),
         toolStartTimes: new Map<string, number>(),
         toolInputsById: new Map<string, JsonObject>(),
-        recordedToolCalls: [],
-        recordedToolResults: [],
-        recordedToolExecutions: [],
         pendingToolCallIds: new Set<string>(),
         lastPlanTodoText: undefined,
         settleTimer: undefined,
@@ -17472,8 +17869,8 @@ export class DaemonServer {
 
     switch (event.type) {
       case "thought_delta": {
-        wakeup.thinkingText += event.text;
-        session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-8000);
+        wakeup.recorder.addThought(event.text);
+        session.inflightThinking = `${session.inflightThinking ?? ""}${event.text}`.slice(-32000);
         broadcastWake("think_part", {
           session_id: session.id,
           think: event.text,
@@ -17481,9 +17878,10 @@ export class DaemonServer {
         break;
       }
       case "text_delta": {
-        if (event.text) {
-          wakeup.assistantText += event.text;
-          session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
+        const deltaText = event.text || summarizeAcpContentBlocksForText(event.contentBlocks);
+        if (deltaText) {
+          wakeup.recorder.addText(deltaText);
+          session.inflightAssistant = `${session.inflightAssistant ?? ""}${deltaText}`;
         }
         broadcastWake("text_part", {
           session_id: session.id,
@@ -17496,7 +17894,7 @@ export class DaemonServer {
       }
       case "continuation": {
         if (event.text) {
-          wakeup.assistantText += event.text;
+          wakeup.recorder.addText(event.text);
           session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
           broadcastWake("text_part", {
             session_id: session.id,
@@ -17510,14 +17908,7 @@ export class DaemonServer {
         const parsedInputs = parseToolInputsObject(event.rawInput, event.argumentsText);
         wakeup.toolInputsById.set(event.toolCallId, parsedInputs);
         wakeup.pendingToolCallIds.add(event.toolCallId);
-        wakeup.recordedToolCalls.push({
-          id: event.toolCallId,
-          type: "function",
-          function: {
-            name: event.name,
-            arguments: event.argumentsText,
-          },
-        });
+        wakeup.recorder.addToolCall(event.toolCallId, event.name, event.argumentsText);
         const wakeToolCtx = inflightToolContext(event.name, event.rawInput ?? event.argumentsText);
         session.inflightTools = [
           ...(session.inflightTools ?? []),
@@ -17559,6 +17950,38 @@ export class DaemonServer {
             ...parsedInputs,
           });
         }
+        const updateDiffs = event.diffs && event.diffs.length > 0
+          ? event.diffs
+          : event.diff
+            ? [event.diff]
+            : [];
+        const primaryUpdateDiff = updateDiffs[0];
+        const updateArtifactId = this.detectAgyArtifactId(
+          session,
+          event.name,
+          wakeup.toolInputsById.get(event.toolCallId) ?? parsedInputs ?? {},
+          event.locations,
+          primaryUpdateDiff,
+          event.kind,
+        );
+        wakeup.recorder.updateTool(event.toolCallId, {
+          ...(event.argumentsText !== undefined ? { argumentsText: event.argumentsText } : {}),
+          ...(parsedInputs ? { inputs: parsedInputs } : {}),
+          ...(event.output !== undefined ? { output: event.output } : {}),
+          ...(event.title ? { title: event.title } : {}),
+          ...(event.kind ? { kind: event.kind } : {}),
+          ...(primaryUpdateDiff ? { diff: primaryUpdateDiff as unknown as Record<string, unknown> } : {}),
+          ...(updateDiffs.length > 0 ? { diffs: updateDiffs as unknown as Record<string, unknown>[] } : {}),
+          ...(event.contentBlocks?.length ? { contentBlocks: event.contentBlocks } : {}),
+          ...(event.locations?.length ? { locations: event.locations } : {}),
+          ...(updateArtifactId ? { artifactId: updateArtifactId } : {}),
+        });
+        if (event.output && session.inflightTools) {
+          const match = session.inflightTools.find((item) => item.id === event.toolCallId);
+          if (match && !match.output_preview) {
+            match.output_preview = event.output.slice(0, 240);
+          }
+        }
         broadcastWake("tool_update", {
           id: event.toolCallId,
           tool_call_id: event.toolCallId,
@@ -17593,35 +18016,42 @@ export class DaemonServer {
             : [];
         const primaryDiff = allDiffs[0];
         const artifactId = !isError && permitted
-          ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff)
+          ? this.detectAgyArtifactId(session, event.name, inputs, event.locations, primaryDiff, event.kind)
           : undefined;
-        wakeup.recordedToolResults.push({
-          role: "tool",
-          tool_call_id: event.toolCallId,
-          name: event.name,
-          content: output,
-          duration_ms: durationMs,
-          ...(isError ? { is_error: true } : {}),
-        });
-        wakeup.recordedToolExecutions.push({
-          toolCallId: event.toolCallId,
-          name: event.name,
-          inputs,
-          result: output,
-          permitted,
-          durationMs,
-          ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
-          ...(primaryDiff ? { diff: primaryDiff } : {}),
-          ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
-          ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
-          ...(event.locations?.length ? { locations: event.locations } : {}),
-          ...(artifactId ? { artifact_id: artifactId } : {}),
-        });
+        wakeup.recorder.addToolResult(
+          {
+            role: "tool",
+            tool_call_id: event.toolCallId,
+            name: event.name,
+            content: output,
+            duration_ms: durationMs,
+            ...(isError ? { is_error: true } : {}),
+          },
+          {
+            toolCallId: event.toolCallId,
+            name: event.name,
+            inputs,
+            result: output,
+            permitted,
+            durationMs,
+            ...(event.title ? { title: event.title } : {}),
+            ...(event.kind ? { kind: event.kind } : {}),
+            ...(isError ? { error: output.slice(0, 240) || "Tool execution failed." } : {}),
+            ...(primaryDiff ? { diff: primaryDiff } : {}),
+            ...(allDiffs.length > 0 ? { diffs: allDiffs } : {}),
+            ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
+            ...(event.locations?.length ? { locations: event.locations } : {}),
+            ...(artifactId ? { artifact_id: artifactId } : {}),
+          },
+        );
         if (session.inflightTools) {
           const match = session.inflightTools.find((item) => item.id === event.toolCallId);
           if (match) {
             match.ok = !isError && permitted;
             match.duration_ms = durationMs;
+            if (output) {
+              match.output_preview = output.slice(0, 240);
+            }
             if ((isError || !permitted) && output) {
               match.error = output.slice(0, 200);
             }
@@ -17645,7 +18075,7 @@ export class DaemonServer {
             });
           }
         }
-        broadcastWake("tool_result", {
+        const wakeToolPayload: JsonRpcPayload = {
           session_id: session.id,
           tool_call_id: event.toolCallId,
           name: event.name,
@@ -17664,7 +18094,11 @@ export class DaemonServer {
           ...(event.locations?.length ? { locations: event.locations } : {}),
           ...(artifactId ? { artifact_id: artifactId } : {}),
           display_blocks: displayBlocks,
-        });
+        };
+        broadcastWake("tool_result", wakeToolPayload);
+        if (artifactId) {
+          this.emitSessionAttention(session, { type: "tool_result", payload: wakeToolPayload });
+        }
         if (isAgySwarmTriggerTool(event.name)) {
           this.ensureAgySwarmWatch(session);
           this.agyBrainBridge.refreshSession(session.id);
@@ -17735,20 +18169,7 @@ export class DaemonServer {
     const session = this.runtime.listSessions().find((item) => item.id === sessionId);
     if (!session) return;
 
-    if (wakeup.assistantText || wakeup.thinkingText || wakeup.recordedToolCalls.length > 0) {
-      session.messages.push({
-        role: "assistant",
-        content: wakeup.assistantText,
-        ...(wakeup.thinkingText ? { thinking: wakeup.thinkingText } : {}),
-        ...(wakeup.recordedToolCalls.length > 0 ? { tool_calls: wakeup.recordedToolCalls } : {}),
-      });
-    }
-    for (const toolMsg of wakeup.recordedToolResults) {
-      session.messages.push(toolMsg);
-    }
-    if (wakeup.recordedToolExecutions.length > 0) {
-      session.toolExecutions.push(...wakeup.recordedToolExecutions);
-    }
+    wakeup.recorder.commitTo(session);
     if (wakeup.lastPlanTodoText !== undefined) {
       session.toolExecutions.push({
         toolCallId: `acp-plan-${wakeup.turnId}`,
@@ -17759,14 +18180,12 @@ export class DaemonServer {
         durationMs: 0,
       });
     }
-    if (wakeup.thinkingText.trim()) {
-      session.thinkingContent.push(wakeup.thinkingText);
-    }
     session.turnCount += 1;
     if (session.activeTurnId === wakeup.turnId) {
       session.activeTurnId = "";
       session.status = "idle";
       delete session.inflightUser;
+      delete session.inflightSteers;
       delete session.inflightAssistant;
       delete session.inflightThinking;
       delete session.inflightTools;
@@ -17774,6 +18193,7 @@ export class DaemonServer {
       delete session.inflightTodoResult;
     }
     session.lastActive = Date.now();
+    this.refreshAcpRuntimeFeaturesForSession(session);
 
     await this.runtime.flushSessions().catch((error) => {
       console.error(`Could not persist autonomous ACP coordinator wakeup: ${errorMessage(error)}`);
@@ -17782,17 +18202,20 @@ export class DaemonServer {
     if (!this.runtimeShutdown) {
       const accepts = (conn: DaemonTransportConnection): boolean =>
         this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
+      const wakeEndPayload: JsonRpcPayload = {
+        session_id: session.id,
+        stop_reason: stopReason,
+        ...(stopReason === "cancelled" ? { cancelled: true } : {}),
+        origin: "agent",
+      };
       this.broadcastEvent(
         "turn_end",
-        {
-          session_id: session.id,
-          stop_reason: stopReason,
-          origin: "agent",
-        },
+        wakeEndPayload,
         accepts,
         [...this.sessionObservers],
         session.cwd,
       );
+      this.emitSessionAttention(session, { type: "turn_end", payload: wakeEndPayload });
       this.notifySessionStateChanged(session.id);
     }
   }
@@ -17960,12 +18383,27 @@ export class DaemonServer {
         question,
         model: acpModel,
       });
+      const inflightSummary = session.activeTurnId
+        ? {
+            user: session.inflightUser ?? "",
+            steers: (session.inflightSteers ?? []).map((entry) => entry.text).filter(Boolean),
+            assistant: session.inflightAssistant ?? "",
+            todos: session.inflightTodoResult ?? "",
+            tools: (session.inflightTools ?? []).slice(-12).map((tool) => ({
+              name: tool.name,
+              ...(tool.context ? { context: tool.context } : {}),
+              ...(typeof tool.ok === "boolean" ? { ok: tool.ok } : {}),
+              ...(tool.error ? { error: tool.error } : {}),
+            })),
+          }
+        : undefined;
       const acpPrompt = buildAcpSideQuestionPrompt({
         workspaceDir,
         transcript: forkedMessages.slice(0, forkedMessages.length - sideHistory.length),
         history: sideHistory,
         question,
         plain: plainSidePrompt,
+        ...(inflightSummary ? { inflight: inflightSummary } : {}),
       });
       const forkedPrompt = buildAcpForkedSideQuestionPrompt({
         history: sideHistory,
@@ -18896,6 +19334,9 @@ function sessionPayload(
             // Additive reattach fields: turn-start continuity plus the work
             // so far, since runner-managed sessions only synchronize
             // session.messages at turn end.
+            ...(session.inflightSteers?.length
+              ? { steers: session.inflightSteers.map((entry) => entry.text).filter(Boolean) }
+              : {}),
             ...(session.inflightStartedAt
               ? { started_at: session.inflightStartedAt / 1000 }
               : {}),
@@ -20230,18 +20671,30 @@ function buildAcpSideQuestionPrompt(input: {
   readonly history: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
   readonly question: string;
   readonly plain?: boolean;
+  readonly inflight?: {
+    readonly user: string;
+    readonly steers: readonly string[];
+    readonly assistant: string;
+    readonly todos: string;
+    readonly tools: ReadonlyArray<{
+      readonly name: string;
+      readonly context?: string;
+      readonly ok?: boolean;
+      readonly error?: string;
+    }>;
+  };
 }): string {
   const MAX_CONTEXT_CHARS = 16_000;
   const sections: string[] = input.plain
     ? [
-        "Answer this read-only question concisely (do not edit files or run mutating commands).",
+        "Answer this read-only side question directly and concisely in Markdown using the live context below or read-only file reads only. Shell commands and file edits are disabled.",
       ]
     : [
         "You are answering an ephemeral, read-only side question (`/btw`) alongside an active Xerxes session.",
         `Workspace: ${input.workspaceDir}`,
         "Rules:",
         "- Answer concisely, accurately, and directly in Markdown.",
-        "- Read-only only: never edit, write, or delete files, never run mutating shell commands, and never alter the main session.",
+        "- Read-only only: never edit, write, or delete files, never run shell commands, and never alter the main session.",
       ];
 
   const contextLines: string[] = [];
@@ -20260,6 +20713,31 @@ function buildAcpSideQuestionPrompt(input: {
   }
   if (contextLines.length > 0) {
     sections.push("", input.plain ? "Recent context:" : "Recent main-session context:", contextLines.join("\n\n"));
+  }
+  if (input.inflight) {
+    const liveParts: string[] = [];
+    if (input.inflight.user.trim()) {
+      liveParts.push(`Active prompt: ${input.inflight.user.trim().slice(0, 800)}`);
+    }
+    if (input.inflight.steers.length > 0) {
+      liveParts.push(`Live steers: ${input.inflight.steers.map((s) => s.slice(0, 400)).join(" | ")}`);
+    }
+    if (input.inflight.todos.trim()) {
+      liveParts.push(`Current steps/todos:\n${input.inflight.todos.trim().slice(0, 1200)}`);
+    }
+    if (input.inflight.tools.length > 0) {
+      const toolLines = input.inflight.tools.map((tool) => {
+        const state = tool.error ? `error: ${tool.error}` : tool.ok === true ? "done" : tool.ok === false ? "failed" : "running";
+        return `- ${tool.name}${tool.context ? ` (${tool.context})` : ""} [${state}]`;
+      });
+      liveParts.push(`Recent in-flight tools:\n${toolLines.join("\n")}`);
+    }
+    if (input.inflight.assistant.trim()) {
+      liveParts.push(`Partial reply so far:\n${input.inflight.assistant.trim().slice(-1600)}`);
+    }
+    if (liveParts.length > 0) {
+      sections.push("", "Live in-progress main turn:", liveParts.join("\n"));
+    }
   }
   if (input.history.length > 0) {
     const historyLines = input.history.map(

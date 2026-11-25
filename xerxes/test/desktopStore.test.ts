@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.8.56',
+  daemon_version: '0.8.57',
   daemon_build_id: 'current-build',
 }
 
@@ -750,7 +750,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.56' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.57' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 
@@ -1461,6 +1461,126 @@ describe('Store workspace folds', () => {
     bridge.push('turn_end', {})
     expect(store.getSnapshot().failed).toBeNull()
     expect(store.getSnapshot().turnFailed).toBe(false)
+  })
+
+  test('recoverable mid-turn tool_result errors never mark a completed turn as failed', () => {
+    bridge.push('turn_begin', { user_input: 'check weights' })
+    bridge.push('tool_call', { tool_call_id: 'tc-1', name: 'read_file', arguments: '{"path":"/missing"}' })
+    bridge.push('tool_result', {
+      tool_call_id: 'tc-1',
+      name: 'read_file',
+      permitted: true,
+      error: 'file does not exist',
+      return_value: 'file does not exist',
+    })
+    bridge.push('text_part', { text: 'Found the checkpoint at the alternate GCS path and finished all steps.' })
+    bridge.push('turn_end', { stop_reason: 'end_turn' })
+    expect(store.getSnapshot().failed).toBeNull()
+    expect(store.getSnapshot().turnFailed).toBe(false)
+  })
+
+  test('turn_end explicit failure payload marks the turn failed even without a prior notification', () => {
+    bridge.push('turn_begin', { user_input: 'run task' })
+    bridge.push('turn_end', { failed: true, error: 'ACP agent exited unexpectedly' })
+    expect(store.getSnapshot().turnFailed).toBe(true)
+    expect(store.getSnapshot().failed).toMatchObject({
+      error: 'ACP agent exited unexpectedly',
+      turn: 1,
+      lastUser: 'run task',
+    })
+  })
+
+  test('session_attention refreshes sidebar sessions without polluting the active transcript', async () => {
+    const blocksBefore = store.getSnapshot().blocks.length
+    const listCallsBefore = bridge.calls.filter(call => call.method === 'session.list').length
+    bridge.push('session_attention', {
+      session_id: 'other-session-42',
+      session_title: 'Background worker',
+      event_type: 'turn_end',
+      payload: { stop_reason: 'completed' },
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(store.getSnapshot().blocks.length).toBe(blocksBefore)
+    expect(bridge.calls.filter(call => call.method === 'session.list').length).toBeGreaterThan(listCallsBefore)
+  })
+
+  test('live ACP steer keeps its user bubble without ghost queue items and rehydrates from inflight.steers on reopen', async () => {
+    bridge.push('turn_begin', { user_input: 'continue' })
+    bridge.respondWith(method => {
+      if (method === 'turn.steer') return { ok: true, disposition: 'live_steer' }
+      return { ok: true }
+    })
+    const ok = await store.steer('switch to GLM Genmix v1 normalizer')
+    expect(ok).toBe(true)
+    expect(store.getSnapshot().queue).toHaveLength(0)
+    const users = store.getSnapshot().blocks
+      .filter((b): b is Extract<typeof b, { kind: 'user' }> => b.kind === 'user')
+      .map(b => b.text)
+    expect(users).toEqual(['continue', 'switch to GLM Genmix v1 normalizer'])
+
+    const { applyInflightTurn } = await import('../src/desktop/renderer/store.js')
+    const { BlockBuilder } = await import('../src/desktop/renderer/blocks.js')
+    const builder = new BlockBuilder()
+    applyInflightTurn(builder, {
+      user: 'continue',
+      thinking: 'Checking bucket',
+      steers: ['switch to GLM Genmix v1 normalizer'],
+    })
+    const rehydratedUsers = builder
+      .snapshot(true)
+      .filter((b): b is Extract<typeof b, { kind: 'user' }> => b.kind === 'user')
+      .map(b => b.text)
+    expect(rehydratedUsers).toEqual(['continue', 'switch to GLM Genmix v1 normalizer'])
+  })
+
+  test('cancel falls back to acp.cancel only when turn.cancel returns ok:false on a connected external ACP session', async () => {
+    bridge.push('acp_status', {
+      session_id: store.getSnapshot().currentId,
+      binding: {
+        session_id: store.getSnapshot().currentId,
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/repo',
+        connected: true,
+      },
+    })
+    bridge.respondWith(method => {
+      if (method === 'turn.cancel') return { ok: false }
+      if (method === 'acp.cancel') return { ok: true, cancelled: true }
+      return { ok: true }
+    })
+    store.cancel()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(true)
+    expect(bridge.calls.some(call => call.method === 'acp.cancel')).toBe(true)
+  })
+
+  test('steerNow on Antigravity uses live turn.steer instead of cancelling the active turn', async () => {
+    bridge.push('acp_status', {
+      session_id: store.getSnapshot().currentId,
+      binding: {
+        session_id: store.getSnapshot().currentId,
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/repo',
+        connected: true,
+      },
+    })
+    bridge.push('turn_begin', { user_input: 'run benchmark' })
+    bridge.calls.length = 0
+    bridge.respondWith(method => {
+      if (method === 'turn.steer') return { ok: true, disposition: 'live_steer' }
+      return { ok: true }
+    })
+    const ok = await store.steerNow('focus on 32K normalizer')
+    expect(ok).toBe(true)
+    expect(bridge.calls.some(call => call.method === 'turn.cancel')).toBe(false)
+    const steerCall = bridge.calls.find(call => call.method === 'turn.steer')
+    expect(steerCall?.params).toMatchObject({ content: 'focus on 32K normalizer', live: true })
   })
 
   test('plan mode captures agent markdown as the working plan', () => {

@@ -42,10 +42,10 @@ export function ModelSheet({ workspace, field, canChange, onChoose, onClose }: {
           ))}
         </ul>
       ) : <p className="notice">This workspace did not publish a list of models. You can type a model name it already knows.</p>}
-      <form onSubmit={event => { event.preventDefault(); if (manual.trim() !== '') onChoose(undefined, manual.trim()) }}>
+      <form className="model-form" onSubmit={event => { event.preventDefault(); if (manual.trim() !== '') onChoose(undefined, manual.trim()) }}>
         <label className="field">
           <span>Model name</span>
-          <input type="text" value={manual} onChange={event => setManual(event.target.value)} disabled={!canChange || busy} autoCapitalize="off" autoCorrect="off" />
+          <input type="text" value={manual} placeholder="Enter model ID…" onChange={event => setManual(event.target.value)} disabled={!canChange || busy} autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
         </label>
         <button type="submit" className="btn btn-primary" disabled={!canChange || busy || manual.trim() === ''}>Request this model</button>
       </form>
@@ -72,10 +72,10 @@ export function GoalSheet({ field, canChange, onSave, onClose }: { field: Config
     <Sheet title="Goal" onClose={onClose} tall>
       <Status field={field} label="Current goal" />
       {!canChange ? <p className="notice">Changing the goal needs a live connection to this workspace.</p> : null}
-      <form onSubmit={event => { event.preventDefault(); if (draft.trim() !== '') onSave(draft.trim()) }}>
+      <form className="model-form" onSubmit={event => { event.preventDefault(); if (draft.trim() !== '') onSave(draft.trim()) }}>
         <label className="field">
           <span>Goal</span>
-          <textarea rows={5} value={draft} onChange={event => setDraft(event.target.value)} disabled={!canChange || busy} />
+          <textarea rows={5} value={draft} placeholder="Describe the goal and success criteria…" onChange={event => setDraft(event.target.value)} disabled={!canChange || busy} />
         </label>
         <button type="submit" className="btn btn-primary" disabled={!canChange || busy || draft.trim() === ''}>Save goal</button>
       </form>

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { desktopCall } from './desktopRpc.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
 import { Icon } from './Icon.js'
+import { isMacPlatform } from './runModeView.js'
 import type { Snapshot } from './store.js'
 
 export interface TaskOutput {
@@ -103,11 +104,11 @@ function OutputRow({ output, cwd, now }: { output: TaskOutput; cwd: string; now:
   const act = (action: 'open' | 'reveal') => {
     setFailure('')
     void host.fileAction?.(action, output.path, cwd)
-      .then(result => { if (!result.ok) setFailure(result.error ?? 'could not open the file') })
+      .then(result => { if (!result.ok) setFailure(result.error ?? 'Could not open the file.') })
       .catch((error: unknown) => setFailure(error instanceof Error ? error.message : String(error)))
   }
   return <li className="output-row">
-    <button className="output-row__main" title={`Preview ${output.path}`} onClick={() => navigate('files', output.path)}>
+    <button type="button" className="output-row__main" title={`Preview ${output.path}`} onClick={() => navigate('files', output.path)}>
       <Icon name="file" size={15} />
       <span className="output-row__text">
         <span className="output-row__name">{name}</span>
@@ -115,8 +116,8 @@ function OutputRow({ output, cwd, now }: { output: TaskOutput; cwd: string; now:
       </span>
     </button>
     {host.fileAction && <span className="output-row__actions">
-      <button className="btn btn--ghost" onClick={() => act('open')} title="Open in its default app">Open</button>
-      <button className="btn btn--ghost" onClick={() => act('reveal')} title="Show in Finder">Show</button>
+      <button type="button" className="btn btn--ghost" onClick={() => act('open')} title="Open in its default app">Open</button>
+      <button type="button" className="btn btn--ghost" onClick={() => act('reveal')} title={isMacPlatform() ? 'Show in Finder' : 'Reveal in folder'}>Show</button>
     </span>}
     {failure && <p className="output-row__error" role="alert">{failure}</p>}
   </li>

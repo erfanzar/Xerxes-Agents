@@ -205,18 +205,18 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
             <section key={id} className="tiercard" aria-label={`${label} tier`}>
               <header className="tiercard__head">
                 <div className="tiercard__title-group">
-                  <span className="tiercard__name">{label}</span>
+                  <h3 className="tiercard__name">{label}</h3>
                   <span className="tiercard__hint">{hint}</span>
                 </div>
                 {tier.model && (
-                  <button type="button" className="chipbtn tiercard__clear" onClick={() => setTier(id, EMPTY_TIER)}>
+                  <button type="button" className="chipbtn tiercard__clear" aria-label={`Clear ${label} tier`} onClick={() => setTier(id, EMPTY_TIER)}>
                     Clear
                   </button>
                 )}
               </header>
               <div className="tiercard__fields">
                 <div className="tiercard__field">
-                  <span id={`tier-provider-label-${id}`} className="tiercard__label">Provider</span>
+                  <label htmlFor={`tier-provider-${id}`} id={`tier-provider-label-${id}`} className="tiercard__label">Provider</label>
                   <SelectField
                     id={`tier-provider-${id}`}
                     ariaLabelledBy={`tier-provider-label-${id}`}
@@ -233,7 +233,9 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
                     variant="field"
                     value={tier.model}
                     options={suggestions}
-                    placeholder="Not set"
+                    placeholder="Choose or type a model…"
+                    ariaInvalid={Boolean(problem && draft.default === id)}
+                    {...(problem && draft.default === id ? { ariaDescribedBy: 'tier-problem-error' } : {})}
                     listLabel={`${label} tier models`}
                     toggleLabel={`Show ${label} tier models`}
                     spellCheck={false}
@@ -241,7 +243,7 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
                   />
                 </div>
                 <div className="tiercard__field">
-                  <span id={`tier-effort-label-${id}`} className="tiercard__label">Reasoning effort</span>
+                  <label htmlFor={`tier-effort-${id}`} id={`tier-effort-label-${id}`} className="tiercard__label">Reasoning effort</label>
                   <SelectField
                     id={`tier-effort-${id}`}
                     ariaLabelledBy={`tier-effort-label-${id}`}
@@ -259,7 +261,7 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
       </div>
       <div className="tierdefault-card">
         <div className="tierdefault-card__copy">
-          <span id="tier-default-label" className="tierdefault-card__title">New agents use</span>
+          <label htmlFor="tier-default" id="tier-default-label" className="tierdefault-card__title">New agents use</label>
           <span className="tierdefault-card__desc">Default tier when an agent does not declare an explicit model.</span>
         </div>
         <div className="tierdefault-card__control">
@@ -286,15 +288,15 @@ export function AgentIntelligenceCard({ snap }: { snap: Snapshot }): ReactElemen
           />
         </div>
       </div>
-      {problem && <p className="studio-error" role="alert">{problem}</p>}
+      {problem && <p id="tier-problem-error" className="studio-error" role="alert">{problem}</p>}
       {status.kind === 'error' && <p className="studio-error" role="alert">{status.message}</p>}
       <div className="approval__row tieractions">
         {status.kind === 'saved' && !dirty && (
           <span className="tieractions__status" role="status">
-            <Icon name="check" size={12} /> Saved — new agents use these tiers.
+            <Icon name="check" size={12} /> Saved. New agents use these tiers.
           </span>
         )}
-        {dirty && <button type="button" className="btn btn--ghost" onClick={() => { setDraft(saved); setStatus({ kind: 'idle' }) }}>Revert</button>}
+        {dirty && <button type="button" className="btn btn--ghost" disabled={status.kind === 'saving'} onClick={() => { setDraft(saved); setStatus({ kind: 'idle' }) }}>Revert</button>}
         <button type="button" className="btn btn--solid" disabled={!dirty || !!problem || status.kind === 'saving'} onClick={() => void save()}>
           {status.kind === 'saving' ? 'Saving…' : 'Save changes'}
         </button>

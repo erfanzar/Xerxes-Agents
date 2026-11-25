@@ -11,7 +11,7 @@
  * in its overflow menu. Nothing else from the desktop window comes along.
  */
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import { ActivityDetails, Announcer, Composer, ConnectionBanner, GlobalKeys, Stream, TaskModal } from '../../desktop/renderer/App.js'
 import {
@@ -87,7 +87,7 @@ function RuntimeUpdate({ snap }: { snap: Snapshot }): ReactElement {
     : 'The running runtime is older than this extension. It is replaced when nothing is running.')
   return <div className="xv-runtime" role="status" aria-live="polite">
     <span className="xv-runtime__text">{text}{blockers.length > 0 && <> Waiting for: {blockers.join(', ')}. Restarting now stops that work.</>}</span>
-    {!appOlder && <button disabled={working} onClick={() => void store.restartRuntimeNow()}>{working ? 'Restarting…' : 'Restart now'}</button>}
+    {!appOlder && <button type="button" disabled={working} onClick={() => void store.restartRuntimeNow()}>{working ? 'Restarting…' : 'Restart now'}</button>}
   </div>
 }
 
@@ -155,7 +155,7 @@ export function VscodeChat({ snap, initialSheet = null }: { snap: Snapshot; init
         {sheet && <DesktopSheet panel={sheet} snap={snap} close={() => { setSheet(null); store.closeSwarmBoard() }} activityDetails={<ActivityDetails snap={snap} />} />}
         {(snap.workspaceBusy || snap.workspaceError) && <div className="workspace-notice" role={snap.workspaceError ? 'alert' : 'status'}>
           <span>{snap.workspaceError || 'Opening workspace…'}</span>
-          {snap.workspaceError && <button aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
+          {snap.workspaceError && <button type="button" aria-label="Dismiss workspace error" onClick={() => store.clearWorkspaceError()}><Icon name="close" size={13} /></button>}
         </div>}
         <GlobalKeys snap={snap} closeSurface={btwOpen ? () => store.closeSideQuestion() : sheet || history ? () => { setSheet(null); setHistory(false); store.closeSwarmBoard() } : null} />
       </div>
@@ -209,7 +209,7 @@ function Header({
   const needsInput = snap.approval !== null || snap.question !== null
   const swarmCounts = snap.swarm?.active ? swarmMemberCounts(snap.swarm.members) : null
   return <header className="xv-head">
-    <button ref={titleRef} className="xv-title" aria-haspopup="dialog" aria-expanded={history} title="Switch task" onClick={() => setHistory(!history)}>
+    <button type="button" ref={titleRef} className="xv-title" aria-haspopup="dialog" aria-expanded={history} title="Switch task" onClick={() => setHistory(!history)}>
       <span className="xv-title__text">{title}</span>
       <Icon name="caretDown" size={12} />
     </button>
@@ -226,7 +226,7 @@ function Header({
           className="xv-pill xv-pill--acp"
           data-provider={snap.acpBinding.provider}
           aria-haspopup="dialog"
-          title={`${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''} — click to inspect runtime & customize`}
+          title={`${snap.acpBinding.name} (${transportBadgeLabel(snap.acpBinding.transport)})${summary ? ` · ${summary}` : ''} · click to inspect runtime & customize`}
           aria-label={`External runtime: ${snap.acpBinding.name}${summary ? ` · ${summary}` : ''}`}
           onClick={openAcpSheet}
         >
@@ -248,11 +248,11 @@ function Header({
         <span className="xv-pill__label">Immortals{swarmCounts.working > 0 ? ` · ${swarmCounts.working}` : ''}</span>
       </button>
     )}
-    {needsInput && snap.interactionHidden && <button className="xv-pill xv-pill--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}><span className="xv-pill__label">needs input</span></button>}
-    {snap.changes.length > 0 && <button className="xv-pill xv-pill--diff" title="Files this task changed — open Source Control" onClick={() => void window.xerxes.showSourceControl?.()}>
+    {needsInput && snap.interactionHidden && <button type="button" className="xv-pill xv-pill--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}><span className="xv-pill__label">Needs input</span></button>}
+    {snap.changes.length > 0 && <button type="button" className="xv-pill xv-pill--diff" title="Files this task changed · open Source Control" onClick={() => void window.xerxes.showSourceControl?.()}>
       <span className="add">+{totals.adds}</span> <span className="del">−{totals.dels}</span>
     </button>}
-    {snap.tab !== 'activity' && <button className="xv-icon" title="Back to the conversation" aria-label="Back to the conversation" onClick={() => store.setTab('activity')}><Icon name="chat" size={15} /></button>}
+    {snap.tab !== 'activity' && <button type="button" className="xv-icon" title="Back to the conversation" aria-label="Back to the conversation" onClick={() => store.setTab('activity')}><Icon name="chat" size={15} /></button>}
     <span className="xv-dot" data-state={snap.connection} title={snap.connection === 'online' ? 'Runtime connected' : snap.connection === 'connecting' ? 'Connecting to the runtime' : snap.error || 'Runtime offline'} />
     {history && <History snap={snap} close={() => setHistory(false)} returnFocus={() => titleRef.current?.focus()} />}
   </header>
@@ -262,6 +262,7 @@ function Header({
 function History({ snap, close, returnFocus }: { snap: Snapshot; close: () => void; returnFocus?: () => void }): ReactElement {
   const [needle, setNeedle] = useState('')
   const [cursor, setCursor] = useState(0)
+  const listId = useId()
   const field = useRef<HTMLInputElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const closeWithFocus = (): void => { close(); returnFocus?.() }
@@ -278,6 +279,7 @@ function History({ snap, close, returnFocus }: { snap: Snapshot; close: () => vo
     close()
     if (row.id !== snap.currentId) void store.openSession(row.id, row)
   }
+  const activeOptionId = rows[cursor] ? `${listId}-opt-${cursor}` : undefined
   return <div
     className="xv-history"
     ref={panel}
@@ -293,19 +295,34 @@ function History({ snap, close, returnFocus }: { snap: Snapshot; close: () => vo
   >
     <div className="xv-history__search">
       <Icon name="search" size={13} />
-      <input ref={field} value={needle} placeholder="Search tasks" aria-label="Search tasks" spellCheck={false}
+      <input
+        ref={field}
+        type="search"
+        role="combobox"
+        aria-expanded={true}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={activeOptionId}
+        value={needle}
+        placeholder="Search tasks"
+        aria-label="Search tasks"
+        spellCheck={false}
         onChange={event => { setNeedle(event.target.value); setCursor(0) }}
         onKeyDown={event => {
+          if (event.nativeEvent.isComposing) return
           if (event.key === 'ArrowDown') { event.preventDefault(); setCursor(index => nextHistoryCursor(index, rows.length, 1)) }
           else if (event.key === 'ArrowUp') { event.preventDefault(); setCursor(index => nextHistoryCursor(index, rows.length, -1)) }
+          else if (event.key === 'Home') { event.preventDefault(); setCursor(0) }
+          else if (event.key === 'End') { event.preventDefault(); setCursor(Math.max(0, rows.length - 1)) }
           else if (event.key === 'Enter') { event.preventDefault(); if (rows.length > 0) pick(rows[cursor]) }
           else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeWithFocus() }
-        }} />
+        }}
+      />
     </div>
-    <button className="xv-history__new" onClick={() => { close(); store.newChat() }}><Icon name="plus" size={13} /> New task</button>
-    <div className="xv-history__list" role="listbox" aria-label="Tasks">
+    <button type="button" className="xv-history__new" onClick={() => { close(); store.newChat() }}><Icon name="plus" size={13} /> New task</button>
+    <div id={listId} className="xv-history__list" role="listbox" aria-label="Tasks">
       {rows.length === 0 && <p className="xv-history__empty">{needle ? 'No tasks match.' : 'No earlier tasks in this folder.'}</p>}
-      {rows.map((row, index) => <button key={row.id} role="option" aria-selected={index === cursor} aria-current={row.id === snap.currentId || undefined}
+      {rows.map((row, index) => <button type="button" id={`${listId}-opt-${index}`} key={row.id} role="option" aria-selected={index === cursor} aria-current={row.id === snap.currentId || undefined}
         className={`xv-history__row${index === cursor ? ' is-on' : ''}`} onMouseEnter={() => setCursor(index)} onClick={() => pick(row)}>
         <span className="xv-history__title">{titleOf(row)}</span>
         {row.status === 'working' || row.status === 'running' ? <span className="xv-history__live">working</span> : <span className="xv-history__age">{row.age}</span>}
@@ -338,7 +355,8 @@ export function historyRows(snap: Snapshot, needle: string): SessionRow[] {
 /** VS Code without a folder: the runtime works on a folder, so ask for one. */
 function NoFolder(): ReactElement {
   return <div className="xv-empty">
+    <h2>No folder open</h2>
     <p>Open a folder to work on it with Xerxes.</p>
-    <button className="xv-button" onClick={() => store.chooseWorkspace()}>Open Folder</button>
+    <button type="button" className="xv-button" onClick={() => store.chooseWorkspace()}>Open Folder</button>
   </div>
 }

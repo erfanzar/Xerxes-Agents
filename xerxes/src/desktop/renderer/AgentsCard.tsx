@@ -123,7 +123,7 @@ function AgentBranch({ row, now, open }: { row: Row; now: number; open: (id: str
   const recent = member.recentTools ?? []
   const hidden = Math.max(0, (member.toolUses ?? recent.length) - (opened ? recent.length : 1))
   return <li className="acard__node" data-tone={tone}>
-    <button className="acard__row" data-tone={tone} onClick={() => open(member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
+    <button type="button" className="acard__row" data-tone={tone} onClick={() => open(member.runtimeId || member.key)} aria-label={`Inspect agent: ${member.title}`}>
       <span className="acard__glyph" aria-hidden="true"><Glyph tone={tone} member={member} /></span>
       <span className="acard__t">{member.title}</span>
       {kind && <span className="acard__kind">{kind}</span>}
@@ -135,9 +135,9 @@ function AgentBranch({ row, now, open }: { row: Row; now: number; open: (id: str
       {tone === 'done' && <span className="acard__outcome">Done{stats ? ` (${stats})` : ''}</span>}
       {tone === 'stopped' && <span className="acard__outcome">Stopped{stats ? ` (${stats})` : ''}</span>}
       {tone === 'failed' && <><span className="acard__outcome acard__outcome--failed">Failed:</span><span className="acard__error" title={member.error}>{member.error?.split('\n')[0] ?? 'the agent ended with an error'}</span></>}
-      {!opened && recent.length > 1 && hidden > 0 && <button className="acard__more-tools" aria-expanded={false} onClick={() => setOpened(true)}>+{hidden} more tool use{hidden === 1 ? '' : 's'}</button>}
-      {opened && hidden > 0 && <button className="acard__more-tools" onClick={() => open(member.runtimeId || member.key)}>{hidden} earlier in its activity</button>}
-      {opened && <button className="acard__more-tools" aria-expanded onClick={() => setOpened(false)}>Hide</button>}
+      {!opened && recent.length > 1 && hidden > 0 && <button type="button" className="acard__more-tools" aria-expanded={false} onClick={() => setOpened(true)}>+{hidden} more tool use{hidden === 1 ? '' : 's'}</button>}
+      {opened && hidden > 0 && <button type="button" className="acard__more-tools" onClick={() => open(member.runtimeId || member.key)}>{hidden} earlier in its activity</button>}
+      {opened && <button type="button" className="acard__more-tools" aria-expanded onClick={() => setOpened(false)}>Hide</button>}
     </div>
     {tone === 'done' && member.summary && <p className="acard__summary">{member.summary}</p>}
     {opened && <ol className="acard__tools">{recent.map((line, index) => <li key={index}>{line}</li>)}</ol>}
@@ -146,15 +146,16 @@ function AgentBranch({ row, now, open }: { row: Row; now: number; open: (id: str
 
 function DotGrid({ rows, open }: { rows: readonly Row[]; open: (id: string) => void }): ReactElement {
   return <div className="acard__grid" role="list" aria-label={`${rows.length} agents`}>
-    {rows.map(({ member, tone }) => <button
-      key={member.key}
-      role="listitem"
-      className="acard__dot"
-      data-tone={tone}
-      title={`${member.title} · ${WORD[tone]}${member.activity && tone === 'working' ? ` · ${member.activity}` : ''}`}
-      aria-label={`${member.title}: ${WORD[tone]}`}
-      onClick={() => open(member.runtimeId || member.key)}
-    />)}
+    {rows.map(({ member, tone }) => <span key={member.key} role="listitem" className="acard__dot-item">
+      <button
+        type="button"
+        className="acard__dot"
+        data-tone={tone}
+        title={`${member.title} · ${WORD[tone]}${member.activity && tone === 'working' ? ` · ${member.activity}` : ''}`}
+        aria-label={`${member.title}: ${WORD[tone]}`}
+        onClick={() => open(member.runtimeId || member.key)}
+      />
+    </span>)}
   </div>
 }
 
@@ -184,9 +185,9 @@ function PhaseSection({ phase, index, total, now, open, expanded, onExpand }: {
     {dense && !expanded && <DotGrid rows={phase.rows} open={open} />}
     {listed.length > 0 && <ul className="acard__tree">{listed.map(row => <AgentBranch key={row.member.key} row={row} now={now} open={open} />)}</ul>}
     {(hidden > 0 || expanded) && <div className="acard__more">
-      {!expanded && hidden > 0 && <button onClick={onExpand}>Show all {phase.rows.length}</button>}
-      {expanded && phase.rows.length > page * PAGE && <button onClick={() => setPage(value => value + 1)}>Show {Math.min(PAGE, phase.rows.length - page * PAGE)} more</button>}
-      {expanded && <button onClick={onExpand}>Show fewer</button>}
+      {!expanded && hidden > 0 && <button type="button" onClick={onExpand}>Show all {phase.rows.length}</button>}
+      {expanded && phase.rows.length > page * PAGE && <button type="button" onClick={() => setPage(value => value + 1)}>Show {Math.min(PAGE, phase.rows.length - page * PAGE)} more</button>}
+      {expanded && <button type="button" onClick={onExpand}>Show fewer</button>}
     </div>}
   </div>
 }
@@ -222,7 +223,7 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
   ].filter(Boolean).join(' · ')
   return (
     <section className="acard" data-state={tally.working ? 'working' : tally.failed ? 'failed' : 'done'} aria-label={label ? `Workflow: ${label}` : 'Subagents'}>
-      <button className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
+      <button type="button" className="acard__head" onClick={() => setOpen(value => !value)} aria-expanded={open}>
         <span className="acard__icon">
           {tally.working > 0
             ? <AgentOrb size={20} state="working" live />
@@ -265,7 +266,7 @@ export function AgentsCard({ members }: { members: readonly AgentMember[] }): Re
         })}
       />)}
       <footer className="acard__foot">
-        <button onClick={() => navigate('activity')}>Open in Activity</button>
+        <button type="button" onClick={() => navigate('activity')}>Open in Activity</button>
         {tally.working > 0 && <StopAllAgents />}
       </footer>
     </section>
@@ -289,9 +290,12 @@ function StopAllAgents(): ReactElement {
     finally { setBusy(false); setArmed(false) }
   }
   return <>
-    <button className="acard__stopall" disabled={busy} onClick={() => void stop()} onBlur={() => setArmed(false)}>
-      {armed ? 'Confirm: stop all agents' : 'Stop all agents'}
-    </button>
+    <span className="acard__stopgroup" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setArmed(false) }}>
+      <button type="button" className={`acard__stopall${armed ? ' btn--danger' : ''}`} disabled={busy} onClick={() => void stop()}>
+        {armed ? 'Confirm: stop all agents' : 'Stop all agents'}
+      </button>
+      {armed && <button type="button" className="acard__stopcancel" disabled={busy} onClick={() => setArmed(false)}>Cancel</button>}
+    </span>
     {notice && <span className="acard__notice" role="status">{notice}</span>}
   </>
 }

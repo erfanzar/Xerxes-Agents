@@ -17,17 +17,17 @@ export function Deliveries({snap,scheduleId,close}:{snap:Snapshot;scheduleId:str
   const inspect=async(id:string)=>{const value=parseDelivery((await call('schedule.delivery.inspect',{delivery_id:id})).delivery);if(value.id!==id)throw Error('Delivery changed. Refresh before acting.');if(alive.current){setDetail(value);setConfirm(null)}}
   const submit=()=>{if(!detail||!confirm)return;const action=confirm;void run(async()=>{await call(action==='send'?'schedule.delivery.send':'schedule.delivery.resolve',{delivery_id:detail.id,...(action==='send'?{}:{decision:action,attempts:detail.attempts})});if(alive.current)setConfirm(null);await inspect(detail.id);await load()})}
   const closeDialog=()=>{setSelected(null);setDetail(null);setConfirm(null);setError('')}
-  const dialogTitle=confirm==='send'?'Send saved output?':confirm==='retry'?'Allow retry?':confirm==='sent'?'Mark delivery as sent?':'Delivery details'
+  const dialogTitle=confirm==='send'?'Send saved output':confirm==='retry'?'Allow retry':confirm==='sent'?'Mark delivery as sent':'Delivery details'
   const dialogConfirmLabel=confirm==='send'?'Confirm send':confirm==='retry'?'Confirm retry':confirm==='sent'?'Confirm mark as sent':'Close'
   const dialogBusyLabel=confirm==='send'?'Sending…':confirm?'Updating…':'Loading…'
   return <section className="deliveries" aria-label="Schedule deliveries"><div className="lsp-actions"><button type="button" className="btn btn--ghost" disabled={busy} onClick={close}>Back to schedules</button><button type="button" className="btn btn--ghost" disabled={busy} onClick={()=>void run(async()=>{await load();if(detail)await inspect(detail.id)})}>Refresh deliveries</button></div><h2>Deliveries</h2><p>Inspect saved output and its destination before sending or resolving an uncertain delivery.</p>{busy&&selected===null&&<p role="status">Loading deliveries…</p>}{error&&selected===null&&<p className="studio-error" role="alert">{error}</p>}{!rows.length&&!busy&&!error&&<p>No deliveries recorded.</p>}
-    {rows.map(row=><div className="studio-item" key={row.id}><div><strong>{row.platform} · {row.recipient||'Default destination'}</strong><p>{row.state} · {row.attempts} attempts</p></div><button type="button" className="btn btn--ghost" disabled={busy} onClick={()=>{setSelected(row.id);setDetail(null);setConfirm(null);void run(()=>inspect(row.id))}}>Inspect delivery</button></div>)}
+    {rows.map(row=><div className="studio-item" key={row.id}><div><strong>{row.platform} · {row.recipient||'Default destination'}</strong><p>{row.state} · {row.attempts} {row.attempts===1?'attempt':'attempts'}</p></div><button type="button" className="btn btn--ghost" disabled={busy} onClick={()=>{setSelected(row.id);setDetail(null);setConfirm(null);void run(()=>inspect(row.id))}}>Inspect delivery</button></div>)}
     {selected!==null&&<ActionDialog title={dialogTitle} done={confirm===null} confirmLabel={dialogConfirmLabel} busyLabel={dialogBusyLabel} busy={busy} error={error} onCancel={()=>confirm!==null?setConfirm(null):closeDialog()} onConfirm={()=>confirm!==null?submit():closeDialog()}>
-    {busy&&<p role="status">Loading delivery…</p>}
+    {busy&&!confirm&&!detail&&<p role="status">Loading delivery…</p>}
     {!detail&&!busy&&error&&<button type="button" className="btn" onClick={()=>void run(()=>inspect(selected))}>Retry inspection</button>}
     {detail&&<div>
       <div className="row__t">{detail.platform} · {detail.recipient||'Default destination'}</div>
-      <p className="row__s">{detail.state} · {detail.attempts} attempts</p>
+      <p className="row__s">{detail.state} · {detail.attempts} {detail.attempts===1?'attempt':'attempts'}</p>
       {detail.error&&<p className="studio-error">{detail.error}</p>}
       {confirm ? (
         <p role="status">{confirm==='sent'?'Confirm you checked the destination and this message arrived.':confirm==='retry'?'Check the destination first. Allowing retry may send a duplicate message.':`Send this saved output to ${detail.recipient||'the default destination'} on ${detail.platform}?`}</p>

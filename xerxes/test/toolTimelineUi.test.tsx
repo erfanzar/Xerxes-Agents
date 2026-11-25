@@ -610,13 +610,13 @@ describe('Semantic Tool Formatting (Shell, Search, Web, Skill, MCP, Memory, Sche
   test('XerxesThinkingMark, XerxesStatusMark, and Hero XerxesBrandEmblem adapt 100% dynamically to CSS theme tokens', () => {
     const HEX_RE = /#[0-9a-fA-F]{6}\b/g
     const thinkingActive = renderToStaticMarkup(createElement(XerxesThinkingMark, { size: 15, active: true }))
-    expect(thinkingActive).toContain('var(--x-accent')
-    expect(thinkingActive).toContain('var(--x-working')
+    expect(thinkingActive).toContain('var(--x-title')
+    expect(thinkingActive).toContain('xerxes-dot-grid')
     expect(thinkingActive.match(HEX_RE) ?? []).toEqual([])
 
     const compactWorking = renderToStaticMarkup(createElement(XerxesStatusMark, { state: 'working', size: 20, live: true }))
-    expect(compactWorking).toContain('var(--x-accent')
-    expect(compactWorking).toContain('var(--x-working')
+    expect(compactWorking).toContain('var(--x-title')
+    expect(compactWorking).toContain('xerxes-dot-grid')
     expect(compactWorking.match(HEX_RE) ?? []).toEqual([])
 
     const compactDone = renderToStaticMarkup(createElement(XerxesStatusMark, { state: 'done', size: 18, live: false }))
@@ -638,8 +638,8 @@ describe('Semantic Tool Formatting (Shell, Search, Web, Skill, MCP, Memory, Sche
     expect(heroEmblem.match(HEX_RE) ?? []).toEqual([])
 
     const regalMark = renderToStaticMarkup(createElement(XerxesStatusMark, { state: 'working', size: 48, live: true }))
-    expect(regalMark).toContain('var(--x-working')
-    expect(regalMark).toContain('var(--x-hairline')
+    expect(regalMark).toContain('var(--x-title')
+    expect(regalMark).toContain('xerxes-dot-grid')
     expect(regalMark.match(HEX_RE) ?? []).toEqual([])
   })
 })

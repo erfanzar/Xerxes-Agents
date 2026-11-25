@@ -59,7 +59,7 @@ import {
 import { verifyRemoteHost } from './main/remoteHostTrust.js'
 import { isSshTarget, sshDestination } from '../daemon/sshTarget.js'
 import { sshFailure } from '../security/sshDiagnostics.js'
-import { shouldNotify } from './main/notify.js'
+import { notificationDedupKey, shouldNotify, unwrapAttentionEvent, type NotifyDecision, type NotifyTarget } from './main/notify.js'
 import { createCliRunner } from './main/hubCli.js'
 import { createHubCockpit } from './main/hubCockpit.js'
 import { registerHubCockpitIpc } from './main/hubCockpitIpc.js'
@@ -151,30 +151,94 @@ let notificationsEnabled = true
 /** Last goal phase seen per session, so a repeated status_update never pings twice. */
 const goalPhases = new Map<string, string>()
 const MAX_GOAL_PHASE_ENTRIES = 256
+/** Keep live Electron Notification instances strongly referenced until dismissed so click handlers never GC. */
+const activeNotifications = new Set<Electron.Notification>()
+/** Short-window dedup so multiple retained views attached to one daemon never fire duplicate alerts. */
+const recentNotifications = new Map<string, number>()
+const MAX_RECENT_NOTIFICATIONS = 128
+const NOTIFICATION_DEDUP_MS = 2_500
+let unreadNotificationCount = 0
 
-function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>, stillBound: () => boolean): void {
-  // Track transitions even when notifications are off, so enabling them never replays one.
-  let previousGoalPhase: string | undefined
-  if (type === 'status_update' && typeof payload.goal_phase === 'string') {
-    const key = typeof payload.session_id === 'string' ? payload.session_id : ''
-    previousGoalPhase = goalPhases.get(key)
-    setBoundedMapEntry(goalPhases, key, payload.goal_phase, MAX_GOAL_PHASE_ENTRIES)
+function clearUnreadNotifications(): void {
+  if (unreadNotificationCount === 0) return
+  unreadNotificationCount = 0
+  if (process.platform === 'darwin') app.dock?.setBadge('')
+}
+
+function navigateNotificationTarget(
+  window: BrowserWindow,
+  contents: Electron.WebContents,
+  target: NotifyTarget | undefined,
+  stillBound: () => boolean,
+): void {
+  if (window.isDestroyed() || contents.isDestroyed() || !stillBound()) return
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+  // The host may still be showing another retained local or SSH workspace.
+  activateSurface(contents.id)
+  // Open what the notification was about: its task, and an artifact when there is one.
+  if (target && !contents.isDestroyed()) contents.send('desktop:navigate', target)
+}
+
+function deliverNotification(
+  window: BrowserWindow,
+  contents: Electron.WebContents,
+  decision: NotifyDecision,
+  stillBound: () => boolean,
+  dedupKey?: string,
+): boolean {
+  if (window.isDestroyed()) return false
+  if (dedupKey) {
+    const now = Date.now()
+    const previous = recentNotifications.get(dedupKey)
+    if (previous !== undefined && now - previous < NOTIFICATION_DEDUP_MS) return false
+    setBoundedMapEntry(recentNotifications, dedupKey, now, MAX_RECENT_NOTIFICATIONS)
   }
-  if (window.isDestroyed() || !Notification.isSupported()) return
-  const decision = shouldNotify({ type, payload }, { enabled: notificationsEnabled, anyWindowFocused: window.isFocused() }, previousGoalPhase)
-  if (!decision) return
-  const ping = new Notification({ title: decision.title, body: decision.body })
+  const focused = window.isFocused()
+  if (!focused) {
+    unreadNotificationCount += 1
+    if (process.platform === 'darwin') {
+      app.dock?.setBadge(String(unreadNotificationCount))
+      app.dock?.bounce(decision.urgent ? 'critical' : 'informational')
+    } else {
+      window.flashFrame(true)
+    }
+  }
+  if (!Notification.isSupported()) return false
+  const ping = new Notification({
+    title: decision.title,
+    body: decision.body,
+    silent: false,
+    ...(process.platform === 'linux' ? { urgency: decision.urgent ? 'critical' : 'normal' } : {}),
+  })
+  activeNotifications.add(ping)
+  const release = () => { activeNotifications.delete(ping) }
+  ping.once('close', release)
+  ping.once('failed', release)
   ping.on('click', () => {
-    if (window.isDestroyed() || contents.isDestroyed() || !stillBound()) return
-    if (window.isMinimized()) window.restore()
-    window.show()
-    window.focus()
-    // The host may still be showing another retained local or SSH workspace.
-    activateSurface(contents.id)
-    // Open what the notification was about: its task, and an artifact when there is one.
-    if (decision.target && !contents.isDestroyed()) contents.send('desktop:navigate', decision.target)
+    release()
+    clearUnreadNotifications()
+    navigateNotificationTarget(window, contents, decision.target, stillBound)
   })
   ping.show()
+  return true
+}
+
+function maybeNotify(window: BrowserWindow, contents: Electron.WebContents, type: string, payload: Record<string, unknown>, stillBound: () => boolean, dedupScope = ''): void {
+  // Track transitions even when notifications are off, so enabling them never replays one.
+  const unwrapped = unwrapAttentionEvent({ type, payload })
+  let previousGoalPhase: string | undefined
+  if (unwrapped.type === 'status_update' && typeof unwrapped.payload.goal_phase === 'string') {
+    const key = typeof unwrapped.payload.session_id === 'string' ? unwrapped.payload.session_id : ''
+    previousGoalPhase = goalPhases.get(key)
+    setBoundedMapEntry(goalPhases, key, unwrapped.payload.goal_phase, MAX_GOAL_PHASE_ENTRIES)
+  }
+  if (window.isDestroyed()) return
+  const decision = shouldNotify({ type, payload }, { enabled: notificationsEnabled, anyWindowFocused: window.isFocused() }, previousGoalPhase)
+  if (!decision) return
+  const dedupKey = `${dedupScope}:${notificationDedupKey({ type, payload }, decision)}`
+  deliverNotification(window, contents, decision, stillBound, dedupKey)
 }
 
 // ── Workspace selection ─────────────────────────────────────────────────
@@ -222,7 +286,7 @@ function createWindow(saved?: SavedWindow): BrowserWindow {
     // Native backdrop material is visible through navigation only. Content
     // remains opaque for legibility; the traffic lights stay system-owned.
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    // Center the 14px native buttons in the renderer's 52px T3 top bar.
+    // Center the 14px native buttons in the renderer's 52px top bar.
     trafficLightPosition: { x: 16, y: 19 },
     ...(windowIcon ? { icon: windowIcon } : {}),
     backgroundColor: process.platform === 'darwin' ? '#00000000' : '#000000',
@@ -670,8 +734,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       // Some session-bound events omit the id. Capture the owning task now,
       // before a later session.open changes what this surface shows.
       const current = session.current
-      maybeNotify(window, contents, type, current && payload.session_id === undefined ? { ...payload, session_id: current } : payload,
-        () => workspaceSurfaces.has(id) && daemon === next)
+      const notifyPayload = type !== 'session_attention' && current && payload.session_id === undefined
+        ? { ...payload, session_id: current }
+        : payload
+      const dedupScope = remoteMachine?.alias ? `ssh:${remoteMachine.alias}` : 'local'
+      maybeNotify(window, contents, type, notifyPayload,
+        () => workspaceSurfaces.has(id) && daemon === next, dedupScope)
       // A turn that ended (perhaps because access was lost while it ran, after
       // an app restart) leaves the conversation idle: bind it again now, so a
       // Retry works instead of failing the same way.
@@ -1196,6 +1264,38 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     notificationsEnabled = on
     return notificationsEnabled
   })
+  handle('native:notifications:test', () => {
+    return deliverNotification(
+      window,
+      contents,
+      {
+        title: 'Notifications enabled',
+        body: 'Xerxes will send system notifications when an agent saves an artifact, needs input, stops, or finishes.',
+        kind: 'finished',
+      },
+      () => workspaceSurfaces.has(id),
+    )
+  })
+  handle('native:notifications:open-settings', async () => {
+    if (process.platform === 'darwin') {
+      await shell.openExternal('x-apple.systempreferences:com.apple.Notifications-Settings.extension')
+      return true
+    }
+    if (process.platform === 'win32') {
+      await shell.openExternal('ms-settings:notifications')
+      return true
+    }
+    return false
+  })
+  handle('desktop:activate-toast', (_event, surfaceId: unknown, target: unknown) => {
+    clearUnreadNotifications()
+    const targetId = typeof surfaceId === 'number' && Number.isSafeInteger(surfaceId) ? surfaceId : id
+    const surface = workspaceSurfaces.get(targetId)
+    const targetContents = surface?.view?.webContents ?? surface?.host.webContents ?? contents
+    const hostWindow = surface?.host ?? window
+    const parsedTarget = target && typeof target === 'object' ? (target as NotifyTarget) : undefined
+    navigateNotificationTarget(hostWindow, targetContents, parsedTarget, () => workspaceSurfaces.has(targetId))
+  })
   handle('native:login-item:get', () => app.getLoginItemSettings().openAtLogin)
   handle('native:login-item:set', (_event, on: unknown) => {
     if (typeof on !== 'boolean') throw new TypeError('login item expects a boolean')
@@ -1231,7 +1331,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     return readLocalChatImage(request.path, request.cwd ?? selectedWorkspace)
   })
-  // Real project logo / favicon discovery for local workspaces (T3 Code parity).
+  // Real project logo / favicon discovery for local workspaces.
   handle(PROJECT_ICON_CHANNEL, async (_event, cwd: unknown) => {
     if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd) || /[\x00-\x1f\x7f]/.test(cwd)) return null
     return resolveProjectIconDataUrl(cwd, bytes => {
@@ -1460,6 +1560,7 @@ void app.whenReady().then(async () => {
   })
   void hubHealth.check()
   app.on('browser-window-focus', () => {
+    clearUnreadNotifications()
     if (systemSuspendedOrLocked) return
     hubHealth.recheckOnFocus()
     void savedHostContexts.refresh(openContextRemotes())

@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code 1:1 floating Thread Details Panel (`data-thread-details-card`).
+ * Floating Thread Details Panel (`data-thread-details-card`).
  *
- * Matches T3 Code's sleek top-right floating card:
+ * Top-right floating card:
  * - Section 1: Machine/Workspace row + folder switcher, Open in Files/Finder menu, + New worktree
  * - Section 2: Git branch row, Commit & push menu, Changes (+adds -dels) diff trigger
  * - Section 3 (conditional): Quiet 1-line links for active Immortals, Subagents, Plan, or Artifacts
@@ -45,6 +45,14 @@ function folderBase(cwd: string): string {
 
 function localHostLabel(): string {
   return localMachineLabel(true)
+}
+
+function revealInFolderLabel(): string {
+  if (typeof navigator === 'undefined') return 'Reveal in Finder'
+  const ua = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
+  if (/Win/i.test(ua)) return 'Show in Explorer'
+  if (/Mac/i.test(ua)) return 'Reveal in Finder'
+  return 'Show in Files'
 }
 
 export function ThreadDetailsCard({
@@ -99,12 +107,22 @@ export function ThreadDetailsCard({
   }, [refreshGit])
 
   useEffect(() => {
-    if (mode === 'inline') return
+    const hasNested = creatingWorktree || openMenu !== null
+    if (mode === 'inline' && !hasNested) return
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
-        onClose()
+        if (creatingWorktree) {
+          setCreatingWorktree(false)
+          setWorktreeName('')
+          return
+        }
+        if (openMenu !== null) {
+          setOpenMenu(null)
+          return
+        }
+        if (mode !== 'inline') onClose()
       }
     }
     const onPointer = (event: MouseEvent): void => {
@@ -112,7 +130,8 @@ export function ThreadDetailsCard({
       if (!target) return
       if (cardRef.current?.contains(target)) return
       if (target.closest('[data-thread-details-toggle="true"]')) return
-      onClose()
+      if (openMenu !== null) setOpenMenu(null)
+      if (mode !== 'inline') onClose()
     }
     document.addEventListener('keydown', onKey, true)
     document.addEventListener('mousedown', onPointer)
@@ -120,7 +139,7 @@ export function ThreadDetailsCard({
       document.removeEventListener('keydown', onKey, true)
       document.removeEventListener('mousedown', onPointer)
     }
-  }, [mode, onClose])
+  }, [mode, onClose, creatingWorktree, openMenu])
 
   const projectName = folderBase(snap.cwd)
   const hostLabel = snap.contextHost?.trim() || (snap.storageScope?.startsWith('ssh:') ? snap.storageScope.slice(4) : localHostLabel())
@@ -189,6 +208,7 @@ export function ThreadDetailsCard({
           <button
             type="button"
             className="t3-drow"
+            aria-haspopup="menu"
             aria-expanded={openMenu === 'open'}
             onClick={() => setOpenMenu(current => (current === 'open' ? null : 'open'))}
           >
@@ -204,7 +224,7 @@ export function ThreadDetailsCard({
               </button>
               <button type="button" role="menuitem" onClick={revealFolder}>
                 <T3Icon name="folder" size={13} />
-                <span>Reveal in Finder</span>
+                <span>{revealInFolderLabel()}</span>
               </button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onOpenTerminal() }}>
                 <T3Icon name="terminal" size={13} />
@@ -221,6 +241,7 @@ export function ThreadDetailsCard({
         <button
           type="button"
           className="t3-drow"
+          aria-expanded={creatingWorktree}
           onClick={() => setCreatingWorktree(value => !value)}
           title="Create an isolated git worktree next to this repository"
         >
@@ -229,24 +250,33 @@ export function ThreadDetailsCard({
         </button>
 
         {creatingWorktree && (
-          <div className="t3-details-wt">
+          <form
+            className="t3-details-wt"
+            onSubmit={event => {
+              event.preventDefault()
+              submitWorktree()
+            }}
+          >
             <input
               type="text"
               autoFocus
               spellCheck={false}
-              placeholder="branch / worktree name…"
+              placeholder="Branch or worktree name"
               aria-label="New worktree name"
               value={worktreeName}
               onChange={event => setWorktreeName(event.target.value)}
-              onKeyDown={event => {
-                if (event.key === 'Enter') { event.preventDefault(); submitWorktree() }
-                if (event.key === 'Escape') { event.preventDefault(); setCreatingWorktree(false); setWorktreeName('') }
-              }}
             />
-            <button type="button" className="t3-details-pill t3-details-pill--primary" disabled={!worktreeName.trim()} onClick={submitWorktree}>
+            <button
+              type="button"
+              className="t3-details-pill"
+              onClick={() => { setCreatingWorktree(false); setWorktreeName('') }}
+            >
+              Cancel
+            </button>
+            <button type="submit" className="t3-details-pill t3-details-pill--primary" disabled={!worktreeName.trim()}>
               Create
             </button>
-          </div>
+          </form>
         )}
       </section>
 
@@ -255,7 +285,7 @@ export function ThreadDetailsCard({
         <button
           type="button"
           className="t3-drow"
-          title={branchName ? `Branch: ${branchName} — open Source Control` : 'Open Source Control'}
+          title={branchName ? `Branch: ${branchName} · Open Source Control` : 'Open Source Control'}
           onClick={() => onNavigate('review')}
         >
           <T3Icon name="gitBranch" size={14} className="t3-drow__ico" />
@@ -267,6 +297,7 @@ export function ThreadDetailsCard({
           <button
             type="button"
             className="t3-drow"
+            aria-haspopup="menu"
             aria-expanded={openMenu === 'git'}
             onClick={() => setOpenMenu(current => (current === 'git' ? null : 'git'))}
           >
@@ -321,7 +352,7 @@ export function ThreadDetailsCard({
         <button
           type="button"
           className="t3-drow"
-          title={changedCount > 0 ? `${changedCount} changed file${changedCount === 1 ? '' : 's'} — open Diff` : 'Open Diff'}
+          title={changedCount > 0 ? `${changedCount} changed file${changedCount === 1 ? '' : 's'} · Open Diff` : 'Open Diff'}
           onClick={() => onNavigate('review')}
         >
           <T3Icon name="fileDiff" size={14} className="t3-drow__ico" />

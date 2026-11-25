@@ -97,7 +97,7 @@ export function ProfileCard({ profile, now }: { profile: UsageProfileView; now: 
       {profile.balance && <span className="usage-plan__balance">{profile.balance}</span>}
     </div>
     {profile.windows.length > 0 && <div className="usage-plan__windows">{profile.windows.map(window => windowMeter(window, profile, now))}</div>}
-    {profile.facts && profile.facts.length > 0 && <dl className="usage-plan__facts">{profile.facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{/^https:\/\//.test(fact.value) ? <a href={fact.value} target="_blank" rel="noreferrer">Open in AI Studio</a> : fact.value}</dd></div>)}</dl>}
+    {profile.facts && profile.facts.length > 0 && <dl className="usage-plan__facts">{profile.facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{/^https:\/\//.test(fact.value) ? <a href={fact.value} target="_blank" rel="noreferrer">{fact.value.includes('aistudio.google.com') ? 'Open in AI Studio' : 'Open usage page'}</a> : fact.value}</dd></div>)}</dl>}
     {profile.status === 'error' && <p className="usage-plan__message" role="status">{profile.message || 'Usage is unavailable right now.'}</p>}
     {profile.status === 'unsupported' && <p className="usage-plan__message usage-plan__message--quiet">This provider doesn't publish usage limits or a balance.</p>}
     {profile.status === 'ok' && !profile.windows.length && !profile.balance && !profile.facts?.length && <p className="usage-plan__message usage-plan__message--quiet">No limits reported for this plan.</p>}
@@ -179,13 +179,13 @@ export function UsagePanel({ snap }: { snap: Snapshot }): ReactElement {
       <header className="usage__head">
         <h3 id="usage-plans">Plans &amp; keys</h3>
         {report && <span className="usage__sub">Updated {ago(report.fetchedAt, now)}</span>}
-        <button className="usage__refresh" disabled={loading || !online} onClick={() => void load(true)} aria-label="Refresh plan usage" title="Refresh plan usage"><Icon name="retry" size={13} /></button>
+        <button type="button" className="usage__refresh" disabled={loading || !online} onClick={() => void load(true)} aria-label="Refresh plan usage" title="Refresh plan usage"><Icon name="retry" size={13} /></button>
       </header>
       {error && <p className="usage__error" role="alert">{error}</p>}
       {!report && !error && <p className="usage__empty" role="status">{online ? 'Checking your plans…' : 'Plan usage appears when the runtime is connected.'}</p>}
       {report && !profiles.length && <p className="usage__empty">No provider profiles yet. Add one from the model picker to see its limits here.</p>}
       {groupUsageProfiles(profiles).map(group => <div className="usage-group" key={group.kind} data-kind={group.kind}>
-        <div className="usage-group__head"><span>{USAGE_GROUP_LABEL[group.kind]}</span><span className="usage-group__count">{group.profiles.length}</span></div>
+        <h4 className="usage-group__head"><span>{USAGE_GROUP_LABEL[group.kind]}</span><span className="usage-group__count">{group.profiles.length}</span></h4>
         <ul className="usage-plans">{group.profiles.map(profile => <ProfileCard key={profile.profile} profile={profile} now={now} />)}</ul>
       </div>)}
     </section>

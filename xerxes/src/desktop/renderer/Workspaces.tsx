@@ -44,7 +44,7 @@ function WorkspaceReturnBar({ title, detail }: { readonly title: string; readonl
 
 export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
   const navigate = useDesktopNavigation()
-  const allChanges = <button className="btn" onClick={() => navigate('review')}>Review working tree, including new files</button>
+  const allChanges = <button type="button" className="btn" onClick={() => navigate('review')}>Review working tree, including new files</button>
   const files = snap.changes
   const totals = useMemo(() => ({
     adds: files.reduce((sum, file) => sum + file.adds, 0),
@@ -57,10 +57,10 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
       <div className="workspace-shell">
         <WorkspaceReturnBar title="Session edits" />
         <div className="tabempty">
-          <div className="tabempty__mark">⎇</div>
+          <div className="tabempty__mark" aria-hidden="true"><Icon name="changes" size={22} /></div>
           <h1>No recorded edits yet</h1>
           {allChanges}
-          <p>File edits the agents make land here as reviewable diffs — per-file +/− and the exact hunks, folded from the edit calls as they stream.</p>
+          <p>File edits the agents make land here as reviewable diffs, with per-file additions, deletions, and hunks folded from each edit.</p>
         </div>
       </div>
     )
@@ -76,9 +76,10 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
           </span>
           <span style={{ flex: '1 1 auto' }} />
           {kept
-            ? <span className="changes__stat">kept — tracking continues</span>
-            : <button className="btn" onClick={() => store.ackChanges()}>Keep all</button>}
+            ? <span className="changes__stat">Kept · tracking continues</span>
+            : <button type="button" className="btn" onClick={() => store.ackChanges()}>Keep all</button>}
           <button
+            type="button"
             className="btn btn--ghost"
             title="Reverse this session's recorded edits across every file"
             onClick={() => { void store.undoChanges(null) }}
@@ -88,7 +89,7 @@ export function ChangesTab({ snap }: { snap: Snapshot }): ReactElement {
         </div>
         {files.map(file => <DiffFileCard key={file.path} file={file} focusAt={snap.changesFocus?.path === file.path ? snap.changesFocus.at : undefined} />)}
         <p className="changes__note">
-          Built from the file edits this task made. Your working tree is the source of truth — undo here asks the runtime to put a file back.
+          Built from the file edits this task made. Your working tree is the source of truth; Undo asks the runtime to restore a file.
         </p>
       </div>
     </div>
@@ -108,22 +109,24 @@ function DiffFileCard({ file, focusAt }: { file: DiffFile; focusAt?: number | un
     if (focusAt === undefined) return
     setOpen(true)
     setFocused(true)
-    ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ref.current?.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' })
     const timer = setTimeout(() => setFocused(false), 1_600)
     return () => clearTimeout(timer)
   }, [focusAt])
   return (
     <div className="dfile" ref={ref} data-focused={focused || undefined}>
       <div className="dfile__head">
-        <span className="dot dot--done" />
-        <button className="dfile__path" onClick={() => setOpen(value => !value)} title="Toggle hunks">
+        <span className="dot dot--done" aria-hidden="true" />
+        <button type="button" className="dfile__path" aria-expanded={open} onClick={() => setOpen(value => !value)} title="Toggle hunks">
           {file.path}
-          {file.isNew ? <span className="chipbtn dfile__new">new</span> : null}
+          {file.isNew ? <span className="chipbtn dfile__new">New</span> : null}
         </button>
         <span className="dfile__stat">
           <span className="add">+{file.adds}</span> <span className="del">−{file.dels}</span>
         </span>
         <button
+          type="button"
           className="chipbtn"
           title="Reverse this session's recorded edits to this file"
           onClick={() => { void store.undoChanges(file.path) }}
@@ -171,8 +174,8 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
           <h1>{snap.planMode ? 'Planning in progress' : 'No plan yet'}</h1>
           <p>
             {snap.planMode
-              ? 'Plan mode is on — the agent explores and proposes a checklist here before touching anything. Steer it from the composer.'
-              : 'Switch the composer’s “Work directly” button to plan first (or ⌘K → plan mode), and the checklist the agent proposes is captured here for review.'}
+              ? 'Plan mode is on. The agent explores and proposes a checklist here before editing files. Steer it from the composer.'
+              : 'Turn on Plan mode in the composer (Shift+Tab or ⌘K → Plan mode), and the checklist the agent proposes appears here for review.'}
           </p>
         </div>
       </div>
@@ -186,7 +189,7 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
         <div className="plan__head">
           <span className="plan__title">Working plan</span>
           <span className="plan__meta">
-            {snap.planMode ? <><Icon name="pause" size={11} /> plan mode</> : 'approved / executing'} · turn {plan.turn}
+            {snap.planMode ? <><Icon name="pause" size={11} /> Plan mode</> : 'Approved · executing'} · turn {plan.turn}
             {items.length ? ` · ${done}/${items.length} done` : ''}
           </span>
         </div>
@@ -205,7 +208,8 @@ export function PlanTab({ snap }: { snap: Snapshot }): ReactElement {
         </div>
         {review && (
           <div className="plan__actions">
-            <span className="appr-policy">a plan review is pending in Activity — answer it there</span>
+            <span className="appr-policy">A plan review is waiting in Activity.</span>
+            <button type="button" className="btn btn--solid" onClick={() => store.setTab('activity')}>Review in Activity</button>
           </div>
         )}
       </div>
@@ -235,7 +239,7 @@ export function LogTab({ snap }: { snap: Snapshot }): ReactElement {
       <div className="workspace-shell workspace-shell--log">
         <WorkspaceReturnBar title="Event log" />
         <div className="tabempty">
-          <div className="tabempty__mark">≡</div>
+          <div className="tabempty__mark" aria-hidden="true"><Icon name="listBullets" size={22} /></div>
           <h1>Event log</h1>
           <p>A diagnostic trace of what the runtime reported, newest last, one line per event. It fills while a task runs and keeps the most recent 400.</p>
         </div>

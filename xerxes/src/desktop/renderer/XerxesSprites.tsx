@@ -440,8 +440,24 @@ export const XerxesBrandEmblem = memo(function XerxesBrandEmblem(props: {
 // ---------------------------------------------------------------------------
 
 /**
- * Clean minimal thinking indicator: a thin `1.75px` open-arc spinner inside a
- * faint hairline track while active, or a quiet `3.5px` dot when settled.
+ * 2×2 chasing 4-dot grid loader rendered inside the shared `24×24` viewBox.
+ * When `animated` is false (static/paused/reduced motion), the 4 dots hold
+ * their staggered clockwise opacities without motion.
+ */
+function renderDotGrid(fill: string, animated: boolean): ReactElement {
+  return (
+    <g className={animated ? 'xerxes-dot-grid xerxes-mark-spin' : 'xerxes-dot-grid'}>
+      <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--1" cx="7.2" cy="7.2" r="3.5" fill={fill} opacity="0.24" />
+      <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--2" cx="16.8" cy="7.2" r="3.5" fill={fill} opacity="0.5" />
+      <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--3" cx="16.8" cy="16.8" r="3.5" fill={fill} opacity="0.82" />
+      <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--4" cx="7.2" cy="16.8" r="3.5" fill={fill} opacity="1" />
+    </g>
+  )
+}
+
+/**
+ * Clean minimal thinking indicator: a 2×2 chasing 4-dot grid while active,
+ * or a quiet `3.5px` dot when settled.
  */
 export const XerxesThinkingMark = memo(function XerxesThinkingMark(
   props: XerxesThinkingMarkProps,
@@ -469,25 +485,7 @@ export const XerxesThinkingMark = memo(function XerxesThinkingMark(
       style={{ display: 'inline-block', flexShrink: 0 }}
     >
       {active ? (
-        <>
-          <circle
-            cx="12"
-            cy="12"
-            r="8.5"
-            fill="none"
-            stroke="var(--x-hairline, currentColor)"
-            strokeWidth="1.75"
-          />
-          <g className={perfPaused ? undefined : 'xerxes-mark-spin'}>
-            <path
-              d="M 12 3.5 A 8.5 8.5 0 0 1 19.36 16.25"
-              fill="none"
-              stroke="var(--x-working, var(--x-accent, currentColor))"
-              strokeWidth="1.75"
-              strokeLinecap="round"
-            />
-          </g>
-        </>
+        renderDotGrid('var(--x-title, currentColor)', !perfPaused)
       ) : (
         <circle cx="12" cy="12" r="3.5" fill="var(--x-meta, currentColor)" />
       )}
@@ -531,7 +529,7 @@ const TONE_COLORS: Readonly<Record<XerxesStatusTone, string>> = {
 
 /**
  * App-wide minimal semantic status mark (`AgentOrb`, rail, agents, supervisor):
- * - `active`: thin `1.75px` open-arc spinner inside a faint hairline track
+ * - `active`: 2×2 chasing 4-dot grid loader
  * - `waiting`: quiet `1.75px` hollow circle (`r=4.5`)
  * - `done`: minimal `1.75px` check stroke
  * - `error`: minimal `1.75px` cross stroke
@@ -562,25 +560,7 @@ export function XerxesStatusMark(props: XerxesStatusMarkProps): ReactElement {
       style={{ display: 'inline-block', flexShrink: 0 }}
     >
       {tone === 'active' ? (
-        <>
-          <circle
-            cx="12"
-            cy="12"
-            r="8.5"
-            fill="none"
-            stroke="var(--x-hairline, currentColor)"
-            strokeWidth="1.75"
-          />
-          <g className={live && !perfPaused ? 'xerxes-mark-spin' : undefined}>
-            <path
-              d="M 12 3.5 A 8.5 8.5 0 0 1 19.36 16.25"
-              fill="none"
-              stroke={color}
-              strokeWidth="1.75"
-              strokeLinecap="round"
-            />
-          </g>
-        </>
+        renderDotGrid('var(--x-title, currentColor)', live && !perfPaused)
       ) : tone === 'waiting' ? (
         <circle
           cx="12"

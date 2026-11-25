@@ -2,16 +2,16 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code Sidebar V2 with Machine + Project Folder Grouping:
+ * Desktop Sidebar with Machine + Project Folder Grouping:
  * - 52px top chrome: sidebar toggle + `Xerxes Agents` wordmark + adjacent Back/Forward arrows.
  * - Borderless inline `Search` + 3 right-aligned icons (Filter/View, Add Project, New Thread).
- * - Projects mode (default): Machine groups (`This Mac`, SSH hosts) → T3 Project Folders
+ * - Projects mode (default): Machine groups (`This Mac`, SSH hosts) → Project Folders
  *   (monogram, name, collapsed status dot + count swapping on hover to New Thread, rotating
  *   trailing chevron) → clean vertical-guide nested thread rows (rich active row with branch
  *   & runtime emblem; single-line calm inactive rows with hover Pin/Snooze/Settle).
- * - Inbox mode (optional via filter menu): T3 flat chronological 3-line cards.
+ * - Inbox mode (optional via filter menu): flat chronological 3-line cards.
  * - Pinned threads at top, collapsible `Snoozed` & `Settled  N >` bottom shelves,
- *   Undo banner (`⌘Z`), and minimal icon footer.
+ *   Undo banner (`⌘Z`), and labeled workspace navigation footer.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
@@ -986,11 +986,11 @@ export function T3Sidebar({
                 ) : activeScopeSet.size > 0 ? (
                   <>No active threads in selected projects. <button type="button" className="linkish" onClick={onClearProjectScope}>Show all</button></>
                 ) : partitioned.settled.length > 0 || partitioned.snoozed.length > 0 ? (
-                  'Inbox zero — all threads are snoozed or settled.'
+                  'All caught up. Every thread is snoozed or settled.'
                 ) : snap.noWorkspace ? (
                   snap.storageScope?.startsWith('ssh:') ? 'Remote threads appear after connecting' : 'Choose a project folder to begin'
                 ) : online ? (
-                  'No threads yet — start a new thread above.'
+                  'No threads yet. Start a new thread above.'
                 ) : (
                   'Connecting to the workspace runtime…'
                 )}
@@ -998,7 +998,7 @@ export function T3Sidebar({
             )}
           </>
         ) : (
-          /* Default: T3 Code Machine → Project Folder → Nested Threads */
+          /* Default: Machine → Project Folder → Nested Threads */
           <div className="t3-side__machines" data-machine-grouped="true">
             {machineGroups.map(machine => {
               const machineKey = `machine:${machine.host}`
@@ -1156,11 +1156,10 @@ export function T3Sidebar({
                                 type="button"
                                 className="t3-folder__cap"
                                 aria-expanded={section.kind === 'context' && folderRows.length === 0 ? undefined : !folded}
-                                aria-haspopup="menu"
                                 title={
                                   section.kind === 'context' && folderRows.length === 0
-                                    ? `Open ${section.label} (${section.cwd}) — right-click for workspace actions`
-                                    : `${section.cwd} — right-click for workspace actions`
+                                    ? `Open ${section.label} (${section.cwd}) · right-click for workspace actions`
+                                    : `${section.cwd} · right-click for workspace actions`
                                 }
                                 onClick={() => {
                                   if (section.kind === 'context' && folderRows.length === 0) {
@@ -1246,7 +1245,7 @@ export function T3Sidebar({
                 {snap.noWorkspace
                   ? (snap.storageScope?.startsWith('ssh:') ? 'Remote threads appear after connecting' : 'Choose a project folder to begin')
                   : online
-                    ? 'No projects yet — click + above to add a folder.'
+                    ? 'No projects yet. Use Add folder above to add one.'
                     : 'Connecting to the workspace runtime…'}
               </div>
             )}
@@ -1313,7 +1312,7 @@ export function T3Sidebar({
       </nav>
 
       {folderMenu && (
-        <>
+        <PickerLayer>
           <div
             className="backdrop backdrop--clear"
             onClick={() => setFolderMenu(null)}
@@ -1384,7 +1383,7 @@ export function T3Sidebar({
                     }}
                   >
                     <T3Icon name="folderOpen" size={13} />
-                    <span>Reveal in Finder</span>
+                    <span>{typeof navigator !== 'undefined' && /Win/i.test(`${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`) ? 'Show in Explorer' : typeof navigator !== 'undefined' && !/Mac/i.test(`${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`) ? 'Show in Files' : 'Reveal in Finder'}</span>
                   </button>
                 )}
                 <button
@@ -1462,7 +1461,7 @@ export function T3Sidebar({
               </>
             )}
           </div>
-        </>
+        </PickerLayer>
       )}
 
       {/* Undo Notice Banner for settle / snooze / pin / workspace removal */}
@@ -1479,21 +1478,34 @@ export function T3Sidebar({
         </div>
       )}
 
-      {/* Minimal T3 Icon Footer: Settings · Skills · Schedules · Usage · Supervisor · Agents on left; Runtime Status circle on far right */}
+      {/* Clean Labeled T3 Sidebar Footer: 2-column workspace navigation + calm Runtime Status row */}
       <footer className="studio-side-bottom t3-side__foot">
-        <div className="t3-side__foot-icons" role="group" aria-label="Workspace destinations">
+        <div className="t3-side__foot-grid" role="group" aria-label="Workspace destinations">
           <button
             type="button"
-            className="t3-icon-btn vibes-foot__settings"
-            title="Settings (⌘,)"
-            aria-label="Settings"
-            onClick={() => store.openSettings()}
+            className={`t3-foot-link${page === 'xerxes' ? ' is-selected' : ''}`}
+            aria-pressed={page === 'xerxes'}
+            title="XERXES Supervisor"
+            aria-label="XERXES Supervisor"
+            onClick={() => onOpen(page === 'xerxes' ? null : 'xerxes')}
           >
-            <T3Icon name="settingsGear" size={14} />
+            <T3Icon name="sparkles" size={14} />
+            <span>XERXES</span>
           </button>
           <button
             type="button"
-            className={`t3-icon-btn${page === 'extensions' ? ' is-selected' : ''}`}
+            className={`t3-foot-link${page === 'agents' ? ' is-selected' : ''}`}
+            aria-pressed={page === 'agents'}
+            title="Agents"
+            aria-label="Agents"
+            onClick={() => onOpen(page === 'agents' ? null : 'agents')}
+          >
+            <T3Icon name="bot" size={14} />
+            <span>Agents</span>
+          </button>
+          <button
+            type="button"
+            className={`t3-foot-link${page === 'extensions' ? ' is-selected' : ''}`}
             aria-pressed={page === 'extensions'}
             disabled={!online}
             title="Skills & tools"
@@ -1501,11 +1513,12 @@ export function T3Sidebar({
             onClick={() => onOpen(page === 'extensions' ? null : 'extensions')}
           >
             <T3Icon name="workflow" size={14} />
+            <span>Skills</span>
             <LearnedBadge snap={snap} />
           </button>
           <button
             type="button"
-            className={`t3-icon-btn${page === 'schedules' ? ' is-selected' : ''}`}
+            className={`t3-foot-link${page === 'schedules' ? ' is-selected' : ''}`}
             aria-pressed={page === 'schedules'}
             disabled={!online}
             title="Scheduled jobs"
@@ -1513,36 +1526,28 @@ export function T3Sidebar({
             onClick={() => onOpen(page === 'schedules' ? null : 'schedules')}
           >
             <T3Icon name="alarmClock" size={14} />
+            <span>Schedules</span>
           </button>
           <button
             type="button"
-            className="t3-icon-btn"
+            className="t3-foot-link"
             disabled={!online}
             title="Usage & provider plans"
             aria-label="Usage"
             onClick={() => onOpen('usage')}
           >
             <T3Icon name="barChart" size={14} />
+            <span>Usage</span>
           </button>
           <button
             type="button"
-            className={`t3-icon-btn${page === 'xerxes' ? ' is-selected' : ''}`}
-            aria-pressed={page === 'xerxes'}
-            title="XERXES Supervisor"
-            aria-label="XERXES Supervisor"
-            onClick={() => onOpen(page === 'xerxes' ? null : 'xerxes')}
+            className="t3-foot-link vibes-foot__settings"
+            title="Settings (⌘,)"
+            aria-label="Settings"
+            onClick={() => store.openSettings()}
           >
-            <T3Icon name="sparkles" size={14} />
-          </button>
-          <button
-            type="button"
-            className={`t3-icon-btn${page === 'agents' ? ' is-selected' : ''}`}
-            aria-pressed={page === 'agents'}
-            title="Agents"
-            aria-label="Agents"
-            onClick={() => onOpen(page === 'agents' ? null : 'agents')}
-          >
-            <T3Icon name="bot" size={14} />
+            <T3Icon name="settingsGear" size={14} />
+            <span>Settings</span>
           </button>
         </div>
         <div className="t3-side__foot-status">{runtimeStatus}</div>

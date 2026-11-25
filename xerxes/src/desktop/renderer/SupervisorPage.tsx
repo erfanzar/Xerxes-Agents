@@ -50,7 +50,7 @@ function connectionNote(status: ConnectionStatus): string | undefined {
     case 'live': return undefined
     case 'connecting': return 'Connecting to the Hub…'
     case 'replaying': return 'Catching up…'
-    case 'reconnecting': return 'Reconnecting — what you see may be outdated.'
+    case 'reconnecting': return 'Reconnecting. What you see may be outdated.'
     case 'revoked': return status.reason
     case 'closed': return 'Disconnected from the Hub.'
   }
@@ -129,7 +129,7 @@ export function ConnectHub({ unavailable = false, onOpenSettings }: {
   return (
     <section className="supervisor supervisor--connect" aria-labelledby="supervisor-connect-title">
       <span className="xempty__mark" aria-hidden="true"><XerxesLogoMark size={52} className="xempty__logo" decorative /></span>
-      <h3 id="supervisor-connect-title">{CONNECT_HUB_TITLE}</h3>
+      <h2 id="supervisor-connect-title">{CONNECT_HUB_TITLE}</h2>
       {unavailable ? (
         <p className="studio-muted">XERXES is only available in the Xerxes desktop app.</p>
       ) : (
@@ -153,7 +153,7 @@ export function SignInFailed({ message, denied, onRetry, onSignInAgain, onOpenSe
   return (
     <section className="supervisor supervisor--connect" aria-labelledby="supervisor-signin-title">
       <span className="xempty__mark" aria-hidden="true"><AgentOrb size={40} state="failed" live={false} /></span>
-      <h3 id="supervisor-signin-title">Could not sign in to the Hub</h3>
+      <h2 id="supervisor-signin-title">Could not sign in to the Hub</h2>
       <p role="alert" className="action-card__error">{message}</p>
       <div className="hubphone__row">
         {denied
@@ -350,7 +350,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
           </div>
         ) : null}
         <span className="supervisor__flex" />
-        <div className="xpills" role="group" aria-label="Autopilot, Watch and Model">
+        <div className="xpills" role="group" aria-label="XERXES status">
           {autopilotAvailable ? (
             <ControlPill name="Autopilot" value={autopilotChip === undefined ? 'Off' : autopilotChip.replace(/^Autopilot on · /, '')}
               tone={autopilotChip === undefined ? 'off' : 'on'} expanded={controlsTab === 'autopilot'} onClick={() => openTab('autopilot')} />
@@ -366,7 +366,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             tone={modelTone(config)}
             expanded={controlsTab === 'model' || inlineChooser}
             disabled={supervisor.phase === 'unsupported'}
-            title={inlineChooser ? 'Model: No model chosen — jump to model setup' : `Model: ${modelChipText(config)}`}
+            title={inlineChooser ? 'Model: No model chosen · jump to model setup' : `Model: ${modelChipText(config)}`}
             onClick={() => openTab('model')}
           />
           {safetyAvailable ? <ControlPill name="Safety" value="Owner controls" tone="off" expanded={controlsTab === 'safety'} onClick={() => openTab('safety')} /> : null}
@@ -445,13 +445,13 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               <p role="status" className="notice">{SUPERVISOR_OLD_HUB}</p>
             ) : supervisor.phase === 'error' ? (
               <div role="alert" className="notice is-error">
-                <p>Could not open the supervisor: {supervisor.error ?? 'unknown error'}</p>
+                <p>Could not open XERXES: {supervisor.error ?? 'unknown error'}</p>
                 <button type="button" className="btn" onClick={onReopen}>Try again</button>
               </div>
             ) : (
               <>
                 {!ready ? (
-                  <p className="xempty xempty--wait" aria-busy="true">
+                  <p className="xempty xempty--wait" role="status" aria-busy="true">
                     <AgentOrb size={36} state="connecting" live />
                     <span>{live ? 'Opening XERXES…' : 'Waiting for the Hub…'}</span>
                   </p>
@@ -459,7 +459,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
                 {ready && supervisor.messages.length === 0 && !pending && !unconfigured ? (
                   <div className="xempty">
                     <span className="xempty__mark" aria-hidden="true"><XerxesLogoMark size={52} className="xempty__logo" decorative /></span>
-                    <strong>Ask XERXES about your work</strong>
+                    <h2>Ask XERXES about your work</h2>
                     <p>It sees every task on your Hub. It can start, steer and stop them and answer their questions for you.</p>
                     <div className="xempty__try" role="group" aria-label="Try asking">
                       {SUGGESTIONS.map(suggestion => (
@@ -485,7 +485,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             )}
           </div>
         </div>
-        {!showSlack && !scroll.following ? (
+        {!showSlack && scroll.showJumpLatest ? (
           <div className="jump-latest-dock" data-scroll-ignore="true">
             <button
               type="button"
@@ -524,7 +524,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
               />
               {thinking && !text.trim() && props.onCancel !== undefined
                 ? <button type="button" className="composer__send composer__send--stop" aria-label="Stop XERXES" title="Stop this turn" onClick={() => { void props.onCancel?.() }}><Icon name="stop" size={18} /></button>
-                : <button type="submit" className="composer__send" aria-label={thinking ? 'Queue message' : 'Send to XERXES'} title={thinking ? 'Queue — runs after this turn (⏎) · ⌘⏎ steer' : 'Send (⏎ · ⇧⏎ newline)'} disabled={!canSend}><Icon name="arrowUp" size={16} /></button>}
+                : <button type="submit" className="composer__send" aria-label={thinking ? 'Queue message' : 'Send to XERXES'} title={thinking ? 'Queue after this turn (⏎) · ⌘⏎ steer' : 'Send (⏎ · ⇧⏎ newline)'} disabled={!canSend}><Icon name="arrowUp" size={16} /></button>}
             </div>
           </div>
           <div className="composer__toolbar">
@@ -536,7 +536,7 @@ export function SupervisorView(props: SupervisorViewProps): ReactElement {
             <button
               type="button"
               className={`cchip composer__text supervisor__model-btn${unconfigured ? ' is-custom' : ''}`}
-              title={inlineChooser ? 'Choose a model for XERXES in the setup panel above' : "XERXES's model — click to change"}
+              title={inlineChooser ? 'Choose a model for XERXES in the setup panel above' : "Change XERXES's model"}
               onClick={() => openTab('model')}
             >
               <span>{modelChipText(config)}</span>
@@ -684,7 +684,7 @@ export function SupervisorPage(): ReactElement {
     case 'signing_in':
       return (
         <section className="supervisor supervisor--connect">
-          <p className="xempty xempty--wait" aria-busy="true">
+          <p className="xempty xempty--wait" role="status" aria-busy="true">
             <AgentOrb size={36} state="connecting" live />
             <span>{gate.phase === 'reading' ? 'Reading the saved Hub…' : 'Signing in to the Hub…'}</span>
           </p>

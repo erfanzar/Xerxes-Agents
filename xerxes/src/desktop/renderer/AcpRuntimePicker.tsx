@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3-Code-style External Agent Runtime Switcher for Xerxes Desktop & VS Code.
+ * External Agent Runtime Switcher for Xerxes Desktop & VS Code.
  *
  * Lives right beside the model picker in the composer toolbar so users can
  * switch any thread seamlessly between native Xerxes, Claude Code (ACP /
@@ -1700,19 +1700,22 @@ export function AntigravityLoginDialog({
               : '. If Google shows an authorization code instead of redirecting automatically, paste it below.'}
           </p>
           <div className="acp-login-flow__linkrow">
-            <button type="button" className="btn btn--primary" onClick={openSignInUrl}>
+            <button type="button" className="btn btn--solid" onClick={openSignInUrl}>
               Open Google sign-in
             </button>
             <CopyButton text={authUrl} label="Copy link" />
           </div>
-          <input
-            type="text"
-            className="acp-login-flow__url"
-            readOnly
-            aria-label="Google sign-in URL"
-            value={authUrl}
-            onFocus={event => event.currentTarget.select()}
-          />
+          <label className="acp-login-flow__field">
+            <span>Google sign-in URL</span>
+            <input
+              type="text"
+              className="acp-login-flow__url"
+              readOnly
+              aria-label="Google sign-in URL"
+              value={authUrl}
+              onFocus={event => event.currentTarget.select()}
+            />
+          </label>
           {showCodeField && (
             <label className="acp-login-flow__field">
               <span>Authorization code or callback URL</span>
@@ -1827,28 +1830,55 @@ export function AcpActiveBanner({
   }
 
   if (acpError) {
+    // Antigravity's native terminal auth method opens the exact same interactive
+    // `AntigravityLoginDialog` as "Login with Antigravity"; deduplicate it so the
+    // banner never stacks duplicate login buttons.
+    const visibleAuthMethods = isAntigravityAuthError
+      ? authMethods.filter(method => !isTerminalAuthMethod(method))
+      : authMethods
     return (
       <>
         <div className="acp-banner acp-banner--error" role="alert">
-          <span className="acp-banner__icon" aria-hidden="true">
-            <Icon name="warning" size={14} />
-          </span>
-          <span className="acp-banner__text acp-banner__text--wrap">
-            <span>{acpError}</span>
-            {showAuthHint && (
-              <span className="acp-banner__hint">
-                {' '}Click Login with Antigravity or run <code>agy acp --login</code> in your terminal, then click Retry.
-              </span>
-            )}
-            {terminalCommand && (
-              <span className="acp-banner__termcmd">
-                {' '}Run <code>{terminalCommand.command}</code> in your terminal, then click Retry.{' '}
-                <CopyButton text={terminalCommand.command} label="Copy command" />
-              </span>
-            )}
-          </span>
+          <div className="acp-banner__head">
+            <span className="acp-banner__icon" aria-hidden="true">
+              <Icon name="warning" size={14} />
+            </span>
+            <span className="acp-banner__text acp-banner__text--wrap">
+              <span>{acpError}</span>
+              {showAuthHint && (
+                <span className="acp-banner__hint">
+                  {' '}Use Login with Antigravity or run <code>agy acp --login</code> in your terminal, then select Retry.
+                </span>
+              )}
+              {terminalCommand && (
+                <span className="acp-banner__termcmd">
+                  {' '}Run <code>{terminalCommand.command}</code> in your terminal, then select Retry.{' '}
+                  <CopyButton text={terminalCommand.command} label="Copy command" />
+                </span>
+              )}
+            </span>
+            <button
+              type="button"
+              className="acp-banner__dismiss"
+              aria-label="Dismiss runtime error"
+              title="Dismiss error"
+              onClick={() => (onDismissError ? onDismissError() : store.clearAcpError())}
+            >
+              <Icon name="close" size={12} />
+            </button>
+          </div>
           <div className="acp-banner__actions">
-            {authMethods.map((method, index) => {
+            {isAntigravityAuthError && (
+              <button
+                type="button"
+                className="acp-banner__switch acp-banner__switch--primary"
+                disabled={connecting || !online}
+                onClick={() => setAgyLoginOpen(true)}
+              >
+                Login with Antigravity
+              </button>
+            )}
+            {visibleAuthMethods.map((method, index) => {
               const isTerm = isTerminalAuthMethod(method)
               const termPreview = isTerm ? formatTerminalAuthCommand(method) : ''
               return (
@@ -1866,20 +1896,10 @@ export function AcpActiveBanner({
                 </button>
               )
             })}
-            {isAntigravityAuthError && (
-              <button
-                type="button"
-                className="acp-banner__switch acp-banner__switch--primary"
-                disabled={connecting || !online}
-                onClick={() => setAgyLoginOpen(true)}
-              >
-                Login with Antigravity
-              </button>
-            )}
             {canRetry && (
               <button
                 type="button"
-                className={`acp-banner__switch${isAntigravityAuthError || authMethods.length > 0 ? '' : ' acp-banner__switch--primary'}`}
+                className={`acp-banner__switch${isAntigravityAuthError || visibleAuthMethods.length > 0 ? '' : ' acp-banner__switch--primary'}`}
                 disabled={connecting || !online}
                 onClick={() => void (onRetry ? onRetry() : store.retryAcpConnect())}
               >
@@ -1896,15 +1916,6 @@ export function AcpActiveBanner({
                 Switch to Xerxes
               </button>
             )}
-            <button
-              type="button"
-              className="acp-banner__dismiss"
-              aria-label="Dismiss runtime error"
-              title="Dismiss error"
-              onClick={() => (onDismissError ? onDismissError() : store.clearAcpError())}
-            >
-              <Icon name="close" size={12} />
-            </button>
           </div>
         </div>
         <AntigravityLoginDialog

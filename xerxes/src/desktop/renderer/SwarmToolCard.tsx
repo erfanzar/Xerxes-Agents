@@ -601,7 +601,7 @@ export const SwarmToolCard = memo(function SwarmToolCard({
       pills.push(<span key="woken" className="swarm-tool__pill swarm-tool__pill--ok">resumed</span>)
       if (wakeMsg) snippetNode = <p className="swarm-tool__snippet">{renderSwarmSnippet(wakeMsg, 160)}</p>
     } else if (status === 'interrupted_by_steer') {
-      titleNode = <span className="swarm-tool__title">Interrupted by user steer</span>
+      titleNode = <span className="swarm-tool__title">Redirected by you</span>
       if (wakeMsg) snippetNode = <p className="swarm-tool__snippet">{clipLine(wakeMsg, 160)}</p>
     } else if (status === 'worker_error') {
       const errObj = res?.worker_error && typeof res.worker_error === 'object' ? (res.worker_error as Record<string, unknown>) : null

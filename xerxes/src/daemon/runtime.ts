@@ -81,6 +81,11 @@ export type DaemonTranscriptMessage = RawMessage & {
   readonly text?: string;
 };
 
+export interface InflightSteerSnapshot {
+  readonly text: string;
+  readonly images?: readonly TurnImage[];
+}
+
 export interface DaemonSession {
   activeTurnId: string;
   agentId: string;
@@ -94,6 +99,7 @@ export interface DaemonSession {
   lastActive: number;
   /** Transient visible turn state used when the TUI switches back mid-turn. */
   inflightUser?: string;
+  inflightSteers?: InflightSteerSnapshot[];
   inflightAssistant?: string;
   /** Epoch ms the in-flight turn began; lets a reattach keep elapsed continuity. */
   inflightStartedAt?: number;
@@ -191,6 +197,8 @@ export interface InflightToolSnapshot {
   id?: string;
   name: string;
   ok?: boolean;
+  /** Bounded preview of tool output for mid-turn reattach. */
+  output_preview?: string;
 }
 
 export interface OpenSessionOptions {
@@ -1985,6 +1993,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const turnCountBefore = session.turnCount;
     const displayText = options.displayText?.trim() || text;
     session.inflightUser = displayText;
+    delete session.inflightSteers;
     session.inflightAssistant = "";
     session.inflightStartedAt = Date.now();
     delete session.inflightThinking;
@@ -2080,7 +2089,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
             // The final boundary ends the turn: durable attributed steers wait for the continuation.
             const queued = boundary === "final" ? [] : options.pullQueuedSteers?.() ?? [];
             const drained = queued.length ? [...live, ...queued] : live;
-            if (drained.length) emitSessionEvent({ type: "steer_applied", payload: { contents: drained.map(steerText), count: drained.length } });
+            if (drained.length) {
+              const appliedTexts = drained.map(steerText);
+              const recorded = appliedTexts
+                .map(entry => entry.trim())
+                .filter(Boolean)
+                .map(entry => ({ text: entry }));
+              if (recorded.length > 0) {
+                session.inflightSteers = [...(session.inflightSteers ?? []), ...recorded];
+              }
+              emitSessionEvent({ type: "steer_applied", payload: { contents: appliedTexts, count: drained.length } });
+            }
             return drained;
           },
           steerWake: () => this.steerWakeController(sessionKey).signal,
@@ -2204,6 +2223,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
         this.applyDefaultSettings(session);
       }
       delete session.inflightUser;
+      delete session.inflightSteers;
       delete session.inflightAssistant;
       delete session.inflightStartedAt;
       delete session.inflightThinking;

@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 
 
 import { desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { isVscodeHost } from './host.js'
+import { isMacPlatform, localMachineLabel } from './runModeView.js'
 
 /** Kinds this renderer can draw, sent as `kinds` on every preview request. */
 export const PREVIEW_KINDS = ['table', 'image', 'pdf', 'sheet', 'document', 'html'] as const
@@ -178,7 +179,7 @@ function SheetView({ preview, requested, choose }: { preview: Extract<RichPrevie
   const loading = requested !== preview.sheet
   return <div className="file-grid-view">
     {preview.sheets.length > 1 && <div className="file-sheet-tabs" role="tablist" aria-label="Sheets">
-      {preview.sheets.map((sheet, index) => <button key={index} role="tab" aria-selected={index === preview.sheet} aria-controls="file-sheet-grid"
+      {preview.sheets.map((sheet, index) => <button type="button" key={index} role="tab" aria-selected={index === preview.sheet} aria-controls="file-sheet-grid"
         className={sheet.hidden ? 'is-hidden' : undefined} title={sheet.hidden ? `${sheet.name} (hidden sheet)` : sheet.name}
         onClick={() => { if (index !== requested) choose(index) }}
         onKeyDown={event => {
@@ -254,7 +255,7 @@ function DocumentView({ preview }: { preview: Extract<RichPreview, { kind: 'docu
 function ImagePreview({ preview }: { preview: Extract<RichPreview, { kind: 'image' }> }): ReactElement {
   const [actual, setActual] = useState(false)
   return <div className={'file-image' + (actual ? ' is-actual' : '')}>
-    <button className="file-image__frame" aria-pressed={actual} title={actual ? 'Fit to the panel' : 'Show at actual size'} onClick={() => setActual(value => !value)}>
+    <button type="button" className="file-image__frame" aria-pressed={actual} title={actual ? 'Fit to the panel' : 'Show at actual size'} onClick={() => setActual(value => !value)}>
       {/* An SVG shown as an image never runs its scripts or loads what it links to. */}
       <img src={`data:${preview.mediaType};base64,${preview.data}`} alt={fileName(preview.path)} draggable={false} />
     </button>
@@ -308,8 +309,6 @@ export function RichFilePreview({ preview, requestedSheet, chooseSheet, actions 
   }
 }
 
-const SHOW_LABEL = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || navigator.userAgent) ? 'Show in Finder' : 'Show in folder'
-
 /** "Open in default app" and "Show in Finder" for the selected file. */
 export function FileActions({ path, cwd, remote, onError, onAction }: {
   path: string
@@ -323,7 +322,8 @@ export function FileActions({ path, cwd, remote, onError, onAction }: {
   const [error, setError] = useState('')
   useEffect(() => { setError(''); onError?.('') }, [path, onError])
   const bridge = typeof window === 'undefined' ? undefined : window.xerxes
-  const unavailable = remote ? 'The file is on the SSH host, not on this computer' : !bridge?.fileAction || !cwd ? 'Update the app to open files from here' : ''
+  const showLabel = isMacPlatform() ? 'Show in Finder' : 'Show in folder'
+  const unavailable = remote ? `The file is on the SSH host, not on ${localMachineLabel()}` : !bridge?.fileAction || !cwd ? 'Update the app to open files from here' : ''
   const reportError = (message: string): void => {
     if (onError) onError(message)
     else setError(message)
@@ -338,7 +338,7 @@ export function FileActions({ path, cwd, remote, onError, onAction }: {
   const itemRole = onAction ? 'menuitem' : undefined
   return <>
     <button type="button" role={itemRole} className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || 'Open the file in the app your computer uses for it'} onClick={() => run('open')}>Open in default app</button>
-    <button type="button" role={itemRole} className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || `${SHOW_LABEL}: ${path}`} onClick={() => run('reveal')}>{SHOW_LABEL}</button>
+    <button type="button" role={itemRole} className="file-browser__action" disabled={Boolean(unavailable)} title={unavailable || `${showLabel}: ${path}`} onClick={() => run('reveal')}>{showLabel}</button>
     {!onError && error && <span className="file-browser__action-error" role="alert">{error}</span>}
   </>
 }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 
 import { checkPairLink } from '../repairLink.js'
 import { cameraErrorMessage, startQrScanner, type RunningScanner } from '../repairScanner.js'
@@ -23,6 +23,7 @@ export function SignedOut({ reason, openLink = openInPlace }: { reason: string; 
   const [scanning, setScanning] = useState(false)
   const [message, setMessage] = useState<string | undefined>(undefined)
   const [pasted, setPasted] = useState('')
+  const errorId = useId()
   const video = useRef<HTMLVideoElement>(null)
 
   const open = (raw: string): boolean => {
@@ -80,12 +81,24 @@ export function SignedOut({ reason, openLink = openInPlace }: { reason: string; 
         <form onSubmit={event => { event.preventDefault(); open(pasted) }}>
           <label className="field">
             <span>Pairing link</span>
-            <input type="text" inputMode="url" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} value={pasted} onChange={event => setPasted(event.target.value)} />
+            <input
+              type="text"
+              inputMode="url"
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder="https://…/pair#…"
+              aria-invalid={message !== undefined ? true : undefined}
+              aria-describedby={message !== undefined ? errorId : undefined}
+              value={pasted}
+              onChange={event => setPasted(event.target.value)}
+            />
           </label>
           <button type="submit" className="btn">Open link</button>
         </form>
       </details>
-      {message === undefined ? null : <p role="alert" className="field-error">{message}</p>}
+      {message === undefined ? null : <p id={errorId} role="alert" className="field-error">{message}</p>}
       <p className="repair-note">This page will not reconnect on its own.</p>
     </section>
   )

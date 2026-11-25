@@ -730,10 +730,22 @@ export class BlockBuilder {
         break
       }
       case 'text_part': {
-        if (typeof payload.text === 'string' && payload.text) {
+        let delta = typeof payload.text === 'string' ? payload.text : ''
+        if (!delta && Array.isArray(payload.content_blocks ?? payload.contentBlocks)) {
+          const blocks = parseToolContentBlocks(payload.content_blocks ?? payload.contentBlocks)
+          const summaries: string[] = []
+          for (const block of blocks) {
+            if (block.type === 'text' && block.text) summaries.push(block.text)
+            else if (block.type === 'resource_link' && block.uri) summaries.push(`[${block.name || block.uri}](${block.uri})`)
+            else if (block.type === 'resource' && block.text) summaries.push(block.text)
+            else if (block.type === 'image' && block.uri) summaries.push(`![image](${block.uri})`)
+          }
+          delta = summaries.join('\n')
+        }
+        if (delta) {
           const run = this.openRun('text')
           if (run.kind === 'text') {
-            run.text += payload.text
+            run.text += delta
             this.settledRunBlocks.delete(run)
             this.invalidateSnapshot()
           }
@@ -1304,15 +1316,24 @@ function pushStoredExecution(builder: BlockBuilder, exec: unknown, index: number
     id,
     name: exec.name,
     arguments: exec.inputs ?? exec.arguments,
+    ...(typeof exec.title === 'string' && exec.title ? { title: exec.title } : {}),
+    ...(typeof exec.kind === 'string' && exec.kind ? { kind: exec.kind } : {}),
     ...(exec.diff !== undefined ? { diff: exec.diff } : {}),
+    ...(exec.diffs !== undefined ? { diffs: exec.diffs } : {}),
+    ...(exec.content_blocks !== undefined ? { content_blocks: exec.content_blocks } : {}),
     ...(exec.locations !== undefined ? { locations: exec.locations } : {}),
   })
   builder.push('tool_result', {
     tool_call_id: id,
     name: exec.name,
     result: content ?? exec.result,
+    ...(typeof exec.title === 'string' && exec.title ? { title: exec.title } : {}),
+    ...(typeof exec.kind === 'string' && exec.kind ? { kind: exec.kind } : {}),
     ...(exec.diff !== undefined ? { diff: exec.diff } : {}),
+    ...(exec.diffs !== undefined ? { diffs: exec.diffs } : {}),
+    ...(exec.content_blocks !== undefined ? { content_blocks: exec.content_blocks } : {}),
     ...(exec.locations !== undefined ? { locations: exec.locations } : {}),
+    ...(typeof exec.artifact_id === 'string' && exec.artifact_id ? { artifact_id: exec.artifact_id } : {}),
     ...(exec.permitted === false ? { error: typeof exec.result === 'string' ? exec.result : 'Tool permission denied' } : {}),
     ...(typeof exec.durationMs === 'number' ? { duration_ms: exec.durationMs } : {}),
     ...(typeof exec.error === 'string' && exec.error ? { error: exec.error } : {}),
@@ -1348,7 +1369,17 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       if (id && calls.has(id)) {
         const call = calls.get(id)!
         const stored = isRecord(execution) ? execution : null
-        builder.push('tool_result', { tool_call_id: id, name: call.name, result: record.content ?? stored?.result,
+        builder.push('tool_result', {
+          tool_call_id: id,
+          name: call.name,
+          result: record.content ?? stored?.result,
+          ...(typeof stored?.title === 'string' && stored.title ? { title: stored.title } : {}),
+          ...(typeof stored?.kind === 'string' && stored.kind ? { kind: stored.kind } : {}),
+          ...(stored?.diff !== undefined ? { diff: stored.diff } : {}),
+          ...(stored?.diffs !== undefined ? { diffs: stored.diffs } : {}),
+          ...(stored?.content_blocks !== undefined ? { content_blocks: stored.content_blocks } : {}),
+          ...(stored?.locations !== undefined ? { locations: stored.locations } : {}),
+          ...(typeof stored?.artifact_id === 'string' && stored.artifact_id ? { artifact_id: stored.artifact_id } : {}),
           duration_ms: stored?.durationMs,
           ...(stored?.permitted === false ? { error: typeof stored.result === 'string' ? stored.result : 'Tool permission denied' } : {}),
           ...(typeof stored?.error === 'string' && stored.error ? { error: stored.error } : {}),
@@ -1358,8 +1389,12 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       continue
     }
 
-    // Reasoning precedes its answer, as it streamed.
-    const turnThinking = role === 'assistant' ? thinking[assistantIndex] : undefined
+    // Reasoning precedes its answer, as it streamed. Prefer per-message thinking
+    // when stored inline so multi-step ACP/native turns never drift against thinking_content.
+    const inlineThinking = role === 'assistant' && typeof record.thinking === 'string' && record.thinking.trim()
+      ? record.thinking
+      : undefined
+    const turnThinking = role === 'assistant' ? (inlineThinking ?? thinking[assistantIndex]) : undefined
     if (role === 'assistant') assistantIndex += 1
     if (typeof turnThinking === 'string' && turnThinking.trim()) {
       builder.push('think_part', { think: turnThinking })
@@ -1371,7 +1406,18 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
         if (!isRecord(rawCall) || typeof rawCall.id !== 'string' || !isRecord(rawCall.function)) continue
         const call = rawCall.function
         calls.set(rawCall.id, call)
-        builder.push('tool_call', { id: rawCall.id, name: call.name, arguments: call.arguments })
+        const stored = executionsById.get(rawCall.id)
+        builder.push('tool_call', {
+          id: rawCall.id,
+          name: call.name,
+          arguments: call.arguments,
+          ...(typeof stored?.title === 'string' && stored.title ? { title: stored.title } : {}),
+          ...(typeof stored?.kind === 'string' && stored.kind ? { kind: stored.kind } : {}),
+          ...(stored?.diff !== undefined ? { diff: stored.diff } : {}),
+          ...(stored?.diffs !== undefined ? { diffs: stored.diffs } : {}),
+          ...(stored?.content_blocks !== undefined ? { content_blocks: stored.content_blocks } : {}),
+          ...(stored?.locations !== undefined ? { locations: stored.locations } : {}),
+        })
       }
     }
     const content = transcriptContent(record)

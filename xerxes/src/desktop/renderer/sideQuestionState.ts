@@ -117,14 +117,16 @@ export function formatSideQuestionToolLabel(tool: SideQuestionToolEvent): {
   const tail = (tool.name.split(/[.:/]/).pop() ?? tool.name).trim()
   const lower = tail.toLowerCase().replace(/tool$/i, '').replace(/[_-]+/g, '')
   let verb: string
-  if (lower === 'readfile' || lower === 'read') verb = 'Read'
-  else if (lower === 'grep' || lower === 'ripgrep' || lower === 'search' || lower === 'searchfiles') verb = 'Grep'
-  else if (lower === 'glob' || lower === 'findfiles' || lower === 'find') verb = 'Glob'
-  else if (lower === 'fileoutline' || lower === 'outline') verb = 'Outline'
+  if (lower === 'readfile' || lower === 'read' || lower === 'viewfile' || lower === 'clientviewfile') verb = 'Read'
+  else if (lower === 'grep' || lower === 'ripgrep' || lower === 'grepsearch' || lower === 'search' || lower === 'searchfiles') verb = 'Grep'
+  else if (lower === 'glob' || lower === 'findfiles' || lower === 'findbyname' || lower === 'find') verb = 'Find'
+  else if (lower === 'fileoutline' || lower === 'outline' || lower === 'viewfileoutline') verb = 'Outline'
   else if (lower === 'listdir' || lower === 'ls' || lower === 'list') verb = 'List'
   else if (lower === 'lsp') verb = 'LSP'
-  else if (lower === 'webfetch') verb = 'Fetch'
-  else if (lower === 'websearch') verb = 'Search'
+  else if (lower === 'webfetch' || lower === 'readurlcontent') verb = 'Fetch'
+  else if (lower === 'websearch' || lower === 'searchweb') verb = 'Search'
+  else if (lower === 'managetask') verb = 'Tasks'
+  else if (lower === 'runcommand' || lower === 'command' || lower === 'execcommand') verb = 'Command'
   else {
     const clean = tail.replace(/Tool$/i, '').replace(/[_-]+/g, ' ').trim()
     verb = clean ? clean[0]!.toUpperCase() + clean.slice(1) : 'Tool'
@@ -132,6 +134,10 @@ export function formatSideQuestionToolLabel(tool: SideQuestionToolEvent): {
 
   const rawTarget = tool.target?.trim() ?? ''
   if (!rawTarget) return { verb }
+  const norm = (value: string): string => value.toLowerCase().replace(/[\s_-]+/g, '')
+  if (norm(rawTarget) === norm(tail) || norm(rawTarget) === norm(verb) || norm(rawTarget) === lower) {
+    return { verb }
+  }
   // Shorten file paths to their basename while preserving patterns/queries intact.
   const looksLikePath = (rawTarget.includes('/') || rawTarget.includes('\\')) && !/\s/.test(rawTarget)
   const displayTarget = looksLikePath

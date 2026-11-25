@@ -92,8 +92,8 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
     )
   }
   const controls = <>
-    <button aria-pressed={wrap} onClick={() => setWrap(value => !value)}>Wrap lines</button>
-    <button disabled={!text} onClick={copy}>{copied || 'Copy output'}</button>
+    <button type="button" aria-pressed={wrap} onClick={() => setWrap(value => !value)}>Wrap lines</button>
+    <button type="button" disabled={!text} onClick={copy}>{copied || 'Copy output'}</button>
   </>
   const displayText = compact ? text.replace(/(?:\r?\n[ \t]*)+$/, '') : text
   const body = <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{displayText || empty}</pre>
@@ -101,22 +101,22 @@ export function OutputViewer({ text, label = 'Output', empty = 'No output record
     ? <pre className="output-viewer__text" data-wrap={wrap} aria-label={label === 'Output' ? 'Command output' : label} tabIndex={0}>{text || empty}</pre>
     : body
   const fullscreen = expanded && createPortal(<dialog ref={dialog} className="output-dialog" aria-label={`${label} expanded`} onCancel={() => setExpanded(false)} onClose={() => setExpanded(false)}>
-    <header><h2>{label}</h2>{controls}<button autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
+    <header><h2>{label}</h2>{controls}<button type="button" autoFocus onClick={() => setExpanded(false)} aria-label="Close expanded output"><Icon name="close" size={16}/></button></header>
     {fullscreenBody}
   </dialog>, document.body)
   // A preview is capped (about 14 lines) and does not scroll, so the wheel keeps moving the page.
   const lineCount = displayText ? displayText.split('\n').length : 0
   if (compact) return <section className="output-viewer output-viewer--compact" aria-label={`${label} viewer`} data-full={full || undefined}>
     {body}
-    {lineCount > PREVIEW_LINES && <button className="output-viewer__more" aria-expanded={full} onClick={() => setFull(value => !value)}>{full ? 'Show less' : `Show all ${lineCount.toLocaleString()} lines`}</button>}
+    {lineCount > PREVIEW_LINES && <button type="button" className="output-viewer__more" aria-expanded={full} onClick={() => setFull(value => !value)}>{full ? 'Show less' : `Show all ${lineCount.toLocaleString()} lines`}</button>}
     <div className="output-viewer__actions">
-      <button disabled={!text} onClick={copy} aria-label={copied || 'Copy output'} title={copied || 'Copy output'}><Icon name={copied === 'Copied' ? 'check' : 'copy'} size={13}/></button>
-      <button ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} title={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={13}/></button>
+      <button type="button" disabled={!text} onClick={copy} aria-label={copied || 'Copy output'} title={copied || 'Copy output'}><Icon name={copied === 'Copied' ? 'check' : 'copy'} size={13}/></button>
+      <button type="button" ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} title={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={13}/></button>
     </div>
     {fullscreen}
   </section>
   return <section className="output-viewer" aria-label={`${label} viewer`}>
-    <header><strong>{label}</strong><span className="output-viewer__count">{text ? `${text.split('\n').length.toLocaleString()} lines` : ''}</span><div className="output-viewer__actions">{controls}<button ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={14}/></button></div></header>
+    <header><strong>{label}</strong><span className="output-viewer__count">{text ? `${text.split('\n').length.toLocaleString()} lines` : ''}</span><div className="output-viewer__actions">{controls}<button type="button" ref={expandButton} aria-label={`Expand ${label.toLowerCase()}`} onClick={() => setExpanded(true)}><Icon name="expand" size={14}/></button></div></header>
     {body}
     {fullscreen}
   </section>

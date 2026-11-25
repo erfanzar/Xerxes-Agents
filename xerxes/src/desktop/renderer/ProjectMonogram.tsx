@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code-style real project logo / favicon badge.
+ * Real project logo / favicon badge.
  *
  * Resolves the workspace's real logo/favicon on disk (`favicon.svg`, `assets/logo*`,
  * `public/favicon.*`, `<link rel="icon">` in `index.html`, etc.) via Electron IPC.

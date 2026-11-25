@@ -1,10 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useId, useState, type ReactElement } from 'react'
 
 import type { SupervisorConfigInput, SupervisorOptionsInput } from '../../client/hubController.js'
 import type { MachinesState, SupervisorConfigState } from '../../client/hubStore.js'
+import { localMachineLabel } from './runModeView.js'
 import { ChipChoice, ListChoice } from './XChoice.js'
 
 /**
@@ -29,6 +30,10 @@ export interface ModelChooserProps {
 
 export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onClose, embedded }: ModelChooserProps): ReactElement {
   const only = machines.list.length === 1 ? machines.list[0]!.id : ''
+  const machineLabelId = useId()
+  const profileLabelId = useId()
+  const modelLabelId = useId()
+  const effortLabelId = useId()
   const [machineId, setMachineId] = useState(config.config?.machineId ?? only)
   const [profile, setProfile] = useState(config.config?.profile ?? '')
   const [model, setModel] = useState(config.config?.model ?? '')
@@ -90,12 +95,13 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
       {config.status === 'unconfigured' ? <p className="studio-muted">XERXES has no model yet. Choose a machine, a provider profile and a model.</p> : null}
       {!editable ? <p role="status" className="studio-muted">Only the Hub owner can change XERXES&apos;s model. This is what it uses now.</p> : null}
       {machines.error ? <p role="alert" className="action-card__error">{machines.error}</p> : null}
-      {machines.phase === 'ready' && machines.list.length === 0 ? <p role="status" className="notice">No machine is linked to this Hub yet. Use “Link this Mac” in Settings → Hub &amp; phone.</p> : null}
+      {machines.phase === 'ready' && machines.list.length === 0 ? <p role="status" className="notice">No machine is linked to this Hub yet. Use “Link {localMachineLabel()}” in Settings → Hub &amp; phone.</p> : null}
 
       <div className="xfield">
-        <span className="xfield__label">Machine</span>
+        <span id={machineLabelId} className="xfield__label">Machine</span>
         <ListChoice
           label="Machine"
+          ariaLabelledBy={machineLabelId}
           value={machineId}
           options={machines.list.map(machine => ({
             value: machine.id,
@@ -109,9 +115,10 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
         />
       </div>
       <div className="xfield">
-        <span className="xfield__label">Provider profile</span>
+        <span id={profileLabelId} className="xfield__label">Provider profile</span>
         <ListChoice
           label="Provider profile"
+          ariaLabelledBy={profileLabelId}
           value={profile}
           options={(forMachine?.profiles ?? []).map(item => ({ value: item.name, label: item.label, hint: item.provider }))}
           disabled={!editable || machineId === ''}
@@ -120,9 +127,10 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
         />
       </div>
       <div className="xfield">
-        <span className="xfield__label">Model</span>
+        <span id={modelLabelId} className="xfield__label">Model</span>
         <ListChoice
           label="Model"
+          ariaLabelledBy={modelLabelId}
           value={model}
           options={(forProfile?.models ?? []).map(item => ({ value: item.id, label: item.label === '' ? item.id : item.label, hint: item.label === '' || item.label === item.id ? '' : item.id }))}
           disabled={!editable || profile === ''}
@@ -131,10 +139,11 @@ export function ModelChooser({ machines, config, onOptions, onSave, onOpen, onCl
         />
       </div>
       <div className="xfield">
-        <span className="xfield__label">Thinking effort</span>
+        <span id={effortLabelId} className="xfield__label">Thinking effort</span>
         {model === '' ? <p className="xlist__empty">Choose a model first.</p> : (
           <ChipChoice
             label="Thinking effort"
+            ariaLabelledBy={effortLabelId}
             value={effort}
             options={[
               { value: '', label: forModel?.defaultEffort ? `Default (${forModel.defaultEffort})` : 'Default' },

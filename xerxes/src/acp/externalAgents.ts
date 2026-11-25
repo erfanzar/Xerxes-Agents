@@ -799,6 +799,8 @@ export interface AcpToolMetaSnapshot {
   readonly diffs?: readonly AcpBridgeDiff[]
   readonly kind?: string
   readonly locations?: readonly AcpBridgeLocation[]
+  readonly settledOutput?: string
+  readonly settledRawInput?: unknown
   readonly title?: string
 }
 
@@ -903,8 +905,9 @@ export function bridgeEventFromAcpClientEvent(
       const diff = diffs?.[0]
       const contentBlocks = event.contentBlocks && event.contentBlocks.length > 0 ? event.contentBlocks : undefined
       const locations = event.locations && event.locations.length > 0 ? event.locations : undefined
+      const prevMetaBeforeUpdate = toolMetaById?.get(event.toolCallId)
       if (toolMetaById && (diff || diffs || contentBlocks || locations || event.kind || event.title)) {
-        const prev = toolMetaById.get(event.toolCallId)
+        const prev = prevMetaBeforeUpdate
         const mergedDiffs = diffs ?? prev?.diffs
         const mergedDiff = diff ?? mergedDiffs?.[0] ?? prev?.diff
         const mergedBlocks = contentBlocks ?? prev?.contentBlocks
@@ -918,6 +921,8 @@ export function bridgeEventFromAcpClientEvent(
           ...(mergedLocations ? { locations: mergedLocations } : {}),
           ...(mergedKind ? { kind: mergedKind } : {}),
           ...(mergedTitle ? { title: mergedTitle } : {}),
+          ...(prev?.settledOutput !== undefined ? { settledOutput: prev.settledOutput } : {}),
+          ...(prev?.settledRawInput !== undefined ? { settledRawInput: prev.settledRawInput } : {}),
         })
       }
 
@@ -939,10 +944,16 @@ export function bridgeEventFromAcpClientEvent(
       const settled =
         isTerminalStatus ||
         (!isNonTerminalStatus && (event.isError === true || event.rawOutput !== undefined || event.content !== undefined))
-      if (!settled) {
-        if (settledToolCallIds?.has(event.toolCallId)) {
-          return undefined
-        }
+      const hasLatePayload =
+        event.content !== undefined ||
+        event.rawOutput !== undefined ||
+        Boolean(diff) ||
+        Boolean(diffs?.length) ||
+        Boolean(contentBlocks?.length) ||
+        Boolean(locations?.length) ||
+        event.rawInput !== undefined ||
+        Boolean(event.title)
+      const buildToolUpdate = (): AcpBridgeStreamEvent => {
         const cachedMeta = toolMetaById?.get(event.toolCallId)
         const resolvedDiffs = diffs ?? cachedMeta?.diffs
         const resolvedDiff = diff ?? resolvedDiffs?.[0] ?? cachedMeta?.diff
@@ -956,6 +967,14 @@ export function bridgeEventFromAcpClientEvent(
             : typeof event.rawInput === 'string'
               ? event.rawInput
               : safeJsonStringify(event.rawInput)
+        const updateOutput =
+          event.content !== undefined
+            ? event.content
+            : event.rawOutput !== undefined
+              ? typeof event.rawOutput === 'string'
+                ? event.rawOutput
+                : safeJsonStringify(event.rawOutput)
+              : undefined
         return {
           type: 'tool_update',
           toolCallId: event.toolCallId,
@@ -965,7 +984,7 @@ export function bridgeEventFromAcpClientEvent(
           ...(event.status ? { status: event.status } : {}),
           ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
           ...(argumentsText !== undefined ? { argumentsText } : {}),
-          ...(event.content !== undefined ? { output: event.content } : {}),
+          ...(updateOutput !== undefined ? { output: updateOutput } : {}),
           ...(resolvedDiff ? { diff: resolvedDiff } : {}),
           ...(resolvedDiffs ? { diffs: resolvedDiffs } : {}),
           ...(resolvedBlocks ? { contentBlocks: resolvedBlocks } : {}),
@@ -973,9 +992,53 @@ export function bridgeEventFromAcpClientEvent(
           ...(event.meta ? { meta: event.meta } : {}),
         }
       }
+      const resolvedOutputText =
+        event.content !== undefined
+          ? event.content
+          : event.rawOutput !== undefined
+            ? typeof event.rawOutput === 'string'
+              ? event.rawOutput
+              : safeJsonStringify(event.rawOutput)
+            : ''
+      const shouldEmitLateUpdate = (): boolean => {
+        if (!hasLatePayload) return false
+        const prev = prevMetaBeforeUpdate
+        const hasNewOutput =
+          resolvedOutputText.length > 0 && resolvedOutputText !== (prev?.settledOutput ?? '')
+        const hasNewDiffs =
+          Boolean(diffs?.length) && safeJsonStringify(diffs) !== safeJsonStringify(prev?.diffs ?? null)
+        const hasNewBlocks =
+          Boolean(contentBlocks?.length) &&
+          safeJsonStringify(contentBlocks) !== safeJsonStringify(prev?.contentBlocks ?? null)
+        const hasNewLocations =
+          Boolean(locations?.length) &&
+          safeJsonStringify(locations) !== safeJsonStringify(prev?.locations ?? null)
+        const hasNewInput =
+          event.rawInput !== undefined &&
+          safeJsonStringify(event.rawInput) !== safeJsonStringify(prev?.settledRawInput ?? null)
+        const hasNewTitle = Boolean(event.title) && event.title !== prev?.title
+        if (!hasNewOutput && !hasNewDiffs && !hasNewBlocks && !hasNewLocations && !hasNewInput && !hasNewTitle) {
+          return false
+        }
+        if (toolMetaById) {
+          const cur = toolMetaById.get(event.toolCallId)
+          toolMetaById.set(event.toolCallId, {
+            ...(cur ?? {}),
+            ...(hasNewOutput ? { settledOutput: resolvedOutputText } : {}),
+            ...(hasNewInput ? { settledRawInput: event.rawInput } : {}),
+          })
+        }
+        return true
+      }
+      if (!settled) {
+        if (settledToolCallIds?.has(event.toolCallId)) {
+          return shouldEmitLateUpdate() ? buildToolUpdate() : undefined
+        }
+        return buildToolUpdate()
+      }
       if (settledToolCallIds) {
         if (settledToolCallIds.has(event.toolCallId)) {
-          return undefined
+          return shouldEmitLateUpdate() ? buildToolUpdate() : undefined
         }
         settledToolCallIds.add(event.toolCallId)
       }
@@ -986,15 +1049,19 @@ export function bridgeEventFromAcpClientEvent(
       const resolvedLocations = locations ?? cachedMeta?.locations
       const resolvedKind = event.kind ?? cachedMeta?.kind
       const resolvedTitle = event.title ?? cachedMeta?.title
-      toolMetaById?.delete(event.toolCallId)
-      const output =
-        event.content !== undefined
-          ? event.content
-          : event.rawOutput !== undefined
-            ? typeof event.rawOutput === 'string'
-              ? event.rawOutput
-              : safeJsonStringify(event.rawOutput)
-            : ''
+      const output = resolvedOutputText
+      if (toolMetaById) {
+        toolMetaById.set(event.toolCallId, {
+          ...(resolvedDiff ? { diff: resolvedDiff } : {}),
+          ...(resolvedDiffs ? { diffs: resolvedDiffs } : {}),
+          ...(resolvedBlocks ? { contentBlocks: resolvedBlocks } : {}),
+          ...(resolvedLocations ? { locations: resolvedLocations } : {}),
+          ...(resolvedKind ? { kind: resolvedKind } : {}),
+          ...(resolvedTitle ? { title: resolvedTitle } : {}),
+          settledOutput: output,
+          ...(event.rawInput !== undefined ? { settledRawInput: event.rawInput } : {}),
+        })
+      }
       return {
         type: 'tool_result',
         toolCallId: event.toolCallId,
@@ -1841,6 +1908,7 @@ export function discoverRuntimeSkillEntries(
     entries.push(
       ...scanSkillMdDirectory(join(cwd, '.agents', 'skills'), 'Workspace'),
       ...scanSkillMdDirectory(join(home, '.gemini', 'antigravity', 'skills'), 'Antigravity'),
+      ...scanSkillMdDirectory(join(home, '.gemini', 'config', 'skills'), 'Antigravity'),
       ...scanSkillMdDirectory(join(home, '.gemini', 'antigravity', 'builtin', 'skills'), 'Antigravity'),
     )
     return entries
@@ -2005,14 +2073,16 @@ export function classifyAcpRuntimeFeatures(
     for (const entry of fsEntries) {
       if (entry.disableSlashCommand) continue
       const lower = entry.name.toLowerCase()
-      if (seenCommands.has(lower)) continue
-      seenCommands.add(lower)
-      availableCommands.push({
-        name: entry.name,
-        ...(entry.description ? { description: entry.description } : {}),
-        kind: entry.kind,
-        source: entry.source,
-      })
+      if (input.provider !== 'antigravity') {
+        if (seenCommands.has(lower)) continue
+        seenCommands.add(lower)
+        availableCommands.push({
+          name: entry.name,
+          ...(entry.description ? { description: entry.description } : {}),
+          kind: entry.kind,
+          source: entry.source,
+        })
+      }
       if (entry.kind === 'skill' && !seenSkills.has(lower)) {
         seenSkills.add(lower)
         discoveredSkills.push({

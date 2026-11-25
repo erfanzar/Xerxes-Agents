@@ -84,6 +84,26 @@ const paths = {
 export type IconName = keyof typeof paths
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }): ReactElement {
+  if (name === 'spinner') {
+    return (
+      <svg
+        className="app-icon app-icon--spinner"
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <g className="xerxes-dot-grid xerxes-mark-spin">
+          <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--1" cx="7.2" cy="7.2" r="3.5" fill="var(--x-title, currentColor)" opacity="0.24" />
+          <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--2" cx="16.8" cy="7.2" r="3.5" fill="var(--x-title, currentColor)" opacity="0.5" />
+          <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--3" cx="16.8" cy="16.8" r="3.5" fill="var(--x-title, currentColor)" opacity="0.82" />
+          <circle className="xerxes-dot-grid__dot xerxes-dot-grid__dot--4" cx="7.2" cy="16.8" r="3.5" fill="var(--x-title, currentColor)" opacity="1" />
+        </g>
+      </svg>
+    )
+  }
   return (
     <svg
       className="app-icon"

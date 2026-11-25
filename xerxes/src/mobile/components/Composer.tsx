@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useRef, useState, type ChangeEvent, type ReactElement } from 'react'
+import { useId, useRef, useState, type ChangeEvent, type ReactElement } from 'react'
 
 import { IMAGE_LIMITS, browserImageEngine, checkImageFile, fitsWireBudget, prepareImage, type PreparedImage } from '../../client/imagePrep.js'
 import type { ComposerMode } from '../../client/taskView.js'
@@ -48,6 +48,7 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage, onEdit
   const [preparing, setPreparing] = useState<readonly Preparing[]>([])
   const [problem, setProblem] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
+  const errorId = useId()
   const count = useRef(0)
   const attached = useRef<readonly PreparedImage[]>([])
   const typing = useRef(false)
@@ -151,14 +152,15 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage, onEdit
 
   const empty = text.trim() === '' && images.length === 0
   const verb = mode === 'steer' ? 'Steer' : 'Send'
+  const hasError = problem !== undefined || sendMessage !== undefined
   return (
     <form className="composer" aria-label="Message" onSubmit={event => { event.preventDefault(); void send() }}>
       {images.length === 0 && preparing.length === 0 ? null : (
         <ul className="attachments" aria-label="Attached images">
-          {images.map(image => (
+          {images.map((image, index) => (
             <li key={image.id} className="attachment">
               <img src={image.previewUrl} alt={`Attached image ${image.width} by ${image.height}`} width={56} height={56} />
-              <button type="button" className="btn btn-quiet" onClick={() => removeImage(image.id)}>Remove</button>
+              <button type="button" className="btn btn-quiet" aria-label={`Remove attached image ${index + 1}`} onClick={() => removeImage(image.id)}>Remove</button>
             </li>
           ))}
           {preparing.map(item => (
@@ -169,15 +171,24 @@ export function Composer({ draftKey, mode, running, canSend, sendMessage, onEdit
         </ul>
       )}
       {images.length > 0 && !controller.imagesSupported ? <p className="notice">This Hub does not accept images yet. Remove them to send your message.</p> : null}
-      {problem === undefined ? null : <p role="alert" className="field-error">{problem}</p>}
-      {sendMessage === undefined ? null : <p role="alert" className="field-error">{sendMessage}</p>}
+      {problem === undefined ? null : <p id={errorId} role="alert" className="field-error">{problem}</p>}
+      {sendMessage === undefined ? null : <p id={problem === undefined ? errorId : undefined} role="alert" className="field-error">{sendMessage}</p>}
       <label className="field">
         <span className="visually-hidden">{mode === 'steer' ? 'Steer the task' : 'Message to the task'}</span>
         <textarea
           rows={2}
           value={text}
+          aria-invalid={hasError ? true : undefined}
+          aria-describedby={hasError ? errorId : undefined}
           placeholder={mode === 'steer' ? 'Steer this task…' : 'Message Xerxes…'}
           onChange={event => update(event.target.value)}
+          onKeyDown={event => {
+            if (event.nativeEvent.isComposing) return
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault()
+              void send()
+            }
+          }}
           onBlur={stoppedTyping}
         />
       </label>

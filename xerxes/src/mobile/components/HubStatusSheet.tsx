@@ -17,6 +17,15 @@ const HEALTH_LABEL: Readonly<Record<string, string>> = {
   needs_operator: 'Needs attention',
 }
 
+const CONNECTION_LABEL: Readonly<Record<string, string>> = {
+  live: 'Connected to Hub',
+  connecting: 'Connecting to Hub…',
+  replaying: 'Catching up with Hub…',
+  reconnecting: 'Reconnecting to Hub…',
+  closed: 'Disconnected from Hub',
+  revoked: 'Signed out',
+}
+
 export function HubStatusSheet({ onClose }: { readonly onClose: () => void }): ReactElement {
   const state = useHubState()
   const now = useNow()
@@ -45,7 +54,7 @@ export function HubStatusSheet({ onClose }: { readonly onClose: () => void }): R
             <div className="hub-row-main">
               <p className="hub-row-title">
                 <span className={live ? 'hub-dot hub-dot-live' : 'hub-dot hub-dot-off'} aria-hidden="true" />
-                <strong>{live ? 'Connected to Hub' : `Connection: ${state.connection.state}`}</strong>
+                <strong>{CONNECTION_LABEL[state.connection.state] ?? 'Connecting to Hub…'}</strong>
               </p>
               <p className="hub-meta">
                 {onlineCount} of {workspaces.length} {workspaces.length === 1 ? 'workspace' : 'workspaces'} reachable

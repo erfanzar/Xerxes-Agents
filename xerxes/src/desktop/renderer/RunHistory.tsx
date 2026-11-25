@@ -25,7 +25,7 @@ export function RunHistory({ page, result, busy, onClose, onMore, onInspect }: {
   onInspect(run: RpcRecord): void
 }): ReactElement {
   return <section className="run-history" aria-label="Scheduled run history">
-    <button disabled={busy} onClick={onClose}>Back to schedules</button>
+    <button type="button" className="btn" disabled={busy} onClick={onClose}>Back to schedules</button>
     <h2>Run history</h2>
     <p>{text(page.job.prompt)}</p>
     {!page.runs.length && <p role="status">This schedule has not run yet.</p>}
@@ -34,7 +34,7 @@ export function RunHistory({ page, result, busy, onClose, onMore, onInspect }: {
         <div><strong>{startedAt(run.startedAt)}</strong><p>{text(run.state) || 'Status unavailable'}</p>
           {text(run.error) && <p className="studio-error">{text(run.error)}</p>}
         </div>
-        <button disabled={busy} aria-expanded={result?.id === run.id} onClick={() => onInspect(run)}>
+        <button type="button" className="btn" disabled={busy} aria-expanded={result?.id === run.id} onClick={() => onInspect(run)}>
           {result?.id === run.id ? 'Refresh result' : 'View result'}
         </button>
       </div>
@@ -45,6 +45,6 @@ export function RunHistory({ page, result, busy, onClose, onMore, onInspect }: {
         {result.outputTruncated === true && <p className="studio-muted">Only the retained output is shown; earlier output was truncated.</p>}
       </div>}
     </div>)}
-    {page.hasMore && <button disabled={busy} onClick={onMore}>Load earlier runs</button>}
+    {page.hasMore && <button type="button" className="btn" disabled={busy} onClick={onMore}>Load earlier runs</button>}
   </section>
 }

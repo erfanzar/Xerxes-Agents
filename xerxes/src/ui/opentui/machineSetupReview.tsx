@@ -32,6 +32,7 @@ export function MachineSetupReview({ machine, t, onBack, onConnect, busy, error,
   const [index, setIndex] = useState(0)
   const scroll = useRef<ScrollBoxRenderable | null>(null)
   useKeyboard(key => {
+    if (key.eventType === 'release') return
     if (!['escape', 'return', 'enter', 'tab', 'left', 'right', 'up', 'down', 'pageup', 'pagedown', 'home', 'end'].includes(key.name)) return
     key.preventDefault(); key.stopPropagation()
     if (key.name === 'escape') { onBack(); return }

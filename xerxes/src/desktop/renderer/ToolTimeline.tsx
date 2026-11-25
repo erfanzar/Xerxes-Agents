@@ -435,7 +435,7 @@ export const ToolTimelineGroup = memo(function ToolTimelineGroup({ blocks, activ
     if (stats.stepCount > 0) metaParts.push(`${stats.stepCount} ${stats.stepCount === 1 ? 'step' : 'steps'}`)
     if (stats.durationLabel) metaParts.push(stats.durationLabel)
     if (stats.failures > 0) metaParts.push(`${stats.failures} failed`)
-    return metaParts.length > 0 ? `${stats.headline} — ${metaParts.join(' · ')}` : stats.headline
+    return metaParts.length > 0 ? `${stats.headline} · ${metaParts.join(' · ')}` : stats.headline
   }, [stats])
 
   const toggleAllDiffs = (): void => {
@@ -467,7 +467,7 @@ export const ToolTimelineGroup = memo(function ToolTimelineGroup({ blocks, activ
             </div>
           </details>
         }
-        return <p key={notice.id} className="tool-timeline__inline-error" role="alert">{trimmed || notice.text}</p>
+        return <p key={notice.id} className="tool-timeline__inline-error" {...(active ? { role: 'alert' } : {})}>{trimmed || notice.text}</p>
       })}
     </div>
   }

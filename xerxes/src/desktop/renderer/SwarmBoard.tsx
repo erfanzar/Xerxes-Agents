@@ -260,13 +260,13 @@ function workspaceBadgeLabel(mode: SwarmMemberSnapshot['workspace']): string {
   return 'inherit'
 }
 
-type SwarmAvatarTint = 'accent' | 'violet' | 'emerald' | 'amber' | 'rose'
+type SwarmAvatarTint = 'accent' | 'sky' | 'emerald' | 'amber' | 'rose'
 
-const WORKER_TINTS: readonly SwarmAvatarTint[] = ['violet', 'emerald', 'rose', 'amber', 'accent']
+const WORKER_TINTS: readonly SwarmAvatarTint[] = ['sky', 'emerald', 'rose', 'amber', 'accent']
 
 function memberAvatarTint(name: string, role: SwarmMemberSnapshot['role']): SwarmAvatarTint {
   if (role === 'coordinator') return 'accent'
-  if (role === 'narrator') return 'violet'
+  if (role === 'narrator') return 'sky'
   if (role === 'monitor') return 'amber'
   const resolved = resolveSimurghRole(name, role)
   if (resolved === 'verifier') return 'emerald'
@@ -274,7 +274,7 @@ function memberAvatarTint(name: string, role: SwarmMemberSnapshot['role']): Swar
   for (let i = 0; i < name.length; i += 1) {
     hash = ((hash * 31) + name.charCodeAt(i)) >>> 0
   }
-  return WORKER_TINTS[hash % WORKER_TINTS.length] ?? 'violet'
+  return WORKER_TINTS[hash % WORKER_TINTS.length] ?? 'sky'
 }
 
 function cleanSingleLineSnippet(raw: string, maxChars = 120): string {
@@ -892,6 +892,20 @@ export function SwarmModelPicker({
             event.stopPropagation()
             onClose()
             anchorRef?.current?.focus()
+            return
+          }
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+            const items = [...(popoverRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)') ?? [])]
+            if (!items.length) return
+            if (event.target instanceof HTMLInputElement && (event.key === 'Home' || event.key === 'End')) return
+            event.preventDefault()
+            const cur = items.findIndex(item => item === document.activeElement)
+            const next =
+              event.key === 'Home' ? 0
+              : event.key === 'End' ? items.length - 1
+              : cur < 0 ? (event.key === 'ArrowDown' ? 0 : items.length - 1)
+              : (cur + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
+            items[next]?.focus()
           }
         }}
       >
@@ -916,7 +930,7 @@ export function SwarmModelPicker({
             <Icon name="search" size={12} />
             <input
               ref={searchInputRef}
-              type="text"
+              type="search"
               className="swarm-model-picker__filter"
               aria-label="Filter models"
               placeholder="Filter models…"
@@ -940,8 +954,8 @@ export function SwarmModelPicker({
           {filtered.length === 0 ? (
             <p className="swarm-model-picker__empty">
               {query.trim()
-                ? 'No matching models — enter a custom ID below.'
-                : 'No discovered models — enter a custom ID below.'}
+                ? 'No matching models. Enter a custom ID below.'
+                : 'No discovered models. Enter a custom ID below.'}
             </p>
           ) : (
             filtered.map(choice => {
@@ -1034,8 +1048,10 @@ export function nextUnseenCount(
 
 function scrollElementToBottom(el: HTMLElement | null, behavior: ScrollBehavior): void {
   if (!el) return
+  const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  const resolved = reduce ? 'auto' : behavior
   if (typeof el.scrollTo === 'function') {
-    el.scrollTo({ top: el.scrollHeight, behavior })
+    el.scrollTo({ top: el.scrollHeight, behavior: resolved })
   } else {
     el.scrollTop = el.scrollHeight
   }
@@ -1383,7 +1399,7 @@ function SwarmMemberInspector({
             }}
             type="button"
             className={`swarm-member__model swarm-member__model--btn${modelFormOpen ? ' is-open' : ''}`}
-            title={`Model: ${effectiveMember.model} — click to switch`}
+            title={`Model: ${effectiveMember.model} (click to switch)`}
             aria-label={`Switch model for ${effectiveMember.name}`}
             aria-haspopup="dialog"
             aria-expanded={modelFormOpen}
@@ -1910,7 +1926,7 @@ function renderSwarmMemberRow({
                 }}
                 type="button"
                 className={`swarm-member__model swarm-member__model--btn${modelFormOpen ? ' is-open' : ''}`}
-                title={member.model ? `Model: ${member.model} — click to switch` : 'Click to switch model'}
+                title={member.model ? `Model: ${member.model} (click to switch)` : 'Click to switch model'}
                 aria-label={`Switch model for ${member.name}`}
                 aria-haspopup="dialog"
                 aria-expanded={modelFormOpen}
@@ -1950,7 +1966,7 @@ function renderSwarmMemberRow({
             {stateLabel === 'waiting'
               ? 'Standing by'
               : stateLabel === 'stopped'
-                ? 'Paused — wakes on mention'
+                ? 'Paused · Wakes on mention'
                 : stateLabel === 'killed'
                   ? 'Stopped'
                   : 'Ready'}
@@ -2330,7 +2346,21 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
         </div>
 
         <div className="swarm-board__bar">
-          <div className="swarm-tabs" role="tablist" aria-label="Immortals views">
+          <div
+            className="swarm-tabs"
+            role="tablist"
+            aria-label="Immortals views"
+            onKeyDown={event => {
+              if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') return
+              const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+              if (tabs.length < 2) return
+              event.preventDefault()
+              const cur = tabs.findIndex(tab => tab === document.activeElement)
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : cur < 0 ? 0 : (cur + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
+              tabs[next]?.click()
+              tabs[next]?.focus()
+            }}
+          >
             <button
               type="button"
               role="tab"
@@ -2724,46 +2754,49 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
 
                   {workerMembers.length > 0 && (
                     <div className="swarm-ov-roster" role="list" aria-label="Immortals team tiles">
-                      <button
-                        type="button"
-                        className="swarm-ov-tile"
-                        title="View all members"
-                        onClick={() => onSelectTab?.('members')}
-                      >
-                        <span className="swarm-avatar-tile swarm-avatar-tile--tile swarm-avatar-tile--all" aria-hidden="true">
-                          <span className="swarm-avatar-cluster">
-                            <SimurghSprite role="coordinator" state="waiting" size={11} animate={false} />
-                            <SimurghSprite role="worker" state="waiting" size={11} animate={false} />
-                            <SimurghSprite role="verifier" state="waiting" size={11} animate={false} />
-                            <SimurghSprite role="narrator" state="waiting" size={11} animate={false} />
+                      <div role="listitem">
+                        <button
+                          type="button"
+                          className="swarm-ov-tile"
+                          title="View all members"
+                          onClick={() => onSelectTab?.('members')}
+                        >
+                          <span className="swarm-avatar-tile swarm-avatar-tile--tile swarm-avatar-tile--all" aria-hidden="true">
+                            <span className="swarm-avatar-cluster">
+                              <SimurghSprite role="coordinator" state="waiting" size={11} animate={false} />
+                              <SimurghSprite role="worker" state="waiting" size={11} animate={false} />
+                              <SimurghSprite role="verifier" state="waiting" size={11} animate={false} />
+                              <SimurghSprite role="narrator" state="waiting" size={11} animate={false} />
+                            </span>
                           </span>
-                        </span>
-                        <span className="swarm-ov-tile__label">All</span>
-                      </button>
+                          <span className="swarm-ov-tile__label">All</span>
+                        </button>
+                      </div>
 
                       {workerMembers.map(worker => {
                         const stateLabel = stateLabelOf(worker)
                         const isWorking = !worker.killed && worker.state === 'working'
                         return (
-                          <button
-                            key={worker.name}
-                            type="button"
-                            className={`swarm-ov-tile${isWorking ? ' is-working' : ''}`}
-                            title={`@${worker.name} (${stateLabel}) — click to inspect`}
-                            onClick={() => onInspectMember?.(worker.name)}
-                          >
-                            <SwarmAvatarTile
-                              name={worker.name}
-                              role={worker.role}
-                              state={worker.error ? 'error' : worker.state}
-                              size="tile"
-                              showSleep={stateLabel === 'waiting'}
-                              showDot={isWorking}
-                              dotState={stateLabel}
-                              active={isWorking}
-                            />
-                            <span className="swarm-ov-tile__label">@{worker.name}</span>
-                          </button>
+                          <div key={worker.name} role="listitem">
+                            <button
+                              type="button"
+                              className={`swarm-ov-tile${isWorking ? ' is-working' : ''}`}
+                              title={`@${worker.name} (${stateLabel}) · Click to inspect`}
+                              onClick={() => onInspectMember?.(worker.name)}
+                            >
+                              <SwarmAvatarTile
+                                name={worker.name}
+                                role={worker.role}
+                                state={worker.error ? 'error' : worker.state}
+                                size="tile"
+                                showSleep={stateLabel === 'waiting'}
+                                showDot={isWorking}
+                                dotState={stateLabel}
+                                active={isWorking}
+                              />
+                              <span className="swarm-ov-tile__label">@{worker.name}</span>
+                            </button>
+                          </div>
                         )
                       })}
                     </div>
@@ -2776,7 +2809,7 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
                 <p className="swarm-board__overview-empty">
                   {hasNarrator
                     ? 'Waiting for @narrator to publish the first overview…'
-                    : 'No narrator overview yet — send feedback below or spawn a narrator worker to curate a live summary.'}
+                    : 'No narrator overview yet. Send feedback below or spawn a narrator worker to curate a live summary.'}
                 </p>
               )}
             </div>
@@ -2998,7 +3031,21 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
 
           {/* Hide channel strip when only #main exists */}
           {hasCustomChannels && (
-            <div className="swarm-board__channels" role="tablist" aria-label="Immortals channels">
+            <div
+              className="swarm-board__channels"
+              role="tablist"
+              aria-label="Immortals channels"
+              onKeyDown={event => {
+                if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') return
+                const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+                if (tabs.length < 2) return
+                event.preventDefault()
+                const cur = tabs.findIndex(tab => tab === document.activeElement)
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : cur < 0 ? 0 : (cur + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
+                tabs[next]?.click()
+                tabs[next]?.focus()
+              }}
+            >
               <button
                 type="button"
                 role="tab"
@@ -3107,6 +3154,7 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
           >
             {mentionCandidates.length > 0 && (
               <div
+                id="swarm-mentions-listbox"
                 className="swarm-mentions-pop"
                 role="listbox"
                 aria-label="Mention an Immortals member"
@@ -3114,6 +3162,7 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
                 {mentionCandidates.map((candidate, index) => (
                   <button
                     key={candidate.name}
+                    id={`swarm-mention-${candidate.name}`}
                     type="button"
                     role="option"
                     aria-selected={index === activeMentionIndex}
@@ -3142,15 +3191,21 @@ export function SwarmBoardView(props: SwarmBoardViewProps): ReactElement {
                 rows={1}
                 className="swarm-board__textarea swarm-pill-composer__input"
                 aria-label={`Post message to #${postChannel}`}
+                role={mentionCandidates.length > 0 ? 'combobox' : undefined}
+                aria-expanded={mentionCandidates.length > 0 ? true : undefined}
+                aria-controls={mentionCandidates.length > 0 ? 'swarm-mentions-listbox' : undefined}
+                aria-activedescendant={mentionCandidates[activeMentionIndex] ? `swarm-mention-${mentionCandidates[activeMentionIndex]!.name}` : undefined}
+                aria-autocomplete={mentionCandidates.length > 0 ? 'list' : undefined}
                 placeholder={
                   postChannelArchived
                     ? `Channel #${postChannel} is archived (read-only)`
-                    : `Message #${postChannel} — type @ to mention…`
+                    : `Message #${postChannel} (type @ to mention…)`
                 }
                 value={postDraft}
                 disabled={!online || Boolean(busyAction) || postChannelArchived}
                 onChange={event => onChangePostDraft(event.target.value)}
                 onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229) return
                   if (mentionCandidates.length > 0) {
                     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                       event.preventDefault()
@@ -3458,7 +3513,8 @@ export function SwarmBoard(props: SwarmBoardProps): ReactElement {
       const element =
         feedRef.current?.querySelector<HTMLElement>(`[data-seq="${seq}"]`) ??
         (typeof document !== 'undefined' ? document.getElementById(`swarm-msg-${seq}`) : null)
-      element?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+      const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      element?.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
     }
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(scrollCard)
     else scrollCard()

@@ -53,11 +53,13 @@ export function ActionConfirmationCard({ item, canAct, onRespond }: ActionConfir
       <p className="action-card__meta">
         {item.requestedBy === undefined ? null : <>Requested by {item.requestedBy}. </>}
         {item.state === 'pending' ? 'Nothing runs until you confirm. ' : null}
-        {item.expiresAt !== undefined && item.state === 'pending' ? <>Expires <time dateTime={item.expiresAt}>{new Date(item.expiresAt).toLocaleTimeString()}</time>.</> : null}
+        {item.expiresAt !== undefined && item.state === 'pending' && Number.isFinite(Date.parse(item.expiresAt))
+          ? <>Expires <time dateTime={item.expiresAt}>{new Date(item.expiresAt).toLocaleTimeString()}</time>.</>
+          : null}
       </p>
       {item.state === 'pending' ? (
         <div className="action-card__actions" role="group" aria-label="Confirm or cancel this action">
-          <button type="button" className="btn btn--solid btn-primary" disabled={!canAct} onClick={() => onRespond('confirm')}>Confirm</button>
+          <button type="button" className="btn btn--solid" disabled={!canAct} onClick={() => onRespond('confirm')}>Confirm</button>
           <button type="button" className="btn" disabled={!canAct} onClick={() => onRespond('cancel')}>Cancel</button>
         </div>
       ) : null}

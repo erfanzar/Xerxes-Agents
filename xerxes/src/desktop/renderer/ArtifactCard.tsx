@@ -283,10 +283,10 @@ export function latestArtifactId(blocks: readonly Block[]): string | undefined {
 export function ArtifactToast({ sessionId, showingArtifacts }: { sessionId: string; showingArtifacts: boolean }): ReactElement | null {
   const open = useDesktopNavigation()
   const [toast, setToast] = useState<Omit<ArtifactRef, 'kind'> | null>(null)
+  const [paused, setPaused] = useState(false)
   const showing = useRef(showingArtifacts)
   showing.current = showingArtifacts
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined
     const pendingInputs = new Map<string, string>()
     const off = window.xerxes.onEvent(({ type, payload }) => {
       if (typeof payload.session_id === 'string' && payload.session_id !== sessionId) return
@@ -314,13 +314,24 @@ export function ArtifactToast({ sessionId, showingArtifacts }: { sessionId: stri
       const saved = artifactFromToolResultPayload(payload, fallbackInput)
       if (!saved || showing.current) return
       setToast(saved)
-      clearTimeout(timer)
-      timer = setTimeout(() => setToast(null), 8000)
     })
-    return () => { off(); clearTimeout(timer) }
+    return () => { off() }
   }, [sessionId])
+  useEffect(() => {
+    if (!toast || paused) return
+    const timer = setTimeout(() => setToast(null), 8000)
+    return () => clearTimeout(timer)
+  }, [toast, paused])
   if (!toast) return null
-  return <div className="artifact-toast" role="status" aria-live="polite">
+  return <div
+    className="artifact-toast"
+    role="status"
+    aria-live="polite"
+    onMouseEnter={() => setPaused(true)}
+    onMouseLeave={() => setPaused(false)}
+    onFocus={() => setPaused(true)}
+    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPaused(false) }}
+  >
     <span className="artifact-toast__icon" aria-hidden="true"><Icon name="file" size={14} /></span>
     <span className="artifact-toast__text">
       <span className="artifact-toast__eyebrow">{toast.action === 'created' ? 'New artifact' : `Updated · v${toast.version}`}</span>
@@ -342,7 +353,7 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
   const open = useDesktopNavigation()
   const isInteractive = artifact.kind === 'html'
   const [previewOpen, setPreviewOpen] = useState(isInteractive && artifact.embed === true)
-  const versionBadge = artifact.version > 1 ? `v${artifact.version}` : artifact.action === 'created' ? 'new' : ''
+  const versionBadge = artifact.version > 1 ? `v${artifact.version}` : artifact.action === 'created' ? 'New' : ''
 
   return <div
     className="artifact-card"
@@ -356,12 +367,7 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
       <span className="artifact-card__icon" data-kind={artifact.kind} aria-hidden="true">
         <Icon name={kindIcon(artifact.kind)} size={15} />
       </span>
-      <button
-        type="button"
-        className="artifact-card__main"
-        onClick={() => open('docs', artifact.id)}
-        title={`Open ${artifact.title}`}
-      >
+      <div className="artifact-card__main" title={artifact.title}>
         <strong className="artifact-card__title">{artifact.title}</strong>
         <span className="artifact-card__meta">
           <span className="artifact-card__pill artifact-card__pill--kind" data-kind={artifact.kind}>{kindLabel(artifact.kind)}</span>
@@ -371,7 +377,7 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
             </span>
           )}
         </span>
-      </button>
+      </div>
       <span className="artifact-card__actions">
         {isInteractive && (
           <button
@@ -388,6 +394,7 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
           type="button"
           className="artifact-card__open"
           data-interactive={isInteractive || undefined}
+          aria-label={`Open ${artifact.title}`}
           onClick={() => open('docs', artifact.id)}
         >
           <span>Open</span>

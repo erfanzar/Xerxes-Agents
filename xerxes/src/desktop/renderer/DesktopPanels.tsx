@@ -88,6 +88,8 @@ import { RunHistory, type RunHistoryPage } from './RunHistory.js'
 import { LearnedBadge, LearnedPanel } from './LearnedPanel.js'
 import { trustAllSkills } from './catalogBulk.js'
 import { ActionDialog } from './ActionDialog.js'
+import { isMacPlatform } from './runModeView.js'
+import { SelectField } from './SelectField.js'
 import { SideQuestionPanel } from './SideQuestion.js'
 import { SwarmBoard } from './SwarmBoard.js'
 import { ScrollableCombobox } from './ScrollableCombobox.js'
@@ -227,7 +229,7 @@ export function DesktopPage({ panel, snap }: { panel: Exclude<DesktopPageName, '
     {/* A full-page destination had no way out of itself: no close button,
         and the tab bar is hidden while it is open, so Escape was the only
         thing left to try — and Escape cancelled the running turn. */}
-    <header className="desktop-page__bar"><h2 className="visually-hidden">{pageTitle}</h2><p className="studio-muted">{pageNote}</p><button className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
+    <header className="desktop-page__bar"><h2 className="visually-hidden">{pageTitle}</h2><p className="studio-muted">{pageNote}</p><button type="button" className="desktop-page__close" aria-label="Back to the conversation" title="Back to the conversation (Esc)" onClick={() => close(null)}><Icon name="close" size={13} /></button></header>
     <div className="studio-sheet-content" key={`${panel}:${snap.cwd}:${snap.sessionKey}:${externalBinding?.agent_id ?? 'native'}`}>{panel === 'agents' ? <SpecialistsPanel snap={snap} /> : panel === 'artifacts' ? <ArtifactsPanel snap={snap} /> : panel === 'schedules' ? <SchedulesPanel snap={snap} /> : <ExtensionsPanel snap={snap} />}</div>
   </section>
 }
@@ -248,11 +250,20 @@ export function RailAddMenu({ onPick, hideSwarm = false, defaultOpen = false }: 
     return () => { document.removeEventListener('mousedown', away); window.removeEventListener('keydown', escape, true) }
   }, [open])
   const panels = hideSwarm ? RAIL_PANELS.filter(value => value !== 'swarm') : RAIL_PANELS
-  return <div className="rail-add" ref={root}>
-    <button className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+  return <div className="rail-add" ref={root} onKeyDown={event => {
+    if (!open) return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return
+    const items = [...(root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+    if (!items.length) return
+    event.preventDefault()
+    const cur = items.findIndex(item => item === document.activeElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : cur < 0 ? 0 : (cur + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
+    items[next]?.focus()
+  }}>
+    <button type="button" className="rail-add__trigger" aria-label="Open a view" title="Open a view" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       {vibes ? <T3Icon name="plus" size={15} /> : <Icon name="plus" size={14} />}
     </button>
-    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{panels.map(value => <button key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}>{vibes ? <T3Icon name={railT3IconOf(value)} size={14} /> : <Icon name={railIconOf(value, vibes)} size={14} />}<span>{railTabName(value)}</span></button>)}</div>}
+    {open && <div className="rail-add__menu" role="menu" aria-label="Views">{panels.map(value => <button type="button" key={value} role="menuitem" className="rail-add__item" onClick={() => { setOpen(false); onPick(value) }}>{vibes ? <T3Icon name={railT3IconOf(value)} size={14} /> : <Icon name={railIconOf(value, vibes)} size={14} />}<span>{railTabName(value)}</span></button>)}</div>}
   </div>
 }
 
@@ -302,7 +313,18 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
     return () => observer.disconnect()
   }, [])
   return <aside ref={aside} data-fit={fit} className={`desktop-rail studio-sheet${panel === "review" ? ` desktop-rail--git${wide ? " desktop-rail--review" : ""}` : panel === "terminal" ? " desktop-rail--terminal" : ""}`} aria-label="Task context">
-    <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views">{shownTabs.map(tab => {
+    <header><nav ref={strip} className="desktop-rail__tabs" role="tablist" aria-label="Open views" onKeyDown={event => {
+      if (shownTabs.length < 2) return
+      if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') return
+      if ((event.target as HTMLElement | null)?.getAttribute('role') !== 'tab') return
+      event.preventDefault()
+      const cur = shownTabs.findIndex(tab => tabKey(tab) === currentKey)
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? shownTabs.length - 1 : event.key === 'ArrowRight' ? (cur < 0 ? 0 : (cur + 1) % shownTabs.length) : (cur <= 0 ? shownTabs.length - 1 : cur - 1)
+      const picked = shownTabs[next]
+      if (!picked) return
+      if (onSelectTab) onSelectTab(tabKey(picked)); else open(picked.panel)
+      strip.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+    }}>{shownTabs.map(tab => {
       const key = tabKey(tab), name = tab.title || railTabName(tab.panel), selected = key === currentKey
       const isItemTab = Boolean(tab.item)
       const hasLabel = selected || isItemTab || fit !== 'narrow'
@@ -318,9 +340,9 @@ export function DesktopRail({ panel, snap, close, activityDetails, filesExpanded
         }} onAuxClick={event => {
           if (event.button === 1) { event.preventDefault(); if (onCloseTab) onCloseTab(key); else close() }
         }}>{vibes ? <T3Icon name={railT3IconOf(tab.panel)} size={15} /> : <Icon name={railIconOf(tab.panel, vibes)} size={14} />}<span className="desktop-rail__tablabel">{name}</span></button>
-        <button className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}>{vibes ? <T3Icon name="close" size={11} /> : <Icon name="close" size={10} />}</button>
+        <button type="button" className="desktop-rail__tabclose" aria-label={`Close ${name}`} title={`Close ${name}`} onClick={() => onCloseTab ? onCloseTab(key) : close()}>{vibes ? <T3Icon name="close" size={11} /> : <Icon name="close" size={10} />}</button>
       </div>
-    })}</nav><RailAddMenu onPick={value => open(value)} hideSwarm={!showsImmortalsForSession(snap)} />{toggleFilesExpanded && <button aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}>{vibes ? <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} /> : <Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} />}</button>}<button aria-label="Close task context" onClick={close}>{vibes ? <T3Icon name="close" size={14} /> : <Icon name="close" size={13} />}</button></header>
+    })}</nav><RailAddMenu onPick={value => open(value)} hideSwarm={!showsImmortalsForSession(snap)} />{toggleFilesExpanded && <button type="button" aria-label={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} title={filesExpanded ? 'Restore conversation' : panel === 'files' ? 'Expand files workspace' : panel === 'browser' ? 'Expand browser' : panel === 'swarm' ? 'Expand Immortals Board' : panel === 'btw' ? 'Expand side question' : panel === 'terminal' ? 'Expand terminal' : panel === 'review' ? 'Show changes' : panel === 'usage' ? 'Expand usage' : panel === 'outputs' ? 'Expand outputs' : 'Expand Activity workspace'} aria-pressed={filesExpanded} onClick={toggleFilesExpanded}>{vibes ? <T3Icon name={filesExpanded ? 'minimize' : 'maximize'} size={14} /> : <Icon name={filesExpanded ? 'collapse' : 'expand'} size={15} />}</button>}<button type="button" aria-label="Close task context" onClick={close}>{vibes ? <T3Icon name="close" size={14} /> : <Icon name="close" size={13} />}</button></header>
     <div className="studio-sheet-content" key={panel === 'browser' ? `${currentKey}:${snap.cwd}` : `${currentKey}:${snap.cwd}:${snap.sessionKey}`}>
       {panel === 'subagents' && <SubagentsSection rows={activityFleetRows(snap.fleet, snap.blocks)} sessionKey={snap.sessionKey} online={snap.connection === 'online'} swarm={snap.swarm ?? null} onOpenSwarm={() => { store.openSwarmBoard(); open('swarm') }} onInspect={id => open('activity', id)} />}
       {panel === 'swarm' && <SwarmBoard snap={snap} />}
@@ -404,7 +426,7 @@ export function DesktopSheet({
       >
         <header>
           <h2>{names[panel]}</h2>
-          <button aria-label="Close dialog" onClick={close}>
+          <button type="button" aria-label="Close dialog" onClick={close}>
             <Icon name="close" size={13} />
           </button>
         </header>
@@ -446,7 +468,7 @@ function ArtifactsPanel({ snap }: { snap: Snapshot }): ReactElement {
   return <div className="studio-form artifacts-page">
     <ArtifactsSection key={snap.currentId} sessionKey={snap.sessionKey} sessionId={snap.currentId} online={snap.connection === 'online'} />
     <Feedback {...request} />
-    <button className="btn btn--ghost artifacts-page__export" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
+    <button type="button" className="btn btn--ghost artifacts-page__export" disabled={!snap.currentId || request.busy || snap.connection !== 'online'} onClick={() => void request.run(() => store.downloadSessionTranscript(snap.sessionKey))}>Export session transcript</button>
   </div>
 }
 
@@ -527,15 +549,15 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
         <div className="agents-hero__copy">
           <span className="agents-hero__eyebrow">Specialist roster</span>
           <h2>Bring in the right mind.</h2>
-          <p>Purpose-built agents for the work that benefits from a second pair of eyes—ready in this workspace when you need them.</p>
+          <p>Project-scoped agents with focused instructions for recurring reviews, audits, and domain tasks.</p>
           <div className="agents-hero__facts"><span><strong>{loaded ? rows.length : '—'}</strong> workspace specialists</span><span>Project-scoped instructions</span><span>Delegate from any conversation</span></div>
         </div>
         <div className="agents-hero__mark" aria-hidden="true"><span className="agents-hero__orbit" /><SimurghMark size={104} /></div>
       </section>
-      <div className="agents-workspace"><span title={snap.cwd}>{snap.cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~')}</span><button disabled={request.busy} onClick={() => store.chooseWorkspace()}>Change workspace…</button></div>
+      <div className="agents-workspace"><span title={snap.cwd}>{snap.cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~')}</span><button type="button" className="btn" disabled={request.busy} onClick={() => store.chooseWorkspace()}>Change workspace…</button></div>
       {mode === 'generate' ? (
-        <div className="studio-form">
-          <h1>Who would help?</h1>
+        <form className="studio-form" onSubmit={event => { event.preventDefault(); if (!request.busy && description.trim()) void generate() }}>
+          <h3>Draft a specialist</h3>
           <p>Your current model drafts a specialist. Review the instructions before saving.</p>
           <label>
             Description
@@ -548,20 +570,20 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
             />
           </label>
           <div className="studio-actions">
-            <button disabled={request.busy} onClick={() => setMode('list')}>
+            <button type="button" className="btn" disabled={request.busy} onClick={() => setMode('list')}>
               Back
             </button>
             <button
-              className="studio-primary"
+              type="submit"
+              className="btn btn--solid studio-primary"
               disabled={request.busy || !description.trim()}
-              onClick={() => void generate()}
             >
               {request.busy ? 'Generating…' : <>Draft specialist <Icon name="arrow" size={12} /></>}
             </button>
           </div>
-        </div>
+        </form>
       ) : mode === 'edit' ? (
-        <div className="studio-form">
+        <form className="studio-form" onSubmit={event => { event.preventDefault(); if (!request.busy) void save() }}>
           <label>
             Instructions · {selected}
             <textarea
@@ -577,20 +599,21 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
             when used.
           </p>
           <div className="studio-actions">
-            <button disabled={request.busy} onClick={() => setMode('list')}>
+            <button type="button" className="btn" disabled={request.busy} onClick={() => setMode('list')}>
               Cancel
             </button>
-            <button className="studio-primary" disabled={request.busy} onClick={() => void save()}>
+            <button type="submit" className="btn btn--solid studio-primary" disabled={request.busy}>
               Save specialist
             </button>
           </div>
-        </div>
+        </form>
       ) : (
         <>
           <div className={rows.length ? "studio-split" : "agents-empty-layout"}>
             <nav hidden={!rows.length}>
               {rows.map((row) => (
                 <button
+                  type="button"
                   key={row.id}
                   className={row.id === selected ? 'is-selected' : ''}
                   disabled={request.busy}
@@ -609,11 +632,11 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
                   <p>{active.description}</p>
                   {active.error && <p role="alert">{active.error}</p>}
                   <p className="studio-muted">Project agent · .xerxes/agents</p>
-                  <button disabled={request.busy || !!active.error} onClick={() => {
+                  <button type="button" className="btn btn--solid" disabled={request.busy || !!active.error} onClick={() => {
                     window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: 'Ask the ' + active.id + ' agent to ' }))
                     open(null)
                   }}>Use in conversation <Icon name="arrow" size={12} /></button>
-                  <button disabled={request.busy} onClick={() => void edit()}>
+                  <button type="button" className="btn" disabled={request.busy} onClick={() => void edit()}>
                     Edit instructions
                   </button>
                 </>
@@ -627,6 +650,8 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
           </div>
           <footer className={rows.length ? "studio-actions" : "studio-actions agents-empty-actions"}>
             <button
+              type="button"
+              className="btn"
               disabled={request.busy}
               onClick={() => {
                 setSelected('new-agent')
@@ -640,7 +665,8 @@ export function SpecialistsPanel({ snap }: { snap: Snapshot }): ReactElement {
               New manually
             </button>
             <button
-              className="studio-primary"
+              type="button"
+              className="btn btn--solid studio-primary"
               disabled={request.busy}
               onClick={() => setMode('generate')}
             >
@@ -877,11 +903,26 @@ export function AcpCustomizePanel({
       </header>
 
       <div className="acp-customize__bar">
-        <div className="acp-customize__tabs" role="tablist" aria-label={`${effectiveBinding.name} runtime views`}>
+        <div
+          className="acp-customize__tabs"
+          role="tablist"
+          aria-label={`${effectiveBinding.name} runtime views`}
+          onKeyDown={event => {
+            const order: readonly AcpCustomizeTab[] = ['skills', 'commands', 'capabilities']
+            if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') return
+            event.preventDefault()
+            const cur = order.indexOf(tab)
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? order.length - 1 : event.key === 'ArrowRight' ? (cur + 1) % order.length : (cur <= 0 ? order.length - 1 : cur - 1)
+            setTab(order[next]!)
+            setNeedle('')
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+          }}
+        >
           <button
             type="button"
             role="tab"
             aria-selected={tab === 'skills'}
+            tabIndex={tab === 'skills' ? 0 : -1}
             className={`acp-customize__tab${tab === 'skills' ? ' is-selected' : ''}`}
             onClick={() => { setTab('skills'); setNeedle('') }}
           >
@@ -892,6 +933,7 @@ export function AcpCustomizePanel({
             type="button"
             role="tab"
             aria-selected={tab === 'commands'}
+            tabIndex={tab === 'commands' ? 0 : -1}
             className={`acp-customize__tab${tab === 'commands' ? ' is-selected' : ''}`}
             onClick={() => { setTab('commands'); setNeedle('') }}
           >
@@ -902,6 +944,7 @@ export function AcpCustomizePanel({
             type="button"
             role="tab"
             aria-selected={tab === 'capabilities'}
+            tabIndex={tab === 'capabilities' ? 0 : -1}
             className={`acp-customize__tab${tab === 'capabilities' ? ' is-selected' : ''}`}
             onClick={() => { setTab('capabilities'); setNeedle('') }}
           >
@@ -1166,9 +1209,9 @@ export function AcpCustomizePanel({
 
                 <div className="acp-cap-row acp-cap-row--stack">
                   <div className="acp-cap-row__head">
-                    <span className="acp-cap-row__label" title="Additional workspace folders passed via --add-dir">
+                    <label htmlFor="acp-launch-add-dir" className="acp-cap-row__label" title="Additional workspace folders passed via --add-dir">
                       Additional directories
-                    </span>
+                    </label>
                     <span className="acp-cap-row__mono">--add-dir</span>
                   </div>
                   {dirsDraft.length > 0 && (
@@ -1183,14 +1226,15 @@ export function AcpCustomizePanel({
                             disabled={controlsDisabled || applyingLaunch}
                             onClick={() => removeExtraDir(dir)}
                           >
-                            ×
+                            <Icon name="close" size={10} />
                           </button>
                         </span>
                       ))}
                     </div>
                   )}
-                  <div className="acp-launch-add">
+                  <form className="acp-launch-add" onSubmit={event => { event.preventDefault(); addExtraDir() }}>
                     <input
+                      id="acp-launch-add-dir"
                       type="text"
                       className="acp-launch-input"
                       aria-label="Add additional directory"
@@ -1199,31 +1243,25 @@ export function AcpCustomizePanel({
                       value={dirInput}
                       disabled={controlsDisabled || applyingLaunch}
                       onChange={event => setDirInput(event.target.value)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault()
-                          addExtraDir()
-                        }
-                      }}
                     />
                     <button
-                      type="button"
+                      type="submit"
                       className="acp-customize__use"
                       disabled={controlsDisabled || applyingLaunch || !dirInput.trim()}
-                      onClick={addExtraDir}
                     >
                       Add
                     </button>
-                  </div>
+                  </form>
                 </div>
 
                 {effectiveBinding.provider === 'antigravity' && (
                   <div className="acp-cap-row">
-                    <span className="acp-cap-row__label" title="Optional Antigravity agent profile passed via --agent">
+                    <label htmlFor="acp-launch-agent" className="acp-cap-row__label" title="Optional Antigravity agent profile passed via --agent">
                       Agent override
-                    </span>
+                    </label>
                     <span className="acp-cap-row__value">
                       <input
+                        id="acp-launch-agent"
                         type="text"
                         className="acp-launch-input acp-launch-input--compact"
                         aria-label="Agent override"
@@ -1243,7 +1281,7 @@ export function AcpCustomizePanel({
                   </span>
                   <button
                     type="button"
-                    className="btn acp-customize__switch"
+                    className="btn btn--solid acp-customize__switch"
                     disabled={controlsDisabled || applyingLaunch || !launchDirty}
                     onClick={() => void applyLaunchOptions()}
                   >
@@ -1360,8 +1398,14 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
     <div className={"studio-form catalog-form" + (tab === "plugins" || tab === "learned" ? " catalog-form--plugins" : "")}>
       {catalogError && <p className="studio-error" role="alert">This runtime returned a {tab} catalog this app build does not understand. {catalogError}</p>}
       <div className="studio-tabs catalog-tabs" role="group" aria-label="Catalog views">
-        {(['skills', 'tools', 'plugins', 'learned'] as const).map((name) => (
+        {([
+          { id: 'skills', label: 'skills' },
+          { id: 'tools', label: 'tools' },
+          { id: 'plugins', label: 'plugins' },
+          { id: 'learned', label: 'learned' },
+        ] as const).map(({ id: name, label }) => (
           <button
+            type="button"
             className={name === tab ? 'is-selected' : ''}
             key={name}
             onClick={() => {
@@ -1375,10 +1419,11 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
             }}
             aria-pressed={name === tab}
           >
-            {name}{name === 'skills' && skillCount !== null ? ' · ' + skillCount : ''}{name === 'learned' && <LearnedBadge snap={snap} />}
+            {label}{name === 'skills' && skillCount !== null ? ' · ' + skillCount : ''}{name === 'learned' && <LearnedBadge snap={snap} />}
           </button>
         ))}
         <button
+          type="button"
           onClick={() => {
             open(null)
             store.openSettings('mcp')
@@ -1399,6 +1444,7 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
               </div>
               {typeof plugin.enabled === 'boolean' && (
                 <button
+                  type="button"
                   disabled={request.busy}
                   onClick={() =>
                     void request.run(async () => {
@@ -1417,6 +1463,7 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
               )}
               {typeof plugin.enabled === 'boolean' && (
                 <button
+                  type="button"
                   disabled={request.busy}
                   title="Load the plugin's current code from disk"
                   onClick={() => void request.run(async () => {
@@ -1429,24 +1476,45 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
                 </button>
               )}
               {typeof plugin.enabled === 'boolean' && (
-                <button
-                  disabled={request.busy}
-                  title="Remove from Xerxes; the module file is not deleted"
-                  onClick={() => {
-                    const name = text(plugin.name)
-                    if (confirmUninstall !== name) { setConfirmUninstall(name); return }
-                    setConfirmUninstall('')
-                    void request.run(async () => {
-                      const result = await request.call('slash', { command: '/plugins uninstall ' + pluginArgument(name) })
-                      if (request.alive.current) setDetail(text(result.output) || 'Plugin uninstalled.')
-                      await loadPlugins()
-                    })
-                  }}
-                >
-                  {confirmUninstall === text(plugin.name) ? 'Confirm uninstall' : 'Uninstall'}
-                </button>
+                confirmUninstall === text(plugin.name) ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn--danger"
+                      disabled={request.busy}
+                      onClick={() => {
+                        const name = text(plugin.name)
+                        setConfirmUninstall('')
+                        void request.run(async () => {
+                          const result = await request.call('slash', { command: '/plugins uninstall ' + pluginArgument(name) })
+                          if (request.alive.current) setDetail(text(result.output) || 'Plugin uninstalled.')
+                          await loadPlugins()
+                        })
+                      }}
+                    >
+                      Confirm uninstall
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={request.busy}
+                      onClick={() => setConfirmUninstall('')}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={request.busy}
+                    title="Remove from Xerxes; the module file is not deleted"
+                    onClick={() => setConfirmUninstall(text(plugin.name))}
+                  >
+                    Uninstall
+                  </button>
+                )
               )}
-              <button onClick={() => setDetail(pluginDetail(plugin))}>Inspect</button>
+              <button type="button" onClick={() => setDetail(pluginDetail(plugin))}>Inspect</button>
               {pluginSecretNames(plugin).length > 0 && (
                 <form
                   className="plugin-secret"
@@ -1465,67 +1533,77 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
                     })
                   }}
                 >
-                  <select
-                    aria-label={`Secret of ${text(plugin.name)}`}
-                    value={secretDrafts[text(plugin.name)]?.secret ?? pluginSecretNames(plugin)[0]}
-                    onChange={event => { const name = text(plugin.name); const secret = event.target.value; setSecretDrafts(drafts => ({ ...drafts, [name]: { secret, value: drafts[name]?.value ?? '' } })) }}
-                  >
-                    {pluginSecretNames(plugin).map(secret => <option key={secret} value={secret}>{secret}</option>)}
-                  </select>
+                  <SelectField
+                    ariaLabel={`Secret of ${text(plugin.name)}`}
+                    listLabel={`Secret of ${text(plugin.name)}`}
+                    value={secretDrafts[text(plugin.name)]?.secret ?? pluginSecretNames(plugin)[0] ?? ''}
+                    options={pluginSecretNames(plugin).map(secret => ({ value: secret, label: secret }))}
+                    onChange={secret => { const name = text(plugin.name); setSecretDrafts(drafts => ({ ...drafts, [name]: { secret, value: drafts[name]?.value ?? '' } })) }}
+                  />
                   <input
                     type="password"
                     autoComplete="off"
                     aria-label="Secret value"
-                    placeholder="value (never shown again)"
+                    placeholder="Value (never shown again)"
                     value={secretDrafts[text(plugin.name)]?.value ?? ''}
                     onChange={event => { const name = text(plugin.name); const value = event.target.value; setSecretDrafts(drafts => ({ ...drafts, [name]: { secret: drafts[name]?.secret ?? pluginSecretNames(plugin)[0]!, value } })) }}
                   />
-                  <button type="submit" disabled={request.busy || !(secretDrafts[text(plugin.name)]?.value)}>Set secret</button>
+                  <button type="submit" className="btn btn--solid" disabled={request.busy || !(secretDrafts[text(plugin.name)]?.value)}>Set secret</button>
                 </form>
               )}
             </div>
           ))}
           <p>Install a local plugin module or create a bundle in Creator mode.</p>
-          <label>
-            Module path
-            <input
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="/path/to/plugin.ts"
-            />
-          </label>
-          <button
-            disabled={request.busy || !path.trim()}
-            onClick={() =>
-              void request.run(async () => {
-                const result = await request.call('slash', {
-                  command: `/plugins install ${pluginArgument(path)}`,
-                })
-                if (request.alive.current) {
-                  setDetail(text(result.output) || 'Plugin installed.')
-                  await loadPlugins()
-                }
+          <form onSubmit={event => {
+            event.preventDefault()
+            if (request.busy || !path.trim()) return
+            void request.run(async () => {
+              const result = await request.call('slash', {
+                command: `/plugins install ${pluginArgument(path)}`,
               })
-            }
-          >
-            Install plugin
-          </button>
-          <button
-            disabled={snap.connection !== 'online'}
-            title={snap.turnActive ? 'Opens Creator mode beside the running task' : undefined}
-            onClick={() => {
-              open(null)
-              store.startCreatorMode()
-            }}
-          >
-            Open Creator mode
-          </button>
+              if (request.alive.current) {
+                setDetail(text(result.output) || 'Plugin installed.')
+                await loadPlugins()
+              }
+            })
+          }}>
+            <label>
+              Module path
+              <input
+                value={path}
+                spellCheck={false}
+                onChange={(event) => setPath(event.target.value)}
+                placeholder="/path/to/plugin.ts"
+              />
+            </label>
+            <div className="studio-actions">
+              <button
+                type="submit"
+                className="btn btn--solid"
+                disabled={request.busy || !path.trim()}
+              >
+                Install plugin
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={snap.connection !== 'online'}
+                title={snap.turnActive ? 'Opens Creator mode beside the running task' : undefined}
+                onClick={() => {
+                  open(null)
+                  store.startCreatorMode()
+                }}
+              >
+                Open Creator mode
+              </button>
+            </div>
+          </form>
         </>
       ) : (
         <>
           <div className="catalog-actions" role="group" aria-label={tab === 'skills' ? 'Skill actions' : 'Tool search'}>
-            <input className="catalog-search" aria-label="Search skills and tools" placeholder={'Search all ' + list.length + ' ' + tab + '…'} value={needle} onChange={event => setNeedle(event.target.value)} />
-            {tab === 'skills' && list.length > 0 && <button className="btn" disabled={request.busy} title="Review trusting all discovered skills after their security scans" onClick={() => setTrustReview(list.map(row => text(row.name)).filter(Boolean))}>Trust all…</button>}
+            <input type="search" className="catalog-search" aria-label="Search skills and tools" placeholder={'Search all ' + list.length + ' ' + tab + '…'} value={needle} onChange={event => setNeedle(event.target.value)} />
+            {tab === 'skills' && list.length > 0 && <button type="button" className="btn" disabled={request.busy} title="Review trusting all discovered skills after their security scans" onClick={() => setTrustReview(list.map(row => text(row.name)).filter(Boolean))}>Trust all…</button>}
           </div>
           {trustReview && <ActionDialog title={`Trust ${trustReview.length} skills?`} confirmLabel="Trust reviewed skills" busyLabel="Scanning and trusting…" busy={request.busy} onCancel={() => setTrustReview(null)} onConfirm={() => {
             const names = trustReview
@@ -1541,7 +1619,7 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
           {catalog && !list.length && <Empty>No {tab} are available in this session.</Empty>}
           <div className="studio-split catalog-browser"><nav aria-label="Installed catalog">
           {list.filter(row => [text(row.name), text(row.description), text(row.source)].join(' ').toLowerCase().includes(needle.toLowerCase())).map(row => (
-            <button className={selectedSkill === text(row.name) ? 'is-selected' : ''} key={text(row.name)} disabled={request.busy} onClick={() => void request.run(async () => {
+            <button type="button" className={selectedSkill === text(row.name) ? 'is-selected' : ''} key={text(row.name)} disabled={request.busy} onClick={() => void request.run(async () => {
               setSelectedSkill(text(row.name)); setDetail('')
               if (tab === 'skills') {
                 const result = await request.call('capabilities.inspect', { name: row.name })
@@ -1552,7 +1630,7 @@ function NativeExtensionsPanel({ snap }: { snap: Snapshot }): ReactElement {
           {list.length > 0 && !list.some(row => [text(row.name), text(row.description), text(row.source)].join(' ').toLowerCase().includes(needle.toLowerCase())) && <Empty>No matches.</Empty>}
           </nav><section key={selectedSkill} aria-label="Selected capability details" tabIndex={0}>
             {selectedSkill ? <><h2>{selectedSkill}</h2><p className="studio-muted">{text(list.find(row => text(row.name) === selectedSkill)?.source)}</p>
-              {tab === 'skills' && <button onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:insert-command', { detail: '/skill ' + selectedSkill })); open(null) }}>Use in conversation <Icon name="arrow" size={12} /></button>}
+              {tab === 'skills' && <button type="button" className="btn btn--solid" onClick={() => { window.dispatchEvent(new CustomEvent('xerxes:insert-command', { detail: '/skill ' + selectedSkill })); open(null) }}>Use in conversation <Icon name="arrow" size={12} /></button>}
               {detail && <Markdown text={detail} />}
             </> : <Empty>Select a {tab === 'skills' ? 'skill' : 'tool'} to read its details.</Empty>}
           </section></div>
@@ -1618,8 +1696,41 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
           if (request.alive.current) setRunResult(record(result.run))
         })}
       /> : creating ? (
-        <>
-          <h1>{editing ? 'Edit scheduled work' : 'Schedule useful work'}</h1>
+        <form onSubmit={event => {
+          event.preventDefault()
+          if (request.busy || !prompt.trim()) return
+          void request.run(async () => {
+            if (!preview) {
+              const result = await request.call('schedule.preview', timing)
+              if (request.alive.current) setPreview(text(result.next_run_at))
+              return
+            }
+            await request.call(
+              editing ? 'schedule.update' : 'schedule.create',
+              editing
+                ? {
+                    ...timing,
+                    prompt,
+                    paused: editing.paused,
+                    schedule_id: editing.id,
+                    revision: editing.revision,
+                  }
+                : {
+                    ...timing,
+                    prompt,
+                    paused: false,
+                    deliver: 'workspace',
+                    target: 'independent',
+                  },
+            )
+            if (request.alive.current) {
+              setCreating(false)
+              setPreview('')
+              await load()
+            }
+          })
+        }}>
+          <h2>{editing ? 'Edit scheduled job' : 'New scheduled job'}</h2>
           <label>
             Task
             <textarea
@@ -1632,25 +1743,31 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
               placeholder="Run regression tests and report confirmed failures."
             />
           </label>
-          <label>
-            Schedule
-            <select
+          <div className="field">
+            <label htmlFor="schedule-preset-select">Schedule</label>
+            <SelectField
+              id="schedule-preset-select"
+              listLabel="Schedule presets"
               value={schedule}
-              onChange={(event) => {
-                setSchedule(event.target.value)
+              options={[
+                ...(!['0 8 * * 1-5', '0 2 * * *', '0 * * * *'].includes(schedule)
+                  ? [{ value: schedule, label: 'Custom expression' }]
+                  : []),
+                { value: '0 8 * * 1-5', label: 'Weekdays at 08:00' },
+                { value: '0 2 * * *', label: 'Every night at 02:00' },
+                { value: '0 * * * *', label: 'Every hour' },
+              ]}
+              onChange={next => {
+                setSchedule(next)
                 setPreview('')
               }}
-            >
-              {!['0 8 * * 1-5', '0 2 * * *', '0 * * * *'].includes(schedule) && <option value={schedule}>Custom expression</option>}
-              <option value="0 8 * * 1-5">Weekdays at 08:00</option>
-              <option value="0 2 * * *">Every night at 02:00</option>
-              <option value="0 * * * *">Every hour</option>
-            </select>
-          </label>
+            />
+          </div>
           <label>
             Cron expression
             <input
               value={schedule}
+              spellCheck={false}
               onChange={(event) => {
                 setSchedule(event.target.value)
                 setPreview('')
@@ -1662,6 +1779,8 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
             Timezone
             <input
               value={timezone}
+              spellCheck={false}
+              placeholder="America/New_York"
               onChange={(event) => {
                 setTimezone(event.target.value)
                 setPreview('')
@@ -1675,57 +1794,27 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
             </p>
           )}
           <div className="studio-actions">
-            <button disabled={request.busy} onClick={() => setCreating(false)}>
+            <button type="button" className="btn" disabled={request.busy} onClick={() => setCreating(false)}>
               Cancel
             </button>
             <button
+              type="submit"
               disabled={request.busy || !prompt.trim()}
-              className="studio-primary"
-              onClick={() =>
-                void request.run(async () => {
-                  if (!preview) {
-                    const result = await request.call('schedule.preview', timing)
-                    if (request.alive.current) setPreview(text(result.next_run_at))
-                    return
-                  }
-                  await request.call(
-                    editing ? 'schedule.update' : 'schedule.create',
-                    editing
-                      ? {
-                          ...timing,
-                          prompt,
-                          paused: editing.paused,
-                          schedule_id: editing.id,
-                          revision: editing.revision,
-                        }
-                      : {
-                          ...timing,
-                          prompt,
-                          paused: false,
-                          deliver: 'workspace',
-                          target: 'independent',
-                        },
-                  )
-                  if (request.alive.current) {
-                    setCreating(false)
-                    setPreview('')
-                    await load()
-                  }
-                })
-              }
+              className="btn btn--solid studio-primary"
             >
               {preview ? (editing ? 'Save schedule' : 'Create schedule') : 'Preview schedule'}
             </button>
           </div>
-        </>
+        </form>
       ) : (
         <>
           <div className="studio-actions">
-            <button disabled={request.busy} onClick={() => void request.run(load)}>
+            <button type="button" className="btn" disabled={request.busy} onClick={() => void request.run(load)}>
               Refresh
             </button>
             <button
-              className="studio-primary"
+              type="button"
+              className="btn btn--solid studio-primary"
               onClick={() => {
                 setEditing(null)
                 setPrompt('')
@@ -1735,7 +1824,7 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
             >
               New schedule
             </button>
-            <button onClick={()=>setAllRuns(true)}>All run history</button>
+            <button type="button" className="btn" onClick={()=>setAllRuns(true)}>All run history</button>
           </div>
           {loaded && !jobs.length && <Empty>No scheduled work in this workspace yet.</Empty>}
           {jobs.map((job) => (
@@ -1750,13 +1839,14 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                   {[cronInEnglish(text(job.schedule)), text(job.timezone), job.paused ? 'Paused' : text(job.execution_state)].filter(Boolean).join(' · ')}
                 </p>
                 <small title={text(job.schedule)}>
-                  {job.paused ? 'Paused — it will not run until you resume it'
+                  {job.paused ? 'Paused. It will not run until you resume it.'
                     : text(job.next_run_at) ? `Next: ${scheduleTime(text(job.next_run_at), text(job.timezone))}`
                     : 'Next run not scheduled yet'}
                 </small>
               </div>
               <div className="studio-actions">
                 <button
+                  type="button"
                   disabled={request.busy || job.execution_state === 'running'}
                   onClick={() => {
                     setAllRuns(true)
@@ -1776,6 +1866,7 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                 </button>
                 {text(job.schedule) && (
                   <button
+                    type="button"
                     disabled={request.busy}
                     onClick={() => {
                       setEditing(job)
@@ -1790,6 +1881,7 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                   </button>
                 )}
                 <button
+                  type="button"
                   disabled={request.busy}
                   onClick={() =>
                     void request.run(async () => {
@@ -1803,13 +1895,15 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                   {job.paused ? 'Resume' : 'Pause'}
                 </button>
                 <button
+                  type="button"
                   disabled={request.busy}
                   onClick={() => void loadHistory(job)}
                 >
                   History
                 </button>
-                <button disabled={request.busy} onClick={()=>setDeliverySchedule(text(job.id))}>Deliveries</button>
+                <button type="button" disabled={request.busy} onClick={()=>setDeliverySchedule(text(job.id))}>Deliveries</button>
                 <button
+                  type="button"
                   disabled={request.busy}
                   onClick={() => {
                     setPendingRemoval(text(job.id))
@@ -1819,8 +1913,8 @@ function SchedulesPanel({ snap }: { snap: Snapshot }): ReactElement {
                 </button>
                 {pendingRemoval === text(job.id) && <div className="schedule-confirmation" role="group" aria-label="Confirm schedule removal">
                   <p>Remove this schedule? Running work and retained history are kept.</p>
-                  <button disabled={request.busy} onClick={() => setPendingRemoval(null)}>Keep schedule</button>
-                  <button disabled={request.busy} onClick={() => {
+                  <button type="button" className="btn" disabled={request.busy} onClick={() => setPendingRemoval(null)}>Keep schedule</button>
+                  <button type="button" className="btn btn--danger" disabled={request.busy} onClick={() => {
                       void request.run(async () => {
                         await request.call('schedule.remove', {
                           schedule_id: job.id,
@@ -2159,6 +2253,7 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
         <span className="railrow__meta">{text(row.state) || text(row.kind)}</span>
         {row.kind === 'watcher' && row.state === 'watching' && (
           <button
+            type="button"
             disabled={request.busy}
             onClick={() =>
               void request.run(async () => {
@@ -2200,9 +2295,9 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
           <span>Terminals, monitors and diagnostics</span>
         </summary>
         <div className="rail-drawer__body">
-          <button className="activity-terminal" onClick={() => store.setTab('log')}><Icon name="note" size={16} /> Event log</button>
-          <button className="activity-terminal" disabled={!snap.currentId} onClick={() => void store.exportSessionTranscript(snap.sessionKey)}><Icon name="download" size={16} /> Export session log</button>
-          <button className="activity-terminal"
+          <button type="button" className="activity-terminal" onClick={() => store.setTab('log')}><Icon name="note" size={16} /> Event log</button>
+          <button type="button" className="activity-terminal" disabled={!snap.currentId} onClick={() => void store.exportSessionTranscript(snap.sessionKey)}><Icon name="download" size={16} /> Export session log</button>
+          <button type="button" className="activity-terminal"
             onClick={() => {
               store.loadTerminals()
               setTerminals((value) => !value)
@@ -2222,6 +2317,7 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
               </p>
             </div>
             <button
+              type="button"
               disabled={snap.turnActive || !snap.contextTokens}
               onClick={() => {
                 void store.submit('/compact')
@@ -2230,7 +2326,7 @@ export function ActivityPanel({ snap, backgroundOnly = false }: { snap: Snapshot
               Summarize
             </button>
           </div>
-          <button className="context-breakdown-toggle" aria-expanded={snap.contextMenuOpen} onClick={() => store.toggleContextMenu()}>Token breakdown</button>
+          <button type="button" className="context-breakdown-toggle" aria-expanded={snap.contextMenuOpen} onClick={() => store.toggleContextMenu()}>Token breakdown</button>
           {snap.contextMenuOpen && (snap.contextBreakdownLoading ? <p role="status">Estimating token usage…</p> : snap.contextBreakdown ? <dl className="context-breakdown">
             <dt>System prompt</dt><dd>{snap.contextBreakdown.systemPromptTokens.toLocaleString()}</dd>
             <dt>Tools</dt><dd>{snap.contextBreakdown.toolsTokens.toLocaleString()}</dd>
@@ -2343,7 +2439,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
   const moreRef = useRef<HTMLSpanElement>(null)
   const [actionError, setActionError] = useState('')
   const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null)
-  const [changedOpen, setChangedOpen] = useState(true)
+  const [changedOpen, setChangedOpen] = useState(false)
   // Shading: narrow card shows only the open file until this flips the tree in; a wide card hides the tree with it.
   const [treeToggled, setTreeToggled] = useState(false)
   // Changed files keyed workspace-relative (no `./`), for badges and folder dots in the tree.
@@ -2512,7 +2608,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
       )}
       <div className="file-browser__location" title={snap.cwd}><Icon name="folder" size={16} /><strong>{needle.includes("/") ? needle : snap.cwd.split('/').filter(Boolean).at(-1) || 'Workspace'}</strong></div>
       <label className="file-browser__search"><Icon name="search" size={15} />
-        <input aria-label="Filter workspace files by path" value={needle} onChange={(event) => setNeedle(event.target.value)} placeholder="Find a file…" />
+        <input type="search" aria-label="Filter workspace files by path" value={needle} onChange={(event) => setNeedle(event.target.value)} placeholder="Find a file…" />
         {needle && (
           <button
             type="button"
@@ -2527,13 +2623,13 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
       </label>
       <div className="file-browser__entries">
         {!debouncedNeedle && changes.length > 0 && <div className="file-browser__changed" role="group" aria-label="Changed files">
-          <button className="file-browser__changed-head" aria-expanded={changedOpen} onClick={() => setChangedOpen(value => !value)}>
+          <button type="button" className="file-browser__changed-head" aria-expanded={changedOpen} onClick={() => setChangedOpen(value => !value)}>
             <Icon name="caretDown" size={10} /><span>Changed files</span><span className="file-browser__changed-count">{changes.length}</span>
           </button>
           {changedOpen && changes.map(change => {
             const path = workspaceFilePath(change.path, snap.cwd)
             const name = change.path.split('/').filter(Boolean).at(-1) ?? change.path
-            return <button key={change.path} className="file-browser__entry file-browser__changed-row" data-change={change.isNew ? 'added' : 'modified'} aria-selected={selected === path} title={change.path} onClick={() => pick(path)}>
+            return <button type="button" key={change.path} className="file-browser__entry file-browser__changed-row" data-change={change.isNew ? 'added' : 'modified'} aria-current={selected === path ? 'true' : undefined} title={change.path} onClick={() => pick(path)}>
               <Icon name="file" size={13} /><span>{name}</span><span className="file-browser__badge" aria-label={change.isNew ? 'Added' : 'Modified'}>{change.isNew ? 'A' : 'M'}</span>
             </button>
           })}
@@ -2545,7 +2641,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
       {selected && <div className="file-browser__document"><div className="file-browser__selection file-browser__pathbar">
         <button type="button" className="file-browser__treebtn" aria-label="Toggle file tree" title="Show or hide the file tree" aria-pressed={treeToggled} onClick={() => setTreeToggled(value => !value)}><Icon name="sidebar" size={14} /></button>
         <p title={selected}><span className="file-browser__dir">{(() => { const dir = selected.replace(/^\.\//, '').split('/').slice(0, -1).join('/'); return dir ? dir + '/' : '' })()}</span><strong>{selectedName}</strong>{dirty && <span className="file-browser__dirty" title="Unsaved changes"> ●</span>}</p>
-        {dirty && <><button type="button" className="file-browser__save" disabled={save.state === 'saving'} title="Save (⌘S)" onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button type="button" title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }); setPendingSwitchPath(null) }}>Revert</button></>}
+        {dirty && <><button type="button" className="file-browser__save" disabled={save.state === 'saving'} title={isMacPlatform() ? 'Save (⌘S)' : 'Save (Ctrl+S)'} onClick={() => void saveFile()}>{save.state === 'saving' ? 'Saving…' : 'Save'}</button><button type="button" title="Discard your changes" onClick={() => { if (file) setDraft(file.content); setSave({ state: 'idle' }); setPendingSwitchPath(null) }}>Revert</button></>}
         {!dirty && save.state === 'saved' && <span className="file-browser__saved" role="status">Saved</span>}
         {editable && /\.pyi?$/.test(selected) && !rich && <button type="button" className="file-browser__format" disabled={formatting} title="Format with Ruff (⇧⌥F)" onClick={() => void formatFile()}>{formatting ? 'Formatting…' : 'Format'}</button>}
         {view && <button type="button" className="file-browser__mode" aria-pressed={source} disabled={dirty && serverRendered} onClick={() => setSourceOf(source ? '' : selected)}>{source ? 'Preview' : 'Source'}</button>}
@@ -2562,7 +2658,7 @@ export function FilesPanel({ snap, close, target, changes = [], onOpen }: { snap
         <div className="file-browser__notice" role="alertdialog" aria-label="Unsaved file changes">
           <span>Discard your unsaved changes to {file?.path ?? selected}?</span>
           <button type="button" className="btn btn--ghost" onClick={() => setPendingSwitchPath(null)}>Keep editing</button>
-          <button type="button" className="btn btn--solid" onClick={() => commitSelected(pendingSwitchPath)}>Discard</button>
+          <button type="button" className="btn btn--danger" onClick={() => commitSelected(pendingSwitchPath)}>Discard</button>
         </div>
       )}
       {actionError && (
@@ -2653,10 +2749,9 @@ function consumeWorkspaceSshForm(): boolean {
   return true
 }
 
-const LOCAL_MACHINE_LABEL =
-  typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || navigator.userAgent)
-    ? 'This Mac'
-    : 'This computer'
+function localMachineTitle(): string {
+  return isMacPlatform() ? 'This Mac' : 'This computer'
+}
 
 export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
   const [managed, setManaged] = useState(false)
@@ -2690,7 +2785,8 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
       setTab('ssh')
       setAdding(true)
       setSshError('')
-      requestAnimationFrame(() => sshSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+      const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      requestAnimationFrame(() => sshSectionRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' }))
     }
     window.addEventListener(WORKSPACE_ADD_SSH_EVENT, onRequestSsh)
     return () => window.removeEventListener(WORKSPACE_ADD_SSH_EVENT, onRequestSsh)
@@ -2792,11 +2888,23 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
   return (
     <div className="studio-form workspace-panel">
       {managed ? <WorkspaceReview key={snap.sessionKey} snap={snap} close={() => setManaged(false)} /> : <>
-        <div className="seg ws-tabs" role="tablist" aria-label="Workspace mode">
+        <div
+          className="seg ws-tabs"
+          role="tablist"
+          aria-label="Workspace mode"
+          onKeyDown={event => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return
+            event.preventDefault()
+            const next: 'ssh' | 'local' = event.key === 'Home' ? 'ssh' : event.key === 'End' ? 'local' : tab === 'ssh' ? 'local' : 'ssh'
+            setTab(next)
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next === 'ssh' ? 0 : 1]?.focus()
+          }}
+        >
           <button
             type="button"
             role="tab"
             aria-selected={tab === 'ssh'}
+            tabIndex={tab === 'ssh' ? 0 : -1}
             className={`ws-tab${tab === 'ssh' ? ' is-on is-active' : ''}`}
             onClick={() => setTab('ssh')}
           >
@@ -2808,11 +2916,12 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
             type="button"
             role="tab"
             aria-selected={tab === 'local'}
+            tabIndex={tab === 'local' ? 0 : -1}
             className={`ws-tab${tab === 'local' ? ' is-on is-active' : ''}`}
             onClick={() => setTab('local')}
           >
             <T3Icon name="monitor" size={14} />
-            <span>{LOCAL_MACHINE_LABEL}</span>
+            <span>{localMachineTitle()}</span>
           </button>
         </div>
 
@@ -2926,7 +3035,14 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
             )}
 
             {adding ? (
-              <div className="ws-card ws-composer-card">
+              <form
+                className="ws-card ws-composer-card"
+                onSubmit={event => {
+                  event.preventDefault()
+                  if (request.busy || browsingBusy || !alias.trim() || !target.trim() || !path.trim()) return
+                  void request.run(() => saveMachine(true))
+                }}
+              >
                 <div className="ws-composer-card__head">
                   <div>
                     <h3 className="ws-composer-card__title">Connect over SSH</h3>
@@ -3015,9 +3131,10 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                 {hostsError && <p className="studio-error ws-error" role="alert">{hostsError} You can still enter a host directly.</p>}
 
                 <div className="field ws-field">
-                  <span>Project folder</span>
+                  <label htmlFor="ws-ssh-folder">Project folder</label>
                   <div className="ws-input-row">
                     <input
+                      id="ws-ssh-folder"
                       aria-label="Project folder"
                       value={path}
                       onChange={(e) => {
@@ -3108,16 +3225,15 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                       Save
                     </button>
                     <button
-                      type="button"
+                      type="submit"
                       className="btn btn--solid"
                       disabled={request.busy || browsingBusy || !alias.trim() || !target.trim() || !path.trim()}
-                      onClick={() => void request.run(() => saveMachine(true))}
                     >
                       Save &amp; connect
                     </button>
                   </div>
                 </div>
-              </div>
+              </form>
             ) : (
               <div className="ws-section-bar">
                 <div>
@@ -3173,7 +3289,7 @@ export function WorkspacePanel({ snap }: { snap: Snapshot }): ReactElement {
                               </button>
                               <button
                                 type="button"
-                                className="btn btn--solid"
+                                className="btn btn--danger"
                                 disabled={request.busy}
                                 onClick={() => {
                                   setRemovingAlias(null)
@@ -3230,7 +3346,7 @@ function pluginDetail(plugin: RpcRecord): string {
   const tools = list(plugin.tools)
   const commands = list(plugin.commands)
   const state = text(plugin.loadError) ? `Failed to load: ${text(plugin.loadError)}`
-    : plugin.enabled === false ? 'Disabled' : plugin.stale === true ? 'Enabled — the file on disk changed; Reload to apply it' : 'Enabled'
+    : plugin.enabled === false ? 'Disabled' : plugin.stale === true ? 'Enabled (file on disk changed; reload to apply)' : 'Enabled'
   const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
   const usage = record(plugin.usage)
   const used = (tool: string): string => {
@@ -3249,9 +3365,9 @@ function pluginDetail(plugin: RpcRecord): string {
   return [
     `**${text(plugin.name)}**${text(plugin.version) ? ` · ${text(plugin.version)}` : ''}${text(plugin.scope) ? ` · ${text(plugin.scope)}` : ''}`,
     text(plugin.description),
-    `State: ${plugin.trusted === false ? `Untrusted — review it, then run /plugins trust ${text(plugin.name)}` : state}${typeof plugin.running === 'boolean' ? ` · process ${plugin.running ? 'running' : 'idle'}` : ''}`,
+    `State: ${plugin.trusted === false ? `Untrusted. Review it, then run /plugins trust ${text(plugin.name)}` : state}${typeof plugin.running === 'boolean' ? ` · process ${plugin.running ? 'running' : 'idle'}` : ''}`,
     text(plugin.module) ? `Module: \`${text(plugin.module)}\`` : '',
-    tools.length ? ['Tools:', ...tools.map(tool => `- \`plugin_${tool}\` — ${typeof descriptions[tool] === 'string' ? descriptions[tool] : 'positional arguments ({"args": [...]})'}${used(tool)}`)].join('\n') : 'Tools: none',
+    tools.length ? ['Tools:', ...tools.map(tool => `- \`plugin_${tool}\`: ${typeof descriptions[tool] === 'string' ? descriptions[tool] : 'positional arguments ({"args": [...]})'}${used(tool)}`)].join('\n') : 'Tools: none',
     commands.length ? `Commands: ${commands.map(command => `\`/${command}\``).join(', ')}` : '',
     declared.length
       ? ['Declared permissions:', ...declared.map(([key, values]) => `- ${key}: ${values.join(', ')} (${notes[key]})`), 'Plugins run in their own process with your user privileges; this is not a sandbox.'].join('\n')
@@ -3339,8 +3455,8 @@ export function BackgroundIndicator({ snap }: { snap: Snapshot }): ReactElement 
   // Idle, it only duplicated the rail's Activity button: show it only while something runs.
   if (!compacting && !(effectiveCounts && (effectiveCounts.shells || effectiveCounts.watchers || effectiveCounts.schedules))) return <></>
   return (
-    <button title="Background activity" aria-label="Activity" className="studio-background" onClick={() => open('activity')} aria-live="polite">
-      <Icon name="activity" /><span>
+    <button type="button" title="Background activity" aria-label="Activity" className="studio-background" onClick={() => open('activity')}>
+      <Icon name="activity" /><span role="status" aria-live="polite">
       {compacting ? (
         <>
           <span className="studio-spinner" />
@@ -3374,6 +3490,7 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
     [selected, setSelected] = useState(''),
     [path, setPath] = useState(''),
     [reviewedPath, setReviewedPath] = useState(''),
+    [confirmRestore, setConfirmRestore] = useState(false),
     [loaded, setLoaded] = useState(false)
   const load = async () => {
     const result = await request.call('snapshot.list')
@@ -3389,10 +3506,12 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
     <div className="studio-form">
       <Feedback {...request} />
       <div className="studio-actions">
-        <button disabled={request.busy} onClick={() => void request.run(load)}>
+        <button type="button" className="btn" disabled={request.busy} onClick={() => void request.run(load)}>
           Refresh
         </button>
         <button
+          type="button"
+          className="btn btn--solid"
           disabled={request.busy || snap.turnActive}
           onClick={() =>
             void request.run(async () => {
@@ -3412,6 +3531,8 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
             <p>{text(row.created_at)}</p>
           </div>
           <button
+            type="button"
+            className="btn"
             disabled={request.busy}
             onClick={() =>
               void request.run(async () => {
@@ -3430,46 +3551,58 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
       ))}
       {preview && (
         <>
-          <label>
-            File to restore
-            <select
+          <div className="field">
+            <label htmlFor="snapshot-restore-file">File to restore</label>
+            <SelectField
+              id="snapshot-restore-file"
+              listLabel="Files in snapshot"
               disabled={request.busy}
               value={path}
-              onChange={(e) => {
-                const path = e.target.value
-                setPath(path)
+              placeholder="Select a file"
+              options={[
+                { value: '', label: 'Select a file' },
+                ...(Array.isArray(preview.files) ? preview.files : []).map((file) => ({
+                  value: String(file),
+                  label: String(file),
+                })),
+              ]}
+              onChange={(nextPath) => {
+                setPath(nextPath)
                 setReviewedPath('')
-                if (path)
+                setConfirmRestore(false)
+                if (nextPath)
                   void request.run(async () => {
                     const result = await request.call('snapshot.preview', {
                       snapshot_id: selected,
-                      path,
+                      path: nextPath,
                     })
                     if (request.alive.current) {
                       setPreview(result)
-                      setReviewedPath(path)
+                      setReviewedPath(nextPath)
                     }
                   })
               }}
-            >
-              <option value="">Select a file</option>
-              {(Array.isArray(preview.files) ? preview.files : []).map((file) => (
-                <option key={String(file)} value={String(file)}>
-                  {String(file)}
-                </option>
-              ))}
-            </select>
-          </label>
+            />
+          </div>
           <DiffPreview diff={text(preview.diff)} label="Snapshot restore diff" />
           {preview.truncated === true && <p>Large preview truncated.</p>}
           <button
+            type="button"
+            className="btn btn--solid"
             disabled={request.busy || !path || reviewedPath !== path || snap.turnActive}
-            onClick={() => {
-              if (
-                window.confirm(
-                  'Restore ' + path + ' from this snapshot? The runtime saves a backup first.',
-                )
-              )
+            onClick={() => setConfirmRestore(true)}
+          >
+            Restore reviewed file
+          </button>
+          {confirmRestore && path && (
+            <ActionDialog
+              title="Restore file from snapshot"
+              confirmLabel="Restore file"
+              busyLabel="Restoring…"
+              busy={request.busy}
+              destructive
+              onCancel={() => setConfirmRestore(false)}
+              onConfirm={() => {
                 void request.run(async () => {
                   await request.call('snapshot.restoreFile', {
                     snapshot_id: selected,
@@ -3477,15 +3610,18 @@ function SnapshotsPanel({ snap }: { snap: Snapshot }): ReactElement {
                     revision: preview.revision,
                   })
                   if (request.alive.current) {
+                    setConfirmRestore(false)
                     setPreview(null)
                     setPath('')
                     await load()
                   }
                 })
-            }}
-          >
-            Restore reviewed file
-          </button>
+              }}
+            >
+              <p>Restore <code>{path}</code> from this snapshot?</p>
+              <p className="studio-muted">The runtime saves a backup before overwriting the file.</p>
+            </ActionDialog>
+          )}
         </>
       )}
     </div>

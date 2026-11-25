@@ -11,5 +11,5 @@ export function ActionFeedback({ busy = false, error, message = 'Saving…' }: {
     root.current.scrollIntoView({ block: 'nearest' })
   }, [busy, error])
   if (!busy && !error) return null
-  return <p ref={root} tabIndex={-1} role={error ? 'alert' : 'status'} className={error ? 'action-card__error' : 'xap__meta'}>{error || message}</p>
+  return <p ref={root} {...(error ? { tabIndex: -1 } : {})} role={error ? 'alert' : 'status'} className={error ? 'action-card__error' : 'xap__meta'}>{error || message}</p>
 }

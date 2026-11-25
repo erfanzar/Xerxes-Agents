@@ -15,7 +15,7 @@ import { desktopCall } from './desktopRpc.js'
 import { activityFleetRows, agentState } from './AgentRoster.js'
 import { artifactRowsOf, compactAge, type ArtifactRow } from './RailSections.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
-import { store, type Snapshot } from './store.js'
+import { showsImmortalsForSession, store, type Snapshot } from './store.js'
 import { swarmMemberCounts, type SwarmStatusSnapshot } from './swarmState.js'
 import type { DiffFile, SessionRow } from './types.js'
 
@@ -78,16 +78,16 @@ function SectionPreview(props: SectionsMenuPanelProps & { section: MenuSection }
       ? <p className="sections-menu__empty">No active Immortals run. Run /immortals &lt;task&gt; or open the Immortals Board.</p>
       : <>
           <div className="sections-menu__group"><span>{swarm?.title || 'Immortals Board'}</span><span>{members.length}</span></div>
-          <div className="sections-menu__items">{members.map(member => <button key={member.name} role="menuitem" className="sections-menu__item" title={`@${member.name} · ${member.state}`} onClick={() => onPick('swarm')}>
-            <span className="sections-menu__dot" data-live={member.state === 'working' || undefined} />
+          <div className="sections-menu__items">{members.map(member => <button key={member.name} type="button" role="menuitem" className="sections-menu__item" title={`@${member.name} · ${member.state}`} onClick={() => onPick('swarm')}>
+            <span className="sections-menu__dot" data-live={member.state === 'working' || undefined} aria-hidden="true" />
             <span className="sections-menu__name">@{member.name}</span><span className="sections-menu__meta">{member.state}</span>
           </button>)}</div>
         </>
   } else if (section === 'subagents') {
     body = agents.length === 0 ? <p className="sections-menu__empty">No subagents in this task.</p> : <>
       <div className="sections-menu__group"><span>Subagents</span><span>{agents.length}</span></div>
-      <div className="sections-menu__items">{agents.map(row => <button key={row.id} role="menuitem" className="sections-menu__item" title={row.title} onClick={() => onPick('subagents', row.id)}>
-        <span className="sections-menu__dot" data-live={agentState(row.status).priority < 2 || undefined} />
+      <div className="sections-menu__items">{agents.map(row => <button key={row.id} type="button" role="menuitem" className="sections-menu__item" title={row.title} onClick={() => onPick('subagents', row.id)}>
+        <span className="sections-menu__dot" data-live={agentState(row.status).priority < 2 || undefined} aria-hidden="true" />
         <span className="sections-menu__name">{row.title}</span><span className="sections-menu__meta">{row.age}</span>
       </button>)}</div>
     </>
@@ -95,14 +95,14 @@ function SectionPreview(props: SectionsMenuPanelProps & { section: MenuSection }
     body = !artifacts ? <p className="sections-menu__empty">Artifacts load when the workspace runtime supports them.</p>
       : artifacts.length === 0 ? <p className="sections-menu__empty">No artifacts yet.</p> : <>
         <div className="sections-menu__group"><span>Artifacts</span><span>{artifacts.length}</span></div>
-        <div className="sections-menu__items">{artifacts.map(row => <button key={row.id} role="menuitem" className="sections-menu__item" title={row.title} onClick={() => onPick('docs')}>
+        <div className="sections-menu__items">{artifacts.map(row => <button key={row.id} type="button" role="menuitem" className="sections-menu__item" title={row.title} onClick={() => onPick('docs')}>
           <Icon name="file" size={13} /><span className="sections-menu__name">{row.title}</span><span className="sections-menu__meta">{compactAge(row.updatedAt)}</span>
         </button>)}</div>
       </>
   } else if (section === 'review') {
     body = changes.length === 0 ? <p className="sections-menu__empty">No changes in this task yet.</p> : <>
       <div className="sections-menu__group"><span>Changes</span><span>{changes.length}</span></div>
-      <div className="sections-menu__items">{changes.map(change => <button key={change.path} role="menuitem" className="sections-menu__item" title={change.path} onClick={() => onPick('review', change.path)}>
+      <div className="sections-menu__items">{changes.map(change => <button key={change.path} type="button" role="menuitem" className="sections-menu__item" title={change.path} onClick={() => onPick('review', change.path)}>
         <Icon name="file" size={13} /><span className="sections-menu__name">{baseName(change.path)}</span>
         <span className="sections-menu__meta"><span className="add">+{change.adds}</span> <span className="del">−{change.dels}</span></span>
       </button>)}</div>
@@ -110,10 +110,10 @@ function SectionPreview(props: SectionsMenuPanelProps & { section: MenuSection }
   } else {
     const shown = filterChanges(changes, needle)
     body = <>
-      <label className="sections-menu__search"><Icon name="search" size={13} /><input aria-label="Filter changed files" placeholder="Search in files" value={needle} spellCheck={false} onChange={event => setNeedle(event.target.value)} /></label>
+      <label className="sections-menu__search"><Icon name="search" size={13} /><input type="search" aria-label="Filter changed files" placeholder="Search in files" value={needle} spellCheck={false} onChange={event => setNeedle(event.target.value)} /></label>
       {changes.length === 0 ? <p className="sections-menu__empty">No changed files. Open Files to browse the project.</p> : <>
         <div className="sections-menu__group"><span>Changed files</span><span>{shown.length}</span></div>
-        <div className="sections-menu__items">{shown.map(change => <button key={change.path} role="menuitem" className="sections-menu__item" title={change.path} onClick={() => onPick('files', change.path)}>
+        <div className="sections-menu__items" role="menu" aria-label="Changed files">{shown.map(change => <button key={change.path} type="button" role="menuitem" className="sections-menu__item" title={change.path} onClick={() => onPick('files', change.path)}>
           <Icon name="file" size={13} /><span className="sections-menu__name">{baseName(change.path)}</span><ChangeBadge change={change} />
         </button>)}</div>
       </>}
@@ -121,7 +121,7 @@ function SectionPreview(props: SectionsMenuPanelProps & { section: MenuSection }
   }
   const side = props.hoverSide ?? 'left'
   const place = side === 'left' ? { right: 'calc(100% + 4px)', left: 'auto' } : { left: 'calc(100% + 4px)', right: 'auto' }
-  return <div className="sections-menu__preview" role="menu" aria-label={label} data-side={side}
+  return <div className="sections-menu__preview" role={section === 'files' ? 'dialog' : 'menu'} aria-label={label} data-side={side}
     style={{ top: hoverTop, ...place, width: props.hoverWidth ?? 300, maxWidth: 'none' }}>{body}</div>
 }
 
@@ -154,7 +154,7 @@ export function SectionsMenuPanel(props: SectionsMenuPanelProps): ReactElement {
         const width = Math.max(180, Math.min(300, side === 'left' ? spaceLeft : spaceRight))
         onHover(section.preview ? section.id : null, row.offsetTop, side, width)
       }
-      return <button key={section.id} role="menuitem" className={`sections-menu__row${hover === section.id ? ' is-hover' : ''}`}
+      return <button key={section.id} type="button" role="menuitem" className={`sections-menu__row${hover === section.id ? ' is-hover' : ''}`}
         aria-haspopup={section.preview ? 'menu' : undefined} aria-expanded={section.preview ? hover === section.id : undefined}
         onMouseEnter={event => enter(event.currentTarget)} onFocus={event => enter(event.currentTarget)} onClick={() => onPick(section.id)}>
         <Icon name={section.icon} size={14} /><span className="sections-menu__label">{section.label}</span>
@@ -179,6 +179,7 @@ export function SectionsMenu({ snap }: { snap: Snapshot }): ReactElement {
   const [artifacts, setArtifacts] = useState<readonly ArtifactRow[] | null>(null)
   const root = useRef<HTMLDivElement>(null)
   const agents = useMemo(() => activityFleetRows(snap.fleet, snap.blocks), [snap.fleet, snap.blocks])
+  const showSwarm = showsImmortalsForSession(snap)
   useEffect(() => {
     if (!open) return
     let live = true
@@ -190,10 +191,15 @@ export function SectionsMenu({ snap }: { snap: Snapshot }): ReactElement {
       void store.refreshSwarm({ silent: true })
     }
     const away = (event: MouseEvent): void => { if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false) }
-    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') setOpen(false) }
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setOpen(false)
+    }
     document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', escape)
-    return () => { live = false; document.removeEventListener('mousedown', away); document.removeEventListener('keydown', escape) }
+    document.addEventListener('keydown', escape, true)
+    return () => { live = false; document.removeEventListener('mousedown', away); document.removeEventListener('keydown', escape, true) }
   }, [open, snap.sessionKey, snap.connection])
   const pick = (section: MenuSection, path?: string): void => {
     setOpen(false); setHover(null); setNeedle('')
@@ -201,8 +207,8 @@ export function SectionsMenu({ snap }: { snap: Snapshot }): ReactElement {
     else navigate(section, path)
   }
   return <div className="sections-menu" ref={root}>
-    <button className="sections-menu__trigger" data-swarm-active={snap.swarm?.active ? 'true' : undefined} aria-label="Sections" title="Sections" aria-haspopup="menu" aria-expanded={open} onClick={() => { setOpen(value => !value); setHover(null) }}><Icon name="stack" size={15} /></button>
-    {open && <SectionsMenuPanel hover={hover?.section ?? null} hoverTop={hover?.top ?? 0} hoverSide={hover?.side ?? 'left'} hoverWidth={hover?.width ?? 300} needle={needle} setNeedle={setNeedle} agents={agents} artifacts={artifacts} changes={snap.changes} swarm={snap.swarm ?? null} showSwarm
+    <button type="button" className="sections-menu__trigger" data-swarm-active={snap.swarm?.active ? 'true' : undefined} aria-label="Sections" title="Sections" aria-haspopup="menu" aria-expanded={open} onClick={() => { setOpen(value => !value); setHover(null) }}><Icon name="stack" size={15} /></button>
+    {open && <SectionsMenuPanel hover={hover?.section ?? null} hoverTop={hover?.top ?? 0} hoverSide={hover?.side ?? 'left'} hoverWidth={hover?.width ?? 300} needle={needle} setNeedle={setNeedle} agents={agents} artifacts={artifacts} changes={snap.changes} swarm={snap.swarm ?? null} showSwarm={showSwarm}
       onHover={(section, top, side, width) => setHover(section ? { section, top, side: side ?? 'left', width: width ?? 300 } : null)} onPick={pick} />}
   </div>
 }

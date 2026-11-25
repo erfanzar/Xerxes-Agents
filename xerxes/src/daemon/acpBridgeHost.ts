@@ -281,6 +281,8 @@ export interface AcpSteerPromptRequest {
   readonly acceptProbeMs?: number
   readonly audio?: readonly AcpPromptAudioInput[]
   readonly images?: readonly AcpPromptImageInput[]
+  /** Called once the live steer is accepted, before `runPrompt` is allowed to settle. */
+  readonly onAccepted?: () => void
   readonly onFallbackQueue?: () => Promise<void> | void
   readonly resources?: readonly AcpPromptResourceInput[]
   readonly sessionId: string
@@ -345,6 +347,8 @@ function isReadOnlySideQuestionPermission(request: AcpClientPermissionRequest): 
 
 function acpSideQuestionToolTarget(name: string, input: Record<string, unknown>, cwd: string): string {
   const rawPath =
+    (typeof input.AbsolutePath === 'string' && input.AbsolutePath) ||
+    (typeof input.TargetFile === 'string' && input.TargetFile) ||
     (typeof input.Path === 'string' && input.Path) ||
     (typeof input.path === 'string' && input.path) ||
     (typeof input.file_path === 'string' && input.file_path) ||
@@ -353,13 +357,22 @@ function acpSideQuestionToolTarget(name: string, input: Record<string, unknown>,
     (typeof input.query === 'string' && input.query) ||
     (typeof input.Query === 'string' && input.Query) ||
     (typeof input.pattern === 'string' && input.pattern) ||
+    (typeof input.CommandLine === 'string' && input.CommandLine) ||
+    (typeof input.command === 'string' && input.command) ||
+    (typeof input.Action === 'string' && input.Action) ||
+    (typeof input.action === 'string' && input.action) ||
+    (typeof input.TaskId === 'string' && input.TaskId) ||
+    (typeof input.Url === 'string' && input.Url) ||
+    (typeof input.url === 'string' && input.url) ||
     ''
-  if (!rawPath) return name
-  if (isAbsolute(rawPath)) {
-    const rel = relative(cwd, rawPath)
+  if (!rawPath) return ''
+  const trimmed = rawPath.trim()
+  if (!trimmed || trimmed.toLowerCase() === name.trim().toLowerCase()) return ''
+  if (isAbsolute(trimmed)) {
+    const rel = relative(cwd, trimmed)
     if (rel && !rel.startsWith('..') && !isAbsolute(rel)) return rel
   }
-  return rawPath.slice(0, 120)
+  return trimmed.slice(0, 120)
 }
 
 const MAX_ACP_TOOL_NAMES = 256
@@ -463,13 +476,19 @@ interface ActiveAcpSession {
     | ((request: AcpClientPermissionRequest) => Promise<AcpClientPermissionResponse> | AcpClientPermissionResponse)
     | undefined
   activeSyntheticUpdate?: ((event: AcpClientEvent) => void) | undefined
+  activeTurnError?: ((message: string) => void) | undefined
+  activeTurnLastResult?: { readonly stopReason: string; readonly usage?: AcpPromptUsage } | undefined
+  activeTurnUsage?: ((usage: AcpPromptUsage) => void) | undefined
   readonly additionalDirectories: readonly string[]
   binding: AcpSessionBinding
+  /** Suppress stale trailing session/update frames briefly after cancel() so they never spawn a zombie wakeup. */
+  cancelSuppressUntil: number
   readonly client: AcpStdioClient
   externalSessionId: string
   hostTurboActive: boolean
   hostTurboUnderlyingMode: string | undefined
   readonly kind: 'acp'
+  lastRawCommands: readonly AcpAvailableCommand[]
   readonly liveSteerTasks: Set<Promise<void>>
   readonly mcpServers: readonly Readonly<Record<string, unknown>>[]
   nativeModes: readonly AcpExternalModeOption[]
@@ -489,6 +508,7 @@ interface ActiveClaudeSession {
   activeAbort: AbortController | undefined
   binding: AcpSessionBinding
   readonly kind: 'claude-stream-json'
+  lastRawCommands: readonly AcpAvailableCommand[]
   readonly runner: ClaudeStreamJsonRunner
 }
 
@@ -519,6 +539,29 @@ export class DaemonAcpBridgeHost {
   private readonly options: DaemonAcpBridgeHostOptions
   private defaultCreateElicitation: AcpDefaultCreateElicitationHandler | undefined
   private defaultRequestPermission: AcpDefaultRequestPermissionHandler | undefined
+
+  /**
+   * Re-scan the connected external runtime's own workspace/user skill directories
+   * (never Xerxes's bundled skills) and merge with the runtime's last advertised
+   * `available_commands_update`. Broadcasts a binding change only when the
+   * discovered skill/command list actually changed.
+   */
+  refreshRuntimeFeatures(sessionId: string): boolean {
+    const entry = this.active.get(sessionId)
+    if (!entry) return false
+    if (entry.binding.provider !== 'antigravity' && entry.binding.provider !== 'claude-code') {
+      return false
+    }
+    const changed = applyLiveBindingEvent(
+      entry,
+      { type: 'available_commands', commands: entry.lastRawCommands },
+      this.options,
+    )
+    if (changed) {
+      this.notifyBindingChange(sessionId, entry.binding)
+    }
+    return changed
+  }
 
   constructor(options: DaemonAcpBridgeHostOptions = {}) {
     this.options = options
@@ -814,6 +857,7 @@ export class DaemonAcpBridgeHost {
       }
       this.active.set(sessionId, {
         kind: 'claude-stream-json',
+        lastRawCommands: [],
         runner,
         binding,
         activeAbort: undefined,
@@ -894,6 +938,7 @@ export class DaemonAcpBridgeHost {
       cancelled = true
     }
     if (existing.kind === 'acp') {
+      existing.cancelSuppressUntil = Date.now() + 5_000
       if (!existing.outOfTurnInteractionAbort.signal.aborted) {
         existing.outOfTurnInteractionAbort.abort(new Error('External ACP interaction cancelled'))
       }
@@ -1782,14 +1827,50 @@ export class DaemonAcpBridgeHost {
       ? AbortSignal.any([request.signal, existing.activeAbort.signal])
       : existing.activeAbort.signal
 
-    // Launch concurrent prompt without registering a duplicate onEvent listener:
-    // the active turn's `promptListeners` subscription already receives every
-    // `session/update` frame for `existing.externalSessionId`!
+    // Register the live-steer task SYNCHRONOUSLY BEFORE dispatching `session/prompt`:
+    // `agy acp 1.5+` resolves the initial prompt RPC within a few milliseconds when
+    // handing the active turn over to the concurrent steer prompt. Without an immediate
+    // entry in `liveSteerTasks`, `runPrompt` would see size === 0 during the 120ms probe
+    // window, emit a premature `turn_end`, and drop the entire steered response.
+    let releaseAcceptGate!: () => void
+    const acceptGate = new Promise<void>(resolveGate => {
+      releaseAcceptGate = resolveGate
+    })
+    let accepted = false
+
     const steerRpc = existing.client.prompt({
       sessionId: existing.externalSessionId,
       text: request.text,
       content: promptBlocks,
       signal: combinedSignal,
+    })
+
+    const tracked = (async () => {
+      try {
+        const res = await steerRpc
+        await acceptGate
+        if (accepted) {
+          existing.activeTurnLastResult = {
+            stopReason: res.stopReason,
+            ...(res.usage ? { usage: res.usage } : {}),
+          }
+          if (res.usage) {
+            existing.activeTurnUsage?.(res.usage)
+          }
+        }
+      } catch (error) {
+        await acceptGate
+        if (!accepted || combinedSignal.aborted) return
+        if (isConcurrentPromptRejection(error) && request.onFallbackQueue) {
+          await request.onFallbackQueue()
+        } else {
+          existing.activeTurnError?.(errorMessage(error))
+        }
+      }
+    })()
+    existing.liveSteerTasks.add(tracked)
+    void tracked.finally(() => {
+      existing.liveSteerTasks.delete(tracked)
     })
 
     const probeMs = Math.max(0, request.acceptProbeMs ?? 120)
@@ -1813,10 +1894,9 @@ export class DaemonAcpBridgeHost {
       clearTimeout(probeTimer)
     }
 
-    if (probeResult.kind === 'settled') {
-      return { ok: true, settled: true, stopReason: probeResult.stopReason }
-    }
     if (probeResult.kind === 'error') {
+      accepted = false
+      releaseAcceptGate()
       return {
         ok: false,
         rejectedConcurrent: isConcurrentPromptRejection(probeResult.error),
@@ -1824,20 +1904,13 @@ export class DaemonAcpBridgeHost {
       }
     }
 
-    // Accepted and still streaming alongside the active turn: track so `runPrompt`
-    // drains it before emitting `turn_end`, and invoke fallback if it rejects later.
-    const tracked = steerRpc.then(
-      () => undefined,
-      async error => {
-        if (!combinedSignal.aborted && isConcurrentPromptRejection(error) && request.onFallbackQueue) {
-          await request.onFallbackQueue()
-        }
-      },
-    )
-    existing.liveSteerTasks.add(tracked)
-    void tracked.finally(() => {
-      existing.liveSteerTasks.delete(tracked)
-    })
+    accepted = true
+    request.onAccepted?.()
+    releaseAcceptGate()
+
+    if (probeResult.kind === 'settled') {
+      return { ok: true, settled: true, stopReason: probeResult.stopReason }
+    }
     return { ok: true, settled: false }
   }
 
@@ -1909,43 +1982,63 @@ export class DaemonAcpBridgeHost {
       }
 
       const promptText = usedFork && request.forkedPrompt ? request.forkedPrompt : request.prompt
-      const result = await existing.client.prompt({
+      let permissionDeniedTool = ''
+      const onSideEvent = (acpEvent: AcpClientEvent): void => {
+        const bridged = bridgeEventFromAcpClientEvent(
+          acpEvent,
+          toolNamesById,
+          toolMetaById,
+          settledToolCallIds,
+        )
+        if (!bridged) return
+        if (bridged.type === 'text_delta' && bridged.text) {
+          answer += bridged.text
+          request.onDelta?.(bridged.text)
+        } else if (bridged.type === 'tool_call') {
+          const rawInput = isAcpRecord(bridged.rawInput) ? bridged.rawInput : {}
+          const locationPath = bridged.locations?.[0]?.path
+          const target = acpSideQuestionToolTarget(
+            bridged.name,
+            locationPath ? { path: locationPath, ...rawInput } : rawInput,
+            existing.binding.cwd,
+          )
+          toolTargetsById.set(bridged.toolCallId, { name: bridged.name, target })
+          request.onTool?.({ name: bridged.name, target, status: 'running' })
+        } else if (bridged.type === 'tool_result') {
+          const meta = toolTargetsById.get(bridged.toolCallId)
+          const failed = bridged.permissionDenied || bridged.isError
+          if (bridged.permissionDenied || (bridged.isError && /denied|permission|reject|not allowed|cancel/i.test(bridged.output))) {
+            permissionDeniedTool = meta?.name ?? bridged.name
+          }
+          request.onTool?.({
+            name: meta?.name ?? bridged.name,
+            target: meta?.target ?? '',
+            status: failed ? 'error' : 'done',
+          })
+        } else if (bridged.type === 'error') {
+          lastError = bridged.message
+        }
+      }
+
+      let result = await existing.client.prompt({
         sessionId: sideSessionId,
         text: promptText,
         ...(request.signal ? { signal: request.signal } : {}),
-        onEvent: acpEvent => {
-          const bridged = bridgeEventFromAcpClientEvent(
-            acpEvent,
-            toolNamesById,
-            toolMetaById,
-            settledToolCallIds,
-          )
-          if (!bridged) return
-          if (bridged.type === 'text_delta' && bridged.text) {
-            answer += bridged.text
-            request.onDelta?.(bridged.text)
-          } else if (bridged.type === 'tool_call') {
-            const rawInput = isAcpRecord(bridged.rawInput) ? bridged.rawInput : {}
-            const locationPath = bridged.locations?.[0]?.path
-            const target = acpSideQuestionToolTarget(
-              bridged.name,
-              locationPath ? { path: locationPath, ...rawInput } : rawInput,
-              existing.binding.cwd,
-            )
-            toolTargetsById.set(bridged.toolCallId, { name: bridged.name, target })
-            request.onTool?.({ name: bridged.name, target, status: 'running' })
-          } else if (bridged.type === 'tool_result') {
-            const meta = toolTargetsById.get(bridged.toolCallId)
-            request.onTool?.({
-              name: meta?.name ?? bridged.name,
-              target: meta?.target ?? bridged.name,
-              status: bridged.permissionDenied || bridged.isError ? 'error' : 'done',
-            })
-          } else if (bridged.type === 'error') {
-            lastError = bridged.message
-          }
-        },
+        onEvent: onSideEvent,
       })
+
+      // If the side agent tried a blocked tool (e.g. `run_command`), got denied
+      // by the read-only guard, and stopped with zero text, ask once more to
+      // answer directly from context / read-only inspection so the user never
+      // lands on a blank panel.
+      if (!answer.trim() && permissionDeniedTool && !request.signal?.aborted) {
+        result = await existing.client.prompt({
+          sessionId: sideSessionId,
+          text: `Tool "${permissionDeniedTool}" is disabled in read-only side questions. Answer the question directly and concisely using only the provided context or read-only file reads (do not run shell commands or edit files).`,
+          ...(request.signal ? { signal: request.signal } : {}),
+          onEvent: onSideEvent,
+        })
+      }
 
       const trimmedAnswer = answer.trim()
       if (lastError && !trimmedAnswer) {
@@ -1953,6 +2046,16 @@ export class DaemonAcpBridgeHost {
       }
       if (result.stopReason === 'cancelled' && !trimmedAnswer) {
         return { ok: false, answer: '', model: effectiveModel, error: 'Side question was cancelled.' }
+      }
+      if (!trimmedAnswer) {
+        return {
+          ok: false,
+          answer: '',
+          model: effectiveModel,
+          error: permissionDeniedTool
+            ? `Blocked mutating/shell tool "${permissionDeniedTool}" in read-only side question and no text answer was returned.`
+            : `${existing.binding.name} returned an empty response to the side question.`,
+        }
       }
       return { ok: true, answer: trimmedAnswer, model: effectiveModel }
     } catch (error) {
@@ -1981,6 +2084,9 @@ export class DaemonAcpBridgeHost {
 
     const turnAbort = new AbortController()
     existing.activeAbort = turnAbort
+    if (existing.kind === 'acp') {
+      existing.cancelSuppressUntil = 0
+    }
     const combinedSignal = request.signal
       ? AbortSignal.any([request.signal, turnAbort.signal])
       : turnAbort.signal
@@ -2040,6 +2146,31 @@ export class DaemonAcpBridgeHost {
           }
         }
         existing.activeSyntheticUpdate = dispatchTurnEvent
+        existing.activeTurnLastResult = undefined
+        existing.activeTurnUsage = usage => {
+          handleBridgeEvent({
+            type: 'usage',
+            ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+            ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+            ...(usage.cachedReadTokens !== undefined ? { cachedReadTokens: usage.cachedReadTokens } : {}),
+            ...(usage.cachedWriteTokens !== undefined ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+            ...(usage.thoughtTokens !== undefined ? { thoughtTokens: usage.thoughtTokens } : {}),
+            ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+            ...(usage.cost ? { cost: usage.cost } : {}),
+            ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+          })
+        }
+        existing.activeTurnError = message => {
+          lastError = message
+          request.onEvent({ type: 'error', message })
+        }
+        // Keep `dispatchTurnEvent` subscribed for the ENTIRE turn lifetime — including
+        // concurrent live-steer prompts that continue streaming after the initial
+        // `session/prompt` RPC settles (which `agy acp 1.5+` resolves immediately on steer).
+        const unsubscribeTurnEvents = existing.client.subscribeSession(
+          existing.externalSessionId,
+          dispatchTurnEvent,
+        )
         const promptBlocks = buildAcpPromptContentBlocks({
           agentName: existing.binding.name,
           capabilities: existing.promptCapabilities,
@@ -2050,40 +2181,54 @@ export class DaemonAcpBridgeHost {
           ...(request.images?.length ? { images: request.images } : {}),
           ...(request.resources?.length ? { resources: request.resources } : {}),
         })
+        const readActiveTurnLastResult = ():
+          | { readonly stopReason: string; readonly usage?: AcpPromptUsage }
+          | undefined => existing.activeTurnLastResult
         try {
           const result = await existing.client.prompt({
             sessionId: existing.externalSessionId,
             text: request.text,
             content: promptBlocks,
             signal: combinedSignal,
-            onEvent: dispatchTurnEvent,
           })
-          if (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
+          if (result.usage) {
+            existing.activeTurnUsage(result.usage)
+          }
+          while (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
             await Promise.allSettled([...existing.liveSteerTasks])
           }
-          if (result.usage) {
-            handleBridgeEvent({
-              type: 'usage',
-              ...(result.usage.inputTokens !== undefined ? { inputTokens: result.usage.inputTokens } : {}),
-              ...(result.usage.outputTokens !== undefined ? { outputTokens: result.usage.outputTokens } : {}),
-              ...(result.usage.cachedReadTokens !== undefined ? { cachedReadTokens: result.usage.cachedReadTokens } : {}),
-              ...(result.usage.cachedWriteTokens !== undefined ? { cachedWriteTokens: result.usage.cachedWriteTokens } : {}),
-              ...(result.usage.thoughtTokens !== undefined ? { thoughtTokens: result.usage.thoughtTokens } : {}),
-              ...(result.usage.totalTokens !== undefined ? { totalTokens: result.usage.totalTokens } : {}),
-              ...(result.usage.cost ? { cost: result.usage.cost } : {}),
-              ...(result.usage.costUsd !== undefined ? { costUsd: result.usage.costUsd } : {}),
-            })
-          }
+          const steerResult = readActiveTurnLastResult()
+          const finalStopReason = steerResult?.stopReason ?? result.stopReason
+          const finalUsage = steerResult?.usage ?? result.usage
           return {
             assistantText,
             thinkingText,
             externalSessionId: existing.externalSessionId,
-            stopReason: result.stopReason,
-            cancelled: combinedSignal.aborted || result.stopReason === 'cancelled',
-            ...(result.usage ? { usage: result.usage } : {}),
+            stopReason: finalStopReason,
+            cancelled: combinedSignal.aborted || finalStopReason === 'cancelled',
+            ...(finalUsage ? { usage: finalUsage } : {}),
             ...(lastError ? { error: lastError } : {}),
           }
         } catch (error) {
+          // If the initial prompt rejected only because a concurrent live steer took
+          // over, keep streaming and finish cleanly on the live-steer result.
+          if (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
+            while (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
+              await Promise.allSettled([...existing.liveSteerTasks])
+            }
+            const steerResult = readActiveTurnLastResult()
+            if (steerResult) {
+              return {
+                assistantText,
+                thinkingText,
+                externalSessionId: existing.externalSessionId,
+                stopReason: steerResult.stopReason,
+                cancelled: combinedSignal.aborted || steerResult.stopReason === 'cancelled',
+                ...(steerResult.usage ? { usage: steerResult.usage } : {}),
+                ...(lastError ? { error: lastError } : {}),
+              }
+            }
+          }
           if (combinedSignal.aborted) {
             return {
               assistantText,
@@ -2104,8 +2249,12 @@ export class DaemonAcpBridgeHost {
             error: message,
           }
         } finally {
+          unsubscribeTurnEvents()
           existing.activePermissionHandler = undefined
           existing.activeSyntheticUpdate = undefined
+          existing.activeTurnLastResult = undefined
+          existing.activeTurnUsage = undefined
+          existing.activeTurnError = undefined
           existing.activeElicitationAbort?.abort(new Error('External ACP turn finished'))
           existing.activeElicitationAbort = undefined
           existing.activeElicitationHandler = undefined
@@ -2488,6 +2637,7 @@ export class DaemonAcpBridgeHost {
 
       if (
         !entryRef.activeAbort &&
+        Date.now() >= entryRef.cancelSuppressUntil &&
         (acpEvent.type === 'usage_update' ||
           acpEvent.type === 'session_info' ||
           acpEvent.type === 'text_delta' ||
@@ -2565,12 +2715,14 @@ export class DaemonAcpBridgeHost {
       const capabilities = buildAcpRuntimeCapabilities(initResult)
       const agentTitle = initResult.agentInfo?.title?.trim() || initResult.agentInfo?.name?.trim() || undefined
       const agentVersion = initResult.agentInfo?.version?.trim() || undefined
-      const classified = initialAvailableCommands && initialAvailableCommands.length > 0
+      const includeUnlistedSkills = isAntigravity || params.provider === 'claude-code'
+      const classified = includeUnlistedSkills || (initialAvailableCommands && initialAvailableCommands.length > 0)
         ? classifyAcpRuntimeFeatures({
             provider: params.provider,
             agentName: params.name,
             cwd: params.cwd,
-            rawCommands: initialAvailableCommands,
+            rawCommands: initialAvailableCommands ?? [],
+            includeFilesystemUnlisted: includeUnlistedSkills,
             ...(this.options.env ? { env: this.options.env } : {}),
             ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
           })
@@ -2615,8 +2767,10 @@ export class DaemonAcpBridgeHost {
         additionalDirectories: normalizedAdditionalDirs,
         mcpServers: wireMcpServers,
         binding: rawBinding,
+        cancelSuppressUntil: 0,
         hostTurboActive: false,
         hostTurboUnderlyingMode: undefined,
+        lastRawCommands: initialAvailableCommands ? [...initialAvailableCommands] : [],
         liveSteerTasks: new Set<Promise<void>>(),
         nativeModes: extracted.modes ?? [],
         outOfTurnInteractionAbort: new AbortController(),
@@ -2638,6 +2792,14 @@ export class DaemonAcpBridgeHost {
       entryRef = entry
       this.active.set(params.sessionId, entry)
       this.lastAuthChallengeBySession.delete(params.sessionId)
+      if (opened.resumeFallbackError) {
+        this.notifySessionEvent(params.sessionId, {
+          type: 'notice',
+          severity: 'warning',
+          title: 'Started a fresh external session',
+          description: `Previous ${params.name} session could not be resumed (${opened.resumeFallbackError}); history remains visible locally, but the runtime started with fresh context.`,
+        })
+      }
 
       const desiredMode =
         params.initialModeId?.trim() ||
@@ -2911,6 +3073,7 @@ async function openOrResumeAcpSession(
   additionalDirectories?: readonly string[],
 ): Promise<{
   readonly result: Awaited<ReturnType<AcpStdioClient['newSession']>>
+  readonly resumeFallbackError?: string
   readonly via: 'load' | 'new' | 'resume'
 }> {
   const sharedOpts = {
@@ -2919,6 +3082,7 @@ async function openOrResumeAcpSession(
     ...(additionalDirectories && additionalDirectories.length > 0 ? { additionalDirectories } : {}),
   }
   const trimmedResume = resumeSessionId?.trim()
+  let resumeFallbackError: string | undefined
   if (trimmedResume) {
     if (initResult.sessionCapabilities.resume) {
       try {
@@ -2930,6 +3094,7 @@ async function openOrResumeAcpSession(
         if (isAcpAuthRequiredError(resumeError)) {
           throw resumeError
         }
+        resumeFallbackError = resumeError instanceof Error ? resumeError.message : String(resumeError)
         if (initResult.sessionCapabilities.load || initResult.supportsLoadSession) {
           try {
             return {
@@ -2940,6 +3105,7 @@ async function openOrResumeAcpSession(
             if (isAcpAuthRequiredError(loadError)) {
               throw loadError
             }
+            resumeFallbackError = loadError instanceof Error ? loadError.message : String(loadError)
           }
         }
       }
@@ -2953,12 +3119,14 @@ async function openOrResumeAcpSession(
         if (isAcpAuthRequiredError(loadError)) {
           throw loadError
         }
+        resumeFallbackError = loadError instanceof Error ? loadError.message : String(loadError)
       }
     }
   }
   return {
     result: await client.newSession(sharedOpts),
     via: 'new',
+    ...(resumeFallbackError ? { resumeFallbackError } : {}),
   }
 }
 
@@ -3452,12 +3620,16 @@ function applyLiveBindingEvent(
       next = applySingleConfigOptionPatch(next, event.configId, event.value)
     }
   } else if (event.type === 'available_commands') {
+    entry.lastRawCommands = [...event.commands]
     const classified = classifyAcpRuntimeFeatures({
       provider: next.provider,
       agentName: next.name,
       cwd: next.cwd,
       rawCommands: event.commands,
-      includeFilesystemUnlisted: entry.kind === 'claude-stream-json',
+      includeFilesystemUnlisted:
+        entry.kind === 'claude-stream-json' ||
+        next.provider === 'antigravity' ||
+        next.provider === 'claude-code',
       ...(options.env ? { env: options.env } : {}),
       ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     })

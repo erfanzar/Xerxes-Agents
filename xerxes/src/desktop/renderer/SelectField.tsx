@@ -37,6 +37,8 @@ export interface SelectFieldProps {
   readonly placeholder?: string
   readonly ariaLabel?: string
   readonly ariaLabelledBy?: string
+  readonly ariaInvalid?: boolean
+  readonly ariaDescribedBy?: string
   readonly listLabel: string
   readonly disabled?: boolean
   readonly className?: string
@@ -51,6 +53,8 @@ export function SelectField({
   placeholder = 'Select…',
   ariaLabel,
   ariaLabelledBy,
+  ariaInvalid,
+  ariaDescribedBy,
   listLabel,
   disabled = false,
   className,
@@ -137,6 +141,11 @@ export function SelectField({
   }, [showPopup])
 
   useEffect(() => {
+    if (!showPopup) return
+    setActiveIndex(prev => (prev >= 0 && prev < options.length ? prev : 0))
+  }, [showPopup, options.length])
+
+  useEffect(() => {
     if (!showPopup || !scrollActiveIntoViewRef.current) return
     scrollActiveIntoViewRef.current = false
     const listEl = listRef.current
@@ -213,10 +222,28 @@ export function SelectField({
       if (chosen && !chosen.disabled) pickOption(chosen)
       return
     }
+    if (event.key === 'Tab' && showPopup) {
+      setOpen(false)
+      return
+    }
     if (event.key === 'Escape' && showPopup) {
       event.preventDefault()
       event.stopPropagation()
       setOpen(false)
+      return
+    }
+    if (showPopup && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const ch = event.key.toLowerCase()
+      const len = options.length
+      for (let i = 1; i <= len; i += 1) {
+        const idx = (activeIndex + i) % len
+        const opt = options[idx]
+        if (opt && !opt.disabled && opt.label.toLowerCase().startsWith(ch)) {
+          scrollActiveIntoViewRef.current = true
+          setActiveIndex(idx)
+          break
+        }
+      }
     }
   }
 
@@ -306,6 +333,8 @@ export function SelectField({
         {...(activeOptionId !== undefined ? { 'aria-activedescendant': activeOptionId } : {})}
         {...(ariaLabel !== undefined ? { 'aria-label': ariaLabel } : {})}
         {...(ariaLabelledBy !== undefined ? { 'aria-labelledby': ariaLabelledBy } : {})}
+        {...(ariaInvalid ? { 'aria-invalid': true } : {})}
+        {...(ariaDescribedBy !== undefined ? { 'aria-describedby': ariaDescribedBy } : {})}
         disabled={disabled}
         className="select-field__trigger"
         onClick={() => {

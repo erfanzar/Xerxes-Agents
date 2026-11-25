@@ -161,6 +161,7 @@ export function GoalOverlay({ t }: GoalOverlayProps) {
     }
     inspect()
     timer = setInterval(inspect, 3_000)
+    timer.unref?.()
     return () => {
       current = false
       if (timer !== undefined) clearInterval(timer)
@@ -304,7 +305,7 @@ export function GoalOverlay({ t }: GoalOverlayProps) {
         {tokenUsageLine ? <Text color={tokenUsageLine.warning ? t.color.warn : t.ds.secondary}>{tokenUsageLine.text}</Text> : null}
         {continuationLine ? <Text color={inspection?.continuation?.state === 'interrupted' ? t.color.warn : t.ds.secondary} wrap="wrap">{continuationLine}{inspection?.continuation?.state === 'queued' && inspected?.activation === 'disarmed' ? ' · /goal resume required' : ''}</Text> : null}
         {inspectionLoading ? <Text color={t.ds.secondary}>Refreshing goal details…</Text> : null}
-        {inspectionError && terminal.width >= 60 ? <Text color={t.color.warn} wrap="wrap">Goal details unavailable: {inspectionError}</Text> : null}
+        {inspectionError && terminal.width >= 60 ? <Text color={t.color.error} wrap="wrap">Goal details unavailable: {inspectionError}</Text> : null}
         <scrollbox ref={scroll} style={{flexGrow: 1, flexShrink: 1, minHeight: 0}}
           contentOptions={{flexDirection: 'column', paddingRight: 1}}>
           <Box flexDirection="column" flexShrink={0}>
@@ -322,9 +323,9 @@ export function GoalOverlay({ t }: GoalOverlayProps) {
             </Box> : null}
             {inspection ? <Box flexDirection="column" flexShrink={0} paddingY={terminal.height < 24 ? 0 : 1}>
               <Text bold color={t.ds.secondary}>ACCEPTANCE CRITERIA</Text>
-              {criteria.length ? criteria.map(criterion => (
+              {criteria.length ? criteria.map((criterion, idx) => (
                 <Box key={criterion.id} flexDirection="column" flexShrink={0} marginTop={1}>
-                  <Text color={criterion.evidence ? t.color.ok : selectedCriterion === criteria.indexOf(criterion) ? t.color.accent : t.color.text} wrap="wrap">{selectedCriterion === criteria.indexOf(criterion) ? '›' : criterion.evidence ? '✓' : '◇'} {criterion.description}</Text>
+                  <Text color={criterion.evidence ? t.color.ok : selectedCriterion === idx ? t.color.accent : t.color.text} wrap="wrap">{selectedCriterion === idx ? '› ' : '  '}{criterion.evidence ? '✓' : '◇'} {criterion.description}</Text>
                   {criterion.evidence ? <Text color={criterion.evidence.kind === 'user-decision' ? t.color.ok : t.ds.secondary} wrap="wrap">{criterion.evidence.kind === 'user-decision' ? `Human decision (user confirmed): ${criterion.evidence.summary} · decision ${criterion.evidence.decisionId}` : `Evidence (model-assessed relevance; tool relevance, not human certification): ${criterion.evidence.summary} · tool ${criterion.evidence.toolCallId}`}</Text> : <Text color={t.ds.secondary}>Pending evidence</Text>}
                 </Box>
               )) : <Text color={t.ds.secondary}>No declared criteria.</Text>}
@@ -346,13 +347,14 @@ export function GoalOverlay({ t }: GoalOverlayProps) {
                 </Box>
               </Box>
             )) : <Text color={t.ds.secondary}>No todos yet.</Text>}
+            {inspectionError && terminal.width < 60 ? <Box flexDirection="column" flexShrink={0} marginTop={1}><Text color={t.color.error} wrap="wrap">Goal details unavailable: {inspectionError}</Text></Box> : null}
           </Box>
         </scrollbox>
         {decisionCriterion !== null && decisionContext.current ? <Box flexDirection="column" flexShrink={0} marginTop={1} paddingX={1} paddingY={terminal.height < 24 ? 0 : 1} borderStyle="round" borderColor={t.color.accent}>
           <Text bold color={t.color.accent}>ACCEPT CRITERION · HUMAN DECISION</Text>
           <Text wrap="wrap">{decisionContext.current.description}</Text>
-          <textarea key={`${decisionContext.current.sessionId}:${decisionContext.current.goalId}:${decisionContext.current.revision}:${decisionContext.current.criterionId}`} ref={decisionInput} focused={!decisionBusy} keyBindings={DECISION_KEY_BINDINGS} minHeight={2} maxHeight={3} placeholder="Explain why you accept this criterion…" placeholderColor={t.color.muted} onContentChange={() => setDecisionDraft(decisionInput.current?.plainText ?? '')} onSubmit={() => { void submitDecision() }} />
-          <Text color={decisionMessage.includes('kept') || decisionMessage.startsWith('Enter') ? t.color.warn : t.ds.secondary} wrap="wrap">{decisionMessage || 'Enter accept · Ctrl+R review latest · Esc cancel'}</Text>
+          <textarea key={`${decisionContext.current.sessionId}:${decisionContext.current.goalId}:${decisionContext.current.revision}:${decisionContext.current.criterionId}`} ref={decisionInput} focused={!decisionBusy} keyBindings={DECISION_KEY_BINDINGS} minHeight={2} maxHeight={3} focusedBackgroundColor={t.ds.sunken} focusedTextColor={t.color.text} placeholder="Explain why you accept this criterion…" placeholderColor={t.color.muted} onContentChange={() => setDecisionDraft(decisionInput.current?.plainText ?? '')} onSubmit={() => { void submitDecision() }} />
+          <Text color={decisionMessage.includes('kept') || decisionMessage.startsWith('Enter') ? t.color.error : decisionMessage.startsWith('Criterion accepted') ? t.color.ok : t.ds.secondary} wrap="wrap">{decisionMessage || 'Enter accept · Ctrl+R review latest · Esc cancel'}</Text>
         </Box> : null}
         <Text color={t.ds.secondary}>{decisionCriterion !== null ? 'Enter accept · Ctrl+R review · Esc cancel' : terminal.width < 60 ? criteria.length && inspected?.phase !== 'complete' ? 'Tab/A accept · Esc close' : '↑↓ scroll · Esc close' : 'Tab select · A/Enter accept · ↑↓ scroll · R refresh · PgUp/PgDn page · L follow-ups · Esc close'}</Text>
       </Box>

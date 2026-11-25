@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import { HubRequestError } from '../../client/hubConnection.js'
 import {
@@ -9,6 +9,7 @@ import {
   type SlackContact, type SlackDm, type SlackDraft, type SlackIdentity, type SlackStatus, type SupervisorSlackClient,
 } from '../../client/supervisorSlack.js'
 import { copyToClipboard } from './CopyButton.js'
+import { SelectField } from './SelectField.js'
 
 const SLACK_UNAVAILABLE = 'Managed Slack sign-in is currently unavailable.'
 const HUB_TOO_OLD = 'Your Hub runs an older Xerxes that can’t connect Slack from this app. Update the Hub, then press Refresh.'
@@ -86,8 +87,10 @@ export function SlackAppSetup({ redirectUrl, disabled, openApp, openTokenPage, o
   const [clientId, setClientId] = useState('')
   const [secret, setSecret] = useState('')
   const [copied, setCopied] = useState<string>()
+  const baseId = useId()
   const token = configToken.trim()
   const tokenValid = isSlackConfigToken(token)
+  const tokenInvalid = Boolean(token && !tokenValid)
   const id = clientId.trim()
   const value = secret.trim()
   const valid = isSlackClientValue(id) && isSlackClientValue(value)
@@ -99,11 +102,11 @@ export function SlackAppSetup({ redirectUrl, disabled, openApp, openTokenPage, o
       setConfigToken('')
       onCreate(token)
     }}>
-      <p>One-time setup. XERXES creates its Slack app for you, then you click <em>Allow</em>.</p>
+      <p>One-time setup. XERXES creates its Slack app for you, then you approve it in Slack.</p>
       <ol className="xslack__steps">
         <li>
           <strong>Get a configuration token from Slack.</strong>
-          <span>On the page that opens, scroll to <em>Your App Configuration Tokens</em>, click <em>Generate Token</em>, pick your workspace, then copy the <em>Access Token</em>.</span>
+          <span>On the page that opens, scroll to <em>Your App Configuration Tokens</em>, choose <em>Generate Token</em>, pick your workspace, then copy the <em>Access Token</em>.</span>
           <div className="xslack__actions">
             <button type="button" className="btn" disabled={disabled} onClick={openTokenPage}>Open Slack token page</button>
           </div>
@@ -111,12 +114,14 @@ export function SlackAppSetup({ redirectUrl, disabled, openApp, openTokenPage, o
         <li>
           <strong>Paste it and let XERXES do the rest.</strong>
           <span>It starts with <code>xoxe.xoxp-</code>. It’s used once to create the app and isn’t stored.</span>
+          <label className="sr-only" htmlFor={`${baseId}-token`}>Slack configuration token</label>
           <div className="xslack__fields">
-            <input type="password" aria-label="Slack configuration token" value={configToken} placeholder="xoxe.xoxp-…" autoComplete="off" spellCheck={false}
+            <input id={`${baseId}-token`} type="password" aria-label="Slack configuration token" value={configToken} placeholder="xoxe.xoxp-…" autoComplete="off" spellCheck={false}
+              aria-invalid={tokenInvalid ? true : undefined} {...(tokenInvalid ? { 'aria-describedby': `${baseId}-token-err` } : {})}
               disabled={disabled} onChange={event => setConfigToken(event.target.value)} />
             <button type="submit" className="btn btn--solid" disabled={disabled || !tokenValid}>Set up automatically</button>
           </div>
-          {token && !tokenValid ? <span className="studio-muted">That isn’t a configuration token. Copy the <em>Access Token</em> (not the Refresh Token); it starts with <code>xoxe.xoxp-</code>.</span> : null}
+          {tokenInvalid ? <span id={`${baseId}-token-err`} role="alert" className="studio-error">That isn’t a configuration token. Copy the <em>Access Token</em> (not the Refresh Token); it starts with <code>xoxe.xoxp-</code>.</span> : null}
         </li>
       </ol>
     </form>
@@ -132,9 +137,9 @@ export function SlackAppSetup({ redirectUrl, disabled, openApp, openTokenPage, o
     <ol className="xslack__steps">
       <li>
         <strong>Create your XERXES app in Slack.</strong>
-        <span>Slack opens with everything filled in. Pick your workspace, click <em>Next</em>, then <em>Create</em>.</span>
+        <span>Slack opens with everything filled in. Pick your workspace, choose <em>Next</em>, then <em>Create</em>.</span>
         <div className="xslack__actions">
-          <button type="button" className="btn btn--solid" disabled={disabled} onClick={openApp}>Create XERXES app in Slack</button>
+          <button type="button" className="btn" disabled={disabled} onClick={openApp}>Create XERXES app in Slack</button>
           <button type="button" className="btn" disabled={disabled}
             onClick={() => void copyToClipboard(slackAppManifest(redirectUrl)).then(ok => setCopied(ok ? 'Manifest copied.' : 'Could not copy the manifest.'))}>Copy manifest</button>
         </div>
@@ -143,11 +148,13 @@ export function SlackAppSetup({ redirectUrl, disabled, openApp, openTokenPage, o
       </li>
       <li>
         <strong>Paste its Client ID and Client Secret.</strong>
-        <span>They’re on the app’s <em>Basic Information</em> page under <em>App Credentials</em>. Click <em>Show</em> to see the secret.</span>
+        <span>They’re on the app’s <em>Basic Information</em> page under <em>App Credentials</em>. Choose <em>Show</em> to see the secret.</span>
         <div className="xslack__fields">
-          <input aria-label="Slack Client ID" value={clientId} placeholder="Client ID" autoComplete="off" spellCheck={false}
+          <label className="sr-only" htmlFor={`${baseId}-cid`}>Slack Client ID</label>
+          <input id={`${baseId}-cid`} aria-label="Slack Client ID" value={clientId} placeholder="Client ID" autoComplete="off" spellCheck={false}
             disabled={disabled} onChange={event => setClientId(event.target.value)} />
-          <input type="password" aria-label="Slack Client Secret" value={secret} placeholder="Client Secret" autoComplete="off" spellCheck={false}
+          <label className="sr-only" htmlFor={`${baseId}-sec`}>Slack Client Secret</label>
+          <input id={`${baseId}-sec`} type="password" aria-label="Slack Client Secret" value={secret} placeholder="Client Secret" autoComplete="off" spellCheck={false}
             disabled={disabled} onChange={event => setSecret(event.target.value)} />
           <button type="submit" className="btn btn--solid" disabled={disabled || !valid}>Save</button>
         </div>
@@ -191,10 +198,11 @@ function ExactIds({ contact }: { readonly contact: SlackIdentity }): ReactElemen
   return <span className="xslack__ids">Workspace <code>{contact.team_id}</code> · Member <code>{contact.user_id}</code></span>
 }
 
-function ConfirmSlack({ title, children, action, disabled, onCancel, onConfirm }: {
+function ConfirmSlack({ title, children, action, destructive = false, disabled, onCancel, onConfirm }: {
   readonly title: string
   readonly children: ReactNode
   readonly action: string
+  readonly destructive?: boolean
   readonly disabled: boolean
   readonly onCancel: () => void
   readonly onConfirm: () => void
@@ -204,12 +212,12 @@ function ConfirmSlack({ title, children, action, disabled, onCancel, onConfirm }
     {children}
     <div className="xslack__actions">
       <button type="button" className="btn" disabled={disabled} onClick={onCancel}>Cancel</button>
-      <button type="button" className="btn btn--solid" disabled={disabled} onClick={onConfirm}>{action}</button>
+      <button type="button" className={destructive ? 'btn btn--danger' : 'btn btn--solid'} disabled={disabled} onClick={onConfirm}>{action}</button>
     </div>
   </section>
 }
 
-type Change = { kind: 'disconnect' } | { kind: 'add'; contact: SlackIdentity } | { kind: 'remove' | 'auto'; contact: SlackContact }
+type Change = { kind: 'disconnect' } | { kind: 'remove_app' } | { kind: 'add'; contact: SlackIdentity } | { kind: 'remove' | 'auto'; contact: SlackContact }
 
 interface SlackWorkspaceProps {
   readonly client: SupervisorSlackClient
@@ -401,7 +409,11 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
         ? <SlackAppSetup redirectUrl={redirectUrl} disabled={locked} openApp={openCreateApp} openTokenPage={openTokenPage} onCreate={createApp} onSave={saveApp} /> : null}
       {account === null && pending === undefined && appSource === 'saved' && oauthUntil === 0
         ? <p className="studio-muted xslack__appnote">Using your XERXES Slack app.{' '}
-          <button type="button" className="btn btn--link" disabled={locked} onClick={removeApp}>Use a different app</button></p> : null}
+          <button type="button" className="btn btn--link" disabled={locked} onClick={() => setChange({ kind: 'remove_app' })}>Use a different app</button></p> : null}
+      {account === null && change?.kind === 'remove_app' ? <ConfirmSlack title="Remove saved Slack app?" action="Remove app" destructive disabled={busy}
+        onCancel={() => setChange(undefined)} onConfirm={() => { setChange(undefined); removeApp() }}>
+        <p>This removes the saved Slack app credentials from the Hub so you can configure a different app.</p>
+      </ConfirmSlack> : null}
       {pending !== undefined ? <section className="xslack__card xslack__confirm" aria-label="Confirm your Slack account">
         <h4>Confirm your Slack account</h4>
         <ExactIds contact={pending} />
@@ -414,7 +426,7 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
         <code>{brokerPairing.code}</code>
       </section> : null}
       {oauthNote ? <p className="notice" role="status">{oauthNote}</p> : null}
-      {account !== null && change?.kind === 'disconnect' ? <ConfirmSlack title="Disconnect this Slack account?" action="Disconnect Slack" disabled={busy}
+      {account !== null && change?.kind === 'disconnect' ? <ConfirmSlack title="Disconnect this Slack account?" action="Disconnect Slack" destructive disabled={busy}
         onCancel={() => setChange(undefined)} onConfirm={() => mutate(() => client.disconnect(account))}>
         <ExactIds contact={account} /><p>XERXES will stop replying and drafting in this workspace.</p>
       </ConfirmSlack> : null}
@@ -425,18 +437,26 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
           {status.contacts.map(row => <div className="xslack__card xslack__row" key={row.user_id}>
             <div><strong>{row.display_name || row.user_id}</strong><ExactIds contact={row} /></div>
             <div className="xslack__actions">
-              <select aria-label={`Reply mode for ${row.user_id}`} value={row.mode} disabled={locked} onChange={event => {
-                if (event.target.value === 'auto') setChange({ kind: 'auto', contact: row })
-                else mutate(() => client.mode(row, 'draft'))
-              }}>
-                <option value="draft">Drafts for review</option><option value="auto">Auto-reply</option>
-              </select>
+              <SelectField
+                ariaLabel={`Reply mode for ${row.user_id}`}
+                listLabel={`Reply mode for ${row.user_id}`}
+                value={row.mode}
+                disabled={locked}
+                options={[
+                  { value: 'draft', label: 'Drafts for review' },
+                  { value: 'auto', label: 'Auto-reply' },
+                ]}
+                onChange={value => {
+                  if (value === 'auto') setChange({ kind: 'auto', contact: row })
+                  else mutate(() => client.mode(row, 'draft'))
+                }}
+              />
               <button type="button" className="btn" aria-label={`Open DM with ${row.user_id}`} disabled={locked} onClick={() => setSelected(row)}>Open DM</button>
               <button type="button" className="btn" aria-label={`Remove ${row.user_id}`} disabled={locked} onClick={() => setChange({ kind: 'remove', contact: row })}>Remove</button>
             </div>
           </div>)}
           {change?.kind === 'remove' || change?.kind === 'auto' ? <ConfirmSlack
-            title={change.kind === 'remove' ? 'Remove this contact?' : 'Allow automatic Slack replies?'} action={change.kind === 'remove' ? 'Remove contact' : 'Enable auto-reply'} disabled={busy}
+            title={change.kind === 'remove' ? 'Remove this contact?' : 'Allow automatic Slack replies?'} action={change.kind === 'remove' ? 'Remove contact' : 'Enable auto-reply'} destructive={change.kind === 'remove'} disabled={busy}
             onCancel={() => setChange(undefined)} onConfirm={() => mutate(() => change.kind === 'remove' ? client.remove(change.contact) : client.mode(change.contact, 'auto'))}>
             <strong>{change.contact.display_name || change.contact.user_id}</strong><ExactIds contact={change.contact} />
             <p>{change.kind === 'remove' ? 'XERXES will stop replying to this contact.' : 'XERXES can send replies to this contact without asking you to review them.'}</p>
@@ -447,10 +467,12 @@ export function SupervisorSlack({ client, openOAuth }: SlackWorkspaceProps): Rea
           <p>In Slack, open the person’s profile and copy their member ID. The workspace ID is <code>{account.team_id}</code>.</p>
           <label htmlFor="xslack-member">Slack member ID</label>
           <div className="xslack__actions">
-            <input id="xslack-member" value={userId} placeholder="U… or W…" autoComplete="off" spellCheck={false} disabled={locked} onChange={event => setUserId(event.target.value)} />
+            <input id="xslack-member" value={userId} placeholder="U… or W…" autoComplete="off" spellCheck={false} disabled={locked}
+              aria-invalid={matchListed ? true : undefined} {...(matchListed ? { 'aria-describedby': 'xslack-member-note' } : {})}
+              onChange={event => setUserId(event.target.value)} />
             <button type="submit" className="btn" disabled={locked || matchListed || !isSlackUserId(userId.trim())}>Look up exact ID</button>
           </div>
-          {matchListed ? <p className="studio-muted">This member is already on the list.</p> : null}
+          {matchListed ? <p id="xslack-member-note" className="studio-muted">This member is already on the list.</p> : null}
         </form>
         {change?.kind === 'add' ? <ConfirmSlack title="Confirm this Slack contact" action="Add contact" disabled={busy}
           onCancel={() => setChange(undefined)} onConfirm={() => mutate(() => client.confirm(change.contact))}>
@@ -521,7 +543,7 @@ export function SlackDirectMessage({ client, contact, onBack }: {
           </ConfirmSlack>
           : <article className="xslack__card" key={draft.id}>
             <p className="xslack__text">{draft.text}</p>
-            <button type="button" className="btn" disabled={busy || review !== undefined} onClick={() => setReview(draft)}>Review draft</button>
+            <button type="button" className="btn" title={review !== undefined ? 'Finish or cancel the open draft review first' : undefined} disabled={busy || review !== undefined} onClick={() => setReview(draft)}>Review draft</button>
           </article>)}
       </div>
     </>}

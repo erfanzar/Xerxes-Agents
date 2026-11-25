@@ -18,6 +18,7 @@ import {
   type AdvisorLimitsView, type TaskModelUsageView, type TaskSplit,
 } from '../../auth/usageView.js'
 import { desktopCall } from './desktopRpc.js'
+import { localMachineLabel } from './runModeView.js'
 import type { Snapshot } from './store.js'
 
 export interface TaskModels {
@@ -82,16 +83,19 @@ function where(model: TaskModelUsageView): 'local' | 'cloud' | 'unknown' {
   return model.local === true ? 'local' : model.local === false ? 'cloud' : 'unknown'
 }
 
-const WHERE_LABEL = { local: 'on this Mac', cloud: 'cloud', unknown: 'unknown location' } as const
+function whereLabel(place: 'local' | 'cloud' | 'unknown'): string {
+  if (place === 'local') return `on ${localMachineLabel()}`
+  return place === 'cloud' ? 'cloud' : 'unknown location'
+}
 
 /** "Main · ternary-bonsai-2-27b (on this Mac): 1.2M tokens in 14 calls". */
 function modelLine(model: TaskModelUsageView): string {
   const place = where(model)
   const cost = place === 'cloud' ? `, ${costLabel(model.costUsd, model.costBasis)}` : ''
-  return `${modelRoleLabel(model.role)} · ${model.model} (${WHERE_LABEL[place]}): ${compactTokens(processedTokens(model))} tokens in ${model.calls} ${model.calls === 1 ? 'call' : 'calls'}${cost}`
+  return `${modelRoleLabel(model.role)} · ${model.model} (${whereLabel(place)}): ${compactTokens(processedTokens(model))} tokens in ${model.calls} ${model.calls === 1 ? 'call' : 'calls'}${cost}`
 }
 
-/** Two segments, on this Mac then cloud, sized by tokens; a 2px gap keeps them apart. */
+/** Two segments, local machine then cloud, sized by tokens; a 2px gap keeps them apart. */
 function SplitBar({ split, className }: { split: TaskSplit; className: string }): ReactElement {
   return <span className={className} aria-hidden="true">
     {split.localTokens > 0 && <span data-where="local" style={{ flexGrow: split.localTokens }} />}
@@ -113,15 +117,16 @@ export function ModelSplitChipView({ task, hybrid, onOpen }: { task: TaskModels 
   if (split.localShare === null || (!hybrid && (split.localTokens === 0 || split.cloudTokens === 0))) return null
   const percent = percentLabel(split)
   const spend = cloudSpend(split)
-  const text = split.cloudTokens === 0 ? 'All on this Mac' : split.localTokens === 0 ? 'All in the cloud' : `${percent}% on this Mac`
+  const machine = localMachineLabel()
+  const text = split.cloudTokens === 0 ? `All on ${machine}` : split.localTokens === 0 ? 'All in the cloud' : `${percent}% on ${machine}`
   const title = [
     split.cloudTokens === 0
-      ? 'This task ran entirely on this Mac.'
-      : `This task: ${percent}% of tokens on this Mac, ${100 - percent}% in the cloud${spend ? ` (${spend})` : ''}.`,
+      ? `This task ran entirely on ${machine}.`
+      : `This task: ${percent}% of tokens on ${machine}, ${100 - percent}% in the cloud${spend ? ` (${spend})` : ''}.`,
     ...task.models.map(modelLine),
     'Open Usage for details.',
   ].join('\n')
-  return <button className="cchip composer__text modelsplit" title={title} aria-label={`${text}${spend && split.cloudTokens > 0 ? `, cloud ${spend}` : ''}. Open usage.`} onClick={onOpen}>
+  return <button type="button" className="cchip composer__text modelsplit" title={title} aria-label={`${text}${spend && split.cloudTokens > 0 ? `, cloud ${spend}` : ''}. Open usage.`} onClick={onOpen}>
     <SplitBar split={split} className="modelsplit__bar" />
     <span>{text}</span>
     {spend && split.cloudTokens > 0 && !split.cloudOnPlan && <span className="modelsplit__spend">{spend}</span>}
@@ -138,6 +143,7 @@ export function TaskModelsView({ task, hybrid }: { task: TaskModels | null; hybr
   const split = taskSplit(task.models)
   const percent = percentLabel(split)
   const spend = cloudSpend(split)
+  const machine = localMachineLabel()
   const showBar = split.localShare !== null && (hybrid || (split.localTokens > 0 && split.cloudTokens > 0))
   return <section className="usage__section" aria-labelledby="usage-task">
     <header className="usage__head">
@@ -148,7 +154,7 @@ export function TaskModelsView({ task, hybrid }: { task: TaskModels | null; hybr
     {showBar && <div className="tasksplit">
       <SplitBar split={split} className="tasksplit__bar" />
       <ul className="tasksplit__legend">
-        <li data-where="local"><span className="tasksplit__swatch" aria-hidden="true" />On this Mac <b>{split.cloudTokens === 0 ? 100 : percent}%</b> · {compactTokens(split.localTokens)} tokens</li>
+        <li data-where="local"><span className="tasksplit__swatch" aria-hidden="true" />On {machine} <b>{split.cloudTokens === 0 ? 100 : percent}%</b> · {compactTokens(split.localTokens)} tokens</li>
         <li data-where="cloud"><span className="tasksplit__swatch" aria-hidden="true" />Cloud <b>{split.cloudTokens === 0 ? 0 : 100 - percent}%</b> · {compactTokens(split.cloudTokens)} tokens{spend ? ` · ${spend}` : ''}</li>
         {split.unknownTokens > 0 && <li data-where="unknown">{compactTokens(split.unknownTokens)} tokens from a model whose location is unknown</li>}
       </ul>
@@ -162,11 +168,11 @@ export function TaskModelsView({ task, hybrid }: { task: TaskModels | null; hybr
             <strong className="usage-model__name" title={model.profile ? `${model.model} · ${model.profile}` : model.model}>{model.model}</strong>
           </span>
           <span className="usage-model__cost" data-unknown={(place === 'cloud' && model.costUsd === undefined && model.costBasis !== 'subscription') || undefined}>
-            {place === 'local' ? 'On this Mac' : costLabel(model.costUsd, model.costBasis)}
+            {place === 'local' ? `On ${machine}` : costLabel(model.costUsd, model.costBasis)}
           </span>
         </div>
         <div className="usage-model__meta">
-          {modelRoleLabel(model.role)} · {place === 'unknown' ? 'location unknown' : place === 'local' ? 'on this Mac' : 'cloud'} · {modelUsageSummary(model)}{model.bytesSent ? ` · ${compactBytes(model.bytesSent)} sent` : ''}
+          {modelRoleLabel(model.role)} · {place === 'unknown' ? 'location unknown' : place === 'local' ? `on ${machine}` : 'cloud'} · {modelUsageSummary(model)}{model.bytesSent ? ` · ${compactBytes(model.bytesSent)} sent` : ''}
         </div>
       </li>
     })}</ul>}

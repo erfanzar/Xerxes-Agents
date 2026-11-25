@@ -249,6 +249,85 @@ export function pruneRailTabsForContext(
   return { tabs: nextTabs, activeKey: nextActive }
 }
 
+export interface NotificationToastItem {
+  readonly id: string
+  readonly title: string
+  readonly body: string
+  readonly kind?: 'artifact' | 'attention' | 'finished' | 'stopped' | 'failed'
+  readonly surfaceId?: number
+  readonly target?: { readonly sessionId?: string; readonly panel?: 'docs'; readonly artifactId?: string }
+}
+
+function toastIconName(kind: NotificationToastItem['kind']): 'file' | 'warning' | 'check' | 'stop' | 'error' {
+  if (kind === 'artifact') return 'file'
+  if (kind === 'attention') return 'warning'
+  if (kind === 'failed') return 'error'
+  if (kind === 'stopped') return 'stop'
+  return 'check'
+}
+
+export function NotificationToastStack({
+  toasts,
+  onActivate,
+  onDismiss,
+  onPause,
+  onResume,
+}: {
+  toasts: readonly NotificationToastItem[]
+  onActivate: (toast: NotificationToastItem) => void
+  onDismiss: (id: string) => void
+  onPause?: (id: string) => void
+  onResume?: (toast: NotificationToastItem) => void
+}): ReactElement | null {
+  if (toasts.length === 0) return null
+  return (
+    <div className="notify-stack" role="region" aria-label="Notifications" aria-live="polite">
+      {toasts.map(toast => {
+        const clickable = Boolean(toast.target?.sessionId || toast.target?.artifactId || toast.surfaceId !== undefined)
+        const actionLabel = toast.kind === 'artifact' ? 'Open' : clickable ? 'View' : ''
+        return (
+          <div
+            key={toast.id}
+            className="notify-toast"
+            data-kind={toast.kind ?? 'finished'}
+            role={toast.kind === 'failed' || toast.kind === 'attention' ? 'alert' : 'status'}
+            onMouseEnter={() => onPause?.(toast.id)}
+            onMouseLeave={() => onResume?.(toast)}
+          >
+            <button
+              type="button"
+              className="notify-toast__main"
+              disabled={!clickable}
+              onClick={() => onActivate(toast)}
+            >
+              <span className="notify-toast__icon" aria-hidden="true">
+                <Icon name={toastIconName(toast.kind)} size={14} />
+              </span>
+              <span className="notify-toast__copy">
+                <strong className="notify-toast__title">{toast.title}</strong>
+                {toast.body && <span className="notify-toast__body">{toast.body}</span>}
+              </span>
+              {actionLabel && (
+                <span className="notify-toast__action" aria-hidden="true">
+                  {actionLabel} →
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              className="notify-toast__close"
+              aria-label={`Dismiss ${toast.title}`}
+              onClick={() => onDismiss(toast.id)}
+            >
+              <Icon name="close" size={12} />
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function App(): ReactElement {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot)
 
@@ -268,6 +347,12 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     const update = (state: { trafficLights: boolean }) => { if (current) setTrafficLights(state.trafficLights) }
     const unsubscribe = window.xerxes.onWindowChrome?.(state => { received = true; update(state) })
     void window.xerxes.getWindowChrome?.().then(state => { if (!received) update(state) }).catch(() => {})
+    try {
+      const enabled = (typeof localStorage === 'undefined' ? null : localStorage.getItem('xerxes.notifications')) !== '0'
+      void window.xerxes.setNotifications?.(enabled)
+    } catch {
+      // Storage unavailable; keep main's default enabled state.
+    }
     return () => { current = false; unsubscribe?.() }
   }, [])
   const [panel, setPanel] = useState<DesktopPanel>(null)
@@ -275,7 +360,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const vibesStyle = useVibesStyle()
   const layout = vibesStyle ? vibesPanelLayout(storedLayout) : storedLayout
   const inbox = useThreadInbox()
-  // T3 Code: null = auto (open inline in the top-right gutter on wide windows when right panel is closed).
+  // null = auto (open inline in the top-right gutter on wide windows when right panel is closed).
   const [detailsChoice, setDetailsChoice] = useState<boolean | null>(null)
   const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false)
   const [terminalDrawerHeight, setTerminalDrawerHeight] = useState<number>(loadTerminalDrawerHeight)
@@ -330,7 +415,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   const inspectorMax = Math.max(panelMin, windowWidth - (focused ? 0 : layout.sidebarWidth) - 320)
   const panelWidth = Math.max(panelMin, Math.min(inspectorMax, panelWidthOf(layout, shownPanel)))
   const contextRequiresFullWidth = windowWidth < (focused ? 0 : layout.sidebarWidth) + panelWidth + 320
-  // In T3 Code (`vibes`/`neo`), the right panel starts closed and the floating ThreadDetailsCard
+  // In Vibes/Neo, the right panel starts closed and the floating ThreadDetailsCard
   // occupies the top-right gutter on wide windows. Classic keeps Activity open on entry.
   const railKey = railChoice === undefined ? (vibesStyle ? null : (!snap.noWorkspace && !contextRequiresFullWidth ? 'activity' : null)) : railChoice
   const rail: RailPanel | null = railKey ? panelOfKey(railKey) : null
@@ -398,7 +483,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // In a narrow window (the VS Code sidebar, a small app window) the task
   // list is a drawer over the conversation: picking a task closes it.
   useEffect(() => { setNarrowNavigation(false) }, [snap.currentId])
-  // Back / Forward navigation history across opened threads and pages (T3 Code sidebar chrome).
+  // Back / Forward navigation history across opened threads and pages (sidebar chrome).
   type NavEntry = { readonly sessionId: string; readonly page: DesktopPageName | null }
   const [navHistory, setNavHistory] = useState<{ readonly entries: readonly NavEntry[]; readonly index: number }>(() => ({
     entries: snap.currentId || page ? [{ sessionId: snap.currentId, page }] : [],
@@ -445,7 +530,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     setNavHistory(current => ({ ...current, index: nextIndex }))
     visitNavEntry(target)
   }
-  // Command Palette T3 layout actions.
+  // Command Palette layout actions.
   const t3ActionRef = useRef({ toggleTerminalDrawer, toggleDetails, toggleRightPanel, inbox })
   t3ActionRef.current = { toggleTerminalDrawer, toggleDetails, toggleRightPanel, inbox }
   useEffect(() => {
@@ -517,7 +602,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
   // A clicked notification: open its task, then the artifact it names. The open
   // above resets the panels, so the artifact waits until that reset has run.
   const pendingArtifact = useRef<{ sessionId?: string; artifactId: string } | null>(null)
-  useEffect(() => window.xerxes.onNavigate?.(target => {
+  const handleExternalNavigate = (target: { sessionId?: string; panel?: 'docs'; artifactId?: string }): void => {
     const current = store.getSnapshot().currentId
     if (target.artifactId) pendingArtifact.current = { artifactId: target.artifactId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) }
     if (target.sessionId && target.sessionId !== current) { void store.openSession(target.sessionId); return }
@@ -525,7 +610,8 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
     // This view's own task was clicked (from another view, or a notification):
     // show its chat, never the page (XERXES, Customize…) the view was left on.
     if (target.sessionId) navigate(null)
-  }), [])
+  }
+  useEffect(() => window.xerxes.onNavigate?.(handleExternalNavigate), [])
   useEffect(() => {
     setPanel(null); setPage(null); setSelectedAgent(''); setFilesExpanded(false)
     const cwdChanged = prevCwdRef.current !== snap.cwd
@@ -602,7 +688,9 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
             {...(!contextRequiresFullWidth ? { toggleFilesExpanded: () => setFilesExpanded(value => !value) } : {})}
           />
         )}
-        {!snap.noWorkspace && <ArtifactToast sessionId={snap.currentId} showingArtifacts={rail === 'docs'} />}
+        {!snap.noWorkspace && (typeof window === 'undefined' || typeof window.xerxes?.onToast !== 'function') && (
+          <ArtifactToast sessionId={snap.currentId} showingArtifacts={rail === 'docs'} />
+        )}
 
       </div>
       {/* The review takeover and an expanded rail both hide .chat, which
@@ -690,7 +778,7 @@ const WindowChrome = createContext<WindowChromeState>({ sidebarVisible: true, in
 function SidebarToggle(): ReactElement {
   const chrome = useContext(WindowChrome)
   const vibes = useVibesStyle()
-  return <button className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}>{vibes ? <T3Icon name="panelLeft" size={15} /> : <Icon name="sidebar" />}</button>
+  return <button type="button" className="studio-icon window-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" aria-expanded={chrome.sidebarVisible} aria-controls="session-sidebar" onClick={chrome.toggleSidebar}>{vibes ? <T3Icon name="panelLeft" size={15} /> : <Icon name="sidebar" />}</button>
 }
 
 /**
@@ -734,7 +822,7 @@ export function FloatingRail({
 function WorkspaceTools(_props: { snap: Snapshot; inspectorOpen: boolean }): ReactElement {
   return <div className="top__actions" role="group" aria-label="Workspace tools">
     {/* Below 761px the floating rail is hidden, so Search falls back to the top bar there (layout.css). */}
-    <button className="top__search" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
+    <button type="button" className="top__search" title="Search sessions" aria-label="Search sessions" onClick={() => store.openSessionSearch()}><Icon name="search" /></button>
   </div>
 }
 
@@ -785,13 +873,13 @@ function RuntimeStatus({ snap, compact = false, iconOnly = false }: { snap: Snap
         <T3Icon name="circleArrowUp" size={15} />
       </button>
     ) : (
-      <button ref={trigger} className={'runtime-status' + (compact ? ' runtime-status--compact' : '')} aria-label={'Workspace runtime: ' + label} aria-expanded={expanded} aria-haspopup="dialog" onClick={() => setExpanded(value => !value)}>
-        <span className="runtime-status__dot" data-state={snap.connection} data-warning={Boolean(snap.daemonWarning)} />
+      <button ref={trigger} type="button" className={'runtime-status' + (compact ? ' runtime-status--compact' : '')} aria-label={'Workspace runtime: ' + label} aria-expanded={expanded} aria-haspopup="dialog" onClick={() => setExpanded(value => !value)}>
+        <span className="runtime-status__dot" data-state={snap.connection} data-warning={Boolean(snap.daemonWarning)} aria-hidden="true" />
         <span>{label}</span>
       </button>
     )}
     {expanded && createPortal(<div ref={popup} className="runtime-popover" role="dialog" aria-label="Workspace runtime" tabIndex={-1}>
-      <header><strong>Workspace runtime</strong><button aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}><Icon name="close" size={13} /></button></header>
+      <header><strong>Workspace runtime</strong><button type="button" aria-label="Close runtime status" onClick={() => { setExpanded(false); trigger.current?.focus() }}><Icon name="close" size={13} /></button></header>
       <p role="status" aria-live="polite">{snap.connection === 'online' ? 'Connected to this workspace' : label}</p>
       {snap.daemonWarning && <><strong>App and runtime versions differ</strong><p>{snap.daemonWarning}</p></>}
       {snap.runtimeUpdateMessage && <p role="status">{snap.runtimeUpdateMessage}</p>}
@@ -799,15 +887,15 @@ function RuntimeStatus({ snap, compact = false, iconOnly = false }: { snap: Snap
         {(snap.runtimeBlockers?.length ?? 0) > 0 && <><p>Still running:</p><ul className="runtime-popover__blockers">{snap.runtimeBlockers!.map(item => <li key={item}>{item}</li>)}</ul></>}
         <p>Restarting now stops that work. Goals pick up again in the new runtime.</p>
         <div className="runtime-popover__actions">
-          <button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button>
-          <button className="runtime-popover__danger" disabled={busy} onClick={() => void store.restartRuntimeNow()}>Restart now</button>
+          <button type="button" onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button>
+          <button type="button" className="runtime-popover__danger" disabled={busy} onClick={() => void store.restartRuntimeNow()}>Restart now</button>
         </div>
       </> : snap.daemonWarning?.startsWith('The app is older')
         // The runtime is newer than this app: restarting it cannot help (the
         // app would refuse, or reinstall the same newer runtime). Update the app.
-        ? <><p>{isVscodeHost() ? 'Update the Xerxes extension, then reload the window. Your tasks keep running meanwhile.' : 'Update this app to match the runtime. Your tasks keep running meanwhile.'}</p>{!isVscodeHost() && <div className="runtime-popover__actions"><button disabled={snap.appUpdate?.phase === 'checking' || snap.appUpdate?.phase === 'downloading'} onClick={() => { setExpanded(false); void store.appUpdateAction('check') }}>Update the app</button></div>}</>
-        : snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button disabled={busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
-      {!snap.daemonWarning && snap.connection !== 'online' && <button onClick={() => { setExpanded(false); navigate('workspace') }}>Open workspace settings</button>}
+        ? <><p>{isVscodeHost() ? 'Update the Xerxes extension, then reload the window. Your tasks keep running meanwhile.' : 'Update this app to match the runtime. Your tasks keep running meanwhile.'}</p>{!isVscodeHost() && <div className="runtime-popover__actions"><button type="button" disabled={snap.appUpdate?.phase === 'checking' || snap.appUpdate?.phase === 'downloading'} onClick={() => { setExpanded(false); void store.appUpdateAction('check') }}>Update the app</button></div>}</>
+        : snap.daemonWarning && <><p>The current runtime keeps your tasks running. Review activity before restarting.</p><div className="runtime-popover__actions"><button type="button" onClick={() => { setExpanded(false); navigate('activity') }}>Review activity</button><button type="button" disabled={busy} onClick={() => void store.restartDaemon()}>Restart workspace runtime</button></div></>}
+      {!snap.daemonWarning && snap.connection !== 'online' && <button type="button" onClick={() => { setExpanded(false); navigate('workspace') }}>Open workspace settings</button>}
     </div>, document.body)}
   </>
 }
@@ -826,7 +914,11 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
     const clean = group.cwd.replace(/\/+$/, '') || '/'
     return clean === (snap.cwd.replace(/\/+$/, '') || '/') || !hiddenSet.has(clean)
   })
-  const statusFor = (cwd: string): string => (cwd === snap.cwd ? 'current' : `${groups.find(g => g.cwd === cwd)?.rows.length ?? 0} tasks`)
+  const statusFor = (cwd: string): string => {
+    if (cwd === snap.cwd) return 'current'
+    const count = groups.find(g => g.cwd === cwd)?.rows.length ?? 0
+    return `${count} ${count === 1 ? 'task' : 'tasks'}`
+  }
   return (
     <>
       <div className="backdrop backdrop--clear" onClick={() => store.closeWorkspaceMenu()} />
@@ -835,16 +927,17 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
           as an empty menu. A labelled group describes what is actually
           rendered. */}
       <div className="wsmenu" role="group" aria-label="Workspaces">
-        <div className="cap" style={{ padding: '6px 10px 2px' }}>Workspaces</div>
+        <div className="cap wsmenu__cap">Workspaces</div>
         {groups.map(group => (
           <button
             key={group.cwd || group.name}
+            type="button"
             aria-current={group.cwd === snap.cwd ? 'true' : undefined}
             className={`wsrow${group.cwd === snap.cwd ? ' is-cur' : ''}`}
-            title={group.cwd === snap.cwd ? `${group.cwd} — you are here` : `Switch to ${group.cwd}`}
+            title={group.cwd === snap.cwd ? `${group.cwd} · current workspace` : `Switch to ${group.cwd}`}
             onClick={() => { if (group.cwd !== snap.cwd) store.enterWorkspace(group.cwd) }}
           >
-            <span className={`dot ${group.cwd === snap.cwd ? 'dot--live' : 'dot--idle'}`} />
+            <span className={`dot ${group.cwd === snap.cwd ? 'dot--live' : 'dot--idle'}`} aria-hidden="true" />
             <span className="wsrow__main">
               <span className="wsrow__t">{group.name}</span>
               <span className="wsrow__s">{group.cwd || group.name} · {statusFor(group.cwd)}</span>
@@ -854,16 +947,16 @@ function WorkspaceMenu({ snap }: { snap: Snapshot }): ReactElement {
         ))}
         {groups.length === 0 && (
           <div className="wsrow is-cur">
-            <span className="dot dot--live" />
+            <span className="dot dot--live" aria-hidden="true" />
             <span className="wsrow__main">
               <span className="wsrow__t">{workspaceLabel(snap.cwd) || 'No workspace'}</span>
-              <span className="wsrow__s">{snap.cwd || 'choose a folder to begin'}</span>
+              <span className="wsrow__s">{snap.cwd || 'Choose a folder to begin'}</span>
             </span>
             <span className="kbd"><Icon name="check" size={11} /></span>
           </div>
         )}
         <div className="menu__sep" />
-        <button className="menu__item" onClick={() => { store.closeWorkspaceMenu(); store.chooseWorkspace() }}>
+        <button type="button" className="menu__item" onClick={() => { store.closeWorkspaceMenu(); store.chooseWorkspace() }}>
           <Icon name="plus" size={13} /> Add workspace…
         </button>
       </div>
@@ -952,30 +1045,36 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
           <p className="modal__sub">Choose how you want to work, then describe your task.</p>
 
           <div className="field">
-            <label>Workspace</label>
+            <label htmlFor="task-workspace-btn">Workspace</label>
             <div className="seg" style={{ flexWrap: 'wrap' }}>
-              <button type="button" className="is-on" title={snap.cwd}><Icon name="folder" size={13} /> {workspaceLabel(snap.cwd) || 'no workspace'}</button>
+              <button id="task-workspace-btn" type="button" className="is-on" title={snap.cwd}><Icon name="folder" size={13} /> {workspaceLabel(snap.cwd) || 'no workspace'}</button>
               <button type="button" onClick={() => store.chooseWorkspace()} title="Open a different folder as the workspace"><Icon name="plus" size={13} /> different folder…</button>
               <button
                 type="button"
+                aria-expanded={namingWorktree}
                 onClick={() => setNamingWorktree(value => !value)}
                 title="Create an isolated git worktree next to the repo and switch into it"
               >
                 <Icon name="plus" size={12} /> new worktree…
               </button>
               {namingWorktree && (
-                <input
-                  className="taskmodal__wt"
-                  autoFocus
-                  spellCheck={false}
-                  placeholder="worktree name (branch + folder)"
-                  value={worktreeName}
-                  onChange={e => setWorktreeName(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') { e.preventDefault(); submitWorktree() }
-                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setNamingWorktree(false); setWorktreeName('') }
-                  }}
-                />
+                <>
+                  <input
+                    className="taskmodal__wt"
+                    autoFocus
+                    spellCheck={false}
+                    aria-label="New worktree name"
+                    placeholder="Worktree name (branch + folder)"
+                    value={worktreeName}
+                    onChange={e => setWorktreeName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); submitWorktree() }
+                      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setNamingWorktree(false); setWorktreeName('') }
+                    }}
+                  />
+                  <button type="button" className="btn btn--solid" disabled={!worktreeName.trim()} onClick={submitWorktree}>Create</button>
+                  <button type="button" className="btn btn--ghost" onClick={() => { setNamingWorktree(false); setWorktreeName('') }}>Cancel</button>
+                </>
               )}
             </div>
           </div>
@@ -1005,10 +1104,10 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
               className="composer__input taskmodal__objective"
               rows={4}
               value={objectiveText}
-              spellCheck={false}
               placeholder="What would you like to get done?"
               onChange={e => setObjectiveText(e.target.value)}
               onKeyDown={e => {
+                if (e.nativeEvent.isComposing) return
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
                   start()
@@ -1045,11 +1144,11 @@ function TaskModal({ snap }: { snap: Snapshot }): ReactElement | null {
               And the affordance was a bare <u>: not focusable, not a
               button, the only one of its kind in the renderer. */}
           <div className="fieldnote" style={{ marginBottom: 16 }}>
-            approvals for this task: {snap.permissionMode || 'daemon policy'} —{' '}
+            approvals for this task: {snap.permissionMode || 'daemon policy'} ·{' '}
             <button className="linkish" onClick={() => { store.closeTaskModal(); store.openSettings('permissions') }}>change</button>
           </div>
 
-          <div role="status" className="taskmodal__error">{snap.error}</div>
+          {snap.error && <div role="alert" className="taskmodal__error">{snap.error}</div>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button type="button" className="btn btn--ghost" disabled={starting} onClick={() => store.closeTaskModal()}>Cancel</button>
             <button type="button" className="btn btn--solid" disabled={starting || !objectiveText.trim() || !model} onClick={start}>{starting ? 'Starting…' : 'Start task'}</button>
@@ -1150,7 +1249,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length
           buttons[next]?.focus()
         }
-      }} className={'menu' + (renaming ? ' menu--renaming' : '')} role={renaming ? 'form' : 'menu'} aria-label={renaming ? 'Rename session' : 'Session actions'} style={{ left: menu.x, top: menu.y }}>
+      }} className={'menu' + (renaming ? ' menu--renaming' : '')} role={renaming ? 'form' : confirmingDelete ? 'dialog' : 'menu'} aria-label={renaming ? 'Rename session' : confirmingDelete ? 'Confirm delete session' : 'Session actions'} style={{ left: menu.x, top: menu.y }}>
         {renaming ? (
           <div className="menu__rename">
             <input
@@ -1169,14 +1268,14 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
               aria-label="Session title"
               spellCheck={false}
             />
-            <button className="menu__item" onClick={submitRename} disabled={menu.pending || !draft.trim()} aria-label="Save session title">{menu.pending ? 'Saving…' : 'Save'}</button>
+            <button type="button" className="btn btn--solid" onClick={submitRename} disabled={menu.pending || !draft.trim()} aria-label="Save session title">{menu.pending ? 'Saving…' : 'Save'}</button>
           </div>
         ) : (
           <>
-            <button role="menuitem" className="menu__item" onClick={() => { store.closeSessionMenu(); void store.openSession(menu.id) }}>
+            <button type="button" role="menuitem" className="menu__item" onClick={() => { store.closeSessionMenu(); void store.openSession(menu.id) }}>
               <Icon name="arrow" size={13} /> Open <kbd className="kbd">⏎</kbd>
             </button>
-            <button role="menuitem" className="menu__item" onClick={() => setRenaming(true)}>
+            <button type="button" role="menuitem" className="menu__item" onClick={() => setRenaming(true)}>
               <Icon name="note" size={13} /> Rename…
             </button>
             <div className="menu__sep" />
@@ -1189,6 +1288,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
               return (
                 <>
                   <button
+                    type="button"
                     role="menuitem"
                     className="menu__item"
                     onClick={() => {
@@ -1200,6 +1300,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
                     <T3Icon name={pinned ? 'pinOff' : 'pin'} size={13} /> {pinned ? 'Unpin' : 'Pin'}
                   </button>
                   <button
+                    type="button"
                     role="menuitem"
                     className="menu__item"
                     onClick={() => {
@@ -1212,6 +1313,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
                     <T3Icon name="alarmClock" size={13} /> {snoozed ? 'Wake now' : 'Snooze 1 hour'}
                   </button>
                   <button
+                    type="button"
                     role="menuitem"
                     className="menu__item"
                     onClick={() => {
@@ -1226,25 +1328,25 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
                 </>
               )
             })()}
-            <button role="menuitem" className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
+            <button type="button" role="menuitem" className="menu__item" onClick={() => { copyText(menu.id); store.closeSessionMenu() }}>
               <Icon name="copy" size={13} /> Copy ID
             </button>
-            <button role="menuitem" className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
+            <button type="button" role="menuitem" className="menu__item" onClick={() => { void store.exportSessionTranscript(menu.key) }}>
               <Icon name="download" size={13} /> Export as Markdown
             </button>
             <div className="menu__sep" />
             {confirmingDelete || menu.pending ? (
               <>
                 <p className="session-menu-confirm" role="alert">Delete “{menu.title || 'this chat'}”? Its saved history is removed permanently.</p>
-                <button role="menuitem" className="menu__item menu__item--danger" disabled={menu.pending} onClick={() => { void store.deleteSession(menu.id) }}>
+                <button type="button" className="menu__item menu__item--danger" disabled={menu.pending} onClick={() => { void store.deleteSession(menu.id) }}>
                   <Icon name="trash" size={13} /> {menu.pending ? 'Deleting…' : 'Delete permanently'}
                 </button>
-                <button role="menuitem" className="menu__item" disabled={menu.pending} onClick={() => setConfirmingDelete(false)}>
+                <button type="button" className="menu__item" disabled={menu.pending} onClick={() => setConfirmingDelete(false)}>
                   Cancel
                 </button>
               </>
             ) : (
-              <button role="menuitem" className="menu__item menu__item--danger" onClick={() => setConfirmingDelete(true)}>
+              <button type="button" role="menuitem" className="menu__item menu__item--danger" onClick={() => setConfirmingDelete(true)}>
                 <Icon name="trash" size={13} /> Delete…
               </button>
             )}
@@ -1262,7 +1364,7 @@ function SessionMenu({ menu }: { menu: Snapshot['sessionMenu'] }): ReactElement 
 
 /** Tasks, Agents and XERXES: the three sidebar destinations. */
 export function SidebarViews({ page, open }: { page: DesktopPageName | null; open: (panel: DesktopPanel) => void }): ReactElement {
-  return <div className="studio-segment" role="group" aria-label="Sidebar view"><button aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button><button aria-pressed={page === 'xerxes'} className={page === 'xerxes' ? 'is-selected' : ''} onClick={() => open('xerxes')}>XERXES</button></div>
+  return <div className="studio-segment" role="group" aria-label="Sidebar view"><button type="button" aria-pressed={page === null} className={page === null ? 'is-selected' : ''} onClick={() => open(null)}>Tasks</button><button type="button" aria-pressed={page === 'agents'} className={page === 'agents' ? 'is-selected' : ''} onClick={() => open('agents')}>Agents</button><button type="button" aria-pressed={page === 'xerxes'} className={page === 'xerxes' ? 'is-selected' : ''} onClick={() => open('xerxes')}>XERXES</button></div>
 }
 
 export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName | null }): ReactElement {
@@ -1405,7 +1507,7 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
         onGoForward={chrome.goForward ?? (() => {})}
         onOpen={open}
         sidebarToggle={<SidebarToggle />}
-        runtimeStatus={<RuntimeStatus snap={snap} iconOnly />}
+        runtimeStatus={<RuntimeStatus snap={snap} />}
       />
     )
   }
@@ -2024,6 +2126,7 @@ const StreamGroupRow = memo(function StreamGroupRow({
   approval,
   permissionMode,
   changes,
+  cwd,
 }: {
   readonly group: readonly Block[]
   readonly disclosed: boolean
@@ -2033,6 +2136,7 @@ const StreamGroupRow = memo(function StreamGroupRow({
   readonly approval: Snapshot['approval']
   readonly permissionMode: string
   readonly changes: Snapshot['changes']
+  readonly cwd?: string
 }): ReactElement {
   return (
     <div className="stream__group" data-history-anchor={group[0]!.id}>
@@ -2040,7 +2144,7 @@ const StreamGroupRow = memo(function StreamGroupRow({
         ? <ActivityGroup blocks={group} active={active} turnActive={turnActive} />
         : group.map(block => <BlockView key={block.id} block={block} />)}
       {inlineApproval && approval && <ApprovalCard approval={approval} policy={permissionMode} inline />}
-      <FilesChangedCard group={group} changes={changes} />
+      <FilesChangedCard group={group} changes={changes} {...(cwd ? { cwd } : {})} />
     </div>
   )
 })
@@ -2110,12 +2214,30 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   const shownGroups = hiddenGroupCount > 0 ? allGroups.slice(hiddenGroupCount) : allGroups
   // Gate automatic daemon paging on `hiddenGroupCount === 0` so scrolling near the top
   // reveals local tail-windowed groups first instead of firing duplicate daemon loads.
-  const { ref, loadOlder, following, scrollToLatest, unpin } = useTranscriptScroll(sessionScope, {
+  const { ref, loadOlder, showJumpLatest, scrollToLatest, unpin } = useTranscriptScroll(sessionScope, {
     more: Boolean(snap.historyMore),
     loading: Boolean(snap.historyLoading),
     automatic: !snap.historyError && hiddenGroupCount === 0,
     load: () => store.loadOlderHistory(),
   })
+  // Re-pin to the bottom whenever the user sends a new message in the current session.
+  const lastUserBlockId = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      if (blocks[i]?.kind === 'user') return blocks[i]!.id
+    }
+    return null
+  }, [blocks])
+  const seenUserScopeRef = useRef<{ readonly scope: string; readonly userId: number | null }>({
+    scope: sessionScope,
+    userId: lastUserBlockId,
+  })
+  useLayoutEffect(() => {
+    const prev = seenUserScopeRef.current
+    seenUserScopeRef.current = { scope: sessionScope, userId: lastUserBlockId }
+    if (prev.scope === sessionScope && lastUserBlockId !== null && lastUserBlockId !== prev.userId) {
+      scrollToLatest()
+    }
+  }, [sessionScope, lastUserBlockId, scrollToLatest])
   const windowExpandAnchorRef = useRef<HistoryScrollAnchor | null>(null)
   const expandWindow = useCallback((nextLimit: (current: number) => number, force = false): void => {
     if (!force && windowExpandAnchorRef.current) return
@@ -2171,7 +2293,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
       </> : (
         <div className="stream__col">
           {(snap.historyMore || snap.historyError) && hiddenGroupCount === 0 && <div className="history-pager">
-            <button className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading earlier conversation…' : snap.historyError ? 'Retry loading earlier conversation' : 'Show earlier conversation'}</button>
+            <button type="button" className="btn" disabled={snap.historyLoading} onClick={() => void loadOlder()}>{snap.historyLoading ? 'Loading earlier conversation…' : snap.historyError ? 'Retry loading earlier conversation' : 'Show earlier conversation'}</button>
             {snap.historyError && <p role="alert">{snap.historyError}</p>}
           </div>}
           {hiddenGroupCount > 0 && (
@@ -2199,6 +2321,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
                 approval={hasInlineApproval ? approval : null}
                 permissionMode={snap.permissionMode}
                 changes={snap.changes}
+                {...(snap.cwd ? { cwd: snap.cwd } : {})}
               />
             )
           })}
@@ -2213,10 +2336,10 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
       )}
       {/* Zero-flow-height sticky dock so toggling .jump-latest never alters
           .stream.scrollHeight or triggers a bottom-overscroll oscillation loop. */}
-      {!following && blocks.length > 0 && (
+      {showJumpLatest && blocks.length > 0 && (
         <div className="jump-latest-dock" data-scroll-ignore="true">
-          <button className="jump-latest" data-working={snap.turnActive || undefined} title={snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'} onClick={scrollToLatest}>
-            <span className="jump-latest__label">{snap.turnActive ? 'Still working — jump to latest' : 'Jump to latest'}</span> <Icon name="chevron" size={12} />
+          <button type="button" className="jump-latest" data-working={snap.turnActive || undefined} title={snap.turnActive ? 'Still working · scroll to end' : 'Scroll to end'} onClick={scrollToLatest}>
+            <span className="jump-latest__label">Scroll to end</span> <Icon name="chevron" size={11} />
           </button>
         </div>
       )}
@@ -2231,7 +2354,7 @@ export { Stream, Composer, ConnectionBanner, Announcer, GlobalKeys, TaskModal }
 
 function TaskContinuation({ snap }: { snap: Snapshot }): ReactElement {
   const open = useDesktopNavigation()
-  return <section className="task-continuation"><Icon name="activity" size={24}/><h1>Continue this task</h1><p>This session has saved work. Review its progress or send your next instruction below.</p><div><button className="btn" onClick={() => open('activity')}>Review activity</button>{(snap.todos?.length || snap.plan) ? <button className="btn" onClick={() => store.setTab('plan')}>View plan &amp; todos</button> : null}</div></section>
+  return <section className="task-continuation"><Icon name="activity" size={24}/><h1>Continue this task</h1><p>This session has saved work. Review its progress or send your next instruction below.</p><div><button type="button" className="btn" onClick={() => open('activity')}>Review activity</button>{(snap.todos?.length || snap.plan) ? <button type="button" className="btn" onClick={() => store.setTab('plan')}>View plan &amp; to-dos</button> : null}</div></section>
 }
 
 /** Most recent first; the daemon already returns them in that order. */
@@ -2268,7 +2391,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
     {dirty > 0 && <p className="welcome__dirty">{dirty} uncommitted {dirty === 1 ? 'file' : 'files'} <b>+{adds}</b> <i>−{dels}</i></p>}
     {resumable.length > 0 && <section className="welcome__resume" aria-label="Recent tasks here">
       <h2>Recent</h2>
-      {resumable.map(row => <button className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
+      {resumable.map(row => <button type="button" className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
         <span className="resumerow__dot" data-state={agentState(row.status).tone} aria-hidden="true" />
         <span className="resumerow__name">{row.title}</span>
         <span className="resumerow__age">{row.age}</span>
@@ -2299,7 +2422,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
         {resumable.map(row => {
           const state = agentState(row.status)
           return (
-            <button className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
+            <button type="button" className="resumerow" key={row.id} onClick={() => void store.openSession(row.id)}>
               <span className="resumerow__dot" data-state={state.tone} aria-hidden="true" />
               <span className="resumerow__name">{row.title}</span>
               <span className="resumerow__age">{row.age}</span>
@@ -2314,7 +2437,7 @@ function Welcome({ snap }: { snap: Snapshot }): ReactElement {
         ['Make a plan', 'Help me plan '],
         ['Build something', 'Help me implement '],
       ] as const).map(([label, prompt]) => (
-        <button className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}>
+        <button type="button" className="idea" key={label} onClick={() => window.dispatchEvent(new CustomEvent('xerxes:add-context', { detail: prompt }))}>
           <span>{label}</span><Icon name="arrow" size={14} />
         </button>
       ))}</div>
@@ -2335,16 +2458,16 @@ function WorkspaceGate(): ReactElement {
     <main className="chat">
       <div className="wsgate">
         <div className="wsgate__mark">
-          <img className="welcome__logo" src="./logo-128.png" alt="Xerxes" width={48} height={48} draggable={false} />
+          <XerxesLogoMark size={48} className="welcome__logo" alt="Xerxes" />
         </div>
         <h1>Welcome to Xerxes.</h1>
         <p>
           Choose the folder you want to work in. Next, connect a model provider and start your first task. Your existing files stay in place.
         </p>
-        <button className="btn btn--solid wsgate__btn" onClick={() => store.chooseWorkspace()}>
+        <button type="button" className="btn btn--solid wsgate__btn" onClick={() => store.chooseWorkspace()}>
           Choose your first folder…
         </button>
-        <p className="studio-muted">The macOS app includes Bun. Git and SSH are needed only for their respective features.</p>
+        <p className="studio-muted">Bun is bundled on macOS. Git and SSH are optional and only needed for Git or remote workspaces.</p>
       </div>
     </main>
   )
@@ -2360,7 +2483,7 @@ function Offline({ cwd, error }: { cwd: string; error: string | null }): ReactEl
       <p>
         The terminal, TUI and desktop app share a daemon across workspaces. Each task keeps its own workspace and session. The app connects automatically when the daemon is available.
       </p>
-      <button className="btn" onClick={() => store.retryConnection()}><Icon name="retry" size={13} /> Retry now</button>
+      <button type="button" className="btn" onClick={() => store.retryConnection()}><Icon name="retry" size={13} /> Retry now</button>
       {cwd && <div className="cmd">Workspace: {cwd}</div>}
     </div>
   )
@@ -2415,7 +2538,7 @@ const UserMessage = memo(function UserMessage({ text, images = [] }: { text: str
     {images.length > 0 && <div className="msg__images">{images.map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer" title="Open image"><img src={url} alt={`Attached image ${index + 1}`} /></a>)}</div>}
     {text && <div className="msg msg--user">
       <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
-      {long && <button className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
+      {long && <button type="button" className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
     </div>}
     <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
   </div>
@@ -3394,7 +3517,7 @@ export function QuestionCard({
         )
       })}
       <div className="approval__row">
-        <button className="btn btn--solid" disabled={!canSubmit} onClick={submit}>{question.items.length === 1 ? 'Send answer' : 'Send answers'} <kbd>⏎</kbd></button>
+        <button type="button" className="btn btn--solid" disabled={!canSubmit} onClick={submit}>{question.items.length === 1 ? 'Send answer' : 'Send answers'} <kbd>⏎</kbd></button>
       </div>
     </div>
   )
@@ -3461,13 +3584,13 @@ function PlanReviewCard({
     <div className="qcard qcard--plan" role="form" aria-label="Plan review">
       <div className="qcard__head">
         <span className="qcard__header-tag">plan review</span>
-        <span className="appr-policy">exit plan — execution waits for this</span>
+        <span className="appr-policy">Exit plan · execution waits for your decision</span>
       </div>
       <div className="qcard__q">{item.question}</div>
       {plan && <Markdown text={plan.markdown} />}
       <div className="optlist">
         {approveOption && (
-          <button className="opt is-approve" onClick={() => answer(approveOption)}>
+          <button type="button" className="opt is-approve" onClick={() => answer(approveOption)}>
             <span className="opt__label">{approveOption}</span>
             <span className="opt__kbd"><kbd>1</kbd></span>
           </button>
@@ -3475,6 +3598,7 @@ function PlanReviewCard({
         {otherOptions.map((option, index) => (
           <button
             key={option}
+            type="button"
             className={`opt${picked === option ? ' is-approve' : ''}`}
             onClick={() => setPicked(option)}
           >
@@ -3482,7 +3606,7 @@ function PlanReviewCard({
             {/* Was pinned to index 0, so a daemon sending
                 ["Approve", "Cancel", "Revise"] labelled Cancel as the
                 revise action. Key off what the option says instead. */}
-            {/revis|edit|change|feedback/i.test(option) ? <span className="opt__desc">— tell the agent what to revise</span> : null}
+            {/revis|edit|change|feedback/i.test(option) ? <span className="opt__desc">· tell the agent what to revise</span> : null}
             <span className="opt__kbd">{index + firstOtherKey < 10 ? <kbd>{index + firstOtherKey}</kbd> : null}</span>
           </button>
         ))}
@@ -3490,11 +3614,12 @@ function PlanReviewCard({
       <div className="otherbox">
         <span>or</span>
         <input
+          aria-label="Plan revision feedback"
           placeholder="feedback for the next revision…"
-          spellCheck={false}
           value={feedback}
           onChange={e => setFeedback(e.target.value)}
           onKeyDown={e => {
+            if (e.nativeEvent.isComposing) return
             if (e.key === 'Enter' && readyToSend) {
               e.preventDefault()
               answer(feedback.trim() || picked!)
@@ -3502,7 +3627,7 @@ function PlanReviewCard({
           }}
         />
         {readyToSend ? (
-          <button className="btn btn--solid" onClick={() => answer(feedback.trim() || picked!)}>Send <kbd>⏎</kbd></button>
+          <button type="button" className="btn btn--solid" onClick={() => answer(feedback.trim() || picked!)}>Send <kbd>⏎</kbd></button>
         ) : null}
       </div>
     </div>
@@ -3722,13 +3847,13 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   const ready = snap.connection === 'online' && !snap.compacting
   const placeholder =
     snap.connection !== 'online'
-      ? 'Connect to a daemon first…'
+      ? 'Waiting for workspace runtime…'
       : snap.turnActive
         ? 'Queue follow-up (⏎) or steer now (⌘⏎)'
         : snap.compacting
-          ? 'Compacting the conversation — you can send when it finishes'
+          ? 'Compacting the conversation. You can send when it finishes.'
           : inPlanMode
-          ? 'Planning — describe the outcome, or /plan <msg> to steer'
+          ? 'Planning · describe the outcome, or /plan <msg> to steer'
           : 'Describe what you need'
   // VS Code has Source Control for the repo line, and no dictation in a webview.
   const vscode = isVscodeHost()
@@ -3753,11 +3878,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             <strong>{externalAcp ? `${snap.acpBinding!.name} commands & skills` : 'Commands & skills'}</strong>
             <span>{hints.items.length} available</span>
           </div>
-          <div className="hints__list" role="listbox" aria-label="Command and skill hints" ref={hintsRef}>
+          <div id="composer-hints-list" className="hints__list" role="listbox" aria-label="Command and skill hints" ref={hintsRef}>
           {hints.items.length === 0 && <div className="hints__empty">No matches. Try another name or description.</div>}
           {hints.items.map((item, index) => (
             <button
               key={`${item.runtimeProvider ?? item.kind}:${item.value}`}
+              id={`composer-hint-${index}`}
               type="button"
               role="option"
               aria-selected={index === hints.index}
@@ -3778,16 +3904,16 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             </button>
           ))}
           </div>
-          <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>esc</kbd> dismiss</div>
+          <div className="hints__keys"><span>Type to filter</span><kbd>↵</kbd> / <kbd>Tab</kbd> complete <kbd>↑↓</kbd> pick <kbd>Esc</kbd> dismiss</div>
         </div>
       )}
       {snap.compacting && !snap.turnActive && <div className="streamstatus composer-status" role="status" aria-live="polite"><AgentOrb size={20} state="working" /><span className="streamstatus__phrase">{snap.compacting}</span></div>}
       {/* One status row at a time: every .composer-status shares the composer grid's row, so a
           "Sending…" shown during compaction was drawn over "Compacting…". The message is sent after it. */}
       {snap.submissionPending && !snap.turnActive && !snap.compacting && <div className="streamstatus composer-status" role="status"><AgentOrb size={20} state="connecting" /><span className="streamstatus__phrase">Sending…</span></div>}
-      {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`} role="status" aria-live="polite"><AgentOrb size={20} state={orbStateOf(snap)} />{snap.stopArmed
-        ? <span className="streamstatus__phrase">Press <kbd>esc</kbd> again to stop this task and its agents</span>
-        : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}<ElapsedClock active={snap.turnActive} since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={turnDurOf} className="streamstatus__clock" /></div>}
+      {snap.turnActive && <div className={`streamstatus composer-status${snap.stopArmed ? ' streamstatus--armed' : ''}`}><AgentOrb size={20} state={orbStateOf(snap)} /><span role="status" aria-live="polite">{snap.stopArmed
+        ? <span className="streamstatus__phrase">Press <kbd>Esc</kbd> again to stop this task and its agents</span>
+        : <span className="streamstatus__phrase">{composerPhraseOf(snap)}</span>}</span><ElapsedClock active={snap.turnActive} since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={turnDurOf} className="streamstatus__clock" /></div>}
       <ComposerTaskSummary snap={snap} />
       {!vscode && !vibes && <RepoBar snap={snap} />}
       <AcpActiveBanner snap={snap} />
@@ -3802,11 +3928,15 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         <textarea
           ref={ref}
           className="composer__input"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={Boolean(hints)}
+          {...(hints ? { 'aria-controls': 'composer-hints-list' } : {})}
+          {...(hints && hints.items.length > 0 ? { 'aria-activedescendant': `composer-hint-${hints.index}` } : {})}
           aria-label="Message"
           rows={1}
           value={draft}
           placeholder={placeholder}
-          spellCheck={false}
           onChange={e => { hintSeq.current += 1; setHints(null); setDraft(e.target.value); grow() }}
           onPaste={e => {
             if (!acpSupportsImages) return
@@ -3817,6 +3947,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             attach(files)
           }}
           onKeyDown={e => {
+            if (e.nativeEvent.isComposing) return
             // Shift+Tab switches between plan mode and normal mode, as in Claude Code.
             if ((!externalAcp || hasAcpPlanMode) && e.key === 'Tab' && e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); store.togglePlanMode(); return }
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && snap.turnActive) { e.preventDefault(); void send('steer') }
@@ -3844,11 +3975,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
         />
         {/* Stop while a turn runs and nothing is typed; otherwise send (or queue). */}
         {(snap.turnActive || snap.submissionPending) && !draft.trim() && !images.length
-          ? <button className="composer__send composer__send--stop" title="Stop (esc esc)" aria-label="Stop" onClick={() => store.cancel()}>{vibes ? <T3Icon name="stopSquare" size={14} /> : <Icon name="stop" size={18} />}</button>
+          ? <button type="button" className="composer__send composer__send--stop" title="Stop (Esc Esc)" aria-label="Stop" onClick={() => store.cancel()}>{vibes ? <T3Icon name="stopSquare" size={14} /> : <Icon name="stop" size={18} />}</button>
           : <button
+              type="button"
               className="composer__send"
               disabled={!ready || (!draft.trim() && !images.length) || snap.submissionPending}
-              title={snap.turnActive ? 'Queue — runs when this step settles (⏎ · ⌘⏎ to steer now)' : 'Send (⏎ · ⇧⏎ newline)'}
+              title={snap.turnActive ? 'Queue for next step (⏎ · ⌘⏎ to steer now)' : 'Send (⏎ · ⇧⏎ newline)'}
               onClick={() => void send('default')}
               aria-label={snap.turnActive ? 'Queue message' : 'Send message'}
             >{vibes ? <T3Icon name="arrowUp" size={16} /> : <Icon name="arrowUp" size={16} />}</button>}
@@ -3899,6 +4031,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
       ) : (
         <div className="composer__toolbar">
           <button
+            type="button"
             className="cchip composer__icon"
             data-images-supported={acpSupportsImages ? 'true' : 'false'}
             title={
@@ -3924,22 +4057,25 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
           {!externalAcp && (
             <>
               <button
+                type="button"
                 className="cchip composer__text composer__perm"
-                title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} — open settings`}
+                title={`Approval policy for this task: ${snap.permissionMode || 'not configured'} · open settings`}
                 onClick={() => store.openSettings('permissions')}
               >{permissionLabel(snap.permissionMode)}</button>
               <button
+                type="button"
                 className={`cchip composer__text composer__plan${snap.planMode ? ' is-on' : ''}`}
                 aria-pressed={snap.planMode}
-                title={snap.planMode ? 'Planning first. Click to work directly.' : 'Click to plan before making changes.'}
+                title={snap.planMode ? 'Planning first. Switch to work directly.' : 'Plan before making changes.'}
                 onClick={() => store.togglePlanMode()}
               >{snap.planMode ? 'Plan first' : 'Plan'}</button>
               <div className="chipanchor">
                 <button
+                  type="button"
                   className={`cchip composer__text delegation-chip${snap.delegationMode === 'auto' ? '' : ' is-on'}`}
                   aria-haspopup="dialog"
                   aria-expanded={snap.delegationMenuOpen}
-                  title="How eagerly this task uses agents and workflows — click to change"
+                  title="Choose how eagerly this task uses agents and workflows"
                   onClick={() => store.toggleDelegationMenu()}
                 >{!vibes && <Icon name="agents" size={14} />}Agents · {snap.delegationMode === 'off' ? 'Off' : snap.delegationMode === 'eager' ? 'Eager' : 'Auto'}</button>
                 <PickerLayer>
@@ -3969,8 +4105,9 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             <>
               <div className="chipanchor composer__model">
                 <button
+                  type="button"
                   className={`cchip composer__text${snap.model ? '' : ' is-custom'}`}
-                  title="Model — click to change"
+                  title="Choose model"
                   onClick={() => store.toggleModelMenu()}
                 >{snap.model ? bareModelName(snap.model) : 'Choose model'}</button>
                 <PickerLayer>
@@ -4145,6 +4282,155 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
 
 const hiddenRepoBars = new Set<string>()
 
+interface ChangedTreeFile {
+  readonly file: Snapshot['changes'][number]
+  readonly name: string
+  readonly relPath: string
+}
+
+interface ChangedTreeDir {
+  readonly key: string
+  readonly name: string
+  readonly dirs: readonly ChangedTreeDir[]
+  readonly files: readonly ChangedTreeFile[]
+  readonly adds: number
+  readonly dels: number
+}
+
+interface MutableChangedDir {
+  readonly key: string
+  readonly name: string
+  readonly dirs: Map<string, MutableChangedDir>
+  readonly files: ChangedTreeFile[]
+}
+
+/** Relativize an edited path against the workspace cwd so ACP absolute paths fold into clean trees. */
+export function relativizeChangedPath(rawPath: string, cwd?: string): string {
+  let normalized = rawPath.replaceAll('\\', '/').replace(/\/{2,}/g, '/').replace(/^\.\//, '')
+  if (cwd) {
+    const normCwd = cwd.replaceAll('\\', '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+    if (normCwd) {
+      if (normalized === normCwd) {
+        const idx = normalized.lastIndexOf('/')
+        return idx >= 0 ? normalized.slice(idx + 1) : normalized
+      }
+      if (normalized.startsWith(`${normCwd}/`)) {
+        normalized = normalized.slice(normCwd.length + 1)
+      }
+    }
+  }
+  const brainMatch = /(?:^|\/)\.gemini\/antigravity\/brain\/[^/]+\/(.+)$/.exec(normalized)
+  if (brainMatch?.[1]) {
+    return `artifacts/${brainMatch[1]}`
+  }
+  return normalized.replace(/^\/+/, '').replace(/\/+$/, '') || rawPath
+}
+
+function finalizeChangedDir(node: MutableChangedDir, depth: number): ChangedTreeDir {
+  const finalizedDirs = [...node.dirs.values()]
+    .map(child => finalizeChangedDir(child, depth + 1))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  const finalizedFiles = [...node.files].sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  // Compact single-child directory chains below depth 0 (e.g. `src/desktop/renderer`),
+  // keeping top-level root directories (`xerxes`, `docs`) collapsed cleanly at depth 0.
+  if (depth >= 1 && finalizedFiles.length === 0 && finalizedDirs.length === 1) {
+    const sole = finalizedDirs[0]!
+    return {
+      key: sole.key,
+      name: `${node.name}/${sole.name}`,
+      dirs: sole.dirs,
+      files: sole.files,
+      adds: sole.adds,
+      dels: sole.dels,
+    }
+  }
+  const adds =
+    finalizedDirs.reduce((sum, child) => sum + child.adds, 0) +
+    finalizedFiles.reduce((sum, entry) => sum + entry.file.adds, 0)
+  const dels =
+    finalizedDirs.reduce((sum, child) => sum + child.dels, 0) +
+    finalizedFiles.reduce((sum, entry) => sum + entry.file.dels, 0)
+  return {
+    key: node.key,
+    name: node.name,
+    dirs: finalizedDirs,
+    files: finalizedFiles,
+    adds,
+    dels,
+  }
+}
+
+function buildChangedFileTree(
+  files: readonly Snapshot['changes'][number][],
+  cwd?: string,
+): { readonly dirs: readonly ChangedTreeDir[]; readonly files: readonly ChangedTreeFile[]; readonly allDirKeys: readonly string[] } {
+  const root: MutableChangedDir = { key: '', name: '', dirs: new Map(), files: [] }
+  for (const file of files) {
+    const relPath = relativizeChangedPath(file.path, cwd)
+    const segments = relPath.split('/').filter(Boolean)
+    if (segments.length <= 1) {
+      root.files.push({ file, name: segments[0] ?? relPath, relPath })
+      continue
+    }
+    let cursor = root
+    let keyPrefix = ''
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const seg = segments[i]!
+      keyPrefix = keyPrefix ? `${keyPrefix}/${seg}` : seg
+      let child = cursor.dirs.get(seg)
+      if (!child) {
+        child = { key: keyPrefix, name: seg, dirs: new Map(), files: [] }
+        cursor.dirs.set(seg, child)
+      }
+      cursor = child
+    }
+    cursor.files.push({ file, name: segments[segments.length - 1]!, relPath })
+  }
+  const dirs = [...root.dirs.values()]
+    .map(child => finalizeChangedDir(child, 0))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  const rootFiles = [...root.files].sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  const allDirKeys: string[] = []
+  const collectKeys = (list: readonly ChangedTreeDir[]): void => {
+    for (const dir of list) {
+      allDirKeys.push(dir.key)
+      collectKeys(dir.dirs)
+    }
+  }
+  collectKeys(dirs)
+  return { dirs, files: rootFiles, allDirKeys }
+}
+
+function ChangedFileIcon({ name }: { readonly name: string }): ReactElement {
+  const dot = name.lastIndexOf('.')
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
+  if (ext === 'tsx' || ext === 'jsx') {
+    return (
+      <span className="t3-file-ico t3-file-ico--tsx" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+          <circle cx="8" cy="8" r="1.4" fill="currentColor" />
+          <ellipse cx="8" cy="8" rx="6.2" ry="2.4" stroke="currentColor" strokeWidth="1.15" />
+          <ellipse cx="8" cy="8" rx="6.2" ry="2.4" stroke="currentColor" strokeWidth="1.15" transform="rotate(60 8 8)" />
+          <ellipse cx="8" cy="8" rx="6.2" ry="2.4" stroke="currentColor" strokeWidth="1.15" transform="rotate(120 8 8)" />
+        </svg>
+      </span>
+    )
+  }
+  if (ext === 'css' || ext === 'scss' || ext === 'less') return <span className="t3-file-badge t3-file-badge--css" aria-hidden="true">css</span>
+  if (ext === 'ts' || ext === 'mts' || ext === 'cts') return <span className="t3-file-badge t3-file-badge--ts" aria-hidden="true">ts</span>
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return <span className="t3-file-badge t3-file-badge--js" aria-hidden="true">js</span>
+  if (ext === 'json' || ext === 'jsonc') return <span className="t3-file-badge t3-file-badge--json" aria-hidden="true">{'{}'}</span>
+  if (ext === 'md' || ext === 'mdx') return <span className="t3-file-badge t3-file-badge--md" aria-hidden="true">md</span>
+  if (ext === 'py' || ext === 'pyi') return <span className="t3-file-badge t3-file-badge--py" aria-hidden="true">py</span>
+  if (ext === 'sh' || ext === 'zsh' || ext === 'bash') return <span className="t3-file-badge t3-file-badge--sh" aria-hidden="true">sh</span>
+  if (ext === 'yml' || ext === 'yaml' || ext === 'toml' || ext === 'ini') return <span className="t3-file-badge t3-file-badge--cfg" aria-hidden="true">cfg</span>
+  return <span className="t3-file-ico" aria-hidden="true"><Icon name="file" size={13} /></span>
+}
+
 /**
  * The end-of-turn summary of edited files. A turn that changed something
  * ends in a checkpoint block; the files listed are the ones whose latest
@@ -4152,7 +4438,15 @@ const hiddenRepoBars = new Set<string>()
  * totals (what the review panel shows), so the header says so when a file
  * was also edited earlier.
  */
-export function FilesChangedCard({ group, changes }: { group: readonly Snapshot['blocks'][number][]; changes: Snapshot['changes'] }): ReactElement | null {
+export function FilesChangedCard({
+  group,
+  changes,
+  cwd,
+}: {
+  group: readonly Snapshot['blocks'][number][]
+  changes: Snapshot['changes']
+  cwd?: string
+}): ReactElement | null {
   const vibes = useVibesStyle()
   const open = useDesktopNavigation()
   const [expandedDirs, setExpandedDirs] = useState<ReadonlySet<string>>(() => new Set())
@@ -4164,39 +4458,72 @@ export function FilesChangedCard({ group, changes }: { group: readonly Snapshot[
   const dels = files.reduce((sum, file) => sum + file.dels, 0)
 
   if (vibes) {
-    // Group changed files by top-level directory (matching T3 Code's ChangedFilesCard).
-    const folderMap = new Map<string, { name: string; files: typeof files; adds: number; dels: number }>()
-    const rootFiles: typeof files = []
-    for (const file of files) {
-      const normalized = file.path.replaceAll('\\', '/').replace(/^\.\//, '')
-      const slash = normalized.indexOf('/')
-      if (slash <= 0) {
-        rootFiles.push(file)
-      } else {
-        const dir = normalized.slice(0, slash)
-        const existing = folderMap.get(dir)
-        if (existing) {
-          existing.files = [...existing.files, file]
-          existing.adds += file.adds
-          existing.dels += file.dels
-        } else {
-          folderMap.set(dir, { name: dir, files: [file], adds: file.adds, dels: file.dels })
-        }
-      }
-    }
-    const folders = [...folderMap.values()]
-    const allOpen = folders.length > 0 && folders.every(dir => expandedDirs.has(dir.name))
+    const tree = buildChangedFileTree(files, cwd)
+    const allOpen = tree.allDirKeys.length > 0 && tree.allDirKeys.every(key => expandedDirs.has(key))
     const toggleAll = (): void => {
-      setExpandedDirs(allOpen ? new Set() : new Set(folders.map(dir => dir.name)))
+      setExpandedDirs(allOpen ? new Set() : new Set(tree.allDirKeys))
     }
-    const toggleDir = (dir: string): void => {
+    const toggleDir = (key: string): void => {
       setExpandedDirs(current => {
         const next = new Set(current)
-        if (!next.delete(dir)) next.add(dir)
+        if (!next.delete(key)) next.add(key)
         return next
       })
     }
     const fmtCompact = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(n))
+
+    const renderFileRow = (entry: ChangedTreeFile, depth: number): ReactElement => {
+      const indentPx = 8 + depth * 18 + (depth > 0 ? 18 : 0)
+      return (
+        <button
+          key={entry.file.path}
+          type="button"
+          className="t3-changed-file__row"
+          style={{ paddingLeft: `${indentPx}px` }}
+          title={`${entry.relPath} — open the diff`}
+          onClick={() => store.openChange(entry.file.path)}
+        >
+          <ChangedFileIcon name={entry.name} />
+          <span className="t3-changed-file__name">{entry.name}</span>
+          {entry.file.isNew && <span className="fileschanged__new">new</span>}
+          <span className="t3-changed-file__stats">
+            <span className="fileschanged__add">+{fmtCompact(entry.file.adds)}</span>
+            <span className="fileschanged__del">-{fmtCompact(entry.file.dels)}</span>
+          </span>
+        </button>
+      )
+    }
+
+    const renderDirNode = (dir: ChangedTreeDir, depth: number): ReactElement => {
+      const isOpen = expandedDirs.has(dir.key)
+      const indentPx = 8 + depth * 18
+      return (
+        <div key={dir.key} className="t3-changed-dir">
+          <button
+            type="button"
+            className="t3-changed-dir__row"
+            style={{ paddingLeft: `${indentPx}px` }}
+            aria-expanded={isOpen}
+            onClick={() => toggleDir(dir.key)}
+          >
+            <T3Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} className="t3-changed-dir__chev" />
+            <T3Icon name="folder" size={14} className="t3-changed-dir__ico" />
+            <span className="t3-changed-dir__name">{dir.name}</span>
+            <span className="t3-changed-dir__stats">
+              <span className="fileschanged__add">+{fmtCompact(dir.adds)}</span>
+              <span className="fileschanged__del">-{fmtCompact(dir.dels)}</span>
+            </span>
+          </button>
+          {isOpen && (
+            <div className="t3-changed-tree">
+              {dir.dirs.map(child => renderDirNode(child, depth + 1))}
+              {dir.files.map(fileEntry => renderFileRow(fileEntry, depth + 1))}
+            </div>
+          )}
+        </div>
+      )
+    }
+
     return (
       <section className="fileschanged t3-changed-card" aria-label={`Files changed in turn ${checkpoint.turn}`}>
         <header className="t3-changed-card__head">
@@ -4206,62 +4533,25 @@ export function FilesChangedCard({ group, changes }: { group: readonly Snapshot[
             <span className="fileschanged__del">-{fmtCompact(dels)}</span>
           </span>
           <span className="composer__flex" />
-          {folders.length > 0 && (
-            <button type="button" className="t3-changed-card__btn" aria-label={allOpen ? 'Collapse all folders' : 'Expand all folders'} onClick={toggleAll}>
-              <T3Icon name="chevronsUpDown" size={12} />
+          {tree.allDirKeys.length > 0 && (
+            <button
+              type="button"
+              className="t3-changed-card__btn t3-changed-card__btn--ico"
+              aria-label={allOpen ? 'Collapse all folders' : 'Expand all folders'}
+              title={allOpen ? 'Collapse all folders' : 'Expand all folders'}
+              onClick={toggleAll}
+            >
+              <T3Icon name="chevronsUpDown" size={13} />
             </button>
           )}
           <button type="button" className="t3-changed-card__btn t3-changed-card__open" onClick={() => open('review')}>
-            <T3Icon name="fileDiff" size={12} />
+            <T3Icon name="fileDiff" size={13} />
             <span>Open diff</span>
           </button>
         </header>
         <div className="t3-changed-card__body">
-          {folders.map(dir => {
-            const isOpen = expandedDirs.has(dir.name)
-            return (
-              <div key={dir.name} className="t3-changed-dir">
-                <button type="button" className="t3-changed-dir__row" aria-expanded={isOpen} onClick={() => toggleDir(dir.name)}>
-                  <T3Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} className="t3-changed-dir__chev" />
-                  <T3Icon name="folder" size={13} className="t3-changed-dir__ico" />
-                  <span className="t3-changed-dir__name">{dir.name}</span>
-                  <span className="t3-changed-dir__stats">
-                    <span className="fileschanged__add">+{fmtCompact(dir.adds)}</span>
-                    <span className="fileschanged__del">-{fmtCompact(dir.dels)}</span>
-                  </span>
-                </button>
-                {isOpen && (
-                  <ul className="fileschanged__list t3-changed-dir__files">
-                    {dir.files.map(file => (
-                      <li key={file.path}>
-                        <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
-                          <Icon name="file" size={12} />
-                          <span className="fileschanged__path">{file.path.slice(dir.name.length + 1)}</span>
-                          <span className="fileschanged__add">+{file.adds}</span>
-                          <span className="fileschanged__del">-{file.dels}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )
-          })}
-          {rootFiles.length > 0 && (
-            <ul className="fileschanged__list">
-              {rootFiles.map(file => (
-                <li key={file.path}>
-                  <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
-                    <Icon name="file" size={12} />
-                    <span className="fileschanged__path">{file.path}</span>
-                    {file.isNew && <span className="fileschanged__new">new</span>}
-                    <span className="fileschanged__add">+{file.adds}</span>
-                    <span className="fileschanged__del">-{file.dels}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+          {tree.dirs.map(dir => renderDirNode(dir, 0))}
+          {tree.files.map(fileEntry => renderFileRow(fileEntry, 0))}
         </div>
       </section>
     )
@@ -4278,7 +4568,7 @@ export function FilesChangedCard({ group, changes }: { group: readonly Snapshot[
       {files.map(file => <li key={file.path}>
         <button type="button" className="fileschanged__row" title={`${file.path} — open the diff`} onClick={() => store.openChange(file.path)}>
           <Icon name="file" size={13} />
-          <span className="fileschanged__path">{file.path}</span>
+          <span className="fileschanged__path">{relativizeChangedPath(file.path, cwd)}</span>
           {file.isNew && <span className="fileschanged__new">new</span>}
           <span className="fileschanged__add">+{file.adds}</span>
           <span className="fileschanged__del">−{file.dels}</span>
@@ -4320,7 +4610,10 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
             onClick={() => store.setTab('plan')}
             title={next?.content ?? 'View completed tasks'}
           >
-            <span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span>
+            <span className="composer-task-summary__label">
+              {current && <AgentOrb size={12} state={snap.turnActive ? orbStateOf(snap) : 'breathing'} live={snap.turnActive} />}
+              {current ? 'Doing' : next ? 'Next' : 'To-dos'}
+            </span>
             <span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span>
             <span className="composer-task-summary__status">{statusSummary}</span>
           </button>

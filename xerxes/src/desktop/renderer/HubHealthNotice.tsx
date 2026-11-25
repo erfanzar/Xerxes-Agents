@@ -65,13 +65,13 @@ export function HubHealthNoticeView(props: HubHealthNoticeProps): ReactElement |
       <div className="macperm-notice__text">
         <strong>{title}</strong>
         <span>{body}</span>
-        {state.target && <span className="hub-notice__target">Hub host: <code>{state.target}</code>{state.checked_at ? ` · checked ${new Date(state.checked_at).toLocaleTimeString()}` : ''}</span>}
+        {state.target && <span className="hub-notice__target">Hub host: <code>{state.target}</code>{state.checked_at && Number.isFinite(Date.parse(state.checked_at)) ? ` · checked ${new Date(state.checked_at).toLocaleTimeString()}` : ''}</span>}
       </div>
       <div className="macperm-notice__actions">
-        <button className="btn btn--solid" onClick={props.onSettings}>Hub settings</button>
-        <button className="btn" disabled={props.checking} onClick={props.onRecheck}>{props.checking ? 'Checking…' : 'Re-check'}</button>
-        <button className="btn btn--ghost" onClick={props.onLater}>Not now</button>
-        <button className="btn btn--ghost" onClick={() => props.onDismiss(kind)}>Don't remind me</button>
+        <button type="button" className="btn btn--solid" onClick={props.onSettings}>Hub settings</button>
+        <button type="button" className="btn" disabled={props.checking} onClick={props.onRecheck}>{props.checking ? 'Checking…' : 'Re-check'}</button>
+        <button type="button" className="btn btn--ghost" onClick={props.onLater}>Not now</button>
+        <button type="button" className="btn btn--ghost" onClick={() => props.onDismiss(kind)}>Don't remind me</button>
       </div>
     </div>
   )

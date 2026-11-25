@@ -29,6 +29,7 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
   const [naming, setNaming] = useState(false)
   const [newName, setNewName] = useState('')
   const [message, setMessage] = useState('Loading…')
+  const [messageTone, setMessageTone] = useState<'info' | 'ok' | 'error'>('info')
   const [busy, setBusy] = useState(false)
   const fieldScroll = useRef<ScrollBoxRenderable | null>(null)
   useEffect(() => {
@@ -45,28 +46,28 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
     try {
       const result = await gateway.rpc<Settings>('mcp.settings.get', {})
       if (!result?.ok) throw new Error(result?.error || 'Could not load MCP settings')
-      if (alive.current) { setSettings(result); setSelected(0); setDraft({}); setCreating(false); setNaming(false); setEditing(false); setMessage('') }
-    } catch (error) { if (alive.current) setMessage(String(error)) }
+      if (alive.current) { setSettings(result); setSelected(0); setDraft({}); setCreating(false); setNaming(false); setEditing(false); setMessage(''); setMessageTone('info') }
+    } catch (error) { if (alive.current) { setMessage(String(error)); setMessageTone('error') } }
     finally { pending.current = false; if (alive.current) setBusy(false) }
   }
-  useEffect(() => { alive.current = true; if (gateway) void load(); else setMessage('MCP gateway unavailable'); return () => { alive.current = false } }, [gateway])
+  useEffect(() => { alive.current = true; if (gateway) void load(); else { setMessage('MCP gateway unavailable'); setMessageTone('error') }; return () => { alive.current = false } }, [gateway])
   const acceptInput = () => {
     const value = input.current?.plainText ?? ''
     if (naming) {
-      if (!value.trim() || settings?.servers.some(server => server.name === value.trim())) { setMessage('Enter a unique server name'); return }
-      setNewName(value.trim()); setCreating(true); setNaming(false); setEditing(false); setDraft({}); setField(2); setMessage('Enter a command, or change transport and enter a URL. Ctrl+S connects and saves.'); return
+      if (!value.trim() || settings?.servers.some(server => server.name === value.trim())) { setMessage('Enter a unique server name'); setMessageTone('error'); return }
+      setNewName(value.trim()); setCreating(true); setNaming(false); setEditing(false); setDraft({}); setField(2); setMessage('Enter a command, or change transport and enter a URL. Ctrl+S connects and saves.'); setMessageTone('info'); return
     }
     try {
       let parsed: unknown = value
       if (value === '') { setDraft(current => { const next = { ...current }; delete next[key]; return next }); setEditing(false); return }
       if (['args', 'env', 'headers'].includes(key)) parsed = JSON.parse(value)
       if (key === 'timeoutMs') { parsed = Number(value); if (!Number.isFinite(parsed)) throw new Error('Enter a number') }
-      setDraft(current => ({ ...current, [key]: parsed })); setEditing(false); setMessage('Draft updated · Ctrl+S to save')
-    } catch { setMessage('Invalid value. Arguments need a JSON array; environment and headers need JSON objects.') }
+      setDraft(current => ({ ...current, [key]: parsed })); setEditing(false); setMessage('Draft updated · Ctrl+S to save'); setMessageTone('info')
+    } catch { setMessage('Invalid value. Arguments need a JSON array; environment and headers need JSON objects.'); setMessageTone('error') }
   }
   const save = async () => {
     if (!gateway || !settings || !server || pending.current || editing || !Object.keys(draft).length) return
-    pending.current = true; setBusy(true); setMessage('Connecting and saving…')
+    pending.current = true; setBusy(true); setMessage('Connecting and saving…'); setMessageTone('info')
     try {
       const result = await gateway.rpc<{ ok: boolean; revision: string; warnings?: string[]; error?: string }>('mcp.settings.save', { name: server.name, revision: settings.revision, changes: draft, ...(creating ? { create: true } : {}) })
       if (!result?.ok) throw new Error(result?.error || 'Could not save MCP settings')
@@ -79,17 +80,18 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
           timeout_ms: 'timeoutMs' in draft ? typeof draft.timeoutMs === 'number' ? draft.timeoutMs : null : value.timeout_ms,
         }) });
         setSelected(updatedIndex); setCreating(false)
-        setDraft({}); setMessage(result.warnings?.length ? result.warnings.join(' · ') : 'Saved. Connected tools refreshed.')
+        setDraft({}); setMessage(result.warnings?.length ? result.warnings.join(' · ') : 'Saved. Connected tools refreshed.'); setMessageTone(result.warnings?.length ? 'info' : 'ok')
       }
-    } catch (error) { if (alive.current) setMessage(`${String(error)} · Draft kept. F5 reload discards it.`) }
+    } catch (error) { if (alive.current) { setMessage(`${String(error)} · Draft kept. F5 reload discards it.`); setMessageTone('error') } }
     finally { pending.current = false; if (alive.current) setBusy(false) }
   }
   const beginNew = () => {
     if (pending.current) return
-    if (!settings || Object.keys(draft).length || creating) { setMessage('Save or reload the current draft first.'); return }
-      setNaming(true); setEditing(true); setMessage('Name the new MCP server'); return
+    if (!settings || Object.keys(draft).length || creating) { setMessage('Save or reload the current draft first.'); setMessageTone('info'); return }
+      setNaming(true); setEditing(true); setMessage('Name the new MCP server'); setMessageTone('info'); return
   }
   useKeyboard(event => {
+    if (event.eventType === 'release') return
     if (editing && !['escape', 'return'].includes(event.name)) return
     if (!['escape', 'return', 'tab', 'up', 'down', 'f2', 'f5', 's', 'delete'].includes(event.name)) return
     if (event.name === 's' && !event.ctrl) return
@@ -103,10 +105,10 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
     if (event.name === 's') { void save(); return }
     if (event.name === 'tab') { setField(value => (value + (event.shift ? fields.length - 1 : 1)) % fields.length); return }
     if (event.name === 'up' || event.name === 'down') {
-      if (Object.keys(draft).length || creating) { setMessage('Save this draft or press F5 to discard it before switching servers.'); return }
+      if (Object.keys(draft).length || creating) { setMessage('Save this draft or press F5 to discard it before switching servers.'); setMessageTone('info'); return }
       setSelected(value => (value + (event.name === 'up' ? settings!.servers.length - 1 : 1)) % settings!.servers.length); return
     }
-    if (event.name === 'delete') { setDraft(value => ({ ...value, [key]: null })); setMessage('Field will be removed on save'); return }
+    if (event.name === 'delete') { setDraft(value => ({ ...value, [key]: null })); setMessage('Field will be removed on save'); setMessageTone('info'); return }
     if (key === 'enabled') setDraft(value => ({ ...value, enabled: !(typeof value.enabled === 'boolean' ? value.enabled : server.enabled) }))
     else if (key === 'transport') setDraft(value => ({ ...value, transport: ['stdio', 'sse', 'streamable_http'][(['stdio', 'sse', 'streamable_http'].indexOf(String(value.transport ?? server.transport)) + 1) % 3] }))
     else setEditing(true)
@@ -119,10 +121,10 @@ export function McpSettingsOverlay({ t }: { t: Theme }) {
         {!compact ? <Text wrap="wrap" color={t.ds.secondary}>Existing launch and credential values stay hidden. Blank input keeps the saved value. Delete removes a field.</Text> : null}
         {server ? fields.map((name, index) => compact && index !== field ? null : <Box key={name} id={`server-field-${index}`} flexDirection="column" flexShrink={0}><SettingRow t={t} label={labels[index]!} selected={field === index}>
           {name in draft ? draft[name] === null ? '(remove)' : ['enabled', 'transport', 'timeoutMs'].includes(name) ? String(draft[name]) : '(replacement entered)' : name === 'enabled' ? String(server.enabled) : name === 'transport' ? server.transport : name === 'timeoutMs' ? String(server.timeout_ms ?? 'default') : '(keep saved value)'}
-        </SettingRow>{editing && !naming && index === field ? <textarea id="server-edit" key={`${selected}-${field}`} ref={input} focused minHeight={2} maxHeight={5} /> : null}</Box>) : !editing ? <DialogEmpty t={t} title="No MCP servers configured" description="Add a server to make its tools available." action="F2  Add server" onAction={beginNew} /> : null}
-        {editing && naming ? <textarea id="server-edit" key={`${naming}-${selected}-${field}`} ref={input} focused minHeight={2} maxHeight={5} /> : null}
+        </SettingRow>{editing && !naming && index === field ? <Box borderStyle="round" borderColor={t.color.accent} paddingX={1} flexShrink={0}><textarea id="server-edit" key={`${selected}-${field}`} ref={input} focused minHeight={2} maxHeight={5} focusedBackgroundColor={t.ds.sunken} focusedTextColor={t.color.text} placeholder={`Enter ${labels[index]!.toLowerCase()}…`} placeholderColor={t.color.muted} /></Box> : null}</Box>) : null}
+        {editing && naming ? <Box borderStyle="round" borderColor={t.color.accent} paddingX={1} flexShrink={0}><textarea id="server-edit" key={`${naming}-${selected}-${field}`} ref={input} focused minHeight={2} maxHeight={5} focusedBackgroundColor={t.ds.sunken} focusedTextColor={t.color.text} placeholder="Enter a unique server name…" placeholderColor={t.color.muted} /></Box> : null}
       </scrollbox>}
-      <Text wrap="wrap" color={t.color.warn}>{message}</Text>
+      {message ? <Text wrap="wrap" color={messageTone === 'error' ? t.color.error : messageTone === 'ok' ? t.color.ok : t.ds.secondary}>{message}</Text> : null}
       <DialogFooter t={t}><Text wrap="wrap">{busy ? 'Saving/loading… Please wait.' : !server && !editing ? 'F2 add server · F5 reload · Esc close' : editing ? 'Enter apply draft · Esc cancel edit' : '↑/↓ server · F2 new · Tab field · Enter edit · Ctrl+S save · F5 reload · Esc close'}</Text></DialogFooter>
     </Box>
   </box>

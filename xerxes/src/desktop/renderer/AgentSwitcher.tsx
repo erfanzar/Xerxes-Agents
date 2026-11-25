@@ -55,27 +55,31 @@ export function AgentMenu({ rows, currentId, label, title, onPick, variant = 'cr
     if (!open) return
     // The window's Escape stops a running turn; inside the menu it only closes the menu.
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return
     const items = [...(list.current?.querySelectorAll<HTMLButtonElement>('.agent-menu__row') ?? [])]
     if (!items.length) return
     event.preventDefault()
     const at = items.findIndex(item => item === document.activeElement)
-    const next = at < 0 ? 0 : (at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
+    const next =
+      event.key === 'Home' ? 0
+      : event.key === 'End' ? items.length - 1
+      : at < 0 ? 0
+      : (at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
     items[next]?.focus()
   }
   return <div className={`agent-menu agent-menu--${variant}`} ref={root} onKeyDown={keys}>
-    <button ref={trigger} className="agent-menu__trigger" aria-haspopup="menu" aria-expanded={open} title={title} onClick={() => { if (open) close(); else setOpen(true) }}>
+    <button type="button" ref={trigger} className="agent-menu__trigger" aria-haspopup="menu" aria-expanded={open} title={title} onClick={() => { if (open) close(); else setOpen(true) }}>
       <span className="agent-menu__label">{label}</span><Icon name="caretDown" size={11} />
     </button>
-    {open && <div className="agent-menu__pop" role="menu" aria-label={title}>
-      {rows.length > 8 && <input className="agent-menu__filter" aria-label="Filter agents" placeholder="Filter agents" value={filter} onChange={event => setFilter(event.target.value)} />}
-      <div className="agent-menu__list" ref={list}>
+    {open && <div className="agent-menu__pop" role="dialog" aria-label={title}>
+      {rows.length > 8 && <input type="search" className="agent-menu__filter" aria-label="Filter agents" placeholder="Filter agents" value={filter} onChange={event => setFilter(event.target.value)} />}
+      <div className="agent-menu__list" ref={list} role="menu" aria-label={title}>
         {shown.slice(0, MENU_ROWS).map(row => {
           const state = agentState(row.status)
           const tools = row.agentDetails?.toolCount
           const sub = [state.label, agentKindLabel(row.agentDetails), tools ? `${tools} tool${tools === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')
           const current = row.id === currentId
-          return <button key={row.id} role="menuitem" className="agent-menu__row" data-tone={state.tone} aria-current={current ? 'true' : undefined} onClick={() => { setOpen(false); setFilter(''); onPick(row.id) }}>
+          return <button type="button" key={row.id} role="menuitem" className="agent-menu__row" data-tone={state.tone} aria-current={current ? 'true' : undefined} onClick={() => { setOpen(false); setFilter(''); onPick(row.id) }}>
             <span className="agent-menu__dot" aria-hidden="true" />
             <span className="agent-menu__text"><span className="agent-menu__title">{row.title}</span><span className="agent-menu__sub">{sub}</span></span>
             <Icon name={current ? 'check' : 'chevron'} size={12} />

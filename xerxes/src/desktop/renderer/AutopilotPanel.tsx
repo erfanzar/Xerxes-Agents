@@ -77,7 +77,7 @@ export function ModeSeg({ value, disabled, label, onChange }: {
 function rowMeta(row: AutopilotRow): string {
   return [
     autopilotStateText(row),
-    row.active && row.expiresAt !== null && row.viaAll !== true ? `until ${new Date(row.expiresAt).toLocaleString()}` : undefined,
+    row.active && row.expiresAt !== null && row.viaAll !== true && Number.isFinite(Date.parse(row.expiresAt)) ? `until ${new Date(row.expiresAt).toLocaleString()}` : undefined,
     row.enabledBy === null || row.viaAll === true ? undefined : `Turned on by ${row.enabledBy.name}.`,
   ].filter((part): part is string => part !== undefined).join(' · ')
 }
@@ -124,15 +124,19 @@ export function AutopilotEditor({ row, live, saving, onSave, onDone }: {
           rows={3}
           maxLength={AUTOPILOT_INSTRUCTION_LIMIT}
           value={instruction}
+          disabled={!live || saving}
+          aria-invalid={tooLong ? true : undefined}
+          {...(tooLong ? { 'aria-describedby': `${id}-err` } : {})}
           placeholder={AUTOPILOT_INSTRUCTION_PLACEHOLDER}
           onChange={event => setInstruction(event.target.value)}
         />
       </div>
+      {tooLong ? <p id={`${id}-err`} role="alert" className="studio-error">Instruction must be {AUTOPILOT_INSTRUCTION_LIMIT} characters or fewer.</p> : null}
       {lapsed ? <p role="status" className="xap__meta">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p> : null}
       <div className="xap__actions">
         <span className="xap__meta">{instruction.length}/{AUTOPILOT_INSTRUCTION_LIMIT}</span>
         <span className="xap__flex" />
-        <button type="button" className="btn" onClick={onDone}>Cancel</button>
+        <button type="button" className="btn" disabled={saving} onClick={onDone}>Cancel</button>
         <button type="submit" className="btn btn--solid" disabled={!live || saving || tooLong}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>
@@ -194,7 +198,7 @@ function Line({ row, canEdit, live, saving, editing, error, onEdit, onSave }: {
         </div>
         {canEdit ? (
           <>
-            <button type="button" className="btn xap__edit" aria-expanded={editing} onClick={() => onEdit(!editing)}>Edit</button>
+            <button type="button" className="btn xap__edit" aria-label={`Edit Autopilot for ${row.label}`} aria-expanded={editing} onClick={() => onEdit(!editing)}>Edit</button>
             <Toggle row={row} label={row.label} disabled={!live || saving} onSave={onSave} />
           </>
         ) : null}
@@ -228,7 +232,7 @@ export function AutopilotPanel({ autopilot, live, onSave, onRetry }: AutopilotPa
           {all === undefined ? null : (
             <AllCard row={all} canEdit={autopilot.canEdit} live={live} saving={autopilot.savingId === all.workspaceId} error={saveTarget === all.workspaceId ? autopilot.saveError : undefined} onSave={save} />
           )}
-          <div className="cap xap__cap">Workspaces</div>
+          <h3 className="cap xap__cap">Workspaces</h3>
           {autopilot.rows.length === 0 ? <p role="status" className="notice">No workspace is linked to this Hub yet.</p> : (
             <ul className="xap__list" aria-label="Workspaces">
               {autopilot.rows.map(row => (

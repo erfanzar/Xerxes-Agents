@@ -26,7 +26,7 @@ export function PairView({ state, onRetry }: { state: PairState; onRetry: () => 
           <button type="button" className="btn" onClick={onRetry}>Try again</button>
         </div>
       ) : null}
-      {state.phase === 'submitting' ? <p aria-busy="true">Contacting the Hub…</p> : null}
+      {state.phase === 'submitting' ? <p role="status" aria-busy="true">Contacting the Hub…</p> : null}
       {state.phase === 'waiting' ? <p role="status">Waiting for confirmation on the desktop. Check that the desktop shows the same code, then confirm it there.</p> : null}
       {state.phase === 'timeout' ? <p role="alert" className="field-error">The desktop did not confirm in time. Create a new pairing code and scan it again.</p> : null}
       {state.phase === 'paired' ? <p role="status">Paired. Opening your inbox…</p> : null}

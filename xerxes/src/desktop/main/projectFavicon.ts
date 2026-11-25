@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code-parity project logo / favicon discovery for local workspaces.
+ * Real project logo / favicon discovery for local workspaces.
  *
  * Probes well-known favicon & brand logo paths inside the workspace root,
  * falls back to `<link rel="icon">` declarations in HTML / root route files,
@@ -260,7 +260,7 @@ export function clearProjectIconCacheForTests(): void {
 
 /**
  * Resolves a project's real favicon/logo as a safe `data:` URL, or `null` if
- * the workspace has no logo file. Cached with TTL matching T3 Code.
+ * the workspace has no logo file. Cached with a short TTL.
  */
 export async function resolveProjectIconDataUrl(
   cwd: string,

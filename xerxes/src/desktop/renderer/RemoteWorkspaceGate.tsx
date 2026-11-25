@@ -69,8 +69,8 @@ export function RemoteWorkspaceGate({ remote = typeof window === 'undefined' ? u
     <h1>{state.connecting ? 'Connecting to SSH workspace' : state.connected ? 'Opening your session' : 'Could not open SSH workspace'}</h1>
     {state.machine && <p>{state.machine.alias} · {state.machine.target}<br />{state.machine.workspacePath}</p>}
     {state.error && <p className="connection-error" role="alert">{state.error}</p>}
-    <p role="status">{state.connecting ? 'Preparing the remote runtime. You can use your other workspaces while it connects.' : state.connected ? 'Restoring the saved conversation.' : 'Your saved workspace and session are retained. Retry after resolving the connection error.'}</p>
-    {state.connecting ? <button className="btn" onClick={() => void cancel()}>Cancel connection</button>
-      : !state.connected && <button className="btn btn--solid" disabled={busy || !state.machine} onClick={() => void act()}>Retry SSH connection</button>}
+    <p role="status">{state.connecting ? 'Preparing the remote runtime. You can use your other workspaces while it connects.' : state.connected ? 'Restoring the saved conversation.' : 'Your saved SSH settings are kept. Retry once the host is reachable.'}</p>
+    {state.connecting ? <button type="button" className="btn" onClick={() => void cancel()}>Cancel connection</button>
+      : !state.connected && <button type="button" className="btn btn--solid" disabled={busy || !state.machine} onClick={() => void act()}>Retry SSH connection</button>}
   </section></main>
 }

@@ -40,22 +40,22 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
         Commands started in this session. Inspect retained output without interrupting the process.
       </p>
       {snap.terminalsError && <p className="studio-error" role="alert">{snap.terminalsError}</p>}
-      {!online && (
-        <div className="row">
-          <span className="dot dot--idle" />
-          <div className="row__main">
-            <div className="row__t">Daemon offline</div>
-            <div className="row__s">Reconnect to list and control terminals.</div>
-          </div>
-        </div>
-      )}
       <div className="rowlist">
+        {!online && (
+          <div className="row">
+            <span className="dot dot--idle" aria-hidden="true" />
+            <div className="row__main">
+              <div className="row__t">Runtime offline</div>
+              <div className="row__s">Reconnect to list and control terminals.</div>
+            </div>
+          </div>
+        )}
         {terminals.length === 0 && online && !snap.terminalsError && (
           <div className="row">
-            <span className="dot dot--idle" />
+            <span className="dot dot--idle" aria-hidden="true" />
             <div className="row__main">
-              <div className="row__t">{snap.terminalsLoading ? 'Asking the daemon…' : 'No terminals yet'}</div>
-              <div className="row__s">Commands the agents run in this session appear here while they're alive.</div>
+              <div className="row__t">{snap.terminalsLoading ? 'Loading terminals…' : 'No terminals yet'}</div>
+              <div className="row__s">Commands the agents run in this session appear here while they&apos;re active.</div>
             </div>
           </div>
         )}
@@ -63,8 +63,8 @@ export function TerminalsCard({ snap }: { snap: Snapshot }): ReactElement {
           <TerminalCard key={row.id} row={row} online={online} />
         ))}
       </div>
-      <div style={{ display: 'flex', gap: 8, paddingTop: 16 }}>
-        <button className="btn btn--ghost" disabled={!online || snap.terminalsLoading} onClick={() => store.loadTerminals()}>
+      <div className="settings-actions">
+        <button type="button" className="btn btn--ghost" disabled={!online || snap.terminalsLoading} onClick={() => store.loadTerminals()}>
           <Icon name="retry" size={13} /> Refresh
         </button>
       </div>
@@ -80,8 +80,9 @@ export function TerminalCard({ row, online }: { row: TerminalRow; online: boolea
   const [draft, setDraft] = useState('')
   const [error, setError] = useState('')
   const [pending, setPending] = useState<'write' | 'interrupt' | 'kill' | null>(null)
+  const [confirmKill, setConfirmKill] = useState(false)
   const running = row.running
-  const state = running ? 'running' : row.exitCode === null ? 'exited' : `exit ${row.exitCode}`
+  const state = running ? 'Running' : row.exitCode === null ? 'Exited' : `exit ${row.exitCode}`
 
   const inspect = (): void => {
     setLoading(true)
@@ -132,11 +133,12 @@ export function TerminalCard({ row, online }: { row: TerminalRow; online: boolea
           </div>
         </div>
       <div className="terminal-row__actions">
-        <button className="chipbtn" disabled={!online || loading || pending !== null} onClick={inspect}>
+        <button type="button" className="chipbtn" disabled={!online || loading || pending !== null} onClick={inspect}>
           {loading ? 'Reading…' : open ? 'Refresh output' : 'Inspect'}
         </button>
         {row.canInterrupt && running && (
           <button
+            type="button"
             className="chipbtn"
             disabled={!online || pending !== null}
             title="Send Ctrl+C to the live process"
@@ -146,14 +148,31 @@ export function TerminalCard({ row, online }: { row: TerminalRow; online: boolea
           </button>
         )}
         {row.canKill && running && (
-          <button
-            className="chipbtn chipbtn--danger"
-            disabled={!online || pending !== null}
-            title="Terminate the process (SIGTERM)"
-            onClick={() => { if (window.confirm(`Kill terminal ${row.label || row.id}?`)) void control('kill') }}
-          >
-            Kill
-          </button>
+          confirmKill ? (
+            <>
+              <button
+                type="button"
+                className="btn btn--danger"
+                disabled={!online || pending !== null}
+                onClick={() => { setConfirmKill(false); void control('kill') }}
+              >
+                {pending === 'kill' ? 'Killing…' : 'Confirm kill'}
+              </button>
+              <button type="button" className="chipbtn" disabled={pending !== null} onClick={() => setConfirmKill(false)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="chipbtn chipbtn--danger"
+              disabled={!online || pending !== null}
+              title="Terminate the process (SIGTERM)"
+              onClick={() => setConfirmKill(true)}
+            >
+              Kill
+            </button>
+          )
         )}
       </div>
       </div>
@@ -163,25 +182,24 @@ export function TerminalCard({ row, online }: { row: TerminalRow; online: boolea
           <pre tabIndex={0} role="region" aria-label="Terminal output">{output || (row.running ? 'No output yet.' : 'No output recorded.')}</pre>
           {truncated && <div className="row__s">Older output was dropped from this view.</div>}
           {row.canWrite && running && (
-            <div className="findwrap">
+            <form className="findwrap" onSubmit={event => { event.preventDefault(); send() }}>
               <input
                 className="side__search findwrap__input"
                 value={draft}
                 aria-label="Terminal input"
                 disabled={!online || pending !== null}
                 spellCheck={false}
-                placeholder="send a line to this shell…"
+                placeholder="Send a line to this terminal…"
                 onChange={event => setDraft(event.target.value)}
                 onKeyDown={event => {
-                  if (event.key === 'Enter') { event.preventDefault(); send() }
                   if (event.key === 'Escape') setDraft('')
                 }}
               />
-              <button className="btn btn--solid" disabled={!draft.trim() || !online || pending !== null} onClick={send}>{pending === 'write' ? 'Sending…' : 'Send ⏎'}</button>
-            </div>
+              <button type="submit" className="btn btn--solid" disabled={!draft.trim() || !online || pending !== null}>{pending === 'write' ? 'Sending…' : 'Send ⏎'}</button>
+            </form>
           )}
           <div className="preset-actions">
-            <button className="btn btn--ghost" onClick={() => setOpen(false)}>Close</button>
+            <button type="button" className="btn btn--ghost" onClick={() => setOpen(false)}>Close</button>
           </div>
           <details className="terminal-row__diagnostics"><summary>Process details</summary><p>{row.kind}{row.pid ? ` · PID ${row.pid}` : ''}</p><p>{row.id}</p></details>
         </div>

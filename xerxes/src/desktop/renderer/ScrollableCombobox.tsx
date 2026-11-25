@@ -131,6 +131,9 @@ export interface ScrollableComboboxProps {
   readonly onSelect?: (value: string) => void
   readonly placeholder?: string
   readonly ariaLabel?: string
+  readonly ariaLabelledBy?: string
+  readonly ariaInvalid?: boolean
+  readonly ariaDescribedBy?: string
   readonly listLabel: string
   readonly toggleLabel?: string
   readonly spellCheck?: boolean
@@ -148,6 +151,9 @@ export function ScrollableCombobox({
   onSelect,
   placeholder,
   ariaLabel,
+  ariaLabelledBy,
+  ariaInvalid,
+  ariaDescribedBy,
   listLabel,
   toggleLabel,
   spellCheck = false,
@@ -164,6 +170,7 @@ export function ScrollableCombobox({
   const listRef = useRef<HTMLDivElement>(null)
   const scrollActiveIntoViewRef = useRef(false)
   const suppressNextFocusOpenRef = useRef(false)
+  const keyboardNavigatedRef = useRef(false)
 
   const [open, setOpen] = useState(false)
   const [filtering, setFiltering] = useState(false)
@@ -233,7 +240,8 @@ export function ScrollableCombobox({
     return () => document.removeEventListener('mousedown', onPointerDown, true)
   }, [showPopup])
 
-  // Capture Escape so closing the combobox never dismisses an enclosing dialog sheet.
+  // Capture Escape so closing the combobox never dismisses an enclosing dialog sheet,
+  // and close the popup when the window loses focus.
   useEffect(() => {
     if (!showPopup || typeof window === 'undefined') return
     const onEscape = (event: globalThis.KeyboardEvent): void => {
@@ -242,11 +250,21 @@ export function ScrollableCombobox({
       event.stopPropagation()
       setOpen(false)
       setFiltering(false)
+      keyboardNavigatedRef.current = false
       suppressNextFocusOpenRef.current = true
       inputRef.current?.focus()
     }
+    const onWindowBlur = (): void => {
+      setOpen(false)
+      setFiltering(false)
+      keyboardNavigatedRef.current = false
+    }
     window.addEventListener('keydown', onEscape, true)
-    return () => window.removeEventListener('keydown', onEscape, true)
+    window.addEventListener('blur', onWindowBlur)
+    return () => {
+      window.removeEventListener('keydown', onEscape, true)
+      window.removeEventListener('blur', onWindowBlur)
+    }
   }, [showPopup])
 
   // Scroll highlighted option into view on open and keyboard navigation.
@@ -263,6 +281,7 @@ export function ScrollableCombobox({
     if (disabled || !hasOptions) return
     const currentIndex = allOptions.findIndex(opt => opt.toLowerCase() === value.trim().toLowerCase())
     scrollActiveIntoViewRef.current = true
+    keyboardNavigatedRef.current = false
     setFiltering(false)
     setActiveIndex(currentIndex >= 0 ? currentIndex : 0)
     setOpen(true)
@@ -273,6 +292,7 @@ export function ScrollableCombobox({
     else onChange(option)
     setOpen(false)
     setFiltering(false)
+    keyboardNavigatedRef.current = false
     suppressNextFocusOpenRef.current = true
     inputRef.current?.focus()
   }
@@ -283,9 +303,11 @@ export function ScrollableCombobox({
       event.preventDefault()
       if (!showPopup) {
         openFullList()
+        keyboardNavigatedRef.current = true
         return
       }
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(prev => (prev + 1) % visibleOptions.length)
       return
     }
@@ -293,44 +315,57 @@ export function ScrollableCombobox({
       event.preventDefault()
       if (!showPopup) {
         scrollActiveIntoViewRef.current = true
+        keyboardNavigatedRef.current = true
         setFiltering(false)
         setActiveIndex(allOptions.length - 1)
         setOpen(true)
         return
       }
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(prev => (prev - 1 + visibleOptions.length) % visibleOptions.length)
       return
     }
     if (event.key === 'PageDown' && showPopup) {
       event.preventDefault()
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(prev => Math.min(visibleOptions.length - 1, prev + 6))
       return
     }
     if (event.key === 'PageUp' && showPopup) {
       event.preventDefault()
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(prev => Math.max(0, prev - 6))
       return
     }
     if (event.key === 'Home' && showPopup) {
       event.preventDefault()
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(0)
       return
     }
     if (event.key === 'End' && showPopup) {
       event.preventDefault()
       scrollActiveIntoViewRef.current = true
+      keyboardNavigatedRef.current = true
       setActiveIndex(visibleOptions.length - 1)
       return
     }
     if (event.key === 'Enter' && showPopup) {
       const chosen = visibleOptions[activeIndex]
-      if (chosen !== undefined) {
+      const exactMatch = visibleOptions.find(opt => opt.toLowerCase() === value.trim().toLowerCase())
+      if (keyboardNavigatedRef.current && chosen !== undefined) {
         event.preventDefault()
         selectOption(chosen)
+      } else if (exactMatch !== undefined) {
+        event.preventDefault()
+        selectOption(exactMatch)
+      } else {
+        setOpen(false)
+        setFiltering(false)
       }
       return
     }
@@ -339,6 +374,7 @@ export function ScrollableCombobox({
       event.stopPropagation()
       setOpen(false)
       setFiltering(false)
+      keyboardNavigatedRef.current = false
     }
   }
 
@@ -423,6 +459,9 @@ export function ScrollableCombobox({
         {...(showPopup ? { 'aria-controls': listId } : {})}
         {...(activeOptionId !== undefined ? { 'aria-activedescendant': activeOptionId } : {})}
         {...(ariaLabel !== undefined ? { 'aria-label': ariaLabel } : {})}
+        {...(ariaLabelledBy !== undefined ? { 'aria-labelledby': ariaLabelledBy } : {})}
+        {...(ariaInvalid ? { 'aria-invalid': true } : {})}
+        {...(ariaDescribedBy !== undefined ? { 'aria-describedby': ariaDescribedBy } : {})}
         value={value}
         {...(placeholder !== undefined ? { placeholder } : {})}
         spellCheck={spellCheck}
@@ -442,6 +481,7 @@ export function ScrollableCombobox({
         onChange={event => {
           onChange(event.target.value)
           if (hasOptions) {
+            keyboardNavigatedRef.current = false
             setFiltering(true)
             setActiveIndex(0)
             setOpen(true)

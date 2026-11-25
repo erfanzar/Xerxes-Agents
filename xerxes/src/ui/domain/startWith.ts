@@ -99,8 +99,8 @@ export function startWithChips({
     chips.push({
       consequence: `${pulse.ahead} commit${pulse.ahead === 1 ? '' : 's'} ahead of upstream`,
       id: 'unpushed',
-      label: 'summarise what is unpushed',
-      prompt: 'Summarise the commits on this branch that are not yet on upstream, grouped by intent.',
+      label: 'summarize what is unpushed',
+      prompt: 'Summarize the commits on this branch that are not yet on upstream, grouped by intent.',
       tone: 'working'
     })
   }

@@ -443,6 +443,13 @@ describe('Side Question state, model selector & read-only tool pills', () => {
       verb: 'Grep',
       target: 'handleSideQuestionRpc',
     })
+    // Redundant target echoing tool name is omitted instead of rendering "Manage task manage_task"
+    expect(formatSideQuestionToolLabel({ name: 'manage_task', target: 'manage_task', status: 'done' })).toEqual({
+      verb: 'Tasks',
+    })
+    expect(formatSideQuestionToolLabel({ name: 'run_command', target: 'run_command', status: 'error' })).toEqual({
+      verb: 'Command',
+    })
   })
 
   test('store persists sideQuestionModel in localStorage and sends model on session.side_question', async () => {
@@ -1373,10 +1380,37 @@ describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & C
     })
     const authBannerHtml = renderToStaticMarkup(createElement(AcpActiveBanner, { snap: authErrSnap }))
     expect(authBannerHtml).toContain('acp-banner--error')
+    expect(authBannerHtml).toContain('acp-banner__head')
     expect(authBannerHtml).toContain('Authentication required')
     expect(authBannerHtml).toContain('agy acp --login')
     expect(authBannerHtml).toContain('Retry')
     expect(authBannerHtml).toContain('Dismiss runtime error')
+
+    // Multi-method Antigravity auth error stacks vertically with wrapping action row and deduplicates terminal auth
+    const multiAuthHtml = renderToStaticMarkup(createElement(AcpActiveBanner, {
+      snap: sampleSnapshot({
+        acpBinding: null,
+        acpError: 'Authentication required (-32000) for Antigravity',
+        acpAuthMethods: [
+          { id: 'google', name: 'Log in with Google', type: 'agent' },
+          { id: 'gemini-ent', name: 'Log in with Gemini Enterprise', type: 'agent' },
+          { id: 'api-key', name: 'Gemini API key', type: 'agent' },
+          { id: 'ent-platform', name: 'Gemini Enterprise Agent Platform', type: 'agent' },
+          { id: 'terminal', name: 'Log in from the terminal', type: 'terminal' },
+        ],
+      }),
+    }))
+    expect(multiAuthHtml).toContain('acp-banner__head')
+    expect(multiAuthHtml).toContain('Login with Antigravity')
+    expect(multiAuthHtml).toContain('Log in with Google')
+    expect(multiAuthHtml).not.toContain('Log in from the terminal')
+    const appCss = await Bun.file(new URL('../src/desktop/renderer/app.css', import.meta.url)).text()
+    expect(appCss).toMatch(/\.acp-banner--error\s*\{[^}]*flex-direction:\s*column/s)
+    expect(appCss).toMatch(/\.acp-banner__actions\s*\{[^}]*flex-wrap:\s*wrap/s)
+    // Verify balanced CSS braces (no orphaned closing brace syntax errors)
+    const openBraces = (appCss.match(/\{/g) ?? []).length
+    const closeBraces = (appCss.match(/\}/g) ?? []).length
+    expect(openBraces).toBe(closeBraces)
 
     // 2. Connected session with runtime error renders a single quiet error banner with Retry, Switch to Xerxes, and Dismiss
     const connectedErrSnap = sampleSnapshot({

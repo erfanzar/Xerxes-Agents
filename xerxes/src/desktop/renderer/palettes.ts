@@ -42,12 +42,12 @@ export type Palette =
   | { readonly name: string; readonly label: string; readonly description: string; readonly only: PaletteColors }
 
 export const PALETTES: readonly Palette[] = [
-  // T3 Code built-in themes (matching pingdotgg/t3code themePalettes.ts)
-  { name: 't3-code', label: 'T3 Code', description: 'Pure obsidian black, crisp light paper, and T3 cobalt blue', light: { background: '#fcfcfc', foreground: '#18181b', card: '#ffffff', muted: '#f4f4f5', mutedForeground: '#71717b', popover: '#ffffff', primary: '#1b4ed8', primaryForeground: '#ffffff', accent: '#f4f4f5', border: '#e4e4e7', destructive: '#ef4444', sidebarBackground: '#fafafa', userBubble: '#f4f4f5' }, dark: { background: '#000000', foreground: '#f5f5f5', card: '#111111', muted: '#141414', mutedForeground: '#818181', popover: '#111111', primary: '#346bf1', primaryForeground: '#ffffff', accent: '#1a1b1b', border: '#242424', destructive: '#fb414a', sidebarBackground: '#000000', userBubble: '#141414' } },
-  { name: 't3-chat', label: 'T3 Chat', description: 'Soft rose vellum and deep plum ink with magenta accents', light: { background: '#fcf6fa', foreground: '#221426', card: '#f7ecf3', muted: '#f4e6f0', mutedForeground: '#765f75', popover: '#f5e8f1', primary: '#ca0277', primaryForeground: '#fffbfe', accent: '#ebd7e6', border: '#dfc8d8', destructive: '#e12d39', sidebarBackground: '#f4e6f0', userBubble: '#eed9e8' }, dark: { background: '#1c151d', foreground: '#fdfafd', card: '#281f29', muted: '#2e212e', mutedForeground: '#9e8c9d', popover: '#312533', primary: '#dc749e', primaryForeground: '#1c151d', accent: '#3e293d', border: '#4c384b', destructive: '#f05252', sidebarBackground: '#241a25', userBubble: '#382538' } },
+  // Built-in two-mode themes
+  { name: 'obsidian', label: 'Obsidian', description: 'Pure obsidian black, crisp light paper, and cobalt blue', light: { background: '#fcfcfc', foreground: '#18181b', card: '#ffffff', muted: '#f4f4f5', mutedForeground: '#71717b', popover: '#ffffff', primary: '#1b4ed8', primaryForeground: '#ffffff', accent: '#f4f4f5', border: '#e4e4e7', destructive: '#ef4444', sidebarBackground: '#fafafa', userBubble: '#f4f4f5' }, dark: { background: '#000000', foreground: '#f5f5f5', card: '#111111', muted: '#141414', mutedForeground: '#818181', popover: '#111111', primary: '#346bf1', primaryForeground: '#ffffff', accent: '#1a1b1b', border: '#242424', destructive: '#fb414a', sidebarBackground: '#000000', userBubble: '#141414' } },
+  { name: 'rose', label: 'Rose', description: 'Soft rose vellum and deep plum ink with magenta accents', light: { background: '#fcf6fa', foreground: '#221426', card: '#f7ecf3', muted: '#f4e6f0', mutedForeground: '#765f75', popover: '#f5e8f1', primary: '#ca0277', primaryForeground: '#fffbfe', accent: '#ebd7e6', border: '#dfc8d8', destructive: '#e12d39', sidebarBackground: '#f4e6f0', userBubble: '#eed9e8' }, dark: { background: '#1c151d', foreground: '#fdfafd', card: '#281f29', muted: '#2e212e', mutedForeground: '#9e8c9d', popover: '#312533', primary: '#dc749e', primaryForeground: '#1c151d', accent: '#3e293d', border: '#4c384b', destructive: '#f05252', sidebarBackground: '#241a25', userBubble: '#382538' } },
   { name: 'grove', label: 'Grove', description: 'Botanical stone and deep pine greens', light: { background: '#f6f8f6', foreground: '#1e2420', card: '#eef2ef', muted: '#eaeff0', mutedForeground: '#5f6b63', popover: '#e9efea', primary: '#2d7a57', primaryForeground: '#ffffff', accent: '#dce8e0', border: '#ccd8cf', destructive: '#dc2626', sidebarBackground: '#edf2ee', userBubble: '#dfebe3' }, dark: { background: '#17231e', foreground: '#f6faf7', card: '#22312a', muted: '#23352c', mutedForeground: '#8ea396', popover: '#293b33', primary: '#63d297', primaryForeground: '#14211b', accent: '#2f493c', border: '#3c5a4b', destructive: '#ef4444', sidebarBackground: '#1d2b24', userBubble: '#2d473a' } },
   { name: 'ocean', label: 'Ocean', description: 'Misty slate and abyss marine blue', light: { background: '#f5f8fc', foreground: '#1b2230', card: '#edf2f8', muted: '#eaeff7', mutedForeground: '#5e6b7e', popover: '#e7eef6', primary: '#2563ab', primaryForeground: '#ffffff', accent: '#dce6f3', border: '#cad6e6', destructive: '#dc2626', sidebarBackground: '#ecf1f8', userBubble: '#dfeaf7' }, dark: { background: '#131d2b', foreground: '#f6f9fd', card: '#1e2c40', muted: '#1f3047', mutedForeground: '#8d9db5', popover: '#25364e', primary: '#69a9f5', primaryForeground: '#111a28', accent: '#29405e', border: '#385276', destructive: '#ef4444', sidebarBackground: '#182436', userBubble: '#263e5c' } },
-  { name: 't3-ember', label: 'T3 Ember', description: 'Warm parchment and roasted copper with amber accents', light: { background: '#fbf7f3', foreground: '#261e1a', card: '#f4ece5', muted: '#f2e8e0', mutedForeground: '#76665d', popover: '#efe4db', primary: '#b4532a', primaryForeground: '#ffffff', accent: '#ead9cc', border: '#dcc9bb', destructive: '#dc2626', sidebarBackground: '#f4ebe3', userBubble: '#eddccf' }, dark: { background: '#221914', foreground: '#fdf9f6', card: '#31251e', muted: '#33251d', mutedForeground: '#a69287', popover: '#3b2c24', primary: '#e89b63', primaryForeground: '#211712', accent: '#473327', border: '#5c4233', destructive: '#ef4444', sidebarBackground: '#2a1f19', userBubble: '#443024' } },
+  { name: 'copper', label: 'Copper', description: 'Warm parchment and roasted copper with amber accents', light: { background: '#fbf7f3', foreground: '#261e1a', card: '#f4ece5', muted: '#f2e8e0', mutedForeground: '#76665d', popover: '#efe4db', primary: '#b4532a', primaryForeground: '#ffffff', accent: '#ead9cc', border: '#dcc9bb', destructive: '#dc2626', sidebarBackground: '#f4ebe3', userBubble: '#eddccf' }, dark: { background: '#221914', foreground: '#fdf9f6', card: '#31251e', muted: '#33251d', mutedForeground: '#a69287', popover: '#3b2c24', primary: '#e89b63', primaryForeground: '#211712', accent: '#473327', border: '#5c4233', destructive: '#ef4444', sidebarBackground: '#2a1f19', userBubble: '#443024' } },
   { name: 'iris', label: 'Iris', description: 'Soft lilac paper and deep amethyst violet', light: { background: '#f9f6fc', foreground: '#221b2c', card: '#f1ebf7', muted: '#eee7f6', mutedForeground: '#6b607a', popover: '#ece3f5', primary: '#6d44b8', primaryForeground: '#ffffff', accent: '#e3d8f0', border: '#d3c5e4', destructive: '#dc2626', sidebarBackground: '#f0e9f7', userBubble: '#e5dbf2' }, dark: { background: '#1a1527', foreground: '#fbf9fd', card: '#28203c', muted: '#2a2040', mutedForeground: '#998db0', popover: '#31274a', primary: '#a985f5', primaryForeground: '#181224', accent: '#3c2e5c', border: '#4e3c73', destructive: '#ef4444', sidebarBackground: '#211a33', userBubble: '#382a57' } },
   // Xerxes's own (not a Hermes theme): the look of Claude's desktop apps.
   // Dark is neutral grey, measured from the app itself — sidebar #111111,
@@ -78,6 +78,12 @@ export const PALETTE_KEY = 'xerxes.desktop.palette.v1'
 /** Stored when the user picks Xerxes's own colours — also what a fresh install uses. */
 const XERXES_COLOURS = 'xerxes'
 
+const LEGACY_PALETTE_ALIASES: Record<string, string> = {
+  't3-code': 'obsidian',
+  't3-chat': 'rose',
+  't3-ember': 'copper',
+}
+
 /**
  * The stored palette, or undefined for Xerxes's own colours: a fresh
  * install, an explicit Xerxes choice, and a stored name no longer shipped.
@@ -86,7 +92,8 @@ export function loadPalette(): Palette | undefined {
   let name: string | null
   try { name = localStorage.getItem(PALETTE_KEY) } catch { name = null }
   if (name === null || name === XERXES_COLOURS) return undefined
-  return PALETTES.find(palette => palette.name === name)
+  const resolved = LEGACY_PALETTE_ALIASES[name] ?? name
+  return PALETTES.find(palette => palette.name === resolved)
 }
 
 /** Remember a palette; undefined means Xerxes's own colours (kept explicitly). */

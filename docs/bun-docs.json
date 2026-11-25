@@ -6,7 +6,7 @@
   "staticDirectory": "_static",
   "typescriptApi": {
     "sourceDirectory": "../xerxes/src",
-    "packageName": "@xerxes/runtime",
+    "packageName": "@xsimurgh/xerxes-agents",
     "outputDirectory": "typescript-api"
   }
 }

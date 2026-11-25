@@ -23,6 +23,7 @@ import { agentKindLabel, agentState } from './AgentRoster.js'
 import { AgentInspector } from './AgentInspector.js'
 import { artifactFromToolResultPayload } from './ArtifactCard.js'
 import { ChatImage } from './ImageView.js'
+import { isMacPlatform } from './runModeView.js'
 import { store } from './store.js'
 import type { SwarmStatusSnapshot } from './swarmState.js'
 import { WidgetFrame } from './WidgetFrame.js'
@@ -148,7 +149,7 @@ function readingStatsLabel(markdown: string): string {
 }
 
 function SectionSearch({ placeholder, value, onChange }: { placeholder: string; value: string; onChange: (value: string) => void }): ReactElement {
-  return <label className="rsec__search"><T3Icon name="search" size={13} /><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
+  return <label className="rsec__search"><T3Icon name="search" size={13} /><input type="search" aria-label={placeholder} placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} spellCheck={false} /></label>
 }
 
 export function ArtifactsSection({
@@ -411,7 +412,7 @@ export function ArtifactsSection({
             <button type="button" className="rsec__icon" aria-pressed={row.pinned} aria-label={row.pinned ? 'Unpin artifact' : 'Pin artifact'} title={row.pinned ? 'Unpin' : 'Pin'} onClick={() => pin(row)}><T3Icon name={row.pinned ? 'pinOff' : 'pin'} size={14} /></button>
             {/* Antigravity artifacts live in agy's own brain directory, which Xerxes never writes. */}
             {!isImage && !row.id.startsWith('agy:') && <button type="button" className="rsec__icon" aria-label="Edit artifact" title="Edit" disabled={!online} onClick={() => setDraft(open.content)}><T3Icon name="edit" size={14} /></button>}
-            {!isImage && <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Copy failed — select and press ⌘C' : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>}
+            {!isImage && <button type="button" className="rsec__icon" data-copied={copied} aria-label={copied === 'copied' ? 'Copied' : 'Copy artifact'} title={copied === 'copied' ? 'Copied' : copied === 'failed' ? `Copy failed. Select and press ${isMacPlatform() ? '⌘C' : 'Ctrl+C'}` : 'Copy'} onClick={() => copy(open.content)}><T3Icon name={copied === 'copied' ? 'check' : copied === 'failed' ? 'alertCircle' : 'copy'} size={14} /></button>}
           </>}
         </span>
       </div>
@@ -552,10 +553,10 @@ export function SubagentsSection({
   if (openRow && sessionKey !== undefined) {
     return <div className="rsec rsec--detail rsec--agent">
       <div className="rsec__bar">
-        <button className="rsec__icon" aria-label="Back to subagents" onClick={() => setOpenId('')}><T3Icon name="arrowLeft" size={14} /></button>
+        <button type="button" className="rsec__icon" aria-label="Back to subagents" onClick={() => setOpenId('')}><T3Icon name="arrowLeft" size={14} /></button>
         <span className="rsec__agent-ico" data-tone={agentState(openRow.status).tone} aria-hidden="true"><T3Icon name={subagentRoleIcon(openRow)} size={14} /></span>
         <strong className="rsec__title" title={openRow.title}>{openRow.title}</strong>
-        {onInspect && <button className="rsec__icon" aria-label="Open in the conversation" title="Open in the conversation" onClick={() => onInspect(openRow.id)}><T3Icon name="maximize" size={13} /></button>}
+        {onInspect && <button type="button" className="rsec__icon" aria-label="Open in the conversation" title="Open in the conversation" onClick={() => onInspect(openRow.id)}><T3Icon name="maximize" size={13} /></button>}
       </div>
       <div className="rsec__body rsec__agent"><AgentInspector row={openRow} rows={rows} sessionKey={sessionKey} online={online ?? false} /></div>
     </div>
@@ -566,7 +567,7 @@ export function SubagentsSection({
     const state = agentState(row.status)
     const kind = agentKindLabel(row.agentDetails)
     const roleIcon = subagentRoleIcon(row)
-    return <button key={row.id} className="rsec__open rsec__row rsec__row--subagent" data-tone={state.tone} onClick={() => sessionKey !== undefined ? setOpenId(row.id) : onInspect?.(row.id)} title={row.title}>
+    return <button type="button" key={row.id} className="rsec__open rsec__row rsec__row--subagent" data-tone={state.tone} onClick={() => sessionKey !== undefined ? setOpenId(row.id) : onInspect?.(row.id)} title={row.title}>
       <span className="rsec__agent-ico" data-tone={state.tone} aria-hidden="true">
         {state.tone === 'working'
           ? <XerxesThinkingMark size={14} active />
@@ -596,7 +597,7 @@ export function SubagentsSection({
             ? `${livingWorkers.length} Immortals ${livingWorkers.length === 1 ? 'worker' : 'workers'} active`
             : 'Immortals swarm active'
         return <div className="rsec__empty rsec__empty--swarm" role="status">
-          <span>{summary} — </span>
+          <span>{summary}. </span>
           <button
             type="button"
             className="linkish rsec__swarm-jump"
@@ -620,7 +621,7 @@ export function SubagentsSection({
     {finished.length > 0 && <>
       {/* the hide/show control sits on the Finished header, above the rows it folds. */}
       <div className="rsec__group"><span>Finished</span><span className="rsec__count">{finished.length}</span>
-        <button className="rsec__toggle" aria-expanded={!hideFinished} onClick={() => setHideFinished(value => !value)}>{hideFinished ? 'Show finished' : 'Hide finished'}<T3Icon name={hideFinished ? 'chevronRight' : 'chevronDown'} size={12} /></button>
+        <button type="button" className="rsec__toggle" aria-expanded={!hideFinished} onClick={() => setHideFinished(value => !value)}>{hideFinished ? 'Show finished' : 'Hide finished'}<T3Icon name={hideFinished ? 'chevronRight' : 'chevronDown'} size={12} /></button>
       </div>
       {!hideFinished && finished.map(line)}
     </>}

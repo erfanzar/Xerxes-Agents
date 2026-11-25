@@ -188,7 +188,7 @@ export function ModelChooser({ onSaved }: { onSaved?: () => void }): ReactElemen
       </div>
     )
   }
-  if (sc.status === 'unknown' && sc.phase !== 'ready') return <p aria-busy="true">Loading…</p>
+  if (sc.status === 'unknown' && sc.phase !== 'ready') return <p role="status" aria-busy="true">Loading…</p>
   if (!sc.canEdit) return <ReadOnlyChoice config={sc.config} status={sc.status} message={sc.message} />
   return <ModelEditor onSaved={onSaved} />
 }

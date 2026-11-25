@@ -578,9 +578,9 @@ export function ToolCallsSection({ items, label = 'Tool calls' }: { items: reado
   }, [items])
 
   return <div className="toolcalls-wrap">
-    <details className="toolcalls" onToggle={event => { if (event.currentTarget.open) setOpened(true) }}>
+    <details className="toolcalls" open={opened} onToggle={event => setOpened(event.currentTarget.open)}>
       <summary>
-        <span className="toolcalls__chev"><Icon name="chevron" size={12} /></span>
+        <span className="toolcalls__chev" aria-hidden="true"><Icon name="chevron" size={12} /></span>
         <span className="toolcalls__title">{label}</span>
         <span className="toolcalls__count">{items.length}</span>
         {(diffTotals.adds > 0 || diffTotals.dels > 0) && (
@@ -683,7 +683,7 @@ const GenericToolRow = memo(function GenericToolRow({ item, label }: { item: Too
               {item.state === 'working' ? 'Running' : failed ? 'Failed' : ''}{dur ? (item.state === 'working' || failed ? ` · ${dur}` : dur) : ''}
             </span>
           )}
-          <span className="execution-row__disclosure"><Icon name="chevron" size={12} /></span>
+          <span className="execution-row__disclosure" aria-hidden="true"><Icon name="chevron" size={12} /></span>
         </span>
       </span>
       {failed && (item.error || view.stderr) && (

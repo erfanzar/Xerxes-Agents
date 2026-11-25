@@ -756,9 +756,19 @@ export const SwarmGraph = memo(function SwarmGraph({
   }
 
   return (
-    <div className="swarm-graph" data-mode={mode}>
+    <div
+      className="swarm-graph"
+      data-mode={mode}
+      onKeyDown={event => {
+        if (event.key === 'Escape' && effectivePinnedMember !== null) {
+          event.preventDefault()
+          event.stopPropagation()
+          setPinnedMember(null)
+        }
+      }}
+    >
       {/* ── Replay Transport Bar ── */}
-      <div className="swarm-graph__replay" aria-label="Immortals timeline replay">
+      <div className="swarm-graph__replay" role="region" aria-label="Immortals timeline replay">
         <div className="swarm-graph__transport">
           <button
             type="button"
@@ -806,6 +816,7 @@ export const SwarmGraph = memo(function SwarmGraph({
           type="range"
           className="swarm-graph__slider"
           aria-label="Replay timeline"
+          aria-valuetext={totalPosts === 0 ? 'No posts' : isLive ? 'Live' : `Post ${effectiveStep} of ${totalPosts}`}
           min={0}
           max={Math.max(1, totalPosts)}
           step={1}
@@ -874,26 +885,28 @@ export const SwarmGraph = memo(function SwarmGraph({
             </span>
           </button>
           {exportNote && (
-            <span className="swarm-graph__export-note" role="status">
+            <span className="swarm-graph__export-note" role={exportStatus === 'error' ? 'alert' : 'status'}>
               {exportNote}
             </span>
           )}
         </div>
 
         <div className="swarm-graph__options">
-          <div className="swarm-graph__mode" role="group" aria-label="Graph view mode">
+          <div className="swarm-graph__mode" role="radiogroup" aria-label="Graph view mode">
             <button
               type="button"
+              role="radio"
               className={`swarm-graph__mode-btn${mode === 'battlefield' ? ' is-selected' : ''}`}
-              aria-pressed={mode === 'battlefield'}
+              aria-checked={mode === 'battlefield'}
               onClick={() => setMode('battlefield')}
             >
               Map
             </button>
             <button
               type="button"
+              role="radio"
               className={`swarm-graph__mode-btn${mode === 'mentions' ? ' is-selected' : ''}`}
-              aria-pressed={mode === 'mentions'}
+              aria-checked={mode === 'mentions'}
               onClick={() => setMode('mentions')}
             >
               Mentions
@@ -949,9 +962,7 @@ export const SwarmGraph = memo(function SwarmGraph({
             }}
           >
             {SPEED_OPTIONS.map(opt => (
-              <option key={opt} value={String(opt)}>
-                {opt}×
-              </option>
+              <option key={opt} value={String(opt)}>{opt}×</option>
             ))}
           </select>
         </div>
@@ -1149,7 +1160,7 @@ export const SwarmGraph = memo(function SwarmGraph({
         ) : null}
 
         {hoveredNode && (
-          <div className="swarm-graph__tooltip" role="status">
+          <div className="swarm-graph__tooltip" role="tooltip">
             <div className="swarm-graph__tooltip-head">
               <SimurghSprite
                 role={hoveredNode.spriteRole}
@@ -1200,7 +1211,7 @@ export const SwarmGraph = memo(function SwarmGraph({
             </span>
             <span className="swarm-graph__legend-item">
               <span className="swarm-graph__legend-badge" aria-hidden="true">@all 2</span>
-              <span>@all posts, drawn by Expand @all</span>
+              <span>@all posts (drawn by Expand @all)</span>
             </span>
           </>
         ) : (

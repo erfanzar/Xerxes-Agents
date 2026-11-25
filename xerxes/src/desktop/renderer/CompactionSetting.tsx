@@ -7,7 +7,7 @@
  * (400k); read and saved through compaction.settings.get/save.
  */
 
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useId, useState, type ReactElement } from 'react'
 
 import { desktopCall, desktopError, type RpcRecord } from './desktopRpc.js'
 import type { Snapshot } from './store.js'
@@ -42,6 +42,8 @@ export function CompactionSetting({ snap }: { snap: Snapshot }): ReactElement | 
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'saved'; text: string } | null>(null)
+  const fieldId = useId()
+  const msgId = `${fieldId}-msg`
   const online = snap.connection === 'online'
 
   useEffect(() => {
@@ -85,18 +87,19 @@ export function CompactionSetting({ snap }: { snap: Snapshot }): ReactElement | 
           <div className="row__s">{compactionSummary(state)}</div>
         </div>
       </div>
-      <div className="row memguard">
-        <label className="memguard__field">
+      <form className="row memguard" onSubmit={event => { event.preventDefault(); apply() }}>
+        <label htmlFor={fieldId} className="memguard__field">
           <span>Compact at</span>
-          <input className="compact-threshold__input" value={draft} spellCheck={false} placeholder="60%, 0.7 or 400k"
+          <input id={fieldId} className="compact-threshold__input" value={draft} spellCheck={false} placeholder="60%, 0.7 or 400k"
             aria-label="Auto-compact threshold" disabled={!online || busy}
-            onChange={event => { setDraft(event.target.value); setMessage(null) }}
-            onKeyDown={event => { if (event.key === 'Enter') apply() }} />
+            aria-invalid={message?.kind === 'error' ? true : undefined}
+            {...(message ? { 'aria-describedby': msgId } : {})}
+            onChange={event => { setDraft(event.target.value); setMessage(null) }} />
         </label>
-        <button className="btn" disabled={!online || busy || draft.trim() === state.label} onClick={apply}>Save</button>
-        {state.saved && <button className="btn btn--ghost" disabled={!online || busy} onClick={() => void save(null)}>Use default ({state.defaultLabel})</button>}
-      </div>
-      {message && <p className={message.kind === 'error' ? 'studio-error' : 'row__s'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
+        <button type="submit" className="btn" disabled={!online || busy || draft.trim() === state.label}>{busy ? 'Saving…' : 'Save'}</button>
+        {state.saved && <button type="button" className="btn btn--ghost" disabled={!online || busy} onClick={() => void save(null)}>Use default ({state.defaultLabel})</button>}
+      </form>
+      {message && <p id={msgId} className={message.kind === 'error' ? 'studio-error' : 'row__s'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
     </>
   )
 }

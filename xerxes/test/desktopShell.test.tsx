@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { Shell, ActivityDetails, AgentsCard, SessionDiagnostics, replyEnds } from '../src/desktop/renderer/App.js'
+import { Shell, ActivityDetails, AgentsCard, NotificationToastStack, SessionDiagnostics, replyEnds } from '../src/desktop/renderer/App.js'
 import { RailStatus } from '../src/desktop/renderer/RailStatus.js'
 import { DesktopPage, DesktopRail, frontMatter, keepUnsavedFile, rendersAsDocument, unsavedFile } from '../src/desktop/renderer/DesktopPanels.js'
 import { isMacPlatform } from '../src/desktop/renderer/runModeView.js'
@@ -1565,4 +1565,44 @@ test('composer renders expandable steps checklist with remaining count and live 
   expect(doneHtml).toContain('>2/2<')
   expect(doneHtml).toContain('aria-label="Show steps"')
   expect(doneHtml).not.toContain('aria-label="Steps"')
+})
+
+test('NotificationToastStack renders clickable artifact, attention, failed, and finished alerts', () => {
+  const html = renderToStaticMarkup(createElement(NotificationToastStack, {
+    toasts: [
+      {
+        id: 't1',
+        title: 'New artifact',
+        body: 'implementation plan — click to read it',
+        kind: 'artifact',
+        surfaceId: 2,
+        target: { sessionId: 's1', panel: 'docs', artifactId: 'agy:implementation_plan.md' },
+      },
+      {
+        id: 't2',
+        title: 'Approval needed',
+        body: 'Deploy fix — Run bun test',
+        kind: 'attention',
+        surfaceId: 3,
+        target: { sessionId: 's2' },
+      },
+      {
+        id: 't3',
+        title: 'Task failed',
+        body: 'Provider 500',
+        kind: 'failed',
+        target: { sessionId: 's3' },
+      },
+    ],
+    onActivate: () => {},
+    onDismiss: () => {},
+  }))
+  expect(html).toContain('aria-label="Notifications"')
+  expect(html).toContain('data-kind="artifact"')
+  expect(html).toContain('Open →')
+  expect(html).toContain('data-kind="attention"')
+  expect(html).toContain('role="alert"')
+  expect(html).toContain('View →')
+  expect(html).toContain('data-kind="failed"')
+  expect(html).toContain('aria-label="Dismiss New artifact"')
 })

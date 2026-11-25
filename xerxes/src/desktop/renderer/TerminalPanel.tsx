@@ -19,6 +19,8 @@ import { Terminal as XTerm, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 
 
+import { externalUrlOf } from '../chatMediaShared.js'
+import { ActionDialog } from './ActionDialog.js'
 import { desktopCall, desktopError, text, type RpcRecord } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { userShells, type ShellRow } from './terminalShells.js'
@@ -167,29 +169,53 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
 
   return (
     <div className="term">
-      <div className="term__bar" role="tablist" aria-label="Terminals">
+      <div
+        className="term__bar"
+        role="tablist"
+        aria-label="Terminals"
+        onKeyDown={event => {
+          const list = shells ?? []
+          if (list.length < 2) return
+          if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') return
+          const target = event.target as HTMLElement | null
+          if (target?.getAttribute('role') !== 'tab') return
+          event.preventDefault()
+          const cur = list.findIndex(row => row.id === active)
+          const next =
+            event.key === 'Home' ? 0
+            : event.key === 'End' ? list.length - 1
+            : event.key === 'ArrowRight' ? (cur < 0 ? 0 : (cur + 1) % list.length)
+            : (cur <= 0 ? list.length - 1 : cur - 1)
+          const picked = list[next]
+          if (picked) {
+            setActive(picked.id)
+            const tabs = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+            tabs[next]?.focus()
+          }
+        }}
+      >
         {(shells ?? []).map((row, index) => (
           <span key={row.id} className={`term-tab${row.id === active ? ' is-active' : ''}${row.running ? '' : ' is-exited'}`}>
-            <button role="tab" aria-selected={row.id === active} onClick={() => setActive(row.id)} title={row.running ? 'Shell' : 'Exited'}>
+            <button type="button" role="tab" aria-selected={row.id === active} tabIndex={row.id === active ? 0 : -1} onClick={() => setActive(row.id)} title={row.running ? 'Terminal' : 'Exited'}>
               <Icon name="terminal" size={12} /><span>{`Terminal ${index + 1}`}</span>
             </button>
-            <button className="term-tab__close" aria-label={closing.has(row.id) ? `Closing shell ${index + 1}` : `Close shell ${index + 1}`} title="Close shell" disabled={closing.has(row.id)} onClick={() => close(row.id)}>{closing.has(row.id) ? 'Closing…' : <Icon name="close" size={10} />}</button>
+            <button type="button" className="term-tab__close" aria-label={closing.has(row.id) ? `Closing terminal ${index + 1}` : `Close terminal ${index + 1}`} title="Close terminal" disabled={closing.has(row.id)} onClick={() => close(row.id)}>{closing.has(row.id) ? 'Closing…' : <Icon name="close" size={10} />}</button>
           </span>
         ))}
-        <button className="term__new" aria-label="New shell" title="New shell" disabled={opening} onClick={() => void open()}><Icon name="plus" size={13} /></button>
+        <button type="button" className="term__new" aria-label="New terminal" title="New terminal" disabled={opening} onClick={() => void open()}><Icon name="plus" size={13} /></button>
         <span className="term__spacer" />
         {split
-          ? <button className="term__tool" aria-label="Close split" title="Close split" onClick={() => setSplit(null)}><Icon name="close" size={12} /><span>Unsplit</span></button>
+          ? <button type="button" className="term__tool" aria-label="Close split" title="Close split" onClick={() => setSplit(null)}><Icon name="close" size={12} /><span>Unsplit</span></button>
           : <>
-            <button className="term__tool" aria-label="Split side by side" title="Split side by side" disabled={opening || !active} onClick={() => void open('row')}><Icon name="half" size={13} /></button>
-            <button className="term__tool term__tool--stack" aria-label="Split top and bottom" title="Split top and bottom" disabled={opening || !active} onClick={() => void open('column')}><Icon name="half" size={13} /></button>
+            <button type="button" className="term__tool" aria-label="Split side by side" title="Split side by side" disabled={opening || !active} onClick={() => void open('row')}><Icon name="half" size={13} /></button>
+            <button type="button" className="term__tool term__tool--stack" aria-label="Split top and bottom" title="Split top and bottom" disabled={opening || !active} onClick={() => void open('column')}><Icon name="half" size={13} /></button>
           </>}
-        <button className="term__tool" aria-label="Clear terminal" title="Clear terminal" disabled={!active} onClick={() => setClears(value => value + 1)}><Icon name="trash" size={13} /></button>
+        <button type="button" className="term__tool" aria-label="Clear terminal" title="Clear terminal" disabled={!active} onClick={() => setClears(value => value + 1)}><Icon name="trash" size={13} /></button>
       </div>
-      {(shells ?? []).map((row, index) => closeErrors[row.id] && <div key={row.id} className="term__error" role="alert"><span>Could not close shell {index + 1}: {closeErrors[row.id]}</span><button className="btn" disabled={closing.has(row.id)} onClick={() => close(row.id)}>Retry close</button></div>)}
-      {error && <div className="term__error" role="alert"><span>{error}</span><button className="btn" onClick={() => { started.current = false; setAttempt(value => value + 1) }}>Try again</button></div>}
+      {(shells ?? []).map((row, index) => closeErrors[row.id] && <div key={row.id} className="term__error" role="alert"><span>Could not close terminal {index + 1}: {closeErrors[row.id]}</span><button type="button" className="btn" disabled={closing.has(row.id)} onClick={() => close(row.id)}>Retry close</button></div>)}
+      {error && <div className="term__error" role="alert"><span>{error}</span><button type="button" className="btn" onClick={() => { started.current = false; setAttempt(value => value + 1) }}>Try again</button></div>}
       {shells !== null && shells.length === 0 && !opening && !error && (
-        <div className="term__empty"><Icon name="terminal" size={22} /><p>No shell open.</p><button className="btn" onClick={() => void open()}>Open a shell</button></div>
+        <div className="term__empty"><Icon name="terminal" size={22} /><p>No terminal open.</p><button type="button" className="btn" onClick={() => void open()}>Open terminal</button></div>
       )}
       <div className="term__panes" data-split={paneSplit?.dir}>
         {(shells ?? []).map(row => (
@@ -206,6 +232,8 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
   const term = useRef<XTerm | null>(null)
   const fit = useRef<FitAddon | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
+  const [pendingLink, setPendingLink] = useState<string | null>(null)
+  const [openingLink, setOpeningLink] = useState(false)
   const call = useCallback((method: string, params: RpcRecord = {}) => desktopCall(window.xerxes, snap.sessionKey, method, { terminal_id: terminalId, ...params }), [snap.sessionKey, terminalId])
 
   useEffect(() => {
@@ -213,6 +241,7 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
     if (!element) return
     let alive = true
     setLinkError(null)
+    setPendingLink(null)
     const xterm = new XTerm({
       allowProposedApi: false,
       convertEol: false,
@@ -230,9 +259,12 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
         allowNonHttpProtocols: false,
         activate: (_event, uri) => {
           setLinkError(null)
-          void openTerminalLink(uri, message => window.confirm(message), window.xerxes).then(error => {
-            if (alive) setLinkError(error)
-          })
+          const url = externalUrlOf(uri)
+          if (!url || !/^https?:/i.test(url)) {
+            if (alive) setLinkError('Only valid HTTP and HTTPS terminal links can be opened.')
+            return
+          }
+          if (alive) setPendingLink(url)
         },
       },
     })
@@ -339,7 +371,30 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
   // parent's box, and padding there made it propose a row that got clipped.
   return (
     <div className="term__view" hidden={!visible} style={{ order }} onClick={() => { onFocusPane?.(); term.current?.focus() }}>
-      {linkError && <div className="term__error" role="alert"><span>{linkError}</span><button className="btn" onClick={event => { event.stopPropagation(); setLinkError(null) }}>Dismiss</button></div>}
+      {linkError && <div className="term__error" role="alert"><span>{linkError}</span><button type="button" className="btn" onClick={event => { event.stopPropagation(); setLinkError(null) }}>Dismiss</button></div>}
+      {pendingLink && (
+        <ActionDialog
+          title="Open terminal link"
+          confirmLabel="Open in browser"
+          busyLabel="Opening…"
+          busy={openingLink}
+          onCancel={() => { if (!openingLink) setPendingLink(null) }}
+          onConfirm={() => {
+            const target = pendingLink
+            setOpeningLink(true)
+            void openTerminalLink(target, () => true, window.xerxes)
+              .then(error => {
+                setPendingLink(null)
+                if (error) setLinkError(error)
+              })
+              .finally(() => setOpeningLink(false))
+          }}
+        >
+          <p>Open this link in your default browser?</p>
+          <p className="studio-muted"><code>{pendingLink}</code></p>
+          <p className="studio-muted">Only continue if you trust this destination.</p>
+        </ActionDialog>
+      )}
       <div className="term__host" ref={host} />
     </div>
   )

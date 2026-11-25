@@ -1941,7 +1941,7 @@ export function StartupWelcome({
           <StartChipRow chip={chip} cols={cols - welcomePadding * 2} composer={composer} index={index} key={chip.id} t={t} />
         ))}
       </Box>
-      <Box flexShrink={0} marginTop={rows >= 40 ? 1 : 0}>
+      <Box flexShrink={0} marginTop={rows >= 40 ? 1 : 0} onClick={() => openOverlayIfUnblocked({ capabilities: true })}>
         <Text color={t.ds.meta} wrap="wrap">Explore capabilities <Span color={t.color.accent}>· /features</Span></Text>
       </Box>
     </Box>

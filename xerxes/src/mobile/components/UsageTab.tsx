@@ -73,7 +73,7 @@ export function UsageTab(): ReactElement {
       </div>
       {hubSheet ? <HubStatusSheet onClose={() => setHubSheet(false)} /> : null}
 
-      {usage.phase === 'loading' && report === undefined ? <p aria-busy="true">Loading usage…</p> : null}
+      {usage.phase === 'loading' && report === undefined ? <p role="status" aria-busy="true">Loading usage…</p> : null}
       {usage.phase === 'idle' && !live ? <p>Usage loads once the connection is live.</p> : null}
       {usage.phase === 'error' ? (
         <div role="alert" className="notice is-error">

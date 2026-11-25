@@ -46,13 +46,14 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
 
   return (
     <section className="runmode" aria-label="How Xerxes runs new tasks">
-      <div className="row__t">How Xerxes runs new tasks</div>
+      <h3 className="row__t">How Xerxes runs new tasks</h3>
       <div className="modecards" role="radiogroup" aria-label="Mode">
         {choices.map(choice => {
           const current = view?.mode === choice.mode
           return (
             <button
               key={choice.mode}
+              type="button"
               role="radio"
               aria-checked={shown === choice.mode}
               className={`modecard${shown === choice.mode ? ' is-current' : ''}`}
@@ -78,7 +79,7 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
       {view?.restartPending && snap.runtimeUpdate === undefined && (
         <div className="runmode__notice" role="status">
           <span>Saved. The runtime applies it after a restart.</span>
-          <button className="btn" disabled={snap.turnActive} onClick={() => void store.restartDaemon(false, false, 'mode')}>Restart now</button>
+          <button type="button" className="btn" disabled={snap.turnActive} onClick={() => void store.restartDaemon(false, false, 'mode')}>Restart now</button>
         </div>
       )}
       {snap.runModeError && <p role="alert" className="studio-error">{snap.runModeError}</p>}
@@ -105,22 +106,22 @@ export function RunModeSection({ snap }: { snap: Snapshot }): ReactElement | nul
           )}
           {settingUp && (
             <div className="localpanel__progress" role="status">
-              <div className="progressbar" aria-hidden="true"><span style={{ width: `${job.percent ?? 0}%` }} /></div>
+              <div className="progressbar" role="progressbar" aria-label="Local model setup progress" aria-valuemin={0} aria-valuemax={100} {...(job.percent !== null ? { 'aria-valuenow': job.percent } : {})}><span style={{ width: `${job.percent ?? 0}%` }} /></div>
               <span className="row__s">{job.step}</span>
-              <button className="btn" onClick={() => store.cancelLocalSetup()}>Cancel</button>
+              <button type="button" className="btn" onClick={() => store.cancelLocalSetup()}>Cancel setup</button>
             </div>
           )}
           {job?.state === 'failed' && <p role="alert" className="studio-error">{job.error ?? 'Setup failed.'}</p>}
-          {job?.state === 'cancelled' && <p className="row__s">Setup cancelled. A partial download is kept and resumes next time.</p>}
+          {job?.state === 'cancelled' && <p role="status" className="row__s">Setup cancelled. A partial download is kept and resumes next time.</p>}
           {local.status?.blocker && !settingUp && (
             <div className="runmode__notice">
               <span>{local.status.blocker}</span>
-              <button className="btn" onClick={() => void store.loadLocalSetup()}>Check again</button>
+              <button type="button" className="btn" onClick={() => void store.loadLocalSetup()}>Check again</button>
             </div>
           )}
           {local.status && !local.status.blocker && !settingUp && !(local.status.server.running && view?.mode === shown) && (
             <div className="localpanel__actions">
-              <button className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown, shown === 'hybrid' ? lead : undefined)}>
+              <button type="button" className="btn btn--solid" disabled={busy} onClick={() => void store.startLocalSetup(shown, shown === 'hybrid' ? lead : undefined)}>
                 {local.status.model.downloaded
                   ? `Start local model and use ${shown === 'private' ? 'Private' : 'Hybrid'}`
                   : `Download${local.status.model.bytes ? ` ${gigabytes(local.status.model.bytes)}` : ''} and set up local model`}

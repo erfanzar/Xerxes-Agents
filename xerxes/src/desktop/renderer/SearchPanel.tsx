@@ -83,13 +83,13 @@ function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
   }
 
   const statsLine = useMemo(() => {
-    if (snap.searchSearching) return 'searching…'
+    if (snap.searchSearching) return 'Searching…'
     if (snap.searchError) return snap.searchError
     const stats = snap.searchStats
     const count = hits.length
     if (!stats) return count ? `${count} match${count === 1 ? '' : 'es'}` : ''
-    const base = `index: ${stats.sessions} session${stats.sessions === 1 ? '' : 's'} · ${stats.searchableMessages} messages`
-    return count ? `${count} match${count === 1 ? '' : 'es'} — ${base}` : base
+    const base = `Index: ${stats.sessions} session${stats.sessions === 1 ? '' : 's'} · ${stats.searchableMessages} messages`
+    return count ? `${count} match${count === 1 ? '' : 'es'} · ${base}` : base
   }, [hits.length, snap.searchError, snap.searchSearching, snap.searchStats])
 
   return (
@@ -98,9 +98,16 @@ function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
       <div className="palette" role="dialog" aria-label="Search sessions and messages">
         <input
           ref={ref}
+          type="search"
           className="palette__in"
+          aria-label="Search across every saved session"
           placeholder="Search across every saved session…"
           spellCheck={false}
+          role="combobox"
+          aria-expanded={true}
+          aria-controls="session-search-results"
+          aria-activedescendant={hits[cursor] ? `session-search-hit-${cursor}` : undefined}
+          aria-autocomplete="list"
           value={needle}
           onChange={e => setNeedle(e.target.value)}
           onKeyDown={e => {
@@ -114,7 +121,7 @@ function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
             }
           }}
         />
-        <div className="palette__list" ref={listRef}>
+        <div className="palette__list" ref={listRef} id="session-search-results" role="listbox" aria-label="Search results">
           {hits.length === 0 && needle.trim().length >= 2 && !snap.searchSearching && (
             <div className="search-status" role="status">{snap.searchError ? `Search failed: ${snap.searchError}` : 'No messages match.'}</div>
           )}
@@ -123,9 +130,13 @@ function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
           )}
           {hits.map((hit, index) => (
             <button
+              type="button"
               key={`${hit.sessionId}:${hit.messageIndex}`}
+              id={`session-search-hit-${index}`}
+              role="option"
+              aria-selected={index === cursor}
               className={`srow${index === cursor ? ' is-sel' : ''}`}
-              title={snap.turnActive ? `open “${hit.title || hit.sessionId}” in its own window — this task keeps running` : `open “${hit.title || hit.sessionId}”`}
+              title={snap.turnActive ? `Open “${hit.title || hit.sessionId}” in its own window while this task keeps running` : `Open “${hit.title || hit.sessionId}”`}
               onMouseEnter={() => setCursor(index)}
               onClick={() => open(hit.sessionId)}
             >
@@ -143,7 +154,7 @@ function SessionSearchDialog({ snap }: { snap: Snapshot }): ReactElement {
         <div className="palette__foot">
           <span><kbd>↑↓</kbd> select</span>
           <span><kbd>⏎</kbd> open</span>
-          <span><kbd>esc</kbd> close</span>
+          <span><kbd>Esc</kbd> close</span>
           <span className="palette__hint">{statsLine}</span>
         </div>
       </div>

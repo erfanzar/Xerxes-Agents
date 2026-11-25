@@ -85,14 +85,24 @@ export function AgentRoster({ rows, onInspect }: { rows: readonly SessionRow[]; 
     const info = row.agentDetails
     const latest = info?.toolCalls?.findLast(call => call.state === 'working')
     const preview = info?.error || (state.tone === 'working' ? info?.notes?.at(-1) || latest?.arg || info?.thinking?.at(-1) : '') || info?.summary
-    return <details className="agent-record" key={row.id} data-state={state.tone}>
-      <summary onClick={event => { if (onInspect) { event.preventDefault(); onInspect(row.id) } }}>
+    const head = (
+      <>
         <Icon name="chevron" size={13} />
         <span className="agent-record__title">{row.title}</span>
         <span className="agent-record__state">{state.label}</span>
         {preview && <span className="agent-record__preview">{preview}</span>}
         {(info?.model || info?.toolCount !== undefined) && <span className="agent-record__meta">{info.model && <span>{info.model}</span>}{info.toolCount !== undefined && info.toolCount > 0 && <span>{info.toolCount} tools</span>}</span>}
-      </summary>
+      </>
+    )
+    if (onInspect) {
+      return <div className="agent-record" key={row.id} data-state={state.tone}>
+        <button type="button" className="agent-record__open" onClick={() => onInspect(row.id)}>
+          {head}
+        </button>
+      </div>
+    }
+    return <details className="agent-record" key={row.id} data-state={state.tone}>
+      <summary>{head}</summary>
       <div className="agent-record__details">
         {info?.goal && info.goal !== row.title && <p>{info.goal}</p>}
         {info?.parentId && <p>Created by {rows.find(parent=>parent.id===info.parentId)?.title || info.parentId}</p>}
@@ -147,16 +157,16 @@ export function AgentControls({ id, active }: { id: string; active: boolean }): 
       <input
         value={message}
         onChange={event => setMessage(event.target.value)}
-        placeholder={active ? 'Redirect it — read at its next step' : 'Optional instruction'}
+        placeholder={active ? 'Redirect at its next step' : 'Optional instruction'}
         // Enter sends while it runs; with no running agent there is nothing
         // to send to, so the key does nothing rather than silently retrying.
-        onKeyDown={event => { if (event.key === 'Enter' && active && message.trim()) { event.preventDefault(); send() } }}
+        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229 && active && message.trim()) { event.preventDefault(); send() } }}
       />
     </label>
     <div className="agent-controls__row">
-      {active && <button disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send'}</button>}
-      <button disabled={busy} onClick={() => void run('control')}>{busy ? 'Requesting…' : active ? 'Stop agent' : 'Retry agent'}</button>
+      {active && <button type="button" className="btn btn--solid" disabled={busy || !message.trim()} onClick={send}>{busy ? 'Sending…' : 'Send'}</button>}
+      <button type="button" className="btn" disabled={busy} onClick={() => void run('control')}>{busy ? 'Requesting…' : active ? 'Stop agent' : 'Retry agent'}</button>
     </div>
-    {feedback && <p role="status" data-error={failed || undefined}>{feedback}</p>}
+    {feedback && <p role={failed ? 'alert' : 'status'} data-error={failed || undefined}>{feedback}</p>}
   </div>
 }

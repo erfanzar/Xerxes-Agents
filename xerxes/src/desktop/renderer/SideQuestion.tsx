@@ -92,6 +92,12 @@ const STARTER_ASIDES: readonly string[] = [
   'Explain the architecture of the files in scope',
 ]
 
+function sideQuestionShortcutLabel(): string {
+  if (typeof navigator === 'undefined') return '⌘;'
+  const ua = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
+  return /Mac|iPhone|iPad|iPod/i.test(ua) ? '⌘;' : 'Ctrl+;'
+}
+
 export function buildSideQuestionModelChoices(
   models: readonly ModelChoice[] | undefined,
   selectedModel: string,
@@ -157,7 +163,9 @@ export function SideQuestionModelPicker({
   )
   const triggerLabel = cleanSelected
     ? activeChoice?.label ?? bareModelName(cleanSelected)
-    : `Session default (${sessionModelShort})`
+    : cleanSession
+      ? sessionModelShort
+      : 'Session default'
 
   const showSearch = modelOptions.length > 6
   const needle = query.trim().toLowerCase()
@@ -275,8 +283,8 @@ export function SideQuestionModelPicker({
         aria-expanded={open}
         title={
           cleanSelected
-            ? `Side question model: ${cleanSelected} (click to change without affecting main chat)`
-            : `Side question model: Session default (${sessionModelShort}) — click to choose`
+            ? `Side question model: ${cleanSelected} (change without affecting main chat)`
+            : `Side question model: Session default (${sessionModelShort})`
         }
         onClick={toggleOpen}
       >
@@ -301,6 +309,21 @@ export function SideQuestionModelPicker({
                 event.preventDefault()
                 event.stopPropagation()
                 close()
+                return
+              }
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+                const target = event.target as HTMLElement | null
+                if (target?.classList.contains('btw-model-pop__custom-input')) return
+                const items = Array.from(popoverRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
+                if (items.length === 0) return
+                event.preventDefault()
+                const cur = items.indexOf(document.activeElement as HTMLButtonElement)
+                const next =
+                  event.key === 'Home' ? 0
+                  : event.key === 'End' ? items.length - 1
+                  : event.key === 'ArrowDown' ? (cur < 0 ? 0 : (cur + 1) % items.length)
+                  : (cur <= 0 ? items.length - 1 : cur - 1)
+                items[next]?.focus()
               }
             }}
           >
@@ -321,7 +344,7 @@ export function SideQuestionModelPicker({
                 <Icon name="search" size={12} />
                 <input
                   ref={searchInputRef}
-                  type="text"
+                  type="search"
                   className="btw-model-pop__filter"
                   aria-label="Filter side question models"
                   placeholder="Filter models…"
@@ -369,14 +392,14 @@ export function SideQuestionModelPicker({
                   {modelsError
                     ? modelsError
                     : online
-                      ? 'No discovered models yet — enter a custom model ID below.'
-                      : 'Offline — enter a custom model ID below.'}
+                      ? 'No discovered models yet. Enter a custom model ID below.'
+                      : 'Offline. Enter a custom model ID below.'}
                 </p>
               )}
 
               {filteredOptions.length === 0 && modelOptions.length > 0 && (
                 <p className="btw-model-pop__empty">
-                  No matching models — enter a custom model ID below.
+                  No matching models. Enter a custom model ID below.
                 </p>
               )}
 
@@ -575,7 +598,7 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
         )}
       </header>
 
-      <div className="side-question__thread" ref={threadRef} role="log" aria-live="polite">
+      <div className="side-question__thread" ref={threadRef} role="log" aria-label="Side question responses">
         {turns.length === 0 ? (
           <div className="side-question__empty">
             <p className="side-question__lead">
@@ -642,6 +665,8 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
                       <XerxesThinkingMark size={13} active />
                       <span>{hasRunningTool ? 'Inspecting files…' : 'Reading context…'}</span>
                     </p>
+                  ) : turn.status === 'done' ? (
+                    <p className="side-question__empty-reply">No response was returned.</p>
                   ) : null}
                   {turn.status === 'error' && (
                     <p className="side-question__error studio-error" role="alert">
@@ -691,7 +716,7 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
         <div className="side-question__composer-box">
           <textarea
             ref={inputRef}
-            rows={1}
+            rows={2}
             className="side-question__input"
             aria-label="Side question prompt"
             placeholder={
@@ -699,13 +724,13 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
                 ? 'Connect to workspace runtime…'
                 : streaming
                   ? 'Answering side question…'
-                  : 'Ask an aside (⌘; or /btw)…'
+                  : 'Ask a quick question…'
             }
             value={draft}
             disabled={!online || streaming}
-            spellCheck={false}
             onChange={event => onChangeDraft(event.target.value)}
             onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+              if (event.nativeEvent.isComposing) return
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault()
                 onSubmit()
@@ -718,30 +743,29 @@ export function SideQuestionView(props: SideQuestionViewProps): ReactElement {
               }
             }}
           />
-          <button
-            type="submit"
-            className="side-question__send"
-            aria-label="Send side question"
-            title="Ask aside (⏎)"
-            disabled={!online || streaming || !draft.trim()}
-          >
-            <Icon name="enter" size={14} />
-          </button>
-        </div>
-
-        <div className="side-question__toolbar">
-          <SideQuestionModelPicker
-            models={models}
-            modelsLoading={modelsLoading}
-            modelsError={modelsError}
-            sessionModel={sessionModel}
-            selectedModel={selectedModel}
-            online={online}
-            defaultOpen={defaultModelPickerOpen}
-            onSelectModel={onSelectModel}
-            onRequestModels={onRequestModels}
-          />
-          <span className="side-question__shortcut" title="Toggle Side Question panel">⌘;</span>
+          <div className="side-question__toolbar">
+            <SideQuestionModelPicker
+              models={models}
+              modelsLoading={modelsLoading}
+              modelsError={modelsError}
+              sessionModel={sessionModel}
+              selectedModel={selectedModel}
+              online={online}
+              defaultOpen={defaultModelPickerOpen}
+              onSelectModel={onSelectModel}
+              onRequestModels={onRequestModels}
+            />
+            <span className="side-question__shortcut" title="Toggle Side Question panel">{sideQuestionShortcutLabel()}</span>
+            <button
+              type="submit"
+              className="side-question__send"
+              aria-label="Send side question"
+              title="Ask aside (⏎)"
+              disabled={!online || streaming || !draft.trim()}
+            >
+              <Icon name="arrowUp" size={14} />
+            </button>
+          </div>
         </div>
       </form>
     </section>

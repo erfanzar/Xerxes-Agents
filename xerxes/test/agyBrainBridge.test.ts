@@ -2147,4 +2147,810 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       { id: 'plan-3', content: 'Verify build', status: 'pending' },
     ])
   })
+
+  test('Antigravity titled edit tools emit artifact_id, broadcast session_attention to background observers, and surface turn_end errors', async () => {
+    const tmp = await makeTempDir()
+    const home = join(tmp, 'home')
+    const workspace = join(tmp, 'workspace')
+    const extId = 'agy-notify-ext-99'
+    await mkdir(workspace, { recursive: true })
+    const seeded = await seedMockAgyBrain(home, extId)
+
+    let activeHarness: InMemoryAcpHarness | undefined
+    const acpHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENTS,
+      resolveBinary: cmd => cmd,
+      createAcpClient: options => {
+        activeHarness = createInMemoryAcpTransport((frame, harness) => {
+          const id = frame.id as number | undefined
+          const method = frame.method as string | undefined
+          if (method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'antigravity', title: 'Antigravity', version: '1.5.16' },
+                agentCapabilities: { loadSession: true },
+              },
+            })
+            return
+          }
+          if (method === 'session/new') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: { sessionId: extId, models: { availableModels: [], currentModelId: 'gemini-4-neon' } },
+            })
+            return
+          }
+          if (method === 'session/prompt') {
+            const p = frame.params as { prompt?: Array<{ text?: string }> }
+            const promptText = p.prompt?.map(b => b.text ?? '').join('\n') ?? ''
+            if (promptText.includes('trigger error')) {
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id,
+                error: { code: -32000, message: 'upstream model quota reached' },
+              })
+              return
+            }
+            const artifactPath = join(seeded.sessionDir, 'implementation_plan.md')
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: extId,
+                update: {
+                  sessionUpdate: 'tool_call',
+                  toolCallId: 'tc-titled-art',
+                  title: 'Write implementation_plan.md',
+                  kind: 'edit',
+                  status: 'in_progress',
+                  rawInput: {
+                    AbsolutePath: artifactPath,
+                    Content: '# Plan\n',
+                  },
+                },
+              },
+            })
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: extId,
+                update: {
+                  sessionUpdate: 'tool_call_update',
+                  toolCallId: 'tc-titled-art',
+                  title: 'Write implementation_plan.md',
+                  kind: 'edit',
+                  status: 'completed',
+                  locations: [{ path: artifactPath }],
+                  content: 'Wrote implementation_plan.md',
+                },
+              },
+            })
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: { stopReason: 'end_turn' },
+            })
+          }
+        })
+        return new AcpStdioClient({ ...options, transport: activeHarness!.transport })
+      },
+    })
+
+    const socketPath = join(tmp, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime()
+    const server = new DaemonServer({
+      socketPath,
+      projectDirectory: workspace,
+      runtime,
+      acpBridgeHost: acpHost,
+      agyBrainHomeDir: home,
+    })
+    await server.start()
+    const workerClient = await SocketRpcClient.open(socketPath)
+    const observerClient = await SocketRpcClient.open(socketPath)
+
+    try {
+      const openedWorker = await workerClient.call('initialize', { session_key: 'worker', project_dir: workspace })
+      const workerSessionId = (openedWorker.session as { id: string }).id
+      await observerClient.call('initialize', { session_key: 'observer', project_dir: workspace })
+
+      const connected = await workerClient.call('acp.connect', {
+        session_id: workerSessionId,
+        agent_id: 'antigravity',
+        cwd: workspace,
+      })
+      expect(connected.ok).toBe(true)
+
+      await workerClient.call('turn.submit', {
+        session_key: 'worker',
+        text: 'draft plan',
+      })
+
+      const directArtifact = await workerClient.next(
+        frame => frame.method === 'event' && frame.params?.type === 'tool_result' && frame.params.payload?.artifact_id === 'agy:implementation_plan.md',
+      )
+      expect(directArtifact.params?.payload?.artifact_id).toBe('agy:implementation_plan.md')
+
+      const observerArtifactAttention = await observerClient.next(
+        frame =>
+          frame.method === 'event'
+          && frame.params?.type === 'session_attention'
+          && frame.params.payload?.session_id === workerSessionId
+          && frame.params.payload?.event_type === 'tool_result',
+      )
+      expect((observerArtifactAttention.params?.payload?.payload as { artifact_id?: string })?.artifact_id).toBe(
+        'agy:implementation_plan.md',
+      )
+
+      const observerTurnEndAttention = await observerClient.next(
+        frame =>
+          frame.method === 'event'
+          && frame.params?.type === 'session_attention'
+          && frame.params.payload?.session_id === workerSessionId
+          && frame.params.payload?.event_type === 'turn_end',
+      )
+      expect((observerTurnEndAttention.params?.payload?.payload as { stop_reason?: string })?.stop_reason).toBe('end_turn')
+
+      // Error turn carries failed: true + error onto turn_end and session_attention
+      workerClient.frames.length = 0
+      observerClient.frames.length = 0
+      await workerClient.call('turn.submit', {
+        session_key: 'worker',
+        text: 'trigger error',
+      })
+      const failedTurnEnd = await workerClient.next(
+        frame => frame.method === 'event' && frame.params?.type === 'turn_end',
+      )
+      expect(failedTurnEnd.params?.payload?.failed).toBe(true)
+      expect(String(failedTurnEnd.params?.payload?.error ?? '')).toContain('upstream model quota reached')
+
+      const observerFailedAttention = await observerClient.next(
+        frame =>
+          frame.method === 'event'
+          && frame.params?.type === 'session_attention'
+          && frame.params.payload?.event_type === 'turn_end',
+      )
+      expect((observerFailedAttention.params?.payload?.payload as { failed?: boolean })?.failed).toBe(true)
+    } finally {
+      workerClient.close()
+      observerClient.close()
+      await server.stop()
+    }
+  })
+
+  test('Antigravity live mid-turn steer persists in inflight.steers + session.messages, and turn.cancel stops active turns & wakeups without zombie resurrection', async () => {
+    const tmp = await makeTempDir()
+    const home = join(tmp, 'home')
+    const workspace = join(tmp, 'workspace')
+    const extId = 'agy-steer-cancel-77'
+    await mkdir(workspace, { recursive: true })
+    await seedMockAgyBrain(home, extId)
+
+    let activeHarness: InMemoryAcpHarness | undefined
+    const pendingPromptIds: number[] = []
+    let cancelCount = 0
+
+    const acpHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENTS,
+      resolveBinary: cmd => cmd,
+      createAcpClient: options => {
+        activeHarness = createInMemoryAcpTransport((frame, harness) => {
+          const id = frame.id as number | undefined
+          const method = frame.method as string | undefined
+          if (method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'antigravity', title: 'Antigravity', version: '1.5.16' },
+                agentCapabilities: { loadSession: true },
+              },
+            })
+            return
+          }
+          if (method === 'session/new') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: { sessionId: extId, models: { availableModels: [], currentModelId: 'gemini-4-neon' } },
+            })
+            return
+          }
+          if (method === 'session/cancel') {
+            cancelCount += 1
+            while (pendingPromptIds.length > 0) {
+              const pid = pendingPromptIds.shift()!
+              harness.pushAgentFrame({ jsonrpc: '2.0', id: pid, result: { stopReason: 'cancelled' } })
+            }
+            return
+          }
+          if (method === 'session/prompt' && id !== undefined) {
+            pendingPromptIds.push(id)
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: extId,
+                update: {
+                  sessionUpdate: 'agent_thought_chunk',
+                  content: { type: 'text', text: 'Working...' },
+                },
+              },
+            })
+          }
+        })
+        return new AcpStdioClient({ ...options, transport: activeHarness!.transport })
+      },
+    })
+
+    const socketPath = join(tmp, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime()
+    const server = new DaemonServer({
+      socketPath,
+      projectDirectory: workspace,
+      runtime,
+      acpBridgeHost: acpHost,
+      agyBrainHomeDir: home,
+      acpWakeupIdleMs: 5_000,
+    })
+    await server.start()
+    const client = await SocketRpcClient.open(socketPath)
+
+    try {
+      const opened = await client.call('initialize', { session_key: 'main', project_dir: workspace })
+      const sessionId = (opened.session as { id: string }).id
+      const connected = await client.call('acp.connect', {
+        session_id: sessionId,
+        agent_id: 'antigravity',
+        cwd: workspace,
+      })
+      expect(connected.ok).toBe(true)
+
+      // 1. Start a live turn and inject a mid-turn live steer
+      await client.call('turn.submit', { session_key: 'main', text: 'continue' })
+      await client.next(frame => frame.method === 'event' && frame.params?.type === 'think_part')
+
+      const steerRes = await client.call('turn.steer', {
+        session_key: 'main',
+        content: 'pivot to 32K normalizer',
+      })
+      expect(steerRes.ok).toBe(true)
+      expect(steerRes.disposition).toBe('live_steer')
+
+      // Mid-turn reattach (`session.status`) must carry the live steer in `inflight.steers`
+      const statusMidTurn = await client.call('session.status', { session_key: 'main' })
+      const inflight = (statusMidTurn.session as { inflight?: { user?: string; steers?: string[] } })?.inflight
+      expect(inflight?.user).toBe('continue')
+      expect(inflight?.steers).toEqual(['pivot to 32K normalizer'])
+
+      // Finish both primary + steer prompts cleanly and verify steer persisted in transcript
+      while (pendingPromptIds.length > 0) {
+        const pid = pendingPromptIds.shift()!
+        activeHarness!.pushAgentFrame({ jsonrpc: '2.0', id: pid, result: { stopReason: 'end_turn' } })
+      }
+      await client.next(frame => frame.method === 'event' && frame.params?.type === 'turn_end')
+
+      const statusAfter = await client.call('session.status', { session_key: 'main' })
+      const transcript = (statusAfter.session as { transcript?: Array<{ role: string; content: unknown }> })?.transcript ?? []
+      const userTexts = transcript.filter(m => m.role === 'user').map(m => String(m.content))
+      expect(userTexts).toContain('continue')
+      expect(userTexts).toContain('pivot to 32K normalizer')
+
+      // 2. Start a second turn, cancel it, and verify trailing frames do NOT resurrect a zombie wakeup
+      client.frames.length = 0
+      await client.call('turn.submit', { session_key: 'main', text: 'long task' })
+      await client.next(frame => frame.method === 'event' && frame.params?.type === 'think_part')
+      const cancelBefore = cancelCount
+      const cancelRes = await client.call('turn.cancel', { session_key: 'main' })
+      expect(cancelRes.ok).toBe(true)
+      await client.next(frame => frame.method === 'event' && frame.params?.type === 'turn_end')
+      expect(cancelCount).toBeGreaterThan(cancelBefore)
+
+      client.frames.length = 0
+      activeHarness!.pushAgentFrame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: extId,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: 'stale trailing thought after cancel' },
+          },
+        },
+      })
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(client.frames.some(f => f.method === 'event' && f.params?.type === 'turn_begin')).toBe(false)
+    } finally {
+      client.close()
+      await server.stop()
+    }
+  })
+
+  test('Antigravity P1 resolving immediately on live steer keeps turn alive, streams P2 text/tools, and side question retries read-only after tool denial', async () => {
+    const tmp = await makeTempDir()
+    const home = join(tmp, 'home')
+    const workspace = join(tmp, 'workspace')
+    const extId = 'agy-handover-88'
+    const sideExtId = 'agy-side-88'
+    await mkdir(workspace, { recursive: true })
+    await seedMockAgyBrain(home, extId)
+
+    let activeHarness: InMemoryAcpHarness | undefined
+    let sessionCount = 0
+    let mainPrompt1Id: number | undefined
+    let sidePromptAttempt = 0
+
+    const acpHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENTS,
+      resolveBinary: cmd => cmd,
+      createAcpClient: options => {
+        activeHarness = createInMemoryAcpTransport((frame, harness) => {
+          const id = frame.id as number | undefined
+          const method = frame.method as string | undefined
+          if (method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'antigravity', title: 'Antigravity', version: '1.5.16' },
+                agentCapabilities: { loadSession: true },
+              },
+            })
+            return
+          }
+          if (method === 'session/new') {
+            sessionCount += 1
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                sessionId: sessionCount === 1 ? extId : sideExtId,
+                models: { availableModels: [], currentModelId: 'gemini-4-neon' },
+              },
+            })
+            return
+          }
+          if (method === 'session/close' || method === 'session/set_model' || method === 'session/set_config_option') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id, result: {} })
+            return
+          }
+          if (method === 'session/prompt' && id !== undefined) {
+            const params = frame.params as { sessionId?: string; prompt?: Array<{ text?: string }> }
+            const sid = params.sessionId
+            const promptText = params.prompt?.map(b => b.text ?? '').join('\n') ?? ''
+
+            if (sid === sideExtId) {
+              sidePromptAttempt += 1
+              if (sidePromptAttempt === 1) {
+                // Simulate agy trying run_command, getting read-only denied, and returning empty text!
+                harness.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    sessionId: sideExtId,
+                    update: {
+                      sessionUpdate: 'tool_call',
+                      toolCallId: 'side-rc-1',
+                      name: 'run_command',
+                      kind: 'execute',
+                      status: 'in_progress',
+                      rawInput: { CommandLine: 'ps aux' },
+                    },
+                  },
+                })
+                harness.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    sessionId: sideExtId,
+                    update: {
+                      sessionUpdate: 'tool_call_update',
+                      toolCallId: 'side-rc-1',
+                      name: 'run_command',
+                      status: 'failed',
+                      content: 'Permission denied',
+                    },
+                  },
+                })
+                harness.pushAgentFrame({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
+                return
+              }
+              // Second prompt (automatic read-only retry) answers cleanly from live context!
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: sideExtId,
+                  update: {
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'Main turn is running step 1 cleanly.' },
+                  },
+                },
+              })
+              harness.pushAgentFrame({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
+              return
+            }
+
+            if (promptText.includes('INITIAL_TURN')) {
+              mainPrompt1Id = id
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call',
+                    toolCallId: 'tc-handover',
+                    name: 'run_command',
+                    status: 'in_progress',
+                    rawInput: { CommandLine: 'sleep 3' },
+                  },
+                },
+              })
+              return
+            }
+
+            if (promptText.includes('STEER_HANDOVER')) {
+              // Exact real agy 1.5.16 timing: P1 resolves IMMEDIATELY (within 5ms, inside 120ms probe!),
+              // then P2 streams tool_result + text_part 180ms later!
+              const p1 = mainPrompt1Id
+              mainPrompt1Id = undefined
+              if (p1 !== undefined) {
+                setTimeout(() => {
+                  harness.pushAgentFrame({ jsonrpc: '2.0', id: p1, result: { stopReason: 'end_turn' } })
+                }, 5)
+              }
+              setTimeout(() => {
+                harness.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    sessionId: extId,
+                    update: {
+                      sessionUpdate: 'tool_call_update',
+                      toolCallId: 'tc-handover',
+                      name: 'run_command',
+                      status: 'completed',
+                      content: 'done',
+                    },
+                  },
+                })
+                harness.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    sessionId: extId,
+                    update: {
+                      sessionUpdate: 'agent_message_chunk',
+                      content: { type: 'text', text: 'HANDOVER_TEXT_DELIVERED' },
+                    },
+                  },
+                })
+                harness.pushAgentFrame({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
+              }, 180)
+            }
+          }
+        })
+        return new AcpStdioClient({ ...options, transport: activeHarness!.transport })
+      },
+    })
+
+    const socketPath = join(tmp, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime()
+    const server = new DaemonServer({
+      socketPath,
+      projectDirectory: workspace,
+      runtime,
+      acpBridgeHost: acpHost,
+      agyBrainHomeDir: home,
+    })
+    await server.start()
+    const client = await SocketRpcClient.open(socketPath)
+
+    try {
+      const opened = await client.call('initialize', { session_key: 'main', project_dir: workspace })
+      const sessionId = (opened.session as { id: string }).id
+      expect((await client.call('acp.connect', { session_id: sessionId, agent_id: 'antigravity', cwd: workspace })).ok).toBe(true)
+
+      await client.call('turn.submit', { session_key: 'main', text: 'INITIAL_TURN' })
+      await client.next(f => f.method === 'event' && f.params?.type === 'tool_call')
+
+      const steerRes = await client.call('turn.steer', { session_key: 'main', content: 'STEER_HANDOVER', live: true })
+      expect(steerRes).toMatchObject({ ok: true, disposition: 'live_steer' })
+
+      await client.next(f => f.method === 'event' && f.params?.type === 'turn_end')
+      const steerIdx = client.frames.findIndex(f => f.method === 'event' && f.params?.type === 'steer_applied')
+      const textIdx = client.frames.findIndex(
+        f => f.method === 'event' && f.params?.type === 'text_part' && f.params.payload?.text === 'HANDOVER_TEXT_DELIVERED',
+      )
+      const endIdx = client.frames.findIndex(f => f.method === 'event' && f.params?.type === 'turn_end')
+      expect(steerIdx).toBeGreaterThanOrEqual(0)
+      expect(textIdx).toBeGreaterThan(steerIdx)
+      expect(endIdx).toBeGreaterThan(textIdx)
+
+      // Side question blocked tool retry produces real answer instead of blank ok:true
+      const btwRes = await client.call('session.side_question', { session_key: 'main', question: 'status?' })
+      expect(btwRes.ok).toBe(true)
+      expect(btwRes.answer).toBe('Main turn is running step 1 cleanly.')
+      expect(sidePromptAttempt).toBe(2)
+    } finally {
+      client.close()
+      await server.stop()
+    }
+  })
+
+  test('ACP preserves chronological multi-step order, enriches late tool_call_update outputs/diffs, keeps partial turn on crash, and auto-refreshes newly created skills', async () => {
+    const tmp = await makeTempDir()
+    const home = join(tmp, 'home')
+    const workspace = join(tmp, 'workspace')
+    const extId = 'agy-content-skills-99'
+    await mkdir(workspace, { recursive: true })
+    await seedMockAgyBrain(home, extId)
+
+    let activeHarness: InMemoryAcpHarness | undefined
+    const acpHost = new DaemonAcpBridgeHost({
+      homeDir: home,
+      discoverAgents: () => AGY_AGENTS,
+      resolveBinary: cmd => cmd,
+      createAcpClient: options => {
+        activeHarness = createInMemoryAcpTransport((frame, harness) => {
+          const id = frame.id as number | undefined
+          const method = frame.method as string | undefined
+          if (method === 'initialize') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'antigravity', title: 'Antigravity', version: '1.5.16' },
+                agentCapabilities: { loadSession: true },
+              },
+            })
+            return
+          }
+          if (method === 'session/new') {
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              id,
+              result: { sessionId: extId, models: { availableModels: [], currentModelId: 'gemini-4-neon' } },
+            })
+            harness.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: extId,
+                update: {
+                  sessionUpdate: 'available_commands_update',
+                  availableCommands: [{ name: 'plan', description: 'Plan carefully' }],
+                },
+              },
+            })
+            return
+          }
+          if (method === 'session/set_mode') {
+            harness.pushAgentFrame({ jsonrpc: '2.0', id, result: {} })
+            return
+          }
+          if (method === 'session/prompt' && id !== undefined) {
+            const p = frame.params as { prompt?: Array<{ text?: string }> }
+            const promptText = p.prompt?.map(b => b.text ?? '').join('\n') ?? ''
+            if (promptText === 'MULTI_STEP_TURN') {
+              // Step 1: think -> tool_call -> early completed tool_call_update -> late content+diff tool_call_update -> intermediate text
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'STEP_1_THINK' } } },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call',
+                    toolCallId: 'tc-1',
+                    title: 'Edit src/app.ts',
+                    kind: 'edit',
+                    status: 'in_progress',
+                    rawInput: { path: join(workspace, 'src/app.ts') },
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call_update',
+                    toolCallId: 'tc-1',
+                    status: 'completed',
+                  },
+                },
+              })
+              // Late post-settlement tool_call_update carrying real output + structured diff!
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call_update',
+                    toolCallId: 'tc-1',
+                    status: 'completed',
+                    content: [
+                      { type: 'content', content: { type: 'text', text: 'LATE_TOOL_OUTPUT_TEXT' } },
+                      { type: 'diff', path: join(workspace, 'src/app.ts'), oldText: 'const a = 1\n', newText: 'const a = 2\n' },
+                    ],
+                    locations: [{ path: join(workspace, 'src/app.ts'), line: 1 }],
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'INTERMEDIATE_STEP_REPLY' } } },
+              })
+              // Step 2: think -> tool_call -> tool_result -> final reply
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'STEP_2_THINK' } } },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call',
+                    toolCallId: 'tc-2',
+                    title: 'Run tests',
+                    kind: 'execute',
+                    status: 'in_progress',
+                    rawInput: { command: 'bun test' },
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: extId,
+                  update: {
+                    sessionUpdate: 'tool_call_update',
+                    toolCallId: 'tc-2',
+                    status: 'completed',
+                    content: '2 passed',
+                  },
+                },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'FINAL_BOTTOM_ANSWER' } } },
+              })
+              harness.pushAgentFrame({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } })
+              return
+            }
+            if (promptText === 'CRASH_MID_TURN') {
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'PRE_CRASH_THINK' } } },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: { sessionId: extId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PARTIAL_BEFORE_CRASH' } } },
+              })
+              harness.pushAgentFrame({
+                jsonrpc: '2.0',
+                id,
+                error: { code: -32000, message: 'simulated transport crash' },
+              })
+            }
+          }
+        })
+        return new AcpStdioClient({ ...options, transport: activeHarness!.transport })
+      },
+    })
+
+    const socketPath = join(tmp, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime()
+    const server = new DaemonServer({
+      socketPath,
+      projectDirectory: workspace,
+      runtime,
+      acpBridgeHost: acpHost,
+      agyBrainHomeDir: home,
+    })
+    await server.start()
+    const client = await SocketRpcClient.open(socketPath)
+
+    try {
+      const opened = await client.call('initialize', { session_key: 'main', project_dir: workspace })
+      const sessionId = (opened.session as { id: string }).id
+      expect((await client.call('acp.connect', { session_id: sessionId, agent_id: 'antigravity', cwd: workspace })).ok).toBe(true)
+
+      // 1. Multi-step chronological persistence + late tool_call_update enrichment
+      await client.call('turn.submit', { session_key: 'main', text: 'MULTI_STEP_TURN' })
+      await client.next(f => f.method === 'event' && f.params?.type === 'turn_end')
+
+      const liveSession = runtime.listSessions().find(s => s.id === sessionId)!
+      const rolesAndContent = liveSession.messages.map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : '',
+        thinking: typeof (m as Record<string, unknown>).thinking === 'string' ? (m as Record<string, unknown>).thinking : undefined,
+        toolCalls: Array.isArray((m as Record<string, unknown>).tool_calls)
+          ? ((m as Record<string, unknown>).tool_calls as Array<{ id: string }>).map(tc => tc.id)
+          : undefined,
+      }))
+      // Exact chronological sequence: user -> step1(think+tc-1) -> tool(tc-1) -> step1-reply -> step2(think+tc-2) -> tool(tc-2) -> final-reply
+      expect(rolesAndContent.map(r => r.role)).toEqual([
+        'user',
+        'assistant',
+        'tool',
+        'assistant',
+        'assistant',
+        'tool',
+        'assistant',
+      ])
+      expect(rolesAndContent[1]).toMatchObject({ thinking: 'STEP_1_THINK', toolCalls: ['tc-1'] })
+      expect(rolesAndContent[2]?.content).toContain('LATE_TOOL_OUTPUT_TEXT')
+      expect(rolesAndContent[3]?.content).toBe('INTERMEDIATE_STEP_REPLY')
+      expect(rolesAndContent[4]).toMatchObject({ thinking: 'STEP_2_THINK', toolCalls: ['tc-2'] })
+      expect(rolesAndContent[6]?.content).toBe('FINAL_BOTTOM_ANSWER')
+
+      // Late structured diff + locations + title + kind persisted on toolExecution
+      const tc1Exec = liveSession.toolExecutions.find(
+        e => typeof e === 'object' && e !== null && (e as Record<string, unknown>).toolCallId === 'tc-1',
+      )
+      expect(tc1Exec).toMatchObject({
+        toolCallId: 'tc-1',
+        title: 'Edit src/app.ts',
+        kind: 'edit',
+        result: 'LATE_TOOL_OUTPUT_TEXT',
+        diff: { path: join(workspace, 'src/app.ts'), old_text: 'const a = 1\n', new_text: 'const a = 2\n' },
+      })
+
+      // 2. Mid-turn crash/error preserves streamed content instead of wiping it
+      client.frames.length = 0
+      await client.call('turn.submit', { session_key: 'main', text: 'CRASH_MID_TURN' })
+      await client.next(f => f.method === 'event' && f.params?.type === 'turn_end')
+      expect(liveSession.messages.some(m => m.role === 'user' && m.content === 'CRASH_MID_TURN')).toBe(true)
+      expect(liveSession.messages.some(m => m.role === 'assistant' && m.content === 'PARTIAL_BEFORE_CRASH')).toBe(true)
+
+      // 3. Dynamic workspace skill creation auto-refreshes `/` completions, `acp.catalog`, and `/skills`
+      const beforeComplete = await client.call('complete', { session_key: 'main', text: '/' })
+      const beforeLabels = ((beforeComplete.completions as Array<{ label?: string }>) ?? []).map(c => c.label)
+      expect(beforeLabels).not.toContain('custom-auto-skill')
+
+      const newSkillDir = join(workspace, '.agents', 'skills', 'custom-auto-skill')
+      await mkdir(newSkillDir, { recursive: true })
+      await writeFile(
+        join(newSkillDir, 'SKILL.md'),
+        '---\nname: custom-auto-skill\ndescription: Dynamically added skill for testing auto-refresh\n---\n\n# Custom Auto Skill\n',
+        'utf8',
+      )
+
+      const afterComplete = await client.call('complete', { session_key: 'main', text: '/' })
+      const afterLabels = ((afterComplete.completions as Array<{ label?: string }>) ?? []).map(c => c.label)
+      expect(afterLabels).toContain('custom-auto-skill')
+
+      const catalog = await client.call('acp.catalog', { session_id: sessionId })
+      const catalogSkillNames = ((catalog.skills as Array<{ name?: string }>) ?? []).map(s => s.name)
+      expect(catalogSkillNames).toContain('custom-auto-skill')
+    } finally {
+      client.close()
+      await server.stop()
+    }
+  })
 })

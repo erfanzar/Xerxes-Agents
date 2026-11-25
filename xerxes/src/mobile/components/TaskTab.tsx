@@ -70,7 +70,7 @@ export function TaskTab({ workspaceId, sessionId }: { workspaceId?: string | und
     return (
       <section aria-labelledby="task-title">
         <h1 id="task-title" className="page-title">Task</h1>
-        {routed ? <p aria-busy="true">Opening task…</p> : <p className="empty">Choose a task from the Inbox to open it here.</p>}
+        {routed ? <p role="status" aria-busy="true">Opening task…</p> : <p className="empty">Choose a task from the Inbox to open it here.</p>}
       </section>
     )
   }
@@ -129,7 +129,7 @@ export function TaskTab({ workspaceId, sessionId }: { workspaceId?: string | und
           <button type="button" className="btn" onClick={() => { if (workspaceId !== undefined && sessionId !== undefined) controller.openSession(workspaceId, sessionId) }}>Try again</button>
         </div>
       ) : null}
-      {selected.phase === 'loading' ? <p aria-busy="true">Loading task…</p> : null}
+      {selected.phase === 'loading' ? <p role="status" aria-busy="true">Loading task…</p> : null}
       {workspace?.readOnly === true ? (
         <p role="status" className="notice">View only. This machine runs a Xerxes version that cannot verify commands from the Hub. Update Xerxes there to send, steer or approve from your phone.</p>
       ) : null}

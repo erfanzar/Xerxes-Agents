@@ -23,7 +23,9 @@ export function RecordForm({ t, fields, values, onChange, onSubmit, onBack, busy
       key.preventDefault(); key.stopPropagation()
       if (busy) return
       if (key.name === 'escape') onBack()
-      else if (key.name === 'tab') setIndex(value => (value + (key.shift ? fields.length - 1 : 1)) % fields.length)
+      else if (key.name === 'tab') {
+        if (fields.length > 0) setIndex(value => (value + (key.shift ? fields.length - 1 : 1)) % fields.length)
+      }
       else onSubmit()
     }
   })
@@ -31,7 +33,9 @@ export function RecordForm({ t, fields, values, onChange, onSubmit, onBack, busy
   return <Box flexDirection="column" flexGrow={1} minHeight={0}>
     <Text color={t.color.accent} wrap="wrap">{field.label} · {index + 1}/{fields.length}</Text>
     {field.help ? <Text color={t.ds.secondary} wrap="wrap">{field.help}</Text> : null}
-    <textarea key={field.key} ref={input} initialValue={values[field.key] ?? ''} onContentChange={() => { if (input.current) onChange(field.key, input.current.plainText) }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.color.overlayBg} focusedTextColor={t.color.text} />
+    <Box flexDirection="column" flexGrow={1} minHeight={3} borderStyle="round" borderColor={t.color.accent} paddingX={1}>
+      <textarea key={field.key} ref={input} initialValue={values[field.key] ?? ''} onContentChange={() => { if (input.current) onChange(field.key, input.current.plainText) }} focused={!busy} flexGrow={1} minHeight={1} focusedBackgroundColor={t.ds.sunken} focusedTextColor={t.color.text} placeholder={`Enter ${field.label.toLowerCase()}…`} placeholderColor={t.color.muted} />
+    </Box>
     <DialogFooter t={t}><Text color={t.ds.secondary} wrap="wrap">Tab / Shift+Tab fields · Ctrl+S {submitLabel} · Esc back</Text></DialogFooter>
   </Box>
 }

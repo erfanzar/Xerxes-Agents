@@ -7,7 +7,7 @@
  * through memory_guard.get/save; the default is half the computer's memory.
  */
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 
 import { desktopCall, desktopError, type RpcRecord } from './desktopRpc.js'
 import type { Snapshot } from './store.js'
@@ -52,6 +52,8 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'saved'; text: string } | null>(null)
+  const fieldId = useId()
+  const msgId = `${fieldId}-msg`
   const inFlight = useRef(false)
   const online = snap.connection === 'online'
 
@@ -107,6 +109,7 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
           </div>
         </div>
         <button
+          type="button"
           className={`switch${on ? ' is-on' : ''}`}
           role="switch"
           aria-checked={on}
@@ -117,26 +120,29 @@ export function MemoryGuardSetting({ snap }: { snap: Snapshot }): ReactElement |
         />
       </div>
       {on && state.supported && !state.environmentOverride && (
-        <div className="row memguard">
-          <label className="memguard__field">
+        <form className="row memguard" onSubmit={event => { event.preventDefault(); applyDraft() }}>
+          <label htmlFor={fieldId} className="memguard__field">
             <span>Limit per command</span>
             <input
+              id={fieldId}
               type="number"
+              inputMode="decimal"
               min={0.5}
               step={0.5}
               value={draft}
               disabled={locked}
+              aria-invalid={message?.kind === 'error' ? true : undefined}
+              {...(message ? { 'aria-describedby': msgId } : {})}
               onChange={event => { setDraft(event.target.value); setMessage(null) }}
-              onKeyDown={event => { if (event.key === 'Enter') applyDraft() }}
               aria-label="Memory limit in GB"
             />
             <span>GB</span>
           </label>
-          <button className="btn" disabled={locked || !draft.trim() || unchanged} onClick={applyDraft}>{busy ? 'Saving…' : 'Save'}</button>
-          {state.limitMb !== null && <button className="btn btn--ghost" disabled={locked} onClick={() => void save(null)}>Use default ({gb(state.defaultMb)} GB)</button>}
-        </div>
+          <button type="submit" className="btn" disabled={locked || !draft.trim() || unchanged}>{busy ? 'Saving…' : 'Save'}</button>
+          {state.limitMb !== null && <button type="button" className="btn btn--ghost" disabled={locked} onClick={() => void save(null)}>Use default ({gb(state.defaultMb)} GB)</button>}
+        </form>
       )}
-      {message && <p className={message.kind === 'error' ? 'studio-error' : 'row__s'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
+      {message && <p id={msgId} className={message.kind === 'error' ? 'studio-error' : 'row__s'} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
     </>
   )
 }

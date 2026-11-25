@@ -128,6 +128,7 @@ function Shell(): ReactElement {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main">Skip to main content</a>
       <header className="app-head" role="banner">
         <span className="app-brand">
           <span className="app-logo" aria-hidden="true" />

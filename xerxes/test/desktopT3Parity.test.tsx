@@ -437,10 +437,33 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
       'Open diff',
       '>xerxes<',
       '>docs<',
+      'aria-expanded="false"',
     ]) {
       expect(html).toContain(needle)
     }
+    // Collapsed by default: nested leaf filenames are hidden until expanded.
+    expect(html).not.toContain('>a.ts<')
+    expect(html).not.toContain('>readme.md<')
     expect(html.match(HEX_RE) ?? []).toEqual([])
+
+    // Absolute ACP paths relativize cleanly against cwd with zero trailing slashes.
+    const acpHtml = renderToStaticMarkup(
+      createElement(FilesChangedCard, {
+        cwd: '/home/erfan/easydel-src',
+        group: [
+          { kind: 'checkpoint', id: 'cp-2', turn: 2, files: ['/home/erfan/easydel-src/AGENTS.md', '/home/erfan/easydel-src/libs/easydel/models/qwen.py'], createdAt: '2026-11-22T00:00:00Z' },
+        ],
+        changes: [
+          { path: '/home/erfan/easydel-src/AGENTS.md', adds: 7, dels: 1, isNew: false, hunks: [], turn: 2 },
+          { path: '/home/erfan/easydel-src/libs/easydel/models/qwen.py', adds: 14, dels: 3, isNew: false, hunks: [], turn: 2 },
+        ],
+      }),
+    )
+    expect(acpHtml).toContain('>AGENTS.md<')
+    expect(acpHtml).toContain('>libs<')
+    expect(acpHtml).not.toContain('home/erfan/easydel-src')
+    expect(acpHtml).not.toContain('AGENTS.md/')
+    expect(acpHtml.match(HEX_RE) ?? []).toEqual([])
   })
 
   test('Sidebar keeps classic unstyled fallback only when data-style is null (VS Code high contrast)', () => {
@@ -545,9 +568,9 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     expect(html.match(HEX_RE) ?? []).toEqual([])
   })
 
-  test('built-in T3 Code themes ship in PALETTES and vibes.css defines T3 obsidian/paper tokens', async () => {
+  test('built-in two-mode themes ship in PALETTES and vibes.css defines obsidian/paper tokens', async () => {
     const names = PALETTES.map(palette => palette.name)
-    for (const id of ['t3-code', 't3-chat', 'grove', 'ocean', 't3-ember', 'iris']) {
+    for (const id of ['obsidian', 'rose', 'grove', 'ocean', 'copper', 'iris']) {
       expect(names).toContain(id)
     }
     const css = await Bun.file(new URL('../src/desktop/renderer/vibes.css', import.meta.url)).text()

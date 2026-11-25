@@ -2014,6 +2014,17 @@ export function applyInflightTurn(
   if (assistant) {
     builder.push('text_part', { text: assistant })
   }
+  const steers = Array.isArray(record.steers)
+    ? record.steers.filter((value): value is string => typeof value === 'string')
+    : []
+  for (const rawSteer of steers) {
+    const cleanSteer = withoutTurnContext(rawSteer).trim()
+    if (!cleanSteer) continue
+    const last = builder.snapshot(true).at(-1)
+    if (!(last && last.kind === 'user' && last.text === cleanSteer)) {
+      builder.pushUser(cleanSteer)
+    }
+  }
   return {
     ...(hydratedUser ? { user: hydratedUser } : {}),
     ...(startedAtMs !== null ? { startedAtMs } : {}),
@@ -3807,12 +3818,16 @@ export class Store {
       const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId, ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
       if (result.ok === true) {
         if (this.sessionKey === sessionKey) {
+          const appliedLive = this.frame.turnActive && (result.disposition === 'live_steer' || !this.pendingSteers.has(steerId))
           if (!pending.shown) {
             pending.blockId = this.builder.pushUser(cleaned, false, shownImages)
             pending.shown = true
           }
           if (cleaned) this.recentSteerTexts.add(cleaned)
-          if (this.frame.turnActive) {
+          if (appliedLive) {
+            this.pendingSteers.delete(steerId)
+            this.notify()
+          } else if (this.frame.turnActive) {
             this.queue = [
               ...this.queue,
               {
@@ -3906,6 +3921,47 @@ export class Store {
       }
       if (this.frame.stopArmed || this.frame.approval || this.frame.question) {
         this.patch({ stopArmed: false, approval: null, question: null })
+      }
+      // Antigravity (`agy acp 1.5+`) supports native live mid-turn steering via
+      // `turn.steer({ live: true })`. Never send `turn.cancel` before trying live
+      // steer — cancelling a mid-step `agy` tool call can corrupt the trajectory.
+      if (
+        this.frame.acpBinding?.connected &&
+        this.frame.acpBinding.provider === 'antigravity' &&
+        !this.frame.approval &&
+        !this.frame.question
+      ) {
+        const steerId = crypto.randomUUID()
+        const shownImages = images.map(image => `data:${image.mediaType};base64,${image.data}`)
+        const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number } = {
+          session: sessionKey,
+          text: cleaned,
+          images: shownImages,
+          shown: Boolean(options?.promotedFromQueue),
+          echoed: false,
+          ...(options?.promotedBlockId !== undefined ? { blockId: options.promotedBlockId } : {}),
+        }
+        this.pendingSteers.set(steerId, pending)
+        const liveRes = await this.bridge.call('turn.steer', {
+          session_key: sessionKey,
+          content: cleaned,
+          live: true,
+          client_steer_id: steerId,
+          ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}),
+        })
+        if (liveRes.ok === true && liveRes.disposition === 'live_steer') {
+          this.pendingSteers.delete(steerId)
+          if (this.sessionKey === sessionKey) {
+            if (!pending.shown) {
+              pending.blockId = this.builder.pushUser(cleaned, false, shownImages)
+              pending.shown = true
+            }
+            if (cleaned) this.recentSteerTexts.add(cleaned)
+            this.notify()
+          }
+          return true
+        }
+        this.pendingSteers.delete(steerId)
       }
       await this.bridge.call('turn.cancel', { session_key: sessionKey, drop_pending_steers: true })
       const settled = await this.waitForTurnState(sessionKey, false, 4500)
@@ -4005,10 +4061,19 @@ export class Store {
     // Leaving the card up would offer buttons that can only answer
     // "refused" while keeping the header stuck on "needs input".
     if (this.frame.approval || this.frame.question) this.patch({ approval: null, question: null })
-    // `turn.cancel` already routes through `cancelTrackedTurn` to cancel an
-    // active external ACP turn cleanly — do not also fire `acp.cancel` here.
+    // `turn.cancel` routes through `cancelTrackedTurn` to cancel active native
+    // and external ACP turns cleanly; only fall back to `acp.cancel` when an
+    // older remote daemon returns `{ ok: false }` (e.g. out-of-turn ACP wakeup).
+    const sessionId = this.frame.currentId
+    const externalConnected = Boolean(this.frame.acpBinding?.connected && sessionId)
     void this.bridge
       .call('turn.cancel', { session_key: this.sessionKey })
+      .then(result => {
+        if (result?.ok === false && externalConnected && this.frame.currentId === sessionId) {
+          return this.bridge.call('acp.cancel', { session_id: sessionId })
+        }
+        return undefined
+      })
       .catch(error => this.fail(error))
   }
 
@@ -7120,6 +7185,12 @@ export class Store {
       else if (payload.online === true && this.frame.currentId && this.frame.connection !== 'online') this.retryConnection()
       return
     }
+    if (type === 'session_attention') {
+      // Background thread status changed (finished, stopped, failed, needs input, or saved an artifact).
+      // Refresh sidebar state without polluting the active transcript or diagnostics ring.
+      void this.refreshSessions()
+      return
+    }
     this.pushLog(type, payload)
     // Learning is workspace-scoped even when another session made the change.
     if (type === 'learning_changed') {
@@ -7223,6 +7294,7 @@ export class Store {
         // A new attempt supersedes the previous failure card; retry clears
         // it explicitly, and any other submit means the human moved on.
         this.failure = null
+        this.turnError = null
         // Defensive: an interrupted previous turn (daemon restart, dropped
         // turn_end) may have left live runs in the builder. Commit them as
         // closed blocks BEFORE the active fold renders, or they come back
@@ -7342,9 +7414,10 @@ export class Store {
             this.turnError = body
           }
         }
-        if (type === 'tool_result' && typeof payload.error === 'string' && payload.error && this.frame.turnActive) {
-          this.turnError = this.turnError ?? payload.error
-        }
+        // Individual tool_result errors (e.g. "file does not exist", non-zero exit
+        // codes, or retries) are normal tool feedback that the agent recovers from
+        // mid-turn and already render on their tool row; they must never mark a
+        // completed turn as failed.
         if (type === 'tool_result') {
           // A foreground agent's terminal status lands with its result:
           // refresh now, then let the poll die once nothing agent-side runs.
@@ -7807,10 +7880,16 @@ export class Store {
         if (totals.adds !== this.turnStartTotals.adds || totals.dels !== this.turnStartTotals.dels) {
           this.builder.pushCheckpoint(this.turnCount, totals)
         }
-        if (this.turnError) {
-          this.failure = { error: this.turnError, turn: this.turnCount, lastUser: this.lastUser }
-          this.turnError = null
+        const turnEndError = typeof payload.error === 'string' && payload.error.trim() ? payload.error.trim() : ''
+        const stopReason = typeof payload.stop_reason === 'string' ? payload.stop_reason : ''
+        const turnEndFailed = payload.failed === true || stopReason === 'provider_failed' || stopReason === 'turn_failed'
+        const failureError = turnEndError
+          || this.turnError
+          || (turnEndFailed ? (stopReason === 'provider_failed' ? 'The provider request failed.' : 'Turn failed.') : '')
+        if (failureError) {
+          this.failure = { error: failureError, turn: this.turnCount, lastUser: this.lastUser }
         }
+        this.turnError = null
         if (this.tick) {
           clearInterval(this.tick)
           this.tick = null

@@ -421,7 +421,7 @@
 :root:not(#layout) .atelier .app__body>.desktop-rail>.studio-sheet-content{padding:0}
 /* Files: the two columns inside the card — a slim tree, then the file. */
 :root:not(#layout) .atelier .desktop-rail .file-browser{padding:0;height:100%}
-:root:not(#layout) .atelier .desktop-rail .file-browser--preview{display:grid;grid-template-columns:minmax(170px,32%) minmax(0,1fr);gap:0}
+:root:not(#layout) .atelier .desktop-rail .file-browser--preview{display:grid;grid-template-columns:clamp(180px,18%,248px) minmax(0,1fr);gap:0}
 :root:not(#layout) .atelier .desktop-rail .file-browser__navigation{padding:4px 6px 8px;min-height:0}
 :root:not(#layout) .atelier .desktop-rail .file-browser--preview .file-browser__navigation{max-height:none;height:100%;border-right:1px solid var(--x-hairline);padding-right:6px}
 :root:not(#layout) .atelier .desktop-rail .file-browser__location{padding:4px 6px 6px;font:400 var(--ui-font)/1.3 var(--sans)}
@@ -776,14 +776,17 @@
 :root:not(#layout) .atelier .plancard__opt:hover{background:var(--x-chip)}
 :root:not(#layout) .atelier .plancard__opt[aria-checked='true']{border-color:var(--x-accent);background:var(--x-accent-soft)}
 :root:not(#layout) .atelier .plancard__opt>kbd{flex:none;display:grid;place-items:center;width:18px;height:18px;margin-top:1px;border:1px solid var(--x-hairline);border-radius:5px;font:500 var(--ui-small)/1 var(--sans);color:var(--x-meta);background:none}
-:root:not(#layout) .atelier .plancard__opt[aria-checked='true']>kbd{border-color:var(--x-accent);color:var(--x-accent)}
+:root:not(#layout) .atelier .plancard__opt[aria-checked='true']>kbd{border-color:var(--x-accent);color:var(--x-accent-text,var(--x-accent))}
 :root:not(#layout) .atelier .plancard__text{display:grid;gap:2px;min-width:0}
 :root:not(#layout) .atelier .plancard__label{font:500 var(--ui-large)/1.35 var(--sans);color:var(--x-title)}
 :root:not(#layout) .atelier .plancard__detail{font:400 var(--ui-font)/1.35 var(--sans);color:var(--x-meta)}
 :root:not(#layout) .atelier .plancard__note{box-sizing:border-box;width:100%;min-height:56px;max-height:160px;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 var(--ui-large)/1.4 var(--sans);resize:none;field-sizing:content}
 :root:not(#layout) .atelier .plancard__note:focus{outline:none;border-color:var(--x-focus)}
+:root:not(#layout) .atelier .plancard__note:focus-visible{outline:2px solid var(--x-accent-text,var(--x-focus));outline-offset:1px}
 :root:not(#layout) .atelier .plancard__actions{display:flex;justify-content:flex-end}
-:root:not(#layout) .atelier .plancard__submit{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-on-accent,#fff);font:500 var(--ui-large)/1 var(--sans);cursor:pointer}
+:root:not(#layout) .atelier .plancard__submit{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:0;border-radius:8px;background:var(--x-accent);color:var(--x-on-accent,#fff);font:500 var(--ui-large)/1 var(--sans);cursor:pointer;transition:background-color 120ms cubic-bezier(.2,.8,.2,1),transform 90ms cubic-bezier(.2,.8,.2,1)}
+:root:not(#layout) .atelier .plancard__submit:hover:not(:disabled){background:var(--x-accent-hover,var(--x-accent));color:var(--x-on-accent,#fff)}
+:root:not(#layout) .atelier .plancard__submit:active:not(:disabled){transform:translateY(1px) scale(.985)}
 :root:not(#layout) .atelier .plancard__submit:disabled{opacity:.45;cursor:default}
 :root:not(#layout) .atelier .plancard__submit kbd{font:500 var(--ui-small)/1 var(--sans);opacity:.75;background:none;border:0;padding:0}
 :root[data-style='neo']:not(#layout) .atelier :is(.plancard,.plancard__plan,.plancard__opt,.plancard__note,.plancard__submit,.plancard__opt>kbd){border-radius:0}
@@ -799,7 +802,7 @@
 :root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea{flex:1 1 auto;min-width:0;box-sizing:border-box;min-height:32px;max-height:140px;padding:6px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-sunken,transparent);color:var(--x-title);font:400 var(--ui-large)/1.4 var(--sans);resize:none;field-sizing:content}
 :root:not(#layout) .atelier .approval--plan .plan-approval__refine>textarea:focus{outline:none;border-color:var(--x-meta)}
 /* Changed files group: the only colour in the tree (blue modified, green added). */
-:root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline)}
+:root:not(#layout) .atelier .file-browser__changed{margin:0 0 6px;padding-bottom:6px;border-bottom:1px solid var(--x-hairline);max-height:220px;overflow-y:auto}
 :root:not(#layout) .atelier .file-browser__changed-head{display:flex;align-items:center;gap:5px;width:100%;height:22px;padding:0 6px;border:0;font:400 var(--ui-small)/1 var(--sans);cursor:pointer}
 :root:not(#layout) .atelier .file-browser__changed-head[aria-expanded='false'] svg{transform:rotate(-90deg)}
 :root:not(#layout) .atelier .file-browser__changed-count{opacity:.8}
@@ -998,7 +1001,7 @@
 :root:not(#layout) .atelier .file-tree__icon[data-type='ts']{color:#4f9cf0}
 :root:not(#layout) .atelier .file-tree__icon[data-type='js']{color:#e8c547}
 :root:not(#layout) .atelier .file-tree__icon[data-type='json']{color:#e8c547}
-:root:not(#layout) .atelier .file-tree__icon[data-type='css']{color:#a777e3}
+:root:not(#layout) .atelier .file-tree__icon[data-type='css']{color:#60a5fa}
 :root:not(#layout) .atelier .file-tree__icon[data-type='doc']{color:#6ea8fe}
 :root:not(#layout) .atelier .file-tree__icon[data-type='config']{color:#f0a04b}
 :root:not(#layout) .atelier .file-tree__icon[data-type='docker']{color:#4fa8e8}
@@ -1094,11 +1097,11 @@
 :root:not(#layout) .atelier .modal__main .provider-accounts__login>select{flex:0 0 170px}
 :root:not(#layout) .atelier .modal__main .provider-accounts__login>input{flex:1 1 160px;min-width:0}
 /* One Providers list: group labels span the grid; an account's usage sits under its row. */
-:root:not(#layout) .atelier .provgrid>.provgroup{grid-column:1/-1;margin:10px 2px 0;color:var(--x-meta);font:500 var(--ui-small)/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
+:root:not(#layout) .atelier .provgrid>.provgroup{grid-column:1/-1;margin:10px 2px 0;color:var(--x-meta);font:600 max(12px,var(--ui-small))/1.4 var(--sans);letter-spacing:0;text-transform:none}
 :root:not(#layout) .atelier .provgrid>.provgroup:first-child{margin-top:2px}
 /* Usage tab: plans grouped by family (Claude Code, Codex, Gemini, Other), the same label grammar as the agent groups. */
 :root:not(#layout) .atelier .usage-group+.usage-group{margin-top:12px}
-:root:not(#layout) .atelier .usage-group__head{display:flex;align-items:center;gap:6px;margin:4px 2px 6px;color:var(--x-meta);font:500 var(--ui-small)/1.4 var(--sans);letter-spacing:.04em;text-transform:uppercase}
+:root:not(#layout) .atelier .usage-group__head{display:flex;align-items:center;gap:6px;margin:4px 2px 6px;color:var(--x-meta);font:600 max(12px,var(--ui-small))/1.4 var(--sans);letter-spacing:0;text-transform:none}
 :root:not(#layout) .atelier .usage-group__count{font-variant-numeric:tabular-nums;letter-spacing:0}
 :root:not(#layout) .atelier .provcard>.provider-account__usage{padding:0 14px 12px 62px}
 /* The active row's buttons line up with every other row: the old 80px gutter was for floating icon tools. */
@@ -1190,7 +1193,7 @@
 :root:not(#layout):not(#tool-ux) .atelier .tool-timeline__headline--live{
   display:block;
   max-width:100%;
-  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 44%,transparent) 0%,color-mix(in srgb,var(--x-title) 44%,transparent) 38%,color-mix(in srgb,var(--x-title) 82%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 82%,transparent) 54%,color-mix(in srgb,var(--x-title) 44%,transparent) 62%,color-mix(in srgb,var(--x-title) 44%,transparent) 100%);
+  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 65%,transparent) 0%,color-mix(in srgb,var(--x-title) 65%,transparent) 38%,color-mix(in srgb,var(--x-title) 88%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 88%,transparent) 54%,color-mix(in srgb,var(--x-title) 65%,transparent) 62%,color-mix(in srgb,var(--x-title) 65%,transparent) 100%);
   background-size:260% 100%;
   -webkit-background-clip:text;
   background-clip:text;
@@ -1203,7 +1206,7 @@
 :root:not(#layout):not(#tool-ux) .atelier .composer-status:not(.streamstatus--armed) .streamstatus__phrase,
 :root:not(#layout):not(#tool-ux) .atelier .xsteps.is-live .streamstatus__phrase,
 :root:not(#layout):not(#tool-ux) .atelier .railstatus[data-tone='working'] .railstatus__head>strong{
-  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 44%,transparent) 0%,color-mix(in srgb,var(--x-title) 44%,transparent) 38%,color-mix(in srgb,var(--x-title) 82%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 82%,transparent) 54%,color-mix(in srgb,var(--x-title) 44%,transparent) 62%,color-mix(in srgb,var(--x-title) 44%,transparent) 100%);
+  background:linear-gradient(105deg,color-mix(in srgb,var(--x-title) 65%,transparent) 0%,color-mix(in srgb,var(--x-title) 65%,transparent) 38%,color-mix(in srgb,var(--x-title) 88%,transparent) 46%,var(--x-title) 50%,color-mix(in srgb,var(--x-title) 88%,transparent) 54%,color-mix(in srgb,var(--x-title) 65%,transparent) 62%,color-mix(in srgb,var(--x-title) 65%,transparent) 100%);
   background-size:260% 100%;
   -webkit-background-clip:text;
   background-clip:text;

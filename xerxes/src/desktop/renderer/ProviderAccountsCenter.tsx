@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import { desktopError } from './desktopRpc.js'
 import { CopyButton } from './CopyButton.js'
@@ -111,6 +111,8 @@ export function AccountRecordedUsage({report}:{report:RecordedUsage}) {
 /** The only key in the renderer is this user's unsaved input; clear on every attempt. */
 export function GeminiAccountForm({busy,save}:{busy:boolean;save:(label:string,apiKey:string,model:string)=>Promise<void>}) {
   const [label,setLabel]=useState(''),[apiKey,setApiKey]=useState(''),[model,setModel]=useState(''),[pending,setPending]=useState(false),[error,setError]=useState('')
+  const baseId = useId()
+  const errId = `${baseId}-err`
   const submit=async()=>{
     if(busy||pending)return
     const key=apiKey
@@ -121,11 +123,20 @@ export function GeminiAccountForm({busy,save}:{busy:boolean;save:(label:string,a
   }
   return <form className="provider-accounts__gemini" aria-label="Add Gemini API-key account" onSubmit={event=>{event.preventDefault();void submit()}}>
     <p>Stored only on this computer in owner-only provider profile storage. No validation or billable model call is made when saving. To transfer a key, review and confirm Sync to SSH separately.</p>
-    <input className="palette__in" aria-label="Gemini account label" autoComplete="off" value={label} onChange={event=>setLabel(event.target.value)} placeholder="Account label (work, personal…)" maxLength={80} disabled={busy||pending} required/>
-    <input className="palette__in" type="password" aria-label="Gemini API key" autoComplete="off" spellCheck={false} autoCapitalize="none" value={apiKey} onChange={event=>setApiKey(event.target.value)} placeholder="Gemini API key" disabled={busy||pending} required/>
-    <input className="palette__in" aria-label="Gemini model id" autoComplete="off" spellCheck={false} value={model} onChange={event=>setModel(event.target.value)} placeholder="Model id, e.g. gemini-2.5-flash" maxLength={512} disabled={busy||pending} required/>
-    <button className="btn" type="submit" disabled={busy||pending||!label.trim()||!apiKey.trim()||!model.trim()}>{pending?'Saving Gemini account…':'Save Gemini account'}</button>
-    {error&&<p role="alert" className="studio-error">{error}</p>}
+    <div className="field">
+      <label htmlFor={`${baseId}-label`}>Account label</label>
+      <input id={`${baseId}-label`} className="palette__in" aria-label="Gemini account label" autoComplete="off" value={label} onChange={event=>setLabel(event.target.value)} placeholder="Account label (work, personal…)" maxLength={80} disabled={busy||pending} aria-invalid={error ? true : undefined} {...(error ? { 'aria-describedby': errId } : {})} required/>
+    </div>
+    <div className="field">
+      <label htmlFor={`${baseId}-key`}>Gemini API key</label>
+      <input id={`${baseId}-key`} className="palette__in" type="password" aria-label="Gemini API key" autoComplete="off" spellCheck={false} autoCapitalize="none" value={apiKey} onChange={event=>setApiKey(event.target.value)} placeholder="Gemini API key" disabled={busy||pending} aria-invalid={error ? true : undefined} {...(error ? { 'aria-describedby': errId } : {})} required/>
+    </div>
+    <div className="field">
+      <label htmlFor={`${baseId}-model`}>Model ID</label>
+      <input id={`${baseId}-model`} className="palette__in" aria-label="Gemini model id" autoComplete="off" spellCheck={false} value={model} onChange={event=>setModel(event.target.value)} placeholder="Model id, e.g. gemini-2.5-flash" maxLength={512} disabled={busy||pending} aria-invalid={error ? true : undefined} {...(error ? { 'aria-describedby': errId } : {})} required/>
+    </div>
+    <button className="btn btn--solid" type="submit" disabled={busy||pending||!label.trim()||!apiKey.trim()||!model.trim()}>{pending?'Saving Gemini account…':'Save Gemini account'}</button>
+    {error&&<p id={errId} role="alert" className="studio-error">{error}</p>}
   </form>
 }
 
@@ -151,7 +162,7 @@ export function AgyCredentialCard({
       <span className="provcard__text">
         <span className="provcard__title">
           <span className="provcard__name">Antigravity (agy)</span>
-          <span className="provcard__badge provcard__badge--quiet">{status.agyInstalled ? 'CLI ready' : 'auto-installs'}</span>
+          <span className="provcard__badge provcard__badge--quiet">{status.agyInstalled ? 'CLI ready' : 'Auto-installs'}</span>
           {status.syncedDestination && status.syncedMode && <span className="provcard__badge provcard__badge--quiet">Synced · {agyModeLabel(status.syncedMode)}</span>}
         </span>
         <span className="provcard__model">
@@ -162,29 +173,23 @@ export function AgyCredentialCard({
         <span className="provcard__meta">
           {shown
             ? shown.detail
-            : 'Sign in with `agy acp --login`, run `gcloud auth application-default login`, or save a Gemini API-key account above.'}
+            : <>Sign in with <code>agy acp --login</code>, run <code>gcloud auth application-default login</code>, or save a Gemini API-key account above.</>}
         </span>
       </span>
       {status.canSync && transferSources.length > 0 && <span className="provcard__tools">
         {transferSources.length > 1 && (
-          <select
-            className="palette__in"
-            aria-label="Antigravity credential source"
+          <SelectField
+            ariaLabel="Antigravity credential source"
+            listLabel="Antigravity credential source"
             value={chosen?.mode ?? ''}
             disabled={busy}
-            onChange={event => {
-              const value = event.target.value
+            options={transferSources.map(source => ({ value: source.mode, label: source.label }))}
+            onChange={value => {
               if (value === 'adc' || value === 'gemini_api_key') onSelectMode(value)
             }}
-          >
-            {transferSources.map(source => (
-              <option key={source.mode} value={source.mode}>
-                {source.label}
-              </option>
-            ))}
-          </select>
+          />
         )}
-        <button className="btn" disabled={busy || !chosen} onClick={onSync}>Sync to SSH</button>
+        <button type="button" className="btn" disabled={busy || !chosen} onClick={onSync}>Sync to SSH</button>
       </span>}
     </div>
   </div>
@@ -370,7 +375,7 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
     <p className="modal__sub">{merged
       ? 'Sign in to Claude, Codex, or Gemini Subscription (Antigravity), or save a Gemini API key. Other API keys and endpoints use Add provider below.'
       : `One account center for ${machine} and every SSH workspace. Each Claude/Codex login has isolated credentials. Gemini Subscription signs in via Antigravity (agy) on each computer that runs it; native Gemini is API-key only (no Gemini OAuth quota readback).`}</p>
-    <div className="provider-accounts__login">
+    <form className="provider-accounts__login" onSubmit={event=>{event.preventDefault();if((kind==='claude'||kind==='codex')&&!busy&&accounts&&label.trim())void login()}}>
       <SelectField
         className="provider-accounts__select"
         ariaLabel="Account provider"
@@ -382,16 +387,16 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
           if (value === 'claude' || value === 'codex' || value === 'gemini_subscription' || value === 'gemini') setKind(value)
         }}
       />
-      {(kind==='claude'||kind==='codex')&&<><input className="palette__in" aria-label="OAuth account label" value={label} onChange={event=>setLabel(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!busy&&accounts&&label.trim()){event.preventDefault();void login()}}} placeholder="Account label (work, personal…)" disabled={busy}/>
-      <button type="button" className="btn" disabled={busy||!accounts||!label.trim()} onClick={login}>Sign in</button></>}
+      {(kind==='claude'||kind==='codex')&&<><input className="palette__in" aria-label="OAuth account label" value={label} onChange={event=>setLabel(event.target.value)} placeholder="Account label (work, personal…)" disabled={busy}/>
+      <button type="submit" className="btn btn--solid" disabled={busy||!accounts||!label.trim()}>Sign in</button></>}
       {kind==='gemini_subscription'&&<>
         <button type="button" className="btn" disabled={busy||!accounts} onClick={recheckAgySignIn}>Check again</button>
       </>}
-    </div>
+    </form>
     {kind==='gemini_subscription'&&<div className="provider-accounts__gemini" aria-label="Gemini Subscription (Antigravity)">
       <p>{agySubscriptionSignedIn
         ? 'Signed in to Gemini Subscription (Antigravity) on this computer. The sign-in stays here: on an SSH host, run the command below there. For headless or third-party harness usage, Google recommends a Gemini API key or Google Cloud ADC.'
-        : 'Antigravity signs in on its own. Run this in a terminal, finish the Google sign-in in your browser, then click Check again. Xerxes never sees your Google sign-in. For headless or third-party harness usage, Google recommends a Gemini API key or Google Cloud ADC.'}</p>
+        : 'Antigravity signs in on its own. Run this in a terminal, finish the Google sign-in in your browser, then select Check again. Xerxes never sees your Google sign-in. For headless or third-party harness usage, Google recommends a Gemini API key or Google Cloud ADC.'}</p>
       <div className="provider-accounts__signin-link"><input aria-label="Antigravity sign-in command" readOnly value="agy acp --login" spellCheck={false} onFocus={event=>event.currentTarget.select()}/><CopyButton text="agy acp --login" label="Copy command"/></div>
     </div>}
     {kind==='gemini'&&<GeminiAccountForm busy={busy||!accounts} save={saveGemini}/>}
@@ -408,9 +413,9 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
             <span className="provcard__meta">{account.provider} · {account.available?'available on this workspace':'not available on this workspace yet'}</span>
           </span>
           <span className="provcard__tools">
-            <button className="btn" disabled={busy||turnActive||!account.available} onClick={()=>void activate(account.id)}>Use</button>
-            {list?.can_sync&&<button className="btn" disabled={busy} onClick={()=>void reviewSync(account)}>Sync to SSH</button>}
-            {removable(account)&&<button className="btn" disabled={busy} onClick={()=>slots.get(account.profileName)?.remove?.()}>Remove</button>}
+            <button type="button" className="btn" disabled={busy||turnActive||!account.available} onClick={()=>void activate(account.id)}>Use</button>
+            {list?.can_sync&&<button type="button" className="btn" disabled={busy} onClick={()=>void reviewSync(account)}>Sync to SSH</button>}
+            {removable(account)&&<button type="button" className="btn" disabled={busy} onClick={()=>slots.get(account.profileName)?.remove?.()}>Remove</button>}
           </span>
         </div>
         {usageOf(account)}
@@ -428,10 +433,10 @@ export function ProviderAccountsCenter({accounts,onAccountLogin,sessionKey,turnA
       }}
     />}
     {action&&<ActionDialog
-      title={action.phase==='done'?(action.kind==='sync'?'Account synced':'Account removed'):(action.kind==='sync'?`Sync ${action.account.label} to SSH`:`Remove ${action.account.label}?`)}
+      title={action.phase==='done'?(action.kind==='sync'?'Account synced':'Account removed'):(action.kind==='sync'?`Sync ${action.account.label} to SSH`:`Remove ${action.account.label}`)}
       confirmLabel={action.phase==='done'?'Done':action.kind==='remove'?'Remove account':!action.review&&action.phase==='ready'?'Review sync again':'Confirm sync'}
       busyLabel={action.kind==='sync'?'Syncing account…':'Removing account…'}
-      busy={action.phase==='working'} disabled={action.phase==='reviewing'} done={action.phase==='done'} error={action.error}
+      busy={action.phase==='working'} disabled={action.phase==='reviewing'} done={action.phase==='done'} destructive={action.kind==='remove'&&action.phase!=='done'} error={action.error}
       onConfirm={()=>void confirmAction()} onCancel={closeAction}>
       {action.phase==='reviewing'?<p role="status">Preparing transfer review for <strong>{action.account.label}</strong>…</p>
         :action.phase==='done'?<p role="status">{action.kind==='sync'?<><strong>{action.account.label}</strong> synced to <strong>{action.review?.destination||list?.destination||'this SSH host'}</strong>.</>:<><strong>{action.account.label}</strong> was removed. Other accounts were not changed.</>}</p>

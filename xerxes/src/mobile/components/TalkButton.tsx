@@ -93,7 +93,7 @@ export function TalkButton({ voice, onTranscript }: { voice: VoiceControl | unde
         {label}
       </button>
       {error === undefined ? null : <span role="alert" className="field-error">{error}</span>}
-      {error === undefined && notice !== undefined ? <span role="status" className="field-error">{notice}</span> : null}
+      {error === undefined && notice !== undefined ? <span role="status" className="field-status">{notice}</span> : null}
     </span>
   )
 }

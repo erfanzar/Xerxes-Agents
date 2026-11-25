@@ -147,6 +147,6 @@ describe('BrowserTab visibility, stacking, and macOS repaint recovery', () => {
 
     expect(atelierCss).toContain('.chat__body{position:relative;display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}')
     expect(atelierCss).toContain('.connection-status{flex:none;')
-    expect(vibesCss).toContain('.t3-details-card{position:absolute;top:4px;right:16px;')
+    expect(vibesCss).toContain('.t3-details-card{position:absolute;top:10px;right:16px;')
   })
 })

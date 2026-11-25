@@ -236,19 +236,38 @@ export async function buildBunDocsSite(
   const staticOutputs = await collectStaticOutputs(configuration);
   const pageOutputs = new Map<string, RenderedOutput>();
   const generatedStylePath = "assets/xerxes-bun-docs.css";
+  const generatedScriptPath = "assets/docs.js";
+  const generatedFaviconPath = "assets/favicon.svg";
+  const searchIndexPath = "assets/search-index.json";
   pageOutputs.set(generatedStylePath, { text: generatedStyleSheet() });
+  pageOutputs.set(generatedScriptPath, { text: generatedClientScript() });
+  pageOutputs.set(generatedFaviconPath, { text: generatedFaviconSvg() });
   for (const [path, output] of staticOutputs) pageOutputs.set(path, output);
 
   const stylePaths = [
     generatedStylePath,
-    ...[...staticOutputs.keys()]
-      .filter((path) => path.endsWith(".css"))
+    ...[...staticOutputs.entries()]
+      .filter(
+        ([path, output]) =>
+          path.endsWith(".css") &&
+          ((output.bytes?.byteLength ?? 0) > 0 || (output.text?.length ?? 0) > 0),
+      )
+      .map(([path]) => path)
       .sort(compareText),
   ];
   const pageNavigation = createPageNavigation(
     documents,
     configuration.apiOutputDirectory,
   );
+  const searchEntries = documents.map((document) => ({
+    kind: document.kind,
+    path: document.outputPath,
+    summary: documentDescription(document.content),
+    title: document.title,
+  }));
+  pageOutputs.set(searchIndexPath, {
+    text: `${JSON.stringify(searchEntries, null, 2)}\n`,
+  });
   for (const document of documents) {
     const body = renderDocumentBody(document);
     pageOutputs.set(document.outputPath, {
@@ -259,6 +278,7 @@ export async function buildBunDocsSite(
         pageNavigation,
         stylePaths,
         configuration.title,
+        documentDescription(document.content),
       ),
     });
   }
@@ -272,6 +292,7 @@ export async function buildBunDocsSite(
       pageNavigation,
       stylePaths,
       configuration.title,
+      "Deterministic build diagnostics reported by the native Bun documentation builder.",
     ),
   });
 
@@ -284,6 +305,7 @@ export async function buildBunDocsSite(
       pageNavigation,
       stylePaths,
       configuration.title,
+      "Complete index of guides and generated TypeScript API pages.",
     ),
   });
 
@@ -612,20 +634,254 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function generatedFaviconSvg(): string {
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">',
+    '  <rect width="32" height="32" rx="7" fill="#0c0d0f"/>',
+    '  <path d="M9 9l14 14M23 9L9 23" stroke="#60a5fa" stroke-width="3.2" stroke-linecap="round"/>',
+    "</svg>",
+    "",
+  ].join("\n");
+}
+
+function generatedClientScript(): string {
+  return [
+    "(() => {",
+    "  const toggle = document.querySelector('[data-nav-toggle]');",
+    "  const sidebar = document.getElementById('docs-sidebar');",
+    "  if (toggle && sidebar) {",
+    "    const setOpen = (open) => {",
+    "      sidebar.classList.toggle('is-open', open);",
+    "      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');",
+    "    };",
+    "    toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('is-open')));",
+    "    document.addEventListener('keydown', (event) => {",
+    "      if (event.key === 'Escape' && sidebar.classList.contains('is-open')) {",
+    "        setOpen(false);",
+    "        toggle.focus();",
+    "      }",
+    "    });",
+    "  }",
+    "  const form = document.querySelector('[data-docs-search]');",
+    "  const input = form?.querySelector('input[type=\"search\"]');",
+    "  const results = document.getElementById('docs-search-results');",
+    "  if (form && input && results) {",
+    "    let indexPromise = null;",
+    "    const baseUrl = form.getAttribute('data-index-url') || 'assets/search-index.json';",
+    "    const rootPrefix = form.getAttribute('data-root-prefix') || '';",
+    "    const loadIndex = () => {",
+    "      if (!indexPromise) {",
+    "        indexPromise = fetch(baseUrl).then((r) => (r.ok ? r.json() : [])).catch(() => []);",
+    "      }",
+    "      return indexPromise;",
+    "    };",
+    "    const renderMatches = (items, query) => {",
+    "      results.replaceChildren();",
+    "      if (!query) { results.hidden = true; return; }",
+    "      const q = query.toLowerCase();",
+    "      const hits = items.filter((item) => item.title.toLowerCase().includes(q) || item.summary.toLowerCase().includes(q) || item.path.toLowerCase().includes(q)).slice(0, 8);",
+    "      if (hits.length === 0) {",
+    "        const empty = document.createElement('p');",
+    "        empty.className = 'search-empty';",
+    "        empty.textContent = 'No matching pages.';",
+    "        results.appendChild(empty);",
+    "      } else {",
+    "        const list = document.createElement('ul');",
+    "        for (const hit of hits) {",
+    "          const li = document.createElement('li');",
+    "          const link = document.createElement('a');",
+    "          link.href = rootPrefix + hit.path;",
+    "          const title = document.createElement('span');",
+    "          title.className = 'search-hit-title';",
+    "          title.textContent = hit.title;",
+    "          const path = document.createElement('span');",
+    "          path.className = 'search-hit-path';",
+    "          path.textContent = hit.path;",
+    "          link.append(title, path);",
+    "          li.appendChild(link);",
+    "          list.appendChild(li);",
+    "        }",
+    "        results.appendChild(list);",
+    "      }",
+    "      results.hidden = false;",
+    "    };",
+    "    form.addEventListener('submit', (event) => event.preventDefault());",
+    "    input.addEventListener('input', () => {",
+    "      const q = input.value.trim();",
+    "      if (!q) { results.hidden = true; return; }",
+    "      void loadIndex().then((items) => renderMatches(items, input.value.trim()));",
+    "    });",
+    "    document.addEventListener('click', (event) => {",
+    "      if (!form.contains(event.target)) results.hidden = true;",
+    "    });",
+    "    document.addEventListener('keydown', (event) => {",
+    "      if (event.key === 'Escape' && !results.hidden) { results.hidden = true; }",
+    "      if (event.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {",
+    "        event.preventDefault();",
+    "        input.focus();",
+    "      }",
+    "    });",
+    "  }",
+    "  for (const pre of document.querySelectorAll('article pre')) {",
+    "    const code = pre.querySelector('code');",
+    "    if (!code || !navigator.clipboard) continue;",
+    "    const btn = document.createElement('button');",
+    "    btn.type = 'button';",
+    "    btn.className = 'code-copy';",
+    "    btn.textContent = 'Copy';",
+    "    btn.setAttribute('aria-label', 'Copy code block');",
+    "    let timer;",
+    "    btn.addEventListener('click', () => {",
+    "      void navigator.clipboard.writeText(code.textContent || '').then(() => {",
+    "        btn.textContent = 'Copied';",
+    "        clearTimeout(timer);",
+    "        timer = setTimeout(() => { btn.textContent = 'Copy'; }, 1600);",
+    "      }).catch(() => undefined);",
+    "    });",
+    "    pre.appendChild(btn);",
+    "  }",
+    "})();",
+    "",
+  ].join("\n");
+}
+
 function generatedStyleSheet(): string {
   return [
-    ":root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }",
-    "body { line-height: 1.55; margin: 0; }",
-    "header, main, footer { margin: 0 auto; max-width: 72rem; padding: 1rem 1.5rem; }",
-    "header { border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent); }",
-    "header nav ul { display: flex; flex-wrap: wrap; gap: .8rem; list-style: none; padding: 0; }",
-    "header nav li { display: inline; }",
-    "pre { overflow-x: auto; padding: 1rem; }",
-    "code, pre { border-radius: .35rem; }",
-    "code { padding: .1rem .25rem; }",
-    ".notice { border-left: .3rem solid #d38a00; padding: .75rem 1rem; }",
-    ".unresolved { opacity: .75; }",
-    "footer { border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent); font-size: .9rem; }",
+    ":root {",
+    "  color-scheme: light dark;",
+    "  --bg: #f7f7f8;",
+    "  --surface: #ffffff;",
+    "  --surface-subtle: #eff1f4;",
+    "  --border: #dcdfe4;",
+    "  --border-strong: #c2c8d1;",
+    "  --text: #181a1f;",
+    "  --title: #0d0f12;",
+    "  --muted: #555c68;",
+    "  --accent: #1d4ed8;",
+    "  --accent-hover: #1e40af;",
+    "  --accent-soft: #1d4ed814;",
+    "  --visited: #1e40af;",
+    "  --warn: #b45309;",
+    "  --warn-bg: #fef3c7;",
+    "  --shadow-sm: 0 1px 2px #0000000f;",
+    "  --shadow-md: 0 8px 24px #00000018;",
+    "  --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;",
+    "  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;",
+    "  --header-h: 56px;",
+    "  --sidebar-w: 268px;",
+    "  --r-sm: 6px;",
+    "  --r-md: 10px;",
+    "}",
+    "@media (prefers-color-scheme: dark) {",
+    "  :root {",
+    "    --bg: #0c0d0f;",
+    "    --surface: #14161a;",
+    "    --surface-subtle: #1b1e24;",
+    "    --border: #ffffff17;",
+    "    --border-strong: #ffffff2b;",
+    "    --text: #dce0e6;",
+    "    --title: #f5f7fa;",
+    "    --muted: #98a1b0;",
+    "    --accent: #60a5fa;",
+    "    --accent-hover: #93c5fd;",
+    "    --accent-soft: #60a5fa1a;",
+    "    --visited: #93c5fd;",
+    "    --warn: #f59e0b;",
+    "    --warn-bg: #f59e0b1a;",
+    "    --shadow-sm: 0 1px 2px #00000059;",
+    "    --shadow-md: 0 12px 32px #00000080;",
+    "  }",
+    "}",
+    "* { box-sizing: border-box; }",
+    "html { background: var(--bg); color: var(--text); font: 400 16px/1.65 var(--sans); -webkit-font-smoothing: antialiased; }",
+    "body { margin: 0; min-height: 100dvh; display: flex; flex-direction: column; overflow-x: clip; }",
+    ":focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }",
+    "[tabindex='-1']:focus, [tabindex='-1']:focus-visible { outline: none; }",
+    ".skip-link { position: absolute; left: -9999px; top: 8px; z-index: 80; padding: 10px 14px; border-radius: var(--r-sm); background: var(--accent); color: #ffffff; font-weight: 600; text-decoration: none; }",
+    ".skip-link:focus { left: 12px; }",
+    ".site-header { position: sticky; top: 0; z-index: 40; min-height: var(--header-h); background: color-mix(in srgb, var(--bg) 90%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }",
+    ".site-header__inner { max-width: 1320px; margin: 0 auto; padding: 10px 24px; display: flex; align-items: center; gap: 16px; }",
+    ".site-brand { display: inline-flex; align-items: center; gap: 10px; color: var(--title); font-size: 16px; font-weight: 700; letter-spacing: -0.02em; text-decoration: none; white-space: nowrap; }",
+    ".site-brand__mark { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r-sm); background: var(--title); color: var(--bg); font: 700 13px/1 var(--mono); }",
+    ".site-header__links { display: flex; align-items: center; gap: 4px; margin-left: 8px; }",
+    ".site-header__links a { padding: 6px 10px; border-radius: var(--r-sm); color: var(--muted); font-size: 14px; font-weight: 500; text-decoration: none; transition: color 120ms, background-color 120ms; }",
+    ".site-header__links a:hover { color: var(--title); background: var(--surface-subtle); }",
+    ".site-header__links a[aria-current='page'] { color: var(--title); background: var(--accent-soft); font-weight: 600; }",
+    ".site-search { position: relative; margin-left: auto; width: min(320px, 100%); }",
+    ".site-search input { width: 100%; height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--title); font: 400 14px/1.2 var(--sans); }",
+    ".site-search input::placeholder { color: var(--muted); }",
+    ".site-search input:focus { border-color: var(--accent); }",
+    ".search-results { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 50; max-height: 360px; overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-md); box-shadow: var(--shadow-md); padding: 6px; }",
+    ".search-results ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }",
+    ".search-results a { display: grid; gap: 2px; padding: 8px 10px; border-radius: var(--r-sm); text-decoration: none; color: var(--title); }",
+    ".search-results a:hover { background: var(--surface-subtle); }",
+    ".search-hit-title { font-size: 14px; font-weight: 600; }",
+    ".search-hit-path { font: 400 12px/1.3 var(--mono); color: var(--muted); }",
+    ".search-empty { margin: 0; padding: 10px; font-size: 13px; color: var(--muted); }",
+    ".nav-toggle { display: none; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--title); font: 500 14px/1 var(--sans); cursor: pointer; }",
+    ".docs-shell { flex: 1 1 auto; width: 100%; max-width: 1320px; margin: 0 auto; padding: 28px 24px 64px; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); gap: 48px; align-items: start; }",
+    ".docs-sidebar { position: sticky; top: calc(var(--header-h) + 20px); max-height: calc(100dvh - var(--header-h) - 40px); overflow-y: auto; padding-right: 12px; }",
+    ".nav-group { margin: 0 0 20px; }",
+    ".nav-group__title { margin: 0 0 8px; padding: 0 10px; font-size: 12px; font-weight: 600; color: var(--muted); }",
+    ".nav-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }",
+    ".nav-group a { display: block; padding: 6px 10px; border-radius: var(--r-sm); color: var(--text); font-size: 14px; line-height: 1.35; text-decoration: none; overflow-wrap: anywhere; transition: background-color 120ms, color 120ms; }",
+    ".nav-group a:hover { background: var(--surface-subtle); color: var(--title); }",
+    ".nav-group a[aria-current='page'] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }",
+    ".nav-group-fold > summary { cursor: pointer; padding: 6px 10px; font-size: 13px; font-weight: 600; color: var(--muted); border-radius: var(--r-sm); list-style: none; }",
+    ".nav-group-fold > summary::-webkit-details-marker { display: none; }",
+    ".nav-group-fold > summary::before { content: '▸ '; }",
+    ".nav-group-fold[open] > summary::before { content: '▾ '; }",
+    ".nav-group-fold > summary:hover { background: var(--surface-subtle); color: var(--title); }",
+    ".docs-main { min-width: 0; }",
+    "article { max-width: 68ch; }",
+    "article h1, article h2, article h3, article h4 { color: var(--title); font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; scroll-margin-top: calc(var(--header-h) + 20px); }",
+    "article h1 { font-size: clamp(1.75rem, 3vw, 2.25rem); margin: 0 0 16px; }",
+    "article h2 { font-size: 1.35rem; margin: 36px 0 12px; padding-top: 20px; border-top: 1px solid var(--border); }",
+    "article h3 { font-size: 1.08rem; margin: 24px 0 8px; }",
+    "article p { margin: 0 0 16px; }",
+    "article ul, article ol { margin: 0 0 16px; padding-left: 22px; }",
+    "article li { margin: 6px 0; }",
+    "article a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }",
+    "article a:visited { color: var(--visited); }",
+    "article a:hover { color: var(--accent-hover); }",
+    "article hr { border: 0; border-top: 1px solid var(--border); margin: 28px 0; }",
+    "article blockquote { margin: 0 0 18px; padding: 10px 16px; border-left: 3px solid var(--accent); background: var(--surface-subtle); border-radius: 0 var(--r-sm) var(--r-sm) 0; color: var(--text); }",
+    "article blockquote p:last-child { margin-bottom: 0; }",
+    "code, pre { font-family: var(--mono); }",
+    "code { font-size: 0.875em; padding: 2px 6px; border-radius: 5px; background: var(--surface-subtle); border: 1px solid var(--border); color: var(--title); overflow-wrap: anywhere; }",
+    "pre { position: relative; margin: 0 0 20px; padding: 16px 68px 16px 18px; overflow-x: auto; border-radius: var(--r-md); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-sm); line-height: 1.5; }",
+    "pre code { padding: 0; border: 0; background: transparent; font-size: 13.5px; color: var(--text); overflow-wrap: normal; }",
+    ".code-copy { position: absolute; top: 8px; right: 8px; padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-subtle); color: var(--text); font: 500 12px/1.2 var(--sans); cursor: pointer; }",
+    ".code-copy:hover { border-color: var(--border-strong); color: var(--title); }",
+    ".code-copy:active { transform: translateY(1px); }",
+    ".table-wrap { width: 100%; overflow-x: auto; margin: 0 0 20px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }",
+    ".table-wrap table { width: 100%; min-width: 540px; border-collapse: collapse; font-size: 14px; text-align: left; }",
+    ".table-wrap th, .table-wrap td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }",
+    ".table-wrap th { font-weight: 600; color: var(--title); background: var(--surface-subtle); white-space: nowrap; }",
+    ".table-wrap tr:last-child td { border-bottom: 0; }",
+    ".table-wrap td code { white-space: nowrap; }",
+    ".notice { border-left: 3px solid var(--warn); background: var(--warn-bg); border-radius: 0 var(--r-sm) var(--r-sm) 0; padding: 12px 16px; margin: 0 0 18px; }",
+    ".unresolved { color: var(--muted); }",
+    ".site-footer { border-top: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 13px; }",
+    ".site-footer__inner { max-width: 1320px; margin: 0 auto; padding: 20px 24px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }",
+    ".site-footer a { color: var(--muted); text-decoration: none; }",
+    ".site-footer a:hover { color: var(--title); text-decoration: underline; }",
+    ".site-footer__links { display: flex; flex-wrap: wrap; gap: 16px; }",
+    "@media (max-width: 960px) {",
+    "  .docs-shell { grid-template-columns: 1fr; gap: 24px; padding: 20px 16px 48px; }",
+    "  .nav-toggle { display: inline-flex; }",
+    "  .site-header__links { display: none; }",
+    "  .site-header__inner { padding: 8px 16px; gap: 10px; }",
+    "  .site-search { flex: 1 1 auto; width: auto; }",
+    "  .site-search input { height: 44px; font-size: 16px; }",
+    "  .docs-sidebar { display: none; position: static; max-height: none; padding: 14px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }",
+    "  .docs-sidebar.is-open { display: block; }",
+    "  .nav-group a, .nav-group-fold > summary { min-height: 44px; display: flex; align-items: center; }",
+    "}",
+    "@media (prefers-reduced-motion: reduce) {",
+    "  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }",
+    "  .code-copy:active { transform: none !important; }",
+    "}",
     "",
   ].join("\n");
 }
@@ -661,8 +917,53 @@ function plainText(value: string): string {
   return value
     .replaceAll("`", "")
     .replaceAll("*", "")
-    .replaceAll("_", " ")
+    .replace(/\[([^\]]+)\]\([^)\s]+\)/gu, "$1")
     .trim();
+}
+
+function documentDescription(content: string): string {
+  const lines = content.split(/\r?\n/u);
+  let inFence = false;
+  for (const line of lines) {
+    if (line.trimStart().startsWith("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const trimmed = line.trim();
+    if (
+      trimmed === "" ||
+      trimmed.startsWith("#") ||
+      trimmed.startsWith("<!--") ||
+      trimmed.startsWith("|") ||
+      trimmed.startsWith("-") ||
+      trimmed.startsWith("*") ||
+      /^\d+\.\s/u.test(trimmed)
+    ) {
+      continue;
+    }
+    const text = plainText(trimmed);
+    if (text.length > 0) {
+      return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+    }
+  }
+  return "Xerxes documentation for the Bun-native TypeScript agent runtime.";
+}
+
+function headingSlug(raw: string, used: Set<string>): string {
+  const base =
+    plainText(raw)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gu, "-")
+      .replace(/^-+|-+$/gu, "") || "section";
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  used.add(candidate);
+  return candidate;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -807,6 +1108,7 @@ function renderHtmlPage(
   navigation: readonly SourceDocument[],
   stylePaths: readonly string[],
   siteTitle: string,
+  description = "Xerxes documentation for the Bun-native TypeScript agent runtime.",
 ): string {
   const styles = stylePaths
     .map(
@@ -814,43 +1116,133 @@ function renderHtmlPage(
         `<link rel="stylesheet" href="${escapeHtml(relativeHref(outputPath, path))}">`,
     )
     .join("\n    ");
-  const links = [
-    ...navigation.map((document) => ({
-      href: relativeHref(outputPath, document.outputPath),
-      title: document.title,
-    })),
-    { href: relativeHref(outputPath, "sitemap.html"), title: "Site map" },
-    {
-      href: relativeHref(outputPath, "documentation-report.html"),
-      title: "Build report",
-    },
-  ];
-  const navigationHtml = links
-    .map(
-      (link) =>
-        `<li><a href="${escapeHtml(link.href)}">${escapeHtml(link.title)}</a></li>`,
+  const isReportDoc = (document: SourceDocument): boolean =>
+    /(?:\b\d{4}-\d{2}-\d{2}\b|audit|report|benchmark|parity|plan|evidence|roadmap|repair|matrix|survives)/iu.test(
+      `${document.sourcePath} ${document.title}`,
+    );
+  const startOrder = new Map<string, number>([
+    ["index.html", 0],
+    ["configuration-guide.md", 1],
+    ["goal-mode.md", 2],
+    ["BUN_BUILD.md", 3],
+  ]);
+  const startDocs = navigation
+    .filter(
+      (doc) =>
+        doc.outputPath === "index.html" ||
+        doc.sourcePath === "BUN_BUILD.md" ||
+        doc.sourcePath === "configuration-guide.md" ||
+        doc.sourcePath === "goal-mode.md",
     )
+    .sort((a, b) => {
+      const rankA = startOrder.get(a.outputPath) ?? startOrder.get(a.sourcePath) ?? 99;
+      const rankB = startOrder.get(b.outputPath) ?? startOrder.get(b.sourcePath) ?? 99;
+      return rankA - rankB;
+    });
+  const startPaths = new Set(startDocs.map((doc) => doc.outputPath));
+  const apiDocs = navigation.filter((doc) => doc.kind === "typescript-api");
+  const apiPaths = new Set(apiDocs.map((doc) => doc.outputPath));
+  const reportDocs = navigation.filter(
+    (doc) => !startPaths.has(doc.outputPath) && !apiPaths.has(doc.outputPath) && isReportDoc(doc),
+  );
+  const reportPaths = new Set(reportDocs.map((doc) => doc.outputPath));
+  const guideDocs = navigation.filter(
+    (doc) =>
+      !startPaths.has(doc.outputPath) &&
+      !apiPaths.has(doc.outputPath) &&
+      !reportPaths.has(doc.outputPath),
+  );
+  const renderNavItem = (item: { readonly outputPath: string; readonly title: string }): string => {
+    const href = relativeHref(outputPath, item.outputPath);
+    const current = item.outputPath === outputPath ? ' aria-current="page"' : "";
+    return `<li><a href="${escapeHtml(href)}"${current}>${escapeHtml(item.title)}</a></li>`;
+  };
+  const primarySection =
+    startDocs.length > 0
+      ? `<div class="nav-group"><p class="nav-group__title">Start here</p><ul>${startDocs.map(renderNavItem).join("")}</ul></div>`
+      : "";
+  const guidesSection =
+    guideDocs.length > 0
+      ? `<div class="nav-group"><p class="nav-group__title">Guides</p><ul>${guideDocs.map(renderNavItem).join("")}</ul></div>`
+      : "";
+  const referenceItems = [
+    ...apiDocs.map((doc) => ({ outputPath: doc.outputPath, title: doc.title })),
+    { outputPath: "sitemap.html", title: "Site map" },
+    { outputPath: "documentation-report.html", title: "Build report" },
+  ];
+  const referenceSection = `<div class="nav-group"><p class="nav-group__title">Reference</p><ul>${referenceItems.map(renderNavItem).join("")}</ul></div>`;
+  const reportsSection =
+    reportDocs.length > 0
+      ? `<div class="nav-group"><details class="nav-group-fold"${reportPaths.has(outputPath) ? " open" : ""}><summary>Architecture notes &amp; reports (${reportDocs.length})</summary><ul>${reportDocs.map(renderNavItem).join("")}</ul></details></div>`
+      : "";
+  const apiIndexDoc = apiDocs[0];
+  const topLinks = [
+    { outputPath: "index.html", title: "Docs" },
+    ...(apiIndexDoc === undefined ? [] : [{ outputPath: apiIndexDoc.outputPath, title: "API" }]),
+    { outputPath: "sitemap.html", title: "Site map" },
+  ]
+    .map((item) => {
+      const href = relativeHref(outputPath, item.outputPath);
+      const current = item.outputPath === outputPath ? ' aria-current="page"' : "";
+      return `<a href="${escapeHtml(href)}"${current}>${escapeHtml(item.title)}</a>`;
+    })
     .join("");
+  const rootPrefix = (() => {
+    const dir = posix.dirname(outputPath);
+    if (dir === "." || dir === "") return "";
+    return `${dir.split("/").map(() => "..").join("/")}/`;
+  })();
+  const indexUrl = relativeHref(outputPath, "assets/search-index.json");
+  const scriptHref = relativeHref(outputPath, "assets/docs.js");
+  const faviconHref = relativeHref(outputPath, "assets/favicon.svg");
+  const pageTitle = `${title} · ${siteTitle}`;
   return [
     "<!doctype html>",
     '<html lang="en">',
     "<head>",
     '  <meta charset="utf-8">',
-    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
-    `  <title>${escapeHtml(`${title} · ${siteTitle}`)}</title>`,
+    '  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
+    `  <meta name="description" content="${escapeHtml(description)}">`,
+    '  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f8">',
+    '  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d0f">',
+    `  <meta property="og:title" content="${escapeHtml(pageTitle)}">`,
+    `  <meta property="og:description" content="${escapeHtml(description)}">`,
+    '  <meta property="og:type" content="website">',
+    '  <meta name="twitter:card" content="summary">',
+    `  <title>${escapeHtml(pageTitle)}</title>`,
+    `  <link rel="icon" type="image/svg+xml" href="${escapeHtml(faviconHref)}">`,
     `    ${styles}`,
     "</head>",
     "<body>",
-    "  <header>",
-    `    <p><a href="${escapeHtml(relativeHref(outputPath, "index.html"))}">${escapeHtml(siteTitle)}</a></p>`,
-    `    <nav aria-label="Site"><ul>${navigationHtml}</ul></nav>`,
+    '  <a class="skip-link" href="#main-content">Skip to main content</a>',
+    '  <header class="site-header">',
+    '    <div class="site-header__inner">',
+    `      <a class="site-brand" href="${escapeHtml(relativeHref(outputPath, "index.html"))}"><span class="site-brand__mark" aria-hidden="true">X</span><span>${escapeHtml(siteTitle)}</span></a>`,
+    `      <div class="site-header__links">${topLinks}</div>`,
+    `      <form class="site-search" role="search" data-docs-search data-index-url="${escapeHtml(indexUrl)}" data-root-prefix="${escapeHtml(rootPrefix)}">`,
+    '        <input type="search" aria-label="Search documentation" placeholder="Search docs (/)">',
+    '        <div id="docs-search-results" class="search-results" role="region" aria-label="Search results" hidden></div>',
+    "      </form>",
+    '      <button type="button" class="nav-toggle" data-nav-toggle aria-expanded="false" aria-controls="docs-sidebar">Menu</button>',
+    "    </div>",
     "  </header>",
-    "  <main>",
-    `    <article data-source="${escapeHtml(outputPath)}">`,
+    '  <div class="docs-shell">',
+    '    <aside id="docs-sidebar" class="docs-sidebar">',
+    `      <nav aria-label="Site">${primarySection}${guidesSection}${referenceSection}${reportsSection}</nav>`,
+    "    </aside>",
+    '    <main id="main-content" class="docs-main" tabindex="-1">',
+    `      <article data-source="${escapeHtml(outputPath)}">`,
     body,
-    "    </article>",
-    "  </main>",
-    "  <footer>Generated deterministically by the native Bun documentation builder.</footer>",
+    "      </article>",
+    "    </main>",
+    "  </div>",
+    '  <footer class="site-footer">',
+    '    <div class="site-footer__inner">',
+    "      <span>Xerxes-Agents documentation. Licensed under the Apache License, Version 2.0. Generated deterministically by the native Bun documentation builder.</span>",
+    `      <span class="site-footer__links"><a href="${escapeHtml(relativeHref(outputPath, "sitemap.html"))}">Site map</a><a href="${escapeHtml(relativeHref(outputPath, "documentation-report.html"))}">Build report</a></span>`,
+    "    </div>",
+    "  </footer>",
+    `  <script src="${escapeHtml(scriptHref)}" defer></script>`,
     "</body>",
     "</html>",
     "",
@@ -858,7 +1250,13 @@ function renderHtmlPage(
 }
 
 function renderInline(value: string): string {
-  const escaped = escapeHtml(value);
+  const codeTokens: string[] = [];
+  const withCodePlaceholders = value.replace(/`([^`]+)`/gu, (_match, code: string) => {
+    const token = `\u0000CODE${codeTokens.length}\u0000`;
+    codeTokens.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+  const escaped = escapeHtml(withCodePlaceholders);
   const linked = escaped.replace(
     /\[([^\]]+)\]\(([^)\s]+)\)/gu,
     (_match, label: string, href: string) => {
@@ -866,15 +1264,32 @@ function renderInline(value: string): string {
       return `<a href="${destination}">${label}</a>`;
     },
   );
-  return linked
-    .replace(/`([^`]+)`/gu, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>");
+  const formatted = linked
+    .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
+    .replace(/(?<![\w*/\\])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/gu, "<em>$1</em>");
+  return formatted.replace(/\u0000CODE(\d+)\u0000/gu, (_match, index: string) => {
+    return codeTokens[Number(index)] ?? "";
+  });
+}
+
+function isTableDivider(line: string | undefined): boolean {
+  return line !== undefined && /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/u.test(line);
+}
+
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/u, "")
+    .replace(/\|$/u, "")
+    .split("|")
+    .map((cell) => cell.trim());
 }
 
 function renderMarkdownBody(source: string): string {
   const lines = source.split(/\r?\n/u);
   const output: string[] = [];
   const paragraph: string[] = [];
+  const usedHeadingIds = new Set<string>();
   let list: { readonly items: string[]; readonly ordered: boolean } | undefined;
   let codeFence:
     { readonly language: string; readonly lines: string[] } | undefined;
@@ -893,7 +1308,8 @@ function renderMarkdownBody(source: string): string {
     list = undefined;
   };
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
     const fence = line.match(/^```([^`]*)$/u);
     if (fence !== null) {
       flushParagraph();
@@ -916,12 +1332,38 @@ function renderMarkdownBody(source: string): string {
       codeFence.lines.push(line);
       continue;
     }
+    if (/^\s*<!--[\s\S]*-->\s*$/u.test(line)) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    if (line.trimStart().startsWith("|") && isTableDivider(lines[index + 1])) {
+      flushParagraph();
+      flushList();
+      const headers = splitTableRow(line);
+      const rows: string[][] = [];
+      let rowIndex = index + 2;
+      while (rowIndex < lines.length && lines[rowIndex]!.trimStart().startsWith("|")) {
+        rows.push(splitTableRow(lines[rowIndex]!));
+        rowIndex += 1;
+      }
+      const headHtml = `<thead><tr>${headers.map((cell) => `<th>${renderInline(cell)}</th>`).join("")}</tr></thead>`;
+      const bodyHtml =
+        rows.length > 0
+          ? `<tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${renderInline(cell)}</td>`).join("")}</tr>`).join("")}</tbody>`
+          : "";
+      output.push(`<div class="table-wrap" tabindex="0"><table>${headHtml}${bodyHtml}</table></div>`);
+      index = rowIndex - 1;
+      continue;
+    }
     const heading = line.match(/^(#{1,6})\s+(.+)$/u);
     if (heading !== null) {
       flushParagraph();
       flushList();
       const level = heading[1]?.length ?? 1;
-      output.push(`<h${level}>${renderInline(heading[2] ?? "")}</h${level}>`);
+      const content = heading[2] ?? "";
+      const idAttr = level === 2 ? ` id="${escapeHtml(headingSlug(content, usedHeadingIds))}"` : "";
+      output.push(`<h${level}${idAttr}>${renderInline(content)}</h${level}>`);
       continue;
     }
     if (/^\s*([-*_])\1\1+\s*$/u.test(line)) {

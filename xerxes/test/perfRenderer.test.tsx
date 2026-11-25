@@ -24,7 +24,11 @@ import {
   syncPerfPaused,
 } from '../src/desktop/renderer/pageVisibility.js'
 import { LOG_CAP, Store, type Snapshot, type XerxesLike } from '../src/desktop/renderer/store.js'
-import { nextTranscriptFollowState } from '../src/desktop/renderer/transcriptScroll.js'
+import {
+  JUMP_LATEST_SHOW_THRESHOLD_PX,
+  nextTranscriptFollowState,
+  shouldShowJumpToLatest,
+} from '../src/desktop/renderer/transcriptScroll.js'
 import { SWARM_BOARD_TAIL_LIMIT, SwarmBoardView } from '../src/desktop/renderer/SwarmBoard.js'
 import { SwarmGraph } from '../src/desktop/renderer/SwarmGraph.js'
 import {
@@ -869,6 +873,31 @@ describe('Renderer Performance — Visibility Pausing, Pollers, Backdrop & Widge
       lastFollowTop: 1000,
     })
     expect(overscrollSettled.following).toBe(true)
+
+    // Jump-to-latest button must stay hidden when already at or near the bottom edge
+    // even if auto-follow paused on a small upward gesture, and show only once genuinely scrolled up.
+    expect(
+      shouldShowJumpToLatest({ following: false, scrollTop: 1000, clientHeight: 600, scrollHeight: 1600 }),
+    ).toBe(false)
+    expect(
+      shouldShowJumpToLatest({
+        following: false,
+        scrollTop: 1000 - JUMP_LATEST_SHOW_THRESHOLD_PX,
+        clientHeight: 600,
+        scrollHeight: 1600,
+      }),
+    ).toBe(false)
+    expect(
+      shouldShowJumpToLatest({
+        following: false,
+        scrollTop: 1000 - JUMP_LATEST_SHOW_THRESHOLD_PX - 1,
+        clientHeight: 600,
+        scrollHeight: 1600,
+      }),
+    ).toBe(true)
+    expect(
+      shouldShowJumpToLatest({ following: true, scrollTop: 100, clientHeight: 600, scrollHeight: 1600 }),
+    ).toBe(false)
 
     // .jump-latest-dock takes 0px of flow height so mounting/unmounting the jump button never alters scrollHeight.
     const appCss = readFileSync(join(RENDERER_DIR, 'app.css'), 'utf8')

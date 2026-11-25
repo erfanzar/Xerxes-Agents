@@ -43,6 +43,10 @@ const WORKSPACE_CHANNEL = 'desktop:choose-workspace'
 const USE_WORKSPACE_CHANNEL = 'desktop:use-workspace'
 const WORKSPACE_STATE_CHANNEL = 'desktop:workspace'
 const NOTIFICATIONS_CHANNEL = 'native:notifications:set'
+const NOTIFICATIONS_TEST_CHANNEL = 'native:notifications:test'
+const NOTIFICATIONS_OPEN_SETTINGS_CHANNEL = 'native:notifications:open-settings'
+const TOAST_EVENT_CHANNEL = 'desktop:toast'
+const ACTIVATE_TOAST_CHANNEL = 'desktop:activate-toast'
 const LOGIN_ITEM_CHANNEL = 'native:login-item:get'
 const LOGIN_ITEM_SET_CHANNEL = 'native:login-item:set'
 const OPEN_PRESET_PATH_CHANNEL = 'native:preset:open-path'
@@ -113,6 +117,67 @@ export function createBridge(transport: BridgeTransport) {
       })
     }
     return transport.on('desktop:navigate', listener)
+  },
+  /** In-app alert toast mirrored from native notifications (clicks jump to the task/artifact). */
+  onToast(
+    handler: (toast: {
+      readonly id: string
+      readonly title: string
+      readonly body: string
+      readonly kind?: 'artifact' | 'attention' | 'finished' | 'stopped' | 'failed'
+      readonly surfaceId?: number
+      readonly target?: { readonly sessionId?: string; readonly panel?: 'docs'; readonly artifactId?: string }
+    }) => void,
+  ): () => void {
+    const idStr = (value: unknown): string | undefined =>
+      typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) ? value : undefined
+    const listener = (rawToast: unknown) => {
+      if (!rawToast || typeof rawToast !== 'object') return
+      const raw = rawToast as Record<string, unknown>
+      const id = idStr(raw.id)
+      const title = typeof raw.title === 'string' ? raw.title.trim().slice(0, 120) : ''
+      const body = typeof raw.body === 'string' ? raw.body.trim().slice(0, 240) : ''
+      if (!id || !title) return
+      const kind =
+        raw.kind === 'artifact' ||
+        raw.kind === 'attention' ||
+        raw.kind === 'finished' ||
+        raw.kind === 'stopped' ||
+        raw.kind === 'failed'
+          ? raw.kind
+          : undefined
+      const surfaceId = typeof raw.surfaceId === 'number' && Number.isSafeInteger(raw.surfaceId) ? raw.surfaceId : undefined
+      let target: { readonly sessionId?: string; readonly panel?: 'docs'; readonly artifactId?: string } | undefined
+      if (raw.target && typeof raw.target === 'object') {
+        const rawTarget = raw.target as Record<string, unknown>
+        const sessionId = idStr(rawTarget.sessionId)
+        const artifactId = idStr(rawTarget.artifactId)
+        if (sessionId || artifactId || rawTarget.panel === 'docs') {
+          target = {
+            ...(sessionId ? { sessionId } : {}),
+            ...(rawTarget.panel === 'docs' ? { panel: 'docs' as const } : {}),
+            ...(artifactId ? { artifactId } : {}),
+          }
+        }
+      }
+      handler({
+        id,
+        title,
+        body,
+        ...(kind ? { kind } : {}),
+        ...(surfaceId !== undefined ? { surfaceId } : {}),
+        ...(target ? { target } : {}),
+      })
+    }
+    return transport.on(TOAST_EVENT_CHANNEL, listener)
+  },
+  /** Focus the owning workspace view and navigate to a notification toast's task/artifact. */
+  activateToast(surfaceId: unknown, target?: unknown): Promise<void> {
+    if (surfaceId !== undefined && (!Number.isSafeInteger(surfaceId) || (surfaceId as number) < 0)) {
+      return Promise.reject(new TypeError('invalid toast surface id'))
+    }
+    const cleanTarget = target && typeof target === 'object' ? cleanParams(target) : undefined
+    return transport.invoke(ACTIVATE_TOAST_CHANNEL, surfaceId, cleanTarget) as Promise<void>
   },
   getResumeSession(): Promise<string | null> {
     return transport.invoke('desktop:resume') as Promise<string | null>
@@ -377,6 +442,14 @@ export function createBridge(transport: BridgeTransport) {
     if (typeof on !== 'boolean')
       return Promise.reject(new TypeError('notifications expects a boolean'))
     return transport.invoke(NOTIFICATIONS_CHANNEL, on) as Promise<boolean>
+  },
+  /** Trigger a sample OS notification so the user can verify system alert permissions. */
+  testNotification(): Promise<boolean> {
+    return transport.invoke(NOTIFICATIONS_TEST_CHANNEL) as Promise<boolean>
+  },
+  /** Open the OS notification preferences pane so the user can enable banners for Xerxes Agents. */
+  openNotificationSettings(): Promise<boolean> {
+    return transport.invoke(NOTIFICATIONS_OPEN_SETTINGS_CHANNEL) as Promise<boolean>
   },
 
   /** Current launch-at-login registration. */

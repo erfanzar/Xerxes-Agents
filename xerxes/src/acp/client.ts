@@ -703,6 +703,32 @@ export class AcpStdioClient {
     }
   }
 
+  /**
+   * Subscribe a turn-scoped listener to all `session/update` events for one ACP
+   * session until explicitly unsubscribed. Unlike `prompt({ onEvent })`, this
+   * stays attached across concurrent mid-turn live-steer prompts even after the
+   * initial `session/prompt` RPC settles.
+   */
+  subscribeSession(
+    sessionId: string,
+    listener: (event: AcpClientEvent) => void,
+  ): () => void {
+    let set = this.promptListeners.get(sessionId)
+    if (!set) {
+      set = new Set()
+      this.promptListeners.set(sessionId, set)
+    }
+    set.add(listener)
+    return () => {
+      const current = this.promptListeners.get(sessionId)
+      if (!current) return
+      current.delete(listener)
+      if (current.size === 0) {
+        this.promptListeners.delete(sessionId)
+      }
+    }
+  }
+
   /** Recent stderr lines captured from the child process. */
   get recentStderr(): string {
     return this.stderrTail.join('\n').trim()

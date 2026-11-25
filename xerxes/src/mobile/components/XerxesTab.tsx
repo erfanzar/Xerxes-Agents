@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 
 import { AUTOPILOT_THREAD_NOTE, autoCardNote, autopilotChipText, pendingBadgeLabel } from '../../client/autopilot.js'
 import { newCommandId } from '../../client/bridge.js'
@@ -56,10 +56,13 @@ function blockClass(message: SupervisorMessage): string {
 /** One thread message; system notices get their own muted row and XERXES replies offer quick copy. */
 function ThreadMessage({ message, now }: { message: SupervisorMessage; now: number }): ReactElement {
   const [copied, setCopied] = useState(false)
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => { if (copyTimer.current !== undefined) clearTimeout(copyTimer.current) }, [])
   const copy = (): void => {
     void navigator.clipboard?.writeText(message.text).then(() => {
       setCopied(true)
-      setTimeout(() => setCopied(false), 1800)
+      if (copyTimer.current !== undefined) clearTimeout(copyTimer.current)
+      copyTimer.current = setTimeout(() => setCopied(false), 1800)
     }).catch(() => undefined)
   }
   return (
@@ -72,7 +75,7 @@ function ThreadMessage({ message, now }: { message: SupervisorMessage; now: numb
           <span className="block-meta"> · <time dateTime={message.at}>{relativeTime(message.at, now)}</time></span>
         </p>
         {message.role === 'xerxes' ? (
-          <button type="button" className="btn btn-quiet msg-copy" onClick={copy}>
+          <button type="button" className="btn btn-quiet msg-copy" aria-label={copied ? 'Copied reply' : 'Copy reply'} onClick={copy}>
             {copied ? 'Copied' : 'Copy'}
           </button>
         ) : null}
@@ -222,6 +225,7 @@ export function XerxesTab(): ReactElement {
   const sending = useRef(false)
   const pending = useRef<{ readonly text: string; readonly id: string } | undefined>(undefined)
   const [dismissedError, setDismissedError] = useState<string | undefined>(undefined)
+  const errorId = useId()
   const update = (value: string): void => {
     latest.current = value
     setText(value)
@@ -332,7 +336,7 @@ export function XerxesTab(): ReactElement {
           ) : null}
           {showThread ? <AutopilotThreadBody /> : null}
           {showThread ? null : <>
-            {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
+            {supervisor.phase === 'loading' || supervisor.phase === 'idle' ? <p role="status" aria-busy="true">{live ? 'Opening…' : 'Waiting for connection…'}</p> : null}
             {supervisor.messages.length === 0 && supervisor.phase === 'ready' ? (
               <div className="xerxes-hero">
                 <span className="xerxes-hero-logo" aria-hidden="true" />
@@ -370,12 +374,27 @@ export function XerxesTab(): ReactElement {
                 : null}
               <JumpToLatest visible={follow.away} onJump={follow.toBottom} />
             </div>
-            {shownError !== undefined && supervisor.phase === 'ready' ? <p role="alert" className="field-error">{shownError}</p> : null}
+            {shownError !== undefined && supervisor.phase === 'ready' ? <p id={errorId} role="alert" className="field-error">{shownError}</p> : null}
             <VoiceStatus voice={voice} />
             <form className="composer" aria-label="Message to XERXES" onSubmit={event => { event.preventDefault(); void send() }}>
               <label className="field">
                 <span className="visually-hidden">Message to XERXES</span>
-                <textarea rows={2} value={text} placeholder="Ask XERXES…" disabled={supervisor.phase !== 'ready'} onChange={event => { update(event.target.value); setFromVoice(false) }} />
+                <textarea
+                  rows={2}
+                  value={text}
+                  placeholder="Ask XERXES…"
+                  disabled={supervisor.phase !== 'ready'}
+                  aria-invalid={shownError !== undefined ? true : undefined}
+                  aria-describedby={shownError !== undefined ? errorId : undefined}
+                  onChange={event => { update(event.target.value); setFromVoice(false) }}
+                  onKeyDown={event => {
+                    if (event.nativeEvent.isComposing) return
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault()
+                      void send()
+                    }
+                  }}
+                />
               </label>
               <div className="composer-row">
                 <div className="composer-tools">

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code-style empty Right Panel launcher ("Open a surface") tailored to Xerxes.
+ * Empty Right Panel launcher ("Open a surface") for Xerxes.
  *
  * Shown when the user opens the Right Panel via the top-right PanelRight toggle
  * and no specific surface tab is currently open (or after closing the last tab).

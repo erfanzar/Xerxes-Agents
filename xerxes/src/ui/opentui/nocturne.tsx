@@ -123,7 +123,30 @@ export function LeaderRow({
   const noteText = (notes ?? []).map(note => `  ${note.text}`).join('')
   const left =
     (glyph ? `${glyph} ` : '') + (label ? `${label} ` : '') + (target ?? '') + noteText
-  const dots = right ? leaderRun(width, stringWidth(left), stringWidth(right)) : ''
+  const leftWidth = stringWidth(left)
+  const rightWidth = right ? stringWidth(right) : 0
+  const dots = right ? leaderRun(width, leftWidth, rightWidth) : ''
+  const overflows = Boolean(right && leftWidth + rightWidth + 1 > width)
+
+  if (overflows) {
+    return (
+      <Box flexDirection="row" flexShrink={0} gap={1} height={1} justifyContent="space-between" overflow="hidden" width="100%">
+        <Box flexShrink={1} minWidth={0} overflow="hidden">
+          <Text wrap="truncate-end">
+            {glyph ? <Span color={glyphColor ?? t.color.accent}>{`${glyph} `}</Span> : null}
+            {label ? <Span color={labelColor ?? t.color.toolName}>{`${label} `}</Span> : null}
+            {target ? <Span color={targetColor ?? t.ds.title}>{target}</Span> : null}
+            {(notes ?? []).map((note, index) => (
+              <Span color={note.color ?? t.ds.meta} key={index}>{`  ${note.text}`}</Span>
+            ))}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={rightColor ?? t.ds.numeric}>{right}</Text>
+        </Box>
+      </Box>
+    )
+  }
 
   return (
     <Box flexShrink={0} height={1} width="100%">

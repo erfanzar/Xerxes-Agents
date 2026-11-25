@@ -77,7 +77,7 @@ export function WatchCard({ row, now }: { readonly row: WatchRow; readonly now: 
       )}
       <p className="watchcard__review">
         {reviewText(row.reviewIntervalMinutes)}
-        {row.expiresAt === null ? '' : <> · until <time dateTime={row.expiresAt}>{new Date(row.expiresAt).toLocaleString()}</time></>}
+        {row.expiresAt !== null && Number.isFinite(Date.parse(row.expiresAt)) ? <> · until <time dateTime={row.expiresAt}>{new Date(row.expiresAt).toLocaleString()}</time></> : ''}
       </p>
         </div>
       </details>
@@ -149,7 +149,7 @@ export function WatchEditor({ row, live, saving, onSave, onDone }: {
       {lapsed ? <p role="status" className="xap__meta">{AUTOPILOT_EXPIRY_LAPSED_NOTE}</p> : null}
       <div className="xap__actions">
         <span className="xap__flex" />
-        <button type="button" className="btn" onClick={onDone}>Cancel</button>
+        <button type="button" className="btn" disabled={saving} onClick={onDone}>Cancel</button>
         <button type="submit" className="btn btn--solid" disabled={!live || saving}>{saving ? 'Saving…' : 'Save'}</button>
       </div>
     </form>
@@ -170,7 +170,7 @@ function WatchLine({ row, canEdit, live, saving, editing, error, onEdit, onSave 
     watchStateText(row),
     row.workspaceLabel,
     reviewText(row.reviewIntervalMinutes),
-    row.expiresAt === null ? undefined : `until ${new Date(row.expiresAt).toLocaleString()}`,
+    row.expiresAt !== null && Number.isFinite(Date.parse(row.expiresAt)) ? `until ${new Date(row.expiresAt).toLocaleString()}` : undefined,
     row.enabledBy === null ? undefined : `Turned on by ${row.enabledBy.name}.`,
   ].filter((part): part is string => part !== undefined).join(' · ')
   return (
@@ -183,7 +183,7 @@ function WatchLine({ row, canEdit, live, saving, editing, error, onEdit, onSave 
         </div>
         {canEdit ? (
           <>
-            <button type="button" className="btn xap__edit" aria-expanded={editing} onClick={() => onEdit(!editing)}>Edit</button>
+            <button type="button" className="btn xap__edit" aria-label={`Edit watch for ${row.title}`} aria-expanded={editing} onClick={() => onEdit(!editing)}>Edit</button>
             <button type="button" className="btn xap__edit" disabled={!live || saving} onClick={() => { void onSave({ workspaceId: row.workspaceId, taskId: row.taskId, enabled: false }) }}>Stop watching</button>
           </>
         ) : null}
@@ -228,7 +228,7 @@ function StartWatch({ candidates, workspaces, live, saving, onSave }: {
         <span className="xap__label">XERXES reviews</span>
         <ChipChoice label="Review interval for the new watch" value={review} options={reviewChoices(null)} disabled={!live || saving} onChange={setReview} />
         <span className="xap__flex" />
-        <button type="submit" className="btn btn--solid" disabled={!live || saving || task === undefined}>{saving ? 'Saving…' : 'Start watching'}</button>
+        <button type="submit" className="btn btn--solid" title={task === undefined ? 'Choose a task above first' : undefined} disabled={!live || saving || task === undefined}>{saving ? 'Saving…' : 'Start watching'}</button>
       </div>
     </form>
   )
@@ -270,11 +270,11 @@ export function WatchPanel({ watch, tasks, workspaces, live, onSave, onRetry }: 
           {watch.canEdit ? null : <p role="status" className="xap__meta">{WATCH_READ_ONLY_NOTE}</p>}
           {watch.canEdit ? (
             <>
-              <div className="cap xap__cap">Watch a task</div>
+              <h3 className="cap xap__cap">Watch a task</h3>
               <StartWatch candidates={candidates} workspaces={workspaces} live={live} saving={savingNew} onSave={save} />
             </>
           ) : null}
-          <div className="cap xap__cap">Watching</div>
+          <h3 className="cap xap__cap">Watching</h3>
           {enabled.length === 0 ? <p role="status" className="notice">No task is being watched.</p> : (
             <ul className="xap__list" aria-label="Watched tasks">
               {enabled.map(row => {

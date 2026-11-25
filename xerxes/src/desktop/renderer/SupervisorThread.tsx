@@ -115,15 +115,18 @@ function CopyReplyButton({ text }: { readonly text: string }): ReactElement {
     }).catch(() => undefined)
   }, [text])
   return (
-    <button
-      type="button"
-      className={`xmsg__copy${copied ? ' is-copied' : ''}`}
-      aria-label={copied ? 'Copied reply' : 'Copy reply'}
-      title={copied ? 'Copied' : 'Copy reply'}
-      onClick={onCopy}
-    >
-      <Icon name={copied ? 'check' : 'copy'} size={13} />
-    </button>
+    <>
+      <button
+        type="button"
+        className={`xmsg__copy${copied ? ' is-copied' : ''}`}
+        aria-label={copied ? 'Copied reply' : 'Copy reply'}
+        title={copied ? 'Copied' : 'Copy reply'}
+        onClick={onCopy}
+      >
+        <Icon name={copied ? 'check' : 'copy'} size={13} />
+      </button>
+      <span className="visually-hidden" role="status" aria-live="polite">{copied ? 'Reply copied.' : ''}</span>
+    </>
   )
 }
 
@@ -181,10 +184,10 @@ export function LiveSteps({ steps, seconds, idle = 'Thinking…' }: {
   readonly idle?: string
 }): ReactElement {
   return (
-    <div className="xsteps is-live" role="status" aria-live="polite">
+    <div className="xsteps is-live">
       <div className="streamstatus supervisor__thinking">
         <AgentOrb size={20} state="working" />
-        <span className="streamstatus__phrase">{stepPhrase(steps) ?? idle}</span>
+        <span className="streamstatus__phrase" role="status" aria-live="polite">{stepPhrase(steps) ?? idle}</span>
         {seconds === undefined ? null : <span className="streamstatus__clock">{elapsedOf(seconds)}</span>}
       </div>
       {steps.length === 0 ? null : <StepList steps={steps} />}
@@ -195,7 +198,7 @@ export function LiveSteps({ steps, seconds, idle = 'Thinking…' }: {
 function StepsSummary({ steps }: { readonly steps: readonly SupervisorStep[] }): ReactElement {
   const tools = steps.filter(step => step.kind === 'tool')
   const failed = tools.filter(step => step.state === 'error').length
-  const label = tools.length === 0 ? 'Worked through it' : `Ran ${tools.length} step${tools.length === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`
+  const label = tools.length === 0 ? 'Thought through steps' : `Ran ${tools.length} step${tools.length === 1 ? '' : 's'}${failed > 0 ? ` · ${failed} failed` : ''}`
   return (
     <details className="xsteps">
       <summary>{label}</summary>

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * T3 Code Sidebar V2 thread organization state: Inbox vs Folders view,
+ * Sidebar thread organization state: Inbox vs Folders view,
  * per-project scope filtering, Pinned / Active / Snoozed / Settled partitions,
  * deterministic project monograms, and undoable sidebar actions.
  */
@@ -314,7 +314,7 @@ export interface InboxPartition<T> {
 }
 
 /**
- * Partition thread rows into T3 Code's 4 Inbox buckets:
+ * Partition thread rows into 4 Inbox buckets:
  * Pinned → Active → Snoozed → Settled.
  * Active live turns automatically surface out of Settled so running work is never hidden.
  */
@@ -350,8 +350,8 @@ export function partitionInboxThreads<T extends { readonly id: string; readonly 
 }
 
 /**
- * Deterministic 1–2 letter project monogram & color token matching T3 Code's
- * project badge geometry (e.g. `Xerxes-Agents` → `XA`, `t3code` → `T3`).
+ * Deterministic 1–2 letter project monogram & color token
+ * (e.g. `Xerxes-Agents` → `XA`, `workspace` → `WO`).
  */
 export function monogramForProject(
   name: string,
@@ -417,7 +417,7 @@ export function useThreadInbox(): {
     return () => window.removeEventListener('storage', onStorage)
   }, [])
 
-  // Auto-dismiss the undo toast after 7 seconds, matching T3 Code's unobtrusive cadence.
+  // Auto-dismiss the undo toast after 7 seconds.
   useEffect(() => {
     if (!undo) return
     const timer = setTimeout(() => setUndo(null), 7000)

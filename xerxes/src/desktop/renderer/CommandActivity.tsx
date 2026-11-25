@@ -63,7 +63,7 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
       {/* A span, not <code>: the inline-code chip style painted a grey pill behind every row. */}
       <span className="command-activity__preview">{heading}</span>
       {!online
-        ? <span className="command-activity__state">disconnected</span>
+        ? <span className="command-activity__state">Disconnected</span>
         : running ? <span className="command-activity__state">running</span> : null}
       {elapsed && <span className="command-activity__elapsed">{elapsed}</span>}
     </summary>
@@ -75,8 +75,8 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
       <div className="command-activity__foot">
         {/* One short outcome line; the command is already shown above, never repeated here. */}
         <span>{outcome}{detail?.outputTruncated === true ? ' Showing the last part of its output.' : ''}</span>
-        {running && <button disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>}
-        {running && detail?.canInterrupt === true && <button disabled={!online || busy} onClick={()=>void interrupt()}>{busy ? 'Requesting…' : 'Interrupt'}</button>}
+        {running && <button type="button" disabled={!online} onClick={()=>setRetry(value=>value+1)}>Refresh</button>}
+        {running && detail?.canInterrupt === true && <button type="button" disabled={!online || busy} onClick={()=>void interrupt()}>{busy ? 'Interrupting…' : 'Interrupt'}</button>}
       </div>
     </div>}
   </details>

@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 
 import { CopyButton } from './CopyButton.js'
 import { desktopError } from './desktopRpc.js'
 import { Icon } from './Icon.js'
+import { localMachineLabel } from './runModeView.js'
 
 export interface BrowserStateView {
   url: string
@@ -88,6 +89,7 @@ export const BROWSER_OVERLAY_SELECTOR = [
   '.decision-dock',
   '.findbar',
   '.artifact-toast',
+  '.notify-stack',
   '.t3-details-card',
   '.notice-stack',
   '.workspace-notice',
@@ -247,17 +249,17 @@ export function BrowserPanel(): ReactElement {
     </form>
     <p className={`browser-panel__via${via ? ' is-remote' : ''}`} role="status">
       <Icon name={via ? 'cloud' : 'laptop'} size={12} />
-      {via ? <>Traffic leaves from <strong>{via}</strong>. localhost here is that machine.</> : <>Traffic leaves from this computer.</>}
+      {via ? <>Traffic leaves from <strong>{via}</strong>. localhost here is that machine.</> : <>Traffic leaves from {localMachineLabel()}.</>}
     </p>
     {error && <p className="browser-panel__error" role="alert">{error}</p>}
     {showPorts && <section className="browser-panel__ports" aria-label="Forwarded ports">
       {via ? <form onSubmit={event => { event.preventDefault(); void forward() }}>
         <input aria-label="Remote port" inputMode="numeric" placeholder={`Port on ${via}`} value={portInput} onChange={event => setPortInput(event.target.value.replace(/[^0-9]/g, '').slice(0, 5))} />
         <button type="submit" className="btn btn--solid" disabled={!portInput}>Forward</button>
-      </form> : <p className="studio-muted">Local workspace: ports are already on this computer.</p>}
+      </form> : <p className="studio-muted">Local workspace: ports are already on {localMachineLabel()}.</p>}
       {ports.ports.map(row => <div key={row.remote} className="browser-panel__port" data-state={row.state}>
         <span>{row.remote} → <code>localhost:{row.local}</code></span>
-        <span className="browser-panel__portstate">{row.state === 'failed' ? row.error ?? 'failed' : row.state}</span>
+        <span className="browser-panel__portstate">{row.state === 'failed' ? row.error ?? 'Failed' : row.state === 'ready' ? 'Ready' : 'Starting'}</span>
         <button type="button" className="btn" disabled={row.state !== 'ready'} onClick={() => void run(async () => { setAddress(`localhost:${row.remote}`); await bridge.browser!('open', { url: `localhost:${row.remote}` }) })}>Open</button>
         <CopyButton text={`http://localhost:${row.local}/`} label="Copy URL" />
         <button type="button" className="btn btn--ghost" onClick={() => void run(async () => { await bridge.browser!('unforward', { remote: row.remote }); await loadPorts() })}>Stop</button>

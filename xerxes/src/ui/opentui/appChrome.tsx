@@ -14,6 +14,7 @@ import { openOverlayIfUnblocked } from '../app/overlayStore.js'
 import { ctxBarColor, ctxMeterBar } from '../domain/statusFormat.js'
 import { summarizeSwarmCounts } from '../lib/swarmFormat.js'
 import { fmtK } from '../lib/text.js'
+import { stringWidth } from '../lib/terminalRuntime.opentui.js'
 import { branchLabel, type RepoPulse } from '../lib/repoPulse.js'
 import type { Theme } from '../theme.js'
 
@@ -291,7 +292,7 @@ export function SessionTabStrip({
           // second row of the active tab's own column, so the renderer never
           // has to mix a border into the band background.
           const content = `● ${label}`
-          const cellWidth = content.length + 2
+          const cellWidth = stringWidth(content) + 2
 
           return (
             <Box
@@ -311,6 +312,7 @@ export function SessionTabStrip({
 
         const glyph = TAB_STATUS_GLYPH[tab.status] ?? '·'
         const content = `${glyph} ${label}`
+        const cellWidth = stringWidth(content) + 2
 
         return (
           <Box
@@ -318,14 +320,14 @@ export function SessionTabStrip({
             flexShrink={0}
             key={tab.id}
             onClick={onSelect ? () => onSelect(tab.id) : undefined}
-            width={content.length + 2}
+            width={cellWidth}
           >
             <Text wrap="truncate-end">
               <Span color={t.color.muted}>{` ${content} `}</Span>
             </Text>
             {/* Keeps every tab column two rows tall, so the strip reads as
                 one band instead of labels floating over loose rows. */}
-            <Text>{' '.repeat(content.length + 2)}</Text>
+            <Text>{' '.repeat(cellWidth)}</Text>
           </Box>
         )
       })}

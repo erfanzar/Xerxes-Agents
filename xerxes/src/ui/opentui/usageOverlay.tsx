@@ -67,6 +67,7 @@ export function UsageOverlay({ t, initialRefresh = false }: { t: Theme; initialR
   useEffect(() => {
     void load(initialRefresh)
     const timer = setInterval(() => { void load(false) }, SESSION_POLL_MS)
+    timer.unref?.()
     return () => clearInterval(timer)
   }, [load, initialRefresh])
 
@@ -86,7 +87,7 @@ export function UsageOverlay({ t, initialRefresh = false }: { t: Theme; initialR
   return <box position="absolute" left={0} top={0} width="100%" height="100%" zIndex={150} backgroundColor={t.ds.scrim} alignItems="center" justifyContent="center">
     <Box width={size.width} height={size.height} paddingX={1} flexDirection="column" borderStyle="round" borderColor={t.color.border} backgroundColor={t.color.overlayBg}>
       <DialogHeader t={t} title={<>Usage{status ? <span fg={t.ds.meta}>{` · ${status}`}</span> : null}</>} subtitle="This session, and the limits on every provider you have imported." />
-      {error ? <Text color={t.color.warn} wrap="wrap">{error}</Text> : null}
+      {error ? <Text color={t.color.error} wrap="wrap">{error}</Text> : null}
       <scrollbox ref={scroll} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }} contentOptions={{ flexDirection: 'column' }}>
         {report ? <PanelMessage panel={{ title: 'Usage', sections: usagePanelSections(report, now) }} t={t} titled={false} width={inner} /> : null}
       </scrollbox>

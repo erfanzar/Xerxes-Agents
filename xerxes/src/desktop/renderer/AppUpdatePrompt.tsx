@@ -51,7 +51,7 @@ export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): R
       <div className="appbanner" role="status" aria-live="polite" onKeyDown={onEscape}>
         <span className="appbanner__icon" aria-hidden="true"><Icon name="check" size={13} /></span>
         <span className="appbanner__text"><strong>Xerxes Agents is up to date.</strong> {update.version ? `${update.version} is the latest version.` : 'You have the latest version.'}</span>
-        <button className="btn btn--ghost" onClick={() => void store.appUpdateAction('dismiss')}>OK</button>
+        <button type="button" className="btn btn--ghost" onClick={() => void store.appUpdateAction('dismiss')}>OK</button>
       </div>
     )
   }
@@ -72,14 +72,14 @@ export function AppUpdatePrompt({ update }: { update: AppUpdateView | null }): R
     <div className="appbanner" role="status" aria-live="polite" data-phase={update.phase} onKeyDown={onEscape}>
       <span className="appbanner__icon" aria-hidden="true"><Icon name={update.phase === 'error' ? 'close' : 'arrowUp'} size={13} /></span>
       <span className="appbanner__text"><strong>{title}</strong> {detail}</span>
-      {update.phase === 'downloading' && <span className="appbanner__progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span style={{ width: `${percent}%` }} /></span>}
+      {update.phase === 'downloading' && <span className="appbanner__progress" role="progressbar" aria-label="Download progress" aria-valuemin={0} aria-valuemax={100} {...(hasTotal ? { 'aria-valuenow': percent } : {})}><span style={{ width: `${percent}%` }} /></span>}
       <span className="appbanner__actions">
-        {update.notes && update.phase !== 'restarting' && <button className="btn btn--ghost" aria-expanded={notesOpen} onClick={() => setNotesOpen(open => !open)}>What&apos;s new</button>}
-        {update.phase === 'available' && update.installable && <button className="btn btn--solid" onClick={() => void store.appUpdateAction('install')}>Install and restart</button>}
-        {(update.phase === 'error' || (update.phase === 'available' && !update.installable)) && <button className="btn" onClick={() => void store.appUpdateAction('open-release')}>Open release page</button>}
-        {update.phase === 'error' && <button className="btn" onClick={() => void store.appUpdateAction('check')}>Try again</button>}
-        {!busy && <button className="btn btn--ghost" onClick={() => void store.appUpdateAction('dismiss')}>Later</button>}
-        {update.phase === 'available' && <button className="btn btn--ghost" onClick={() => void store.appUpdateAction('skip')}>Skip this version</button>}
+        {update.notes && update.phase !== 'restarting' && <button type="button" className="btn btn--ghost" aria-expanded={notesOpen} onClick={() => setNotesOpen(open => !open)}>What&apos;s new</button>}
+        {update.phase === 'available' && update.installable && <button type="button" className="btn btn--solid" onClick={() => void store.appUpdateAction('install')}>Install and restart</button>}
+        {(update.phase === 'error' || (update.phase === 'available' && !update.installable)) && <button type="button" className="btn" onClick={() => void store.appUpdateAction('open-release')}>Open release page</button>}
+        {update.phase === 'error' && <button type="button" className="btn" onClick={() => void store.appUpdateAction('check')}>Try again</button>}
+        {!busy && <button type="button" className="btn btn--ghost" onClick={() => void store.appUpdateAction('dismiss')}>Later</button>}
+        {update.phase === 'available' && <button type="button" className="btn btn--ghost" onClick={() => void store.appUpdateAction('skip')}>Skip this version</button>}
       </span>
       {/* In the page (and read by screen readers) even while folded, so the notes are never lost. */}
       {update.notes && update.phase !== 'restarting' && <div className="appbanner__notes" hidden={!notesOpen}><Markdown text={update.notes} /></div>}

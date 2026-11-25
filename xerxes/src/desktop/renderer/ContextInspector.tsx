@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { desktopCall, desktopError, record, records } from './desktopRpc.js'
 import type { Snapshot } from './store.js'
 import { Icon } from './Icon.js'
+import { SelectField } from './SelectField.js'
 
 /** `goal_policy` → `Goal policy`; paths and prose titles pass through untouched. */
 export function contextTitle(title: string): string {
@@ -90,8 +91,15 @@ export function ContextInspector({ snap }: { snap: Snapshot }): ReactElement {
   return <section className="context-inspector" aria-label="Context inspector">
     <p className="context-inspector__lead">What the agent sees. Estimates are local; no provider request is made.</p>
     <div className="context-inspector__bar">
-      <select aria-label="Context section" value={section} disabled={saving} onChange={event => { setSection(event.target.value as Section); setOffset(0) }}>{contextSections.map(id => <option key={id} value={id}>{id[0]!.toUpperCase()+id.slice(1)}</option>)}</select>
-      <button className="context-inspector__refresh" title="Refresh context" aria-label="Refresh context" disabled={loading || saving} onClick={() => { generation.current = undefined; setOffset(0); setRefresh(value => value + 1) }}><Icon name="retry" size={13} /></button>
+      <SelectField
+        ariaLabel="Context section"
+        listLabel="Context section"
+        value={section}
+        disabled={saving}
+        options={contextSections.map(id => ({ value: id, label: id[0]!.toUpperCase() + id.slice(1) }))}
+        onChange={next => { setSection(next as Section); setOffset(0) }}
+      />
+      <button type="button" className="context-inspector__refresh" title="Refresh context" aria-label="Refresh context" disabled={loading || saving} onClick={() => { generation.current = undefined; setOffset(0); setRefresh(value => value + 1) }}><Icon name="retry" size={13} /></button>
     </div>
     {summary && <p className="context-inspector__meta">{summary.available ? `${summary.count.toLocaleString()} ${summary.count === 1 ? 'entry' : 'entries'} · ${section === 'compaction' ? 'not in model context' : `~${summary.estimated_tokens.toLocaleString()} tokens`} · ${summary.provenance}` : 'Not assembled yet'}</p>}
     {loading && <p className="context-inspector__meta" role="status">Loading context…</p>}{error && <p className="studio-error" role="alert">{error}</p>}{notice && <p className="context-inspector__meta" role="status">{notice}</p>}
@@ -109,17 +117,17 @@ export function ContextInspector({ snap }: { snap: Snapshot }): ReactElement {
           <div className="context-source__body" tabIndex={0}>{reflowContextText(entry.text)}</div>
           {entry.truncated && <p className="context-inspector__meta">Excerpt truncated at 8,000 characters.</p>}
           {entry.control && <div className="lsp-actions">
-            <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.pinned ? 'unpin' : 'pin')}>{entry.control.pinned ? 'Unpin' : 'Pin source'}</button>
-            <button disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.excluded ? 'include' : 'exclude')}>{entry.control.excluded ? 'Include source' : 'Exclude source'}</button>
+            <button type="button" className="btn" disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.pinned ? 'unpin' : 'pin')}>{entry.control.pinned ? 'Unpin' : 'Pin source'}</button>
+            <button type="button" className="btn" disabled={saving || loading || !!error || snap.turnActive} onClick={() => void change(entry.control!, entry.control!.excluded ? 'include' : 'exclude')}>{entry.control.excluded ? 'Include source' : 'Exclude source'}</button>
           </div>}
         </details>
       })}
       </div>
       {section === 'memory' && snap.turnActive && <p className="context-inspector__meta">Wait for this turn to finish before changing memory sources.</p>}
       {paged && <div className="context-pager">
-        <button aria-label="Previous page" disabled={loading || saving || !!error || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}><Icon name="chevron" size={12} /></button>
+        <button type="button" aria-label="Previous page" disabled={loading || saving || !!error || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}><Icon name="chevron" size={12} /></button>
         <span>{page.entries.length ? `${offset + 1}–${offset + page.entries.length}` : '0'}{summary ? ` of ${summary.count.toLocaleString()}` : ''}</span>
-        <button aria-label="Next page" disabled={loading || saving || !!error || page.next_offset === null} onClick={() => setOffset(page.next_offset!)}><Icon name="chevron" size={12} /></button>
+        <button type="button" aria-label="Next page" disabled={loading || saving || !!error || page.next_offset === null} onClick={() => setOffset(page.next_offset!)}><Icon name="chevron" size={12} /></button>
       </div>}
       <p className="context-inspector__note">{page.note}</p>
     </>}
